@@ -242,6 +242,19 @@ export interface CodexAuthStatus {
   issue?: string | null;
 }
 
+export interface XaiAuthStatus {
+  signed_in: boolean;
+}
+
+export interface XaiDeviceLogin {
+  verification_url: string;
+  user_code: string;
+  device_code: string;
+  interval?: number;
+  expires_in?: number;
+  token_endpoint: string;
+}
+
 export interface GatewayEndpoints {
   base_url: string;
   models: string;

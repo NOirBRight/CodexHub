@@ -33,6 +33,7 @@
       "../config/resolved_model_limits.json": "config/resolved_model_limits.json",
       "../src-python/*.py": "src-python",
       "../src-python/vendor/*.whl": "src-python/vendor",
+      "../scripts/xai_device_login.py": "scripts/xai_device_login.py",
       "resources/python/*": "python"
     },
     "icon": [

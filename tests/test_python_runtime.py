@@ -64,6 +64,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/validate_issue_278_evidence.py",
     "scripts/validate_issue_369_matrix.py",
     "scripts/validate_issue_63_evidence.py",
+    "scripts/xai_device_login.py",
     "tests/validate_issue_108_evidence.py",
     "tests/validate_issue_251_evidence.py",
 )

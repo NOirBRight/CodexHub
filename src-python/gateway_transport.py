@@ -88,8 +88,10 @@ from route_primitives import (
     OperationalAuthentication,
     TransportPolicy,
 )
+from subscription_credential import credential_for, register_builtin_adapters
 
 logger = logging.getLogger("gateway_transport")
+register_builtin_adapters()
 
 HOP_BY_HOP_REQUEST_HEADERS = {
     "connection",
@@ -302,14 +304,12 @@ class GatewayTransport:
     def resolved_access_token(self) -> str:
         if self.access_token is not None:
             return self.access_token()
-        from codex_auth import access_token as load_access_token
-        return load_access_token()
+        return _default_access_token()
 
     def resolved_account_id(self) -> str | None:
         if self.account_id is not None:
             return self.account_id()
-        from codex_auth import account_id as load_account_id
-        return load_account_id()
+        return _default_account_id()
 
     def resolved_ollama_api_key(self) -> str | None:
         if self.ollama_api_key is not None:
@@ -1046,13 +1046,124 @@ def _get_header(headers: Mapping[str, str] | Any, name: str) -> str | None:
 
 
 def _default_access_token() -> str:
+    adapter = credential_for("codex_auth")
+    if adapter is not None:
+        return adapter.access_token()
     from codex_auth import access_token as load_access_token
     return load_access_token()
 
 
 def _default_account_id() -> str | None:
+    adapter = credential_for("codex_auth")
+    if adapter is not None:
+        account = adapter.account_headers().get("Chatgpt-account-id")
+        return str(account) if account else None
     from codex_auth import account_id as load_account_id
     return load_account_id()
+
+
+def _catalog_auth_mode(upstream: Mapping[str, Any]) -> str | None:
+    auth_mode = upstream.get("auth")
+    return str(auth_mode) if auth_mode else None
+
+
+def _resolved_auth_mode(
+    *,
+    upstream: Mapping[str, Any],
+    operational_authentication: OperationalAuthentication | None,
+    authentication_strategy: AuthenticationStrategy | None,
+) -> str | None:
+    catalog_auth = _catalog_auth_mode(upstream)
+    if credential_for(catalog_auth) is not None:
+        return catalog_auth
+    if operational_authentication is not None:
+        return operational_authentication.strategy.value
+    if authentication_strategy is not None:
+        return authentication_strategy.value
+    return catalog_auth
+
+
+def _subscription_authorization(
+    adapter: Any,
+    *,
+    auth_mode: str | None,
+    operational_authentication: OperationalAuthentication | None,
+    access_token: Callable[[], str] | None,
+    load_token: Callable[[], str],
+) -> str:
+    if operational_authentication is not None:
+        authorization = operational_authentication.authorization
+    elif access_token is not None:
+        authorization = f"Bearer {load_token()}"
+    else:
+        authorization = f"Bearer {adapter.access_token()}"
+    if not authorization:
+        raise ValueError(f"subscription credential is missing for auth mode: {auth_mode}")
+    return authorization
+
+
+def _subscription_account_headers(
+    adapter: Any,
+    *,
+    operational_authentication: OperationalAuthentication | None,
+    account_id: Callable[[], str | None] | None,
+    load_account: Callable[[], str | None],
+) -> dict[str, str]:
+    if operational_authentication is not None:
+        account = operational_authentication.account_id
+        return {"Chatgpt-account-id": account} if account else {}
+    if account_id is not None:
+        account = load_account()
+        return {"Chatgpt-account-id": account} if account else {}
+    return dict(adapter.account_headers())
+
+
+def _apply_codex_identity_headers(
+    outgoing: dict[str, str],
+    *,
+    operational_authentication: OperationalAuthentication | None,
+    request_mutation_policy: MutationPolicy | None,
+    behavior_profile: str | None,
+    resolved_facts: TransportFacts,
+    read_header: Callable[..., str | None],
+    make_id: Callable[[], str],
+) -> None:
+    strict_official_passthrough = (
+        request_mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH
+        if request_mutation_policy is not None
+        else behavior_profile == resolved_facts.official_passthrough_behavior
+    )
+    if strict_official_passthrough:
+        return
+    if not read_header(outgoing, "Accept"):
+        outgoing["Accept"] = "text/event-stream"
+    if not read_header(outgoing, "Originator"):
+        outgoing["Originator"] = "codexhub-proxy"
+    if not read_header(outgoing, "User-Agent"):
+        outgoing["User-Agent"] = "Codex Desktop/0.142.4 (CodexHub proxy)"
+    session_id = read_header(outgoing, "Session-id")
+    if not session_id:
+        session_id = (
+            operational_authentication.generated_session_id
+            if operational_authentication is not None
+            else make_id()
+        )
+        if not session_id:
+            raise ValueError("materialized Codex auth is missing session identity")
+        outgoing["Session-id"] = session_id
+    if not read_header(outgoing, "Thread-id"):
+        outgoing["Thread-id"] = session_id
+    if not read_header(outgoing, "X-codex-window-id"):
+        outgoing["X-codex-window-id"] = f"{session_id}:1"
+    if not read_header(outgoing, "X-client-request-id"):
+        client_request_id = (
+            operational_authentication.generated_client_request_id
+            if operational_authentication is not None
+            else make_id()
+        )
+        if not client_request_id:
+            raise ValueError("materialized Codex auth is missing request identity")
+        outgoing["X-client-request-id"] = client_request_id
 
 
 def materialize_operational_authentication(
@@ -1069,7 +1180,37 @@ def materialize_operational_authentication(
     make_id = new_id or (lambda: str(uuid.uuid4()))
     load_token = access_token or _default_access_token
     load_account = account_id or _default_account_id
-    strategy = _authentication_strategy(upstream.get("auth") or "unknown")
+    auth_mode = _catalog_auth_mode(upstream) or "unknown"
+    strategy = _authentication_strategy(auth_mode)
+    adapter = credential_for(auth_mode)
+    if adapter is not None:
+        token = load_token() if access_token is not None else adapter.access_token()
+        account_headers = _subscription_account_headers(
+            adapter,
+            operational_authentication=None,
+            account_id=account_id,
+            load_account=load_account,
+        )
+        account = account_headers.get("Chatgpt-account-id")
+        if strategy == AuthenticationStrategy.CODEX_AUTH:
+            return OperationalAuthentication(
+                strategy,
+                authorization=f"Bearer {token}",
+                account_id=account,
+                generated_session_id=(
+                    read_header(incoming_headers, "Session-id")
+                    or make_id()
+                ),
+                generated_client_request_id=(
+                    read_header(incoming_headers, "X-client-request-id")
+                    or make_id()
+                ),
+            )
+        return OperationalAuthentication(
+            strategy,
+            authorization=f"Bearer {token}",
+            account_id=account,
+        )
     if strategy == AuthenticationStrategy.INCOMING:
         return OperationalAuthentication(
             strategy,
@@ -1086,20 +1227,6 @@ def materialize_operational_authentication(
         return OperationalAuthentication(
             strategy,
             authorization=f"Bearer {api_key}" if api_key else None,
-        )
-    if strategy == AuthenticationStrategy.CODEX_AUTH:
-        return OperationalAuthentication(
-            strategy,
-            authorization=f"Bearer {load_token()}",
-            account_id=load_account(),
-            generated_session_id=(
-                read_header(incoming_headers, "Session-id")
-                or make_id()
-            ),
-            generated_client_request_id=(
-                read_header(incoming_headers, "X-client-request-id")
-                or make_id()
-            ),
         )
     return OperationalAuthentication(strategy, authorization=None)
 
@@ -1128,12 +1255,10 @@ def build_upstream_headers(
     make_id = new_id or (lambda: str(uuid.uuid4()))
     load_token = access_token or _default_access_token
     load_account = account_id or _default_account_id
-    auth_mode = (
-        operational_authentication.strategy.value
-        if operational_authentication is not None
-        else authentication_strategy.value
-        if authentication_strategy is not None
-        else upstream.get("auth")
+    auth_mode = _resolved_auth_mode(
+        upstream=upstream,
+        operational_authentication=operational_authentication,
+        authentication_strategy=authentication_strategy,
     )
     outgoing: dict[str, str] = {}
     upstream_model_id = canonical_model_id(
@@ -1156,6 +1281,34 @@ def build_upstream_headers(
             continue
         outgoing[key] = value
 
+    adapter = credential_for(auth_mode)
+    if adapter is not None:
+        outgoing["Authorization"] = _subscription_authorization(
+            adapter,
+            auth_mode=auth_mode,
+            operational_authentication=operational_authentication,
+            access_token=access_token,
+            load_token=load_token,
+        )
+        for header_name, header_value in _subscription_account_headers(
+            adapter,
+            operational_authentication=operational_authentication,
+            account_id=account_id,
+            load_account=load_account,
+        ).items():
+            if header_value and not read_header(outgoing, header_name):
+                outgoing[header_name] = header_value
+        if auth_mode == "codex_auth":
+            _apply_codex_identity_headers(
+                outgoing,
+                operational_authentication=operational_authentication,
+                request_mutation_policy=request_mutation_policy,
+                behavior_profile=behavior_profile,
+                resolved_facts=resolved_facts,
+                read_header=read_header,
+                make_id=make_id,
+            )
+        return outgoing
     if auth_mode == "incoming":
         incoming_auth = (
             operational_authentication.authorization
@@ -1192,60 +1345,6 @@ def build_upstream_headers(
                 )
             authorization = f"Bearer {api_key}"
         outgoing["Authorization"] = authorization
-    elif auth_mode == "codex_auth":
-        strict_official_passthrough = (
-            request_mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH
-            if request_mutation_policy is not None
-            else behavior_profile == resolved_facts.official_passthrough_behavior
-        )
-        authorization = (
-            operational_authentication.authorization
-            if operational_authentication is not None
-            else f"Bearer {load_token()}"
-        )
-        outgoing["Authorization"] = authorization
-        if not read_header(outgoing, "Chatgpt-account-id"):
-            account = (
-                operational_authentication.account_id
-                if operational_authentication is not None
-                else load_account()
-            )
-            if account:
-                outgoing["Chatgpt-account-id"] = account
-        if not strict_official_passthrough:
-            if not read_header(outgoing, "Accept"):
-                outgoing["Accept"] = "text/event-stream"
-            if not read_header(outgoing, "Originator"):
-                outgoing["Originator"] = "codexhub-proxy"
-            if not read_header(outgoing, "User-Agent"):
-                outgoing["User-Agent"] = "Codex Desktop/0.142.4 (CodexHub proxy)"
-            session_id = read_header(outgoing, "Session-id")
-            if not session_id:
-                session_id = (
-                    operational_authentication.generated_session_id
-                    if operational_authentication is not None
-                    else make_id()
-                )
-                if not session_id:
-                    raise ValueError(
-                        "materialized Codex auth is missing session identity"
-                    )
-                outgoing["Session-id"] = session_id
-            if not read_header(outgoing, "Thread-id"):
-                outgoing["Thread-id"] = session_id
-            if not read_header(outgoing, "X-codex-window-id"):
-                outgoing["X-codex-window-id"] = f"{session_id}:1"
-            if not read_header(outgoing, "X-client-request-id"):
-                client_request_id = (
-                    operational_authentication.generated_client_request_id
-                    if operational_authentication is not None
-                    else make_id()
-                )
-                if not client_request_id:
-                    raise ValueError(
-                        "materialized Codex auth is missing request identity"
-                    )
-                outgoing["X-client-request-id"] = client_request_id
     else:
         raise ValueError(f"unsupported upstream auth mode: {auth_mode}")
     return outgoing

@@ -26,6 +26,7 @@ mod routing_owner;
 mod runtime_paths;
 mod safe_file;
 mod web_bridge;
+mod xai_auth;
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
@@ -1296,7 +1297,11 @@ fn run_gui() {
             open_codex_app,
             window_minimize,
             window_toggle_maximize,
-            window_close_to_tray
+            window_close_to_tray,
+            xai_auth::xai_auth_status,
+            xai_auth::xai_start_device_login,
+            xai_auth::xai_poll_device_login,
+            xai_auth::xai_logout
         ])
         .build(tauri::generate_context!())
         .expect("error while building CodexHub Tauri application");

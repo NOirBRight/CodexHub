@@ -23,6 +23,7 @@ const perfTabSwitchPath = new URL("./perf-tab-switch.mjs", import.meta.url);
 const providersPagePath = new URL("../src/pages/ProvidersPage.tsx", import.meta.url);
 const officialOpenAIUsagePanelPath = new URL("../src/components/providers/OfficialOpenAIUsagePanel.tsx", import.meta.url);
 const providerEditorPath = new URL("../src/components/providers/ProviderEditor.tsx", import.meta.url);
+const xaiLoginCardPath = new URL("../src/components/providers/XaiLoginCard.tsx", import.meta.url);
 const providerFormControlsPath = new URL("../src/components/providers/ProviderFormControls.tsx", import.meta.url);
 const providerModelSectionPath = new URL("../src/components/providers/ProviderModelSection.tsx", import.meta.url);
 const providerNavigationGuardPath = new URL("../src/hooks/useProviderNavigationGuard.ts", import.meta.url);
@@ -596,6 +597,10 @@ test("tauri config enables cross-platform updater packaging", async () => {
   assert.equal(typeof tauriConfig.plugins.updater.pubkey, "string");
   assert.ok(tauriConfig.plugins.updater.pubkey.length > 80);
   assert.equal(tauriConfig.bundle.resources["resources/python/*"], "python");
+  assert.equal(
+    tauriConfig.bundle.resources["../scripts/xai_device_login.py"],
+    "scripts/xai_device_login.py",
+  );
 });
 
 test("Windows release build vendors a pinned Python runtime", async () => {
@@ -3506,6 +3511,38 @@ test("debug diagnostics open from Recovery in a localized accessible overlay", a
   assert.match(zhSource, /open: "打开调试诊断"/);
   assert.match(enSource, /summary: "\{\{hours\}\}h · \{\{bytes\}\} bytes · \{\{count\}\} incidents"/);
   assert.match(zhSource, /summary: "\{\{hours\}\} 小时 · \{\{bytes\}\} 字节 · \{\{count\}\} 个事件"/);
+});
+
+test("xAI SuperGrok login card uses one loading toast and the XAI_API_KEY fallback copy", async () => {
+  const [cardSource, editorSource, tauriSource, typesSource, commandsSource, bridgeSource, enSource, zhSource] =
+    await Promise.all([
+      readFile(xaiLoginCardPath, "utf8"),
+      readFile(providerEditorPath, "utf8"),
+      readFile(tauriSourcePath, "utf8"),
+      readFile(typesPath, "utf8"),
+      readFile(new URL("../src/lib/commands.ts", import.meta.url), "utf8"),
+      readFile(tauriWebBridgePath, "utf8"),
+      readFile(enLocalePath, "utf8"),
+      readFile(zhLocalePath, "utf8"),
+    ]);
+
+  assert.match(editorSource, /provider\.id === "xai" \? <XaiLoginCard \/> : null/);
+  assert.match(cardSource, /showToast\(translate\("providers\.xaiStartingDeviceLogin"\), "loading"\)/);
+  assert.match(cardSource, /updateToast\(toastId, \{[\s\S]*tone: "success"/);
+  assert.match(cardSource, /updateToast\(toastId, \{[\s\S]*tone: "error"/);
+  assert.doesNotMatch(cardSource, /showToast\([^)]*,\s*"(success|error)"\)/);
+  assert.match(cardSource, /not-eligible/);
+  assert.match(cardSource, /providers\.xaiAllowlistFallback/);
+  assert.match(typesSource, /export interface XaiAuthStatus/);
+  assert.match(typesSource, /export interface XaiDeviceLogin/);
+  assert.match(commandsSource, /xaiAuthStatus: "xai_auth_status"/);
+  assert.match(tauriSource, /call<XaiAuthStatus>\(COMMANDS.xaiAuthStatus\)/);
+  assert.match(tauriSource, /call<XaiDeviceLogin>\(COMMANDS.xaiStartDeviceLogin\)/);
+  assert.match(tauriSource, /call<\{ ok: boolean \}>\(COMMANDS.xaiPollDeviceLogin/);
+  assert.match(tauriSource, /call<\{ ok: boolean \}>\(COMMANDS.xaiLogout\)/);
+  assert.match(bridgeSource, /"xai_auth_status" => to_value\(xai_auth::xai_auth_status\(\)\)/);
+  assert.match(enSource, /xaiAllowlistFallback:[\s\S]*XAI_API_KEY/);
+  assert.match(zhSource, /xaiAllowlistFallback:[\s\S]*XAI_API_KEY/);
 });
 
 test("gateway reserves its three-row flexible left-column allocation for the usage chart", async () => {

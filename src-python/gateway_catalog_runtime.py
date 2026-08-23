@@ -892,10 +892,18 @@ class CatalogRuntime:
                 f"model identity is internal and cannot be routed: {slug}",
                 reason="internal_model", provider_id=provider_id, model_slug=slug,
             )
+        auth_mode = "api_key"
+        if provider_id == "xai":
+            try:
+                from xai_auth import has_session
+            except ImportError:
+                has_session = lambda: False  # noqa: E731
+            if has_session():
+                auth_mode = "xai_oauth"
         return {
             "name": external_model["upstream_name"], "provider_id": provider_id,
             "model_id": slug, "base_url": external_model["base_url"],
-            "auth": "api_key", "api_key": external_model["api_key"],
+            "auth": auth_mode, "api_key": external_model["api_key"],
             "upstream_model": external_model["upstream_model"],
             "upstream_format": external_model.get("upstream_format", "responses"),
             "tool_protocol": external_model.get("tool_protocol", "auto"),
