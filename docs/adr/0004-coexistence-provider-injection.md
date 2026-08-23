@@ -10,12 +10,12 @@ CodexHub integrated its first five clients (codex, opencode, pi, omp, zcode)
 with **Managed Takeover** semantics: Apply rewrote the client configuration so
 the local Gateway was effectively the only route. Four of the five clients
 overwrite whole files or strip foreign provider sections
-(`opencode_config_text` gateway.rs:5725-5787, `omp_models_yml_text`
-gateway.rs:5936-5971, zcode catalog gateway.rs:5989-6030, codex overlay
-`STALE_PROXY_PROVIDER_SECTIONS` config_overlay.py:38-42); pi alone edits
+(`clients::opencode::opencode_config_text`, `clients::omp::omp_models_yml_text`,
+`clients::zcode::zcode_catalog_text`, codex overlay
+`config_overlay.STALE_PROXY_PROVIDER_SECTIONS`); pi alone edits
 surgically but still forces `defaultProvider`/`defaultModel`. Readback
 verifies by byte-comparing a re-serialized expectation against the whole file
-(`verify_apply_readback` gateway.rs:1146-1303).
+(`readback::verify_apply_readback`).
 
 Consequences that motivated the change:
 
@@ -66,7 +66,7 @@ reintroduce that regression, so codex is the sole exception to decision 2:
 `model_provider` stays pinned to the fixed bucket ID at all times, and
 direct-vs-gateway is expressed by the presence of `base_url` inside that one
 bucket (the existing unified-history machinery,
-`config_overlay.py:714` / `history_overlay.py`). Foreign
+`config_overlay.unified_config_state` / `history_overlay`). Foreign
 `model_providers.*` sections are no longer stripped, but switching to them
 changes the history bucket by design of the client itself.
 
