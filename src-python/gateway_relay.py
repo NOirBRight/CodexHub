@@ -11,6 +11,21 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from gateway_interfaces import RequestAdmission, RelayWriter, UpstreamResponseLike
+import http.client
+import urllib.error
+
+import gateway_compat
+import gateway_errors
+import gateway_events
+import gateway_request
+import gateway_sse
+import gateway_stream_semantics
+import gateway_transport
+import protocol_translation
+import route_primitives
+import runtime_tool_compatibility
+import sse_events
+
 from route_primitives import MutationPolicy, StreamingPolicy, UsagePolicy
 
 
@@ -278,137 +293,19 @@ def iter_upstream_sse_lines(
 
 
 @dataclass(frozen=True)
-class RelaySymbols:
-    """Explicit facade callbacks and helper types used by the relay state machine."""
+class RelayGlue:
+    """Exchange-owned callables. Kept off the import graph to avoid a relay/exchange cycle."""
 
-    CompactEmptyResponseError: type[BaseException]
-    DownstreamKeepaliveFailedError: type[BaseException]
-    IncompleteRead: type[BaseException]
-    NonForwardable: type[BaseException]
-    RuntimeToolCompatibilityError: type[BaseException]
-    SseFrameTooLargeError: type[BaseException]
-    URLError: type[BaseException]
-    UpstreamEmptyCompletedResponseError: type[BaseException]
-    UpstreamProtocolTranslationError: type[BaseException]
-    UpstreamSseSemanticError: type[BaseException]
-    UpstreamStreamErrorEvent: type[BaseException]
-    UpstreamStreamIdleTimeoutError: type[BaseException]
-    UpstreamStreamIncompleteError: type[BaseException]
-    UpstreamStreamInterruptedError: type[BaseException]
-    DownstreamStreamCommit: type[Any]
-    MutationPolicy: type[Any]
-    PreparedExchange: type[Any]
-    StreamingPolicy: type[Any]
-    UsagePolicy: type[Any]
-    _ChatToResponsesStreamConverter: type[Any]
-    _ResponsesToChatStreamConverter: type[Any]
-    _ThirdPartyApplyPatchStreamAdapter: type[Any]
-    _RuntimeToolInverseStreamError: type[BaseException]
-    RETRY_FAILURE_QUICK_TRANSIENT: str
-    RETRY_REQUEST_COMPACT: str
-    RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE: str
-    RETRY_SAFETY_SUPPRESSED_POST_WRITE: str
-    _adapt_third_party_apply_patch_stream_events: Callable[..., Any]
-    _apply_external_worker_response_contract: Callable[..., Any]
-    _apply_patch_adapter_enabled: Callable[..., Any]
     _bind_downstream_stream_commit: Callable[..., Any]
-    _bounded_failure_event_context: Callable[..., Any]
-    _capture_usage: Callable[..., Any]
-    _chat_completion_body_is_empty: Callable[..., Any]
-    _chat_completion_body_to_stream_chunks: Callable[..., Any]
-    _chat_completion_to_response_body: Callable[..., Any]
-    _chat_sse_event_resets_idle_timeout: Callable[..., Any]
-    _chat_stream_chunks_have_terminal: Callable[..., Any]
-    _chat_stream_chunks_to_response_events: Callable[..., Any]
-    _chat_stream_error_detail: Callable[..., Any]
-    _chat_stream_lifecycle_final_issue: Callable[..., Any]
-    _chat_stream_shape_summary: Callable[..., Any]
-    _chat_terminal_observer: Callable[..., Any]
-    _coerce_exact_spawn_prompt_tool_calls: Callable[..., Any]
-    _coerce_required_subagent_tool_calls: Callable[..., Any]
-    _compact_response_body_is_empty: Callable[..., Any]
-    _converted_sse_payload: Callable[..., Any]
-    _count_sse_reasoning_event: Callable[..., Any]
-    _downgrade_invalid_third_party_tool_calls: Callable[..., Any]
-    _events_to_responses_body: Callable[..., Any]
-    _filtered_response_headers: Callable[..., Any]
-    _guard_duplicate_multi_agent_spawn_calls: Callable[..., Any]
     _handler_downstream_stream_commit: Callable[..., Any]
-    _incomplete_stream_json_error_body: Callable[..., Any]
-    _is_event_stream: Callable[..., Any]
-    _is_reasoning_summary_stream_event: Callable[..., Any]
-    _is_sse_blank_line: Callable[..., Any]
-    _is_sse_event_metadata_line: Callable[..., Any]
-    _json_error_payload_for_inbound_format: Callable[..., Any]
-    _lifecycle_final_issue_event_name: Callable[..., Any]
-    _lifecycle_final_issue_missing_reason: Callable[..., Any]
-    _normalize_third_party_tool_call: Callable[..., Any]
     _observe_gateway_diagnostic: Callable[..., Any]
-    _offer_usage_observed_body: Callable[..., Any]
-    _offer_usage_observed_sse_line: Callable[..., Any]
-    _parse_sse_json_payload: Callable[..., Any]
-    _parse_sse_json_payloads: Callable[..., Any]
-    _public_event_context: Callable[..., Any]
-    _raise_lifecycle_final_issue: Callable[..., Any]
-    _raise_runtime_tool_compatibility_error: Callable[..., Any]
-    _reconcile_function_call_argument_events: Callable[..., Any]
-    _redact_identity_in_text: Callable[..., Any]
-    _repair_missing_required_subagent_call_events: Callable[..., Any]
-    _response_body_lifecycle_final_issue: Callable[..., Any]
-    _response_body_to_chat_completion_body: Callable[..., Any]
-    _response_body_to_response_sse_events: Callable[..., Any]
-    _response_events_shape_summary: Callable[..., Any]
-    _responses_body_is_empty: Callable[..., Any]
-    _responses_completed_tool_item: Callable[..., Any]
-    _responses_event_commits_downstream_output: Callable[..., Any]
-    _responses_event_has_visible_or_tool_output: Callable[..., Any]
-    _responses_event_is_tool_call_construction: Callable[..., Any]
-    _responses_event_starts_downstream_output: Callable[..., Any]
-    _responses_events_have_terminal: Callable[..., Any]
-    _responses_events_lifecycle_final_issue: Callable[..., Any]
-    _responses_failed_event_for_stream_error: Callable[..., Any]
-    _responses_sse_event_resets_idle_timeout: Callable[..., Any]
-    _responses_sse_line_resets_idle_timeout: Callable[..., Any]
-    _responses_stream_error_detail: Callable[..., Any]
-    _responses_stream_error_type: Callable[..., Any]
-    _responses_terminal_observer: Callable[..., Any]
-    _retry_identity_from_context: Callable[..., Any]
-    _route_failure_event_fields: Callable[..., Any]
-    _runtime_tool_compatibility_stream_for_attempt: Callable[..., Any]
-    _sse_event_separator_after_line: Callable[..., Any]
-    _sse_json_line: Callable[..., Any]
-    _sse_line_ending: Callable[..., Any]
-    _suppress_bounded_tool_search_calls: Callable[..., Any]
-    _suppress_chat_reasoning_extensions: Callable[..., Any]
-    _suppress_coordinator_forbidden_tool_calls: Callable[..., Any]
-    _suppress_worker_multi_agent_tool_calls: Callable[..., Any]
-    _synthetic_response_completed_from_tool_items: Callable[..., Any]
-    _upstream_failure_class: Callable[..., Any]
-    _usage_from_json_body: Callable[..., Any]
-    _usage_from_payload: Callable[..., Any]
-    _usage_from_response_event: Callable[..., Any]
-    _usage_observed_context: Callable[..., Any]
-    _verified_converted_sse_semantic_error: Callable[..., Any]
-    _with_codexhub_http_error: Callable[..., Any]
     _write_adapter_event: Callable[..., Any]
-    _write_runtime_tool_adapter_response_evidence: Callable[..., Any]
-    compatible_response_body: Callable[..., Any]
-    compatible_sse_line: Callable[..., Any]
-    safe_upstream_error_detail: Callable[..., Any]
-    write_proxy_event: Callable[..., Any]
-    _active_gateway_request: Callable[..., Any]
     _bind_handler_synthetic_terminal_failure: Callable[..., Any]
     _responses_synthetic_terminal_failure: Callable[..., Any]
-    _offer_official_passthrough_usage_line: Callable[..., Any]
-    _UpstreamSseReaderLifecycle: type[Any]
+    compatible_sse_line: Callable[..., Any]
+    write_proxy_event: Callable[..., Any]
+    _active_gateway_request: Callable[..., Any]
     logger: Any
-    _UNSET_CONTENT_ENCODING: Any
-    _chat_completion_error_payload: Callable[..., Any]
-    _downstream_stream_error_payload: Callable[..., Any]
-    _get_header: Callable[..., Any]
-    decoded_request_body: Callable[..., Any]
-    _sse_payload_bytes: Callable[..., Any]
-    _chat_function_name_from_response_item: Callable[[Mapping[str, Any]], str | None]
 
 
 class RelayHandler(Protocol):
@@ -446,7 +343,7 @@ class RelayPlan(Protocol):
 @dataclass(frozen=True)
 class RelayContext:
     handler: RelayHandler
-    symbols: RelaySymbols
+    glue: RelayGlue
     transparent_relay: Callable[..., int]
     official_passthrough_relay: Callable[..., int]
     prepared_exchange: Any = None
@@ -469,120 +366,121 @@ def relay_upstream_response(
     response_lifecycle_state: dict[str, str] | None = None,
 ) -> int:
     self = relay_context.handler
-    CompactEmptyResponseError = relay_context.symbols.CompactEmptyResponseError
-    DownstreamKeepaliveFailedError = relay_context.symbols.DownstreamKeepaliveFailedError
-    IncompleteRead = relay_context.symbols.IncompleteRead
-    NonForwardable = relay_context.symbols.NonForwardable
-    RuntimeToolCompatibilityError = relay_context.symbols.RuntimeToolCompatibilityError
-    SseFrameTooLargeError = relay_context.symbols.SseFrameTooLargeError
-    URLError = relay_context.symbols.URLError
-    UpstreamEmptyCompletedResponseError = relay_context.symbols.UpstreamEmptyCompletedResponseError
-    UpstreamProtocolTranslationError = relay_context.symbols.UpstreamProtocolTranslationError
-    UpstreamSseSemanticError = relay_context.symbols.UpstreamSseSemanticError
-    UpstreamStreamErrorEvent = relay_context.symbols.UpstreamStreamErrorEvent
-    UpstreamStreamIdleTimeoutError = relay_context.symbols.UpstreamStreamIdleTimeoutError
-    UpstreamStreamIncompleteError = relay_context.symbols.UpstreamStreamIncompleteError
-    UpstreamStreamInterruptedError = relay_context.symbols.UpstreamStreamInterruptedError
-    DownstreamStreamCommit = relay_context.symbols.DownstreamStreamCommit
-    MutationPolicy = relay_context.symbols.MutationPolicy
-    PreparedExchange = relay_context.symbols.PreparedExchange
-    StreamingPolicy = relay_context.symbols.StreamingPolicy
-    UsagePolicy = relay_context.symbols.UsagePolicy
-    _ChatToResponsesStreamConverter = relay_context.symbols._ChatToResponsesStreamConverter
-    _ResponsesToChatStreamConverter = relay_context.symbols._ResponsesToChatStreamConverter
-    _ThirdPartyApplyPatchStreamAdapter = relay_context.symbols._ThirdPartyApplyPatchStreamAdapter
-    _RuntimeToolInverseStreamError = relay_context.symbols._RuntimeToolInverseStreamError
-    RETRY_FAILURE_QUICK_TRANSIENT = relay_context.symbols.RETRY_FAILURE_QUICK_TRANSIENT
-    RETRY_REQUEST_COMPACT = relay_context.symbols.RETRY_REQUEST_COMPACT
-    RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE = relay_context.symbols.RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
-    RETRY_SAFETY_SUPPRESSED_POST_WRITE = relay_context.symbols.RETRY_SAFETY_SUPPRESSED_POST_WRITE
-    _adapt_third_party_apply_patch_stream_events = relay_context.symbols._adapt_third_party_apply_patch_stream_events
-    _apply_external_worker_response_contract = relay_context.symbols._apply_external_worker_response_contract
-    _apply_patch_adapter_enabled = relay_context.symbols._apply_patch_adapter_enabled
-    _bind_downstream_stream_commit = relay_context.symbols._bind_downstream_stream_commit
-    _bounded_failure_event_context = relay_context.symbols._bounded_failure_event_context
-    _capture_usage = relay_context.symbols._capture_usage
-    _chat_completion_body_is_empty = relay_context.symbols._chat_completion_body_is_empty
-    _chat_completion_body_to_stream_chunks = relay_context.symbols._chat_completion_body_to_stream_chunks
-    _chat_completion_to_response_body = relay_context.symbols._chat_completion_to_response_body
-    _chat_sse_event_resets_idle_timeout = relay_context.symbols._chat_sse_event_resets_idle_timeout
-    _chat_stream_chunks_have_terminal = relay_context.symbols._chat_stream_chunks_have_terminal
-    _chat_stream_chunks_to_response_events = relay_context.symbols._chat_stream_chunks_to_response_events
-    _chat_stream_error_detail = relay_context.symbols._chat_stream_error_detail
-    _chat_stream_lifecycle_final_issue = relay_context.symbols._chat_stream_lifecycle_final_issue
-    _chat_stream_shape_summary = relay_context.symbols._chat_stream_shape_summary
-    _chat_terminal_observer = relay_context.symbols._chat_terminal_observer
-    _coerce_exact_spawn_prompt_tool_calls = relay_context.symbols._coerce_exact_spawn_prompt_tool_calls
-    _coerce_required_subagent_tool_calls = relay_context.symbols._coerce_required_subagent_tool_calls
-    _compact_response_body_is_empty = relay_context.symbols._compact_response_body_is_empty
-    _converted_sse_payload = relay_context.symbols._converted_sse_payload
-    _count_sse_reasoning_event = relay_context.symbols._count_sse_reasoning_event
-    _downgrade_invalid_third_party_tool_calls = relay_context.symbols._downgrade_invalid_third_party_tool_calls
-    _events_to_responses_body = relay_context.symbols._events_to_responses_body
-    _filtered_response_headers = relay_context.symbols._filtered_response_headers
-    _guard_duplicate_multi_agent_spawn_calls = relay_context.symbols._guard_duplicate_multi_agent_spawn_calls
-    _handler_downstream_stream_commit = relay_context.symbols._handler_downstream_stream_commit
-    _incomplete_stream_json_error_body = relay_context.symbols._incomplete_stream_json_error_body
-    _is_event_stream = relay_context.symbols._is_event_stream
-    _is_reasoning_summary_stream_event = relay_context.symbols._is_reasoning_summary_stream_event
-    _is_sse_blank_line = relay_context.symbols._is_sse_blank_line
-    _is_sse_event_metadata_line = relay_context.symbols._is_sse_event_metadata_line
-    _json_error_payload_for_inbound_format = relay_context.symbols._json_error_payload_for_inbound_format
-    _lifecycle_final_issue_event_name = relay_context.symbols._lifecycle_final_issue_event_name
-    _lifecycle_final_issue_missing_reason = relay_context.symbols._lifecycle_final_issue_missing_reason
-    _normalize_third_party_tool_call = relay_context.symbols._normalize_third_party_tool_call
-    _observe_gateway_diagnostic = relay_context.symbols._observe_gateway_diagnostic
-    _offer_usage_observed_body = relay_context.symbols._offer_usage_observed_body
-    _offer_usage_observed_sse_line = relay_context.symbols._offer_usage_observed_sse_line
-    _parse_sse_json_payload = relay_context.symbols._parse_sse_json_payload
-    _parse_sse_json_payloads = relay_context.symbols._parse_sse_json_payloads
-    _public_event_context = relay_context.symbols._public_event_context
-    _raise_lifecycle_final_issue = relay_context.symbols._raise_lifecycle_final_issue
-    _raise_runtime_tool_compatibility_error = relay_context.symbols._raise_runtime_tool_compatibility_error
-    _reconcile_function_call_argument_events = relay_context.symbols._reconcile_function_call_argument_events
-    _redact_identity_in_text = relay_context.symbols._redact_identity_in_text
-    _repair_missing_required_subagent_call_events = relay_context.symbols._repair_missing_required_subagent_call_events
-    _response_body_lifecycle_final_issue = relay_context.symbols._response_body_lifecycle_final_issue
-    _response_body_to_chat_completion_body = relay_context.symbols._response_body_to_chat_completion_body
-    _response_body_to_response_sse_events = relay_context.symbols._response_body_to_response_sse_events
-    _response_events_shape_summary = relay_context.symbols._response_events_shape_summary
-    _responses_body_is_empty = relay_context.symbols._responses_body_is_empty
-    _responses_completed_tool_item = relay_context.symbols._responses_completed_tool_item
-    _responses_event_commits_downstream_output = relay_context.symbols._responses_event_commits_downstream_output
-    _responses_event_has_visible_or_tool_output = relay_context.symbols._responses_event_has_visible_or_tool_output
-    _responses_event_is_tool_call_construction = relay_context.symbols._responses_event_is_tool_call_construction
-    _responses_event_starts_downstream_output = relay_context.symbols._responses_event_starts_downstream_output
-    _responses_events_have_terminal = relay_context.symbols._responses_events_have_terminal
-    _responses_events_lifecycle_final_issue = relay_context.symbols._responses_events_lifecycle_final_issue
-    _responses_failed_event_for_stream_error = relay_context.symbols._responses_failed_event_for_stream_error
-    _responses_sse_event_resets_idle_timeout = relay_context.symbols._responses_sse_event_resets_idle_timeout
-    _responses_sse_line_resets_idle_timeout = relay_context.symbols._responses_sse_line_resets_idle_timeout
-    _responses_stream_error_detail = relay_context.symbols._responses_stream_error_detail
-    _responses_stream_error_type = relay_context.symbols._responses_stream_error_type
-    _responses_terminal_observer = relay_context.symbols._responses_terminal_observer
-    _retry_identity_from_context = relay_context.symbols._retry_identity_from_context
-    _route_failure_event_fields = relay_context.symbols._route_failure_event_fields
-    _runtime_tool_compatibility_stream_for_attempt = relay_context.symbols._runtime_tool_compatibility_stream_for_attempt
-    _sse_event_separator_after_line = relay_context.symbols._sse_event_separator_after_line
-    _sse_json_line = relay_context.symbols._sse_json_line
-    _sse_line_ending = relay_context.symbols._sse_line_ending
-    _suppress_bounded_tool_search_calls = relay_context.symbols._suppress_bounded_tool_search_calls
-    _suppress_chat_reasoning_extensions = relay_context.symbols._suppress_chat_reasoning_extensions
-    _suppress_coordinator_forbidden_tool_calls = relay_context.symbols._suppress_coordinator_forbidden_tool_calls
-    _suppress_worker_multi_agent_tool_calls = relay_context.symbols._suppress_worker_multi_agent_tool_calls
-    _synthetic_response_completed_from_tool_items = relay_context.symbols._synthetic_response_completed_from_tool_items
-    _upstream_failure_class = relay_context.symbols._upstream_failure_class
-    _usage_from_json_body = relay_context.symbols._usage_from_json_body
-    _usage_from_payload = relay_context.symbols._usage_from_payload
-    _usage_from_response_event = relay_context.symbols._usage_from_response_event
-    _usage_observed_context = relay_context.symbols._usage_observed_context
-    _verified_converted_sse_semantic_error = relay_context.symbols._verified_converted_sse_semantic_error
-    _with_codexhub_http_error = relay_context.symbols._with_codexhub_http_error
-    _write_adapter_event = relay_context.symbols._write_adapter_event
-    _write_runtime_tool_adapter_response_evidence = relay_context.symbols._write_runtime_tool_adapter_response_evidence
-    compatible_response_body = relay_context.symbols.compatible_response_body
-    compatible_sse_line = relay_context.symbols.compatible_sse_line
-    safe_upstream_error_detail = relay_context.symbols.safe_upstream_error_detail
+    glue = relay_context.glue
+    CompactEmptyResponseError = gateway_errors.CompactEmptyResponseError
+    DownstreamKeepaliveFailedError = gateway_stream_semantics.DownstreamKeepaliveFailedError
+    IncompleteRead = http.client.IncompleteRead
+    NonForwardable = protocol_translation.NonForwardable
+    RuntimeToolCompatibilityError = runtime_tool_compatibility.ToolCompatibilityError
+    SseFrameTooLargeError = sse_events.SseFrameTooLargeError
+    URLError = urllib.error.URLError
+    UpstreamEmptyCompletedResponseError = gateway_stream_semantics.UpstreamEmptyCompletedResponseError
+    UpstreamProtocolTranslationError = gateway_errors.UpstreamProtocolTranslationError
+    UpstreamSseSemanticError = gateway_stream_semantics.UpstreamSseSemanticError
+    UpstreamStreamErrorEvent = gateway_stream_semantics.UpstreamStreamErrorEvent
+    UpstreamStreamIdleTimeoutError = gateway_errors.UpstreamStreamIdleTimeoutError
+    UpstreamStreamIncompleteError = protocol_translation.UpstreamStreamIncompleteError
+    UpstreamStreamInterruptedError = gateway_stream_semantics.UpstreamStreamInterruptedError
+    DownstreamStreamCommit = gateway_sse.DownstreamStreamCommit
+    MutationPolicy = route_primitives.MutationPolicy
+    PreparedExchange = protocol_translation.PreparedExchange
+    StreamingPolicy = route_primitives.StreamingPolicy
+    UsagePolicy = route_primitives.UsagePolicy
+    _ChatToResponsesStreamConverter = protocol_translation.GatewayChatToResponsesStreamConverter
+    _ResponsesToChatStreamConverter = protocol_translation.GatewayResponsesToChatStreamConverter
+    _ThirdPartyApplyPatchStreamAdapter = gateway_compat.response._ThirdPartyApplyPatchStreamAdapter
+    _RuntimeToolInverseStreamError = gateway_stream_semantics._RuntimeToolInverseStreamError
+    RETRY_FAILURE_QUICK_TRANSIENT = route_primitives.RETRY_FAILURE_QUICK_TRANSIENT
+    RETRY_REQUEST_COMPACT = route_primitives.RETRY_REQUEST_COMPACT
+    RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE = route_primitives.RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
+    RETRY_SAFETY_SUPPRESSED_POST_WRITE = route_primitives.RETRY_SAFETY_SUPPRESSED_POST_WRITE
+    _adapt_third_party_apply_patch_stream_events = gateway_compat.response._adapt_third_party_apply_patch_stream_events
+    _apply_external_worker_response_contract = gateway_compat.multi_agent._apply_external_worker_response_contract
+    _apply_patch_adapter_enabled = gateway_compat.response._apply_patch_adapter_enabled
+    _bind_downstream_stream_commit = glue._bind_downstream_stream_commit
+    _bounded_failure_event_context = gateway_events.bounded_failure_event_context
+    _capture_usage = gateway_events.capture_usage
+    _chat_completion_body_is_empty = gateway_stream_semantics._chat_completion_body_is_empty
+    _chat_completion_body_to_stream_chunks = gateway_stream_semantics._chat_completion_body_to_stream_chunks
+    _chat_completion_to_response_body = gateway_stream_semantics._chat_completion_to_response_body
+    _chat_sse_event_resets_idle_timeout = gateway_stream_semantics._chat_sse_event_resets_idle_timeout
+    _chat_stream_chunks_have_terminal = gateway_stream_semantics._chat_stream_chunks_have_terminal
+    _chat_stream_chunks_to_response_events = gateway_stream_semantics._chat_stream_chunks_to_response_events
+    _chat_stream_error_detail = gateway_stream_semantics._chat_stream_error_detail
+    _chat_stream_lifecycle_final_issue = gateway_stream_semantics._chat_stream_lifecycle_final_issue
+    _chat_stream_shape_summary = gateway_stream_semantics._chat_stream_shape_summary
+    _chat_terminal_observer = gateway_stream_semantics._chat_terminal_observer
+    _coerce_exact_spawn_prompt_tool_calls = gateway_compat.sse._coerce_exact_spawn_prompt_tool_calls
+    _coerce_required_subagent_tool_calls = gateway_compat.sse._coerce_required_subagent_tool_calls
+    _compact_response_body_is_empty = gateway_stream_semantics._compact_response_body_is_empty
+    _converted_sse_payload = gateway_stream_semantics._converted_sse_payload
+    _count_sse_reasoning_event = gateway_stream_semantics._count_sse_reasoning_event
+    _downgrade_invalid_third_party_tool_calls = gateway_compat.official_passthrough._downgrade_invalid_third_party_tool_calls
+    _events_to_responses_body = gateway_stream_semantics._events_to_responses_body
+    _filtered_response_headers = gateway_request._filtered_response_headers
+    _guard_duplicate_multi_agent_spawn_calls = gateway_compat.multi_agent._guard_duplicate_multi_agent_spawn_calls
+    _handler_downstream_stream_commit = glue._handler_downstream_stream_commit
+    _incomplete_stream_json_error_body = gateway_stream_semantics._incomplete_stream_json_error_body
+    _is_event_stream = gateway_request._is_event_stream
+    _is_reasoning_summary_stream_event = gateway_stream_semantics._is_reasoning_summary_stream_event
+    _is_sse_blank_line = gateway_sse._is_sse_blank_line
+    _is_sse_event_metadata_line = gateway_sse._is_sse_event_metadata_line
+    _json_error_payload_for_inbound_format = gateway_errors._json_error_payload_for_inbound_format
+    _lifecycle_final_issue_event_name = gateway_stream_semantics._lifecycle_final_issue_event_name
+    _lifecycle_final_issue_missing_reason = gateway_stream_semantics._lifecycle_final_issue_missing_reason
+    _normalize_third_party_tool_call = gateway_compat.official_passthrough._normalize_third_party_tool_call
+    _observe_gateway_diagnostic = glue._observe_gateway_diagnostic
+    _offer_usage_observed_body = gateway_events.offer_usage_observed_body
+    _offer_usage_observed_sse_line = gateway_events.offer_usage_observed_sse_line
+    _parse_sse_json_payload = gateway_sse._parse_sse_json_payload
+    _parse_sse_json_payloads = gateway_sse._parse_sse_json_payloads
+    _public_event_context = gateway_events.public_event_context
+    _raise_lifecycle_final_issue = gateway_stream_semantics._raise_lifecycle_final_issue
+    _raise_runtime_tool_compatibility_error = gateway_compat.official_passthrough._raise_runtime_tool_compatibility_error
+    _reconcile_function_call_argument_events = gateway_compat.sse._reconcile_function_call_argument_events
+    _redact_identity_in_text = gateway_errors._redact_identity_in_text
+    _repair_missing_required_subagent_call_events = gateway_compat.sse._repair_missing_required_subagent_call_events
+    _response_body_lifecycle_final_issue = gateway_stream_semantics._response_body_lifecycle_final_issue
+    _response_body_to_chat_completion_body = gateway_stream_semantics._response_body_to_chat_completion_body
+    _response_body_to_response_sse_events = gateway_stream_semantics._response_body_to_response_sse_events
+    _response_events_shape_summary = gateway_stream_semantics._response_events_shape_summary
+    _responses_body_is_empty = gateway_stream_semantics._responses_body_is_empty
+    _responses_completed_tool_item = gateway_stream_semantics._responses_completed_tool_item
+    _responses_event_commits_downstream_output = gateway_stream_semantics._responses_event_commits_downstream_output
+    _responses_event_has_visible_or_tool_output = gateway_stream_semantics._responses_event_has_visible_or_tool_output
+    _responses_event_is_tool_call_construction = gateway_stream_semantics._responses_event_is_tool_call_construction
+    _responses_event_starts_downstream_output = gateway_stream_semantics._responses_event_starts_downstream_output
+    _responses_events_have_terminal = gateway_stream_semantics._responses_events_have_terminal
+    _responses_events_lifecycle_final_issue = gateway_stream_semantics._responses_events_lifecycle_final_issue
+    _responses_failed_event_for_stream_error = gateway_errors._responses_failed_event_for_stream_error
+    _responses_sse_event_resets_idle_timeout = gateway_stream_semantics._responses_sse_event_resets_idle_timeout
+    _responses_sse_line_resets_idle_timeout = gateway_stream_semantics._responses_sse_line_resets_idle_timeout
+    _responses_stream_error_detail = gateway_stream_semantics._responses_stream_error_detail
+    _responses_stream_error_type = gateway_stream_semantics._responses_stream_error_type
+    _responses_terminal_observer = gateway_stream_semantics._responses_terminal_observer
+    _retry_identity_from_context = gateway_transport._retry_identity_from_context
+    _route_failure_event_fields = gateway_events.route_failure_event_fields
+    _runtime_tool_compatibility_stream_for_attempt = gateway_compat.official_passthrough._runtime_tool_compatibility_stream_for_attempt
+    _sse_event_separator_after_line = gateway_sse._sse_event_separator_after_line
+    _sse_json_line = gateway_stream_semantics._sse_json_line
+    _sse_line_ending = gateway_sse._sse_line_ending
+    _suppress_bounded_tool_search_calls = gateway_compat.multi_agent._suppress_bounded_tool_search_calls
+    _suppress_chat_reasoning_extensions = gateway_stream_semantics._suppress_chat_reasoning_extensions
+    _suppress_coordinator_forbidden_tool_calls = gateway_compat.multi_agent._suppress_coordinator_forbidden_tool_calls
+    _suppress_worker_multi_agent_tool_calls = gateway_compat.multi_agent._suppress_worker_multi_agent_tool_calls
+    _synthetic_response_completed_from_tool_items = gateway_stream_semantics._synthetic_response_completed_from_tool_items
+    _upstream_failure_class = gateway_transport._upstream_failure_class
+    _usage_from_json_body = gateway_events._usage_from_json_body
+    _usage_from_payload = gateway_events._usage_from_payload
+    _usage_from_response_event = gateway_events._usage_from_response_event
+    _usage_observed_context = gateway_events._usage_observed_context
+    _verified_converted_sse_semantic_error = gateway_stream_semantics._verified_converted_sse_semantic_error
+    _with_codexhub_http_error = gateway_errors._with_codexhub_http_error
+    _write_adapter_event = glue._write_adapter_event
+    _write_runtime_tool_adapter_response_evidence = gateway_compat.official_passthrough._write_runtime_tool_adapter_response_evidence
+    compatible_response_body = gateway_compat.compatible_response_body
+    compatible_sse_line = glue.compatible_sse_line
+    safe_upstream_error_detail = gateway_errors.safe_upstream_error_detail
     upstream_format = relay_execution_plan.selected_upstream_format
     request_kind = relay_execution_plan.request_kind
     streaming_policy = relay_execution_plan.streaming_policy
@@ -666,7 +564,7 @@ def relay_upstream_response(
     )
     relay_redact_identity = _retry_identity_from_context(event_context)
     route_failure_event_fields = _route_failure_event_fields(event_context)
-    _write_proxy_event = relay_context.symbols.write_proxy_event
+    _write_proxy_event = glue.write_proxy_event
 
     def write_proxy_event(event: str, **fields: Any) -> None:
         enriched = dict(fields)
@@ -985,7 +883,7 @@ def relay_upstream_response(
                         try:
                             return exchange.decode_response(
                                 payload,
-                                function_name_from_response_item=relay_context.symbols._chat_function_name_from_response_item,
+                                function_name_from_response_item=gateway_stream_semantics._chat_function_name_from_response_item,
                             )
                         except NonForwardable as exc:
                             raise UpstreamProtocolTranslationError(exc) from exc

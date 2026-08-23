@@ -1,12 +1,25 @@
 """Official-passthrough and transparent Gateway SSE relay paths.
 
 Frame helpers and ``relay_upstream_response`` stay in ``gateway_relay``.
-These two paths only read ``RelayContext`` symbols at call time.
+These two paths only read ``RelayContext`` glue and owning modules at call time.
 """
 
 from __future__ import annotations
 
 import json
+import http.client
+import urllib.error
+
+import gateway_errors
+import gateway_events
+import gateway_request
+import gateway_sse
+import gateway_stream_semantics
+import gateway_transport
+import protocol_translation
+import route_primitives
+import sse_events
+
 import time
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
@@ -34,31 +47,32 @@ def relay_official_passthrough_sse_response(
     defer_stream_errors: bool = False,
 ) -> int:
     self = relay_context.handler
-    IncompleteRead = relay_context.symbols.IncompleteRead
-    SseFrameTooLargeError = relay_context.symbols.SseFrameTooLargeError
-    URLError = relay_context.symbols.URLError
-    UpstreamStreamIncompleteError = relay_context.symbols.UpstreamStreamIncompleteError
-    UpstreamStreamInterruptedError = relay_context.symbols.UpstreamStreamInterruptedError
-    _UpstreamSseReaderLifecycle = relay_context.symbols._UpstreamSseReaderLifecycle
-    _active_gateway_request = relay_context.symbols._active_gateway_request
-    _bind_downstream_stream_commit = relay_context.symbols._bind_downstream_stream_commit
-    _bind_handler_synthetic_terminal_failure = relay_context.symbols._bind_handler_synthetic_terminal_failure
-    _capture_usage = relay_context.symbols._capture_usage
-    _filtered_response_headers = relay_context.symbols._filtered_response_headers
-    _handler_downstream_stream_commit = relay_context.symbols._handler_downstream_stream_commit
-    _observe_gateway_diagnostic = relay_context.symbols._observe_gateway_diagnostic
-    _offer_official_passthrough_usage_line = relay_context.symbols._offer_official_passthrough_usage_line
-    _responses_event_commits_downstream_output = relay_context.symbols._responses_event_commits_downstream_output
-    _responses_synthetic_terminal_failure = relay_context.symbols._responses_synthetic_terminal_failure
-    _responses_terminal_observer = relay_context.symbols._responses_terminal_observer
-    _route_failure_event_fields = relay_context.symbols._route_failure_event_fields
-    logger = relay_context.symbols.logger
-    safe_upstream_error_detail = relay_context.symbols.safe_upstream_error_detail
+    glue = relay_context.glue
+    IncompleteRead = http.client.IncompleteRead
+    SseFrameTooLargeError = sse_events.SseFrameTooLargeError
+    URLError = urllib.error.URLError
+    UpstreamStreamIncompleteError = protocol_translation.UpstreamStreamIncompleteError
+    UpstreamStreamInterruptedError = gateway_stream_semantics.UpstreamStreamInterruptedError
+    _UpstreamSseReaderLifecycle = gateway_transport.UpstreamSseReaderLifecycle
+    _active_gateway_request = glue._active_gateway_request
+    _bind_downstream_stream_commit = glue._bind_downstream_stream_commit
+    _bind_handler_synthetic_terminal_failure = glue._bind_handler_synthetic_terminal_failure
+    _capture_usage = gateway_events.capture_usage
+    _filtered_response_headers = gateway_request._filtered_response_headers
+    _handler_downstream_stream_commit = glue._handler_downstream_stream_commit
+    _observe_gateway_diagnostic = glue._observe_gateway_diagnostic
+    _offer_official_passthrough_usage_line = gateway_events.offer_official_passthrough_usage_line
+    _responses_event_commits_downstream_output = gateway_stream_semantics._responses_event_commits_downstream_output
+    _responses_synthetic_terminal_failure = glue._responses_synthetic_terminal_failure
+    _responses_terminal_observer = gateway_stream_semantics._responses_terminal_observer
+    _route_failure_event_fields = gateway_events.route_failure_event_fields
+    logger = glue.logger
+    safe_upstream_error_detail = gateway_errors.safe_upstream_error_detail
 
     status = getattr(response, "status", None) or getattr(response, "code", 502)
     headers_sent_downstream = bool(headers_already_sent)
     route_failure_event_fields = _route_failure_event_fields(event_context)
-    _write_proxy_event = relay_context.symbols.write_proxy_event
+    _write_proxy_event = glue.write_proxy_event
 
     def write_proxy_event(event: str, **fields: Any) -> None:
         enriched = dict(fields)
@@ -333,44 +347,45 @@ def relay_transparent_upstream_response(
     defer_stream_errors: bool = False,
 ) -> int:
     self = relay_context.handler
-    IncompleteRead = relay_context.symbols.IncompleteRead
-    RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE = relay_context.symbols.RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
-    RETRY_SAFETY_SUPPRESSED_POST_WRITE = relay_context.symbols.RETRY_SAFETY_SUPPRESSED_POST_WRITE
-    SseFrameTooLargeError = relay_context.symbols.SseFrameTooLargeError
-    URLError = relay_context.symbols.URLError
-    UpstreamStreamErrorEvent = relay_context.symbols.UpstreamStreamErrorEvent
-    UpstreamStreamInterruptedError = relay_context.symbols.UpstreamStreamInterruptedError
-    _UNSET_CONTENT_ENCODING = relay_context.symbols._UNSET_CONTENT_ENCODING
-    _UpstreamSseReaderLifecycle = relay_context.symbols._UpstreamSseReaderLifecycle
-    _active_gateway_request = relay_context.symbols._active_gateway_request
-    _bind_downstream_stream_commit = relay_context.symbols._bind_downstream_stream_commit
-    _bind_handler_synthetic_terminal_failure = relay_context.symbols._bind_handler_synthetic_terminal_failure
-    _bounded_failure_event_context = relay_context.symbols._bounded_failure_event_context
-    _capture_usage = relay_context.symbols._capture_usage
-    _chat_completion_error_payload = relay_context.symbols._chat_completion_error_payload
-    _chat_stream_error_detail = relay_context.symbols._chat_stream_error_detail
-    _chat_terminal_observer = relay_context.symbols._chat_terminal_observer
-    _downstream_stream_error_payload = relay_context.symbols._downstream_stream_error_payload
-    _filtered_response_headers = relay_context.symbols._filtered_response_headers
-    _get_header = relay_context.symbols._get_header
-    _handler_downstream_stream_commit = relay_context.symbols._handler_downstream_stream_commit
-    _is_event_stream = relay_context.symbols._is_event_stream
-    _observe_gateway_diagnostic = relay_context.symbols._observe_gateway_diagnostic
-    _offer_usage_observed_body = relay_context.symbols._offer_usage_observed_body
-    _offer_usage_observed_sse_line = relay_context.symbols._offer_usage_observed_sse_line
-    _redact_identity_in_text = relay_context.symbols._redact_identity_in_text
-    _responses_event_commits_downstream_output = relay_context.symbols._responses_event_commits_downstream_output
-    _responses_event_starts_downstream_output = relay_context.symbols._responses_event_starts_downstream_output
-    _responses_stream_error_type = relay_context.symbols._responses_stream_error_type
-    _responses_synthetic_terminal_failure = relay_context.symbols._responses_synthetic_terminal_failure
-    _responses_terminal_observer = relay_context.symbols._responses_terminal_observer
-    _retry_identity_from_context = relay_context.symbols._retry_identity_from_context
-    _route_failure_event_fields = relay_context.symbols._route_failure_event_fields
-    _sse_payload_bytes = relay_context.symbols._sse_payload_bytes
-    _usage_observed_context = relay_context.symbols._usage_observed_context
-    decoded_request_body = relay_context.symbols.decoded_request_body
-    logger = relay_context.symbols.logger
-    safe_upstream_error_detail = relay_context.symbols.safe_upstream_error_detail
+    glue = relay_context.glue
+    IncompleteRead = http.client.IncompleteRead
+    RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE = route_primitives.RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
+    RETRY_SAFETY_SUPPRESSED_POST_WRITE = route_primitives.RETRY_SAFETY_SUPPRESSED_POST_WRITE
+    SseFrameTooLargeError = sse_events.SseFrameTooLargeError
+    URLError = urllib.error.URLError
+    UpstreamStreamErrorEvent = gateway_stream_semantics.UpstreamStreamErrorEvent
+    UpstreamStreamInterruptedError = gateway_stream_semantics.UpstreamStreamInterruptedError
+    _UNSET_CONTENT_ENCODING = gateway_request._UNSET_CONTENT_ENCODING
+    _UpstreamSseReaderLifecycle = gateway_transport.UpstreamSseReaderLifecycle
+    _active_gateway_request = glue._active_gateway_request
+    _bind_downstream_stream_commit = glue._bind_downstream_stream_commit
+    _bind_handler_synthetic_terminal_failure = glue._bind_handler_synthetic_terminal_failure
+    _bounded_failure_event_context = gateway_events.bounded_failure_event_context
+    _capture_usage = gateway_events.capture_usage
+    _chat_completion_error_payload = gateway_errors._chat_completion_error_payload
+    _chat_stream_error_detail = gateway_stream_semantics._chat_stream_error_detail
+    _chat_terminal_observer = gateway_stream_semantics._chat_terminal_observer
+    _downstream_stream_error_payload = gateway_errors._downstream_stream_error_payload
+    _filtered_response_headers = gateway_request._filtered_response_headers
+    _get_header = gateway_transport._get_header
+    _handler_downstream_stream_commit = glue._handler_downstream_stream_commit
+    _is_event_stream = gateway_request._is_event_stream
+    _observe_gateway_diagnostic = glue._observe_gateway_diagnostic
+    _offer_usage_observed_body = gateway_events.offer_usage_observed_body
+    _offer_usage_observed_sse_line = gateway_events.offer_usage_observed_sse_line
+    _redact_identity_in_text = gateway_errors._redact_identity_in_text
+    _responses_event_commits_downstream_output = gateway_stream_semantics._responses_event_commits_downstream_output
+    _responses_event_starts_downstream_output = gateway_stream_semantics._responses_event_starts_downstream_output
+    _responses_stream_error_type = gateway_stream_semantics._responses_stream_error_type
+    _responses_synthetic_terminal_failure = glue._responses_synthetic_terminal_failure
+    _responses_terminal_observer = gateway_stream_semantics._responses_terminal_observer
+    _retry_identity_from_context = gateway_transport._retry_identity_from_context
+    _route_failure_event_fields = gateway_events.route_failure_event_fields
+    _sse_payload_bytes = gateway_sse._sse_payload_bytes
+    _usage_observed_context = gateway_events._usage_observed_context
+    decoded_request_body = gateway_request.decoded_request_body
+    logger = glue.logger
+    safe_upstream_error_detail = gateway_errors.safe_upstream_error_detail
 
     status = getattr(response, "status", None) or getattr(response, "code", 502)
     is_event_stream = _is_event_stream(response.headers)
@@ -384,7 +399,7 @@ def relay_transparent_upstream_response(
     )
     relay_redact_identity = _retry_identity_from_context(event_context)
     route_failure_event_fields = _route_failure_event_fields(event_context)
-    _write_proxy_event = relay_context.symbols.write_proxy_event
+    _write_proxy_event = glue.write_proxy_event
 
     def write_proxy_event(event: str, **fields: Any) -> None:
         enriched = dict(fields)

@@ -82,7 +82,6 @@ from gateway_exchange import (
 )
 from gateway_relay import (
     RelayContext,
-    RelaySymbols,
     SseLineRelayContext,
     iter_upstream_sse_lines,
     relay_official_passthrough_sse_response,

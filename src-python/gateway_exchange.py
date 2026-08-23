@@ -628,7 +628,7 @@ def execute_exchange(request: ExchangeRequest, hooks: ExchangeHooks, *, progress
 
 
 # ---------------------------------------------------------------------------
-# Handler-facing relay bindings. These build per-request RelaySymbols /
+# Handler-facing relay bindings. These build per-request RelayGlue /
 # RelayContext objects and the downstream stream-commit seam, reading
 # owning-module attributes at call time so test patches stay live.
 # ---------------------------------------------------------------------------
@@ -650,7 +650,7 @@ from gateway_errors import (
     _responses_failed_event_for_stream_error,
     safe_upstream_error_detail,
 )
-from gateway_relay import RelayContext, RelaySymbols
+from gateway_relay import RelayContext, RelayGlue
 from gateway_request import (
     _UNSET_CONTENT_ENCODING,
     _filtered_response_headers,
@@ -877,157 +877,25 @@ def _relay_active_gateway_request() -> Any:
     return gateway_admission.active_gateway_request()
 
 
-def _relay_symbols() -> RelaySymbols:
-    _stream = gateway_stream_semantics
-    _events = gateway_events
-    _errors = gateway_errors
-    _sse = gateway_sse
-    return RelaySymbols(
-        CompactEmptyResponseError=CompactEmptyResponseError,
-        DownstreamKeepaliveFailedError=DownstreamKeepaliveFailedError,
-        IncompleteRead=IncompleteRead,
-        NonForwardable=NonForwardable,
-        RuntimeToolCompatibilityError=RuntimeToolCompatibilityError,
-        SseFrameTooLargeError=SseFrameTooLargeError,
-        URLError=URLError,
-        UpstreamEmptyCompletedResponseError=UpstreamEmptyCompletedResponseError,
-        UpstreamProtocolTranslationError=UpstreamProtocolTranslationError,
-        UpstreamSseSemanticError=_stream.UpstreamSseSemanticError,
-        UpstreamStreamErrorEvent=UpstreamStreamErrorEvent,
-        UpstreamStreamIdleTimeoutError=UpstreamStreamIdleTimeoutError,
-        UpstreamStreamIncompleteError=UpstreamStreamIncompleteError,
-        UpstreamStreamInterruptedError=UpstreamStreamInterruptedError,
-        DownstreamStreamCommit=DownstreamStreamCommit,
-        MutationPolicy=MutationPolicy,
-        PreparedExchange=PreparedExchange,
-        StreamingPolicy=StreamingPolicy,
-        UsagePolicy=UsagePolicy,
-        _ChatToResponsesStreamConverter=_ChatToResponsesStreamConverter,
-        _ResponsesToChatStreamConverter=_ResponsesToChatStreamConverter,
-        _ThirdPartyApplyPatchStreamAdapter=gateway_compat.response._ThirdPartyApplyPatchStreamAdapter,
-        _RuntimeToolInverseStreamError=_stream._RuntimeToolInverseStreamError,
-        RETRY_FAILURE_QUICK_TRANSIENT=RETRY_FAILURE_QUICK_TRANSIENT,
-        RETRY_REQUEST_COMPACT=RETRY_REQUEST_COMPACT,
-        RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE=RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE,
-        RETRY_SAFETY_SUPPRESSED_POST_WRITE=RETRY_SAFETY_SUPPRESSED_POST_WRITE,
-        _adapt_third_party_apply_patch_stream_events=gateway_compat.response._adapt_third_party_apply_patch_stream_events,
-        _apply_external_worker_response_contract=gateway_compat.multi_agent._apply_external_worker_response_contract,
-        _apply_patch_adapter_enabled=gateway_compat.response._apply_patch_adapter_enabled,
+def _relay_glue() -> RelayGlue:
+    return RelayGlue(
         _bind_downstream_stream_commit=_bind_downstream_stream_commit,
-        _bounded_failure_event_context=_events.bounded_failure_event_context,
-        _capture_usage=_events.capture_usage,
-        _chat_completion_body_is_empty=_stream._chat_completion_body_is_empty,
-        _chat_completion_body_to_stream_chunks=_stream._chat_completion_body_to_stream_chunks,
-        _chat_completion_to_response_body=_stream._chat_completion_to_response_body,
-        _chat_sse_event_resets_idle_timeout=_stream._chat_sse_event_resets_idle_timeout,
-        _chat_stream_chunks_have_terminal=_stream._chat_stream_chunks_have_terminal,
-        _chat_stream_chunks_to_response_events=_stream._chat_stream_chunks_to_response_events,
-        _chat_stream_error_detail=_stream._chat_stream_error_detail,
-        _chat_stream_lifecycle_final_issue=_stream._chat_stream_lifecycle_final_issue,
-        _chat_stream_shape_summary=_stream._chat_stream_shape_summary,
-        _chat_terminal_observer=_stream._chat_terminal_observer,
-        _coerce_exact_spawn_prompt_tool_calls=gateway_compat.sse._coerce_exact_spawn_prompt_tool_calls,
-        _coerce_required_subagent_tool_calls=gateway_compat.sse._coerce_required_subagent_tool_calls,
-        _compact_response_body_is_empty=_stream._compact_response_body_is_empty,
-        _converted_sse_payload=_stream._converted_sse_payload,
-        _count_sse_reasoning_event=_stream._count_sse_reasoning_event,
-        _downgrade_invalid_third_party_tool_calls=gateway_compat.official_passthrough._downgrade_invalid_third_party_tool_calls,
-        _events_to_responses_body=_stream._events_to_responses_body,
-        _filtered_response_headers=_filtered_response_headers,
-        _guard_duplicate_multi_agent_spawn_calls=gateway_compat.multi_agent._guard_duplicate_multi_agent_spawn_calls,
         _handler_downstream_stream_commit=_handler_downstream_stream_commit,
-        _incomplete_stream_json_error_body=_stream._incomplete_stream_json_error_body,
-        _is_event_stream=_is_event_stream,
-        _is_reasoning_summary_stream_event=_stream._is_reasoning_summary_stream_event,
-        _is_sse_blank_line=_sse._is_sse_blank_line,
-        _is_sse_event_metadata_line=_sse._is_sse_event_metadata_line,
-        _json_error_payload_for_inbound_format=_errors._json_error_payload_for_inbound_format,
-        _lifecycle_final_issue_event_name=_stream._lifecycle_final_issue_event_name,
-        _lifecycle_final_issue_missing_reason=_stream._lifecycle_final_issue_missing_reason,
-        _normalize_third_party_tool_call=gateway_compat.official_passthrough._normalize_third_party_tool_call,
         _observe_gateway_diagnostic=_observe_gateway_diagnostic,
-        _offer_usage_observed_body=_events.offer_usage_observed_body,
-        _offer_usage_observed_sse_line=_events.offer_usage_observed_sse_line,
-        _parse_sse_json_payload=_sse._parse_sse_json_payload,
-        _parse_sse_json_payloads=_sse._parse_sse_json_payloads,
-        _public_event_context=_events.public_event_context,
-        _raise_lifecycle_final_issue=_stream._raise_lifecycle_final_issue,
-        _raise_runtime_tool_compatibility_error=gateway_compat.official_passthrough._raise_runtime_tool_compatibility_error,
-        _reconcile_function_call_argument_events=gateway_compat.sse._reconcile_function_call_argument_events,
-        _redact_identity_in_text=_errors._redact_identity_in_text,
-        _repair_missing_required_subagent_call_events=gateway_compat.sse._repair_missing_required_subagent_call_events,
-        _response_body_lifecycle_final_issue=_stream._response_body_lifecycle_final_issue,
-        _response_body_to_chat_completion_body=_stream._response_body_to_chat_completion_body,
-        _response_body_to_response_sse_events=_stream._response_body_to_response_sse_events,
-        _response_events_shape_summary=_stream._response_events_shape_summary,
-        _responses_body_is_empty=_stream._responses_body_is_empty,
-        _responses_completed_tool_item=_stream._responses_completed_tool_item,
-        _responses_event_commits_downstream_output=(
-            _stream._responses_event_commits_downstream_output
-        ),
-        _responses_event_has_visible_or_tool_output=(
-            _stream._responses_event_has_visible_or_tool_output
-        ),
-        _responses_event_is_tool_call_construction=(
-            _stream._responses_event_is_tool_call_construction
-        ),
-        _responses_event_starts_downstream_output=(
-            _stream._responses_event_starts_downstream_output
-        ),
-        _responses_events_have_terminal=_stream._responses_events_have_terminal,
-        _responses_events_lifecycle_final_issue=_stream._responses_events_lifecycle_final_issue,
-        _responses_failed_event_for_stream_error=_errors._responses_failed_event_for_stream_error,
-        _responses_sse_event_resets_idle_timeout=_stream._responses_sse_event_resets_idle_timeout,
-        _responses_sse_line_resets_idle_timeout=_stream._responses_sse_line_resets_idle_timeout,
-        _responses_stream_error_detail=_stream._responses_stream_error_detail,
-        _responses_stream_error_type=_stream._responses_stream_error_type,
-        _responses_terminal_observer=_stream._responses_terminal_observer,
-        _retry_identity_from_context=_retry_identity_from_context,
-        _route_failure_event_fields=_events.route_failure_event_fields,
-        _runtime_tool_compatibility_stream_for_attempt=gateway_compat.official_passthrough._runtime_tool_compatibility_stream_for_attempt,
-        _sse_event_separator_after_line=_sse._sse_event_separator_after_line,
-        _sse_json_line=_stream._sse_json_line,
-        _sse_line_ending=_sse._sse_line_ending,
-        _suppress_bounded_tool_search_calls=gateway_compat.multi_agent._suppress_bounded_tool_search_calls,
-        _suppress_chat_reasoning_extensions=_stream._suppress_chat_reasoning_extensions,
-        _suppress_coordinator_forbidden_tool_calls=gateway_compat.multi_agent._suppress_coordinator_forbidden_tool_calls,
-        _suppress_worker_multi_agent_tool_calls=gateway_compat.multi_agent._suppress_worker_multi_agent_tool_calls,
-        _synthetic_response_completed_from_tool_items=(
-            _stream._synthetic_response_completed_from_tool_items
-        ),
-        _upstream_failure_class=gateway_transport._upstream_failure_class,
-        _usage_from_json_body=_events._usage_from_json_body,
-        _usage_from_payload=_events._usage_from_payload,
-        _usage_from_response_event=_events._usage_from_response_event,
-        _usage_observed_context=_events._usage_observed_context,
-        _verified_converted_sse_semantic_error=_stream._verified_converted_sse_semantic_error,
-        _with_codexhub_http_error=_errors._with_codexhub_http_error,
         _write_adapter_event=_write_adapter_event,
-        _write_runtime_tool_adapter_response_evidence=gateway_compat.official_passthrough._write_runtime_tool_adapter_response_evidence,
-        compatible_response_body=gateway_compat.compatible_response_body,
-        compatible_sse_line=_relay_compatible_sse_line,
-        safe_upstream_error_detail=_errors.safe_upstream_error_detail,
-        write_proxy_event=_relay_write_proxy_event,
-        _active_gateway_request=_relay_active_gateway_request,
         _bind_handler_synthetic_terminal_failure=_bind_handler_synthetic_terminal_failure,
         _responses_synthetic_terminal_failure=_responses_synthetic_terminal_failure,
-        _offer_official_passthrough_usage_line=_events.offer_official_passthrough_usage_line,
-        _UpstreamSseReaderLifecycle=_UpstreamSseReaderLifecycle,
+        compatible_sse_line=_relay_compatible_sse_line,
+        write_proxy_event=_relay_write_proxy_event,
+        _active_gateway_request=_relay_active_gateway_request,
         logger=logger,
-        _UNSET_CONTENT_ENCODING=_UNSET_CONTENT_ENCODING,
-        _chat_completion_error_payload=_errors._chat_completion_error_payload,
-        _downstream_stream_error_payload=_errors._downstream_stream_error_payload,
-        _get_header=_get_header,
-        decoded_request_body=decoded_request_body,
-        _sse_payload_bytes=_sse._sse_payload_bytes,
-        _chat_function_name_from_response_item=_stream._chat_function_name_from_response_item,
     )
 
 
 def _relay_context_for_handler(handler: Any) -> RelayContext:
     return RelayContext(
         handler=handler,
-        symbols=_relay_symbols(),
+        glue=_relay_glue(),
         transparent_relay=handler._relay_transparent_upstream_response,
         official_passthrough_relay=handler._relay_official_passthrough_sse_response,
         prepared_exchange=getattr(handler, "_active_prepared_exchange", None),
