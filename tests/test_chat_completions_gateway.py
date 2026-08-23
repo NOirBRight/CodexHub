@@ -10,6 +10,7 @@ from urllib.error import HTTPError, URLError
 
 import codex_proxy
 import gateway_catalog_runtime
+import gateway_events
 import gateway_transport
 import route_plan
 import route_primitives
@@ -935,7 +936,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         )
         self.catalog_by_slug_patch.start()
         self.addCleanup(self.catalog_by_slug_patch.stop)
-        self.event_patch = patch("codex_proxy.write_proxy_event")
+        self.event_patch = patch("gateway_events.write_proxy_event")
         self.write_proxy_event = self.event_patch.start()
         self.addCleanup(self.event_patch.stop)
         self.auth_patch = patch("codex_proxy.codex_access_token", return_value="fake-sub-token")

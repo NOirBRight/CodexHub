@@ -9,9 +9,9 @@ FORBIDDEN = re.compile(
     r"codex_proxy\._[A-Za-z]|CodexProxyHandler\.__new__|CodexProxyHandler\._"
 )
 
-# Transport and catalog families now belong to owning modules (#461).
+# Transport, catalog, and event families now belong to owning modules (#461, #462).
 FORBIDDEN_OWNING_MODULE_PATCH = re.compile(
-    r"patch(?:\.object)?\(\s*(?:"
+    r"(?:patch(?:\.object)?\(\s*|setattr\(\s*)(?:"
     r"['\"]codex_proxy\.(?:urlopen|official_urlopen|official_pool_manager|"
     r"official_proxy_url|open_upstream_once|transport_failure_phase|"
     r"getproxies_registry|getproxies|proxy_bypass|time\.sleep|time\.monotonic|"
@@ -21,9 +21,12 @@ FORBIDDEN_OWNING_MODULE_PATCH = re.compile(
     r"existing_generated_catalog_path|published_catalog_model|"
     r"should_include_model|ollama_cloud_alias_upstream_model|"
     r"ollama_cloud_runtime_upstream|choose_upstream|official_upstream|"
-    r"current_catalog_data|load_policy)"
+    r"current_catalog_data|load_policy|write_proxy_event|GATEWAY_EVENT_WRITER|"
+    r"GATEWAY_DIAGNOSTIC_RECORDER|flush_proxy_event_writer)"
     r"|codex_proxy,\s*['\"](?:OFFICIAL_HTTP_POOLS|_open_upstream_once|"
-    r"open_upstream_once|choose_upstream|official_upstream|current_catalog_data)"
+    r"open_upstream_once|choose_upstream|official_upstream|current_catalog_data|"
+    r"write_proxy_event|GATEWAY_EVENT_WRITER|GATEWAY_DIAGNOSTIC_RECORDER|"
+    r"flush_proxy_event_writer)"
     r")"
 )
 

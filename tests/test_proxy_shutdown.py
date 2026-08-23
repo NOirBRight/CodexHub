@@ -14,6 +14,7 @@ from urllib.request import Request
 
 import codex_proxy
 import gateway_catalog_runtime
+import gateway_events
 import gateway_transport
 import pytest
 from codex_proxy import CodexProxyHandler
@@ -76,7 +77,7 @@ def _run_server_with_event_writer_result(writer_result):
             patch.object(codex_proxy.logging, "FileHandler"),
             patch.object(codex_proxy.logging, "StreamHandler"),
             patch.object(codex_proxy, "ThreadingHTTPServer", return_value=server),
-            patch.object(codex_proxy, "GATEWAY_EVENT_WRITER", writer),
+            patch.object(gateway_events, "GATEWAY_EVENT_WRITER", writer),
             patch.object(codex_proxy.logger, "warning") as warning,
         ):
             codex_proxy.run_server("127.0.0.1", 8080)
@@ -475,7 +476,7 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
                 return_value="test-account",
             ) as account_id,
             patch.object(codex_proxy, "_open_upstream_response", side_effect=wait_for_shutdown) as open_upstream,
-            patch.object(codex_proxy, "write_proxy_event") as write_event,
+            patch.object(gateway_events, "write_proxy_event") as write_event,
         ):
             client_thread.start()
             assert upstream_entered.wait(timeout=2)
@@ -554,7 +555,7 @@ def test_run_server_uses_the_remaining_shared_shutdown_budget_for_flush() -> Non
             patch.object(codex_proxy.logging, "StreamHandler"),
             patch.object(codex_proxy, "ThreadingHTTPServer", return_value=server),
             patch.object(codex_proxy, "GatewayShutdownController", return_value=controller),
-            patch.object(codex_proxy, "GATEWAY_EVENT_WRITER", writer),
+            patch.object(gateway_events, "GATEWAY_EVENT_WRITER", writer),
         ):
             codex_proxy.run_server("127.0.0.1", 8080)
 

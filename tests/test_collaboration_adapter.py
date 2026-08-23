@@ -272,13 +272,14 @@ def test_stream_ledger_rejects_malformed_selector_before_sidecar(tmp_path):
 
 def test_facade_wrappers_use_live_emit_and_signing_root(tmp_path, monkeypatch):
     import codex_proxy
+    import gateway_events
 
     seen = []
 
     def emit(event, **fields):
         seen.append((event, fields))
 
-    monkeypatch.setattr(codex_proxy, "write_proxy_event", emit)
+    monkeypatch.setattr(gateway_events, "write_proxy_event", emit)
     monkeypatch.setattr(codex_proxy, "WORKER_BINDING_SIGNING_ROOT", tmp_path)
     with pytest.raises(codex_proxy.UpstreamProtocolTranslationError):
         codex_proxy.resolve_collaboration_boundary(

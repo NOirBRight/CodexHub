@@ -11,6 +11,7 @@ from urllib.request import Request
 
 import codex_proxy
 import diagnostic_recorder
+import gateway_events
 import gateway_transport
 
 
@@ -315,7 +316,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         with (
             patch("gateway_transport.time.monotonic", side_effect=clock.monotonic),
             patch("gateway_transport.official_pool_manager", return_value=manager),
-            patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
+            patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
             self.assertRaises(TimeoutError) as raised,
         ):
             codex_proxy.open_upstream_response(
@@ -549,7 +550,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
 
         with (
-            patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
+            patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
             patch("gateway_transport.GatewayTransport.open_once", return_value=_Response()),
         ):
             response = codex_proxy.open_upstream_response(
@@ -588,7 +589,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
 
         with (
-            patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
+            patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
             patch("gateway_transport.GatewayTransport.open_once", side_effect=URLError("private failure")),
             patch("gateway_transport.transport_failure_phase", return_value="tls"),
         ):
@@ -628,7 +629,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         with patch.object(diagnostic_recorder.DiagnosticRecorder, "_ensure_control_thread_locked"):
             recorder = diagnostic_recorder.DiagnosticRecorder(Path(tmpdir), incident_tail_seconds=0)
             self.addCleanup(recorder.shutdown, 1)
-            with patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder):
+            with patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder):
                 status = handler._relay_official_passthrough_sse_response(
                     _TerminalResponse(),
                     "official",
@@ -682,7 +683,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         handler = object.__new__(codex_proxy.CodexProxyHandler)
         handler._diagnostic_request_id = "private-downstream-request"
 
-        with patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", recorder):
+        with patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder):
             handler._observe_downstream_phase("downstream_response_open", status=200)
             handler._observe_downstream_phase("downstream_headers")
 
@@ -696,7 +697,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         self.assertNotIn("private-downstream-request", rendered)
 
     def test_recorder_failure_is_never_visible_to_proxy_event_callers(self) -> None:
-        with patch.object(codex_proxy, "GATEWAY_DIAGNOSTIC_RECORDER", _ExplodingRecorder()):
+        with patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", _ExplodingRecorder()):
             codex_proxy.observe_gateway_diagnostic(
                 "observe_proxy_event",
                 "request_start",

@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 import codex_proxy
+import gateway_events
 import route_primitives
 from collaboration_runtime_contract import EXPECTED_PARAMETER_SCHEMAS
 from codex_semantic_adapter import COLLABORATION_V1, COLLABORATION_V2
@@ -80,7 +81,7 @@ def _decoded_sse(line: bytes) -> dict:
 def test_gateway_builds_and_applies_one_runtime_plan_before_external_sampling(monkeypatch):
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(
-        codex_proxy,
+        gateway_events,
         "write_proxy_event",
         lambda name, **fields: events.append((name, fields)),
     )
@@ -253,7 +254,7 @@ def test_gateway_adapter_evidence_is_emitted_after_encode_and_inverse_decode():
     context: dict = {}
     upstream = _external_chat_upstream()
     with patch.object(
-        codex_proxy,
+        gateway_events,
         "write_proxy_event",
         lambda name, **fields: events.append((name, fields)),
     ):
@@ -777,7 +778,7 @@ def test_retry_attempt_generation_rebinds_partial_call_identity_for_second_strea
 def test_required_tool_restriction_diagnostics_keep_generated_aliases_private(monkeypatch):
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(
-        codex_proxy,
+        gateway_events,
         "write_proxy_event",
         lambda name, **fields: events.append((name, fields)),
     )
@@ -1209,7 +1210,7 @@ def test_deferred_core_v1_telemetry_uses_removed_surface_without_request_context
         ],
     }
 
-    with patch.object(codex_proxy, "write_proxy_event") as write_proxy_event:
+    with patch.object(gateway_events, "write_proxy_event") as write_proxy_event:
         payload = json.loads(
             codex_proxy.compatible_request_body(
                 _request([collaboration, vendor]),
@@ -1240,7 +1241,7 @@ def test_deferred_core_v2_keeps_collaboration_core_without_expanding_other_names
     }
     context: dict = {}
 
-    with patch.object(codex_proxy, "write_proxy_event") as write_proxy_event:
+    with patch.object(gateway_events, "write_proxy_event") as write_proxy_event:
         payload = json.loads(
             codex_proxy.compatible_request_body(
                 _request([collaboration, vendor]),

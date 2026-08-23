@@ -103,6 +103,7 @@ from gateway_admission import (
     restore_gateway_request as _restore_gateway_request,
     sleep_for_retry_with_gateway_cancellation as _sleep_for_retry_with_gateway_cancellation,
 )
+import gateway_events
 
 from vision_proxy import (
     IMAGE_PROXY_CACHE_LOCK,
@@ -486,13 +487,7 @@ RUNTIME_CODEX_DIR = _runtime_codex_dir()
 RUNTIME_PROXY_DIR = RUNTIME_CODEX_DIR / "proxy"
 WORKER_BINDING_SIGNING_ROOT = RUNTIME_PROXY_DIR
 OFFICIAL_REFRESH_STATE_FILENAME = "official-refresh-state.json"
-PROXY_EVENT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy-events.jsonl"
 PROXY_TEXT_LOG_PATH = RUNTIME_PROXY_DIR / "codex-proxy.log"
-# Both limits apply to serialized Gateway telemetry still awaiting a sink write,
-# including an in-flight batch, so slow storage cannot grow request memory.
-GATEWAY_EVENT_QUEUE_MAX_RECORDS = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_RECORDS", 4096)
-GATEWAY_EVENT_QUEUE_MAX_BYTES = _env_positive_int("CODEX_GATEWAY_EVENT_QUEUE_MAX_BYTES", 4 * 1024 * 1024)
-GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 def user_requested_shutdown_payload(inbound_format: str) -> dict[str, Any]:
     message = "Gateway stopped because the user requested shutdown."
@@ -523,47 +518,20 @@ def user_requested_shutdown_payload(inbound_format: str) -> dict[str, Any]:
 
 
 def _record_user_requested_shutdown() -> None:
-    write_proxy_event(
-        "request_cancelled",
-        shutdown_outcome=USER_REQUESTED_SHUTDOWN_OUTCOME,
-        status=503,
-        error=USER_REQUESTED_SHUTDOWN_OUTCOME,
-        detail="Gateway shutdown requested by user",
-    )
+    gateway_events.record_user_requested_shutdown()
 
 
-def _gateway_event_writer_recovery_record(
-    summary: bounded_event_writer.RecoverySummary,
-) -> Mapping[str, Any]:
-    return proxy_telemetry.prepare_event_payload(
-        "telemetry_writer_recovered",
-        {
-            "overflow_records": summary.overflow_records,
-            "overflow_bytes": summary.overflow_bytes,
-            "failed_records": summary.failed_records,
-            "failure_count": summary.failure_count,
-            "failure_categories": list(summary.failure_categories),
-        },
-        RUNTIME_CODEX_DIR,
-    )
-
-
-_previous_gateway_event_writer = globals().get("GATEWAY_EVENT_WRITER")
-if isinstance(_previous_gateway_event_writer, bounded_event_writer.BoundedEventWriter):
-    _previous_gateway_event_writer.shutdown(timeout=1.0)
-
-
-GATEWAY_EVENT_WRITER = bounded_event_writer.BoundedEventWriter(
-    bounded_event_writer.JsonlFileSink(PROXY_EVENT_LOG_PATH),
-    max_records=GATEWAY_EVENT_QUEUE_MAX_RECORDS,
-    max_bytes=GATEWAY_EVENT_QUEUE_MAX_BYTES,
-    recovery_record_factory=_gateway_event_writer_recovery_record,
-    thread_name="codex-gateway-event-writer",
-)
+PROXY_EVENT_LOG_PATH = gateway_events.PROXY_EVENT_LOG_PATH
+GATEWAY_EVENT_QUEUE_MAX_RECORDS = gateway_events.GATEWAY_EVENT_QUEUE_MAX_RECORDS
+GATEWAY_EVENT_QUEUE_MAX_BYTES = gateway_events.GATEWAY_EVENT_QUEUE_MAX_BYTES
+GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS = gateway_events.GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS
+gateway_events.refresh_runtime_paths()
+GATEWAY_EVENT_WRITER = gateway_events.GATEWAY_EVENT_WRITER
+PROXY_EVENT_LOG_PATH = gateway_events.PROXY_EVENT_LOG_PATH
 # The compile-selected debug flavor will install a recorder in the later
 # Tauri/runtime slice. Normal builds intentionally have no recorder object,
 # settings toggle, or environment switch that could activate persistence.
-GATEWAY_DIAGNOSTIC_RECORDER: diagnostic_recorder.DiagnosticRecorderProtocol | None = None
+GATEWAY_DIAGNOSTIC_RECORDER = gateway_events.GATEWAY_DIAGNOSTIC_RECORDER
 from route_primitives import (
     DEFAULT_UPSTREAM_TIMEOUT_SECONDS,
     DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS,
@@ -771,17 +739,7 @@ from gateway_settings import (
 
 
 def _observe_gateway_diagnostic(method: str, *args: Any, **kwargs: Any) -> None:
-    """Keep optional recorder failures out of Gateway request behavior."""
-
-    recorder = GATEWAY_DIAGNOSTIC_RECORDER
-    if recorder is None:
-        return
-    try:
-        observation = getattr(recorder, method, None)
-        if callable(observation):
-            observation(*args, **kwargs)
-    except Exception:
-        return
+    gateway_events.observe_gateway_diagnostic(method, *args, **kwargs)
 
 
 def _diagnostic_context_value(event_context: Mapping[str, Any] | None, key: str) -> Any:
@@ -839,14 +797,7 @@ def _diagnostic_transport_phase(failure_phase: str | None) -> str | None:
 
 
 def write_proxy_event(event: str, **fields: Any) -> None:
-    live = _live("write_proxy_event", None)
-    if live is not None and live is not write_proxy_event:
-        live(event, **fields)
-        return
-    public_fields = _public_event_context(fields)
-    _observe_gateway_diagnostic("observe_proxy_event", event, public_fields)
-    payload = proxy_telemetry.prepare_event_payload(event, public_fields, RUNTIME_CODEX_DIR)
-    _enqueue_gateway_event_payload(payload)
+    gateway_events.write_proxy_event(event, **fields)
 
 
 
@@ -857,26 +808,11 @@ def _forward_planning_event(event: str, **fields: Any) -> None:
 _route_plan_module._planning_event_sink = _forward_planning_event
 
 def _enqueue_gateway_event_payload(payload: Mapping[str, Any]) -> bool:
-    return GATEWAY_EVENT_WRITER.enqueue(payload)
+    return gateway_events.enqueue_gateway_event_payload(payload)
 
 
 def flush_proxy_event_writer(timeout: float = 5.0) -> bool:
-    return GATEWAY_EVENT_WRITER.flush(timeout).completed
-
-
-def _usage_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int) and value >= 0:
-        return value
-    return None
-
-
-def _usage_nested_int(usage: Mapping[str, Any], object_key: str, value_key: str) -> int | None:
-    value = usage.get(object_key)
-    if not isinstance(value, Mapping):
-        return None
-    return _usage_int(value.get(value_key))
+    return gateway_events.flush_proxy_event_writer(timeout)
 
 
 def _normalize_usage_for_event(
@@ -884,67 +820,7 @@ def _normalize_usage_for_event(
     *,
     missing_reason: str = "upstream_missing_usage",
 ) -> dict[str, Any]:
-    if not isinstance(usage, Mapping):
-        return {
-            "usage_source": "missing",
-            "usage_missing_reason": missing_reason,
-        }
-
-    input_tokens = _usage_int(usage.get("input_tokens"))
-    if input_tokens is None:
-        input_tokens = _usage_int(usage.get("prompt_tokens"))
-    output_tokens = _usage_int(usage.get("output_tokens"))
-    if output_tokens is None:
-        output_tokens = _usage_int(usage.get("completion_tokens"))
-    total_tokens = _usage_int(usage.get("total_tokens"))
-    cached_input_tokens = _usage_nested_int(usage, "input_tokens_details", "cached_tokens")
-    if cached_input_tokens is None:
-        cached_input_tokens = _usage_nested_int(usage, "prompt_tokens_details", "cached_tokens")
-    reasoning_tokens = _usage_nested_int(usage, "output_tokens_details", "reasoning_tokens")
-    if reasoning_tokens is None:
-        reasoning_tokens = _usage_nested_int(usage, "completion_tokens_details", "reasoning_tokens")
-
-    fields: dict[str, Any] = {"usage_source": "upstream"}
-    if input_tokens is not None:
-        fields["usage_input_tokens"] = input_tokens
-    if output_tokens is not None:
-        fields["usage_output_tokens"] = output_tokens
-    if total_tokens is not None:
-        fields["usage_total_tokens"] = total_tokens
-    elif input_tokens is not None and output_tokens is not None:
-        fields["usage_total_tokens"] = input_tokens + output_tokens
-    if cached_input_tokens is not None:
-        fields["usage_cached_input_tokens"] = cached_input_tokens
-    if reasoning_tokens is not None:
-        fields["usage_reasoning_tokens"] = reasoning_tokens
-    if len(fields) == 1:
-        return {
-            "usage_source": "missing",
-            "usage_missing_reason": "upstream_usage_unrecognized",
-        }
-    return fields
-
-
-def _usage_from_payload(payload: Any) -> Mapping[str, Any] | None:
-    if not isinstance(payload, Mapping):
-        return None
-    usage = payload.get("usage")
-    return usage if isinstance(usage, Mapping) else None
-
-
-def _usage_from_json_body(body: bytes) -> Mapping[str, Any] | None:
-    try:
-        payload = json.loads(body.decode("utf-8-sig"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    return _usage_from_payload(payload)
-
-
-def _usage_from_response_event(event: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    if event.get("type") != "response.completed":
-        return None
-    response = event.get("response")
-    return _usage_from_payload(response)
+    return gateway_events.normalize_usage_for_event(usage, missing_reason=missing_reason)
 
 
 def _capture_usage(
@@ -953,102 +829,19 @@ def _capture_usage(
     *,
     missing_reason: str = "upstream_missing_usage",
 ) -> None:
-    if usage_capture is None:
-        return
-    if usage_capture.get("usage_source") == "upstream":
-        return
-    usage_capture.clear()
-    usage_capture.update(_normalize_usage_for_event(usage, missing_reason=missing_reason))
+    gateway_events.capture_usage(usage_capture, usage, missing_reason=missing_reason)
 
 
 def _public_event_context(context: Mapping[str, Any] | None) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in (context or {}).items()
-        if not str(key).startswith("_")
-    }
+    return gateway_events.public_event_context(context)
 
 
-_FAILURE_EVENT_CONTEXT_FIELD_ALLOWLIST = frozenset(
-    {
-        "behavior_profile",
-        "client_id",
-        "client_inference_source",
-        "inbound_format",
-        "model",
-        "model_canonical",
-        "model_requested",
-        "provider_hint",
-        "request_id",
-        "request_kind",
-        "route_attempt_fallback_http_statuses",
-        "route_attempt_index",
-        "route_attempt_endpoint_url",
-        "route_attempt_model_canonical",
-        "route_attempt_model_requested",
-        "route_attempt_mutation_summary",
-        "route_attempt_protocol",
-        "route_attempt_provider_id",
-        "route_attempt_upstream_model",
-        "route_endpoint_url",
-        "route_model_canonical",
-        "route_model_requested",
-        "route_provider_id",
-        "route_mode",
-        "route_reason",
-        "route_upstream_model",
-        "upstream_format",
-    }
-)
-
-_FAILURE_EVENT_CONTEXT_BOUNDED_LIST_FIELDS = frozenset(
-    {
-        "route_attempt_fallback_http_statuses",
-        "route_attempt_mutation_summary",
-    }
-)
+def _bounded_failure_event_context(context: Mapping[str, Any] | None) -> dict[str, Any]:
+    return gateway_events.bounded_failure_event_context(context)
 
 
-def _bounded_failure_event_context(
-    context: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    """Keep only bounded routing metadata on failure-classification events."""
-
-    bounded: dict[str, Any] = {}
-    for key, value in (context or {}).items():
-        if key not in _FAILURE_EVENT_CONTEXT_FIELD_ALLOWLIST:
-            continue
-        if isinstance(value, str):
-            bounded[key] = value[:200]
-        elif isinstance(value, (bool, int, float)) or value is None:
-            bounded[key] = value
-        elif (
-            key in _FAILURE_EVENT_CONTEXT_BOUNDED_LIST_FIELDS
-            and isinstance(value, (list, tuple))
-        ):
-            bounded[key] = [
-                item[:80] if isinstance(item, str) else item
-                for item in value[:32]
-                if isinstance(item, (str, bool, int, float)) or item is None
-            ]
-    return bounded
-
-
-def _route_failure_event_fields(
-    context: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    """Return only route identity fields for direct failure events.
-
-    Several stream failure branches already pass request/model/status fields
-    explicitly.  Keeping this helper route-only avoids duplicate keyword
-    arguments while preserving the exact provider/model/endpoint identity.
-    """
-
-    return {
-        key: value
-        for key, value in _bounded_failure_event_context(context).items()
-        if key.startswith("route_")
-    }
+def _route_failure_event_fields(context: Mapping[str, Any] | None) -> dict[str, Any]:
+    return gateway_events.route_failure_event_fields(context)
 
 
 def _usage_observed_context(
@@ -1060,17 +853,14 @@ def _usage_observed_context(
     upstream_format: str,
     inbound_format: str,
 ) -> dict[str, Any]:
-    context = _public_event_context(event_context)
-    context.update(
-        {
-            "request_id": request_id,
-            "model": model,
-            "upstream": upstream,
-            "upstream_format": upstream_format,
-            "inbound_format": inbound_format,
-        }
+    return gateway_events._usage_observed_context(
+        event_context,
+        request_id=request_id,
+        model=model,
+        upstream=upstream,
+        upstream_format=upstream_format,
+        inbound_format=inbound_format,
     )
-    return context
 
 
 def _write_usage_observed_event(
@@ -1079,115 +869,30 @@ def _write_usage_observed_event(
     *,
     missing_reason: str | None = None,
 ) -> None:
-    if usage is None:
-        if missing_reason is None:
-            return
-        usage_fields = _normalize_usage_for_event(None, missing_reason=missing_reason)
-    else:
-        usage_fields = _normalize_usage_for_event(usage)
-    write_proxy_event(
-        "usage_observed",
-        request_id=context.get("request_id"),
-        model=context.get("model"),
-        model_requested=context.get("model_requested"),
-        model_canonical=context.get("model_canonical"),
-        upstream=context.get("upstream"),
-        provider_id=context.get("provider_id") or context.get("upstream"),
-        upstream_format=context.get("upstream_format"),
-        inbound_format=context.get("inbound_format"),
-        route_mode=context.get("route_mode"),
-        client_id=context.get("client_id"),
-        client_inference_source=context.get("client_inference_source"),
-        **usage_fields,
-    )
+    gateway_events.write_usage_observed_event(context, usage, missing_reason=missing_reason)
 
 
 def _write_usage_observed_body_event(context: Mapping[str, Any], body: bytes) -> None:
-    usage = _usage_from_json_body(body)
-    _write_usage_observed_event(
-        context,
-        usage,
-        missing_reason="upstream_missing_usage",
-    )
+    gateway_events.write_usage_observed_body_event(context, body)
 
 
-OFFICIAL_PASSTHROUGH_USAGE_QUEUE: queue.Queue[tuple[dict[str, Any], bytes]] = queue.Queue(maxsize=2048)
-_OFFICIAL_PASSTHROUGH_USAGE_WORKER_STARTED = False
-_OFFICIAL_PASSTHROUGH_USAGE_WORKER_LOCK = threading.Lock()
-USAGE_OBSERVED_QUEUE: queue.Queue[tuple[str, dict[str, Any], bytes, str | None]] = queue.Queue(maxsize=2048)
-_USAGE_OBSERVED_WORKER_STARTED = False
-_USAGE_OBSERVED_WORKER_LOCK = threading.Lock()
+_usage_from_payload = gateway_events._usage_from_payload
+_usage_from_json_body = gateway_events._usage_from_json_body
+_usage_from_response_event = gateway_events._usage_from_response_event
+_usage_int = gateway_events._usage_int
+_usage_nested_int = gateway_events._usage_nested_int
 
 
-def _start_official_passthrough_usage_worker() -> None:
-    global _OFFICIAL_PASSTHROUGH_USAGE_WORKER_STARTED
-    if _OFFICIAL_PASSTHROUGH_USAGE_WORKER_STARTED:
-        return
-    with _OFFICIAL_PASSTHROUGH_USAGE_WORKER_LOCK:
-        if _OFFICIAL_PASSTHROUGH_USAGE_WORKER_STARTED:
-            return
-        threading.Thread(
-            target=_official_passthrough_usage_worker,
-            name="codex-proxy-official-usage",
-            daemon=True,
-        ).start()
-        _OFFICIAL_PASSTHROUGH_USAGE_WORKER_STARTED = True
+OFFICIAL_PASSTHROUGH_USAGE_QUEUE = gateway_events.OFFICIAL_PASSTHROUGH_USAGE_QUEUE
+USAGE_OBSERVED_QUEUE = gateway_events.USAGE_OBSERVED_QUEUE
 
 
 def _offer_official_passthrough_usage_line(context: Mapping[str, Any], line: bytes) -> None:
-    if not line.startswith(b"data:"):
-        return
-    _start_official_passthrough_usage_worker()
-    try:
-        OFFICIAL_PASSTHROUGH_USAGE_QUEUE.put_nowait((_public_event_context(context), line))
-    except queue.Full:
-        return
-
-
-def _official_passthrough_usage_worker() -> None:
-    while True:
-        context, line = OFFICIAL_PASSTHROUGH_USAGE_QUEUE.get()
-        try:
-            payload_bytes = _sse_payload_bytes(line)
-            if payload_bytes is None:
-                continue
-            try:
-                payload = json.loads(payload_bytes.decode("utf-8-sig"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            if not isinstance(payload, Mapping):
-                continue
-            usage = _usage_from_response_event(payload)
-            if usage is None:
-                continue
-            _write_usage_observed_event(context, usage)
-        finally:
-            OFFICIAL_PASSTHROUGH_USAGE_QUEUE.task_done()
-
-
-def _start_usage_observed_worker() -> None:
-    global _USAGE_OBSERVED_WORKER_STARTED
-    if _USAGE_OBSERVED_WORKER_STARTED:
-        return
-    with _USAGE_OBSERVED_WORKER_LOCK:
-        if _USAGE_OBSERVED_WORKER_STARTED:
-            return
-        threading.Thread(
-            target=_usage_observed_worker,
-            name="codex-proxy-usage-observed",
-            daemon=True,
-        ).start()
-        _USAGE_OBSERVED_WORKER_STARTED = True
+    gateway_events.offer_official_passthrough_usage_line(context, line)
 
 
 def _offer_usage_observed_body(context: Mapping[str, Any], body: bytes) -> None:
-    if not body:
-        return
-    _start_usage_observed_worker()
-    try:
-        USAGE_OBSERVED_QUEUE.put_nowait(("body", _public_event_context(context), body, None))
-    except queue.Full:
-        return
+    gateway_events.offer_usage_observed_body(context, body)
 
 
 def _offer_usage_observed_sse_line(
@@ -1196,48 +901,11 @@ def _offer_usage_observed_sse_line(
     *,
     upstream_format: str,
 ) -> None:
-    if not line.startswith(b"data:"):
-        return
-    _start_usage_observed_worker()
-    try:
-        USAGE_OBSERVED_QUEUE.put_nowait(("sse", _public_event_context(context), line, upstream_format))
-    except queue.Full:
-        return
-
-
-def _usage_observed_worker() -> None:
-    while True:
-        item_type, context, payload_bytes, upstream_format = USAGE_OBSERVED_QUEUE.get()
-        try:
-            usage: Mapping[str, Any] | None = None
-            if item_type == "body":
-                _write_usage_observed_body_event(context, payload_bytes)
-                continue
-            elif item_type == "sse":
-                payload = None
-                sse_payload_bytes = _sse_payload_bytes(payload_bytes)
-                if sse_payload_bytes is not None and sse_payload_bytes != b"[DONE]":
-                    try:
-                        payload = json.loads(sse_payload_bytes.decode("utf-8-sig"))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        payload = None
-                if isinstance(payload, Mapping):
-                    usage = (
-                        _usage_from_payload(payload)
-                        if upstream_format == "chat_completions"
-                        else _usage_from_response_event(payload)
-                    )
-            _write_usage_observed_event(context, usage)
-        finally:
-            USAGE_OBSERVED_QUEUE.task_done()
+    gateway_events.offer_usage_observed_sse_line(context, line, upstream_format=upstream_format)
 
 
 def _write_adapter_event(event_context: Mapping[str, Any] | None, event: str, **fields: Any) -> None:
-    if event_context is None:
-        return
-    payload = _public_event_context(event_context)
-    payload.update(fields)
-    write_proxy_event(event, **payload)
+    gateway_events.write_adapter_event(event_context, event, **fields)
 
 
 def _write_failure_event(
@@ -1245,18 +913,14 @@ def _write_failure_event(
     event: str,
     **fields: Any,
 ) -> None:
-    _write_adapter_event(
-        _bounded_failure_event_context(event_context),
-        event,
-        **fields,
-    )
+    gateway_events.write_failure_event(event_context, event, **fields)
 
 
 def _collaboration_adapter() -> CollaborationAdapter:
     """Build a request-time adapter so emit and signing-root patches stay live."""
     return CollaborationAdapter(
         facts=CollaborationFacts(signing_root=WORKER_BINDING_SIGNING_ROOT),
-        emit=write_proxy_event,
+        emit=gateway_events.write_proxy_event,
         signer=PathBindingSigner(WORKER_BINDING_SIGNING_ROOT),
     )
 
@@ -9768,7 +9432,7 @@ def _gateway_transport() -> GatewayTransport:
         active_request=_live("_active_gateway_request", _active_gateway_request),
         access_token=_live("codex_access_token", codex_access_token),
         account_id=_live("codex_account_id", codex_account_id),
-        diagnostic_recorder=_live("GATEWAY_DIAGNOSTIC_RECORDER", GATEWAY_DIAGNOSTIC_RECORDER),
+        diagnostic_recorder=_owning(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", None),
         diagnostic_context_value=_live("_diagnostic_context_value", _diagnostic_context_value),
         diagnostic_connection_disposition=_live(
             "_diagnostic_connection_disposition", _diagnostic_connection_disposition
