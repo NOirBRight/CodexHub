@@ -302,10 +302,6 @@ def access_token(*, opener: Any = None, now: Any = time.time) -> str:
     return token
 
 
-def reset_cache() -> None:
-    return None
-
-
 class XaiOauthAdapter:
     def access_token(self) -> str:
         return access_token()
@@ -330,4 +326,3 @@ def logout() -> None:
     path = auth_json_path()
     if path.exists():
         path.unlink()
-    reset_cache()

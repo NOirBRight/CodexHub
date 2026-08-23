@@ -40,7 +40,6 @@ def test_pin_https_xai_url_rejects_non_xai_hosts() -> None:
 def test_persist_and_load_tokens_uses_private_mode(tmp_path, monkeypatch) -> None:
     path = tmp_path / "xai_auth.json"
     monkeypatch.setenv("CODEXHUB_XAI_AUTH_PATH", str(path))
-    xai_auth.reset_cache()
     xai_auth.persist_tokens(
         {"access_token": "access-1", "refresh_token": "refresh-1", "token_type": "Bearer"}
     )
@@ -86,7 +85,6 @@ def test_start_device_login_reads_oidc_discovery(monkeypatch) -> None:
 def test_poll_device_login_persists_access_token(tmp_path, monkeypatch) -> None:
     path = tmp_path / "xai_auth.json"
     monkeypatch.setenv("CODEXHUB_XAI_AUTH_PATH", str(path))
-    xai_auth.reset_cache()
     pending = {"count": 0}
 
     def opener(request: Any, timeout: float = 20.0) -> _FakeResponse:
@@ -156,7 +154,6 @@ def test_xai_oauth_headers_use_the_adapter_not_a_transport_branch(tmp_path, monk
 
     path = tmp_path / "xai_auth.json"
     monkeypatch.setenv("CODEXHUB_XAI_AUTH_PATH", str(path))
-    xai_auth.reset_cache()
     xai_auth.persist_tokens({"access_token": "xai-live", "refresh_token": "refresh-1"})
     headers = build_upstream_headers(
         {"Content-Type": "application/json"},
