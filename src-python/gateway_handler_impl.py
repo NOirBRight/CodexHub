@@ -39,7 +39,7 @@ from gateway_admission import (
 from gateway_compat.host import (
     EXCESSIVE_TOOL_LOOP_BOUND,
     EXCESSIVE_TOOL_LOOP_ERROR_CODE,
-    _resolve_collaboration_boundary,
+    resolve_collaboration_boundary as _resolve_collaboration_boundary,
 )
 from gateway_errors import (
     CompactEmptyResponseError,
@@ -53,11 +53,11 @@ from gateway_errors import (
     UnsupportedRouteProtocolError,
     UpstreamProtocolTranslationError,
     UpstreamStreamIdleTimeoutError,
-    _downstream_json_error_payload,
-    _downstream_sse_error_payload_for_inbound_format,
-    _local_gateway_auth_error_payload,
-    _redact_identity_in_text,
-    _responses_failed_event_for_stream_error,
+    downstream_json_error_payload as _downstream_json_error_payload,
+    downstream_sse_error_payload_for_inbound_format as _downstream_sse_error_payload_for_inbound_format,
+    local_gateway_auth_error_payload as _local_gateway_auth_error_payload,
+    redact_identity_in_text as _redact_identity_in_text,
+    responses_failed_event_for_stream_error as _responses_failed_event_for_stream_error,
     safe_upstream_error_detail,
     user_requested_shutdown_payload,
 )
@@ -71,11 +71,11 @@ from gateway_exchange import (
     OpenExchangeRequest,
     ParsedInboundRequest as GatewayRequestInput,
     RelayExchangeRequest,
-    _bind_downstream_stream_commit,
-    _downstream_has_been_exposed,
-    _handler_downstream_stream_commit,
-    _relay_context_for_handler,
-    _responses_synthetic_terminal_failure,
+    bind_downstream_stream_commit as _bind_downstream_stream_commit,
+    downstream_has_been_exposed as _downstream_has_been_exposed,
+    handler_downstream_stream_commit as _handler_downstream_stream_commit,
+    relay_context_for_handler as _relay_context_for_handler,
+    responses_synthetic_terminal_failure as _responses_synthetic_terminal_failure,
     execute_exchange,
     parse_inbound_request,
     terminal_result,
@@ -97,16 +97,16 @@ from gateway_relay import (
     write_sse_keepalive,
 )
 from gateway_request import (
-    _UNSET_CONTENT_ENCODING,
-    _filtered_response_headers,
-    _is_event_stream,
-    _json_response_bytes,
-    _local_request_authorized,
-    _reasoning_policy_for_request,
-    _request_observability_with_prefix,
-    _validate_reasoning_effort_for_upstream,
-    _value_contains_image,
-    _websocket_probe_frame_metadata,
+    UNSET_CONTENT_ENCODING as _UNSET_CONTENT_ENCODING,
+    filtered_response_headers as _filtered_response_headers,
+    is_event_stream as _is_event_stream,
+    json_response_bytes as _json_response_bytes,
+    local_request_authorized as _local_request_authorized,
+    reasoning_policy_for_request as _reasoning_policy_for_request,
+    request_observability_with_prefix as _request_observability_with_prefix,
+    validate_reasoning_effort_for_upstream as _validate_reasoning_effort_for_upstream,
+    value_contains_image as _value_contains_image,
+    websocket_probe_frame_metadata as _websocket_probe_frame_metadata,
     decoded_request_body,
     enforce_text_only_image_boundary,
     provider_scoped_route_model,
@@ -122,8 +122,8 @@ from gateway_stream_semantics import (
     UpstreamEmptyCompletedResponseError,
     UpstreamStreamErrorEvent,
     UpstreamStreamInterruptedError,
-    _request_kind_from_headers_and_payload,
-    _sse_json_line,
+    request_kind_from_headers_and_payload as _request_kind_from_headers_and_payload,
+    sse_json_line as _sse_json_line,
 )
 from protocol_translation import (
     GatewayChatToResponsesStreamConverter as _ChatToResponsesStreamConverter,
@@ -136,8 +136,8 @@ from protocol_translation import (
 from route_plan import (
     RelayExecutionPlan,
     RouteAttemptPlan,
-    _route_attempt_event_fields,
-    _route_plan_event_fields,
+    route_attempt_event_fields as _route_attempt_event_fields,
+    route_plan_event_fields as _route_plan_event_fields,
 )
 from route_primitives import (
     CapabilityState,
@@ -166,13 +166,13 @@ from sse_events import (
 )
 from gateway_events import RUNTIME_CODEX_DIR
 from gateway_transport import (
-    _SUPPRESSED_RETRY_SAFETY_CLASSES,
+    SUPPRESSED_RETRY_SAFETY_CLASSES as _SUPPRESSED_RETRY_SAFETY_CLASSES,
     UpstreamSseReaderLifecycle as _UpstreamSseReaderLifecycle,
-    _get_header,
-    _model_access_path_from_event_context,
-    _retry_after_delay_seconds,
-    _retry_identity_from_context,
-    _upstream_failure_class,
+    get_header as _get_header,
+    model_access_path_from_event_context as _model_access_path_from_event_context,
+    retry_after_delay_seconds as _retry_after_delay_seconds,
+    retry_identity_from_context as _retry_identity_from_context,
+    upstream_failure_class as _upstream_failure_class,
     transport_failure_phase,
 )
 from websocket_transport import (

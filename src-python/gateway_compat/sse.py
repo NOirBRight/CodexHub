@@ -14,7 +14,7 @@ import uuid
 from apply_patch_adapter import (
     ApplyPatchAdapter,
     ApplyPatchFacts,
-    _ThirdPartyApplyPatchStreamAdapter as _ApplyPatchStreamAdapterImpl,
+    ThirdPartyApplyPatchStreamAdapter as _ApplyPatchStreamAdapterImpl,
 )
 from collaboration_adapter import (
     CollaborationAdapter,
@@ -31,7 +31,7 @@ from codex_semantic_adapter import (
     normalize_tool_search_arguments as _semantic_normalize_tool_search_arguments,
 )
 from gateway_errors import UpstreamProtocolTranslationError
-from gateway_sse import _sse_line_ending, _sse_payload_bytes
+from gateway_sse import sse_line_ending as _sse_line_ending, sse_payload_bytes as _sse_payload_bytes
 from protocol_translation import UnsupportedProtocolTranslationError
 from runtime_tool_compatibility import (
     HostedCapabilityFacts as RuntimeHostedCapabilityFacts,
@@ -60,9 +60,9 @@ from tool_surface_adapter import (
 from route_plan import (
     NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE,
     TOOL_SURFACE_STRATEGY_ERROR_CODE,
-    _external_native_responses_tool_codec,
-    _external_tool_protocol,
-    _external_tool_surface_strategy,
+    external_native_responses_tool_codec as _external_native_responses_tool_codec,
+    external_tool_protocol as _external_tool_protocol,
+    external_tool_surface_strategy as _external_tool_surface_strategy,
 )
 from route_primitives import (
     BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,

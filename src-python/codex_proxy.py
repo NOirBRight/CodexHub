@@ -42,12 +42,12 @@ from gateway_admission import (
     USER_REQUESTED_SHUTDOWN_OUTCOME,
     gateway_shutdown_controller_for_handler as _gateway_shutdown_controller_for_handler,
 )
-from gateway_errors import _local_gateway_auth_error_payload
+from gateway_errors import local_gateway_auth_error_payload as _local_gateway_auth_error_payload
 from gateway_events import GATEWAY_EVENT_WRITER_SHUTDOWN_TIMEOUT_SECONDS
 from gateway_handler_impl import GatewayHandlerMixin
 from gateway_request import (
-    _is_websocket_upgrade,
-    _local_request_authorized,
+    is_websocket_upgrade as _is_websocket_upgrade,
+    local_request_authorized as _local_request_authorized,
     provider_scoped_path,
     request_context_from_headers,
 )

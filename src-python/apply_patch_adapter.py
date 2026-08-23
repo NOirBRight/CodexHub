@@ -515,7 +515,7 @@ class _ApplyPatchStreamState:
     item_done: bool = False
 
 
-class _ThirdPartyApplyPatchStreamAdapter:
+class ThirdPartyApplyPatchStreamAdapter:
     def __init__(
         self,
         adapter: ApplyPatchAdapter,
@@ -802,6 +802,7 @@ class _ThirdPartyApplyPatchStreamAdapter:
                 outcome="untouched",
                 count=len(self._untouched_keys),
             )
+_ThirdPartyApplyPatchStreamAdapter = ThirdPartyApplyPatchStreamAdapter
 
 
 def apply_patch_adapter() -> ApplyPatchAdapter:

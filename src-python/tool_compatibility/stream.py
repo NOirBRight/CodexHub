@@ -19,7 +19,7 @@ from collaboration_runtime_contract import (
 
 from .collab_v1 import is_legacy_flattened_spawn
 from .collab_v2 import CollaborationV2StreamMixin, V2_NAMES as _V2_NAMES
-from .contracts import ToolCompatibilityError, _copy_mapping, _freeze, _item_id, _native_wire_identity, _thaw
+from .contracts import ToolCompatibilityError, copy_mapping as _copy_mapping, freeze as _freeze, item_id as _item_id, native_wire_identity as _native_wire_identity, thaw as _thaw
 from .dispositions import (
     ADAPT,
     CUSTOM_FREEFORM,
@@ -27,11 +27,11 @@ from .dispositions import (
     PLAIN_FUNCTION,
     SELECTED_PROVIDER_HOSTED,
     TOOL_SEARCH,
-    _history_output_type_for_entry,
-    _hosted_event_spec,
-    _hosted_event_spec_for_declaration_kind,
-    _hosted_kind_for_item_type,
-    _is_unsupported_hosted_stream_event,
+    history_output_type_for_entry as _history_output_type_for_entry,
+    hosted_event_spec as _hosted_event_spec,
+    hosted_event_spec_for_declaration_kind as _hosted_event_spec_for_declaration_kind,
+    hosted_kind_for_item_type as _hosted_kind_for_item_type,
+    is_unsupported_hosted_stream_event as _is_unsupported_hosted_stream_event,
 )
 from .plan import (
     CUSTOM_INPUT_KEY,
@@ -39,10 +39,10 @@ from .plan import (
     AliasRecord,
     ToolCompatibilityEntry,
     ToolCompatibilityPlan,
-    _is_legacy_message_identity,
-    _item_identity,
-    _json_object_exact,
-    _json_object_with_key,
+    is_legacy_message_identity as _is_legacy_message_identity,
+    item_identity as _item_identity,
+    json_object_exact as _json_object_exact,
+    json_object_with_key as _json_object_with_key,
 )
 
 @dataclass(slots=True)

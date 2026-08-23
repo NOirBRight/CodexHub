@@ -39,9 +39,10 @@ class RequiredToolUnavailableError(ToolCompatibilityError):
         )
 
 
-class _MalformedDeclaration(ToolCompatibilityError):
+class MalformedDeclaration(ToolCompatibilityError):
     def __init__(self) -> None:
         super().__init__("tool_compatibility_boundary", "malformed_declaration")
+_MalformedDeclaration = MalformedDeclaration
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,20 +167,22 @@ class HostedCapabilityFacts:
         return cls()
 
 
-def _protocol_capabilities(
+def protocol_capabilities(
     selected_protocol: str,
     supplied: ProtocolCapabilities | Mapping[str, Any] | None,
 ) -> ProtocolCapabilities:
     if isinstance(supplied, ProtocolCapabilities):
         return supplied
     return ProtocolCapabilities.for_protocol(selected_protocol, supplied)
+_protocol_capabilities = protocol_capabilities
 
 
-def _provider_hosted(value: Any) -> HostedCapabilityFacts:
+def provider_hosted(value: Any) -> HostedCapabilityFacts:
     return HostedCapabilityFacts.from_value(value)
+_provider_hosted = provider_hosted
 
 
-def _freeze(value: Any) -> Any:
+def freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
         return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
     if isinstance(value, list):
@@ -189,9 +192,10 @@ def _freeze(value: Any) -> Any:
     if isinstance(value, set):
         return frozenset(_freeze(item) for item in value)
     return value
+_freeze = freeze
 
 
-def _thaw(value: Any) -> Any:
+def thaw(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {key: _thaw(item) for key, item in value.items()}
     if isinstance(value, tuple):
@@ -199,10 +203,12 @@ def _thaw(value: Any) -> Any:
     if isinstance(value, frozenset):
         return {_thaw(item) for item in value}
     return value
+_thaw = thaw
 
 
-def _copy_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+def copy_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     return _thaw(_freeze(value))
+_copy_mapping = copy_mapping
 
 
 CUSTOM_INPUT_KEY = "__codexhub_custom_input"
@@ -230,7 +236,7 @@ class ToolCompatibilityEntry:
         return name if isinstance(name, str) else None
 
 
-def _json_object_with_key(value: Any, key: str) -> dict[str, Any]:
+def json_object_with_key(value: Any, key: str) -> dict[str, Any]:
     if isinstance(value, Mapping):
         parsed = _copy_mapping(value)
     elif isinstance(value, str):
@@ -253,18 +259,21 @@ def _json_object_with_key(value: Any, key: str) -> dict[str, Any]:
     if not isinstance(parsed, dict) or set(parsed) != {key}:
         raise ToolCompatibilityError("tool_compatibility_boundary", "invalid_envelope")
     return parsed
+_json_object_with_key = json_object_with_key
 
 
-def _json_object_exact(value: Any, *, output: bool = False) -> dict[str, Any]:
+def json_object_exact(value: Any, *, output: bool = False) -> dict[str, Any]:
     expected = CUSTOM_OUTPUT_KEY if output else CUSTOM_INPUT_KEY
     return _json_object_with_key(value, expected)
+_json_object_exact = json_object_exact
 
 
-def _dump_envelope(key: str, value: Any) -> str:
+def dump_envelope(key: str, value: Any) -> str:
     return json.dumps({key: _thaw(_freeze(value))}, ensure_ascii=True, separators=(",", ":"))
+_dump_envelope = dump_envelope
 
 
-def _item_identity(item: Mapping[str, Any], *, surface: str = "request") -> str | None:
+def item_identity(item: Mapping[str, Any], *, surface: str = "request") -> str | None:
     item_id = item.get("item_id")
     plain_id = item.get("id")
     if (
@@ -284,26 +293,30 @@ def _item_identity(item: Mapping[str, Any], *, surface: str = "request") -> str 
         if isinstance(value, str) and value:
             return value
     return None
+_item_identity = item_identity
 
 
-def _item_id(value: Mapping[str, Any]) -> str | None:
+def item_id(value: Mapping[str, Any]) -> str | None:
     """Extract stream-surface item identity from ``item_id`` or ``id``."""
 
     return _item_identity(value, surface="stream")
+_item_id = item_id
 
 
-def _native_wire_identity(item: Mapping[str, Any]) -> tuple[Any, Any, Any]:
+def native_wire_identity(item: Mapping[str, Any]) -> tuple[Any, Any, Any]:
     return (item.get("type"), item.get("name"), item.get("namespace"))
+_native_wire_identity = native_wire_identity
 
 
-def _is_legacy_message_identity(value: str) -> bool:
+def is_legacy_message_identity(value: str) -> bool:
     """Recognize the bounded synthetic IDs emitted by older Desktop builds."""
 
     prefix = "message_"
     return value.startswith(prefix) and value[len(prefix) :].isdigit()
+_is_legacy_message_identity = is_legacy_message_identity
 
 
-def _provider_function_declaration(child: Mapping[str, Any], alias: str) -> dict[str, Any]:
+def provider_function_declaration(child: Mapping[str, Any], alias: str) -> dict[str, Any]:
     """Return the plain-function shape exposed to a non-Codex provider."""
 
     function = _copy_mapping(child)
@@ -311,4 +324,5 @@ def _provider_function_declaration(child: Mapping[str, Any], alias: str) -> dict
     function["name"] = alias
     function.pop("namespace", None)
     return function
+_provider_function_declaration = provider_function_declaration
 

@@ -16,7 +16,7 @@ from collaboration_runtime_contract import (
     validate_collaboration_result,
 )
 
-from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, _copy_mapping, _freeze
+from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, copy_mapping as _copy_mapping, freeze as _freeze
 from .dispositions import ADAPT, NAMESPACE
 
 

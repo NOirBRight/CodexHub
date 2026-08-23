@@ -16,11 +16,11 @@ from .contracts import (
     RequiredToolUnavailableError,
     ToolCompatibilityEntry,
     ToolCompatibilityError,
-    _MalformedDeclaration,
-    _copy_mapping,
-    _freeze,
-    _protocol_capabilities,
-    _provider_hosted,
+    MalformedDeclaration as _MalformedDeclaration,
+    copy_mapping as _copy_mapping,
+    freeze as _freeze,
+    protocol_capabilities as _protocol_capabilities,
+    provider_hosted as _provider_hosted,
 )
 
 
@@ -57,7 +57,7 @@ _HOSTED_EVENT_STAGES = {
 }
 
 
-def _name_of(value: Mapping[str, Any]) -> str | None:
+def name_of(value: Mapping[str, Any]) -> str | None:
     name = value.get("name")
     if isinstance(name, str) and name:
         return name
@@ -67,6 +67,7 @@ def _name_of(value: Mapping[str, Any]) -> str | None:
         if isinstance(name, str) and name:
             return name
     return None
+_name_of = name_of
 
 
 def _is_explicit_function_tool_search(declaration: Mapping[str, Any]) -> bool:
@@ -87,7 +88,7 @@ def _is_explicit_function_tool_search(declaration: Mapping[str, Any]) -> bool:
     )
 
 
-def _namespace_details(declaration: Mapping[str, Any]) -> tuple[str | None, tuple[Mapping[str, Any], ...], str | None, bool]:
+def namespace_details(declaration: Mapping[str, Any]) -> tuple[str | None, tuple[Mapping[str, Any], ...], str | None, bool]:
     namespace = declaration.get("name")
     namespace = namespace if isinstance(namespace, str) and namespace else None
     raw_tools = declaration.get("tools")
@@ -108,6 +109,7 @@ def _namespace_details(declaration: Mapping[str, Any]) -> tuple[str | None, tupl
     else:
         version = None
     return namespace, tuple(children), version, bool(namespace and children)
+_namespace_details = namespace_details
 
 
 def classify_declaration(declaration: Mapping[str, Any]) -> str:
@@ -131,7 +133,7 @@ def classify_declaration(declaration: Mapping[str, Any]) -> str:
     return UNKNOWN_FUTURE_KIND
 
 
-def _declaration_valid_for_family(declaration: Mapping[str, Any], family: str) -> bool:
+def declaration_valid_for_family(declaration: Mapping[str, Any], family: str) -> bool:
     if family == PLAIN_FUNCTION:
         return declaration.get("type") == "function" and bool(_name_of(declaration))
     if family == NAMESPACE:
@@ -155,40 +157,45 @@ def _declaration_valid_for_family(declaration: Mapping[str, Any], family: str) -
     if family == SELECTED_PROVIDER_HOSTED:
         return isinstance(declaration.get("type"), str)
     return isinstance(declaration.get("type"), str)
+_declaration_valid_for_family = declaration_valid_for_family
 
 
-def _hosted_kind_for_item_type(item_type: Any) -> str | None:
+def hosted_kind_for_item_type(item_type: Any) -> str | None:
     if not isinstance(item_type, str) or not item_type.endswith("_call"):
         return None
     kind = item_type[: -len("_call")]
     return kind if kind in _KNOWN_HOSTED_TYPES else None
+_hosted_kind_for_item_type = hosted_kind_for_item_type
 
 
-def _hosted_output_kind_for_item_type(item_type: Any) -> str | None:
+def hosted_output_kind_for_item_type(item_type: Any) -> str | None:
     if not isinstance(item_type, str):
         return None
     for event_kind, _stages in _HOSTED_EVENT_STAGES.values():
         if item_type == f"{event_kind}_output":
             return event_kind
     return None
+_hosted_output_kind_for_item_type = hosted_output_kind_for_item_type
 
 
-def _hosted_event_spec_for_declaration_kind(kind: Any) -> tuple[str, tuple[str, ...]] | None:
+def hosted_event_spec_for_declaration_kind(kind: Any) -> tuple[str, tuple[str, ...]] | None:
     if not isinstance(kind, str):
         return None
     return _HOSTED_EVENT_STAGES.get(kind)
+_hosted_event_spec_for_declaration_kind = hosted_event_spec_for_declaration_kind
 
 
-def _hosted_event_spec_for_item_type(item_type: Any) -> tuple[str, tuple[str, ...]] | None:
+def hosted_event_spec_for_item_type(item_type: Any) -> tuple[str, tuple[str, ...]] | None:
     if not isinstance(item_type, str):
         return None
     for event_kind, stages in _HOSTED_EVENT_STAGES.values():
         if item_type in {event_kind, f"{event_kind}_output"}:
             return event_kind, stages
     return None
+_hosted_event_spec_for_item_type = hosted_event_spec_for_item_type
 
 
-def _hosted_history_item_key(item_type: Any) -> tuple[str, bool] | None:
+def hosted_history_item_key(item_type: Any) -> tuple[str, bool] | None:
     if not isinstance(item_type, str):
         return None
     if item_type in {
@@ -211,9 +218,10 @@ def _hosted_history_item_key(item_type: Any) -> tuple[str, bool] | None:
         if item_type == f"{hosted_kind}_call_output":
             return hosted_kind, True
     return None
+_hosted_history_item_key = hosted_history_item_key
 
 
-def _declaration_key(declaration: Mapping[str, Any]) -> tuple[Any, ...]:
+def declaration_key(declaration: Mapping[str, Any]) -> tuple[Any, ...]:
     family = classify_declaration(declaration)
     # ``tool_search`` has two equivalent declaration spellings in the
     # Responses/Chat boundary: the native client-owned item and the explicit
@@ -239,9 +247,10 @@ def _declaration_key(declaration: Mapping[str, Any]) -> tuple[Any, ...]:
         declaration.get("name"),
         declaration.get("namespace"),
     )
+_declaration_key = declaration_key
 
 
-def _family_for_item_type(item_type: Any, namespace: Any = None) -> str | None:
+def family_for_item_type(item_type: Any, namespace: Any = None) -> str | None:
     if item_type == "function_call":
         return NAMESPACE if namespace is not None else PLAIN_FUNCTION
     if item_type == "custom_tool_call":
@@ -253,9 +262,10 @@ def _family_for_item_type(item_type: Any, namespace: Any = None) -> str | None:
         if kind in _KNOWN_HOSTED_TYPES:
             return SELECTED_PROVIDER_HOSTED
     return None
+_family_for_item_type = family_for_item_type
 
 
-def _hosted_entry_item_kind(entry: ToolCompatibilityEntry) -> str | None:
+def hosted_entry_item_kind(entry: ToolCompatibilityEntry) -> str | None:
     declaration_type = entry.declaration.get("type")
     if entry.family == SELECTED_PROVIDER_HOSTED:
         declaration_spec = _hosted_event_spec_for_declaration_kind(declaration_type)
@@ -269,9 +279,10 @@ def _hosted_entry_item_kind(entry: ToolCompatibilityEntry) -> str | None:
     ):
         return declaration_type
     return None
+_hosted_entry_item_kind = hosted_entry_item_kind
 
 
-def _unknown_response_item_kind(item_type: Any) -> str | None:
+def unknown_response_item_kind(item_type: Any) -> str | None:
     if not isinstance(item_type, str):
         return None
     if item_type.endswith("_call_output"):
@@ -281,9 +292,10 @@ def _unknown_response_item_kind(item_type: Any) -> str | None:
         kind = item_type[: -len("_call")]
         return kind if kind else None
     return None
+_unknown_response_item_kind = unknown_response_item_kind
 
 
-def _history_output_type_for_entry(entry: ToolCompatibilityEntry) -> str | None:
+def history_output_type_for_entry(entry: ToolCompatibilityEntry) -> str | None:
     if entry.family in {PLAIN_FUNCTION, NAMESPACE}:
         return "function_call_output"
     if entry.family == CUSTOM_FREEFORM:
@@ -295,9 +307,10 @@ def _history_output_type_for_entry(entry: ToolCompatibilityEntry) -> str | None:
         if isinstance(declaration_type, str):
             return f"{declaration_type}_call_output"
     return None
+_history_output_type_for_entry = history_output_type_for_entry
 
 
-def _hosted_event_spec(event_type: Any) -> tuple[str, str, tuple[str, ...]] | None:
+def hosted_event_spec(event_type: Any) -> tuple[str, str, tuple[str, ...]] | None:
     if not isinstance(event_type, str) or not event_type.startswith("response."):
         return None
     suffix = event_type[len("response.") :]
@@ -308,9 +321,10 @@ def _hosted_event_spec(event_type: Any) -> tuple[str, str, tuple[str, ...]] | No
         if event_kind == mapped_event_kind and stage in stages:
             return event_kind, stage, stages
     return None
+_hosted_event_spec = hosted_event_spec
 
 
-def _is_unsupported_hosted_stream_event(event_type: Any) -> bool:
+def is_unsupported_hosted_stream_event(event_type: Any) -> bool:
     if not isinstance(event_type, str) or not event_type.startswith("response."):
         return False
     if _hosted_event_spec(event_type) is not None:
@@ -332,9 +346,10 @@ def _is_unsupported_hosted_stream_event(event_type: Any) -> bool:
     # unknown provider-specific hosted lifecycle.  Neither can be safely
     # passed through without an explicit lifecycle contract.
     return "_call." in suffix
+_is_unsupported_hosted_stream_event = is_unsupported_hosted_stream_event
 
 
-def _tool_choice_matches_declaration(
+def tool_choice_matches_declaration(
     declaration: Mapping[str, Any],
     tool_choice: Any,
 ) -> bool:
@@ -383,9 +398,10 @@ def _tool_choice_matches_declaration(
     if isinstance(choice_type, str) and choice_type == declaration.get("type"):
         return choice_name in {None, name}
     return False
+_tool_choice_matches_declaration = tool_choice_matches_declaration
 
 
-def _has_explicit_named_tool_choice(tool_choice: Any) -> bool:
+def has_explicit_named_tool_choice(tool_choice: Any) -> bool:
     if isinstance(tool_choice, str):
         return tool_choice not in {"auto", "none", "required"}
     if not isinstance(tool_choice, Mapping):
@@ -398,9 +414,10 @@ def _has_explicit_named_tool_choice(tool_choice: Any) -> bool:
         "tool_search",
         *_KNOWN_HOSTED_TYPES,
     }
+_has_explicit_named_tool_choice = has_explicit_named_tool_choice
 
 
-def _required_by_rule(
+def required_by_rule(
     declaration: Mapping[str, Any],
     index: int,
     *,
@@ -437,6 +454,7 @@ def _required_by_rule(
             return result or _tool_choice_matches_declaration(declaration, tool_choice)
         return result
     return result or _tool_choice_matches_declaration(declaration, tool_choice)
+_required_by_rule = required_by_rule
 
 
 

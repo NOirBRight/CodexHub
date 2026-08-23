@@ -19,8 +19,8 @@ import bounded_event_writer
 import diagnostic_recorder
 import proxy_telemetry
 from gateway_admission import USER_REQUESTED_SHUTDOWN_OUTCOME
-from gateway_settings import _runtime_proxy_dir
-from gateway_sse import _sse_payload_bytes
+from gateway_settings import runtime_proxy_dir as _runtime_proxy_dir
+from gateway_sse import sse_payload_bytes as _sse_payload_bytes
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -199,11 +199,12 @@ def normalize_usage_for_event(
     return fields
 
 
-def _usage_from_payload(payload: Any) -> Mapping[str, Any] | None:
+def usage_from_payload(payload: Any) -> Mapping[str, Any] | None:
     if not isinstance(payload, Mapping):
         return None
     usage = payload.get("usage")
     return usage if isinstance(usage, Mapping) else None
+_usage_from_payload = usage_from_payload
 
 
 def _usage_from_json_body(body: bytes) -> Mapping[str, Any] | None:
