@@ -88,7 +88,7 @@ def test_upstream_sse_reader_queue_is_exactly_32_and_full_queue_cancellation_is_
     admission = controller.admit()
     assert admission is not None
     response = _ProducingResponse()
-    lifecycle = codex_proxy._UpstreamSseReaderLifecycle(response, admission=admission)
+    lifecycle = codex_proxy.UpstreamSseReaderLifecycle(response, admission=admission)
     full_queue_put_entered = threading.Event()
     queue_put = lifecycle._queue.put
 
@@ -121,7 +121,7 @@ def test_upstream_sse_reader_queue_is_exactly_32_and_full_queue_cancellation_is_
 
 def test_upstream_sse_reader_closes_once_on_normal_eof_and_preserves_order() -> None:
     response = _LifecycleResponse([b"data: first\n\n", b"data: second\n\n", b""])
-    lifecycle = codex_proxy._UpstreamSseReaderLifecycle(response)
+    lifecycle = codex_proxy.UpstreamSseReaderLifecycle(response)
 
     assert list(lifecycle.iter_lines()) == [
         b"data: first\n\n",
@@ -139,7 +139,7 @@ def test_upstream_sse_reader_closes_once_on_normal_eof_and_preserves_order() -> 
 
 def test_upstream_sse_reader_closes_once_and_wakes_consumer_on_upstream_error() -> None:
     response = _LifecycleResponse([OSError("synthetic upstream failure")])
-    lifecycle = codex_proxy._UpstreamSseReaderLifecycle(response)
+    lifecycle = codex_proxy.UpstreamSseReaderLifecycle(response)
 
     with pytest.raises(OSError, match="synthetic upstream failure"):
         lifecycle.readline()
@@ -154,7 +154,7 @@ def test_upstream_sse_reader_closes_once_and_wakes_consumer_on_upstream_error() 
 
 def test_upstream_sse_reader_repeated_close_wakes_unstarted_consumer_without_starting_reader() -> None:
     response = _LifecycleResponse([b"must not be read"])
-    lifecycle = codex_proxy._UpstreamSseReaderLifecycle(response)
+    lifecycle = codex_proxy.UpstreamSseReaderLifecycle(response)
 
     lifecycle.close()
     lifecycle.close()
@@ -167,7 +167,7 @@ def test_upstream_sse_reader_repeated_close_wakes_unstarted_consumer_without_sta
 
 def test_upstream_sse_reader_join_is_capped_at_one_second_and_timeout_is_classified() -> None:
     response = _NonTerminatingResponse()
-    lifecycle = codex_proxy._UpstreamSseReaderLifecycle(response)
+    lifecycle = codex_proxy.UpstreamSseReaderLifecycle(response)
     lifecycle.start()
     assert response.entered.wait(timeout=1.0)
     lifecycle.close()
@@ -376,13 +376,13 @@ def test_request_racing_admission_closure_never_opens_or_retries_upstream_work()
     controller = codex_proxy.GatewayShutdownController()
     admission = controller.admit()
     assert admission is not None
-    previous = codex_proxy._activate_gateway_request(admission)
+    previous = codex_proxy.activate_gateway_request(admission)
 
     try:
         controller.close_admission()
         with patch.object(codex_proxy, "_open_upstream_once") as open_upstream:
             with pytest.raises(codex_proxy.GatewayUserRequestedShutdown):
-                codex_proxy._open_upstream_response(
+                codex_proxy.open_upstream_response(
                     Request("https://example.invalid/v1/responses", data=b"{}", method="POST"),
                     upstream_name="official",
                     upstream_format="responses",
@@ -390,7 +390,7 @@ def test_request_racing_admission_closure_never_opens_or_retries_upstream_work()
                 )
         open_upstream.assert_not_called()
     finally:
-        codex_proxy._restore_gateway_request(previous)
+        codex_proxy.restore_gateway_request(previous)
         controller.complete(admission)
 
 
@@ -398,16 +398,16 @@ def test_cancelled_admission_interrupts_retry_wait_without_sleep() -> None:
     controller = codex_proxy.GatewayShutdownController()
     admission = controller.admit()
     assert admission is not None
-    previous = codex_proxy._activate_gateway_request(admission)
+    previous = codex_proxy.activate_gateway_request(admission)
 
     try:
         controller.close_admission()
         with patch.object(codex_proxy.time, "sleep") as sleep:
             with pytest.raises(codex_proxy.GatewayUserRequestedShutdown):
-                codex_proxy._sleep_for_retry_with_gateway_cancellation(30.0)
+                codex_proxy.sleep_for_retry_with_gateway_cancellation(30.0)
         sleep.assert_not_called()
     finally:
-        codex_proxy._restore_gateway_request(previous)
+        codex_proxy.restore_gateway_request(previous)
         controller.complete(admission)
 
 
@@ -422,7 +422,7 @@ def test_active_request_receives_a_sanitized_user_requested_shutdown_outcome() -
 
     def wait_for_shutdown(*_args, **_kwargs):
         upstream_entered.set()
-        admission = codex_proxy._active_gateway_request()
+        admission = codex_proxy.active_gateway_request()
         assert admission is not None
         assert admission.wait_for_cancellation(2.0)
         admission.raise_if_cancelled()
