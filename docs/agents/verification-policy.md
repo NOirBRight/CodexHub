@@ -47,8 +47,9 @@ module's public interface — the HTTP surface, or an extracted seam such as
 `execute_exchange`, `prepare_exchange`, `RoutePlan`, or the relay/SSE
 helpers. They must not import or invoke private members of
 `CodexProxyHandler` or other underscore-private internals of `codex_proxy`.
-Existing violations of this rule are being removed by the #448 migration
-campaign (#451). Do not add new private-method tests.
+`tests/test_seam_discipline.py` enforces that `tests/` has no
+`codex_proxy._*` or `CodexProxyHandler.__new__` / `CodexProxyHandler._`
+references. Do not add new private-method tests.
 
 ## Manual and runtime evidence
 
