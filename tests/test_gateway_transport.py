@@ -39,6 +39,7 @@ FORBIDDEN_SOURCE_MARKERS = (
     "gateway_sse",
     "BaseHTTPRequestHandler",
     "CodexProxyHandler",
+    'auth_mode == "codex_auth"',
 )
 
 
@@ -209,6 +210,24 @@ def test_header_and_auth_materialization_uses_injected_tokens() -> None:
     assert "x-openai-internal-codex-responses-lite" not in {
         key.lower() for key in headers
     }
+
+
+def test_codex_responses_lite_header_is_dropped_through_adapter_hook() -> None:
+    headers = build_upstream_headers(
+        {
+            "Content-Type": "application/json",
+            "x-openai-internal-codex-responses-lite": "true",
+        },
+        {"auth": "codex_auth", "name": "official", "upstream_model": "openai/gpt-5.4"},
+        access_token=lambda: "tok",
+        account_id=lambda: "acct",
+        new_id=lambda: "id",
+    )
+    assert "x-openai-internal-codex-responses-lite" not in {
+        key.lower() for key in headers
+    }
+    assert headers["Authorization"] == "Bearer tok"
+    assert headers["Session-id"] == "id"
 
 
 def test_module_level_header_helpers_match_injected_adapter() -> None:

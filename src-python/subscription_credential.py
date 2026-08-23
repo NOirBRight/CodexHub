@@ -91,6 +91,10 @@ def provider_auth_mode(provider_id: str | None) -> str | None:
 class CodexAuthAdapter:
     """ADR-0005 adapter #1: ChatGPT Codex subscription via ``codex_auth``."""
 
+    _OFFICIAL_ALIAS_PREFIX = "openai/"
+    _RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
+    _RESPONSES_LITE_UNSUPPORTED_MODELS = frozenset({"gpt-5.4", "gpt-5.4-mini"})
+
     def access_token(self) -> str:
         from codex_auth import CodexAuthError, access_token
 
@@ -118,6 +122,51 @@ class CodexAuthAdapter:
             return refresh_codex(auth_data)
         except CodexAuthError as exc:
             raise SubscriptionAuthError(str(exc), classification=REFRESH_FAILED) from exc
+
+    def drop_incoming_header(self, name: str, *, model_id: str) -> bool:
+        """Drop Codex responses-lite on models that reject the official header."""
+        if name.lower() != self._RESPONSES_LITE_HEADER:
+            return False
+        model = model_id.strip().lower()
+        prefix = self._OFFICIAL_ALIAS_PREFIX
+        if model.startswith(prefix):
+            model = model[len(prefix) :]
+        return model in self._RESPONSES_LITE_UNSUPPORTED_MODELS
+
+    def apply_identity_headers(
+        self,
+        outgoing: dict[str, str],
+        *,
+        strict_official_passthrough: bool,
+        session_id: str | None,
+        client_request_id: str | None,
+        read_header: Callable[..., str | None],
+        make_id: Callable[[], str],
+    ) -> None:
+        """Materialize Codex session/thread/window/request identity headers."""
+        if strict_official_passthrough:
+            return
+        if not read_header(outgoing, "Accept"):
+            outgoing["Accept"] = "text/event-stream"
+        if not read_header(outgoing, "Originator"):
+            outgoing["Originator"] = "codexhub-proxy"
+        if not read_header(outgoing, "User-Agent"):
+            outgoing["User-Agent"] = "Codex Desktop/0.142.4 (CodexHub proxy)"
+        resolved_session_id = read_header(outgoing, "Session-id")
+        if not resolved_session_id:
+            resolved_session_id = session_id or make_id()
+            if not resolved_session_id:
+                raise ValueError("materialized Codex auth is missing session identity")
+            outgoing["Session-id"] = resolved_session_id
+        if not read_header(outgoing, "Thread-id"):
+            outgoing["Thread-id"] = resolved_session_id
+        if not read_header(outgoing, "X-codex-window-id"):
+            outgoing["X-codex-window-id"] = f"{resolved_session_id}:1"
+        if not read_header(outgoing, "X-client-request-id"):
+            resolved_request_id = client_request_id or make_id()
+            if not resolved_request_id:
+                raise ValueError("materialized Codex auth is missing request identity")
+            outgoing["X-client-request-id"] = resolved_request_id
 
 
 def register_builtin_adapters() -> None:

@@ -48,7 +48,6 @@ sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
 
 import urllib3
 
-from catalog import canonical_model_id
 import gateway_admission
 import gateway_events
 from gateway_admission import sleep_for_retry_with_gateway_cancellation
@@ -1128,54 +1127,6 @@ def _subscription_account_headers(
     return dict(adapter.account_headers())
 
 
-def _apply_codex_identity_headers(
-    outgoing: dict[str, str],
-    *,
-    operational_authentication: OperationalAuthentication | None,
-    request_mutation_policy: MutationPolicy | None,
-    behavior_profile: str | None,
-    resolved_facts: TransportFacts,
-    read_header: Callable[..., str | None],
-    make_id: Callable[[], str],
-) -> None:
-    strict_official_passthrough = (
-        request_mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH
-        if request_mutation_policy is not None
-        else behavior_profile == resolved_facts.official_passthrough_behavior
-    )
-    if strict_official_passthrough:
-        return
-    if not read_header(outgoing, "Accept"):
-        outgoing["Accept"] = "text/event-stream"
-    if not read_header(outgoing, "Originator"):
-        outgoing["Originator"] = "codexhub-proxy"
-    if not read_header(outgoing, "User-Agent"):
-        outgoing["User-Agent"] = "Codex Desktop/0.142.4 (CodexHub proxy)"
-    session_id = read_header(outgoing, "Session-id")
-    if not session_id:
-        session_id = (
-            operational_authentication.generated_session_id
-            if operational_authentication is not None
-            else make_id()
-        )
-        if not session_id:
-            raise ValueError("materialized Codex auth is missing session identity")
-        outgoing["Session-id"] = session_id
-    if not read_header(outgoing, "Thread-id"):
-        outgoing["Thread-id"] = session_id
-    if not read_header(outgoing, "X-codex-window-id"):
-        outgoing["X-codex-window-id"] = f"{session_id}:1"
-    if not read_header(outgoing, "X-client-request-id"):
-        client_request_id = (
-            operational_authentication.generated_client_request_id
-            if operational_authentication is not None
-            else make_id()
-        )
-        if not client_request_id:
-            raise ValueError("materialized Codex auth is missing request identity")
-        outgoing["X-client-request-id"] = client_request_id
-
-
 def materialize_operational_authentication(
     incoming_headers: Mapping[str, str] | Any,
     upstream: Mapping[str, Any],
@@ -1271,27 +1222,24 @@ def build_upstream_headers(
         authentication_strategy=authentication_strategy,
     )
     outgoing: dict[str, str] = {}
-    upstream_model_id = canonical_model_id(
-        str(upstream.get("upstream_model") or model_id or "")
-    ).lower()
-    if upstream_model_id.startswith(resolved_facts.official_alias_prefix):
-        upstream_model_id = upstream_model_id[len(resolved_facts.official_alias_prefix):]
-    drop_responses_lite_header = (
-        auth_mode == "codex_auth"
-        and upstream_model_id in resolved_facts.official_responses_lite_unsupported_models
+    adapter = credential_for(auth_mode)
+    drop_incoming_header = (
+        getattr(adapter, "drop_incoming_header", None) if adapter is not None else None
     )
+    model_id_for_adapter = str(upstream.get("upstream_model") or model_id or "")
 
     for key, value in items(incoming_headers):
         lowered = key.lower()
         if lowered in resolved_facts.hop_by_hop_request_headers or lowered == "authorization":
             continue
-        if drop_responses_lite_header and lowered == "x-openai-internal-codex-responses-lite":
+        if drop_incoming_header is not None and drop_incoming_header(
+            lowered, model_id=model_id_for_adapter
+        ):
             continue
         if drop_content_encoding and lowered == "content-encoding":
             continue
         outgoing[key] = value
 
-    adapter = credential_for(auth_mode)
     if adapter is not None:
         outgoing["Authorization"] = _subscription_authorization(
             adapter,
@@ -1308,13 +1256,26 @@ def build_upstream_headers(
         ).items():
             if header_value and not read_header(outgoing, header_name):
                 outgoing[header_name] = header_value
-        if auth_mode == "codex_auth":
-            _apply_codex_identity_headers(
+        apply_identity_headers = getattr(adapter, "apply_identity_headers", None)
+        if apply_identity_headers is not None:
+            strict_official_passthrough = (
+                request_mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH
+                if request_mutation_policy is not None
+                else behavior_profile == resolved_facts.official_passthrough_behavior
+            )
+            apply_identity_headers(
                 outgoing,
-                operational_authentication=operational_authentication,
-                request_mutation_policy=request_mutation_policy,
-                behavior_profile=behavior_profile,
-                resolved_facts=resolved_facts,
+                strict_official_passthrough=strict_official_passthrough,
+                session_id=(
+                    operational_authentication.generated_session_id
+                    if operational_authentication is not None
+                    else None
+                ),
+                client_request_id=(
+                    operational_authentication.generated_client_request_id
+                    if operational_authentication is not None
+                    else None
+                ),
                 read_header=read_header,
                 make_id=make_id,
             )
