@@ -27,6 +27,7 @@ import {
   storeOfficialOpenAIUsageSnapshot,
 } from "../components/providers/OfficialOpenAIUsagePanel";
 import { AddProviderPanel, ProviderDetail } from "../components/providers/ProviderEditor";
+import { ProviderCatalogPicker } from "../components/providers/ProviderCatalogPicker";
 import { HeaderRow } from "../components/providers/ProviderFormControls";
 import {
   isOfficialModelDisabled,
@@ -154,6 +155,8 @@ function ProvidersPageImpl({
   const [officialUsageHidden, setOfficialUsageHidden] = useState(false);
   const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot | null>(null);
   const [form, setForm] = useState(emptyProvider);
+  const [catalogPickerOpen, setCatalogPickerOpen] = useState(false);
+  const [catalogPresets, setCatalogPresets] = useState<Provider[] | null>(null);
   const [probeResult, setProbeResult] = useState<UpstreamFormatProbeResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [modelDiscoveryError, setModelDiscoveryError] = useState<string | null>(null);
@@ -176,6 +179,7 @@ function ProvidersPageImpl({
     saveExistingDraft: (draft) => updateProvider(draft, t("providers.providerSaved", { name: draft.name })),
   });
   const {
+    addCatalogProvider,
     addProvider,
     catalogSyncToastMessage,
     discoverForForm,
@@ -866,6 +870,15 @@ function ProvidersPageImpl({
     setError(null);
   }
 
+  async function openCatalogPicker() {
+    setCatalogPickerOpen(true);
+    try {
+      setCatalogPresets(await api.getBundledProviders());
+    } catch {
+      setCatalogPresets([]);
+    }
+  }
+
   return (
     <>
     <main className="relative grid h-full min-h-0 min-w-0 grid-cols-[minmax(240px,32%)_minmax(0,1fr)] gap-3 overflow-hidden">
@@ -883,7 +896,7 @@ function ProvidersPageImpl({
           officialIncluded={settings?.include_official_models ?? false}
           officialCount={officialModels.length}
           providerModelCount={providerModelCount}
-          onAdd={() => selectProvider(ADD_ID)}
+          onAdd={() => void openCatalogPicker()}
           items={providerNavItems}
           onReorder={(items) => void reorderHubProviders(items)}
           onSelect={selectProvider}
@@ -947,7 +960,7 @@ function ProvidersPageImpl({
                 discoverError={modelDiscoveryError}
                 probeResult={probeResult}
                 provider={selectedProvider}
-                onChange={(provider) => void updateProvider(provider)}
+                onChange={(provider, successMessage) => void updateProvider(provider, successMessage)}
                 onDelete={() => void deleteProvider(selectedProvider.id)}
                 onDraftStateChange={trackProviderDraft}
                 onProbe={(provider) =>
@@ -976,6 +989,22 @@ function ProvidersPageImpl({
         onCancel={cancelPendingProviderNavigation}
         onDiscard={discardPendingProviderNavigation}
         onSave={() => void savePendingProviderNavigation()}
+      />
+    )}
+    {catalogPickerOpen && (
+      <ProviderCatalogPicker
+        existingIds={new Set(providers.map((provider) => provider.id))}
+        loading={catalogPresets === null}
+        presets={catalogPresets ?? []}
+        onClose={() => setCatalogPickerOpen(false)}
+        onSelectCustom={() => {
+          setCatalogPickerOpen(false);
+          selectProvider(ADD_ID);
+        }}
+        onSelectPreset={(preset) => {
+          setCatalogPickerOpen(false);
+          void addCatalogProvider(preset);
+        }}
       />
     )}
     </>

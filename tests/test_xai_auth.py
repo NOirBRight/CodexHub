@@ -58,12 +58,16 @@ def test_start_device_login_reads_oidc_discovery(monkeypatch) -> None:
     def opener(request: Any, timeout: float = 20.0) -> _FakeResponse:
         calls.append(request.full_url)
         if request.full_url.endswith("openid-configuration"):
+            assert request.get_method() == "GET"
             return _FakeResponse(
                 {
                     "device_authorization_endpoint": "https://auth.x.ai/oauth/device",
                     "token_endpoint": "https://auth.x.ai/oauth/token",
                 }
             )
+        assert request.get_header("Content-type") == "application/x-www-form-urlencoded"
+        body = request.data.decode("utf-8") if isinstance(request.data, bytes) else ""
+        assert "client_id=" in body
         return _FakeResponse(
             {
                 "device_code": "dev-1",
@@ -215,6 +219,24 @@ def test_access_token_skips_refresh_without_expires_at(tmp_path, monkeypatch) ->
         raise AssertionError(f"unexpected refresh against {request.full_url}")
 
     assert xai_auth.access_token(opener=opener) == "live-token"
+
+
+def test_access_token_cli_prints_token_json(tmp_path, monkeypatch, capsys) -> None:
+    import importlib.util
+    from pathlib import Path
+
+    monkeypatch.setenv("CODEXHUB_XAI_AUTH_PATH", str(tmp_path / "xai_auth.json"))
+    xai_auth.persist_tokens(
+        {"access_token": "cli-token", "refresh_token": "r1", "token_type": "Bearer"}
+    )
+    script = Path(__file__).resolve().parents[1] / "scripts" / "xai_device_login.py"
+    spec = importlib.util.spec_from_file_location("xai_device_login_cli", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.main(["access-token"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["access_token"] == "cli-token"
 
 
 def test_poll_device_login_honors_cli_timeout_env(monkeypatch) -> None:

@@ -2,9 +2,12 @@
 //! keep the window visually rounded. Do not stamp a square opaque region —
 //! that turns the rounded app into a hard rectangle.
 
-use gtk::gdk::WindowTypeHint;
+use gtk::gdk::{self, WindowTypeHint};
 use gtk::prelude::*;
+use std::cell::Cell;
 use std::io::Write;
+use std::rc::Rc;
+use std::time::Duration;
 use tauri::{Manager, WebviewWindow};
 
 const APP_ICON_PNG: &[u8] = include_bytes!("../icons/128x128.png");
@@ -40,17 +43,89 @@ fn configure_shell(window: &WebviewWindow) -> Result<(), String> {
     gtk_window.set_skip_pager_hint(false);
     gtk_window.set_type_hint(WindowTypeHint::Normal);
     gtk_window.set_accept_focus(true);
+    gtk_window.set_app_paintable(false);
+    if let Some(screen) = gtk::prelude::WidgetExt::screen(&gtk_window) {
+        if let Some(visual) = screen.system_visual() {
+            gtk_window.set_visual(Some(&visual));
+        }
+    }
     let _ = window.set_skip_taskbar(false);
-    apply_transparent_rounded_css(&gtk_window);
+    apply_opaque_window_css(&gtk_window);
+    fill_webview_on_resize(&gtk_window);
     Ok(())
 }
 
-fn apply_transparent_rounded_css(gtk_window: &gtk::ApplicationWindow) {
+/// wry/WebKitGTK on Linux can park the webview in a GtkFixed at 1×1 when
+/// bounds are unset. Stretch GTK widgets *and* the native Gdk/X11 child so
+/// the UI actually paints instead of a blank shell.
+fn fill_webview_on_resize(gtk_window: &gtk::ApplicationWindow) {
+    gtk_window.connect_size_allocate(|window, _| {
+        stretch_webview(window, false);
+    });
+    let window = gtk_window.clone();
+    let attempts = Rc::new(Cell::new(0u32));
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        stretch_webview(&window, true);
+        let n = attempts.get() + 1;
+        attempts.set(n);
+        if n < 40 {
+            glib::ControlFlow::Continue
+        } else {
+            glib::ControlFlow::Break
+        }
+    });
+}
+
+fn stretch_webview(gtk_window: &gtk::ApplicationWindow, allocate: bool) {
+    let width = gtk_window.allocated_width().max(1);
+    let height = gtk_window.allocated_height().max(1);
+    for child in gtk_window.children() {
+        expand_widget_tree(&child, width, height, allocate);
+    }
+    resize_native_children(gtk_window, width, height);
+}
+
+fn expand_widget_tree(widget: &gtk::Widget, width: i32, height: i32, allocate: bool) {
+    widget.set_hexpand(true);
+    widget.set_vexpand(true);
+    let type_name = widget.type_().name();
+    if type_name.contains("WebView") || type_name.contains("Fixed") {
+        widget.set_size_request(width, height);
+    }
+    if let Ok(fixed) = widget.clone().downcast::<gtk::Fixed>() {
+        for child in fixed.children() {
+            fixed.move_(&child, 0, 0);
+            child.set_size_request(width, height);
+            if allocate {
+                child.size_allocate(&gdk::Rectangle::new(0, 0, width, height));
+            }
+            if let Some(gdk_window) = child.window() {
+                gdk_window.move_resize(0, 0, width, height);
+            }
+        }
+    }
+    if let Ok(container) = widget.clone().downcast::<gtk::Container>() {
+        for child in container.children() {
+            expand_widget_tree(&child, width, height, allocate);
+        }
+    }
+}
+
+fn resize_native_children(gtk_window: &gtk::ApplicationWindow, width: i32, height: i32) {
+    let Some(gdk_window) = gtk::prelude::WidgetExt::window(gtk_window) else {
+        return;
+    };
+    for child in gdk_window.children() {
+        child.move_resize(0, 0, width, height);
+    }
+}
+
+fn apply_opaque_window_css(gtk_window: &gtk::ApplicationWindow) {
     let provider = gtk::CssProvider::new();
+    // Do not set border-radius here: GTK then picks an RGBA visual and
+    // WebKitGTK paints a black webview on X11/XWayland.
     if provider
-        .load_from_data(
-            b"window { background-color: transparent; border-radius: 16px; box-shadow: none; }",
-        )
+        .load_from_data(b"window { background-color: #f8f8f7; }")
         .is_err()
     {
         return;
@@ -120,6 +195,12 @@ fn install_desktop_entry() {
 fn desktop_exec_path() -> String {
     let raw = std::env::var("APPIMAGE")
         .ok()
+        .filter(|path| {
+            std::path::Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.to_ascii_lowercase().starts_with("codexhub"))
+        })
         .or_else(|| {
             std::env::current_exe()
                 .ok()

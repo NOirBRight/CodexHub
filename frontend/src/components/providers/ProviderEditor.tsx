@@ -1,5 +1,5 @@
 import { Check, ChevronDown, FlaskConical, Plus, RefreshCcw, Save, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useToasts } from "../PageToast";
 import { ModelSection, createDraftModel, uniqueModelId } from "./ProviderModelSection";
@@ -19,6 +19,7 @@ import {
   toolProtocolLabel,
   upstreamFormatLabel,
 } from "../../lib/providerEndpoint";
+import { applyCatalogPresetDefaults } from "../../lib/providerCatalog";
 import { endpointSelectionOptions, type AddProviderForm, type InlineTestState } from "../../lib/providerForm";
 import { normalizeModel } from "../../lib/providerModel";
 import { isProviderDirty } from "../../lib/providerComparison";
@@ -57,6 +58,9 @@ export function ProviderDetail({
   const [draft, setDraft] = useState(() => normalizedProvider);
   const [endpointTestState, setEndpointTestState] = useState<InlineTestState>("idle");
   const dirty = isProviderDirty(normalizedProvider, draft);
+  const draftRef = useRef(draft);
+  const ensuringXaiCatalog = useRef(false);
+  draftRef.current = draft;
 
   useEffect(() => {
     setDraft(normalizedProvider);
@@ -128,6 +132,37 @@ export function ProviderDetail({
     onChange(next, t("providers.modelRemoved"));
   }
 
+  async function ensureXaiCatalogReady() {
+    if (provider.id !== "xai" || ensuringXaiCatalog.current) {
+      return;
+    }
+    ensuringXaiCatalog.current = true;
+    try {
+      let current = draftRef.current;
+      if (!current.base_url.trim()) {
+        const bundled = await api.getBundledProviders();
+        const next = applyCatalogPresetDefaults(current, bundled.find((item) => item.id === "xai"), {
+          includeModels: false,
+        });
+        if (next !== current) {
+          current = next;
+          setDraft(next);
+        }
+      }
+      const catalogOnly =
+        current.models.length === 0 || current.models.every((model) => model.id === "grok-4");
+      if (catalogOnly && current.base_url.trim()) {
+        onRefresh(current);
+      } else if (current !== draftRef.current) {
+        await onChange(current, t("providers.xaiCatalogReady"));
+      }
+    } catch {
+      return;
+    } finally {
+      ensuringXaiCatalog.current = false;
+    }
+  }
+
   async function runProbe() {
     setEndpointTestState("testing");
     const result = await onProbe(draft);
@@ -182,7 +217,7 @@ export function ProviderDetail({
           }
         />
 
-        {provider.id === "xai" ? <XaiLoginCard /> : null}
+        {provider.id === "xai" ? <XaiLoginCard onSignedIn={() => void ensureXaiCatalogReady()} /> : null}
 
         <div className="grid grid-cols-2 gap-2">
           <Field label={t("common.name")}>

@@ -388,6 +388,11 @@ fn get_providers() -> Result<Vec<Provider>, String> {
 }
 
 #[tauri::command]
+fn get_bundled_providers() -> Result<Vec<Provider>, String> {
+    config::get_bundled_providers()
+}
+
+#[tauri::command]
 fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
     config::save_providers(providers)
 }
@@ -435,8 +440,8 @@ async fn openai_usage_completions(
 }
 
 #[tauri::command]
-fn discover_provider_models(base_url: String, api_key: String) -> Result<Vec<Model>, String> {
-    models::discover_provider_models(&base_url, &api_key)
+fn discover_provider_models(base_url: String, api_key: String, provider_id: Option<String>) -> Result<Vec<Model>, String> {
+    models::discover_provider_models(&base_url, &api_key, provider_id.as_deref())
 }
 
 #[tauri::command]
@@ -1238,6 +1243,7 @@ fn run_gui() {
             stop_proxy,
             restart_proxy,
             get_providers,
+            get_bundled_providers,
             save_providers,
             get_settings,
             get_app_flavor,
@@ -1301,7 +1307,8 @@ fn run_gui() {
             xai_auth::xai_auth_status,
             xai_auth::xai_start_device_login,
             xai_auth::xai_poll_device_login,
-            xai_auth::xai_logout
+            xai_auth::xai_logout,
+            xai_auth::xai_open_verification_url
         ])
         .build(tauri::generate_context!())
         .expect("error while building CodexHub Tauri application");

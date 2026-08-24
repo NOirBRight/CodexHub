@@ -336,6 +336,13 @@ const enUS = {
     contextDynamic: "Client dynamic",
     contextDetails: "Effective: {{effective}} · API max: {{max}} · Source: {{source}} · Verified: {{verified}}",
     addProvider: "Add provider",
+    chooseCatalogProviderTitle: "Choose a provider",
+    chooseCatalogProviderBody: "Pick a catalog provider to fill the right-hand setup. You only need to sign in or add a key.",
+    chooseCatalogProviderCustom: "Custom provider",
+    chooseCatalogProviderCustomHint: "Enter the name, base URL, and models yourself.",
+    catalogProviderAlreadyAdded: "Already added",
+    catalogPickerLoading: "Loading provider catalog...",
+    catalogProviderXaiHint: "Includes SuperGrok device login.",
     addHubProviderEmpty: "Add a Hub provider to expose external models.",
     addModel: "Add model",
     appsMaySortModels: "Apps may sort models alphabetically.",
@@ -404,6 +411,9 @@ const enUS = {
     xaiSignedInTitle: "Signed in with SuperGrok",
     xaiSignInBody:
       "Use an xAI device-code login for SuperGrok or X Premium+. If inference returns 403, keep this session and set XAI_API_KEY as a fallback.",
+    xaiSignedInBody:
+      "SuperGrok is ready. CodexHub fills the xAI endpoint and Grok 4 so you can pick it in Codex.",
+    xaiCatalogReady: "xAI is ready with Grok 4",
     xaiStartDeviceLogin: "Start device login",
     xaiStartingDeviceLogin: "Starting xAI device login",
     xaiDeviceCodeReady: "Enter {{code}} at the xAI verification page",

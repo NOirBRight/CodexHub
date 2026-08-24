@@ -15,6 +15,7 @@ export const COMMANDS = {
   stopProxy: "stop_proxy",
   restartProxy: "restart_proxy",
   getProviders: "get_providers",
+  getBundledProviders: "get_bundled_providers",
   saveProviders: "save_providers",
   getSettings: "get_settings",
   saveSettings: "save_settings",
@@ -77,6 +78,7 @@ export const COMMANDS = {
   xaiStartDeviceLogin: "xai_start_device_login",
   xaiPollDeviceLogin: "xai_poll_device_login",
   xaiLogout: "xai_logout",
+  xaiOpenVerificationUrl: "xai_open_verification_url",
 } as const;
 
 export type CommandName = (typeof COMMANDS)[keyof typeof COMMANDS];

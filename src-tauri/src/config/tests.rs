@@ -1,5 +1,6 @@
 use super::{
-    codex_overlay_owner, get_codex_context_guard_status_with_paths, get_providers_with_paths,
+    codex_overlay_owner, get_codex_context_guard_status_with_paths,
+    get_bundled_providers_with_paths, get_providers_with_paths,
     get_settings_with_paths, migrate_legacy_context_guard_with_paths,
     republish_managed_codex_context_budget_with_paths,
     save_providers_with_paths, save_settings_with_paths, set_codex_context_guard_with_paths,
@@ -167,6 +168,46 @@ sort_order = 7
     assert_eq!(loaded[0].models[0].id, "model-a");
     assert!(loaded[0].enabled);
     assert!(loaded[0].models[0].enabled);
+}
+
+#[test]
+fn get_bundled_providers_reads_bundled_file_even_when_runtime_config_exists() {
+    let root = temp_root("providers-bundled-catalog");
+    let paths = test_paths(&root);
+    fs::create_dir_all(paths.bundled_providers_path().parent().unwrap()).unwrap();
+    fs::create_dir_all(paths.runtime_providers_path().parent().unwrap()).unwrap();
+    fs::write(
+        paths.bundled_providers_path(),
+        r#"
+[[providers]]
+id = "xai"
+name = "xAI"
+base_url = "https://api.x.ai/v1"
+
+  [[providers.models]]
+  id = "grok-4"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        paths.runtime_providers_path(),
+        r#"
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.com/v1"
+"#,
+    )
+    .unwrap();
+
+    let runtime = get_providers_with_paths(&paths).expect("runtime providers");
+    let bundled = get_bundled_providers_with_paths(&paths).expect("bundled providers");
+
+    assert_eq!(runtime.len(), 1);
+    assert_eq!(runtime[0].id, "ollama-cloud");
+    assert_eq!(bundled.len(), 1);
+    assert_eq!(bundled[0].id, "xai");
+    assert_eq!(bundled[0].models[0].id, "grok-4");
 }
 
 #[test]

@@ -24,6 +24,8 @@ const providersPagePath = new URL("../src/pages/ProvidersPage.tsx", import.meta.
 const officialOpenAIUsagePanelPath = new URL("../src/components/providers/OfficialOpenAIUsagePanel.tsx", import.meta.url);
 const providerEditorPath = new URL("../src/components/providers/ProviderEditor.tsx", import.meta.url);
 const xaiLoginCardPath = new URL("../src/components/providers/XaiLoginCard.tsx", import.meta.url);
+const providerCatalogPickerPath = new URL("../src/components/providers/ProviderCatalogPicker.tsx", import.meta.url);
+const tauriXaiAuthPath = new URL("../../src-tauri/src/xai_auth.rs", import.meta.url);
 const providerFormControlsPath = new URL("../src/components/providers/ProviderFormControls.tsx", import.meta.url);
 const providerModelSectionPath = new URL("../src/components/providers/ProviderModelSection.tsx", import.meta.url);
 const providerNavigationGuardPath = new URL("../src/hooks/useProviderNavigationGuard.ts", import.meta.url);
@@ -547,7 +549,7 @@ test("linux maximize toggle restores a saved size instead of trusting GTK is_max
   assert.match(mainSource, /state\.size = window\.inner_size\(\)\.ok\(\)/);
 });
 
-test("linux window stays rounded, on the dock, and uses a real tray png", async () => {
+test("linux window stays on the dock, fills the webview, and uses a real tray png", async () => {
   const [mainSource, linuxWindowSource] = await Promise.all([
     readFile(tauriMainPath, "utf8"),
     readFile(new URL("../../src-tauri/src/linux_window.rs", import.meta.url), "utf8"),
@@ -564,8 +566,10 @@ test("linux window stays rounded, on the dock, and uses a real tray png", async 
   assert.match(linuxWindowSource, /set_skip_taskbar_hint\(false\)/);
   assert.match(linuxWindowSource, /WindowTypeHint::Normal/);
   assert.match(linuxWindowSource, /install_hicolor_icon/);
-  assert.match(linuxWindowSource, /apply_transparent_rounded_css/);
+  assert.match(linuxWindowSource, /apply_opaque_window_css/);
+  assert.match(linuxWindowSource, /fill_webview_on_resize/);
   assert.doesNotMatch(linuxWindowSource, /set_opaque_region/);
+  assert.doesNotMatch(linuxWindowSource, /\/tmp\/codexhub-widgets\.log/);
 });
 
 test("Linux desktop window opens at the release candidate height without changing other platforms", async () => {
@@ -1516,8 +1520,8 @@ test("desktop shell and confirmations use rounded Linux-safe surfaces", async ()
   assert.ok(cssSource.includes("border-radius: 16px;"));
   assert.ok(cssSource.includes("position: relative;"));
   assert.ok(cssSource.includes("isolation: isolate;"));
-  assert.equal(tauriConfig.app.windows[0].transparent, true);
-  assert.equal(tauriConfig.app.windows[0].backgroundColor, "#00000000");
+  assert.equal(tauriConfig.app.windows[0].transparent, false);
+  assert.equal(tauriConfig.app.windows[0].backgroundColor, "#f8f8f7");
 });
 
 test("provider persistence reports downstream client sync failures as non-blocking", async () => {
@@ -1998,8 +2002,8 @@ test("fit stage uses the compact 0.93 scale only on Linux", async () => {
   assert.match(cssSource, /#root \{[\s\S]*?border-radius: 16px;/);
   assert.equal(tauriConfig.app.windows[0].width, 1280);
   assert.equal("transparent" in tauriConfig.app.windows[0], false);
-  assert.equal(linuxConfig.app.windows[0].transparent, true);
-  assert.equal(linuxConfig.app.windows[0].backgroundColor, "#00000000");
+  assert.equal(linuxConfig.app.windows[0].transparent, false);
+  assert.equal(linuxConfig.app.windows[0].backgroundColor, "#f8f8f7");
   assert.equal(linuxConfig.app.windows[0].skipTaskbar, false);
 });
 
@@ -2952,7 +2956,9 @@ test("provider discovery updates the selected provider and reports progress", as
 
   assert.match(providersSource, /showToast\(t\("providers\.discoveringProviderModels", \{ name: provider\.name \}\), "loading"\)/);
   assert.match(providersSource, /const\s+persistedProvider\s*=\s*providers\.find\(\(item\)\s*=>\s*item\.id\s*===\s*provider\.id\)\s*\?\?\s*provider;/);
-  assert.match(providersSource, /const nextProvider = \{\s*\.\.\.persistedProvider,\s*models: mergeDiscoveredModels\(persistedProvider\.models, models\),\s*\}/s);
+  assert.match(providersSource, /const nextProvider = \{\s*\.\.\.persistedProvider,\s*models: mergeDiscoveredModels\(retainedModels, models\),\s*\}/s);
+  assert.match(providersSource, /provider\.id === "xai"/);
+  assert.match(providersSource, /api\.discoverProviderModels\(\s*provider\.base_url,\s*provider\.api_key \?\? "",\s*provider\.id,/);
   assert.match(providersSource, /setProviders\(nextProviders\)/);
   assert.match(providersSource, /t\("providers\.discoveredProviderModels", \{/);
 });
@@ -3519,7 +3525,7 @@ test("debug diagnostics open from Recovery in a localized accessible overlay", a
 });
 
 test("xAI SuperGrok login card uses one loading toast and the XAI_API_KEY fallback copy", async () => {
-  const [cardSource, editorSource, tauriSource, typesSource, commandsSource, bridgeSource, enSource, zhSource] =
+  const [cardSource, editorSource, tauriSource, typesSource, commandsSource, bridgeSource, actionsSource, enSource, zhSource] =
     await Promise.all([
       readFile(xaiLoginCardPath, "utf8"),
       readFile(providerEditorPath, "utf8"),
@@ -3527,17 +3533,32 @@ test("xAI SuperGrok login card uses one loading toast and the XAI_API_KEY fallba
       readFile(typesPath, "utf8"),
       readFile(new URL("../src/lib/commands.ts", import.meta.url), "utf8"),
       readFile(tauriWebBridgePath, "utf8"),
+      readFile(providerCatalogActionsPath, "utf8"),
       readFile(enLocalePath, "utf8"),
       readFile(zhLocalePath, "utf8"),
     ]);
 
-  assert.match(editorSource, /provider\.id === "xai" \? <XaiLoginCard \/> : null/);
+  assert.match(editorSource, /provider\.id === "xai" \? <XaiLoginCard onSignedIn=\{\(\) => void ensureXaiCatalogReady\(\)\} \/> : null/);
+  assert.match(editorSource, /applyCatalogPresetDefaults/);
+  assert.match(cardSource, /onSignedIn\?\.\(\)/);
+  assert.match(cardSource, /notifySignedIn\(\)/);
+  assert.match(cardSource, /providers\.xaiSignedInBody/);
+  assert.match(enSource, /xaiCatalogReady: "xAI is ready with Grok 4"/);
+  assert.match(zhSource, /xaiCatalogReady: "已启用 Grok 4，可在 Codex 中使用"/);
+  assert.match(editorSource, /onRefresh\(current\)/);
+  assert.match(tauriSource, /providerId: providerId \?\? null/);
+  assert.match(actionsSource, /api\.discoverProviderModels\(\s*provider\.base_url,\s*provider\.api_key \?\? "",\s*provider\.id,/);
   assert.match(cardSource, /showToast\(translate\("providers\.xaiStartingDeviceLogin"\), "loading"\)/);
   assert.match(cardSource, /updateToast\(toastId, \{[\s\S]*tone: "success"/);
   assert.match(cardSource, /updateToast\(toastId, \{[\s\S]*tone: "error"/);
   assert.doesNotMatch(cardSource, /showToast\([^)]*,\s*"(success|error)"\)/);
   assert.match(cardSource, /not-eligible/);
   assert.match(cardSource, /providers\.xaiAllowlistFallback/);
+  assert.doesNotMatch(cardSource, /window\.open/);
+  assert.doesNotMatch(cardSource, /target="_blank"/);
+  assert.match(cardSource, /void openVerificationUrl\(started\.verification_url\)/);
+  assert.match(cardSource, /onClick=\{\(\) => void openVerificationUrl\(verificationUrl\)\}/);
+  assert.match(cardSource, /await api\.xaiOpenVerificationUrl\(/);
   assert.match(typesSource, /export interface XaiAuthStatus/);
   assert.match(typesSource, /export interface XaiDeviceLogin/);
   assert.match(commandsSource, /xaiAuthStatus: "xai_auth_status"/);
@@ -3545,9 +3566,55 @@ test("xAI SuperGrok login card uses one loading toast and the XAI_API_KEY fallba
   assert.match(tauriSource, /call<XaiDeviceLogin>\(COMMANDS.xaiStartDeviceLogin\)/);
   assert.match(tauriSource, /call<\{ ok: boolean \}>\(COMMANDS.xaiPollDeviceLogin/);
   assert.match(tauriSource, /call<\{ ok: boolean \}>\(COMMANDS.xaiLogout\)/);
-  assert.match(bridgeSource, /"xai_auth_status" => to_value\(xai_auth::xai_auth_status\(\)\)/);
+  assert.match(tauriSource, /call<string>\(COMMANDS.xaiOpenVerificationUrl, \{ url \}\)/);
+  assert.match(commandsSource, /xaiOpenVerificationUrl: "xai_open_verification_url"/);
+  assert.match(bridgeSource, /"xai_auth_status" => to_value\(xai_auth::xai_auth_status_blocking\(\)\)/);
+  assert.match(bridgeSource, /xai_auth::xai_open_verification_url_blocking\(/);
   assert.match(enSource, /xaiAllowlistFallback:[\s\S]*XAI_API_KEY/);
   assert.match(zhSource, /xaiAllowlistFallback:[\s\S]*XAI_API_KEY/);
+});
+
+test("xAI device login runs off the UI thread and yields before polling", async () => {
+  const [cardSource, authSource] = await Promise.all([
+    readFile(xaiLoginCardPath, "utf8"),
+    readFile(tauriXaiAuthPath, "utf8"),
+  ]);
+
+  assert.match(authSource, /pub async fn xai_start_device_login/);
+  assert.match(authSource, /pub async fn xai_poll_device_login/);
+  assert.match(authSource, /async_runtime::spawn_blocking/);
+  assert.match(cardSource, /window\.setTimeout\(resolve, 0\)/);
+});
+
+test("add provider opens a catalog overlay instead of a blank form", async () => {
+  const [providersSource, pickerSource, actionsSource, commandsSource, tauriSource, mainSource, bridgeSource, enSource, zhSource] =
+    await Promise.all([
+      readFile(providersPagePath, "utf8"),
+      readFile(providerCatalogPickerPath, "utf8"),
+      readFile(providerCatalogActionsPath, "utf8"),
+      readFile(new URL("../src/lib/commands.ts", import.meta.url), "utf8"),
+      readFile(tauriSourcePath, "utf8"),
+      readFile(tauriMainPath, "utf8"),
+      readFile(tauriWebBridgePath, "utf8"),
+      readFile(enLocalePath, "utf8"),
+      readFile(zhLocalePath, "utf8"),
+    ]);
+
+  assert.match(providersSource, /onAdd=\{\(\) => void openCatalogPicker\(\)\}/);
+  assert.match(providersSource, /<ProviderCatalogPicker/);
+  assert.match(providersSource, /onSelectCustom=\{\(\) => \{[\s\S]*selectProvider\(ADD_ID\)/);
+  assert.match(providersSource, /void addCatalogProvider\(preset\)/);
+  assert.match(pickerSource, /role="dialog"/);
+  assert.match(pickerSource, /onSelectPreset/);
+  assert.match(pickerSource, /chooseCatalogProviderCustom/);
+  assert.match(actionsSource, /async function addCatalogProvider/);
+  assert.match(actionsSource, /applyCatalogPresetDefaults\(existing, preset\)/);
+  assert.match(commandsSource, /getBundledProviders: "get_bundled_providers"/);
+  assert.match(tauriSource, /COMMANDS.getBundledProviders/);
+  assert.match(mainSource, /fn get_bundled_providers/);
+  assert.match(bridgeSource, /"get_bundled_providers" => to_value\(config::get_bundled_providers\(\)\)/);
+  assert.match(enSource, /chooseCatalogProviderTitle: "Choose a provider"/);
+  assert.match(zhSource, /chooseCatalogProviderTitle: "选择供应商"/);
 });
 
 test("gateway reserves its three-row flexible left-column allocation for the usage chart", async () => {

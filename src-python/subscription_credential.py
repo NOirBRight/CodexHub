@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Mapping, Protocol, runtime_checkable
+import sys
 
 AUTH_REQUIRED = "auth-required"
 REFRESH_FAILED = "refresh-failed"
@@ -174,6 +175,9 @@ def register_builtin_adapters() -> None:
     if credential_for("codex_auth") is None:
         register("codex_auth", CodexAuthAdapter())
     if credential_for("xai_oauth") is None:
+        xai_mod = sys.modules.get("xai_auth")
+        if xai_mod is not None and not hasattr(xai_mod, "register_default"):
+            return
         from xai_auth import register_default
 
         register_default()
