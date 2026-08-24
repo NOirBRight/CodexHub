@@ -10,6 +10,10 @@ pub fn get_providers() -> Result<Vec<Provider>, String> {
     get_providers_with_paths(&ConfigPaths::runtime()?)
 }
 
+pub fn get_bundled_providers() -> Result<Vec<Provider>, String> {
+    get_bundled_providers_with_paths(&ConfigPaths::runtime()?)
+}
+
 pub fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
     save_providers_with_paths(providers, &ConfigPaths::runtime()?)
 }
@@ -557,8 +561,15 @@ fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String
     } else {
         paths.bundled_providers_path()
     };
+    load_providers_from_path(&path)
+}
 
-    let text = fs::read_to_string(&path)
+pub(crate) fn get_bundled_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String> {
+    load_providers_from_path(&paths.bundled_providers_path())
+}
+
+fn load_providers_from_path(path: &Path) -> Result<Vec<Provider>, String> {
+    let text = fs::read_to_string(path)
         .map_err(|error| format!("failed to read providers TOML {}: {error}", path.display()))?;
     let document: ProvidersDocument = toml::from_str(&text)
         .map_err(|error| format!("failed to parse providers TOML {}: {error}", path.display()))?;

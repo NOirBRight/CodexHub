@@ -86,8 +86,26 @@ pub(crate) fn cached_official_snapshot_timestamp() -> Option<u64> {
         })
 }
 
-pub fn discover_provider_models(base_url: &str, api_key: &str) -> Result<Vec<Model>, String> {
-    discover_provider_models_with_timeout(base_url, api_key, DISCOVERY_TIMEOUT)
+pub fn discover_provider_models(
+    base_url: &str,
+    api_key: &str,
+    provider_id: Option<&str>,
+) -> Result<Vec<Model>, String> {
+    let credential = resolve_provider_discovery_api_key(api_key, provider_id)?;
+    discover_provider_models_with_timeout(base_url, &credential, DISCOVERY_TIMEOUT)
+}
+
+pub(crate) fn resolve_provider_discovery_api_key(
+    api_key: &str,
+    provider_id: Option<&str>,
+) -> Result<String, String> {
+    if let Some(key) = resolve_api_key(api_key)? {
+        return Ok(key);
+    }
+    if provider_id.is_some_and(|id| id.eq_ignore_ascii_case("xai")) {
+        return crate::xai_auth::xai_access_token_blocking();
+    }
+    Ok(String::new())
 }
 
 pub fn probe_upstream_format(
@@ -3059,6 +3077,7 @@ mod tests {
         provider_api_endpoint,
         provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
         refresh_official_models_with_runner, resolve_gateway_api_key_for_settings,
+        resolve_provider_discovery_api_key,
         subscription_models_from_payload, subscription_models_to_metadata_models,
         test_model_endpoint_with_timeout, visibility_diagnostics_from_payload,
         AppServerModelListRunner, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
@@ -4950,6 +4969,18 @@ for line in sys.stdin:
                 .find(|model| model.id == "gpt-5.5")
                 .and_then(|model| model.display_name.as_deref()),
             Some("Known override")
+        );
+    }
+
+    #[test]
+    fn resolve_provider_discovery_api_key_keeps_explicit_secret() {
+        assert_eq!(
+            resolve_provider_discovery_api_key(" secret ", Some("xai")).expect("key"),
+            "secret"
+        );
+        assert_eq!(
+            resolve_provider_discovery_api_key("  ", None).expect("blank"),
+            ""
         );
     }
 

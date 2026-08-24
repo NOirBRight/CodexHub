@@ -8,6 +8,9 @@ edition = "2021"
 
 [features]
 debug-diagnostics = []
+# Production loads frontendDist via the custom protocol. Without this,
+# even `--release` uses build.devUrl (http://localhost:1420).
+custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -26,6 +29,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
 dirs = "5"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
+url = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

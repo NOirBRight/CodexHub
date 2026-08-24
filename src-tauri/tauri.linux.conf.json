@@ -10,8 +10,8 @@
         "minHeight": 600,
         "decorations": false,
         "resizable": true,
-        "transparent": true,
-        "backgroundColor": "#00000000",
+        "transparent": false,
+        "backgroundColor": "#f8f8f7",
         "skipTaskbar": false
       }
     ]

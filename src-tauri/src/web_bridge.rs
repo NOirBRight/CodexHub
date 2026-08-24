@@ -268,6 +268,7 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         "stop_proxy" => to_value(proxy::stop()),
         "restart_proxy" => to_value(crate::restart_proxy()),
         "get_providers" => to_value(config::get_providers()),
+        "get_bundled_providers" => to_value(config::get_bundled_providers()),
         "save_providers" => {
             let providers = serde_json::from_value(
                 request
@@ -314,7 +315,12 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         "discover_provider_models" => {
             let base_url = string_arg(&request.args, "baseUrl")?;
             let api_key = string_arg(&request.args, "apiKey")?;
-            to_value(models::discover_provider_models(&base_url, &api_key))
+            let provider_id = optional_string_arg(&request.args, &["providerId", "provider_id"]);
+            to_value(models::discover_provider_models(
+                &base_url,
+                &api_key,
+                provider_id.as_deref(),
+            ))
         }
         "probe_upstream_format" => {
             let base_url = string_arg(&request.args, "baseUrl")?;
@@ -578,14 +584,19 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         "remove_autostart" => to_value(autostart::remove_autostart()),
         "get_autostart_status" => to_value(autostart::get_autostart_status()),
         "open_codex_app" => to_value(crate::open_codex_app()),
-        "xai_auth_status" => to_value(xai_auth::xai_auth_status()),
-        "xai_start_device_login" => to_value(xai_auth::xai_start_device_login()),
+        "xai_auth_status" => to_value(xai_auth::xai_auth_status_blocking()),
+        "xai_start_device_login" => to_value(xai_auth::xai_start_device_login_blocking()),
         "xai_poll_device_login" => {
             let device_json = optional_string_arg(&request.args, &["deviceJson", "device_json"])
                 .ok_or_else(|| "deviceJson argument is required".to_string())?;
-            to_value(xai_auth::xai_poll_device_login(device_json))
+            to_value(xai_auth::xai_poll_device_login_blocking(device_json))
         }
-        "xai_logout" => to_value(xai_auth::xai_logout()),
+        "xai_logout" => to_value(xai_auth::xai_logout_blocking()),
+        "xai_open_verification_url" => {
+            let url = optional_string_arg(&request.args, &["url"])
+                .ok_or_else(|| "url argument is required".to_string())?;
+            to_value(xai_auth::xai_open_verification_url_blocking(url))
+        }
         command => Err(format!("unknown CodexHub command: {command}")),
     }
 }

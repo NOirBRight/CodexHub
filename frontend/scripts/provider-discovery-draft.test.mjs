@@ -149,7 +149,12 @@ test("refreshProviderModels merges against persisted provider models, not the st
   );
   assert.match(
     source,
-    /mergeDiscoveredModels\(persistedProvider\.models,\s*models\)/,
+    /provider\.id === "xai"[\s\S]*persistedProvider\.models\.filter/,
+    "should drop xAI models that discovery no longer returns",
+  );
+  assert.match(
+    source,
+    /mergeDiscoveredModels\(retainedModels,\s*models\)/,
     "should merge discovered models against the persisted provider's models",
   );
   assert.match(

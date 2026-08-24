@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="xAI SuperGrok device-code login")
     parser.add_argument(
         "command",
-        choices=("status", "start-device", "poll-device", "logout"),
+        choices=("status", "start-device", "poll-device", "logout", "access-token"),
     )
     parser.add_argument("--device-json", default=None)
     args = parser.parse_args(argv)
@@ -40,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             tokens = xai_auth.poll_device_login(json.loads(args.device_json))
             print(json.dumps({"ok": True, "token_type": tokens.get("token_type")}))
+        elif args.command == "access-token":
+            print(json.dumps({"access_token": xai_auth.access_token()}))
         elif args.command == "logout":
             xai_auth.logout()
             print(json.dumps({"ok": True}))

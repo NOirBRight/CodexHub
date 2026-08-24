@@ -200,6 +200,7 @@ export const api = {
   stopProxy: () => call<AppStatus>(COMMANDS.stopProxy),
   restartProxy: () => call<AppStatus>(COMMANDS.restartProxy),
   getProviders: () => call<Provider[]>(COMMANDS.getProviders),
+  getBundledProviders: () => call<Provider[]>(COMMANDS.getBundledProviders),
   saveProviders: (providers: Provider[]) => call<Provider[]>(COMMANDS.saveProviders, { providers }),
   getSettings: async () => normalizeSettings(await call<Partial<Settings>>(COMMANDS.getSettings)),
   saveSettings: async (settings: Settings) =>
@@ -215,8 +216,12 @@ export const api = {
   refreshOfficialModels: () => call<OfficialRefreshResult>(COMMANDS.refreshOfficialModels),
   openaiUsageCompletions: (window?: OpenAIUsageQueryWindow | null) =>
     call<OpenAIUsageSnapshot>(COMMANDS.openaiUsageCompletions, openaiUsageWindowArgs(window)),
-  discoverProviderModels: (baseUrl: string, apiKey: string) =>
-    call<Model[]>(COMMANDS.discoverProviderModels, { baseUrl, apiKey }),
+  discoverProviderModels: (baseUrl: string, apiKey: string, providerId?: string | null) =>
+    call<Model[]>(COMMANDS.discoverProviderModels, {
+      baseUrl,
+      apiKey,
+      providerId: providerId ?? null,
+    }),
   probeUpstreamFormat: (baseUrl: string, apiKey: string, model?: string | null) =>
     call<UpstreamFormatProbeResult>(COMMANDS.probeUpstreamFormat, {
       baseUrl,
@@ -352,6 +357,7 @@ export const api = {
   windowCloseToTray: () => desktopCall<void>(COMMANDS.windowCloseToTray),
   xaiAuthStatus: () => call<XaiAuthStatus>(COMMANDS.xaiAuthStatus),
   xaiStartDeviceLogin: () => call<XaiDeviceLogin>(COMMANDS.xaiStartDeviceLogin),
+  xaiOpenVerificationUrl: (url: string) => call<string>(COMMANDS.xaiOpenVerificationUrl, { url }),
   xaiPollDeviceLogin: (device: XaiDeviceLogin) => {
     const deviceJson = JSON.stringify(device);
     return call<{ ok: boolean }>(COMMANDS.xaiPollDeviceLogin, {

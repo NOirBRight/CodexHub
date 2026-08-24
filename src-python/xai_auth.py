@@ -7,8 +7,10 @@ import os
 import threading
 import time
 from pathlib import Path
+from http.client import RemoteDisconnected
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from atomic_io import atomic_write_text
@@ -25,7 +27,10 @@ API_HOST_SUFFIXES = (".x.ai",)
 API_HOSTS = {"x.ai", "api.x.ai", "auth.x.ai", "accounts.x.ai"}
 TOKEN_FILENAME = "xai_auth.json"
 PRIVATE_AUTH_FILE_MODE = 0o600
-DEFAULT_CLIENT_ID = "codexhub"
+# Public Grok-CLI OAuth client. auth.x.ai only issues device codes to this
+# allowlisted id; `codexhub` is not registered and returns client_id required.
+DEFAULT_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
+DEFAULT_SCOPE = "openid profile email offline_access grok-cli:access api:access"
 POLL_INTERVAL_SECONDS = 5.0
 DEVICE_TIMEOUT_SECONDS = 600.0
 
@@ -86,11 +91,15 @@ def _open_json(
     timeout: float = 20.0,
 ) -> dict[str, Any]:
     pinned = pin_https_xai_url(url)
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    # Token and device-code endpoints require form posts; discovery remains GET.
+    body = None if payload is None else urlencode(payload).encode("utf-8")
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
     request = Request(
         pinned,
         data=body,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers=headers,
         method="GET" if body is None else "POST",
     )
     open_fn = opener if opener is not None else urlopen
@@ -103,7 +112,7 @@ def _open_json(
             f"xAI OAuth HTTP {exc.code}: {detail[:200]}",
             classification="refresh-failed" if payload else "auth-required",
         ) from exc
-    except URLError as exc:
+    except (URLError, RemoteDisconnected, ConnectionResetError, TimeoutError) as exc:
         raise SubscriptionAuthError(
             f"xAI OAuth transport error: {exc}",
             classification="auth-required",
@@ -139,7 +148,7 @@ def start_device_login(*, opener: Any = None) -> dict[str, Any]:
     endpoints = discover_endpoints(opener=opener)
     data = _open_json(
         endpoints["device_authorization_endpoint"],
-        payload={"client_id": client_id(), "scope": "openid profile offline_access"},
+        payload={"client_id": client_id(), "scope": DEFAULT_SCOPE},
         opener=opener,
     )
     verification_url = data.get("verification_uri_complete") or data.get("verification_uri")
@@ -150,6 +159,7 @@ def start_device_login(*, opener: Any = None) -> dict[str, Any]:
             "xAI device-code response is missing verification fields",
             classification="auth-required",
         )
+    verification_url = pin_https_xai_url(verification_url)
     interval = data.get("interval")
     expires_in = data.get("expires_in")
     return {

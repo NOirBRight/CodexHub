@@ -7,7 +7,7 @@ import type { XaiAuthStatus, XaiDeviceLogin } from "../../lib/types";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
-export function XaiLoginCard() {
+export function XaiLoginCard({ onSignedIn }: { onSignedIn?: () => void }) {
   const { t } = useTranslation();
   const translate = t as Translate;
   const { showToast, updateToast } = useToasts();
@@ -15,19 +15,48 @@ export function XaiLoginCard() {
   const [device, setDevice] = useState<XaiDeviceLogin | null>(null);
   const [busy, setBusy] = useState(false);
   const pollCancel = useRef(false);
+  const signedInNotified = useRef(false);
 
   useEffect(() => {
-    void refreshStatus();
+    void refreshStatus().then((signedIn) => {
+      if (signedIn) {
+        notifySignedIn();
+      }
+    });
     return () => {
       pollCancel.current = true;
     };
   }, []);
 
+  function notifySignedIn() {
+    if (signedInNotified.current) {
+      return;
+    }
+    signedInNotified.current = true;
+    onSignedIn?.();
+  }
+
   async function refreshStatus() {
     try {
-      setStatus(await api.xaiAuthStatus());
+      const next = await api.xaiAuthStatus();
+      setStatus(next);
+      return next.signed_in === true;
     } catch {
       setStatus({ signed_in: false });
+      return false;
+    }
+  }
+
+  async function openVerificationUrl(url: string) {
+    try {
+      await api.xaiOpenVerificationUrl(url);
+    } catch (err) {
+      const toastId = showToast(translate("providers.xaiOpenVerificationUrl"), "loading");
+      updateToast(toastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
     }
   }
 
@@ -44,14 +73,18 @@ export function XaiLoginCard() {
         tone: "loading",
       });
       if (started.verification_url) {
-        window.open(started.verification_url, "_blank", "noopener,noreferrer");
+        void openVerificationUrl(started.verification_url);
       }
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 0);
+      });
       await api.xaiPollDeviceLogin(started);
       if (pollCancel.current) {
         return;
       }
       await refreshStatus();
       setDevice(null);
+      notifySignedIn();
       updateToast(toastId, {
         action: null,
         text: translate("providers.xaiSignedIn"),
@@ -92,6 +125,7 @@ export function XaiLoginCard() {
   }
 
   const signedIn = status?.signed_in === true;
+  const verificationUrl = device?.verification_url;
 
   return (
     <section className="grid gap-3 rounded-inner bg-amber-50/70 p-3 text-sm shadow-hairline">
@@ -99,7 +133,9 @@ export function XaiLoginCard() {
         <h3 className="truncate text-sm font-semibold text-ink">
           {signedIn ? translate("providers.xaiSignedInTitle") : translate("providers.xaiSignInTitle")}
         </h3>
-        <p className="mt-1 text-xs leading-5 text-slate-700">{translate("providers.xaiSignInBody")}</p>
+        <p className="mt-1 text-xs leading-5 text-slate-700">
+          {translate(signedIn ? "providers.xaiSignedInBody" : "providers.xaiSignInBody")}
+        </p>
         {device && (
           <p className="mt-2 font-mono text-sm tracking-wide text-ink">
             {translate("providers.xaiUserCode", { code: device.user_code })}
@@ -118,17 +154,16 @@ export function XaiLoginCard() {
             <span className="truncate">{translate("providers.xaiStartDeviceLogin")}</span>
           </button>
         )}
-        {device?.verification_url && (
-          <a
+        {verificationUrl ? (
+          <button
+            type="button"
             className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-slate-700 shadow-control hover:bg-white"
-            href={device.verification_url}
-            target="_blank"
-            rel="noreferrer"
+            onClick={() => void openVerificationUrl(verificationUrl)}
           >
             <ExternalLink size={15} />
             <span className="truncate">{translate("providers.xaiOpenVerificationUrl")}</span>
-          </a>
-        )}
+          </button>
+        ) : null}
         <button
           type="button"
           className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-slate-700 shadow-control hover:bg-white disabled:text-slate-300"
