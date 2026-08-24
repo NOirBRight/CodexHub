@@ -231,7 +231,7 @@ function tabPaneClass(active: boolean) {
   return cx(
     "absolute inset-0 min-h-0 min-w-0 p-4 [contain:layout_paint_style]",
     active
-      ? "visible z-10 opacity-100 [content-visibility:visible] [will-change:opacity]"
+      ? "visible z-10 opacity-100 [content-visibility:visible]"
       : "invisible z-0 opacity-0 pointer-events-none [content-visibility:hidden]",
   );
 }
@@ -740,13 +740,6 @@ export default function App() {
       unlisten?.();
     };
   }, [showToast, updateToast]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setMountedTabs((current) => (current.gateway ? current : { ...current, gateway: true }));
-    }, 250);
-    return () => window.clearTimeout(timer);
-  }, []);
 
   useEffect(() => {
     if (startupUpdateCheckStarted.current || !settingsLoaded) {

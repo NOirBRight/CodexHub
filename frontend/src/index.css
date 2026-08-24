@@ -189,7 +189,6 @@ html.sortable-list-dragging * {
     rgba(16, 185, 129, 0)
   );
   border-radius: 999px;
-  filter: blur(1.5px);
 }
 
 .codexhub-flow-beam-delay {
@@ -204,7 +203,6 @@ html.sortable-list-dragging * {
     rgba(16, 185, 129, 0.65),
     rgba(16, 185, 129, 0)
   );
-  filter: blur(0.4px);
 }
 
 .codexhub-card-flow-delay {
@@ -242,5 +240,12 @@ html.sortable-list-dragging * {
   100% {
     opacity: 0;
     transform: translateX(240%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .codexhub-flow-beam,
+  .codexhub-card-flow {
+    animation: none;
   }
 }
