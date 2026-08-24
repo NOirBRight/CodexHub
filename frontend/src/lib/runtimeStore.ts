@@ -76,12 +76,31 @@ export function setCacheLoading(current: RuntimeSnapshot, key: RuntimeCacheKey):
   } as RuntimeSnapshot;
 }
 
+function stableEqual(left: unknown, right: unknown): boolean {
+  if (left === right) {
+    return true;
+  }
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
 export function setCacheData<K extends RuntimeCacheKey>(
   current: RuntimeSnapshot,
   key: K,
   data: RuntimeData<K>,
 ): RuntimeSnapshot {
   const cache = current[key] as RuntimeCache<RuntimeData<K>>;
+  if (
+    cache.loading === false &&
+    cache.error === null &&
+    cache.data !== null &&
+    stableEqual(cache.data, data)
+  ) {
+    return current;
+  }
   return {
     ...current,
     [key]: {

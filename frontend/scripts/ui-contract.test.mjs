@@ -239,10 +239,12 @@ test("main tabs use persistent panes and tab clicks do not reload runtime data",
   assert.match(appSource, /setActiveTab\(tabId\);[\s\S]*setVisibleTab\(tabId\);[\s\S]*setMountedTabs/);
   const selectTabSource = appSource.match(/const selectTab = useCallback[\s\S]*?\}, \[\]\);/)?.[0] ?? "";
   const gatewayTelemetryEffect = appSource.match(/useEffect\(\(\) => \{[\s\S]*?refreshGatewayTelemetry[\s\S]*?\}, \[gatewayVisited, loadGatewayClients, refreshGatewayTelemetry, visibleTab\]\);/)?.[0] ?? "";
-  assert.match(appSource, /setMountedTabs\(\(current\) => \(current\.gateway \? current : \{ \.\.\.current, gateway: true \}\)\)/);
+  assert.match(appSource, /setMountedTabs\(\(current\) => \(current\[tabId\] \? current : \{ \.\.\.current, \[tabId\]: true \}\)\)/);
+  assert.doesNotMatch(appSource, /setTimeout\(\(\) => \{\s*setMountedTabs\(\(current\) => \(current\.gateway/);
   assert.match(appSource, /function tabPaneClass\(active: boolean\)/);
   assert.match(appSource, /"absolute inset-0 min-h-0 min-w-0 p-4 \[contain:layout_paint_style\]"/);
-  assert.match(appSource, /"visible z-10 opacity-100 \[content-visibility:visible\] \[will-change:opacity\]"/);
+  assert.match(appSource, /"visible z-10 opacity-100 \[content-visibility:visible\]"/);
+  assert.doesNotMatch(appSource, /will-change:opacity/);
   assert.match(appSource, /"invisible z-0 opacity-0 pointer-events-none \[content-visibility:hidden\]"/);
   assert.match(appSource, /mountedTabs\.codexhub &&/);
   assert.match(appSource, /mountedTabs\.gateway &&/);
@@ -2823,7 +2825,8 @@ test("Codex Hub connection CTA is prominent and has a connecting state", async (
   assert.match(css, /@keyframes codexhub-flow-up/);
   assert.match(css, /transform:\s*translate\(-50%, var\(--flow-distance, 92px\)\)/);
   assert.match(css, /transform:\s*translate\(-50%, -44px\)/);
-  assert.match(css, /filter:\s*blur\(1\.5px\)/);
+  assert.doesNotMatch(css, /filter:\s*blur\(/);
+  assert.match(css, /prefers-reduced-motion:\s*reduce/);
   assert.match(providersSource, /function ConnectedSurfaceFlow/);
   assert.match(providersSource, /codexhub-card-flow absolute left-0 top-0 h-px w-1\/2/);
   assert.match(providersSource, /codexhub-card-flow codexhub-card-flow-delay absolute bottom-0 left-0 h-px w-1\/2/);
