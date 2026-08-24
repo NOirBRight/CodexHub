@@ -617,6 +617,28 @@ fn telemetry_incremental_ingest_resets_after_log_truncation_and_dedupes() {
 }
 
 #[test]
+fn telemetry_ingest_skips_sqlite_when_jsonl_size_is_unchanged() {
+    let root = unique_temp_dir("codexhub-usage-ingest-skip-unchanged");
+    fs::create_dir_all(&root).unwrap();
+    let log_path = root.join("codex-proxy-events.jsonl");
+    let db_path = root.join("codex-proxy-telemetry.sqlite");
+    let line = r#"{"ts":"2026-07-03T01:00:00Z","event":"request_complete","request_id":"req-skip","status":200,"duration_ms":10,"usage_source":"upstream","usage_input_tokens":1,"usage_output_tokens":2,"upstream":"official","model":"openai/gpt-5.5"}"#;
+    fs::write(&log_path, format!("{line}\n")).unwrap();
+
+    super::reset_telemetry_sqlite_ready_calls();
+    let first = super::ingest_telemetry_once_for_paths(&log_path, &db_path).unwrap();
+    let after_first = super::telemetry_sqlite_ready_calls();
+    assert!(after_first > 0);
+    assert_eq!(first.lag_bytes, 0);
+
+    let second = super::ingest_telemetry_once_for_paths(&log_path, &db_path).unwrap();
+    assert_eq!(super::telemetry_sqlite_ready_calls(), after_first);
+    assert_eq!(second.indexed_offset, first.indexed_offset);
+    assert_eq!(second.event_log_size, first.event_log_size);
+    assert_eq!(second.lag_bytes, 0);
+}
+
+#[test]
 fn usage_snapshot_reports_lag_without_inline_backfill() {
     let root = unique_temp_dir("codexhub-usage-snapshot-lag");
     fs::create_dir_all(&root).unwrap();

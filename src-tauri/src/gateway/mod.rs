@@ -81,8 +81,9 @@ pub(crate) use telemetry::{
     read_usage_events_from_sqlite_path, read_usage_events_from_sqlite_path_with_window,
     read_usage_events_from_text, read_usage_summary_from_sqlite_path_with_pricing,
     read_usage_summary_from_sqlite_path_with_pricing_and_window, read_usage_summary_from_text,
-    read_usage_summary_from_text_with_pricing, sanitize_event, usage_pricing_by_model,
-    UsagePricing, UsageTimeWindow,
+    read_usage_summary_from_text_with_pricing, reset_telemetry_sqlite_ready_calls,
+    sanitize_event, telemetry_sqlite_ready_calls, usage_pricing_by_model, UsagePricing,
+    UsageTimeWindow,
 };
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(900);

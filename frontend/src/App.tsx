@@ -408,6 +408,9 @@ export default function App() {
   }, [runCachedRequest]);
 
   const refreshGatewayTelemetry = useCallback(async (options?: { force?: boolean }) => {
+    if (!gatewayVisited || visibleTab !== "gateway") {
+      return;
+    }
     await Promise.allSettled([
       runCachedRequest(
         "gatewayUsageSnapshot",
@@ -420,7 +423,7 @@ export default function App() {
         { force: options?.force, quiet: true, staleMs: 4000 },
       ),
     ]);
-  }, [runCachedRequest, usageWindow]);
+  }, [gatewayVisited, runCachedRequest, usageWindow, visibleTab]);
 
   const refreshCoreRuntime = useCallback(async (options?: { force?: boolean }) => {
     try {

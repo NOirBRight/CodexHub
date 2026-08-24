@@ -1,7 +1,5 @@
 use crate::AppStatus;
-use crate::gateway_transaction::{
-    GatewayLifecyclePhase, LifecycleGateAccess, LifecycleTransactionGate,
-};
+use crate::gateway_transaction::{GatewayLifecyclePhase, LifecycleTransactionGate};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -89,22 +87,17 @@ impl GatewayLifecycleCoordinator {
     where
         B: GatewayLifecycleBackend,
     {
-        let _transaction = match LifecycleTransactionGate::inspect_or_acquire(
-            backend.lifecycle_gate_path(),
-        )? {
-            LifecycleGateAccess::Held(phase) => {
-                let status = backend.transitional_status(phase)?;
-                let mut state = self.lock_state();
-                state.phase = phase;
-                state.published = None;
-                state.last_error = None;
-                return Ok(GatewayLifecycleSnapshot {
-                    status,
-                    identity: None,
-                });
-            }
-            LifecycleGateAccess::Acquired(transaction) => transaction,
-        };
+        if let Some(phase) = LifecycleTransactionGate::inspect(backend.lifecycle_gate_path())? {
+            let status = backend.transitional_status(phase)?;
+            let mut state = self.lock_state();
+            state.phase = phase;
+            state.published = None;
+            state.last_error = None;
+            return Ok(GatewayLifecycleSnapshot {
+                status,
+                identity: None,
+            });
+        }
         match backend.snapshot() {
             Ok(snapshot) if snapshot.identity.is_some() => {
                 let mut state = self.lock_state();
@@ -683,6 +676,29 @@ mod tests {
     }
 
     #[test]
+    fn status_does_not_hold_the_lifecycle_gate_during_snapshot() {
+        let coordinator = GatewayLifecycleCoordinator::new();
+        let backend = FakeLifecycleBackend::stopped().probe_snapshot_lock();
+
+        let snapshot = coordinator.status(&backend).expect("idle status");
+
+        assert_eq!(
+            snapshot.status.gateway_lifecycle,
+            GatewayLifecyclePhase::Stopped
+        );
+        assert!(backend
+            .events()
+            .iter()
+            .any(|event| event == "snapshot-lock-free"));
+        let acquired = LifecycleTransactionGate::inspect_or_acquire(backend.lifecycle_gate_path())
+            .expect("status must leave the gate free");
+        assert!(matches!(
+            acquired,
+            crate::gateway_transaction::LifecycleGateAccess::Acquired(_)
+        ));
+    }
+
+    #[test]
     fn poisoned_state_recovers_failed_without_dropping_session_handoff() {
         let coordinator = Arc::new(GatewayLifecycleCoordinator::new());
         let backend = FakeLifecycleBackend::stopped();
@@ -797,6 +813,7 @@ mod tests {
         fail_next_stop: Option<String>,
         replace_on_start: bool,
         leave_running_on_stop: bool,
+        probe_snapshot_lock: bool,
     }
 
     impl FakeLifecycleBackend {
@@ -821,6 +838,7 @@ mod tests {
                     fail_next_stop: None,
                     replace_on_start: false,
                     leave_running_on_stop: false,
+                    probe_snapshot_lock: false,
                 }),
             }
         }
@@ -848,6 +866,11 @@ mod tests {
 
         fn leave_running_on_stop(self) -> Self {
             self.state.lock().unwrap().leave_running_on_stop = true;
+            self
+        }
+
+        fn probe_snapshot_lock(self) -> Self {
+            self.state.lock().unwrap().probe_snapshot_lock = true;
             self
         }
 
@@ -932,6 +955,29 @@ mod tests {
         }
 
         fn snapshot(&self) -> Result<GatewayLifecycleSnapshot, String> {
+            let probe_lock = self.state.lock().unwrap().probe_snapshot_lock;
+            let lock_free = if probe_lock {
+                let gate_path = self.gate_path.clone();
+                thread::spawn(move || {
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&gate_path)
+                        .ok()?;
+                    match file.try_lock() {
+                        Ok(()) => {
+                            let _ = file.unlock();
+                            Some(true)
+                        }
+                        Err(_) => Some(false),
+                    }
+                })
+                .join()
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
             let mut state = self.state.lock().unwrap();
             let event = state
                 .identity
@@ -939,6 +985,16 @@ mod tests {
                 .map(|identity| format!("snapshot:{}", identity.pid))
                 .unwrap_or_else(|| "snapshot:none".to_string());
             state.events.push(event);
+            if let Some(free) = lock_free {
+                state.events.push(
+                    if free {
+                        "snapshot-lock-free"
+                    } else {
+                        "snapshot-lock-held"
+                    }
+                    .to_string(),
+                );
+            }
             Ok(Self::snapshot_from_state(&state))
         }
 

@@ -256,6 +256,10 @@ test("main tabs use persistent panes and tab clicks do not reload runtime data",
   assert.match(gatewayTelemetryEffect, /visibleTab !== "gateway"/);
   assert.match(gatewayTelemetryEffect, /window\.setTimeout\(\(\) => \{[\s\S]*refreshGatewayTelemetry/);
   assert.match(gatewayTelemetryEffect, /loadGatewayClients\(\{ staleMs: 30_000 \}\)/);
+  const telemetryRefreshSource =
+    appSource.match(/const refreshGatewayTelemetry = useCallback[\s\S]*?\}, \[[^\]]*\]\);/)?.[0] ?? "";
+  assert.match(telemetryRefreshSource, /if \(!gatewayVisited \|\| visibleTab !== "gateway"\)/);
+  assert.match(telemetryRefreshSource, /api\.gatewayUsageSnapshot\(usageWindow\)/);
   assert.doesNotMatch(appSource, /activeTab === "codexhub"\s*\?\s*\(/);
   assert.doesNotMatch(appSource, /activeTab === "codexhub" \? "block" : "hidden"/);
   assert.doesNotMatch(appSource, /activeTab === "gateway" \? "block" : "hidden"/);
@@ -1072,8 +1076,9 @@ test("usage telemetry uses a single snapshot call and keeps usage errors out of 
 
   assert.match(tauriSource, /gatewayUsageSnapshot: \(window\?: UsageQueryWindow \| null\) =>/);
   assert.match(tauriSource, /call<GatewayUsageSnapshot>\(COMMANDS.gatewayUsageSnapshot/);
-  const telemetryRefresh = appSource.match(/const refreshGatewayTelemetry = useCallback[\s\S]*?\}, \[runCachedRequest, usageWindow\]\);/)?.[0] ?? "";
+  const telemetryRefresh = appSource.match(/const refreshGatewayTelemetry = useCallback[\s\S]*?\}, \[gatewayVisited, runCachedRequest, usageWindow, visibleTab\]\);/)?.[0] ?? "";
   assert.match(await readFile(runtimeStorePath, "utf8"), /gatewayUsageSnapshot: RuntimeCache<GatewayUsageSnapshot>/);
+  assert.match(telemetryRefresh, /if \(!gatewayVisited \|\| visibleTab !== "gateway"\)/);
   assert.match(telemetryRefresh, /api\.gatewayUsageSnapshot\(usageWindow\)/);
   assert.match(telemetryRefresh, /quiet: true/);
   assert.match(appSource, /usageError=\{runtime\.gatewayUsageSnapshot\.error\}/);

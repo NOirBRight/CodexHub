@@ -57,13 +57,15 @@ pub(crate) struct LifecycleTransactionGate {
     phase_path: PathBuf,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) enum LifecycleGateAccess {
     Acquired(LifecycleTransactionGate),
     Held(GatewayLifecyclePhase),
 }
 
+#[cfg(test)]
 impl LifecycleGateAccess {
-    #[cfg(test)]
     pub(crate) fn held_phase(&self) -> Option<GatewayLifecyclePhase> {
         match self {
             Self::Acquired(_) => None,
@@ -100,19 +102,49 @@ impl LifecycleTransactionGate {
         Ok(Self { file, phase_path })
     }
 
+    /// Observe the gate without taking an exclusive transaction.
+    ///
+    /// `None` means the lock is free. The caller must not keep a handle. A
+    /// published holder phase is returned without waiting to own the lock.
+    /// Phase-less holders are waited out, matching `inspect_or_acquire`.
+    pub(crate) fn inspect(path: &Path) -> Result<Option<GatewayLifecyclePhase>, String> {
+        let file = open_gate_file(path)?;
+        loop {
+            match classify_try_lock(file.try_lock()) {
+                TryLockClass::Free => return Ok(None),
+                TryLockClass::Busy => {
+                    if let Ok(value) = fs::read_to_string(phase_path(path)) {
+                        if let Some(phase) = GatewayLifecyclePhase::parse(&value) {
+                            return Ok(Some(phase));
+                        }
+                    }
+                    notify_test_contention(path);
+                    thread::sleep(PHASE_PUBLICATION_POLL);
+                }
+                TryLockClass::Failed(error) => {
+                    return Err(format!(
+                        "failed to inspect Gateway lifecycle transaction gate {}: {error}",
+                        path.display()
+                    ))
+                }
+            }
+        }
+    }
+
     /// Atomically returns either an owned silent guard or the phase published
     /// by a lifecycle holder. Phase-less status holders are waited out rather
     /// than misclassified as corrupt after an arbitrary timeout.
+    #[cfg(test)]
     pub(crate) fn inspect_or_acquire(path: &Path) -> Result<LifecycleGateAccess, String> {
         let file = open_gate_file(path)?;
         loop {
-            match file.try_lock() {
-                Ok(()) => {
+            match classify_try_lock(file.try_lock()) {
+                TryLockClass::Free => {
                     let phase_path = phase_path(path);
                     let _ = fs::remove_file(&phase_path);
                     return Ok(LifecycleGateAccess::Acquired(Self { file, phase_path }));
                 }
-                Err(std::fs::TryLockError::WouldBlock) => {
+                TryLockClass::Busy => {
                     if let Ok(value) = fs::read_to_string(phase_path(path)) {
                         if let Some(phase) = GatewayLifecyclePhase::parse(&value) {
                             return Ok(LifecycleGateAccess::Held(phase));
@@ -121,7 +153,7 @@ impl LifecycleTransactionGate {
                     notify_test_contention(path);
                     thread::sleep(PHASE_PUBLICATION_POLL);
                 }
-                Err(std::fs::TryLockError::Error(error)) => {
+                TryLockClass::Failed(error) => {
                     return Err(format!(
                         "failed to inspect Gateway lifecycle transaction gate {}: {error}",
                         path.display()
@@ -146,10 +178,32 @@ impl LifecycleTransactionGate {
     }
 }
 
+enum TryLockClass {
+    Free,
+    Busy,
+    Failed(std::io::Error),
+}
+
+fn classify_try_lock(result: Result<(), std::fs::TryLockError>) -> TryLockClass {
+    match result {
+        Ok(()) => TryLockClass::Free,
+        Err(std::fs::TryLockError::WouldBlock) => TryLockClass::Busy,
+        Err(std::fs::TryLockError::Error(error)) if is_lock_busy(&error) => TryLockClass::Busy,
+        Err(std::fs::TryLockError::Error(error)) => TryLockClass::Failed(error),
+    }
+}
+
+fn is_lock_busy(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ) || matches!(error.raw_os_error(), Some(32 | 33))
+}
+
 fn lock_gate_file(file: &File, path: &Path) -> Result<(), String> {
-    match file.try_lock() {
-        Ok(()) => Ok(()),
-        Err(std::fs::TryLockError::WouldBlock) => {
+    match classify_try_lock(file.try_lock()) {
+        TryLockClass::Free => Ok(()),
+        TryLockClass::Busy => {
             notify_test_contention(path);
             file.lock().map_err(|error| {
                 format!(
@@ -158,7 +212,7 @@ fn lock_gate_file(file: &File, path: &Path) -> Result<(), String> {
                 )
             })
         }
-        Err(std::fs::TryLockError::Error(error)) => Err(format!(
+        TryLockClass::Failed(error) => Err(format!(
             "failed to acquire Gateway lifecycle transaction gate {}: {error}",
             path.display()
         )),
@@ -328,6 +382,46 @@ mod tests {
 
         assert!(matches!(access, LifecycleGateAccess::Acquired(_)));
         drop(access);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inspect_does_not_own_an_idle_gate() {
+        let root = test_root("inspect-idle");
+        let lock_path = root.join("lifecycle.lock");
+
+        assert_eq!(
+            LifecycleTransactionGate::inspect(&lock_path).expect("inspect idle gate"),
+            None,
+        );
+        let acquired = LifecycleTransactionGate::inspect_or_acquire(&lock_path)
+            .expect("idle inspect must leave the gate free");
+        assert!(matches!(acquired, LifecycleGateAccess::Acquired(_)));
+        drop(acquired);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inspect_reports_holder_phase_without_taking_the_gate() {
+        let root = test_root("inspect-held");
+        let lock_path = root.join("lifecycle.lock");
+        let holder = LifecycleTransactionGate::acquire(
+            &lock_path,
+            GatewayLifecyclePhase::Restarting,
+        )
+        .expect("hold gate");
+
+        assert_eq!(
+            LifecycleTransactionGate::inspect(&lock_path).expect("inspect held gate"),
+            Some(GatewayLifecyclePhase::Restarting),
+        );
+        assert_eq!(
+            LifecycleTransactionGate::inspect_or_acquire(&lock_path)
+                .expect("inspect held gate as access")
+                .held_phase(),
+            Some(GatewayLifecyclePhase::Restarting),
+        );
+        drop(holder);
         let _ = fs::remove_dir_all(root);
     }
 
