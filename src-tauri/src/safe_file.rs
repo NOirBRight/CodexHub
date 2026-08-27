@@ -186,11 +186,39 @@ fn apply_atomic_write_mode(_path: &Path, _temp_file: &File, _requested: Option<u
     Ok(())
 }
 
-fn lock_path(path: &Path) -> PathBuf {
+fn adjacent_lock_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(
         "{}.lock",
         path.file_name().and_then(|name| name.to_str()).unwrap_or("file")
     ))
+}
+
+fn lock_path(path: &Path) -> PathBuf {
+    let coordination_target =
+        dsh_private_lock_target(path).unwrap_or_else(|| path.to_path_buf());
+    adjacent_lock_path(&coordination_target)
+}
+
+/// DSH treats an adjacent document lock as a live writer based on file
+/// presence alone. Keep CodexHub's persistent flock protocol in its own
+/// namespace for the two DSH documents we mutate. Rust and Python intentionally
+/// use this same deterministic mapping.
+fn dsh_private_lock_target(path: &Path) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    if !matches!(file_name, ".credentials.yaml" | "settings.yaml") {
+        return None;
+    }
+    let dsh_dir = path.parent()?;
+    if dsh_dir.file_name()?.to_str()? != ".dsh" {
+        return None;
+    }
+    let home = dsh_dir.parent()?;
+    Some(
+        home.join(".codexhub")
+            .join("locks")
+            .join("dsh")
+            .join(file_name),
+    )
 }
 
 fn timestamp_millis() -> u128 {
@@ -336,6 +364,10 @@ impl FileLock {
 
     fn acquire_inner(target: &Path, hook: Option<&dyn Fn(&'static str)>) -> Result<Self, String> {
         let path = lock_path(target);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|_| "failed to create atomic write lock directory".to_owned())?;
+        }
         let namespace_path = namespace_lock_path(&path);
         let started = Instant::now();
         let namespace = acquire_namespace_guard(&namespace_path, &started, hook)?;
@@ -811,6 +843,59 @@ mod tests {
         let target = root.join("providers.toml");
         write_text_atomic(&target, "new").unwrap();
         assert_eq!(fs::read_to_string(root.join("providers.toml.lock")).unwrap(), "codexhub-atomic-lock=1\n");
+    }
+
+    #[test]
+    fn dsh_writes_leave_the_foreign_lock_namespace_available() {
+        let home = test_root("dsh-lock-interop");
+        let dsh = home.join(".dsh");
+        fs::create_dir_all(&dsh).unwrap();
+
+        for name in [".credentials.yaml", "settings.yaml"] {
+            let target = dsh.join(name);
+            write_text_atomic(&target, "new\n").unwrap();
+
+            let adjacent_lock = dsh.join(format!("{name}.lock"));
+            assert!(
+                !adjacent_lock.exists(),
+                "CodexHub must not leave DSH's exclusive-create lock path occupied"
+            );
+            assert!(
+                !dsh.join(format!("{name}.lock.guard")).exists(),
+                "CodexHub guards must not remain in the foreign client directory"
+            );
+            let private_lock = home
+                .join(".codexhub/locks/dsh")
+                .join(format!("{name}.lock"));
+            assert_eq!(fs::read_to_string(private_lock).unwrap(), LOCK_PROTOCOL);
+            let _dsh_lock = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&adjacent_lock)
+                .expect("DSH-style exclusive lock creation must succeed");
+            fs::remove_file(adjacent_lock).unwrap();
+        }
+    }
+
+    #[test]
+    fn crashed_codexhub_dsh_lock_does_not_occupy_the_foreign_namespace() {
+        let home = test_root("dsh-lock-crash-recovery");
+        let dsh = home.join(".dsh");
+        let private_lock = home.join(".codexhub/locks/dsh/.credentials.yaml.lock");
+        fs::create_dir_all(private_lock.parent().unwrap()).unwrap();
+        fs::create_dir_all(&dsh).unwrap();
+        fs::write(&private_lock, LOCK_PROTOCOL).unwrap();
+        let target = dsh.join(".credentials.yaml");
+
+        write_text_atomic(&target, "new\n").unwrap();
+
+        let adjacent_lock = dsh.join(".credentials.yaml.lock");
+        let _dsh_lock = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&adjacent_lock)
+            .expect("a crashed private CodexHub lock must not block DSH");
+        assert_eq!(fs::read_to_string(private_lock).unwrap(), LOCK_PROTOCOL);
     }
 
     #[cfg(unix)]

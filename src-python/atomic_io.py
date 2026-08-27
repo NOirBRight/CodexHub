@@ -39,10 +39,22 @@ def _notify_test_lock(event: str) -> None:
         _TEST_LOCK_HOOK(event)
 
 
+def _dsh_private_lock_target(path: Path) -> Path | None:
+    if path.name not in {".credentials.yaml", "settings.yaml"} or path.parent.name != ".dsh":
+        return None
+    return path.parent.parent / ".codexhub" / "locks" / "dsh" / path.name
+
+
+def _lock_path_for(path: Path) -> Path:
+    """Return CodexHub's coordination path without occupying DSH's lock name."""
+    coordination_target = _dsh_private_lock_target(path) or path
+    return coordination_target.with_name(f"{coordination_target.name}.lock")
+
+
 @contextlib.contextmanager
 def file_lock_for(path: Path) -> Iterator[Callable[[], None]]:
     """Hold the cross-language advisory lock and its namespace guard."""
-    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path = _lock_path_for(path)
     namespace_path = lock_path.with_name(f"{lock_path.name}.guard")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()

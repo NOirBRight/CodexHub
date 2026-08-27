@@ -303,6 +303,38 @@ def test_lock_release_is_idempotent_and_coordination_file_persists(tmp_path: Pat
     assert target.with_name("settings.json.lock").read_text(encoding="ascii") == "codexhub-atomic-lock=1\n"
 
 
+@pytest.mark.parametrize("name", [".credentials.yaml", "settings.yaml"])
+def test_dsh_writes_leave_the_foreign_lock_namespace_available(tmp_path: Path, name: str) -> None:
+    dsh = tmp_path / ".dsh"
+    target = dsh / name
+
+    atomic_write_text(target, "new\n")
+
+    adjacent_lock = target.with_name(f"{name}.lock")
+    assert not adjacent_lock.exists()
+    assert not target.with_name(f"{name}.lock.guard").exists()
+    private_lock = tmp_path / ".codexhub" / "locks" / "dsh" / f"{name}.lock"
+    assert private_lock.read_text(encoding="ascii") == "codexhub-atomic-lock=1\n"
+    fd = os.open(adjacent_lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+
+
+def test_crashed_codexhub_dsh_lock_does_not_occupy_the_foreign_namespace(tmp_path: Path) -> None:
+    dsh = tmp_path / ".dsh"
+    dsh.mkdir()
+    private_lock = tmp_path / ".codexhub" / "locks" / "dsh" / ".credentials.yaml.lock"
+    private_lock.parent.mkdir(parents=True)
+    private_lock.write_text("codexhub-atomic-lock=1\n", encoding="ascii")
+    target = dsh / ".credentials.yaml"
+
+    atomic_write_text(target, "new\n")
+
+    adjacent_lock = target.with_name(".credentials.yaml.lock")
+    fd = os.open(adjacent_lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+    assert private_lock.read_text(encoding="ascii") == "codexhub-atomic-lock=1\n"
+
+
 @pytest.mark.parametrize(
     ("data", "expected"),
     [
