@@ -144,17 +144,17 @@ test("refreshProviderModels merges against persisted provider models, not the st
   const source = await readFile(actionsPath, "utf8");
   assert.match(
     source,
-    /const\s+persistedProvider\s*=\s*providers\.find\(\(item\)\s*=>\s*item\.id\s*===\s*provider\.id\)\s*\?\?\s*provider;/,
-    "should look up the persisted provider by id",
+    /const\s+persistedProvider\s*=\s*isPending\s*\?[\s\S]*providers\.find\(\(item\)\s*=>\s*item\.id\s*===\s*provider\.id\)\s*\?\?\s*provider;/,
+    "should look up the persisted provider by id unless the add draft is unsaved",
   );
   assert.match(
     source,
-    /provider\.id === "xai"[\s\S]*persistedProvider\.models\.filter/,
-    "should drop xAI models that discovery no longer returns",
+    /preset\?\.discovery_policy === "retain-intersection"[\s\S]*persistedProvider\.models\.filter/,
+    "should drop retain-intersection models that discovery no longer returns",
   );
   assert.match(
     source,
-    /mergeDiscoveredModels\(retainedModels,\s*models\)/,
+    /mergeDiscoveredModels\(retainedModels,\s*discovered\)/,
     "should merge discovered models against the persisted provider's models",
   );
   assert.match(

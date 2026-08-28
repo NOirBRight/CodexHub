@@ -412,7 +412,9 @@ const enUS = {
     xaiSignInBody:
       "Use an xAI device-code login for SuperGrok or X Premium+. If inference returns 403, keep this session and set XAI_API_KEY as a fallback.",
     xaiSignedInBody:
-      "SuperGrok is ready. CodexHub fills the xAI endpoint and Grok 4 so you can pick it in Codex.",
+      "SuperGrok is ready. The endpoint and models come from the preset so you can pick them in Codex.",
+    catalogProviderSubscriptionHint: "Sign in with your account. Endpoint and models are filled from the preset.",
+    xaiRefreshUsage: "Refresh xAI quota",
     xaiCatalogReady: "xAI is ready with Grok 4",
     xaiStartDeviceLogin: "Start device login",
     xaiStartingDeviceLogin: "Starting xAI device login",

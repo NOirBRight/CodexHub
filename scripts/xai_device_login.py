@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="xAI SuperGrok device-code login")
     parser.add_argument(
         "command",
-        choices=("status", "start-device", "poll-device", "logout", "access-token"),
+        choices=("status", "start-device", "poll-device", "logout", "access-token", "usage"),
     )
     parser.add_argument("--device-json", default=None)
     args = parser.parse_args(argv)
@@ -45,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "logout":
             xai_auth.logout()
             print(json.dumps({"ok": True}))
+        elif args.command == "usage":
+            print(json.dumps(xai_auth.fetch_usage()))
     except SubscriptionAuthError as exc:
         print(json.dumps({"ok": False, "error": str(exc), "classification": exc.classification}))
         return 1

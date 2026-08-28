@@ -160,6 +160,23 @@ def test_models_endpoint_lists_catalog_ids(harness: GatewayHarness) -> None:
     assert "fetched_at" not in payload
 
 
+def test_models_endpoint_returns_codex_catalog_for_client_version_probe(harness: GatewayHarness) -> None:
+    response = request_gateway(
+        harness.host,
+        harness.port,
+        "GET",
+        "/v1/models?client_version=0.149.1",
+    )
+    assert response.status == 200
+    payload = json.loads(response.body)
+    slugs = [row["slug"] for row in payload["models"]]
+    assert "gpt-5.5" in slugs
+    assert "volc/glm-5.2" in slugs
+    assert payload["models"][0]["visibility"] == "list"
+    assert payload["models"][0]["hidden"] is False
+    assert "data" not in payload
+
+
 def test_official_nonstreaming_responses_round_trip(harness: GatewayHarness) -> None:
     harness.set_json_response(_completed_response_json())
     response = request_gateway(

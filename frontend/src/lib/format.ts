@@ -50,9 +50,11 @@ export function mergeDiscoveredModels(existing: Model[], discovered: Model[]) {
       tool_surface_strategy: previous?.tool_surface_strategy ?? model.tool_surface_strategy ?? null,
       input_modalities: previous?.input_modalities ?? model.input_modalities ?? null,
       supported_reasoning_levels:
-        previous?.supported_reasoning_levels ?? model.supported_reasoning_levels ?? null,
+        nonempty(model.supported_reasoning_levels) ??
+        nonempty(previous?.supported_reasoning_levels) ??
+        null,
       default_reasoning_level:
-        previous?.default_reasoning_level ?? model.default_reasoning_level ?? null,
+        model.default_reasoning_level ?? previous?.default_reasoning_level ?? null,
       source_kind: previous?.source_kind ?? model.source_kind ?? null,
       locked: previous?.locked ?? model.locked ?? false,
       codex_enabled: previous?.codex_enabled ?? model.codex_enabled ?? true,
@@ -71,4 +73,8 @@ export function mergeDiscoveredModels(existing: Model[], discovered: Model[]) {
   }
 
   return renumberModels(merged);
+}
+
+function nonempty(values?: string[] | null): string[] | null | undefined {
+  return values && values.length > 0 ? values : undefined;
 }

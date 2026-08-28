@@ -42,6 +42,7 @@ import type {
   UsageQueryWindow,
   XaiAuthStatus,
   XaiDeviceLogin,
+  XaiUsageSnapshot,
 } from "./types";
 import { normalizeSettings } from "./settings";
 
@@ -366,6 +367,7 @@ export const api = {
     });
   },
   xaiLogout: () => call<{ ok: boolean }>(COMMANDS.xaiLogout),
+  xaiUsageSnapshot: () => call<XaiUsageSnapshot>(COMMANDS.xaiUsageSnapshot),
 };
 
 export function messageFromError(error: unknown): string {

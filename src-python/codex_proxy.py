@@ -163,12 +163,11 @@ class CodexProxyHandler(GatewayHandlerMixin, BaseHTTPRequestHandler):
             )
             return
         if parsed.path == "/v1/models":
-            self._send_json(
-                200,
-                gateway_catalog_runtime.openai_model_list(
-                    gateway_catalog_runtime.current_catalog_data()
-                ),
-            )
+            catalog = gateway_catalog_runtime.current_catalog_data()
+            if gateway_catalog_runtime.wants_codex_model_manifest(parsed.query):
+                self._send_json(200, gateway_catalog_runtime.codex_model_manifest(catalog))
+            else:
+                self._send_json(200, gateway_catalog_runtime.openai_model_list(catalog))
             return
         if parsed.path == "/v1/responses":
             if _is_websocket_upgrade(self.headers):

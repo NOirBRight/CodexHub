@@ -43,6 +43,10 @@ if exist "%~f0.bootstrap-fail-once" if not exist "%CODEXHUB_RUNTIME_HOME%\proxy\
 if exist "%~f0.bootstrap-slow" (
   ping.exe 127.0.0.1 -n 4 >nul
 )
+if exist "%~f0.bootstrap-hang-35" (
+  rem ~32s: longer than the legacy 30s E2E kill, shorter than the 120s budget.
+  ping.exe 127.0.0.1 -n 33 >nul
+)
 set "catalog=%CODEXHUB_RUNTIME_HOME%\model-catalogs"
 if not exist "%catalog%" mkdir "%catalog%"
 call "%~dp0run-fixture-python.cmd" "%~dp0write-catalog.py" "%catalog%\codexhub-model-catalog.json"

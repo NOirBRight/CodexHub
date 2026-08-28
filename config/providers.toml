@@ -223,6 +223,8 @@ display_prefix = "xAI"
 upstream_format = "responses"
 available_upstream_formats = ["responses"]
 reports_cached_input_tokens = false
+auth_capabilities = ["subscription:xai_oauth"]
+discovery_policy = "retain-intersection"
 sort_order = 5
 enabled = true
 
@@ -231,5 +233,8 @@ enabled = true
   display_name = "Grok 4"
   context_window = 256000
   max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "high"
   sort_order = 1
   enabled = true

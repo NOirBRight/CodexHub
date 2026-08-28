@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
+import { usesSubscriptionAuth } from "../../lib/providerCatalog";
 import type { Provider } from "../../lib/types";
 
 export function ProviderCatalogPicker({
@@ -82,10 +83,11 @@ export function ProviderCatalogPicker({
                         </span>
                       ) : null}
                     </span>
-                    <span className="truncate text-xs text-slate-500">{provider.base_url}</span>
-                    {provider.id === "xai" ? (
-                      <span className="text-xs text-slate-600">{t("providers.catalogProviderXaiHint")}</span>
-                    ) : null}
+                    {usesSubscriptionAuth(provider) ? (
+                      <span className="text-xs text-slate-600">{t("providers.catalogProviderSubscriptionHint")}</span>
+                    ) : (
+                      <span className="truncate text-xs text-slate-500">{provider.base_url}</span>
+                    )}
                   </button>
                 );
               })}

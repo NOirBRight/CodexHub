@@ -540,6 +540,17 @@ pub(in crate::gateway) fn apply_pi_config_with_paths(
     )
     .map_err(|_| "failed to create Pi backup snapshot".to_string())?;
     record_pi_rollback_baseline(settings_path, models_path, backup_roots)?;
+    if !settings_path.exists() {
+        // Isolated apply roots have no user settings yet. Seed an empty
+        // object so declared target_names exist; do not set defaultProvider.
+        if let Some(parent) = settings_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|_| "failed to create Pi settings directory".to_string())?;
+        }
+        let seeded = pi_settings_text(settings_path, settings, providers, &model)?;
+        write_text_replace(settings_path, &seeded)
+            .map_err(|_| "failed to seed isolated Pi settings".to_string())?;
+    }
     let next_models = pi_models_text(models_path, settings, providers, &model)?;
     write_text_replace(models_path, &next_models)
         .map_err(|_| "failed to write managed Pi models".to_string())?;

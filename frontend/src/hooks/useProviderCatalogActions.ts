@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from "react";
+import { useState, type Dispatch, type SetStateAction } from "react";
 import type { ToastContextValue } from "../components/PageToast";
 import { mergeDiscoveredModels, renumberModels, slugify } from "../lib/format";
 import {
@@ -8,7 +8,11 @@ import {
   sortOfficialModels,
 } from "../lib/officialModels";
 import { emptyProvider, type AddProviderForm } from "../lib/providerForm";
-import { applyCatalogPresetDefaults } from "../lib/providerCatalog";
+import {
+  applyPresetReasoningDefaults,
+  bundledPresetFor,
+  instantiateCatalogProvider,
+} from "../lib/providerCatalog";
 import { normalizeModel } from "../lib/providerModel";
 import {
   applyProviderProbeResult,
@@ -85,6 +89,7 @@ export function useProviderCatalogActions({
   updateToastWithError,
 }: ProviderCatalogActionOptions) {
   const { showToast, updateToast } = toast;
+  const [pendingNewProvider, setPendingNewProvider] = useState<Provider | null>(null);
 
   function updateProbeToast(toastId: string, result: UpstreamFormatProbeResult) {
     if (result.model_required) {
@@ -285,18 +290,40 @@ export function useProviderCatalogActions({
         provider.api_key ?? "",
         provider.id,
       );
+      const bundled = await api.getBundledProviders().catch(() => [] as Provider[]);
+      const preset = bundledPresetFor(provider.id, bundled);
+      const discovered = applyPresetReasoningDefaults(models, preset);
       // Merge against the persisted provider so discovery never drops manual
       // models that are present in saved state but absent from a stale draft.
-      const persistedProvider = providers.find((item) => item.id === provider.id) ?? provider;
+      const isPending = pendingNewProvider?.id === provider.id;
+      const persistedProvider = isPending
+        ? pendingNewProvider
+        : providers.find((item) => item.id === provider.id) ?? provider;
       const previousModelIds = new Set(persistedProvider.models.map((model) => model.id));
-      const retainedModels =
-        provider.id === "xai"
-          ? persistedProvider.models.filter((model) => models.some((item) => item.id === model.id))
-          : persistedProvider.models;
+      const retainIntersection = preset?.discovery_policy === "retain-intersection";
+      const retainedModels = retainIntersection
+        ? persistedProvider.models.filter((model) => discovered.some((item) => item.id === model.id))
+        : persistedProvider.models;
       const nextProvider = {
         ...persistedProvider,
-        models: mergeDiscoveredModels(retainedModels, models),
+        models: mergeDiscoveredModels(retainedModels, discovered),
       };
+      if (isPending) {
+        setPendingNewProvider(nextProvider);
+        const addedCount = nextProvider.models.filter((model) => !previousModelIds.has(model.id)).length;
+        updateToast(toastId, {
+          action: null,
+          text: t("providers.discoveredProviderModels", {
+            name: provider.name,
+            count: models.length,
+            plural: models.length === 1 ? "" : "s",
+            addedCount,
+          }),
+          tone: "success",
+        });
+        setModelDiscoveryError(null);
+        return;
+      }
       const nextProviders = providers.map((item) =>
         item.id === provider.id ? nextProvider : item,
       );
@@ -455,6 +482,12 @@ export function useProviderCatalogActions({
       updateProbeToast(toastId, result);
       return;
     }
+    if (pendingNewProvider?.id === providerId) {
+      setPendingNewProvider(applyProviderProbeResult(pendingNewProvider, result));
+      setError(null);
+      updateProbeToast(toastId, result);
+      return;
+    }
     const nextProviders = providers.map((provider) =>
       provider.id === providerId ? applyProviderProbeResult(provider, result) : provider,
     );
@@ -524,27 +557,20 @@ export function useProviderCatalogActions({
     await saveAddProviderForm(form);
   }
 
-  async function addCatalogProvider(preset: Provider) {
+  function addCatalogProvider(preset: Provider) {
     const existing = providers.find((provider) => provider.id === preset.id);
     if (existing) {
-      const filled = applyCatalogPresetDefaults(existing, preset);
-      if (filled !== existing) {
-        await saveProviders(
-          providers.map((provider) => (provider.id === preset.id ? filled : provider)),
-          true,
-          t("providers.providerAdded", { name: preset.name }),
-        );
-      }
+      setPendingNewProvider(null);
+      setSelectedId(preset.id);
+      return preset.id;
+    }
+    if (pendingNewProvider?.id === preset.id) {
       setSelectedId(preset.id);
       return preset.id;
     }
 
     const nextSortOrder = Math.max(0, ...providers.map((provider) => provider.sort_order ?? 0)) + 1;
-    await saveProviders(
-      [...providers, { ...preset, sort_order: nextSortOrder, enabled: true }],
-      true,
-      t("providers.providerAdded", { name: preset.name }),
-    );
+    setPendingNewProvider(instantiateCatalogProvider(preset, nextSortOrder));
     setSelectedId(preset.id);
     return preset.id;
   }
@@ -552,6 +578,8 @@ export function useProviderCatalogActions({
   return {
     addCatalogProvider,
     addProvider,
+    pendingNewProvider,
+    setPendingNewProvider,
     catalogSyncToastMessage,
     discoverForForm,
     formProbeModel,

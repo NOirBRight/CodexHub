@@ -1,4 +1,41 @@
-import type { Provider } from "./types";
+import type { Model, Provider } from "./types";
+
+export function bundledPresetFor(providerId: string, presets: Provider[]): Provider | undefined {
+  return presets.find((preset) => preset.id === providerId);
+}
+
+export function usesSubscriptionAuth(preset: Provider | null | undefined): boolean {
+  return (preset?.auth_capabilities ?? []).some((capability) => capability.startsWith("subscription:"));
+}
+
+export function instantiateCatalogProvider(preset: Provider, sortOrder: number): Provider {
+  return {
+    ...preset,
+    api_key: usesSubscriptionAuth(preset) ? null : preset.api_key ?? null,
+    sort_order: sortOrder,
+    enabled: true,
+  };
+}
+
+export function applyPresetReasoningDefaults(models: Model[], preset: Provider | null | undefined): Model[] {
+  const template = preset?.models.find((model) => (model.supported_reasoning_levels ?? []).length > 0);
+  if (!template) {
+    return models;
+  }
+  return models.map((model) => {
+    if ((model.supported_reasoning_levels ?? []).length > 0) {
+      return model;
+    }
+    return {
+      ...model,
+      supported_reasoning_levels: template.supported_reasoning_levels,
+      default_reasoning_level: model.default_reasoning_level ?? template.default_reasoning_level ?? null,
+      input_modalities: model.input_modalities?.length
+        ? model.input_modalities
+        : template.input_modalities ?? model.input_modalities,
+    };
+  });
+}
 
 export function applyCatalogPresetDefaults(
   existing: Provider,
@@ -17,7 +54,19 @@ export function applyCatalogPresetDefaults(
   const needsPrefix = !existing.display_prefix && Boolean(preset.display_prefix);
   const needsCachedFlag =
     existing.reports_cached_input_tokens == null && preset.reports_cached_input_tokens != null;
-  if (!needsBaseUrl && !needsModels && !needsFormats && !needsPrefix && !needsCachedFlag) {
+  const needsAuthCapabilities =
+    !(existing.auth_capabilities && existing.auth_capabilities.length > 0) &&
+    Boolean(preset.auth_capabilities && preset.auth_capabilities.length > 0);
+  const needsDiscoveryPolicy = !existing.discovery_policy && Boolean(preset.discovery_policy);
+  if (
+    !needsBaseUrl &&
+    !needsModels &&
+    !needsFormats &&
+    !needsPrefix &&
+    !needsCachedFlag &&
+    !needsAuthCapabilities &&
+    !needsDiscoveryPolicy
+  ) {
     return existing;
   }
   return {
@@ -31,6 +80,8 @@ export function applyCatalogPresetDefaults(
     reports_cached_input_tokens: needsCachedFlag
       ? preset.reports_cached_input_tokens
       : existing.reports_cached_input_tokens,
+    auth_capabilities: needsAuthCapabilities ? preset.auth_capabilities : existing.auth_capabilities,
+    discovery_policy: needsDiscoveryPolicy ? preset.discovery_policy : existing.discovery_policy,
     models: needsModels ? preset.models.map((model) => ({ ...model })) : existing.models,
   };
 }

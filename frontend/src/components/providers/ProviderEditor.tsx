@@ -1,4 +1,5 @@
-import { Check, ChevronDown, FlaskConical, Plus, RefreshCcw, Save, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, FlaskConical, LogOut, Plus, RefreshCcw, Save, Trash2, X } from "lucide-react";
+import { OfficialOpenAIUsageLimitBars } from "./OfficialOpenAIUsagePanel";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useToasts } from "../PageToast";
@@ -19,13 +20,24 @@ import {
   toolProtocolLabel,
   upstreamFormatLabel,
 } from "../../lib/providerEndpoint";
-import { applyCatalogPresetDefaults } from "../../lib/providerCatalog";
+import {
+  applyCatalogPresetDefaults,
+  bundledPresetFor,
+  usesSubscriptionAuth,
+} from "../../lib/providerCatalog";
 import { endpointSelectionOptions, type AddProviderForm, type InlineTestState } from "../../lib/providerForm";
 import { normalizeModel } from "../../lib/providerModel";
 import { isProviderDirty } from "../../lib/providerComparison";
 import { cx, displayModel, renumberModels, slugify } from "../../lib/format";
 import { api, messageFromError } from "../../lib/tauri";
-import type { Model, Provider, ToolProtocol, UpstreamFormat, UpstreamFormatProbeResult } from "../../lib/types";
+import type {
+  Model,
+  OpenAIUsageLimit,
+  Provider,
+  ToolProtocol,
+  UpstreamFormat,
+  UpstreamFormatProbeResult,
+} from "../../lib/types";
 import type { ProviderDraftState } from "../../hooks/useProviderNavigationGuard";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
@@ -41,6 +53,7 @@ export function ProviderDetail({
   onRefresh,
   probeResult,
   provider,
+  unsaved = false,
 }: {
   busy: string | null;
   discoverError?: string | null;
@@ -51,21 +64,49 @@ export function ProviderDetail({
   onRefresh: (provider: Provider) => void;
   probeResult: UpstreamFormatProbeResult | null;
   provider: Provider;
+  unsaved?: boolean;
 }) {
   const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
   const normalizedProvider = useMemo(() => normalizeProviderEndpointSelection(provider), [provider]);
   const [draft, setDraft] = useState(() => normalizedProvider);
   const [endpointTestState, setEndpointTestState] = useState<InlineTestState>("idle");
-  const dirty = isProviderDirty(normalizedProvider, draft);
+  const [bundledPresets, setBundledPresets] = useState<Provider[]>([]);
+  const [usageLimits, setUsageLimits] = useState<OpenAIUsageLimit[]>([]);
+  const [usageBusy, setUsageBusy] = useState(false);
+  const [signedIn, setSignedIn] = useState<boolean | null>(null);
+  const dirty = unsaved || isProviderDirty(normalizedProvider, draft);
   const draftRef = useRef(draft);
   const ensuringXaiCatalog = useRef(false);
   draftRef.current = draft;
+  const preset = bundledPresetFor(provider.id, bundledPresets);
+  const subscriptionAuth = usesSubscriptionAuth(provider) || usesSubscriptionAuth(preset);
 
   useEffect(() => {
     setDraft(normalizedProvider);
     setEndpointTestState(hasAvailableEndpointFormats(normalizedProvider.available_upstream_formats) ? "success" : "idle");
   }, [provider.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.getBundledProviders().then((presets) => {
+      if (!cancelled) {
+        setBundledPresets(presets);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!preset) {
+      return;
+    }
+    setDraft((current) =>
+      applyCatalogPresetDefaults(current, preset, { includeModels: current.models.length === 0 }),
+    );
+  }, [preset, provider.id]);
 
   useEffect(() => {
     const availableFormats = normalizeEndpointFormats(provider.available_upstream_formats);
@@ -99,6 +140,54 @@ export function ProviderDetail({
   }, [probeResult]);
 
   useEffect(() => {
+    if (!subscriptionAuth) {
+      setSignedIn(null);
+      setUsageLimits([]);
+      setUsageBusy(false);
+      return;
+    }
+    let cancelled = false;
+    setUsageBusy(true);
+    void (async () => {
+      try {
+        const status = await api.xaiAuthStatus();
+        if (cancelled) {
+          return;
+        }
+        const ok = status.signed_in === true;
+        setSignedIn(ok);
+        if (!ok) {
+          setUsageLimits([]);
+          return;
+        }
+        try {
+          const snapshot = await api.xaiUsageSnapshot();
+          if (!cancelled) {
+            setUsageLimits(snapshot.limits ?? []);
+          }
+        } catch {
+          if (!cancelled) {
+            setUsageLimits([]);
+          }
+        }
+        void ensureXaiCatalogReady();
+      } catch {
+        if (!cancelled) {
+          setSignedIn(false);
+          setUsageLimits([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setUsageBusy(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [provider.id, subscriptionAuth]);
+
+  useEffect(() => {
     onDraftStateChange({ providerId: provider.id, draft, dirty });
     return () => {
       onDraftStateChange({ providerId: provider.id, draft: normalizedProvider, dirty: false });
@@ -129,7 +218,9 @@ export function ProviderDetail({
       models: renumberModels(draft.models.filter((model) => model.id !== modelId)),
     };
     setDraft(next);
-    onChange(next, t("providers.modelRemoved"));
+    if (!unsaved) {
+      onChange(next, t("providers.modelRemoved"));
+    }
   }
 
   async function ensureXaiCatalogReady() {
@@ -154,12 +245,52 @@ export function ProviderDetail({
       if (catalogOnly && current.base_url.trim()) {
         onRefresh(current);
       } else if (current !== draftRef.current) {
-        await onChange(current, t("providers.xaiCatalogReady"));
+        if (unsaved) {
+          setDraft(current);
+        } else {
+          await onChange(current, t("providers.xaiCatalogReady"));
+        }
       }
     } catch {
       return;
     } finally {
       ensuringXaiCatalog.current = false;
+    }
+  }
+
+  async function refreshXaiUsage() {
+    setUsageBusy(true);
+    try {
+      const snapshot = await api.xaiUsageSnapshot();
+      setUsageLimits(snapshot.limits ?? []);
+      setSignedIn(true);
+    } catch {
+      setUsageLimits([]);
+    } finally {
+      setUsageBusy(false);
+    }
+  }
+
+  async function signOutXai() {
+    const toastId = showToast(t("providers.xaiSigningOut"), "loading");
+    setUsageBusy(true);
+    try {
+      await api.xaiLogout();
+      setSignedIn(false);
+      setUsageLimits([]);
+      updateToast(toastId, {
+        action: null,
+        text: t("providers.xaiSignedOut"),
+        tone: "success",
+      });
+    } catch (err) {
+      updateToast(toastId, {
+        action: null,
+        text: messageFromError(err),
+        tone: "error",
+      });
+    } finally {
+      setUsageBusy(false);
     }
   }
 
@@ -205,20 +336,61 @@ export function ProviderDetail({
       <div className="grid gap-2 border-b border-line p-4">
         <HeaderRow
           title={provider.name}
+          titleAccessory={
+            subscriptionAuth ? <SubscriptionAuthChip signedIn={signedIn} /> : null
+          }
           actions={
-            <IconButton
-              title={t("providers.deleteProvider")}
-              danger
-              disabled={busy === "save"}
-              onClick={onDelete}
-            >
-              <Trash2 size={16} />
-            </IconButton>
+            <>
+              {subscriptionAuth && signedIn ? (
+                <OfficialOpenAIUsageLimitBars busy={usageBusy} limits={usageLimits} />
+              ) : null}
+              {subscriptionAuth && signedIn ? (
+                <IconButton
+                  title={t("providers.xaiRefreshUsage")}
+                  disabled={usageBusy}
+                  onClick={() => void refreshXaiUsage()}
+                >
+                  <RefreshCcw size={16} className={usageBusy ? "animate-spin" : undefined} />
+                </IconButton>
+              ) : null}
+              <IconButton
+                title={t("providers.deleteProvider")}
+                danger
+                disabled={busy === "save"}
+                onClick={onDelete}
+              >
+                <Trash2 size={16} />
+              </IconButton>
+            </>
           }
         />
 
-        {provider.id === "xai" ? <XaiLoginCard onSignedIn={() => void ensureXaiCatalogReady()} /> : null}
+        {provider.id === "xai" && signedIn === false ? (
+          <XaiLoginCard
+            onAuthChange={setSignedIn}
+            onSignedIn={() => void ensureXaiCatalogReady()}
+            onUsage={(limits) => {
+              setUsageLimits(limits);
+              setUsageBusy(false);
+            }}
+          />
+        ) : null}
+        {provider.id === "xai" && signedIn ? (
+          <div className="flex min-w-0 items-center justify-between gap-2 rounded-inner bg-panel px-3 py-2 text-xs leading-5 text-slate-600 shadow-hairline">
+            <p className="min-w-0 truncate">{t("providers.xaiSignedInBody")}</p>
+            <button
+              type="button"
+              className="focus-ring inline-flex h-8 shrink-0 items-center gap-1.5 rounded-control bg-surface px-2.5 text-xs font-semibold text-slate-700 shadow-control hover:bg-white disabled:text-slate-300"
+              disabled={usageBusy}
+              onClick={() => void signOutXai()}
+            >
+              <LogOut size={14} />
+              {t("providers.xaiSignOut")}
+            </button>
+          </div>
+        ) : null}
 
+        {subscriptionAuth ? null : (
         <div className="grid grid-cols-2 gap-2">
           <Field label={t("common.name")}>
             <input
@@ -253,6 +425,7 @@ export function ProviderDetail({
             />
           </div>
         </div>
+        )}
       </div>
 
       <ModelSection
@@ -281,7 +454,14 @@ export function ProviderDetail({
           type="button"
           className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-action px-3 text-sm font-semibold text-white disabled:bg-slate-300"
           disabled={!dirty || busy === "save"}
-          onClick={() => onChange(draft, t("providers.providerSaved", { name: draft.name }))}
+          onClick={() =>
+            onChange(
+              draft,
+              unsaved
+                ? t("providers.providerAdded", { name: draft.name })
+                : t("providers.providerSaved", { name: draft.name }),
+            )
+          }
         >
           <Save size={16} />
           {t("common.save")}
@@ -457,6 +637,29 @@ export function AddProviderPanel({
   );
 }
 
+
+function SubscriptionAuthChip({ signedIn }: { signedIn: boolean | null }) {
+  const { t } = useTranslation();
+  const tone = signedIn === true ? "ok" : signedIn === false ? "pending" : "muted";
+  const label =
+    signedIn === true
+      ? t("providers.authorized")
+      : signedIn === false
+        ? t("providers.authMissing")
+        : t("providers.authUnknown");
+  return (
+    <span
+      className={cx(
+        "inline-flex h-6 max-w-[112px] items-center rounded-full border px-2 text-[11px] font-semibold leading-none",
+        tone === "ok" && "border-emerald-200 bg-emerald-50 text-emerald-700",
+        tone === "pending" && "border-amber-200 bg-amber-50 text-amber-700",
+        tone === "muted" && "border-slate-200 bg-white text-slate-500",
+      )}
+    >
+      <span className="truncate whitespace-nowrap">{label}</span>
+    </span>
+  );
+}
 
 function EndpointSelectionPanel({
   availableFormats,

@@ -181,6 +181,8 @@ function ProvidersPageImpl({
   const {
     addCatalogProvider,
     addProvider,
+    pendingNewProvider,
+    setPendingNewProvider,
     catalogSyncToastMessage,
     discoverForForm,
     formProbeModel,
@@ -255,11 +257,12 @@ function ProvidersPageImpl({
     if (
       selectedId !== OFFICIAL_ID &&
       selectedId !== ADD_ID &&
+      pendingNewProvider?.id !== selectedId &&
       !providersSnapshot.some((provider) => provider.id === selectedId)
     ) {
       setSelectedId(providersSnapshot[0]?.id ?? OFFICIAL_ID);
     }
-  }, [providersSnapshot, selectedId]);
+  }, [pendingNewProvider?.id, providersSnapshot, selectedId]);
 
   useEffect(() => {
     setCodexStatus(appStatusSnapshot);
@@ -300,10 +303,12 @@ function ProvidersPageImpl({
     setModelDiscoveryError(null);
   }, [selectedId]);
 
-  const selectedProvider = useMemo(
-    () => providers.find((provider) => provider.id === selectedId) ?? null,
-    [providers, selectedId],
-  );
+  const selectedProvider = useMemo(() => {
+    if (pendingNewProvider && selectedId === pendingNewProvider.id) {
+      return pendingNewProvider;
+    }
+    return providers.find((provider) => provider.id === selectedId) ?? null;
+  }, [pendingNewProvider, providers, selectedId]);
   const providerModelCount = useMemo(
     () =>
       providers.reduce(
@@ -339,7 +344,7 @@ function ProvidersPageImpl({
     (model) => !isOfficialModelDisabled(officialDisabledModels, model.id),
   ).length;
   const providerNavItems = useMemo<ProviderNavItem[]>(() => {
-    return providers
+    const items = providers
       .map((provider) => ({
         id: provider.id,
         sort_order: provider.sort_order ?? 0,
@@ -351,7 +356,15 @@ function ProvidersPageImpl({
         }
         return left.id.localeCompare(right.id);
       });
-  }, [providers]);
+    if (pendingNewProvider && !items.some((item) => item.id === pendingNewProvider.id)) {
+      items.push({
+        id: pendingNewProvider.id,
+        sort_order: pendingNewProvider.sort_order ?? items.length + 1,
+        provider: pendingNewProvider,
+      });
+    }
+    return items;
+  }, [pendingNewProvider, providers]);
   const canAdd = Boolean(form.name.trim());
   const gatewayStatus = gatewayStatusSnapshot ?? loadedGatewayStatus;
   const realCodexConnected = codexStatus?.mode === "custom" && codexStatus.proxy_running === true;
@@ -665,6 +678,11 @@ function ProvidersPageImpl({
   }
 
   async function updateProvider(next: Provider, successMessage?: string) {
+    if (pendingNewProvider && next.id === pendingNewProvider.id) {
+      await saveProviders([...providers, next], true, successMessage);
+      setPendingNewProvider(null);
+      return;
+    }
     await saveProviders(
       providers.map((provider) => (provider.id === next.id ? next : provider)),
       true,
@@ -673,6 +691,10 @@ function ProvidersPageImpl({
   }
 
   function toggleProviderEnabled(providerId: string, enabled: boolean) {
+    if (pendingNewProvider?.id === providerId) {
+      setPendingNewProvider({ ...pendingNewProvider, enabled });
+      return;
+    }
     const providerName = providers.find((provider) => provider.id === providerId)?.name ?? providerId;
     const toastId = showToast(
       enabled
@@ -695,15 +717,24 @@ function ProvidersPageImpl({
   }
 
   async function reorderHubProviders(items: ProviderNavItem[]) {
+    const persistedItems = pendingNewProvider
+      ? items.filter((item) => item.id !== pendingNewProvider.id)
+      : items;
     const nextProviders = providers.map((provider) => provider);
 
-    items.forEach((item, index) => {
+    persistedItems.forEach((item, index) => {
       const sortOrder = index + 1;
       const providerIndex = nextProviders.findIndex((provider) => provider.id === item.id);
       if (providerIndex >= 0) {
         nextProviders[providerIndex] = { ...nextProviders[providerIndex], sort_order: sortOrder };
       }
     });
+    if (pendingNewProvider) {
+      const pendingIndex = items.findIndex((item) => item.id === pendingNewProvider.id);
+      if (pendingIndex >= 0) {
+        setPendingNewProvider({ ...pendingNewProvider, sort_order: pendingIndex + 1 });
+      }
+    }
 
     setProviders(nextProviders);
     await saveProviders(nextProviders, true, t("providers.providerOrderSaved"));
@@ -833,6 +864,23 @@ function ProvidersPageImpl({
   }
 
   async function deleteProvider(providerId: string) {
+    if (pendingNewProvider?.id === providerId) {
+      if (!(await confirmAction({
+        cancelLabel: t("common.cancel"),
+        confirmLabel: t("providers.deleteProvider"),
+        message: t("providers.deleteProviderConfirm", { name: pendingNewProvider.name }),
+        title: t("providers.deleteProvider"),
+        tone: "danger",
+      }))) {
+        return;
+      }
+      setPendingNewProvider(null);
+      setSelectedId(OFFICIAL_ID);
+      setProbeResult(null);
+      setModelDiscoveryError(null);
+      setError(null);
+      return;
+    }
     const target = providers.find((provider) => provider.id === providerId);
     if (!target) {
       setError(t("providers.providerNotFound", { providerId }));
@@ -962,6 +1010,7 @@ function ProvidersPageImpl({
                 provider={selectedProvider}
                 onChange={(provider, successMessage) => void updateProvider(provider, successMessage)}
                 onDelete={() => void deleteProvider(selectedProvider.id)}
+                unsaved={pendingNewProvider?.id === selectedProvider.id}
                 onDraftStateChange={trackProviderDraft}
                 onProbe={(provider) =>
                   probeUpstreamFormat(
@@ -987,7 +1036,12 @@ function ProvidersPageImpl({
         busy={busy === "save"}
         providerName={pendingProviderName(pendingProviderNavigation, tr)}
         onCancel={cancelPendingProviderNavigation}
-        onDiscard={discardPendingProviderNavigation}
+        onDiscard={() => {
+          if (pendingNewProvider && selectedId === pendingNewProvider.id) {
+            setPendingNewProvider(null);
+          }
+          discardPendingProviderNavigation();
+        }}
         onSave={() => void savePendingProviderNavigation()}
       />
     )}
@@ -1003,7 +1057,7 @@ function ProvidersPageImpl({
         }}
         onSelectPreset={(preset) => {
           setCatalogPickerOpen(false);
-          void addCatalogProvider(preset);
+          addCatalogProvider(preset);
         }}
       />
     )}

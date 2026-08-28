@@ -85,6 +85,11 @@ pub fn switch_mode_with_takeover(
     let python = find_python()?;
     let runner = ProcessCommandRunner;
 
+    if mode == "custom" {
+        if let Err(error) = crate::catalog::generate_catalog() {
+            log::warn!("catalog refresh before Codex Hub connect failed: {error}");
+        }
+    }
     let mut status =
         switch_mode_with_paths_takeover(mode, auto_sync, force_takeover, &paths, &python, &runner)?;
     let lifecycle = crate::proxy::status()?;
@@ -98,24 +103,23 @@ pub fn switch_mode_with_takeover(
     } else {
         "openai"
     };
-
-    match crate::history::reconcile_after_confirmed_route_switch(Some(target_provider)) {
-        Ok(result) => {
-            status.history_sync_status = Some(result.status.as_str().to_string());
-            status.history_sync_message = result.error.or(result.reason).or_else(|| {
-                (result.changed_rows > 0 || result.changed_files > 0).then(|| {
-                    format!(
-                        "changed {} history rows and {} files",
-                        result.changed_rows, result.changed_files
-                    )
-                })
-            });
+    // Overlay apply is the user-visible connect/disconnect. History-bucket
+    // repair can take seconds on a large session DB and must not stall the
+    // toggle; Codex already needs a restart to pick up the overlay.
+    let history_target = target_provider.to_string();
+    std::thread::spawn(move || {
+        if let Err(error) =
+            crate::history::reconcile_after_confirmed_route_switch(Some(&history_target))
+        {
+            log::warn!("history repair after route switch failed: {error}");
         }
-        Err(error) => {
-            status.history_sync_status = Some("conflict".to_string());
-            status.history_sync_message = Some(error);
-        }
-    }
+    });
+    status.history_sync_status = Some(
+        crate::history::UnifiedHistoryStatus::Deferred
+            .as_str()
+            .to_string(),
+    );
+    status.history_sync_message = None;
 
     Ok(status)
 }

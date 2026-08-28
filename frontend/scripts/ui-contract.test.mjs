@@ -2127,10 +2127,11 @@ test("provider endpoint probe persists detected formats and selects the recommen
   assert.match(catalogActionsSource, /const detectedFormat = probeDetectedEndpointFormat\(result\);/);
   assert.match(catalogActionsSource, /detectedFormat[\s\S]*t\("providers\.probeCompleted"/);
   assert.match(catalogActionsSource, /t\("providers\.probeNoSupportedEndpoint"\)/);
+  assert.match(catalogActionsSource, /pendingNewProvider\?\.id === providerId/);
   assert.match(catalogActionsSource, /const saved = await api\.saveProviders\(nextProviders\);/);
   assert.match(catalogActionsSource, /updateToast\(toastId, \{[\s\S]*providers\.probeCompleted/);
   assert.match(providerDetail, /const normalizedProvider = useMemo\(\(\) => normalizeProviderEndpointSelection\(provider\), \[provider\]\);/);
-  assert.match(providerDetail, /const dirty = isProviderDirty\(normalizedProvider, draft\);/);
+  assert.match(providerDetail, /const dirty = unsaved \|\| isProviderDirty\(normalizedProvider, draft\);/);
   assert.doesNotMatch(providerDetail, /JSON\.stringify\(draft\)/);
   assert.match(providerEditorSource, /import \{ isProviderDirty \} from "\.\.\/\.\.\/lib\/providerComparison";/);
   assert.match(providerDetail, /setDraft\(\(current\) => applyProviderProbeResult\(current, result\)\);/);
@@ -2898,9 +2899,10 @@ test("connection switching delegates idempotent history reconciliation to the ba
   ]);
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
-  assert.match(configSource, /switch_mode_with_paths_takeover\([\s\S]*crate::history::reconcile_after_confirmed_route_switch\(Some\(target_provider\)\)/);
+  assert.match(configSource, /crate::history::reconcile_after_confirmed_route_switch\(Some\(&history_target\)\)/);
+  assert.match(configSource, /std::thread::spawn/);
   assert.match(configSource, /mode == "custom" \|\| settings\.unified_codex_history/);
-  assert.match(configSource, /status\.history_sync_status = Some\(result\.status\.as_str\(\)\.to_string\(\)\)/);
+  assert.match(configSource, /UnifiedHistoryStatus::Deferred/);
   // The route command owns reconciliation; the UI must not launch a duplicate repair.
   assert.doesNotMatch(action, /targetProvider/);
   assert.doesNotMatch(action, /repairUnifiedHistoryInBackground/);
@@ -2963,9 +2965,9 @@ test("provider discovery updates the selected provider and reports progress", as
   const providersSource = await readProviderContractSource();
 
   assert.match(providersSource, /showToast\(t\("providers\.discoveringProviderModels", \{ name: provider\.name \}\), "loading"\)/);
-  assert.match(providersSource, /const\s+persistedProvider\s*=\s*providers\.find\(\(item\)\s*=>\s*item\.id\s*===\s*provider\.id\)\s*\?\?\s*provider;/);
-  assert.match(providersSource, /const nextProvider = \{\s*\.\.\.persistedProvider,\s*models: mergeDiscoveredModels\(retainedModels, models\),\s*\}/s);
-  assert.match(providersSource, /provider\.id === "xai"/);
+  assert.match(providersSource, /const\s+persistedProvider\s*=\s*isPending\s*\?[\s\S]*providers\.find\(\(item\)\s*=>\s*item\.id\s*===\s*provider\.id\)\s*\?\?\s*provider;/);
+  assert.match(providersSource, /const nextProvider = \{\s*\.\.\.persistedProvider,\s*models: mergeDiscoveredModels\(retainedModels, discovered\),\s*\}/s);
+  assert.match(providersSource, /discovery_policy === "retain-intersection"/);
   assert.match(providersSource, /api\.discoverProviderModels\(\s*provider\.base_url,\s*provider\.api_key \?\? "",\s*provider\.id,/);
   assert.match(providersSource, /setProviders\(nextProviders\)/);
   assert.match(providersSource, /t\("providers\.discoveredProviderModels", \{/);
@@ -3029,7 +3031,8 @@ test("provider write actions keep explicit success feedback", async () => {
   assert.match(providersSource, /successMessage\?: string/);
   assert.match(providersSource, /t\("providers\.providerAdded", \{ name: providerName \}\)/);
   assert.match(providersSource, /t\("providers\.providerDeleted", \{ name: target\.name \}\)/);
-  assert.match(providersSource, /onChange\(draft, t\("providers\.providerSaved", \{ name: draft\.name \}\)\)/);
+  assert.match(providersSource, /t\("providers\.providerSaved", \{ name: draft\.name \}\)/);
+  assert.match(providersSource, /onChange\(\s*draft,\s*unsaved\s*\?\s*t\("providers\.providerAdded"/);
   assert.match(providersSource, /onChange\(next, t\("providers\.modelRemoved"\)\)/);
 });
 
@@ -3077,6 +3080,8 @@ test("Windows portable build uses the Tauri custom protocol pipeline", async () 
   assert.match(portableScript, /Prepare-PythonRuntime\.ps1/);
   assert.match(portableScript, /\$tauriBuildArgs = @\("tauri", "build", "--config", \$generatedTauriConfigPath, "--no-bundle", "--ci"\)/);
   assert.match(portableScript, /& cargo @tauriBuildArgs/);
+  assert.match(portableScript, /"config", "src-python", "python", "scripts"/);
+  assert.match(portableScript, /scripts\\xai_device_login\.py/);
   assert.doesNotMatch(portableScript, /cargo build --release/);
 });
 
@@ -3546,8 +3551,18 @@ test("xAI SuperGrok login card uses one loading toast and the XAI_API_KEY fallba
       readFile(zhLocalePath, "utf8"),
     ]);
 
-  assert.match(editorSource, /provider\.id === "xai" \? <XaiLoginCard onSignedIn=\{\(\) => void ensureXaiCatalogReady\(\)\} \/> : null/);
+  assert.match(editorSource, /provider\.id === "xai" && signedIn === false/);
+  assert.match(editorSource, /XaiLoginCard/);
+  assert.match(editorSource, /onSignedIn=\{\(\) => void ensureXaiCatalogReady\(\)\}/);
+  assert.match(editorSource, /usesSubscriptionAuth\(provider\) \|\| usesSubscriptionAuth\(preset\)/);
+  assert.match(editorSource, /OfficialOpenAIUsageLimitBars/);
+  assert.match(editorSource, /SubscriptionAuthChip/);
+  assert.match(editorSource, /t\("providers\.authorized"\)/);
+  assert.match(editorSource, /api\.xaiLogout\(\)/);
+  assert.doesNotMatch(editorSource, /<OfficialOpenAIUsagePanel/);
   assert.match(editorSource, /applyCatalogPresetDefaults/);
+  assert.match(editorSource, /unsaved\s*\?\s*t\("providers\.providerAdded"/);
+  assert.match(cardSource, /onAuthChange\?\.\(signedIn\)/);
   assert.match(cardSource, /onSignedIn\?\.\(\)/);
   assert.match(cardSource, /notifySignedIn\(\)/);
   assert.match(cardSource, /providers\.xaiSignedInBody/);
@@ -3611,12 +3626,13 @@ test("add provider opens a catalog overlay instead of a blank form", async () =>
   assert.match(providersSource, /onAdd=\{\(\) => void openCatalogPicker\(\)\}/);
   assert.match(providersSource, /<ProviderCatalogPicker/);
   assert.match(providersSource, /onSelectCustom=\{\(\) => \{[\s\S]*selectProvider\(ADD_ID\)/);
-  assert.match(providersSource, /void addCatalogProvider\(preset\)/);
+  assert.match(providersSource, /addCatalogProvider\(preset\)/);
   assert.match(pickerSource, /role="dialog"/);
   assert.match(pickerSource, /onSelectPreset/);
   assert.match(pickerSource, /chooseCatalogProviderCustom/);
-  assert.match(actionsSource, /async function addCatalogProvider/);
-  assert.match(actionsSource, /applyCatalogPresetDefaults\(existing, preset\)/);
+  assert.match(actionsSource, /function addCatalogProvider/);
+  assert.match(actionsSource, /setPendingNewProvider\(instantiateCatalogProvider/);
+  assert.doesNotMatch(actionsSource, /async function addCatalogProvider[\s\S]*saveProviders/);
   assert.match(commandsSource, /getBundledProviders: "get_bundled_providers"/);
   assert.match(tauriSource, /COMMANDS.getBundledProviders/);
   assert.match(mainSource, /fn get_bundled_providers/);

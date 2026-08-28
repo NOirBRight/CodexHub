@@ -1186,6 +1186,30 @@ hidden = true
         self.assertEqual(sorted(index), ["present-key/model"])
         self.assertEqual(index["present-key/model"]["api_key"], "present-secret")
 
+    def test_build_external_model_index_includes_subscription_session_without_api_key(self):
+        providers = [
+            ProviderConfig(
+                id="xai",
+                name="xAI",
+                base_url="https://api.x.ai/v1",
+                api_key="{env:XAI_API_KEY}",
+                models=[ModelConfig(id="grok-4.6")],
+            ),
+        ]
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "providers_config.provider_has_subscription_session",
+                side_effect=lambda provider_id: provider_id == "xai",
+            ),
+        ):
+            index = build_external_model_index(providers)
+
+        self.assertEqual(sorted(index), ["xai/grok-4.6"])
+        self.assertIsNone(index["xai/grok-4.6"]["api_key"])
+        self.assertEqual(index["xai/grok-4.6"]["upstream_model"], "grok-4.6")
+
     def test_build_external_model_index_can_include_models_without_api_keys_for_catalogs(self):
         providers = [
             ProviderConfig(
@@ -1391,16 +1415,24 @@ enabled = true
             [provider.id for provider in providers],
             ["ollama-cloud", "volc", "minimax-cn", "xunfei", "xai"],
         )
+        xai = next(provider for provider in providers if provider.id == "xai")
+        grok = next(model for model in xai.models if model.id == "grok-4")
+        self.assertEqual(grok.supported_reasoning_levels, ("low", "medium", "high", "xhigh", "max"))
+        self.assertEqual(grok.default_reasoning_level, "high")
+        self.assertEqual(grok.input_modalities, ("text", "image"))
 
     def test_default_config_external_aliases_exclude_volc_minimax_m3_by_default(self):
-        with patch.dict(
-            "os.environ",
-            {
-                "OLLAMA_API_KEY": "ollama-secret",
-                "VOLCENGINE_API_KEY": "volc-secret",
-                "MINIMAX_API_KEY": "minimax-secret",
-            },
-            clear=True,
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "OLLAMA_API_KEY": "ollama-secret",
+                    "VOLCENGINE_API_KEY": "volc-secret",
+                    "MINIMAX_API_KEY": "minimax-secret",
+                },
+                clear=True,
+            ),
+            patch("providers_config.provider_has_subscription_session", return_value=False),
         ):
             index = build_external_model_index(load_providers(DEFAULT_PROVIDERS_PATH))
             volc_minimax = resolve_external_model_alias("volc/minimax-m3", providers_path=DEFAULT_PROVIDERS_PATH)

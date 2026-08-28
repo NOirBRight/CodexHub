@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import tomllib
+from urllib.parse import parse_qs
 from types import MappingProxyType
 from typing import Any, Protocol, TypedDict
 
@@ -964,6 +965,38 @@ class CatalogRuntime:
             })
         return {"object": "list", "data": data}
 
+    @staticmethod
+    def wants_codex_model_manifest(query: str) -> bool:
+        params = parse_qs(query, keep_blank_values=True)
+        return "client_version" in params or "includeHidden" in params
+
+    @staticmethod
+    def codex_model_manifest(catalog: Mapping[str, Any]) -> dict[str, Any]:
+        models: list[dict[str, Any]] = []
+        raw_models = catalog.get("models")
+        if not isinstance(raw_models, list):
+            raw_models = []
+        for model in raw_models:
+            if not isinstance(model, Mapping):
+                continue
+            slug = model.get("slug")
+            if not isinstance(slug, str) or not slug.strip():
+                continue
+            row = dict(model)
+            row["slug"] = slug.strip()
+            row["visibility"] = "list"
+            row["hidden"] = False
+            row.setdefault("supported_in_api", True)
+            models.append(row)
+        manifest: dict[str, Any] = {"models": models}
+        fetched_at = catalog.get("fetched_at")
+        if isinstance(fetched_at, str) and fetched_at.strip():
+            manifest["fetched_at"] = fetched_at
+        client_version = catalog.get("client_version")
+        if isinstance(client_version, str) and client_version.strip():
+            manifest["client_version"] = client_version
+        return manifest
+
     def published_official_context_budgets(
         self, catalog_path: Path
     ) -> dict[str, Mapping[str, Any]]:
@@ -1371,6 +1404,14 @@ def route_capability_metadata(source: Mapping[str, Any]) -> dict[str, Any]:
 
 def openai_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
     return CatalogRuntime.openai_model_list(catalog)
+
+
+def wants_codex_model_manifest(query: str) -> bool:
+    return CatalogRuntime.wants_codex_model_manifest(query)
+
+
+def codex_model_manifest(catalog: Mapping[str, Any]) -> dict[str, Any]:
+    return CatalogRuntime.codex_model_manifest(catalog)
 
 
 def published_official_context_budgets(catalog_path: Path) -> dict[str, Mapping[str, Any]]:

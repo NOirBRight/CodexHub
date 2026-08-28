@@ -199,6 +199,14 @@ def discover_provider_models(base_url: str, api_key: str, timeout_seconds: int =
     return models
 
 
+def provider_has_subscription_session(provider_id: str) -> bool:
+    """True when ADR-0005 has a live subscription session for this provider."""
+
+    from subscription_credential import provider_auth_mode
+
+    return bool(provider_auth_mode(provider_id))
+
+
 def build_external_model_index(
     providers: Iterable[ProviderConfig],
     *,
@@ -219,7 +227,9 @@ def build_external_model_index(
             continue
 
         api_key = provider.resolved_api_key()
-        if require_api_key and not api_key:
+        if require_api_key and not api_key and not provider_has_subscription_session(
+            provider_id
+        ):
             continue
 
         for model in provider.models:

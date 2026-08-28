@@ -362,6 +362,8 @@ fn candidate_official_provider(models: Vec<Model>) -> Provider {
         reports_cached_input_tokens: None,
         supports_developer_role: Some(true),
         display_prefix: Some("openai/".to_string()),
+        auth_capabilities: None,
+        discovery_policy: None,
         sort_order: Some(0),
         enabled: true,
         locked: true,

@@ -251,6 +251,8 @@ mod isolated_managed_client_config {
             reports_cached_input_tokens: None,
             supports_developer_role: None,
             display_prefix: Some("openai/".to_string()),
+            auth_capabilities: None,
+            discovery_policy: None,
             sort_order: Some(0),
             enabled: true,
             locked: false,
