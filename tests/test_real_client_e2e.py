@@ -720,6 +720,17 @@ def test_runner_invokes_candidate_materializer_for_every_managed_client(tmp_path
     assert "Get-ClientProviderMap" not in SCRIPT.read_text(encoding="utf-8")
 
 
+def test_pi_publishes_only_the_generated_models_file(tmp_path):
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    pi_root = (
+        tmp_path / "output" / "isolated" / "work" / "pi-luna" / ".pi" / "agent"
+    )
+    assert (pi_root / "models.json").is_file()
+    assert not (pi_root / "settings.json").exists()
+
+
 def test_all_managed_client_route_contracts_are_probed_before_candidate_launch(
     tmp_path,
 ):

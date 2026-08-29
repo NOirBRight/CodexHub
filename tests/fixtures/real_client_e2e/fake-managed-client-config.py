@@ -64,7 +64,7 @@ def targets(client: str) -> list[str]:
     return {
         "codex": ["codex-target/config.toml"],
         "opencode": ["opencode/opencode.json"],
-        "pi": ["pi/settings.json", "pi/models.json"],
+        "pi": ["pi/models.json"],
         "omp": ["omp/config.yml", "omp/models.yml"],
         "zcode": [
             "zcode/codexhub.json",

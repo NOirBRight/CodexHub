@@ -397,6 +397,27 @@ mod isolated_managed_client_config {
     }
 
     #[test]
+    fn pi_materializer_reports_only_the_generated_models_target() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = fresh_root("pi-published-targets");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let settings = settings_with_port(9099);
+        let providers = volc_provider(UpstreamFormat::Responses);
+        let inp = input("pi", "volc/glm-5.2", settings, providers);
+
+        let preview = isolated_client_preview(&isolated, &inp).unwrap();
+        assert_eq!(preview.target_names, ["pi/models.json"]);
+
+        let apply = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        assert_eq!(apply.target_names, ["pi/models.json"]);
+        assert!(root.join("pi/models.json").is_file());
+        assert!(!root.join("pi/settings.json").exists());
+    }
+
+    #[test]
     fn isolated_apply_then_readback_round_trips_for_omp() {
         let _guard = TEST_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
