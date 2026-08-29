@@ -127,10 +127,15 @@ Pop-Location
 
 On a Linux host, `./scripts/verify-linux.sh` runs Python core (excluding
 `tests/test_real_client_e2e.py`), the Python partition completeness checker,
-`cargo test --locked`, and clippy. Use it whenever the changed boundary includes
-Gateway, process-lifecycle, packaging, or Rust code. The synthetic real-client
-partition remains Windows-watchdog-only. Windows cmd/PowerShell launcher and
-release-script tests skip on Linux; they stay in the Windows core suite.
+`cargo test --locked`, clippy, a fresh frontend/custom-protocol app build, and
+the watchdog-bounded physical pointer-input E2E in isolated D-Bus and Xvfb
+sessions. The E2E checks full native input coverage, background click-through,
+and a rendered DOM state transition. Use this complete Linux suite whenever the
+changed boundary includes frontend, Gateway, process-lifecycle, packaging, or
+Rust code. Install `xvfb`, `xauth`, and `x11-utils` first. The synthetic
+real-client partition remains Windows-watchdog-only. Windows cmd/PowerShell
+launcher and release-script tests skip on Linux; they stay in the Windows core
+suite.
 
 ```bash
 ./scripts/verify-linux.sh
@@ -143,6 +148,12 @@ Equivalent expanded commands:
 ./scripts/codexhub-python.sh scripts/ci/check_python_test_partitions.py
 ( cd src-tauri && cargo test --locked -- --test-threads=1 )
 ( cd src-tauri && cargo clippy --locked --all-targets -- -D warnings )
+( cd frontend && npm run build )
+( cd src-tauri && cargo build --locked --features custom-protocol )
+timeout --signal=TERM --kill-after=10s 90s \
+  dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' \
+  ./scripts/codexhub-python.sh scripts/e2e_linux_window_input.py \
+  --bin src-tauri/target/debug/codexhub
 ```
 
 ### One-command Python fallback

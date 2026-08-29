@@ -9,9 +9,19 @@ export const FIT_STAGE_SCALE = 0.93;
 const DEFAULT_FIT_STAGE_WIDTH = 1280;
 const DEFAULT_FIT_STAGE_HEIGHT = 960;
 
+function usesCssTransformScale() {
+  if (typeof navigator === "undefined") {
+    return true;
+  }
+  // WebKitGTK does not keep hit-testing aligned with CSS transforms, so clicks
+  // can miss the painted UI and punch through. Linux uses webview zoom instead.
+  return !/Linux/i.test(navigator.userAgent) || /Android/i.test(navigator.userAgent);
+}
+
 export function FitStage({ children }: { children: ReactNode }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const linuxViewport = isLinuxViewport();
+  const cssTransform = usesCssTransformScale();
   const [metrics, setMetrics] = useState(() => linuxViewport
     ? {
       scale: FIT_STAGE_SCALE,
@@ -64,8 +74,7 @@ export function FitStage({ children }: { children: ReactNode }) {
         width: viewport.width / scale,
         height: viewport.height / scale,
       });
-      // WebKitGTK setZoom != 1 letterboxes a frame around the UI.
-      await setWebviewZoom(1);
+      await setWebviewZoom(scale);
     };
 
     void syncLinuxViewportMetrics();
@@ -88,12 +97,13 @@ export function FitStage({ children }: { children: ReactNode }) {
 
   return (
     <div ref={hostRef} className="relative h-full w-full overflow-hidden bg-canvas">
+      <div className="pointer-events-none absolute inset-0 bg-canvas" aria-hidden="true" />
       <div
-        className="relative origin-top-left"
+        className={cssTransform ? "relative origin-top-left" : "relative"}
         style={{
           width: metrics.width,
           height: metrics.height,
-          transform: "scale(" + metrics.scale + ")",
+          ...(cssTransform ? { transform: "scale(" + metrics.scale + ")" } : {}),
         }}
       >
         {children}

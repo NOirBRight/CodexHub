@@ -1985,7 +1985,7 @@ test("providers page uses stable zero-min split columns", async () => {
   assert.doesNotMatch(providersSource, /grid-cols-\[minmax\(0,4fr\)_minmax\(0,6fr\)\]/);
 });
 
-test("fit stage uses the compact 0.93 scale only on Linux", async () => {
+test("fit stage avoids CSS-transformed hit testing on Linux", async () => {
   const fitStageSource = await readFile(new URL("../src/components/FitStage.tsx", import.meta.url), "utf8");
   const cssSource = await readFile(indexCssPath, "utf8");
   const tauriConfig = JSON.parse(await readFile(tauriConfigPath, "utf8"));
@@ -2000,10 +2000,11 @@ test("fit stage uses the compact 0.93 scale only on Linux", async () => {
   assert.match(fitStageSource, /if \(!linuxViewport\)/);
   assert.match(fitStageSource, /syncLinuxViewportMetrics/);
   assert.match(fitStageSource, /className="relative h-full w-full overflow-hidden bg-canvas"/);
-  assert.match(fitStageSource, /transform: "scale\(" \+ metrics\.scale \+ "\)"/);
-  assert.match(fitStageSource, /setWebviewZoom\(1\)/);
-  assert.doesNotMatch(fitStageSource, /setWebviewZoom\(scale\)/);
-  assert.doesNotMatch(fitStageSource, /usesCssTransformScale/);
+  assert.match(fitStageSource, /usesCssTransformScale/);
+  assert.match(fitStageSource, /WebKitGTK[\s\S]*?hit-testing[\s\S]*?punch through/);
+  assert.match(fitStageSource, /setWebviewZoom\(scale\)/);
+  assert.match(fitStageSource, /cssTransform \? \{ transform: "scale\(" \+ metrics\.scale \+ "\)" \} : \{\}/);
+  assert.match(fitStageSource, /pointer-events-none absolute inset-0 bg-canvas/);
   assert.doesNotMatch(fitStageSource, /zoom:\s*metrics\.scale/);
   assert.match(cssSource, /#root \{[\s\S]*?background: #f8f8f7;/);
   assert.match(cssSource, /#root \{[\s\S]*?border-radius: 16px;/);

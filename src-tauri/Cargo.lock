@@ -496,6 +496,7 @@ dependencies = [
 name = "codexhub"
 version = "0.1.9-beta.3.7"
 dependencies = [
+ "cairo-rs",
  "dirs 5.0.1",
  "glib",
  "gtk",
