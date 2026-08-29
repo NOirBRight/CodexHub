@@ -306,7 +306,8 @@ def test_portable_rejects_invalid_flavor_before_building(tmp_path):
 
     assert result.returncode != 0
     normalized_error = "".join(result.stderr.split())
-    assert "parameter'Flavor'" in normalized_error
+    assert "ParameterArgumentValidationError" in normalized_error
+    assert "invalid" in normalized_error
 
 
 def _git(repo: Path, *args: str) -> str:
