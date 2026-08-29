@@ -548,6 +548,8 @@ def _run(
             command,
             cwd=ROOT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=240,
         )
@@ -2110,6 +2112,20 @@ def test_packaged_gateway_and_materializer_bind_to_their_embedded_python():
     assert "CODEXHUB_E2E_PYTHON" in shared_start_info
     assert "$owner.MainModule.FileName" in gateway_probe
     assert "$ExpectedPythonPath" in gateway_probe
+    assert "Test-PythonExecutableIdentity" in gateway_probe
+    assert "pyvenv.cfg" in source[
+        source.index("function Test-PythonExecutableIdentity"):
+        source.index("function Test-GatewayPythonProcess")
+    ]
+    assert "$script:CandidateOfficialBootstrapBudgetSeconds = 120" in source
+    assert "Min($TimeoutSeconds, $script:CandidateOfficialBootstrapBudgetSeconds)" in source
+    arguments = source[
+        source.index("function Get-ClientArguments"):
+        source.index("function ConvertFrom-ClientEvents")
+    ]
+    assert "--dangerously-bypass-approvals-and-sandbox" in arguments
+    assert "'-s', 'read-only'" in arguments
+    assert "features.apps=false" in arguments
     assert "CandidatePythonPath = Resolve-E2EPythonPath" in source
     assert "MaterializerPythonPath = Resolve-E2EPythonPath" in source
     assert "-PythonPath $script:CandidatePythonPath" in source
@@ -3131,6 +3147,57 @@ def test_candidate_context_budget_bootstrap_failure_is_bounded_and_sanitized(tmp
     assert "fixture-codex-access-token" not in serialized
     assert "fixture-ollama-private-token" not in serialized
     assert not list((tmp_path / "output" / "isolated" / "work").glob("gui-*.launched"))
+
+
+def test_official_bootstrap_survives_hang_past_legacy_thirty_second_kill(tmp_path):
+    def hang_past_legacy_kill(_output, _isolation, debug_build):
+        Path(f"{debug_build}.bootstrap-hang-35").write_text("hang", encoding="ascii")
+
+    started = time.monotonic()
+    result = _run(
+        tmp_path,
+        debug_fake="fake-debug-build-official-bootstrap.cmd",
+        mutate=hang_past_legacy_kill,
+        cli_only=True,
+        finalize_manual=False,
+        timeout_seconds=60,
+        overall_timeout_seconds=120,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert elapsed >= 30
+    assert elapsed < 90
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    assert summary["verification_scope"] == "cli_only"
+    assert summary["outcome"] == "passed"
+    assert summary["counts"]["automated_case_count"] == 8
+
+
+def test_official_bootstrap_hang_still_fails_closed_inside_timeout_seconds(tmp_path):
+    def hang_past_legacy_kill(_output, _isolation, debug_build):
+        Path(f"{debug_build}.bootstrap-hang-35").write_text("hang", encoding="ascii")
+
+    started = time.monotonic()
+    result = _run(
+        tmp_path,
+        debug_fake="fake-debug-build-official-bootstrap.cmd",
+        mutate=hang_past_legacy_kill,
+        cli_only=True,
+        finalize_manual=False,
+        timeout_seconds=1,
+        overall_timeout_seconds=30,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode != 0
+    assert elapsed < 20
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    assert summary["failure_classification"] == "candidate_gateway_bootstrap_timeout"
 
 
 def test_candidate_retries_transient_native_model_cache_timeout_within_shared_budget(

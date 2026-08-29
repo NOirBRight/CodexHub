@@ -256,6 +256,10 @@ test("main tabs use persistent panes and tab clicks do not reload runtime data",
   assert.match(gatewayTelemetryEffect, /visibleTab !== "gateway"/);
   assert.match(gatewayTelemetryEffect, /window\.setTimeout\(\(\) => \{[\s\S]*refreshGatewayTelemetry/);
   assert.match(gatewayTelemetryEffect, /loadGatewayClients\(\{ staleMs: 30_000 \}\)/);
+  const telemetryRefreshSource =
+    appSource.match(/const refreshGatewayTelemetry = useCallback[\s\S]*?\}, \[[^\]]*\]\);/)?.[0] ?? "";
+  assert.match(telemetryRefreshSource, /if \(!gatewayVisited \|\| visibleTab !== "gateway"\)/);
+  assert.match(telemetryRefreshSource, /api\.gatewayUsageSnapshot\(usageWindow\)/);
   assert.doesNotMatch(appSource, /activeTab === "codexhub"\s*\?\s*\(/);
   assert.doesNotMatch(appSource, /activeTab === "codexhub" \? "block" : "hidden"/);
   assert.doesNotMatch(appSource, /activeTab === "gateway" \? "block" : "hidden"/);
@@ -1072,8 +1076,9 @@ test("usage telemetry uses a single snapshot call and keeps usage errors out of 
 
   assert.match(tauriSource, /gatewayUsageSnapshot: \(window\?: UsageQueryWindow \| null\) =>/);
   assert.match(tauriSource, /call<GatewayUsageSnapshot>\(COMMANDS.gatewayUsageSnapshot/);
-  const telemetryRefresh = appSource.match(/const refreshGatewayTelemetry = useCallback[\s\S]*?\}, \[runCachedRequest, usageWindow\]\);/)?.[0] ?? "";
+  const telemetryRefresh = appSource.match(/const refreshGatewayTelemetry = useCallback[\s\S]*?\}, \[gatewayVisited, runCachedRequest, usageWindow, visibleTab\]\);/)?.[0] ?? "";
   assert.match(await readFile(runtimeStorePath, "utf8"), /gatewayUsageSnapshot: RuntimeCache<GatewayUsageSnapshot>/);
+  assert.match(telemetryRefresh, /if \(!gatewayVisited \|\| visibleTab !== "gateway"\)/);
   assert.match(telemetryRefresh, /api\.gatewayUsageSnapshot\(usageWindow\)/);
   assert.match(telemetryRefresh, /quiet: true/);
   assert.match(appSource, /usageError=\{runtime\.gatewayUsageSnapshot\.error\}/);
@@ -2122,10 +2127,11 @@ test("provider endpoint probe persists detected formats and selects the recommen
   assert.match(catalogActionsSource, /const detectedFormat = probeDetectedEndpointFormat\(result\);/);
   assert.match(catalogActionsSource, /detectedFormat[\s\S]*t\("providers\.probeCompleted"/);
   assert.match(catalogActionsSource, /t\("providers\.probeNoSupportedEndpoint"\)/);
+  assert.match(catalogActionsSource, /pendingNewProvider\?\.id === providerId/);
   assert.match(catalogActionsSource, /const saved = await api\.saveProviders\(nextProviders\);/);
   assert.match(catalogActionsSource, /updateToast\(toastId, \{[\s\S]*providers\.probeCompleted/);
-  assert.match(providerDetail, /const normalizedProvider = useMemo\(\(\) => normalizeProviderEndpointSelection\(provider\), \[provider\]\);/);
-  assert.match(providerDetail, /const dirty = isProviderDirty\(normalizedProvider, draft\);/);
+  assert.match(providerDetail, /upstream_format: provider\.upstream_format/);
+  assert.match(providerDetail, /const dirty = unsaved \|\| isProviderDirty\(normalizedProvider, draft\);/);
   assert.doesNotMatch(providerDetail, /JSON\.stringify\(draft\)/);
   assert.match(providerEditorSource, /import \{ isProviderDirty \} from "\.\.\/\.\.\/lib\/providerComparison";/);
   assert.match(providerDetail, /setDraft\(\(current\) => applyProviderProbeResult\(current, result\)\);/);
@@ -2893,9 +2899,13 @@ test("connection switching delegates idempotent history reconciliation to the ba
   ]);
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
-  assert.match(configSource, /switch_mode_with_paths_takeover\([\s\S]*crate::history::reconcile_after_confirmed_route_switch\(Some\(target_provider\)\)/);
+  assert.match(configSource, /crate::history::reconcile_after_confirmed_route_switch\(Some\(target_provider\)\)/);
+  assert.doesNotMatch(configSource, /std::thread::spawn/);
   assert.match(configSource, /mode == "custom" \|\| settings\.unified_codex_history/);
   assert.match(configSource, /status\.history_sync_status = Some\(result\.status\.as_str\(\)\.to_string\(\)\)/);
+  assert.match(configSource, /status\.history_sync_message = Some\(error\)/);
+  assert.match(configSource, /crate::catalog::generate_catalog\(\)\?/);
+  assert.doesNotMatch(configSource, /catalog refresh before Codex Hub connect failed/);
   // The route command owns reconciliation; the UI must not launch a duplicate repair.
   assert.doesNotMatch(action, /targetProvider/);
   assert.doesNotMatch(action, /repairUnifiedHistoryInBackground/);
@@ -2920,18 +2930,23 @@ test("Codex Hub connection failures no longer mention history sync", async () =>
   assert.doesNotMatch(pageToastSource, /toast\.tone === "success"[\s\S]{0,160}"truncate"/);
 });
 
-test("Codex Hub connection ignores structured history sync fields from switch status", async () => {
-  const [providersSource, typesSource] = await Promise.all([
+test("Codex Hub connection reports structured history sync failures on the route toast", async () => {
+  const [providersSource, typesSource, enSource, zhSource] = await Promise.all([
     readProviderContractSource(),
     readFile(typesPath, "utf8"),
+    readFile(enLocalePath, "utf8"),
+    readFile(zhLocalePath, "utf8"),
   ]);
   const action = providersSource.match(/async function toggleCodexHubConnection\(\)[\s\S]*?async function reorderOfficialModels/)?.[0] ?? "";
 
   assert.match(typesSource, /history_sync_status\?: string \| null;/);
   assert.match(typesSource, /history_sync_message\?: string \| null;/);
-  assert.doesNotMatch(action, /status\.history_sync_status/);
-  assert.doesNotMatch(action, /history sync failed/);
-  assert.doesNotMatch(action, /history sync skipped/);
+  assert.match(action, /const historySyncStatus = status\.history_sync_status;/);
+  assert.match(action, /historySyncStatus !== "clean" &&\s*historySyncStatus !== "repaired"/);
+  assert.match(action, /codexRouteChangedHistoryIssueRestart/);
+  assert.match(action, /tone: "error"/);
+  assert.match(enSource, /codexRouteChangedHistoryIssueRestart:[\s\S]*Restart Codex App/);
+  assert.match(zhSource, /codexRouteChangedHistoryIssueRestart:[\s\S]*重启 Codex App/);
 });
 
 test("Codex Hub connection does not retry after history sync failures", async () => {
@@ -2958,9 +2973,9 @@ test("provider discovery updates the selected provider and reports progress", as
   const providersSource = await readProviderContractSource();
 
   assert.match(providersSource, /showToast\(t\("providers\.discoveringProviderModels", \{ name: provider\.name \}\), "loading"\)/);
-  assert.match(providersSource, /const\s+persistedProvider\s*=\s*providers\.find\(\(item\)\s*=>\s*item\.id\s*===\s*provider\.id\)\s*\?\?\s*provider;/);
-  assert.match(providersSource, /const nextProvider = \{\s*\.\.\.persistedProvider,\s*models: mergeDiscoveredModels\(retainedModels, models\),\s*\}/s);
-  assert.match(providersSource, /provider\.id === "xai"/);
+  assert.match(providersSource, /const\s+persistedProvider\s*=\s*isPending\s*\?[\s\S]*providers\.find\(\(item\)\s*=>\s*item\.id\s*===\s*provider\.id\)\s*\?\?\s*provider;/);
+  assert.match(providersSource, /const nextProvider = \{\s*\.\.\.persistedProvider,\s*models: mergeDiscoveredModels\(retainedModels, discovered\),\s*\}/s);
+  assert.match(providersSource, /discovery_policy === "retain-intersection"/);
   assert.match(providersSource, /api\.discoverProviderModels\(\s*provider\.base_url,\s*provider\.api_key \?\? "",\s*provider\.id,/);
   assert.match(providersSource, /setProviders\(nextProviders\)/);
   assert.match(providersSource, /t\("providers\.discoveredProviderModels", \{/);
@@ -3024,7 +3039,8 @@ test("provider write actions keep explicit success feedback", async () => {
   assert.match(providersSource, /successMessage\?: string/);
   assert.match(providersSource, /t\("providers\.providerAdded", \{ name: providerName \}\)/);
   assert.match(providersSource, /t\("providers\.providerDeleted", \{ name: target\.name \}\)/);
-  assert.match(providersSource, /onChange\(draft, t\("providers\.providerSaved", \{ name: draft\.name \}\)\)/);
+  assert.match(providersSource, /t\("providers\.providerSaved", \{ name: draft\.name \}\)/);
+  assert.match(providersSource, /onChange\(\s*draft,\s*unsaved\s*\?\s*t\("providers\.providerAdded"/);
   assert.match(providersSource, /onChange\(next, t\("providers\.modelRemoved"\)\)/);
 });
 
@@ -3072,6 +3088,8 @@ test("Windows portable build uses the Tauri custom protocol pipeline", async () 
   assert.match(portableScript, /Prepare-PythonRuntime\.ps1/);
   assert.match(portableScript, /\$tauriBuildArgs = @\("tauri", "build", "--config", \$generatedTauriConfigPath, "--no-bundle", "--ci"\)/);
   assert.match(portableScript, /& cargo @tauriBuildArgs/);
+  assert.match(portableScript, /"config", "src-python", "python", "scripts"/);
+  assert.match(portableScript, /scripts\\xai_device_login\.py/);
   assert.doesNotMatch(portableScript, /cargo build --release/);
 });
 
@@ -3541,8 +3559,21 @@ test("xAI SuperGrok login card uses one loading toast and the XAI_API_KEY fallba
       readFile(zhLocalePath, "utf8"),
     ]);
 
-  assert.match(editorSource, /provider\.id === "xai" \? <XaiLoginCard onSignedIn=\{\(\) => void ensureXaiCatalogReady\(\)\} \/> : null/);
+  assert.match(editorSource, /xaiSubscriptionAuth && signedIn === false/);
+  assert.match(editorSource, /XaiLoginCard/);
+  assert.match(editorSource, /onSignedIn=\{\(\) => void ensureXaiCatalogReady\(\)\}/);
+  assert.match(editorSource, /subscriptionAuthAdapter\(provider\) \?\? subscriptionAuthAdapter\(preset\)/);
+  assert.match(editorSource, /subscriptionAuth === "xai_oauth"/);
+  assert.match(editorSource, /bundledPresetFor\(current\.id, bundled\)/);
+  assert.doesNotMatch(editorSource, /bundled\.find\(\(item\) => item\.id === "xai"\)/);
+  assert.match(editorSource, /OfficialOpenAIUsageLimitBars/);
+  assert.match(editorSource, /SubscriptionAuthChip/);
+  assert.match(editorSource, /t\("providers\.authorized"\)/);
+  assert.match(editorSource, /api\.xaiLogout\(\)/);
+  assert.doesNotMatch(editorSource, /<OfficialOpenAIUsagePanel/);
   assert.match(editorSource, /applyCatalogPresetDefaults/);
+  assert.match(editorSource, /unsaved\s*\?\s*t\("providers\.providerAdded"/);
+  assert.match(cardSource, /onAuthChange\?\.\(signedIn\)/);
   assert.match(cardSource, /onSignedIn\?\.\(\)/);
   assert.match(cardSource, /notifySignedIn\(\)/);
   assert.match(cardSource, /providers\.xaiSignedInBody/);
@@ -3606,12 +3637,14 @@ test("add provider opens a catalog overlay instead of a blank form", async () =>
   assert.match(providersSource, /onAdd=\{\(\) => void openCatalogPicker\(\)\}/);
   assert.match(providersSource, /<ProviderCatalogPicker/);
   assert.match(providersSource, /onSelectCustom=\{\(\) => \{[\s\S]*selectProvider\(ADD_ID\)/);
-  assert.match(providersSource, /void addCatalogProvider\(preset\)/);
+  assert.match(providersSource, /addCatalogProvider\(preset\)/);
   assert.match(pickerSource, /role="dialog"/);
+  assert.match(pickerSource, /provider\.onboarding_hint/);
   assert.match(pickerSource, /onSelectPreset/);
   assert.match(pickerSource, /chooseCatalogProviderCustom/);
-  assert.match(actionsSource, /async function addCatalogProvider/);
-  assert.match(actionsSource, /applyCatalogPresetDefaults\(existing, preset\)/);
+  assert.match(actionsSource, /function addCatalogProvider/);
+  assert.match(actionsSource, /setPendingNewProvider\(instantiateCatalogProvider/);
+  assert.doesNotMatch(actionsSource, /async function addCatalogProvider[\s\S]*saveProviders/);
   assert.match(commandsSource, /getBundledProviders: "get_bundled_providers"/);
   assert.match(tauriSource, /COMMANDS.getBundledProviders/);
   assert.match(mainSource, /fn get_bundled_providers/);

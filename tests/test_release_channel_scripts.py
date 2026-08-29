@@ -488,6 +488,18 @@ def test_linux_release_builder_rejects_stale_or_ambiguous_bundle_artifacts():
     assert "deb package version mismatch" in script
 
 
+def test_linux_portable_packages_the_xai_device_login_helper():
+    script = (ROOT / "scripts" / "build-linux-portable.sh").read_text(encoding="utf-8")
+    tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
+
+    assert 'for resource in config src-python python scripts' in script
+    assert '"$portable_dir/scripts/xai_device_login.py"' in script
+    assert (
+        tauri["bundle"]["resources"]["../scripts/xai_device_login.py"]
+        == "scripts/xai_device_login.py"
+    )
+
+
 def _validate_manifest(
     flavor: str,
     version: str,

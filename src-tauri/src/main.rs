@@ -194,6 +194,12 @@ pub struct Provider {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_developer_role: Option<bool>,
     pub display_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_capabilities: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_policy: Option<String>,
     pub sort_order: Option<i32>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -1308,6 +1314,7 @@ fn run_gui() {
             xai_auth::xai_start_device_login,
             xai_auth::xai_poll_device_login,
             xai_auth::xai_logout,
+            xai_auth::xai_usage_snapshot,
             xai_auth::xai_open_verification_url
         ])
         .build(tauri::generate_context!())

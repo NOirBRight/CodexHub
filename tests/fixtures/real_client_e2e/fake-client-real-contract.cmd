@@ -47,7 +47,7 @@ if "%CODEXHUB_E2E_CLIENT%"=="codex-cli" (
   ) else if "%CODEXHUB_E2E_CODEX_TOOL_RESULT%"=="failed" (
     echo {"type":"item.completed","item":{"type":"command_execution","command":"read sentinel.txt","status":"completed","exit_code":7}}
   ) else (
-    echo {"type":"item.completed","item":{"type":"command_execution","command":"read sentinel.txt","status":"completed","exit_code":0}}
+    echo {"type":"item.completed","item":{"type":"command_execution","command":"Get-Content -Raw -LiteralPath ./sentinel.txt","status":"completed","exit_code":0}}
   )
   echo {"type":"item.completed","item":{"type":"agent_message","text":"%CODEXHUB_E2E_SENTINEL%"}}
   echo {"type":"turn.completed"}

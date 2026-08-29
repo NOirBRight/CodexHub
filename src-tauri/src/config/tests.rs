@@ -1,5 +1,5 @@
 use super::{
-    codex_overlay_owner, get_codex_context_guard_status_with_paths,
+    apply_history_sync_result, codex_overlay_owner, get_codex_context_guard_status_with_paths,
     get_bundled_providers_with_paths, get_providers_with_paths,
     get_settings_with_paths, migrate_legacy_context_guard_with_paths,
     republish_managed_codex_context_budget_with_paths,
@@ -33,6 +33,9 @@ fn providers_toml_roundtrip_preserves_all_provider_and_model_fields() {
         reports_cached_input_tokens: Some(true),
         supports_developer_role: None,
         display_prefix: Some("Volc".to_string()),
+        auth_capabilities: None,
+        onboarding_hint: Some("providers.catalogProviderSubscriptionHint".to_string()),
+        discovery_policy: None,
         sort_order: Some(2),
         enabled: true,
         locked: false,
@@ -86,6 +89,7 @@ fn providers_toml_roundtrip_preserves_all_provider_and_model_fields() {
     assert!(written.contains("tool_protocol = \"chat_tools\""));
     assert!(written.contains("tool_surface_strategy = \"eager\""));
     assert!(written.contains("reports_cached_input_tokens = true"));
+    assert!(written.contains("onboarding_hint = \"providers.catalogProviderSubscriptionHint\""));
     assert!(written.contains("\"responses\""));
     assert!(written.contains("upstream_model = \"ep-20260629\""));
     assert!(written.contains("aliases"));
@@ -119,6 +123,9 @@ fn providers_toml_roundtrip_preserves_anthropic_endpoint_selection() {
         reports_cached_input_tokens: None,
         supports_developer_role: None,
         display_prefix: Some("anthropic/".to_string()),
+        auth_capabilities: None,
+        onboarding_hint: None,
+        discovery_policy: None,
         sort_order: Some(3),
         enabled: true,
         locked: false,
@@ -722,6 +729,19 @@ fn switch_mode_custom_applies_config_overlay_without_history_sync() {
     assert!(!commands[0].args.iter().any(|arg| arg == "normalize-fast"));
     assert_eq!(status.history_sync_status, None);
     assert_eq!(status.history_sync_message, None);
+}
+
+#[test]
+fn route_switch_history_failure_is_returned_to_the_user() {
+    let mut status = crate::AppStatus::scaffold("route switched");
+
+    apply_history_sync_result(&mut status, Err("history database is busy".to_string()));
+
+    assert_eq!(status.history_sync_status.as_deref(), Some("conflict"));
+    assert_eq!(
+        status.history_sync_message.as_deref(),
+        Some("history database is busy")
+    );
 }
 
 #[test]

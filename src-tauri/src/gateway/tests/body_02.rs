@@ -16,6 +16,9 @@ fn omp_models_omit_unknown_context_window_instead_of_inventing_a_default() {
         reports_cached_input_tokens: None,
         supports_developer_role: None,
         display_prefix: Some("Ollama".to_string()),
+        auth_capabilities: None,
+        onboarding_hint: None,
+        discovery_policy: None,
         sort_order: None,
         enabled: true,
         locked: false,
@@ -356,6 +359,53 @@ fn usage_summary_reads_sqlite_requests_as_source_of_truth() {
 }
 
 #[test]
+fn usage_snapshot_caps_visible_events_without_truncating_summary() {
+    let root = unique_temp_dir("codexhub-usage-snapshot-cap");
+    fs::create_dir_all(&root).unwrap();
+    let event_path = root.join("codex-proxy-events.jsonl");
+    let db_path = root.join("codex-proxy-telemetry.sqlite");
+    fs::write(&event_path, "").unwrap();
+    let mut connection = rusqlite::Connection::open(&db_path).unwrap();
+    super::initialize_telemetry_db(&connection).unwrap();
+    let transaction = connection.transaction().unwrap();
+    for index in 0..501 {
+        transaction
+            .execute(
+                r#"
+                INSERT INTO gateway_requests (
+                    request_id, completed_ts, method, path, route_reason,
+                    model_canonical, upstream, provider_id, status,
+                    usage_source, usage_input_tokens, usage_output_tokens,
+                    usage_total_tokens, created_at, updated_at
+                ) VALUES (?1, ?2, 'POST', '/v1/responses', 'model',
+                    'openai/gpt-5.5', 'official', 'official', 200,
+                    'upstream', 1, 1, 2, 'test', 'test')
+                "#,
+                rusqlite::params![
+                    format!("req-{index:03}"),
+                    format!("2026-07-03T01:{:02}:{:02}Z", index / 60, index % 60),
+                ],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+    drop(connection);
+
+    let snapshot = super::gateway_usage_snapshot_for_paths(
+        &event_path,
+        &db_path,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(snapshot.events.len(), 500);
+    assert_eq!(snapshot.summary.requests, 501);
+    assert_eq!(snapshot.summary.total_tokens, Some(1_002));
+}
+
+#[test]
 fn usage_events_normalize_official_bare_model_names() {
     let root = unique_temp_dir("codexhub-usage-official-models");
     fs::create_dir_all(&root).unwrap();
@@ -614,6 +664,48 @@ fn telemetry_incremental_ingest_resets_after_log_truncation_and_dedupes() {
         fs::metadata(&log_path).unwrap().len()
     );
     assert_eq!(status.lag_bytes, 0);
+}
+
+#[test]
+fn telemetry_ingest_skips_sqlite_when_jsonl_size_is_unchanged() {
+    let root = unique_temp_dir("codexhub-usage-ingest-skip-unchanged");
+    fs::create_dir_all(&root).unwrap();
+    let log_path = root.join("codex-proxy-events.jsonl");
+    let db_path = root.join("codex-proxy-telemetry.sqlite");
+    let line = r#"{"ts":"2026-07-03T01:00:00Z","event":"request_complete","request_id":"req-skip","status":200,"duration_ms":10,"usage_source":"upstream","usage_input_tokens":1,"usage_output_tokens":2,"upstream":"official","model":"openai/gpt-5.5"}"#;
+    fs::write(&log_path, format!("{line}\n")).unwrap();
+
+    super::reset_telemetry_sqlite_ready_calls();
+    let first = super::ingest_telemetry_once_for_paths(&log_path, &db_path).unwrap();
+    let after_first = super::telemetry_sqlite_ready_calls();
+    assert!(after_first > 0);
+    assert_eq!(first.lag_bytes, 0);
+
+    let second = super::ingest_telemetry_once_for_paths(&log_path, &db_path).unwrap();
+    assert_eq!(super::telemetry_sqlite_ready_calls(), after_first);
+    assert_eq!(second.indexed_offset, first.indexed_offset);
+    assert_eq!(second.event_log_size, first.event_log_size);
+    assert_eq!(second.lag_bytes, 0);
+}
+
+#[test]
+fn telemetry_ingest_rebuilds_deleted_sqlite_when_jsonl_is_unchanged() {
+    let root = unique_temp_dir("codexhub-usage-ingest-rebuild-deleted-db");
+    fs::create_dir_all(&root).unwrap();
+    let log_path = root.join("codex-proxy-events.jsonl");
+    let db_path = root.join("codex-proxy-telemetry.sqlite");
+    let line = r#"{"ts":"2026-07-03T01:00:00Z","event":"request_complete","request_id":"req-rebuild","status":200,"duration_ms":10,"usage_source":"upstream","usage_input_tokens":1,"usage_output_tokens":2,"upstream":"official","model":"openai/gpt-5.5"}"#;
+    fs::write(&log_path, format!("{line}\n")).unwrap();
+
+    super::ingest_telemetry_once_for_paths(&log_path, &db_path).unwrap();
+    fs::remove_file(&db_path).unwrap();
+
+    let rebuilt = super::ingest_telemetry_once_for_paths(&log_path, &db_path).unwrap();
+    let events = read_usage_events_from_sqlite_path(&db_path, usize::MAX).unwrap();
+
+    assert_eq!(rebuilt.lag_bytes, 0);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].request_id.as_deref(), Some("req-rebuild"));
 }
 
 #[test]
@@ -1099,6 +1191,11 @@ fn pi_apply_writes_models_and_settings_with_backup() {
 
 #[test]
 fn pi_apply_and_detach_preserve_foreign_providers_and_activation() {
+    let _guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-pi-apply-detach-cycle");
     let settings_path = root.join("settings.json");
     let models_path = root.join("models.json");
@@ -1111,6 +1208,7 @@ fn pi_apply_and_detach_preserve_foreign_providers_and_activation() {
             r#"{"providers":{"ollama":{"baseUrl":"http://localhost:11434/v1","api":"openai-completions","apiKey":"ollama","models":[{"id":"qwen2.5-coder:7b"}]}}}"#,
         )
         .unwrap();
+    std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
     let settings = Settings::default();
 
     super::apply_pi_config_with_paths(
@@ -1167,6 +1265,7 @@ fn pi_apply_and_detach_preserve_foreign_providers_and_activation() {
             .and_then(serde_json::Value::as_str),
         Some("qwen2.5-coder:7b")
     );
+    restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
 }
 
 #[test]

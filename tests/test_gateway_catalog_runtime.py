@@ -11,6 +11,7 @@ import pytest
 import gateway_catalog_runtime
 from catalog import CatalogPolicy
 from gateway_catalog_runtime import CatalogFacts, CatalogRuntime
+from gateway_errors import ModelIdentityResolutionError
 
 
 FORBIDDEN_SOURCE_MARKERS = (
@@ -62,6 +63,25 @@ def test_catalog_facts_are_deeply_immutable() -> None:
         facts.official_fast_variant_base_models["other"] = "base"  # type: ignore[index]
 
 
+def test_openai_model_list_stays_openai_shaped() -> None:
+    payload = gateway_catalog_runtime.openai_model_list(
+        {
+            "fetched_at": "2026-08-25T00:00:00Z",
+            "models": [
+                {"slug": "gpt-5.6-luna", "codex_proxy_metadata": {"provider": "openai"}},
+                {"slug": "xai/grok-4", "codex_proxy_metadata": {"provider": "xai"}},
+            ],
+        }
+    )
+    assert payload == {
+        "object": "list",
+        "data": [
+            {"id": "gpt-5.6-luna", "object": "model", "owned_by": "openai"},
+            {"id": "xai/grok-4", "object": "model", "owned_by": "xai"},
+        ],
+    }
+
+
 def test_generated_catalog_reader_hook_normalizes_exact_official_identity() -> None:
     requested_path = Path("missing-generated-catalog.json")
     runtime = CatalogRuntime(
@@ -74,6 +94,69 @@ def test_generated_catalog_reader_hook_normalizes_exact_official_identity() -> N
     )
 
     assert runtime.generated_catalog_slugs() == {"gpt-5.6-sol", "provider/model"}
+
+
+def test_xai_oauth_session_routes_grok_without_api_key() -> None:
+    from providers_config import ModelConfig, ProviderConfig, build_external_model_index
+
+    providers = [
+        ProviderConfig(
+            id="xai",
+            name="xAI",
+            base_url="https://api.x.ai/v1",
+            api_key="{env:XAI_API_KEY}",
+            models=[ModelConfig(id="grok-4.6")],
+        )
+    ]
+    with (
+        patch.dict("os.environ", {}, clear=True),
+        patch(
+            "providers_config.provider_has_subscription_session",
+            side_effect=lambda provider_id: provider_id == "xai",
+        ),
+    ):
+        index = build_external_model_index(providers)
+
+    runtime = CatalogRuntime(
+        policy_reader=lambda _path: _policy(),
+        external_model_reader=lambda slug: index.get(slug),
+        official_fast_variant_reader=lambda _slug, _policy: None,
+        official_alias_reader=lambda _slug, _policy: None,
+        generated_official_reader=lambda _slug, _policy: None,
+        ollama_alias_reader=lambda _slug, _policy: None,
+        ollama_runtime_reader=lambda _slug, _policy: None,
+    )
+
+    with patch(
+        "gateway_catalog_runtime.provider_auth_mode",
+        side_effect=lambda provider_id: "xai_oauth" if provider_id == "xai" else None,
+    ):
+        upstream = runtime.choose_upstream("xai/grok-4.6")
+
+    assert upstream["provider_id"] == "xai"
+    assert upstream["model_id"] == "xai/grok-4.6"
+    assert upstream["upstream_model"] == "grok-4.6"
+    assert upstream["auth"] == "xai_oauth"
+    assert upstream["api_key"] is None
+
+
+def test_xai_without_api_key_or_session_is_unsupported_model() -> None:
+    runtime = CatalogRuntime(
+        policy_reader=lambda _path: _policy(),
+        external_model_reader=lambda _slug: None,
+        official_fast_variant_reader=lambda _slug, _policy: None,
+        official_alias_reader=lambda _slug, _policy: None,
+        generated_official_reader=lambda _slug, _policy: None,
+        ollama_alias_reader=lambda _slug, _policy: None,
+        ollama_runtime_reader=lambda _slug, _policy: None,
+    )
+
+    with pytest.raises(ModelIdentityResolutionError) as failure:
+        runtime.choose_upstream("xai/grok-4.6")
+
+    assert failure.value.reason == "unsupported_model"
+    assert failure.value.provider_id == "xai"
+    assert failure.value.model_slug == "xai/grok-4.6"
 
 
 def test_external_resolution_returns_ephemeral_provider_model_facts() -> None:

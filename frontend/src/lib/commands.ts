@@ -78,6 +78,7 @@ export const COMMANDS = {
   xaiStartDeviceLogin: "xai_start_device_login",
   xaiPollDeviceLogin: "xai_poll_device_login",
   xaiLogout: "xai_logout",
+  xaiUsageSnapshot: "xai_usage_snapshot",
   xaiOpenVerificationUrl: "xai_open_verification_url",
 } as const;
 

@@ -2070,6 +2070,8 @@ fn discovered_model_id(value: &Value) -> Option<String> {
 }
 
 fn model_from_discovered_item(id: String, item: &Value) -> Model {
+    let reasoning_levels = discovered_reasoning_levels(item);
+    let default_reasoning = discovered_default_reasoning(item, reasoning_levels.as_deref());
     Model {
         id,
         display_name: None,
@@ -2080,7 +2082,118 @@ fn model_from_discovered_item(id: String, item: &Value) -> Model {
             "context",
         ),
         max_output_tokens: numeric_limit(item, &["max_output_tokens", "output_tokens"], "output"),
+        input_modalities: discovered_input_modalities(item),
+        supported_reasoning_levels: reasoning_levels,
+        default_reasoning_level: default_reasoning,
         ..Model::default()
+    }
+}
+
+fn discovered_reasoning_levels(item: &Value) -> Option<Vec<String>> {
+    let object = item.as_object()?;
+    for key in [
+        "supported_reasoning_levels",
+        "supported_reasoning_efforts",
+        "reasoning_levels",
+        "reasoning_efforts",
+    ] {
+        if let Some(levels) = object.get(key).and_then(string_list_from_json) {
+            if !levels.is_empty() {
+                return Some(levels);
+            }
+        }
+    }
+    if object.get("reasoning").and_then(Value::as_bool) == Some(true)
+        || object
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.as_str()
+                        .is_some_and(|value| value.eq_ignore_ascii_case("reasoning") || value.eq_ignore_ascii_case("thinking"))
+                })
+            })
+    {
+        return Some(
+            ["low", "medium", "high", "xhigh", "max"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+    }
+    None
+}
+
+fn discovered_default_reasoning(item: &Value, levels: Option<&[String]>) -> Option<String> {
+    let object = item.as_object()?;
+    for key in ["default_reasoning_level", "default_reasoning_effort", "reasoning_effort"] {
+        if let Some(value) = object.get(key).and_then(Value::as_str).and_then(nonblank) {
+            let normalized = value.to_ascii_lowercase();
+            if levels.is_none_or(|items| items.iter().any(|item| item == &normalized)) {
+                return Some(normalized);
+            }
+        }
+    }
+    levels.and_then(|items| {
+        items
+            .iter()
+            .find(|item| item.as_str() == "high")
+            .cloned()
+            .or_else(|| items.first().cloned())
+    })
+}
+
+fn discovered_input_modalities(item: &Value) -> Option<Vec<String>> {
+    let object = item.as_object()?;
+    if let Some(modalities) = object.get("input_modalities").and_then(string_list_from_json) {
+        if !modalities.is_empty() {
+            return Some(modalities);
+        }
+    }
+    let vision = object.get("capabilities").and_then(Value::as_array).is_some_and(|items| {
+        items.iter().any(|item| {
+            item.as_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case("vision"))
+        })
+    });
+    if vision {
+        return Some(vec!["text".to_string(), "image".to_string()]);
+    }
+    None
+}
+
+fn string_list_from_json(value: &Value) -> Option<Vec<String>> {
+    let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    match value {
+        Value::Array(values) => {
+            for item in values {
+                let raw = if let Some(text) = item.as_str() {
+                    text
+                } else if let Some(effort) = item.get("effort").and_then(Value::as_str) {
+                    effort
+                } else {
+                    continue;
+                };
+                let normalized = raw.trim().to_ascii_lowercase();
+                if normalized.is_empty() || !seen.insert(normalized.clone()) {
+                    continue;
+                }
+                items.push(normalized);
+            }
+        }
+        Value::String(text) => {
+            let normalized = text.trim().to_ascii_lowercase();
+            if !normalized.is_empty() {
+                items.push(normalized);
+            }
+        }
+        _ => return None,
+    }
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
     }
 }
 
@@ -4787,6 +4900,31 @@ for line in sys.stdin:
                 .contains("authorization: bearer provider-secret"));
             server.join();
         }
+    }
+
+    #[test]
+    fn provider_discovery_reads_reasoning_levels_and_vision_capabilities() {
+        let server = MockServer::json(
+            r#"{"data":[{"id":"grok-4","supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],"default_reasoning_level":"high","capabilities":["vision"]}]}"#,
+            Duration::ZERO,
+        );
+        let models = discover_provider_models_with_timeout(
+            &server.base_url(),
+            "provider-secret",
+            Duration::from_secs(2),
+        )
+        .expect("provider discovery");
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0].supported_reasoning_levels.as_deref(),
+            Some(["low".to_string(), "high".to_string()].as_slice())
+        );
+        assert_eq!(models[0].default_reasoning_level.as_deref(), Some("high"));
+        assert_eq!(
+            models[0].input_modalities.as_deref(),
+            Some(["text".to_string(), "image".to_string()].as_slice())
+        );
+        server.join();
     }
 
     #[test]

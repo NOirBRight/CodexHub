@@ -85,6 +85,9 @@ pub fn switch_mode_with_takeover(
     let python = find_python()?;
     let runner = ProcessCommandRunner;
 
+    if mode == "custom" {
+        crate::catalog::generate_catalog()?;
+    }
     let mut status =
         switch_mode_with_paths_takeover(mode, auto_sync, force_takeover, &paths, &python, &runner)?;
     let lifecycle = crate::proxy::status()?;
@@ -98,8 +101,19 @@ pub fn switch_mode_with_takeover(
     } else {
         "openai"
     };
+    apply_history_sync_result(
+        &mut status,
+        crate::history::reconcile_after_confirmed_route_switch(Some(target_provider)),
+    );
 
-    match crate::history::reconcile_after_confirmed_route_switch(Some(target_provider)) {
+    Ok(status)
+}
+
+fn apply_history_sync_result(
+    status: &mut AppStatus,
+    result: Result<crate::history::UnifiedHistoryResult, String>,
+) {
+    match result {
         Ok(result) => {
             status.history_sync_status = Some(result.status.as_str().to_string());
             status.history_sync_message = result.error.or(result.reason).or_else(|| {
@@ -116,8 +130,6 @@ pub fn switch_mode_with_takeover(
             status.history_sync_message = Some(error);
         }
     }
-
-    Ok(status)
 }
 
 #[derive(Debug, Clone)]

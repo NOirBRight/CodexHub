@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, Read, Seek};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,6 +19,30 @@ const EVENT_READ_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 const TELEMETRY_INGEST_BATCH_LINES: usize = 1000;
 const TELEMETRY_INGEST_BATCH_BYTES: u64 = 1024 * 1024;
 const TELEMETRY_INGEST_INTERVAL: Duration = Duration::from_secs(2);
+const USAGE_SNAPSHOT_EVENT_CAP: usize = 500;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TelemetryIngestKey {
+    event_log: PathBuf,
+    sqlite_db: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TelemetryFileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    identity: u128,
+}
+
+struct TelemetryIngestCursor {
+    event_log_stamp: Option<TelemetryFileStamp>,
+    sqlite_stamp: TelemetryFileStamp,
+    status: TelemetryStatus,
+}
+
+static TELEMETRY_INGEST_CURSOR: OnceLock<Mutex<HashMap<TelemetryIngestKey, TelemetryIngestCursor>>> =
+    OnceLock::new();
+static TELEMETRY_SQLITE_READY_CALLS: AtomicU64 = AtomicU64::new(0);
 
 const OFFICIAL_FAST_PRICING: &[(&str, f64, f64, f64)] = &[
     ("gpt-5.5-fast", 12.50, 1.25, 75.00),
@@ -39,10 +64,6 @@ impl UsageTimeWindow {
             start_ts: non_empty_owned(start_ts),
             end_ts: non_empty_owned(end_ts),
         }
-    }
-
-    fn is_bounded(&self) -> bool {
-        self.start_ts.is_some() || self.end_ts.is_some()
     }
 }
 
@@ -96,11 +117,9 @@ pub(super) fn gateway_usage_events(
     end_ts: Option<String>,
 ) -> Result<Vec<GatewayUsageEvent>, String> {
     let window = UsageTimeWindow::new(start_ts, end_ts);
-    let limit = match limit {
-        Some(value) => value.clamp(1, 500),
-        None if window.is_bounded() => usize::MAX,
-        None => 100,
-    };
+    let limit = limit
+        .unwrap_or(USAGE_SNAPSHOT_EVENT_CAP)
+        .clamp(1, USAGE_SNAPSHOT_EVENT_CAP);
     let paths = GatewayTelemetryPaths::runtime(codex_home);
     ensure_telemetry_sqlite_ready(&paths.sqlite_db)?;
     read_usage_events_from_sqlite_path_with_window(&paths.sqlite_db, limit, &window)
@@ -183,6 +202,7 @@ pub(super) fn start_telemetry_ingester(codex_home: fn() -> PathBuf) {
 }
 
 fn ensure_telemetry_sqlite_ready(path: &Path) -> Result<(), String> {
+    TELEMETRY_SQLITE_READY_CALLS.fetch_add(1, Ordering::Relaxed);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -194,6 +214,71 @@ fn ensure_telemetry_sqlite_ready(path: &Path) -> Result<(), String> {
     let connection = open_telemetry_connection(path)?;
     initialize_telemetry_db(&connection)?;
     Ok(())
+}
+
+fn ingest_cursor_map() -> &'static Mutex<HashMap<TelemetryIngestKey, TelemetryIngestCursor>> {
+    TELEMETRY_INGEST_CURSOR.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn telemetry_file_stamp(path: &Path) -> Option<TelemetryFileStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        (u128::from(metadata.dev()) << 64) | u128::from(metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let identity = 0;
+    Some(TelemetryFileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        identity,
+    })
+}
+
+fn cached_ingest_if_unchanged(event_path: &Path, db_path: &Path) -> Option<TelemetryStatus> {
+    let key = TelemetryIngestKey {
+        event_log: event_path.to_path_buf(),
+        sqlite_db: db_path.to_path_buf(),
+    };
+    let event_log_stamp = telemetry_file_stamp(event_path);
+    let sqlite_stamp = telemetry_file_stamp(db_path)?;
+    let cache = ingest_cursor_map().lock().ok()?;
+    let cursor = cache.get(&key)?;
+    if cursor.event_log_stamp == event_log_stamp && cursor.sqlite_stamp == sqlite_stamp {
+        Some(cursor.status.clone())
+    } else {
+        None
+    }
+}
+
+fn remember_ingest_cursor(event_path: &Path, db_path: &Path, status: &TelemetryStatus) {
+    let Some(sqlite_stamp) = telemetry_file_stamp(db_path) else {
+        return;
+    };
+    if let Ok(mut cache) = ingest_cursor_map().lock() {
+        cache.insert(
+            TelemetryIngestKey {
+                event_log: event_path.to_path_buf(),
+                sqlite_db: db_path.to_path_buf(),
+            },
+            TelemetryIngestCursor {
+                event_log_stamp: telemetry_file_stamp(event_path),
+                sqlite_stamp,
+                status: status.clone(),
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn telemetry_sqlite_ready_calls() -> u64 {
+    TELEMETRY_SQLITE_READY_CALLS.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_telemetry_sqlite_ready_calls() {
+    TELEMETRY_SQLITE_READY_CALLS.store(0, Ordering::Relaxed);
 }
 
 fn telemetry_ingest_lock() -> &'static Mutex<()> {
@@ -212,10 +297,13 @@ pub(crate) fn ingest_telemetry_once_for_paths(
     let _guard = telemetry_ingest_lock()
         .lock()
         .map_err(|_| "telemetry ingest lock is poisoned".to_string())?;
+    let event_log_size = event_log_size(event_path);
+    if let Some(status) = cached_ingest_if_unchanged(event_path, db_path) {
+        return Ok(status);
+    }
     ensure_telemetry_sqlite_ready(db_path)?;
     let mut connection = open_telemetry_connection(db_path)?;
     initialize_telemetry_db(&connection)?;
-    let event_log_size = event_log_size(event_path);
     let meta_offset = telemetry_meta_u64(&connection, "last_ingested_offset")?;
     let mut indexed_offset = meta_offset
         .or_else(|| {
@@ -236,7 +324,10 @@ pub(crate) fn ingest_telemetry_once_for_paths(
     if next_offset != indexed_offset || meta_offset != Some(indexed_offset) {
         write_telemetry_ingest_batch(&mut connection, &events, next_offset)?;
     }
-    telemetry_status_for_paths(event_path, db_path)
+    drop(connection);
+    let status = telemetry_status_for_paths(event_path, db_path)?;
+    remember_ingest_cursor(event_path, db_path, &status);
+    Ok(status)
 }
 
 fn read_telemetry_ingest_batch(
@@ -918,14 +1009,10 @@ pub(crate) fn gateway_usage_snapshot_for_paths(
     ensure_telemetry_sqlite_ready(db_path)?;
     let window = UsageTimeWindow::new(start_ts, end_ts);
     let pricing = usage_pricing_by_model();
-    let event_limit = match limit {
-        Some(value) => value.clamp(1, 500),
-        None if window.is_bounded() => usize::MAX,
-        None => 100,
-    };
+    let event_limit = limit.unwrap_or(USAGE_SNAPSHOT_EVENT_CAP).clamp(1, USAGE_SNAPSHOT_EVENT_CAP);
+    let events = read_usage_events_from_sqlite_path_with_window(db_path, event_limit, &window)?;
     let summary =
         read_usage_summary_from_sqlite_path_with_pricing_and_window(db_path, &pricing, &window)?;
-    let events = read_usage_events_from_sqlite_path_with_window(db_path, event_limit, &window)?;
     let telemetry_status = telemetry_status_for_paths(event_path, db_path)?;
     Ok(GatewayUsageSnapshot {
         summary,

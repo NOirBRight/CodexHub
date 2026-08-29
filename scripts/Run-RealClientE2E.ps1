@@ -53,6 +53,11 @@ $script:RepositoryRoot = Split-Path -Parent $script:ScriptDirectory
 . (Join-Path $script:ScriptDirectory 'Resolve-CodexHubPython.ps1')
 $script:RepositoryPython = Resolve-CodexHubPythonPath -Root $script:RepositoryRoot
 $script:RepositoryPythonDirectory = Split-Path -Parent $script:RepositoryPython
+# Official refresh-models waits 8s for model/list plus 20s native-cache grace,
+# then may retry once. Isolated Codex homes also spend time on first-run
+# skills/sqlite. The runner must not kill that process before it can return.
+# Listener/health keep a separate 30s window after bootstrap returns.
+$script:CandidateOfficialBootstrapBudgetSeconds = 120
 
 try {
 Add-Type -TypeDefinition @'
@@ -1207,6 +1212,66 @@ function Test-GatewayHealth {
     }
 }
 
+function Test-PythonExecutableIdentity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ActualPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedPythonPath
+    )
+    $expectedPath = [System.IO.Path]::GetFullPath($ExpectedPythonPath)
+    if ($ActualPath.Equals($expectedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    # Windows venv launchers keep the invoked Scripts\python.exe path in
+    # CommandLine, then re-exec so MainModule is home\python.exe from pyvenv.cfg.
+    # The cfg lives next to a root-layout interpreter or one directory above
+    # Scripts\python.exe / bin/python.
+    $pythonDirectory = Split-Path -Parent $expectedPath
+    $cfg = $null
+    foreach ($candidateCfg in @(
+        (Join-Path $pythonDirectory 'pyvenv.cfg'),
+        (Join-Path (Split-Path -Parent $pythonDirectory) 'pyvenv.cfg')
+    )) {
+        if (Test-Path -LiteralPath $candidateCfg -PathType Leaf) {
+            $cfg = $candidateCfg
+            break
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($cfg)) {
+        return $false
+    }
+    foreach ($line in [System.IO.File]::ReadAllLines($cfg)) {
+        if ($line -notmatch '^\s*(home|executable)\s*=\s*(.+?)\s*$') {
+            continue
+        }
+        $value = $Matches[2].Trim().Trim('"')
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            continue
+        }
+        $candidates = New-Object 'System.Collections.Generic.List[string]'
+        if ($Matches[1] -eq 'executable') {
+            [void]$candidates.Add($value)
+        }
+        else {
+            [void]$candidates.Add((Join-Path $value 'python.exe'))
+            [void]$candidates.Add((Join-Path $value 'pythonw.exe'))
+        }
+        foreach ($candidate in $candidates) {
+            try {
+                $resolved = [System.IO.Path]::GetFullPath($candidate)
+            }
+            catch {
+                continue
+            }
+            if ($ActualPath.Equals($resolved, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
 function Test-GatewayPythonProcess {
     param(
         [int]$Port,
@@ -1252,8 +1317,7 @@ function Test-GatewayPythonProcess {
                 catch {
                     return $false
                 }
-                $expectedPath = [System.IO.Path]::GetFullPath($ExpectedPythonPath)
-                return $actualPath.Equals($expectedPath, [System.StringComparison]::OrdinalIgnoreCase)
+                return Test-PythonExecutableIdentity -ActualPath $actualPath -ExpectedPythonPath $ExpectedPythonPath
             }
             finally {
                 $owner.Dispose()
@@ -1375,7 +1439,7 @@ function Invoke-CandidateOfficialBootstrap {
         [Parameter(Mandatory = $true)]
         [string]$PythonPath
     )
-    $budgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
+    $budgetMilliseconds = [Math]::Min($TimeoutSeconds, $script:CandidateOfficialBootstrapBudgetSeconds) * 1000
     $bootstrapStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         $remainingMilliseconds = $budgetMilliseconds - [int]$bootstrapStopwatch.ElapsedMilliseconds
@@ -1396,9 +1460,11 @@ function Invoke-CandidateOfficialBootstrap {
             return $result
         }
         $boundedOutput = [string]$result.stdout + "`n" + [string]$result.stderr
-        $transientNativeCacheTimeout = $boundedOutput -match '(?i)codex app-server model list did not publish a readable native models cache before the refresh deadline'
+        $transientOfficialAcquisition = $boundedOutput -match '(?i)codex app-server model list did not publish a readable native models cache before the refresh deadline' -or
+            $boundedOutput -match '(?i)published Official catalog contains no safe resolved context budget' -or
+            $boundedOutput -match '(?i)current Official context snapshot is unavailable'
         $remainingAfterAttempt = $budgetMilliseconds - [int]$bootstrapStopwatch.ElapsedMilliseconds
-        if ($attempt -eq 1 -and $transientNativeCacheTimeout -and $remainingAfterAttempt -gt 1000) {
+        if ($attempt -eq 1 -and $transientOfficialAcquisition -and $remainingAfterAttempt -gt 1000) {
             continue
         }
         $failure = if ($boundedOutput -match '(?i)published Official catalog contains no safe resolved context budget|current Official context snapshot is unavailable') {
@@ -1419,6 +1485,7 @@ function Get-ClientArguments {
         'codex-cli' {
             return @(
                 'exec', '--ephemeral', '--json', '--skip-git-repo-check',
+                '--dangerously-bypass-approvals-and-sandbox',
                 '-C', $WorkRoot, '-m', $Model, '-s', 'read-only',
                 '-c', 'features.apps=false', '-'
             )
@@ -2368,7 +2435,7 @@ function Get-NativeClientVersion {
         CODEXHUB_E2E_VERSION_PROBE = '1'
         CODEXHUB_E2E_MINIMUM_VERSION = $Minimum
         CODEXHUB_E2E_CLIENT = $Client
-    } -StandardInput '' -ProcessTimeoutSeconds 15
+    } -StandardInput '' -ProcessTimeoutSeconds 30
     $text = ($result.stdout + "`n" + $result.stderr).Trim()
     $versionMatches = @([regex]::Matches(
         $text,
@@ -2502,8 +2569,41 @@ function Get-ManagedTargetSource {
     if ($segments.Count -ne 1) {
         throw 'client_configuration_materializer_output_invalid'
     }
+    $depthOne = [System.Collections.Generic.List[string]]::new()
+    foreach ($directory in @(Get-ChildItem -LiteralPath $resolvedRoot -Directory -Force -ErrorAction Stop)) {
+        $itemLinkType = if ($directory.PSObject.Properties['LinkType']) { [string]$directory.LinkType } else { '' }
+        if (($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $itemLinkType) {
+            throw 'client_configuration_materializer_output_invalid'
+        }
+        $candidatePath = [System.IO.Path]::GetFullPath((Join-Path $directory.FullName $RelativeName))
+        $childPrefix = [System.IO.Path]::GetFullPath($directory.FullName).TrimEnd('\') + '\'
+        if (-not $candidatePath.StartsWith($childPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'client_configuration_materializer_output_invalid'
+        }
+        if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
+            try {
+                $resolvedCandidate = (Resolve-Path -LiteralPath $candidatePath -ErrorAction Stop).Path
+                if (-not $resolvedCandidate.Equals($candidatePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'client_configuration_materializer_output_invalid'
+                }
+                Assert-IsolatedRegularFile -Path $resolvedCandidate -IsolationRoot $resolvedRoot
+                $depthOne.Add($resolvedCandidate)
+            }
+            catch {
+                throw 'client_configuration_materializer_output_invalid'
+            }
+        }
+    }
+    if ($depthOne.Count -eq 1) {
+        return $depthOne[0]
+    }
+    if ($depthOne.Count -gt 1) {
+        throw 'client_configuration_materializer_output_invalid'
+    }
 
-    $maximumFiles = 64
+    # Production apply roots copy portable repo/runtime next to the target
+    # (observed 85 files). Keep the walk bounded, but above that snapshot.
+    $maximumFiles = 256
     $maximumDirectories = 64
     $fileCount = 0
     $directoryCount = 0
@@ -3320,14 +3420,12 @@ try {
     $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     [void](Invoke-CandidateOfficialBootstrap -Executable $DebugBuild -CandidateRoot $candidateRoot -Environment $candidateEnvironment -TimeoutSeconds $TimeoutSeconds -PythonPath $script:CandidatePythonPath)
     $candidateCatalogPath = Join-Path $script:CandidateRuntimeRoot 'model-catalogs\codexhub-model-catalog.json'
-    $candidateCatalogDeadlineMilliseconds = [Math]::Min(
-        $candidateStartupBudgetMilliseconds,
-        [int]$candidateStartupStopwatch.ElapsedMilliseconds + 2000
-    )
+    $catalogWait = [System.Diagnostics.Stopwatch]::StartNew()
     while (-not (Test-Path -LiteralPath $candidateCatalogPath -PathType Leaf) -and
-        $candidateStartupStopwatch.ElapsedMilliseconds -lt $candidateCatalogDeadlineMilliseconds) {
+        $catalogWait.ElapsedMilliseconds -lt 2000) {
         Start-Sleep -Milliseconds 25
     }
+    $catalogWait.Stop()
     if (-not (Test-Path -LiteralPath $candidateCatalogPath -PathType Leaf)) {
         $candidateStartupStopwatch.Stop()
         Write-CandidateStartupDiagnostic -FailureClassification 'candidate_gateway_bootstrap_failed_context_budget' -DurationMilliseconds ([int]$candidateStartupStopwatch.ElapsedMilliseconds) -PortableResourcesReady $true -CandidateRunning $false -PythonChildSeen $false -ListenerSeen $false -HealthReady $false -DiagnosticsReady (Test-Path -LiteralPath $script:DiagnosticsPath -PathType Leaf)

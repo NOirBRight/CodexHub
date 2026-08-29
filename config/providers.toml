@@ -92,129 +92,6 @@ enabled = true
   enabled = true
 
 [[providers]]
-id = "xunfei"
-name = "Xunfei MaaS"
-base_url = "https://maas-coding-api.cn-huabei-1.xf-yun.com/v1/responses"
-api_key = "{env:XUNFEI_MAAS_API_KEY}"
-display_prefix = "Xunfei"
-upstream_format = "responses"
-available_upstream_formats = ["responses"]
-sort_order = 4
-enabled = true
-
-  [[providers.models]]
-  id = "xsparkx2"
-  display_name = "Xunfei Spark X2"
-  context_window = 128000
-  sort_order = 1
-  enabled = true
-
-  [[providers.models]]
-  id = "xopglm5"
-  display_name = "Xunfei GLM-5"
-  context_window = 200000
-  sort_order = 2
-  enabled = true
-
-  [[providers.models]]
-  id = "xopglm52"
-  display_name = "Xunfei GLM-5.2"
-  context_window = 500000
-  sort_order = 3
-  enabled = true
-
-  [[providers.models]]
-  id = "xopdeepseekv4pro"
-  display_name = "Xunfei DeepSeek-V4-Pro"
-  context_window = 1000000
-  sort_order = 4
-  enabled = true
-
-  [[providers.models]]
-  id = "xopdeepseekv4flash"
-  display_name = "Xunfei DeepSeek-V4-Flash"
-  context_window = 1000000
-  sort_order = 5
-  enabled = true
-
-  [[providers.models]]
-  id = "xopkimik26"
-  display_name = "Xunfei Kimi-K2.6"
-  context_window = 256000
-  sort_order = 6
-  enabled = true
-
-  [[providers.models]]
-  id = "xopglm51"
-  display_name = "Xunfei GLM-5.1"
-  context_window = 200000
-  sort_order = 7
-  enabled = true
-
-  [[providers.models]]
-  id = "xminimaxm25"
-  display_name = "Xunfei MiniMax-M2.5"
-  context_window = 128000
-  sort_order = 8
-  enabled = true
-
-  [[providers.models]]
-  id = "xopkimik25"
-  display_name = "Xunfei KIMI-K2.5"
-  context_window = 128000
-  sort_order = 9
-  enabled = true
-
-  [[providers.models]]
-  id = "xopdeepseekv32"
-  display_name = "Xunfei DeepSeek-V3.2"
-  context_window = 128000
-  sort_order = 10
-  enabled = true
-
-  [[providers.models]]
-  id = "xsparkx2flash"
-  display_name = "Xunfei Spark-X2-Flash"
-  context_window = 256000
-  sort_order = 11
-  enabled = true
-
-  [[providers.models]]
-  id = "xopqwen36v35b"
-  display_name = "Xunfei Qwen3.6-35B-A3B"
-  context_window = 128000
-  sort_order = 12
-  enabled = true
-
-  [[providers.models]]
-  id = "xopglmv47flash"
-  display_name = "Xunfei GLM-4.7-Flash"
-  context_window = 128000
-  sort_order = 13
-  enabled = true
-
-  [[providers.models]]
-  id = "xopqwen35v35b"
-  display_name = "Xunfei Qwen3.5-35B-A3B"
-  context_window = 128000
-  sort_order = 14
-  enabled = true
-
-  [[providers.models]]
-  id = "xop3qwencodernext"
-  display_name = "Xunfei Qwen3-Coder-Next-FP8"
-  context_window = 256000
-  sort_order = 15
-  enabled = true
-
-  [[providers.models]]
-  id = "xopqwen35397b"
-  display_name = "Xunfei Qwen3.5-397B-A17B"
-  context_window = 256000
-  sort_order = 16
-  enabled = true
-
-[[providers]]
 id = "xai"
 name = "xAI"
 base_url = "https://api.x.ai/v1"
@@ -223,6 +100,9 @@ display_prefix = "xAI"
 upstream_format = "responses"
 available_upstream_formats = ["responses"]
 reports_cached_input_tokens = false
+auth_capabilities = ["subscription:xai_oauth"]
+onboarding_hint = "providers.catalogProviderSubscriptionHint"
+discovery_policy = "retain-intersection"
 sort_order = 5
 enabled = true
 
@@ -231,5 +111,8 @@ enabled = true
   display_name = "Grok 4"
   context_window = 256000
   max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "high"
   sort_order = 1
   enabled = true

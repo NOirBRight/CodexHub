@@ -592,6 +592,7 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             to_value(xai_auth::xai_poll_device_login_blocking(device_json))
         }
         "xai_logout" => to_value(xai_auth::xai_logout_blocking()),
+        "xai_usage_snapshot" => to_value(xai_auth::xai_usage_snapshot_blocking()),
         "xai_open_verification_url" => {
             let url = optional_string_arg(&request.args, &["url"])
                 .ok_or_else(|| "url argument is required".to_string())?;

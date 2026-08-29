@@ -160,6 +160,21 @@ def test_models_endpoint_lists_catalog_ids(harness: GatewayHarness) -> None:
     assert "fetched_at" not in payload
 
 
+def test_models_endpoint_keeps_openai_shape_when_query_parameters_are_present(harness: GatewayHarness) -> None:
+    response = request_gateway(
+        harness.host,
+        harness.port,
+        "GET",
+        "/v1/models?client_version=0.149.1",
+    )
+    assert response.status == 200
+    payload = json.loads(response.body)
+    ids = [row["id"] for row in payload["data"]]
+    assert "gpt-5.5" in ids
+    assert "volc/glm-5.2" in ids
+    assert "models" not in payload
+
+
 def test_official_nonstreaming_responses_round_trip(harness: GatewayHarness) -> None:
     harness.set_json_response(_completed_response_json())
     response = request_gateway(

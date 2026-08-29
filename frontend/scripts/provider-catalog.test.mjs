@@ -17,10 +17,18 @@ const jsOutput = ts.transpileModule(
 ).outputText;
 
 const moduleExports = {};
-new Function("exports", jsOutput + "\nexports.applyCatalogPresetDefaults = applyCatalogPresetDefaults;")(
-  moduleExports,
-);
-const { applyCatalogPresetDefaults } = moduleExports;
+new Function(
+  "exports",
+  jsOutput +
+    "\nexports.applyCatalogPresetDefaults = applyCatalogPresetDefaults; exports.subscriptionAuthAdapter = subscriptionAuthAdapter; exports.usesSubscriptionAuth = usesSubscriptionAuth; exports.applyPresetReasoningDefaults = applyPresetReasoningDefaults; exports.instantiateCatalogProvider = instantiateCatalogProvider;",
+)(moduleExports);
+const {
+  applyCatalogPresetDefaults,
+  subscriptionAuthAdapter,
+  usesSubscriptionAuth,
+  applyPresetReasoningDefaults,
+  instantiateCatalogProvider,
+} = moduleExports;
 
 function makeProvider(overrides = {}) {
   return {
@@ -46,6 +54,7 @@ const catalogXai = makeProvider({
   display_prefix: "xAI",
   available_upstream_formats: ["responses"],
   reports_cached_input_tokens: false,
+  onboarding_hint: "providers.catalogProviderSubscriptionHint",
   models: [
     {
       id: "grok-4",
@@ -53,6 +62,9 @@ const catalogXai = makeProvider({
       enabled: true,
       context_window: 256000,
       max_output_tokens: 65536,
+      input_modalities: ["text", "image"],
+      supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max"],
+      default_reasoning_level: "high",
       sort_order: 1,
     },
   ],
@@ -66,6 +78,7 @@ test("empty xAI stub inherits catalog endpoint and Grok 4 without copying the en
   assert.equal(filled.display_prefix, "xAI");
   assert.deepEqual(filled.available_upstream_formats, ["responses"]);
   assert.equal(filled.reports_cached_input_tokens, false);
+  assert.equal(filled.onboarding_hint, "providers.catalogProviderSubscriptionHint");
   assert.equal(filled.models.length, 1);
   assert.equal(filled.models[0].id, "grok-4");
   assert.equal(filled.enabled, true);
@@ -77,6 +90,32 @@ test("complete provider is left unchanged", () => {
   assert.equal(applyCatalogPresetDefaults(existing, catalogXai), existing);
 });
 
+test("subscription auth is declared on the preset, not by provider id", () => {
+  assert.equal(usesSubscriptionAuth(makeProvider()), false);
+  assert.equal(subscriptionAuthAdapter(makeProvider()), null);
+  assert.equal(
+    usesSubscriptionAuth(makeProvider({ auth_capabilities: ["subscription:xai_oauth"] })),
+    true,
+  );
+  assert.equal(
+    subscriptionAuthAdapter(makeProvider({ auth_capabilities: ["subscription:xai_oauth"] })),
+    "xai_oauth",
+  );
+  assert.equal(
+    subscriptionAuthAdapter(makeProvider({ auth_capabilities: ["subscription:future_oauth"] })),
+    "future_oauth",
+  );
+});
+
+test("discovered grok models inherit preset thinking levels when discovery omits them", () => {
+  const filled = applyPresetReasoningDefaults(
+    [{ id: "grok-4.6", enabled: true }],
+    catalogXai,
+  );
+  assert.deepEqual(filled[0].supported_reasoning_levels, ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(filled[0].default_reasoning_level, "high");
+});
+
 test("missing preset is a no-op", () => {
   const stub = makeProvider();
   assert.equal(applyCatalogPresetDefaults(stub, null), stub);
@@ -86,4 +125,49 @@ test("includeModels false fills the endpoint without seeding grok-4", () => {
   const filled = applyCatalogPresetDefaults(makeProvider(), catalogXai, { includeModels: false });
   assert.equal(filled.base_url, "https://api.x.ai/v1");
   assert.deepEqual(filled.models, []);
+});
+
+test("saved xAI rows inherit subscription capabilities from the preset", () => {
+  const filled = applyCatalogPresetDefaults(
+    makeProvider(),
+    makeProvider({
+      auth_capabilities: ["subscription:xai_oauth"],
+      onboarding_hint: "providers.catalogProviderSubscriptionHint",
+      discovery_policy: "retain-intersection",
+    }),
+    { includeModels: false },
+  );
+  assert.deepEqual(filled.auth_capabilities, ["subscription:xai_oauth"]);
+  assert.equal(filled.onboarding_hint, "providers.catalogProviderSubscriptionHint");
+  assert.equal(filled.discovery_policy, "retain-intersection");
+});
+
+test("preset backfill preserves an existing automatic protocol selection", () => {
+  for (const upstreamFormat of [null, "auto"]) {
+    const filled = applyCatalogPresetDefaults(
+      makeProvider({ upstream_format: upstreamFormat }),
+      catalogXai,
+      { includeModels: false },
+    );
+    assert.equal(filled.upstream_format, upstreamFormat);
+  }
+});
+
+test("instantiate catalog xAI keeps subscription metadata and drops the env api key", () => {
+  const draft = instantiateCatalogProvider(
+    makeProvider({
+      api_key: "{env:XAI_API_KEY}",
+      auth_capabilities: ["subscription:xai_oauth"],
+      onboarding_hint: "providers.catalogProviderSubscriptionHint",
+      discovery_policy: "retain-intersection",
+      models: catalogXai.models,
+    }),
+    7,
+  );
+  assert.equal(draft.api_key, null);
+  assert.equal(draft.sort_order, 7);
+  assert.equal(draft.enabled, true);
+  assert.deepEqual(draft.auth_capabilities, ["subscription:xai_oauth"]);
+  assert.equal(draft.onboarding_hint, "providers.catalogProviderSubscriptionHint");
+  assert.equal(draft.discovery_policy, "retain-intersection");
 });
