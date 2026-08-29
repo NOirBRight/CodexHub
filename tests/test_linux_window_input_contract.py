@@ -1,7 +1,10 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from scripts.e2e_linux_window_input import (
     drawer_cycle_has_required_transitions,
@@ -10,6 +13,7 @@ from scripts.e2e_linux_window_input import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux packaging and pointer contract")
 
 
 def test_full_linux_suite_public_interface_lists_physical_pointer_gate() -> None:

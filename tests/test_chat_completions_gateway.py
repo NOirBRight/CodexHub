@@ -85,6 +85,27 @@ def _exact_external_model_resolver(*models):
     return lambda model_id: by_alias.get(model_id)
 
 
+def _ollama_responses_vision_router(original):
+    def choose(model_id):
+        if str(model_id).strip().casefold() in {
+            "minimax-m3",
+            "ollama-cloud/minimax-m3",
+        }:
+            return {
+                "name": "ollama_cloud",
+                "provider_id": "ollama-cloud",
+                "model_id": "ollama-cloud/minimax-m3",
+                "base_url": "https://ollama.com/v1",
+                "auth": "ollama_api_key",
+                "upstream_model": "minimax-m3",
+                "upstream_format": "responses",
+                "reports_cached_input_tokens": False,
+            }
+        return original(model_id)
+
+    return choose
+
+
 class UpstreamUrlTests(unittest.TestCase):
     def test_upstream_urls_accept_complete_responses_endpoint(self):
         upstream = {"base_url": "https://example.test/v1/responses"}
@@ -935,9 +956,20 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
     def setUp(self):
         self.runtime_proxy_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.runtime_proxy_dir.cleanup)
+        runtime_codex_dir = Path(self.runtime_proxy_dir.name)
+        runtime_proxy_dir = runtime_codex_dir / "proxy"
+        runtime_proxy_dir.mkdir()
+        for target in (
+            "gateway_events.RUNTIME_CODEX_DIR",
+            "gateway_handler_impl.RUNTIME_CODEX_DIR",
+            "gateway_stream_semantics.RUNTIME_CODEX_DIR",
+        ):
+            runtime_patch = patch(target, runtime_codex_dir)
+            runtime_patch.start()
+            self.addCleanup(runtime_patch.stop)
         self.gateway_settings_patch = patch(
             "gateway_settings._runtime_proxy_dir",
-            return_value=Path(self.runtime_proxy_dir.name),
+            return_value=runtime_proxy_dir,
         )
         self.gateway_settings_patch.start()
         self.addCleanup(self.gateway_settings_patch.stop)
@@ -3736,6 +3768,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "ollama-cloud/minimax-m3": {"slug": "ollama-cloud/minimax-m3", "input_modalities": ["text", "image"]},
         }
 
+        original_choose_upstream = gateway_catalog_runtime.choose_upstream
         with tempfile.TemporaryDirectory() as temp_dir:
             with (
                 patch.dict(
@@ -3743,14 +3776,22 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     {
                         "OLLAMA_API_KEY": "ollama-test-token",
                         "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                        "CODEX_HOME": temp_dir,
                         "CODEX_PROXY_IMAGE_PROXY_MODEL": "minimax-m3",
                         "CODEX_PROXY_AUTO_RETRY_ENABLED": "0",
                     },
                     clear=False,
                 ),
                 patch("vision_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("gateway_events.RUNTIME_CODEX_DIR", Path(temp_dir)),
+                patch("gateway_handler_impl.RUNTIME_CODEX_DIR", Path(temp_dir)),
+                patch("gateway_stream_semantics.RUNTIME_CODEX_DIR", Path(temp_dir)),
                 patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
                 patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
+                patch(
+                    "gateway_catalog_runtime.choose_upstream",
+                    side_effect=_ollama_responses_vision_router(original_choose_upstream),
+                ),
                 patch(
                     "gateway_catalog_runtime.load_policy",
                     return_value=replace(
@@ -3769,7 +3810,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             ):
                 CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(handler._fake.status, 200)
+        self.assertEqual(
+            handler._fake.status,
+            200,
+            (b"".join(handler.wfile.writes), mock_urlopen.call_args_list),
+        )
         self.assertEqual(mock_urlopen.call_count, 2)
         vision_responses_request = mock_urlopen.call_args_list[0].args[0]
         vision_responses_payload = json.loads(vision_responses_request.data)
@@ -3831,6 +3876,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "ollama-cloud/minimax-m3": {"slug": "ollama-cloud/minimax-m3", "input_modalities": ["text", "image"]},
         }
 
+        original_choose_upstream = gateway_catalog_runtime.choose_upstream
         with tempfile.TemporaryDirectory() as temp_dir:
             with (
                 patch.dict(
@@ -3838,14 +3884,22 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     {
                         "OLLAMA_API_KEY": "ollama-test-token",
                         "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                        "CODEX_HOME": temp_dir,
                         "CODEX_PROXY_IMAGE_PROXY_MODEL": "minimax-m3",
                         "CODEX_PROXY_AUTO_RETRY_ENABLED": "0",
                     },
                     clear=False,
                 ),
                 patch("vision_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("gateway_events.RUNTIME_CODEX_DIR", Path(temp_dir)),
+                patch("gateway_handler_impl.RUNTIME_CODEX_DIR", Path(temp_dir)),
+                patch("gateway_stream_semantics.RUNTIME_CODEX_DIR", Path(temp_dir)),
                 patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
                 patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
+                patch(
+                    "gateway_catalog_runtime.choose_upstream",
+                    side_effect=_ollama_responses_vision_router(original_choose_upstream),
+                ),
                 patch(
                     "gateway_catalog_runtime.load_policy",
                     return_value=replace(
@@ -3860,14 +3914,15 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                         _FakeSseResponse(vision_responses_events),
                         _FakeSseResponse(main_responses_events),
                     ],
-                ),
+                ) as mock_urlopen,
             ):
                 CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
+        self.assertEqual(handler._fake.status, 200, (written, mock_urlopen.call_args_list))
         self.assertNotIn(b"event: codexhub.", written)
         data_lines = [line for line in written.split(b"\n") if line.startswith(b"data: {")]
-        self.assertTrue(data_lines)
+        self.assertTrue(data_lines, written)
         first_chunk = json.loads(data_lines[0].removeprefix(b"data: "))
         self.assertEqual(first_chunk["object"], "chat.completion.chunk")
         self.assertEqual(
@@ -3922,6 +3977,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "ollama-cloud/minimax-m3": {"slug": "ollama-cloud/minimax-m3", "input_modalities": ["text", "image"]},
         }
 
+        original_choose_upstream = gateway_catalog_runtime.choose_upstream
         with tempfile.TemporaryDirectory() as temp_dir:
             with (
                 patch.dict(
@@ -3929,14 +3985,22 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     {
                         "OLLAMA_API_KEY": "ollama-test-token",
                         "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                        "CODEX_HOME": temp_dir,
                         "CODEX_PROXY_IMAGE_PROXY_MODEL": "minimax-m3",
                         "CODEX_PROXY_AUTO_RETRY_ENABLED": "0",
                     },
                     clear=False,
                 ),
                 patch("vision_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
+                patch("gateway_events.RUNTIME_CODEX_DIR", Path(temp_dir)),
+                patch("gateway_handler_impl.RUNTIME_CODEX_DIR", Path(temp_dir)),
+                patch("gateway_stream_semantics.RUNTIME_CODEX_DIR", Path(temp_dir)),
                 patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
                 patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
+                patch(
+                    "gateway_catalog_runtime.choose_upstream",
+                    side_effect=_ollama_responses_vision_router(original_choose_upstream),
+                ),
                 patch(
                     "gateway_catalog_runtime.load_policy",
                     return_value=replace(
@@ -3951,14 +4015,15 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                         _FakeSseResponse(vision_responses_events),
                         _FakeSseResponse(main_responses_events),
                     ],
-                ),
+                ) as mock_urlopen,
             ):
                 CodexProxyHandler.do_POST(handler)
 
         written = b"".join(handler.wfile.writes)
+        self.assertEqual(handler._fake.status, 200, (written, mock_urlopen.call_args_list))
         self.assertNotIn(b"event: codexhub.", written)
         data_lines = [line for line in written.split(b"\n") if line.startswith(b"data: {")]
-        self.assertTrue(data_lines)
+        self.assertTrue(data_lines, written)
         first_event = json.loads(data_lines[0].removeprefix(b"data: "))
         self.assertEqual(first_event["type"], "response.output_text.delta")
         self.assertEqual(first_event["delta"], "Analyzing image...\n\n")
@@ -4011,6 +4076,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "ollama-cloud/minimax-m3": {"slug": "ollama-cloud/minimax-m3", "input_modalities": ["text", "image"]},
         }
 
+        original_choose_upstream = gateway_catalog_runtime.choose_upstream
         with tempfile.TemporaryDirectory() as temp_dir:
             with (
                 patch.dict(
@@ -4018,6 +4084,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                     {
                         "OLLAMA_API_KEY": "ollama-test-token",
                         "CODEX_PROXY_IMAGE_PROXY_ENABLED": "1",
+                        "CODEX_HOME": temp_dir,
                         "CODEX_PROXY_IMAGE_PROXY_MODEL": "minimax-m3",
                         "CODEX_PROXY_AUTO_RETRY_ENABLED": "0",
                     },
@@ -4026,6 +4093,13 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 patch("vision_proxy.IMAGE_PROXY_CACHE_PATH", f"{temp_dir}/image-proxy-cache.sqlite"),
                 patch("gateway_catalog_runtime.generated_catalog_slugs", return_value=set(catalog)),
                 patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value=catalog),
+                patch("gateway_events.RUNTIME_CODEX_DIR", Path(temp_dir)),
+                patch("gateway_handler_impl.RUNTIME_CODEX_DIR", Path(temp_dir)),
+                patch("gateway_stream_semantics.RUNTIME_CODEX_DIR", Path(temp_dir)),
+                patch(
+                    "gateway_catalog_runtime.choose_upstream",
+                    side_effect=_ollama_responses_vision_router(original_choose_upstream),
+                ),
                 patch(
                     "gateway_catalog_runtime.load_policy",
                     return_value=replace(
@@ -4044,7 +4118,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             ):
                 CodexProxyHandler.do_POST(handler)
 
-        self.assertEqual(handler._fake.status, 200)
+        self.assertEqual(handler._fake.status, 200, b"".join(handler.wfile.writes))
         self.assertEqual(mock_urlopen.call_count, 2)
         main_request = mock_urlopen.call_args_list[1].args[0]
         main_payload = json.loads(main_request.data)

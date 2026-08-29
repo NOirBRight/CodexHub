@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from http.client import HTTPMessage
 from typing import Any
 from urllib.error import HTTPError
@@ -122,7 +123,8 @@ def test_persist_and_load_tokens_uses_private_mode(tmp_path, monkeypatch) -> Non
     xai_auth.persist_tokens(
         {"access_token": "access-1", "refresh_token": "refresh-1", "token_type": "Bearer"}
     )
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
     loaded = xai_auth.load_auth_json()
     assert loaded["auth_mode"] == "xai_oauth"
     assert loaded["tokens"]["access_token"] == "access-1"
@@ -338,4 +340,3 @@ def test_poll_device_login_honors_cli_timeout_env(monkeypatch) -> None:
             now=lambda: clock["now"],
         )
     assert exc.value.classification == "auth-required"
-
