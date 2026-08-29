@@ -53,9 +53,10 @@ use clients::opencode::{
 #[cfg(test)]
 use clients::opencode::{
     detect_opencode_executable_path_in_home, opencode_config_text,
-    opencode_ownership_bounded_cleanup, opencode_reasoning_variants,
-    opencode_system_executable_candidates, restore_latest_backup,
+    opencode_ownership_bounded_cleanup, opencode_reasoning_variants, restore_latest_backup,
 };
+#[cfg(all(test, target_os = "linux"))]
+use clients::opencode::opencode_system_executable_candidates;
 use clients::pi::{
     apply_pi_config_with_paths, detect_pi_config_paths, detect_pi_route_details,
     preview_pi_config_with_paths, restore_pi_config_with_paths,

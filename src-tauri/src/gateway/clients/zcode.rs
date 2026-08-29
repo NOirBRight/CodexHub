@@ -505,16 +505,19 @@ pub(in crate::gateway) fn zcode_catalog_provider_matches_expected(
 pub(in crate::gateway) fn zcode_app_data_root() -> PathBuf {
     #[cfg(windows)]
     {
-        return std::env::var_os("APPDATA")
+        std::env::var_os("APPDATA")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .map(|path| path.join("ZCode"))
-            .unwrap_or_else(|| PathBuf::from("%APPDATA%/ZCode"));
+            .unwrap_or_else(|| PathBuf::from("%APPDATA%/ZCode"))
     }
 
-    dirs::home_dir()
-        .map(|home| home.join(".zcode"))
-        .unwrap_or_else(|| PathBuf::from("~/.zcode"))
+    #[cfg(not(windows))]
+    {
+        dirs::home_dir()
+            .map(|home| home.join(".zcode"))
+            .unwrap_or_else(|| PathBuf::from("~/.zcode"))
+    }
 }
 
 pub(in crate::gateway) fn detect_zcode_config_path() -> PathBuf {

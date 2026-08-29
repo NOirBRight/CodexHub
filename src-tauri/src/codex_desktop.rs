@@ -711,10 +711,22 @@ mod tests {
     }
 
     fn lock_path(name: &str) -> PathBuf {
+        let thread_name = std::thread::current()
+            .name()
+            .unwrap_or("test")
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
         std::env::temp_dir().join(format!(
             "codexhub-codex-desktop-{name}-{}-{}.lock",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            thread_name
         ))
     }
 
