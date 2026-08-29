@@ -583,7 +583,8 @@ impl AppServerChild {
 
 impl Drop for AppServerChild {
     fn drop(&mut self) {
-        kill_child(&mut self.child);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
         log::info!("openai usage refresh: app-server child cleanup complete");
     }
 }
@@ -866,6 +867,7 @@ fn spawn_app_server_line_reader(
     receiver
 }
 
+#[cfg(test)]
 fn kill_child(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();

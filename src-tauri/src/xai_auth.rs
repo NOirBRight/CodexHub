@@ -266,6 +266,25 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(program, "powershell");
+            assert_eq!(
+                args,
+                [
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    "Start-Process 'https://auth.x.ai/device?user_code=ABCD-EFGH'",
+                ]
+            );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(program, "open");
+            assert_eq!(args, [url]);
+        }
         #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
         {
             assert_eq!(program, "xdg-open");

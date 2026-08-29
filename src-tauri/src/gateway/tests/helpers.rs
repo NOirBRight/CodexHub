@@ -53,9 +53,11 @@ impl Drop for ReplacementLock {
     fn drop(&mut self) {
         #[cfg(windows)]
         {
+            use std::os::windows::fs::PermissionsExt;
+            const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
             if let Ok(metadata) = fs::metadata(&self.path) {
                 let mut permissions = metadata.permissions();
-                permissions.set_readonly(false);
+                permissions.set_attributes(permissions.attributes() & !FILE_ATTRIBUTE_READONLY);
                 let _ = fs::set_permissions(&self.path, permissions);
             }
         }
