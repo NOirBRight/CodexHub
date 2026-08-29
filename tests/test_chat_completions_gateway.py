@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 import codex_proxy
 import gateway_catalog_runtime
 import gateway_events
+import gateway_settings
 import gateway_transport
 import vision_proxy
 from gateway_compat import multi_agent as gateway_compat_multi_agent
@@ -934,6 +935,12 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
     def setUp(self):
         self.runtime_proxy_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.runtime_proxy_dir.cleanup)
+        self.gateway_settings_patch = patch(
+            "gateway_settings._runtime_proxy_dir",
+            return_value=Path(self.runtime_proxy_dir.name),
+        )
+        self.gateway_settings_patch.start()
+        self.addCleanup(self.gateway_settings_patch.stop)
         self.runtime_proxy_patch = patch(
             "collaboration_adapter.WORKER_BINDING_SIGNING_ROOT", Path(self.runtime_proxy_dir.name)
         )

@@ -44,6 +44,7 @@ export type SaveProviders = (
 ) => Promise<Provider[]>;
 
 type ProviderCatalogActionOptions = {
+  authorizeCodexRestart: () => Promise<boolean | null>;
   form: AddProviderForm;
   officialModelOrderDraft: string[];
   onProvidersChanged?: (providers: Provider[]) => void;
@@ -67,6 +68,7 @@ type ProviderCatalogActionOptions = {
 };
 
 export function useProviderCatalogActions({
+  authorizeCodexRestart,
   form,
   officialModelOrderDraft,
   onProvidersChanged,
@@ -128,7 +130,7 @@ export function useProviderCatalogActions({
   async function updateGatewayAfterCatalog(
     activeSettings?: Settings | null,
     toastId?: string,
-    options?: { catalogAlreadyPublished?: boolean },
+    options?: { catalogAlreadyPublished?: boolean; restartCodex?: boolean },
   ) {
     const catalogAlreadyPublished = options?.catalogAlreadyPublished ?? false;
     if (toastId && !catalogAlreadyPublished) {
@@ -146,7 +148,7 @@ export function useProviderCatalogActions({
         syncClients: Boolean(syncSettings?.auto_sync_clients),
       },
       {
-        generate: () => api.generateCatalog(),
+        generate: () => api.generateCatalog(options?.restartCodex ?? false),
         sync: async () => {
           if (toastId) {
             updateToast(toastId, {
@@ -228,6 +230,10 @@ export function useProviderCatalogActions({
     successMessage?: string,
     toastId?: string,
   ) {
+    const restartCodex = regenerateCatalog ? await authorizeCodexRestart() : false;
+    if (restartCodex === null) {
+      return providers;
+    }
     setBusy("save");
     const activeToastId = toastId ?? showToast(
       successMessage ? `${successMessage}...` : t("providers.updateProviderCatalog"),
@@ -240,7 +246,9 @@ export function useProviderCatalogActions({
       let syncResult: GatewayClientSyncSummary | null = null;
       if (regenerateCatalog) {
         try {
-          syncResult = await updateGatewayAfterCatalog(undefined, activeToastId);
+          syncResult = await updateGatewayAfterCatalog(undefined, activeToastId, {
+            restartCodex,
+          });
         } catch (err) {
           updateToast(activeToastId, {
             action: null,
@@ -358,12 +366,17 @@ export function useProviderCatalogActions({
     options?: { quiet?: boolean; throwOnError?: boolean },
   ): Promise<boolean> {
     const quiet = options?.quiet ?? false;
-    if (!quiet) {
-      setBusy("official-refresh");
-    }
-    const toastId = quiet ? null : showToast(t("providers.refreshingOfficialModels"), "loading");
+    let toastId: string | null = null;
     try {
-      const refreshResult = await api.refreshOfficialModels();
+      const restartCodex = quiet ? false : await authorizeCodexRestart();
+      if (restartCodex === null) {
+        return false;
+      }
+      if (!quiet) {
+        setBusy("official-refresh");
+        toastId = showToast(t("providers.refreshingOfficialModels"), "loading");
+      }
+      const refreshResult = await api.refreshOfficialModels(restartCodex);
       const refreshed = filterCodexVisibleOfficialModels(refreshResult.models);
       const followsAutomaticOrder = shouldFollowOfficialCatalogOrder(officialModelOrderDraft);
       const nextOrder = followsAutomaticOrder
@@ -381,10 +394,20 @@ export function useProviderCatalogActions({
       const syncResult = await updateGatewayAfterCatalog(undefined, toastId ?? undefined, {
         catalogAlreadyPublished: true,
       });
-      const refreshMessage = refreshResult.restart_required
-        ? `${t("providers.officialModelsRefreshed")} ${t("providers.officialContextLimitsRestartCodex")}`
-        : t("providers.officialModelsRefreshed");
-      const toastMessage = catalogSyncToastMessage(refreshMessage, syncResult);
+      const refreshMessage = refreshResult.codex_restart_result === "restarted"
+        ? t("providers.officialModelsRefreshedCodexRestarted")
+        : refreshResult.codex_restart_result === "switched_relaunch_failed"
+          ? t("providers.officialModelsRefreshedCodexRelaunchFailed")
+          : refreshResult.restart_required
+            ? `${t("providers.officialModelsRefreshed")} ${t("providers.officialContextLimitsRestartCodex")}`
+            : t("providers.officialModelsRefreshed");
+      const refreshFeedback = refreshResult.warning?.trim()
+        ? t("providers.officialModelsRefreshedWithWarning", {
+            message: refreshResult.warning.trim(),
+            status: refreshMessage,
+          })
+        : refreshMessage;
+      const toastMessage = catalogSyncToastMessage(refreshFeedback, syncResult);
       if (syncResult?.failed) {
         updateToast(toastId!, {
           action: null,
@@ -395,7 +418,7 @@ export function useProviderCatalogActions({
         updateToast(toastId!, {
           action: null,
           text: toastMessage ?? t("providers.officialModelsRefreshed"),
-          tone: "success",
+          tone: refreshResult.warning?.trim() ? "error" : "success",
         });
         setError(null);
       }
@@ -407,7 +430,11 @@ export function useProviderCatalogActions({
           throw err;
         }
       } else {
-        updateToastWithError(toastId!, err);
+        if (toastId) {
+          updateToastWithError(toastId, err);
+        } else {
+          showToast(messageFromError(err), "error");
+        }
       }
       return false;
     } finally {

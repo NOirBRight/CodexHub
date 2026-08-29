@@ -41,6 +41,31 @@ def _responses_request(model: str, *, stream: bool) -> bytes:
     ).encode("utf-8")
 
 
+def _compacted_responses_request(model: str) -> bytes:
+    return json.dumps(
+        {
+            "model": model,
+            "input": [
+                {
+                    "type": "compaction",
+                    "summary": {
+                        "content": [
+                            {"type": "input_text", "text": "HTTP replay context."}
+                        ]
+                    },
+                },
+                {"type": "compaction_trigger"},
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Continue."}],
+                },
+            ],
+            "stream": False,
+        }
+    ).encode("utf-8")
+
+
 def _chat_request(model: str, *, stream: bool) -> bytes:
     return json.dumps(
         {
@@ -197,6 +222,44 @@ def test_official_nonstreaming_responses_round_trip(harness: GatewayHarness) -> 
     assert sent["model"] == "gpt-5.5"
     assert captured.headers["authorization"] == "Bearer synthetic-official-token"
     assert GATEWAY_CLIENT_KEY not in captured.headers.get("authorization", "")
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_model", "expected_authorization"),
+    [
+        ("gpt-5.5", "gpt-5.5", "Bearer synthetic-official-token"),
+        ("xai/grok-4.6", "grok-4.6", "Bearer xai-test-token"),
+    ],
+)
+def test_compacted_responses_history_reaches_upstream_without_local_500(
+    harness: GatewayHarness,
+    model: str,
+    expected_model: str,
+    expected_authorization: str,
+) -> None:
+    completed = _completed_response_json()
+    completed["model"] = expected_model
+    harness.set_json_response(completed)
+
+    response = request_gateway(
+        harness.host,
+        harness.port,
+        "POST",
+        "/v1/responses",
+        body=_compacted_responses_request(model),
+        headers=_auth_headers(),
+    )
+
+    assert response.status == 200
+    assert harness.stub is not None
+    assert len(harness.stub.captures) == 1
+    captured = harness.stub.captures[0]
+    sent = json.loads(captured.body)
+    assert sent["model"] == expected_model
+    assert captured.headers["authorization"] == expected_authorization
+    assert all(item.get("type") != "compaction" for item in sent["input"])
+    assert all(item.get("type") != "compaction_trigger" for item in sent["input"])
+    assert "HTTP replay context." in json.dumps(sent["input"])
 
 
 def test_official_control_get_is_passthrough_to_upstream(harness: GatewayHarness) -> None:

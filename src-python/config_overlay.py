@@ -1095,6 +1095,19 @@ def _preserve_user_catalog_path(current: str, restored: str) -> str:
     return set_top_level_values(restored, {"model_catalog_json": toml_literal(current_value)})
 
 
+def _cleanup_after_committed_restore(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as error:
+        # The config write is already atomic and durable. Cleanup cannot turn
+        # that committed route into a failed switch; leave the artifact for a
+        # later idempotent cleanup and emit a bounded, path-free warning.
+        print(
+            f"warning: route committed; backup cleanup deferred ({type(error).__name__})",
+            file=sys.stderr,
+        )
+
+
 def restore_overlay(
     config_path: Path,
     backup_path: Path,
@@ -1120,8 +1133,8 @@ def restore_overlay(
             restored_owner = overlay_owner(restored)
             if not unified_history or restored_owner is not None:
                 atomic_write_text(config_path, restored, encoding="utf-8")
-                backup_path.unlink()
-                takeover_metadata_path(backup_path).unlink()
+                _cleanup_after_committed_restore(backup_path)
+                _cleanup_after_committed_restore(takeover_metadata_path(backup_path))
                 return "restored_takeover_backup"
     elif config_path.exists():
         restored = strip_marked_overlay(config_path.read_text(encoding="utf-8"))
@@ -1139,10 +1152,8 @@ def restore_overlay(
     if restored or config_path.exists() or unified_history:
         atomic_write_text(config_path, restored, encoding="utf-8")
     if restore_from_backup:
-        backup_path.unlink()
-        metadata_path = takeover_metadata_path(backup_path)
-        if metadata_path.exists():
-            metadata_path.unlink()
+        _cleanup_after_committed_restore(backup_path)
+        _cleanup_after_committed_restore(takeover_metadata_path(backup_path))
     return status
 
 

@@ -1,18 +1,80 @@
 use super::{
-    apply_history_sync_result, codex_overlay_owner, get_codex_context_guard_status_with_paths,
-    get_bundled_providers_with_paths, get_providers_with_paths,
-    get_settings_with_paths, migrate_legacy_context_guard_with_paths,
-    republish_managed_codex_context_budget_with_paths,
-    save_providers_with_paths, save_settings_with_paths, set_codex_context_guard_with_paths,
-    switch_mode_with_paths, switch_mode_with_paths_takeover_as_owner,
-    top_level_model_is_official, CommandOutcome, CommandRunner, ConfigPaths,
-    ProcessCommandRunner,
+    apply_history_sync_result, codex_overlay_owner, get_bundled_providers_with_paths,
+    get_codex_context_guard_status_with_paths, get_providers_with_paths, get_settings_with_paths,
+    merge_post_switch_gateway_status, migrate_legacy_context_guard_with_paths,
+    managed_codex_projection_transaction_paths_with_paths,
+    republish_managed_codex_context_budget_with_paths, save_providers_with_paths,
+    save_settings_with_paths, set_codex_context_guard_with_paths, switch_mode_with_paths,
+    switch_mode_with_paths_takeover_as_owner, takeover_metadata_path, top_level_model_is_official,
+    CommandOutcome, CommandRunner, ConfigPaths, ProcessCommandRunner,
 };
 use crate::{Model, Provider, Settings, ToolProtocol, ToolSurfaceStrategy, UpstreamFormat};
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[test]
+fn projection_transaction_restores_both_channel_backups_and_takeover_metadata() {
+    let root = temp_root("projection-cross-channel-rollback");
+    let paths = test_paths(&root);
+    let transaction_paths = managed_codex_projection_transaction_paths_with_paths(
+        &paths,
+        crate::app_flavor::RoutingOwner::Release,
+    );
+    let release_backup = paths.config_backup_path_for_target_owner(
+        crate::app_flavor::RoutingOwner::Release,
+        crate::app_flavor::RoutingOwner::Release,
+    );
+    let beta_backup = paths.config_backup_path_for_target_owner(
+        crate::app_flavor::RoutingOwner::Release,
+        crate::app_flavor::RoutingOwner::Beta,
+    );
+    let release_takeover = takeover_metadata_path(&release_backup);
+    let beta_takeover = takeover_metadata_path(&beta_backup);
+    for (path, text) in [
+        (&release_backup, "old-release-backup"),
+        (&beta_backup, "old-beta-backup"),
+        (&release_takeover, "old-release-takeover"),
+        (&beta_takeover, "old-beta-takeover"),
+    ] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+        assert!(transaction_paths.contains(path));
+    }
+
+    let result = crate::file_transaction::with_text_file_rollback(&transaction_paths, || {
+        fs::write(&release_backup, "new-release-backup").unwrap();
+        fs::write(&beta_backup, "new-beta-backup").unwrap();
+        fs::write(&release_takeover, "new-release-takeover").unwrap();
+        fs::remove_file(&beta_takeover).unwrap();
+        Err::<(), _>("injected post-projection failure".to_string())
+    });
+
+    assert!(result.is_err());
+    assert_eq!(fs::read_to_string(release_backup).unwrap(), "old-release-backup");
+    assert_eq!(fs::read_to_string(beta_backup).unwrap(), "old-beta-backup");
+    assert_eq!(
+        fs::read_to_string(release_takeover).unwrap(),
+        "old-release-takeover"
+    );
+    assert_eq!(
+        fs::read_to_string(beta_takeover).unwrap(),
+        "old-beta-takeover"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn committed_route_survives_gateway_status_readback_failure() {
+    let mut status = crate::AppStatus::scaffold("Switched to custom mode");
+
+    merge_post_switch_gateway_status(&mut status, Err("health unavailable".to_string()));
+
+    assert_eq!(status.mode, "unknown");
+    assert!(status.message.contains("route committed"));
+    assert!(status.message.contains("health unavailable"));
+}
 
 #[test]
 fn providers_toml_roundtrip_preserves_all_provider_and_model_fields() {
@@ -375,14 +437,8 @@ fn legacy_official_model_ids_are_normalized_on_load_and_save() {
                 "openai/gpt-5.5".to_string(),
                 " gpt-5.4 ".to_string(),
             ],
-            official_disabled_models: vec![
-                "openai/gpt-5.4".to_string(),
-                " gpt-5.4 ".to_string(),
-            ],
-            official_model_sort_order: vec![
-                "openai/gpt-5.5".to_string(),
-                " gpt-5.5 ".to_string(),
-            ],
+            official_disabled_models: vec!["openai/gpt-5.4".to_string(), " gpt-5.4 ".to_string()],
+            official_model_sort_order: vec!["openai/gpt-5.5".to_string(), " gpt-5.5 ".to_string()],
             ..Settings::default()
         },
         &paths,
@@ -684,9 +740,8 @@ fn switch_mode_custom_applies_config_overlay_without_history_sync() {
     .expect("settings save");
     let runner = RecordingRunner::successful();
 
-    let status =
-        switch_mode_with_paths("custom", true, &paths, Path::new("python-test"), &runner)
-            .expect("switch custom");
+    let status = switch_mode_with_paths("custom", true, &paths, Path::new("python-test"), &runner)
+        .expect("switch custom");
 
     assert_eq!(status.mode, "custom");
     assert_eq!(status.proxy_port, 4555);
@@ -752,9 +807,15 @@ fn isolated_paths_keep_beta_runtime_artifacts_out_of_codex_target() {
     let paths = ConfigPaths::new_isolated(&runtime, &target, root.join("repo"));
 
     assert_eq!(paths.settings_path(), runtime.join("proxy/settings.json"));
-    assert_eq!(paths.config_backup_path(), runtime.join("proxy/config.toml.release.backup"));
+    assert_eq!(
+        paths.config_backup_path(),
+        runtime.join("proxy/config.toml.release.backup")
+    );
     assert_eq!(paths.codex_config_path(), target.join("config.toml"));
-    assert_eq!(paths.generated_catalog_path(), runtime.join("model-catalogs/codexhub-model-catalog.json"));
+    assert_eq!(
+        paths.generated_catalog_path(),
+        runtime.join("model-catalogs/codexhub-model-catalog.json")
+    );
 }
 
 #[test]
@@ -1026,7 +1087,8 @@ fn stable_same_owner_force_with_missing_backup_disconnects_to_unified_official()
 
 #[test]
 fn codex_overlay_owner_is_detected_from_managed_marker() {
-    let text = "# BEGIN CODEX PROXY SESSION CONFIG\n# owner = beta\n# END CODEX PROXY SESSION CONFIG\n";
+    let text =
+        "# BEGIN CODEX PROXY SESSION CONFIG\n# owner = beta\n# END CODEX PROXY SESSION CONFIG\n";
     assert_eq!(
         codex_overlay_owner(text),
         Some(crate::app_flavor::RoutingOwner::Beta)
@@ -1137,9 +1199,8 @@ fn switch_mode_does_not_run_history_when_overlay_fails() {
     .expect("settings save");
     let runner = RecordingRunner::failed(23, "overlay stdout", "overlay stderr");
 
-    let error =
-        switch_mode_with_paths("custom", true, &paths, Path::new("python-test"), &runner)
-            .expect_err("overlay should fail");
+    let error = switch_mode_with_paths("custom", true, &paths, Path::new("python-test"), &runner)
+        .expect_err("overlay should fail");
 
     let commands = runner.commands.borrow();
     assert_eq!(commands.len(), 1);
@@ -1167,23 +1228,41 @@ fn switch_mode_returns_stdout_stderr_context_when_python_fails() {
 }
 
 #[test]
+fn committed_restore_cleanup_warning_is_exposed_in_switch_status() {
+    let root = temp_root("switch-committed-cleanup-warning");
+    let paths = test_paths(&root);
+    let runner = RecordingRunner::sequence(vec![CommandOutcome {
+        code: Some(0),
+        stdout: "restored".to_string(),
+        stderr: "warning: route committed; backup cleanup deferred (PermissionError)\n"
+            .to_string(),
+    }]);
+
+    let status =
+        switch_mode_with_paths("official", false, &paths, Path::new("python-test"), &runner)
+            .expect("the committed route switch remains successful");
+
+    assert!(status.message.contains("Switched to official mode"));
+    assert!(status.message.contains("route committed"));
+    assert!(status.message.contains("cleanup deferred"));
+    assert!(status.message.contains("PermissionError"));
+}
+
+#[test]
 fn context_guard_command_keeps_codex_and_gateway_state_in_sync() {
     let root = temp_root("context-guard-command");
     let paths = test_paths(&root);
-    let status_json = r#"{"enabled":true,"model_context_window":272000,"model_auto_compact_token_limit":240000}"#;
+    let status_json =
+        r#"{"enabled":true,"model_context_window":272000,"model_auto_compact_token_limit":240000}"#;
     let set_runner = RecordingRunner::sequence(vec![CommandOutcome {
         code: Some(0),
         stdout: status_json.to_string(),
         stderr: String::new(),
     }]);
 
-    let status = set_codex_context_guard_with_paths(
-        true,
-        &paths,
-        Path::new("python-test"),
-        &set_runner,
-    )
-    .expect("context guard enabled");
+    let status =
+        set_codex_context_guard_with_paths(true, &paths, Path::new("python-test"), &set_runner)
+            .expect("context guard enabled");
 
     assert!(status.enabled);
     assert!(status.codex_enabled);
@@ -1216,12 +1295,9 @@ fn context_guard_command_keeps_codex_and_gateway_state_in_sync() {
         stdout: status_json.to_string(),
         stderr: String::new(),
     }]);
-    let refreshed = get_codex_context_guard_status_with_paths(
-        &paths,
-        Path::new("python-test"),
-        &get_runner,
-    )
-    .expect("context guard status");
+    let refreshed =
+        get_codex_context_guard_status_with_paths(&paths, Path::new("python-test"), &get_runner)
+            .expect("context guard status");
     assert!(refreshed.enabled);
     assert_contains_sequence(
         &get_runner.commands.borrow()[0].args,
@@ -1301,10 +1377,8 @@ fn startup_context_migration_targets_a_foreign_channel_backup() {
     )
     .unwrap();
     let current_owner = crate::app_flavor::current().routing_owner();
-    let backup_path = paths.config_backup_path_for_target_owner(
-        current_owner,
-        crate::app_flavor::RoutingOwner::Beta,
-    );
+    let backup_path = paths
+        .config_backup_path_for_target_owner(current_owner, crate::app_flavor::RoutingOwner::Beta);
     let other_backup_path = paths.config_backup_path_for_target_owner(
         current_owner,
         crate::app_flavor::RoutingOwner::Release,
@@ -1315,18 +1389,19 @@ fn startup_context_migration_targets_a_foreign_channel_backup() {
     }
     let runner = RecordingRunner::successful();
 
-    migrate_legacy_context_guard_with_paths(
-        &paths,
-        Path::new("python-test"),
-        &runner,
-    )
-    .expect("startup context migration");
+    migrate_legacy_context_guard_with_paths(&paths, Path::new("python-test"), &runner)
+        .expect("startup context migration");
 
     let commands = runner.commands.borrow();
     assert_eq!(commands.len(), 1);
     assert_contains_sequence(
         &commands[0].args,
-        &["migrate-context-guard", "--config", "--backup", "--context-guard-state"],
+        &[
+            "migrate-context-guard",
+            "--config",
+            "--backup",
+            "--context-guard-state",
+        ],
     );
     assert_eq!(
         commands[0]
@@ -1590,13 +1665,9 @@ mod isolated_codex_managed_config {
         let root = temp_root("codex-preview-isolated");
         let paths = isolated_paths(&root);
         let catalog_path = paths.generated_catalog_path();
-        let preview = preview_codex_config_isolated(
-            &paths,
-            "custom",
-            "gpt-5.6-luna",
-            Some(&catalog_path),
-        )
-        .unwrap();
+        let preview =
+            preview_codex_config_isolated(&paths, "custom", "gpt-5.6-luna", Some(&catalog_path))
+                .unwrap();
 
         assert_eq!(preview.client_id, "codex");
         // F4: the Codex preview now reports the real overlay provider/route
@@ -1654,7 +1725,11 @@ mod isolated_codex_managed_config {
             "--context-guard-state",
             &paths.context_guard_state_path(),
         );
-        assert_arg_value(&commands[0].args, "--catalog", &paths.generated_catalog_path());
+        assert_arg_value(
+            &commands[0].args,
+            "--catalog",
+            &paths.generated_catalog_path(),
+        );
         assert_arg_literal(&commands[0].args, "--base-url", "http://127.0.0.1:9099");
         assert_arg_literal(&commands[0].args, "--gateway-key", "isolated-key");
         // All config/backup/catalog paths stay beneath the isolated root.

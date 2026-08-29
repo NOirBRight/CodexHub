@@ -55,6 +55,7 @@ const tauriDefaultCapabilityPath = new URL("../../src-tauri/capabilities/default
 const tauriAppUpdatesPath = new URL("../../src-tauri/src/app_updates.rs", import.meta.url);
 const tauriCargoPath = new URL("../../src-tauri/Cargo.toml", import.meta.url);
 const tauriConfigSourcePath = new URL("../../src-tauri/src/config.rs", import.meta.url);
+const tauriCodexDesktopPath = new URL("../../src-tauri/src/codex_desktop.rs", import.meta.url);
 const tauriMainPath = new URL("../../src-tauri/src/main.rs", import.meta.url);
 const tauriOpenAiUsagePath = new URL("../../src-tauri/src/openai_usage.rs", import.meta.url);
 const tauriModelsPath = new URL("../../src-tauri/src/models.rs", import.meta.url);
@@ -460,9 +461,10 @@ test("gateway request timeout defaults to 300 seconds across UI and runtime", as
 });
 
 test("runtime header removes flow chips and exposes desktop window controls", async () => {
-  const [runtimeSource, tauriSource, tauriConfig, tauriDefaultCapability, css] = await Promise.all([
+  const [runtimeSource, tauriSource, codexDesktopSource, tauriConfig, tauriDefaultCapability, css] = await Promise.all([
     readFile(runtimeBarPath, "utf8"),
     readFile(tauriMainPath, "utf8"),
+    readFile(tauriCodexDesktopPath, "utf8"),
     readFile(tauriConfigPath, "utf8"),
     readFile(tauriDefaultCapabilityPath, "utf8"),
     readFile(indexCssPath, "utf8"),
@@ -495,8 +497,14 @@ test("runtime header removes flow chips and exposes desktop window controls", as
   assert.match(tauriSource, /TrayIconBuilder::with_id\("codexhub"\)/);
   assert.match(tauriSource, /Connect Codex to CodexHub/);
   assert.doesNotMatch(tauriSource, /Restart Codex App/);
-  assert.doesNotMatch(tauriSource, /Stop-Process/);
-  assert.match(tauriSource, /Get-StartApps/);
+  assert.doesNotMatch(codexDesktopSource, /Stop-Process/);
+  assert.match(codexDesktopSource, /Get-AppxPackageManifest/);
+  assert.match(codexDesktopSource, /Get-AppxPackage -Name 'OpenAI\.Codex'/);
+  assert.match(codexDesktopSource, /\$ErrorActionPreference = 'Stop'/);
+  assert.match(codexDesktopSource, /Windows\.FullTrustApplication/);
+  assert.match(codexDesktopSource, /lifecycle command timed out/);
+  assert.doesNotMatch(codexDesktopSource, /OpenAI\.Codex\*/);
+  assert.match(codexDesktopSource, /CloseMainWindow/);
   assert.doesNotMatch(tauriSource, /Restart CodexHub/);
   assert.equal(JSON.parse(tauriConfig).app.windows[0].decorations, false);
 });
@@ -1887,7 +1895,8 @@ test("official model list exposes a Codex and Gateway context cost guard", async
   assert.match(tauriSource, /COMMANDS.getCodexContextGuardStatus/);
   assert.match(tauriSource, /COMMANDS.setCodexContextGuard/);
   assert.match(providersSource, /api\.getCodexContextGuardStatus\(\)/);
-  assert.match(providersSource, /api\.setCodexContextGuard\(enabled\)/);
+  assert.match(providersSource, /api\.setCodexContextGuard\(enabled, restartCodex\)/);
+  assert.match(providersSource, /await onAuthorizeCodexRestart\(\)/);
   const toggleAction = providersSource.match(
     /async function toggleContextGuard\(enabled: boolean\) \{[\s\S]*?\n  \}/,
   )?.[0] ?? "";
@@ -2267,7 +2276,7 @@ test("Luna Collaboration selector shows only V1/V2 and marks the live catalog de
   assert.match(zhSource, /collaborationVersionDefault: "（默认）"/);
 });
 
-test("Luna Collaboration save uses the Tauri modelId contract and reloads persisted overrides", async () => {
+test("Luna Collaboration save coordinates Codex before the catalog commit", async () => {
   const [tauriSource, bridgeSource, providersSource] = await Promise.all([
     readFile(tauriSourcePath, "utf8"),
     readFile(tauriWebBridgePath, "utf8"),
@@ -2275,8 +2284,8 @@ test("Luna Collaboration save uses the Tauri modelId contract and reloads persis
   ]);
   const saveApi = tauriSource.match(/saveOfficialMultiAgentVersion[\s\S]*?listOfficialMultiAgentOverrides/)?.[0] ?? "";
 
-  assert.match(saveApi, /call<Model>\(COMMANDS.saveOfficialMultiAgentVersion/);
-  assert.match(saveApi, /modelId,\s*version/);
+  assert.match(saveApi, /call<OfficialMultiAgentSaveResult>\(COMMANDS.saveOfficialMultiAgentVersion/);
+  assert.match(saveApi, /modelId,\s*version,\s*restartCodex/);
   assert.doesNotMatch(saveApi, /model_id/);
   assert.match(tauriSource, /listOfficialMultiAgentBaselines:[\s\S]*COMMANDS.listOfficialMultiAgentBaselines/);
   assert.match(
@@ -2284,13 +2293,17 @@ test("Luna Collaboration save uses the Tauri modelId contract and reloads persis
     /"save_official_multi_agent_version"[\s\S]*optional_string_arg\(&request\.args, &\["modelId", "model_id"\]\)/,
   );
   assert.match(providersSource, /api\.listOfficialMultiAgentOverrides\(\)/);
-  assert.match(providersSource, /api\.saveOfficialMultiAgentVersion\(modelId, version\)/);
+  assert.match(providersSource, /restartCodex = await onAuthorizeCodexRestart\(\)/);
+  assert.match(providersSource, /api\.saveOfficialMultiAgentVersion\(modelId, version, restartCodex\)/);
   assert.match(
     providersSource,
     /async function refreshOfficialModelsAndCollaborationState[\s\S]*api\.listOfficialMultiAgentBaselines\(\)/,
   );
   assert.doesNotMatch(providersSource, /primeOfficialModels/);
-  assert.match(providersSource, /onRefresh\(\{ quiet: true, throwOnError: true \}\)/);
+  const saveAction = providersSource.match(/async function changeOfficialCollaborationVersion[\s\S]*?return \(/)?.[0] ?? "";
+  assert.doesNotMatch(saveAction, /onRefresh\(/);
+  assert.match(saveAction, /codex_restart_result === "restarted"/);
+  assert.match(saveAction, /collaborationVersionSavedCodexRelaunchFailed/);
 });
 
 test("Gateway restart planning uses only the current Gateway running snapshot", async () => {
@@ -2531,10 +2544,11 @@ test("manual and quiet Official refresh expose only the post-publication catalog
   const manualResultModels = refreshSource.match(/fn manual_refresh_models[\s\S]*?(?=fn published_official_catalog_models)/)?.[0] ?? "";
 
   assert.match(refreshAction, /const quiet = options\?\.quiet \?\? false;/);
-  assert.match(refreshAction, /const refreshResult = await api\.refreshOfficialModels\(\);/);
+  assert.match(refreshAction, /const restartCodex = quiet \? false : await authorizeCodexRestart\(\);/);
+  assert.match(refreshAction, /const refreshResult = await api\.refreshOfficialModels\(restartCodex\);/);
   assert.match(refreshManual, /let outcome = refresh\(RefreshTrigger::Manual\)\?;/);
-  assert.match(refreshManual, /models: manual_refresh_models\([\s\S]*?outcome\.snapshot_available,[\s\S]*?outcome\.models,[\s\S]*?published_official_catalog_models,/);
-  assert.match(manualResultModels, /if snapshot_available \{[\s\S]*?load_published_catalog\(\)[\s\S]*?\} else \{[\s\S]*?Ok\(outcome_models\)/);
+  assert.match(refreshManual, /let \(models, delivery_warning\) = manual_refresh_models\([\s\S]*?outcome\.snapshot_available,[\s\S]*?outcome\.models,[\s\S]*?published_official_catalog_models,/);
+  assert.match(manualResultModels, /if snapshot_available \{[\s\S]*?match load_published_catalog\(\)[\s\S]*?Err\(error\)[\s\S]*?outcome_models/);
 });
 
 test("official OpenAI controls are locked while Codex auth is missing", async () => {
@@ -2614,10 +2628,11 @@ test("official OpenAI source explains export-only semantics", async () => {
 });
 
 test("official OpenAI auth prompt guides login before showing usage", async () => {
-  const [providersSource, tauriSource, mainSource, webBridgeSource, enSource, zhSource] = await Promise.all([
+  const [providersSource, tauriSource, mainSource, codexDesktopSource, webBridgeSource, enSource, zhSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
     readFile(tauriMainPath, "utf8"),
+    readFile(tauriCodexDesktopPath, "utf8"),
     readFile(tauriWebBridgePath, "utf8"),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
@@ -2674,9 +2689,10 @@ test("official OpenAI auth prompt guides login before showing usage", async () =
   assert.match(tauriSource, /openCodexApp: \(\) => call<string>\(COMMANDS.openCodexApp\)/);
   assert.match(mainSource, /fn open_codex_app\(\) -> Result<String, String> \{[\s\S]*launch_codex_app\(\)/);
   assert.match(mainSource, /open_codex_app,/);
-  assert.match(mainSource, /fn launch_codex_app\(\) -> Result<String, String> \{[\s\S]*Get-StartApps[\s\S]*Start-Process \('shell:AppsFolder\\' \+ \$app\.AppID\)/);
-  assert.match(mainSource, /fn detect_codex_desktop_executable\(\) -> Option<std::path::PathBuf>/);
-  assert.match(mainSource, /\/usr\/lib\/chatgpt\/codex-launcher/);
+  assert.match(mainSource, /fn launch_codex_app\(\) -> Result<String, String> \{[\s\S]*codex_desktop::launch\(\)/);
+  assert.match(codexDesktopSource, /fn detect_linux_installation\(\) -> Option<LinuxCodexInstallation>/);
+  assert.match(codexDesktopSource, /\/usr\/lib\/chatgpt\/codex-launcher/);
+  assert.match(codexDesktopSource, /Get-AppxPackageManifest/);
   assert.match(webBridgeSource, /"open_codex_app" => to_value\(crate::open_codex_app\(\)\)/);
   assert.match(enSource, /codexAuthRequiredTitle: "Sign in to Codex"/);
   assert.match(zhSource, /codexAuthRequiredTitle: "需要登录 Codex"/);
@@ -2706,7 +2722,6 @@ test("official refresh action is placed in the Models toolbar", async () => {
 
   assert.doesNotMatch(officialDetail, /IconButton title="Refresh official models"/);
   assert.match(officialDetail, /onRefresh=\{onRefresh\}/);
-  assert.match(officialDetail, /await onRefresh\(\{ quiet: true, throwOnError: true \}\)/);
   assert.match(officialDetail, /refreshBusy=\{busy === "official-refresh"\}/);
   assert.match(modelSection, /onRefresh\?: \(\) => void;/);
   assert.match(modelSection, /refreshBusy\?: boolean;/);
@@ -2879,10 +2894,10 @@ test("Codex Hub connection action reports progress immediately", async () => {
   assert.match(action, /setConnectionPendingMode\(nextMode\);[\s\S]*setBusy\("route"\);/);
   assert.match(action, /showToast\(`\$\{actionLabel\}\.\.\.`, "loading"\);/);
   assert.ok(action.indexOf("showToast(`${actionLabel}...`, \"loading\");") < action.indexOf("api.switchMode("));
-  assert.match(action, /api\.switchMode\(nextMode, false\)/);
+  assert.match(action, /api\.switchMode\(nextMode, false, false, restartCodex\)/);
   assert.match(action, /if \(nextMode === "custom" && !status\.proxy_running\) \{/);
   assert.match(action, /await startProxyForHubConnection\(\);/);
-  assert.match(action, /status = refreshedStatus \?\? status;/);
+  assert.match(action, /\{ \.\.\.refreshedStatus, codex_restart_result: codexRestartResult \}/);
   assert.match(action, /setConnectionPendingMode\(null\);/);
   assert.match(action, /if \(isBackendDisconnectedMessage\(message\)\) \{[\s\S]*setConnectionPendingMode\(null\);[\s\S]*updateToastWithError\(toastId, err\);[\s\S]*return;[\s\S]*\}/);
   assert.match(providersSource, /function updateToastWithError\(toastId: string, err: unknown\)[\s\S]*label: t\("gateway\.startBackend"\)[\s\S]*startBackendFromToast\(toastId\)/);
@@ -2905,7 +2920,7 @@ test("connection switching delegates idempotent history reconciliation to the ba
   assert.match(configSource, /mode == "custom" \|\| settings\.unified_codex_history/);
   assert.match(configSource, /status\.history_sync_status = Some\(result\.status\.as_str\(\)\.to_string\(\)\)/);
   assert.match(configSource, /status\.history_sync_message = Some\(error\)/);
-  assert.match(configSource, /crate::catalog::generate_catalog\(\)\?/);
+  assert.match(configSource, /crate::catalog::generate_catalog_with_existing_lock\(\)\?/);
   assert.doesNotMatch(configSource, /catalog refresh before Codex Hub connect failed/);
   // The route command owns reconciliation; the UI must not launch a duplicate repair.
   assert.doesNotMatch(action, /targetProvider/);
@@ -2956,7 +2971,7 @@ test("Codex Hub connection does not retry after history sync failures", async ()
 
   assert.doesNotMatch(action, /historyError/);
   assert.doesNotMatch(action, /without history sync/);
-  assert.match(action, /api\.switchMode\(nextMode, false\)/);
+  assert.match(action, /api\.switchMode\(nextMode, false, false, restartCodex\)/);
   assert.doesNotMatch(providersSource, /function codexHubHistorySyncErrorMessage/);
 });
 
@@ -3094,17 +3109,128 @@ test("Windows portable build uses the Tauri custom protocol pipeline", async () 
   assert.doesNotMatch(portableScript, /cargo build --release/);
 });
 
-test("CodexHub route switches never control Codex processes", async () => {
-  const [providersSource, tauriSource] = await Promise.all([
+test("Codex route switches require explicit confirmation and use the bounded exact lifecycle", async () => {
+  const [providersSource, appSource, tauriSource, mainSource, codexDesktopSource] = await Promise.all([
     readProviderContractSource(),
+    readFile(appPath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
+    readFile(tauriMainPath, "utf8"),
+    readFile(tauriCodexDesktopPath, "utf8"),
   ]);
 
   assert.match(tauriSource, /reconcileAfterRouteSwitch/);
   assert.match(tauriSource, /COMMANDS.reconcileAfterRouteSwitch/);
   assert.doesNotMatch(providersSource, /api\.reconcileAfterRouteSwitch/);
-  assert.doesNotMatch(providersSource, /codexRestartedForRoute/);
-  assert.match(providersSource, /codexRouteChangedRestart/);
+  assert.match(tauriSource, /getCodexDesktopStatus/);
+  assert.match(tauriSource, /restartCodex = false/);
+  assert.match(providersSource, /async function authorizeCodexRestart\(\)/);
+  assert.match(providersSource, /await confirmAction\(\{/);
+  assert.match(providersSource, /providers\.codexRestartConfirmation/);
+  assert.match(providersSource, /return confirmed \? true : null/);
+  assert.match(providersSource, /codexRestartResult === "switch_failed_reopened"[\s\S]*tone: "error"/);
+  const routeAction = providersSource.match(/async function applyCodexHubConnection[\s\S]*?useEffect\(\(\) => \{/)?.[0] ?? "";
+  assert.doesNotMatch(
+    routeAction.match(/catch \(err\) \{[\s\S]*?if \(restartCodex === null\)/)?.[0] ?? "",
+    /showToast\(messageFromError\(err\), "error"\)/,
+  );
+  assert.match(mainSource, /request_tray_codex_switch\(app, "official"\)/);
+  assert.match(mainSource, /request_tray_codex_switch\(app, "custom"\)/);
+  assert.match(appSource, /codexhub:request-codex-switch/);
+  assert.match(codexDesktopSource, /Duration::from_secs\(10\)/);
+  assert.match(codexDesktopSource, /Duration::from_secs\(15\)/);
+  assert.match(codexDesktopSource, /linux_main_process_ids\(Path::new\("\/proc"\)/);
+  assert.match(codexDesktopSource, /Get-AppxPackageManifest/);
+  assert.match(codexDesktopSource, /CloseMainWindow/);
+  assert.doesNotMatch(codexDesktopSource, /kill\s+-9|SIGKILL|Stop-Process/);
+});
+
+test("catalog and metadata writers share the lifecycle and publication lock", async () => {
+  const [catalogActionsSource, providersPageSource, tauriSource, mainSource, modelsSource, codexDesktopSource, webBridgeSource, cliSource] = await Promise.all([
+    readFile(providerCatalogActionsPath, "utf8"),
+    readFile(providersPagePath, "utf8"),
+    readFile(tauriSourcePath, "utf8"),
+    readFile(tauriMainPath, "utf8"),
+    readFile(tauriModelsPath, "utf8"),
+    readFile(tauriCodexDesktopPath, "utf8"),
+    readFile(tauriWebBridgePath, "utf8"),
+    readFile(new URL("../../src-tauri/src/cli.rs", import.meta.url), "utf8"),
+  ]);
+
+  const saveProviders = catalogActionsSource.match(
+    /async function saveProviders\([\s\S]*?(?=\n  async function refreshProviderModels)/,
+  )?.[0] ?? "";
+  const saveSettings = providersPageSource.match(
+    /async function saveSettings\([\s\S]*?(?=\n  async function toggleAutostart)/,
+  )?.[0] ?? "";
+  for (const [name, source, persistence] of [
+    ["saveProviders", saveProviders, "api.saveProviders(next)"],
+    ["saveSettings", saveSettings, "api.saveSettings(next)"],
+  ]) {
+    const authorizeAt = source.indexOf("await authorizeCodexRestart()");
+    const cancelAt = source.indexOf("if (restartCodex === null)");
+    const persistAt = source.indexOf(persistence);
+    const publishAt = source.indexOf("updateGatewayAfterCatalog(");
+    assert.ok(authorizeAt >= 0, `${name} must authorize before publication`);
+    assert.ok(cancelAt > authorizeAt, `${name} must handle cancellation after authorization`);
+    assert.ok(persistAt > cancelAt, `${name} must return before its first persistence call`);
+    assert.ok(publishAt > persistAt, `${name} must persist only after confirmation and publish last`);
+    assert.match(source.slice(cancelAt, persistAt), /if \(restartCodex === null\) \{\s*return(?: providers)?;\s*\}/);
+  }
+  assert.match(catalogActionsSource, /api\.generateCatalog\(options\?\.restartCodex \?\? false\)/);
+  assert.match(tauriSource, /generateCatalog: \(restartCodex = false\)/);
+  assert.match(mainSource, /generate_catalog_coordinated\(restart_codex\.unwrap_or\(false\)\)/);
+  assert.match(mainSource, /coordinated_catalog_write\(restart_codex, catalog::generate_catalog_with_existing_lock\)/);
+  assert.match(mainSource, /CodexRestartResult::SwitchedRelaunchFailed[\s\S]*SWITCH_RELAUNCH_FAILED_ERROR/);
+  assert.match(modelsSource, /serialize_config_writer\(refresh_model_metadata_with_existing_lock\)/);
+  assert.match(modelsSource, /serialize_config_writer\(\|\|\s*\{\s*save_model_metadata_override_with_existing_lock\(model\)/);
+  assert.match(codexDesktopSource, /settings_writer_waits_for_an_active_publication_transaction/);
+  assert.match(webBridgeSource, /"generate_catalog"[\s\S]*generate_catalog_coordinated\(restart_codex\)/);
+  assert.match(webBridgeSource, /"sync_catalog"[\s\S]*sync_catalog_coordinated\(restart_codex\)/);
+  assert.match(cliSource, /Some\("sync-catalog"\)[\s\S]*sync_catalog_coordinated\(restart_codex\)/);
+});
+
+test("catalog confirmation cancellation performs zero persistence", async () => {
+  const [catalogActionsSource, providersPageSource] = await Promise.all([
+    readFile(providerCatalogActionsPath, "utf8"),
+    readFile(providersPagePath, "utf8"),
+  ]);
+  const saveProvidersSource = catalogActionsSource.match(
+    /async function saveProviders\([\s\S]*?(?=\n  async function refreshProviderModels)/,
+  )?.[0] ?? "";
+  const saveSettingsSource = providersPageSource.match(
+    /async function saveSettings\([\s\S]*?(?=\n  async function toggleAutostart)/,
+  )?.[0] ?? "";
+  const transpile = (source) => ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const calls = [];
+  const api = {
+    saveProviders: async () => { calls.push("saveProviders"); },
+    saveSettings: async () => { calls.push("saveSettings"); },
+  };
+  const updateGatewayAfterCatalog = async () => { calls.push("generateCatalog"); };
+  const authorizeCodexRestart = async () => {
+    calls.push("authorize");
+    return null;
+  };
+  const providers = [{ id: "existing" }];
+  const saveProviders = Function(
+    "authorizeCodexRestart",
+    "providers",
+    "api",
+    "updateGatewayAfterCatalog",
+    `"use strict"; ${transpile(saveProvidersSource)}; return saveProviders;`,
+  )(authorizeCodexRestart, providers, api, updateGatewayAfterCatalog);
+  const saveSettings = Function(
+    "authorizeCodexRestart",
+    "api",
+    "updateGatewayAfterCatalog",
+    `"use strict"; ${transpile(saveSettingsSource)}; return saveSettings;`,
+  )(authorizeCodexRestart, api, updateGatewayAfterCatalog);
+
+  assert.equal(await saveProviders([], true), providers);
+  assert.equal(await saveSettings({}, true), undefined);
+  assert.deepEqual(calls, ["authorize", "authorize"]);
 });
 
 test("settings drawer keeps language immediate and protects unsaved drafts", async () => {
@@ -3368,12 +3494,12 @@ test("Codex takeover uses the existing connected control and exposes ownership s
   assert.match(typesSource, /codex_target_home_suffix: string/);
   assert.match(typesSource, /codex_target_owner: RoutingOwner \| null/);
   assert.match(typesSource, /codex_takeover_required: boolean/);
-  assert.match(tauriSource, /switchMode: \(mode: string, autoSync: boolean, forceTakeover = false\)/);
+  assert.match(tauriSource, /switchMode: \(mode: string, autoSync: boolean, forceTakeover = false, restartCodex = false\)/);
   assert.match(tauriSource, /forceTakeover/);
   assert.match(providersSource, /appFlavor\?\.codex_takeover_required/);
   assert.doesNotMatch(providersSource, /window\.confirm\(t\("providers\.betaTakeoverConfirm"/);
   assert.doesNotMatch(providersSource, /TakeoverSummaryDialog/);
-  assert.match(providersSource, /forceTakeover[\s\S]*api\.switchMode\(nextMode, false, true\)/);
+  assert.match(providersSource, /forceTakeover[\s\S]*api\.switchMode\(nextMode, false, true, restartCodex\)/);
   assert.match(providersSource, /await applyCodexHubConnection\(nextMode, Boolean\(appFlavor\?\.codex_takeover_required\)\)/);
   assert.match(providersSource, /setCodexTargetOwnerOverride\(nextMode === "custom" \? appFlavor\?\.routing_owner \?\? null : "official"\)/);
   assert.match(providersSource, /codexForeignOwner=\{codexOwnedByOtherApp\}/);
@@ -3409,15 +3535,24 @@ test("manual Official refresh carries and discloses a Codex restart requirement"
     readFile(zhLocalePath, "utf8"),
   ]);
 
-  assert.match(typesSource, /export interface OfficialRefreshResult[\s\S]*restart_required: boolean/);
-  assert.match(tauriSource, /refreshOfficialModels: \(\) => call<OfficialRefreshResult>\(COMMANDS.refreshOfficialModels\)/);
-  assert.match(actionsSource, /const refreshResult = await api\.refreshOfficialModels\(\)/);
+  assert.match(typesSource, /export interface OfficialRefreshResult[\s\S]*restart_required: boolean[\s\S]*warning\?: string \| null/);
+  assert.match(tauriSource, /refreshOfficialModels: \(restartCodex = false\)/);
+  assert.match(actionsSource, /const refreshResult = await api\.refreshOfficialModels\(restartCodex\)/);
   assert.match(actionsSource, /refreshResult\.restart_required[\s\S]*officialContextLimitsRestartCodex/);
   const refresh = actionsSource.match(/async function refreshOfficialModels[\s\S]*?async function discoverForForm/)?.[0] ?? "";
+  assert.ok(
+    refresh.indexOf("await authorizeCodexRestart()") < refresh.indexOf('showToast(t("providers.refreshingOfficialModels")'),
+    "cancelling restart confirmation must happen before the persistent loading Toast is created",
+  );
+  assert.match(refresh, /codex_restart_result === "restarted"[\s\S]*officialModelsRefreshedCodexRestarted/);
+  assert.match(refresh, /codex_restart_result === "switched_relaunch_failed"[\s\S]*officialModelsRefreshedCodexRelaunchFailed/);
+  assert.match(refresh, /refreshResult\.warning\?\.trim\(\)[\s\S]*officialModelsRefreshedWithWarning/);
   assert.match(refresh, /catalogAlreadyPublished: true/);
   assert.doesNotMatch(refresh, /api\.generateCatalog\(\)/);
   assert.match(enSource, /officialContextLimitsRestartCodex: "Official context limits changed\. Restart Codex App to apply them\."/);
   assert.match(zhSource, /officialContextLimitsRestartCodex: "官方上下文限制已更新。请重启 Codex App 以应用它们。"/);
+  assert.match(enSource, /officialModelsRefreshedCodexRestarted:/);
+  assert.match(zhSource, /officialModelsRefreshedCodexRestarted:/);
 });
 
 test("persistent state changes follow the project toast and restart-disclosure standard", async () => {

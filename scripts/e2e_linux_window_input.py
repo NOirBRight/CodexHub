@@ -389,13 +389,18 @@ def wait_for_stable_pixels(
     width: int,
     height: int,
     *,
-    timeout: float = 8.0,
+    timeout: float = 15.0,
 ) -> tuple[int, ...]:
     deadline = time.monotonic() + timeout
     previous: tuple[int, ...] | None = None
     stable_frames = 0
     while time.monotonic() < deadline:
         current = x11.pixel_sample(window_id, x, y, width, height)
+        if not visual_frame_has_ui_content(current):
+            previous = None
+            stable_frames = 0
+            time.sleep(0.2)
+            continue
         if current == previous:
             stable_frames += 1
         else:
@@ -404,7 +409,19 @@ def wait_for_stable_pixels(
         if stable_frames >= 5:
             return current
         time.sleep(0.2)
-    raise RuntimeError("CodexHub UI did not reach a stable five-frame visual baseline")
+    raise RuntimeError(
+        "CodexHub UI did not render a non-blank stable five-frame visual baseline"
+    )
+
+
+def visual_frame_has_ui_content(pixels: tuple[int, ...]) -> bool:
+    if not pixels:
+        return False
+    counts: dict[int, int] = {}
+    for pixel in pixels:
+        counts[pixel] = counts.get(pixel, 0) + 1
+    dominant_fraction = max(counts.values()) / len(pixels)
+    return len(counts) >= 8 and dominant_fraction <= 0.95
 
 
 def changed_pixel_fraction(before: tuple[int, ...], after: tuple[int, ...]) -> float:
@@ -685,6 +702,9 @@ def main() -> int:
             return 1
         if changed_pixel_fraction((1, 2, 3, 4), (1, 9, 8, 4)) != 0.5:
             print("FAIL: visual transition measurement is not deterministic")
+            return 1
+        if visual_frame_has_ui_content((0xFFFFFF,) * 128):
+            print("FAIL: stable blank frames are accepted as interactive UI")
             return 1
         print("PASS: Linux pointer-input E2E self-test")
         return 0

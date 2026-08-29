@@ -1,6 +1,6 @@
 use crate::{
-    app_updates, autostart, catalog, config, gateway, history, models, official_refresh,
-    openai_usage, proxy, xai_auth,
+    app_updates, autostart, catalog, config, gateway, history, models, openai_usage, proxy,
+    xai_auth,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -252,16 +252,21 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             app_updates::install_app_update(desktop_app(&app)?),
         )),
         "get_status" => to_value(proxy::status()),
+        "get_codex_desktop_status" => to_value(crate::codex_desktop::status()),
         "switch_mode" => {
             let mode = string_arg(&request.args, "mode")?;
             let auto_sync = bool_arg(&request.args, "autoSync")?;
             let force_takeover =
                 optional_bool_arg(&request.args, &["forceTakeover", "force_takeover"])
                     .unwrap_or(false);
+            let restart_codex =
+                optional_bool_arg(&request.args, &["restartCodex", "restart_codex"])
+                    .unwrap_or(false);
             to_value(crate::switch_mode(
                 mode,
                 auto_sync,
                 Some(force_takeover),
+                Some(restart_codex),
             ))
         }
         "start_proxy" => to_value(crate::start_proxy()),
@@ -280,9 +285,7 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             .map_err(|error| format!("invalid providers argument: {error}"))?;
             to_value(config::save_providers(providers))
         }
-        "get_settings" => to_value(
-            config::get_settings().and_then(autostart::reconcile_settings),
-        ),
+        "get_settings" => to_value(config::get_settings().and_then(autostart::reconcile_settings)),
         "get_app_flavor" => to_value(Ok(crate::app_flavor::current_info())),
         "save_settings" => {
             let settings = serde_json::from_value(
@@ -298,9 +301,17 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
         "get_codex_context_guard_status" => to_value(config::get_codex_context_guard_status()),
         "set_codex_context_guard" => {
             let enabled = bool_arg(&request.args, "enabled")?;
-            to_value(config::set_codex_context_guard(enabled))
+            let restart_codex =
+                optional_bool_arg(&request.args, &["restartCodex", "restart_codex"])
+                    .unwrap_or(false);
+            to_value(crate::set_codex_context_guard(enabled, Some(restart_codex)))
         }
-        "refresh_official_models" => to_value(official_refresh::refresh_manual()),
+        "refresh_official_models" => {
+            let restart_codex =
+                optional_bool_arg(&request.args, &["restartCodex", "restart_codex"])
+                    .unwrap_or(false);
+            to_value(crate::refresh_official_models_coordinated(restart_codex))
+        }
         "openai_usage_completions" => {
             let start_time = optional_u64_arg(&request.args, &["startTime", "start_time"]);
             let end_time = optional_u64_arg(&request.args, &["endTime", "end_time"]);
@@ -489,7 +500,14 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
             to_value(gateway::sync_gateway_clients(model))
         }
         "subagent_matrix_status" => to_value(gateway::subagent_matrix_status()),
-        "generate_catalog" => to_value(catalog::generate_catalog()),
+        "generate_catalog" => {
+            let restart_codex = optional_bool_arg(
+                &request.args,
+                &["restartCodex", "restart_codex"],
+            )
+            .unwrap_or(false);
+            to_value(crate::generate_catalog_coordinated(restart_codex))
+        }
         "get_catalog_override_diagnostics" => to_value(catalog::catalog_override_diagnostics()),
         "list_models" => to_value(models::list_models()),
         "refresh_model_metadata" => to_value(models::refresh_model_metadata()),
@@ -513,7 +531,16 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
                 .get("version")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            to_value(models::save_official_multi_agent_version(model_id, version))
+            let restart_codex = optional_bool_arg(
+                &request.args,
+                &["restartCodex", "restart_codex"],
+            )
+            .unwrap_or(false);
+            to_value(crate::save_official_multi_agent_version_coordinated(
+                model_id,
+                version,
+                restart_codex,
+            ))
         }
         "list_official_multi_agent_overrides" => {
             to_value(models::list_official_multi_agent_overrides())
@@ -576,7 +603,14 @@ fn dispatch(request: InvokeRequest, app: Option<AppHandle>) -> Result<Value, Str
                 optional_bool_arg(&request.args, &["fullScan", "full_scan"]).unwrap_or(true);
             to_value(history::diagnose_unified_history(full_scan))
         }
-        "sync_catalog" => to_value(catalog::sync_catalog()),
+        "sync_catalog" => {
+            let restart_codex = optional_bool_arg(
+                &request.args,
+                &["restartCodex", "restart_codex"],
+            )
+            .unwrap_or(false);
+            to_value(crate::sync_catalog_coordinated(restart_codex))
+        }
         "set_autostart" => to_value(autostart::set_autostart(bool_arg(
             &request.args,
             "enabled",
@@ -742,7 +776,10 @@ impl BridgeResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_request, optional_string_arg, origin_allowed, BridgeRequest, BridgeResponse};
+    use super::{
+        handle_request, optional_bool_arg, optional_string_arg, origin_allowed, BridgeRequest,
+        BridgeResponse,
+    };
     use serde_json::json;
 
     #[test]
@@ -756,12 +793,40 @@ mod tests {
     #[test]
     fn official_collaboration_save_accepts_camel_case_and_legacy_model_id() {
         assert_eq!(
-            optional_string_arg(&json!({"modelId": "gpt-5.6-luna"}), &["modelId", "model_id"]),
+            optional_string_arg(
+                &json!({"modelId": "gpt-5.6-luna"}),
+                &["modelId", "model_id"]
+            ),
             Some("gpt-5.6-luna".to_string())
         );
         assert_eq!(
-            optional_string_arg(&json!({"model_id": "gpt-5.6-luna"}), &["modelId", "model_id"]),
+            optional_string_arg(
+                &json!({"model_id": "gpt-5.6-luna"}),
+                &["modelId", "model_id"]
+            ),
             Some("gpt-5.6-luna".to_string())
+        );
+    }
+
+    #[test]
+    fn restart_codex_argument_accepts_both_cases_and_defaults_to_none() {
+        assert_eq!(
+            optional_bool_arg(
+                &json!({"restartCodex": true}),
+                &["restartCodex", "restart_codex"]
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            optional_bool_arg(
+                &json!({"restart_codex": true}),
+                &["restartCodex", "restart_codex"]
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            optional_bool_arg(&json!({}), &["restartCodex", "restart_codex"]),
+            None
         );
     }
 

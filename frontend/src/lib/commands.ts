@@ -10,6 +10,7 @@ export const COMMANDS = {
   consumeAppUpdateCompletion: "consume_app_update_completion",
   installAppUpdate: "install_app_update",
   getStatus: "get_status",
+  getCodexDesktopStatus: "get_codex_desktop_status",
   switchMode: "switch_mode",
   startProxy: "start_proxy",
   stopProxy: "stop_proxy",

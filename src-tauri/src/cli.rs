@@ -1,5 +1,5 @@
 use crate::{
-    autostart, catalog, config, gateway, history, models, proxy, AppStatus, Model, Provider,
+    autostart, config, gateway, history, models, proxy, AppStatus, Model, Provider,
     Settings, UpstreamFormat,
 };
 use serde::Serialize;
@@ -11,17 +11,33 @@ const MAX_MANAGED_CLIENT_CATALOG_BYTES: u64 = 16 * 1024 * 1024;
 pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("status") => print_result(proxy::status()),
-        Some("switch") => {
-            run_switch_command(&args[1..], config::get_settings, |mode, auto_sync| {
-                crate::switch_mode(mode.to_string(), auto_sync, None)
-            })
-        }
+        Some("switch") => run_switch_command(
+            &args[1..],
+            config::get_settings,
+            |mode, auto_sync, restart_codex| {
+                crate::switch_mode(mode.to_string(), auto_sync, None, Some(restart_codex))
+            },
+        ),
         Some("start") => print_result(crate::start_proxy()),
         Some("stop") => print_result(proxy::stop()),
         Some("restart") => print_result(crate::restart_proxy()),
-        Some("refresh-models") => print_result(crate::official_refresh::refresh_manual()),
+        Some("refresh-models") => match parse_restart_codex_flag(&args[1..]) {
+            Ok(restart_codex) => {
+                print_result(crate::refresh_official_models_coordinated(restart_codex))
+            }
+            Err(()) => {
+                print_refresh_models_usage();
+                2
+            }
+        },
         Some("sync-history") => print_result(history::sync_history(None)),
-        Some("sync-catalog") => print_result(catalog::sync_catalog()),
+        Some("sync-catalog") => match parse_restart_codex_flag(&args[1..]) {
+            Ok(restart_codex) => print_result(crate::sync_catalog_coordinated(restart_codex)),
+            Err(()) => {
+                print_sync_catalog_usage();
+                2
+            }
+        },
         Some("list-providers") => print_result(config::get_providers()),
         Some("list-models") => print_result(models::list_models()),
         Some("set-autostart") => match parse_set_autostart_enabled(&args[1..]) {
@@ -61,9 +77,22 @@ fn parse_set_autostart_enabled(values: &[String]) -> Result<bool, ()> {
     }
 }
 
+fn parse_restart_codex_flag(values: &[String]) -> Result<bool, ()> {
+    match values {
+        [] => Ok(false),
+        [flag] if flag == "--restart-codex" => Ok(true),
+        _ => Err(()),
+    }
+}
+
+fn print_sync_catalog_usage() {
+    eprintln!("usage: codexhub sync-catalog [--restart-codex]");
+}
+
 struct SwitchRequest<'a> {
     mode: &'a str,
     auto_sync: Option<bool>,
+    restart_codex: bool,
 }
 
 fn parse_switch_args(values: &[String]) -> Result<SwitchRequest<'_>, ()> {
@@ -75,18 +104,25 @@ fn parse_switch_args(values: &[String]) -> Result<SwitchRequest<'_>, ()> {
     }
 
     let mut auto_sync = None;
+    let mut restart_codex = false;
     for flag in flags {
-        let value = match flag.as_str() {
-            "--auto-sync" => true,
-            "--no-auto-sync" => false,
+        match flag.as_str() {
+            "--auto-sync" | "--no-auto-sync" => {
+                let value = flag == "--auto-sync";
+                if auto_sync.replace(value).is_some() {
+                    return Err(());
+                }
+            }
+            "--restart-codex" if !restart_codex => restart_codex = true,
             _ => return Err(()),
-        };
-        if auto_sync.replace(value).is_some() {
-            return Err(());
         }
     }
 
-    Ok(SwitchRequest { mode, auto_sync })
+    Ok(SwitchRequest {
+        mode,
+        auto_sync,
+        restart_codex,
+    })
 }
 
 fn run_switch_command<GetSettings, SwitchMode>(
@@ -96,7 +132,7 @@ fn run_switch_command<GetSettings, SwitchMode>(
 ) -> i32
 where
     GetSettings: FnOnce() -> Result<Settings, String>,
-    SwitchMode: FnOnce(&str, bool) -> Result<AppStatus, String>,
+    SwitchMode: FnOnce(&str, bool, bool) -> Result<AppStatus, String>,
 {
     let request = match parse_switch_args(values) {
         Ok(request) => request,
@@ -108,7 +144,17 @@ where
 
     let auto_sync = request.auto_sync.unwrap_or(false);
 
-    print_result(switch_mode(request.mode, auto_sync))
+    match switch_mode(request.mode, auto_sync, request.restart_codex) {
+        Ok(status)
+            if status.codex_restart_result
+                == Some(crate::codex_desktop::CodexRestartResult::SwitchFailedReopened) =>
+        {
+            let _ = serde_json::to_writer_pretty(std::io::stderr(), &status);
+            eprintln!();
+            1
+        }
+        result => print_result(result),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -233,8 +279,12 @@ fn load_settings_and_providers(
     let staged_catalog_path = stage_candidate_catalog(request.catalog_path.as_deref(), &paths)?;
     // Seed settings.json from the caller-supplied path if provided.
     if let Some(settings_path) = &request.settings_path {
-        let text = std::fs::read_to_string(settings_path)
-            .map_err(|error| format!("failed to read settings {}: {error}", settings_path.display()))?;
+        let text = std::fs::read_to_string(settings_path).map_err(|error| {
+            format!(
+                "failed to read settings {}: {error}",
+                settings_path.display()
+            )
+        })?;
         std::fs::create_dir_all(paths.settings_path().parent().unwrap_or(Path::new(".")))
             .map_err(|error| format!("failed to create settings dir: {error}"))?;
         std::fs::write(paths.settings_path(), text)
@@ -242,11 +292,13 @@ fn load_settings_and_providers(
     }
     if let Some(providers_path) = &request.providers_path {
         let text = std::fs::read_to_string(providers_path).map_err(|error| {
-            format!("failed to read providers {}: {error}", providers_path.display())
+            format!(
+                "failed to read providers {}: {error}",
+                providers_path.display()
+            )
         })?;
-        std::fs::write(paths.runtime_providers_path_for_cli(), text).map_err(|error| {
-            format!("failed to write isolated providers: {error}")
-        })?;
+        std::fs::write(paths.runtime_providers_path_for_cli(), text)
+            .map_err(|error| format!("failed to write isolated providers: {error}"))?;
     }
     let mut settings = config::get_settings_from_paths(&paths)?;
     let mut providers = config::get_providers_from_paths(&paths)?;
@@ -289,8 +341,9 @@ fn stage_candidate_catalog(
         .map_err(|_| "failed to create isolated candidate catalog directory".to_string())?;
 
     if staged_path.exists() {
-        let staged_bytes = read_bounded_single_link_file(&staged_path)
-            .map_err(|_| "isolated candidate catalog is not a regular single-link file".to_string())?;
+        let staged_bytes = read_bounded_single_link_file(&staged_path).map_err(|_| {
+            "isolated candidate catalog is not a regular single-link file".to_string()
+        })?;
         if staged_bytes != source_bytes {
             return Err("isolated candidate catalog contradicts supplied source".to_string());
         }
@@ -305,8 +358,9 @@ fn stage_candidate_catalog(
             .and_then(|_| staged.sync_all())
             .map_err(|_| "failed to write isolated candidate catalog".to_string())?;
         drop(staged);
-        let staged_bytes = read_bounded_single_link_file(&staged_path)
-            .map_err(|_| "isolated candidate catalog is not a regular single-link file".to_string())?;
+        let staged_bytes = read_bounded_single_link_file(&staged_path).map_err(|_| {
+            "isolated candidate catalog is not a regular single-link file".to_string()
+        })?;
         if staged_bytes != source_bytes {
             return Err("isolated candidate catalog copy verification failed".to_string());
         }
@@ -417,7 +471,10 @@ fn run_codex_managed_client_config(
     };
     let (_settings, _providers, paths, staged_catalog_path) =
         load_settings_and_providers(request, isolated.root())?;
-    let model = request.model.clone().unwrap_or_else(|| "gpt-5.5".to_string());
+    let model = request
+        .model
+        .clone()
+        .unwrap_or_else(|| "gpt-5.5".to_string());
     match request.verb.as_str() {
         "preview" => {
             let preview = config::preview_codex_config_isolated(
@@ -473,7 +530,9 @@ fn print_set_autostart_usage() {
 }
 
 fn print_switch_usage() {
-    eprintln!("usage: codexhub switch <official|custom> [--auto-sync|--no-auto-sync]");
+    eprintln!(
+        "usage: codexhub switch <official|custom> [--auto-sync|--no-auto-sync] [--restart-codex]"
+    );
 }
 
 fn print_result<T: Serialize>(result: Result<T, String>) -> i32 {
@@ -499,6 +558,10 @@ fn print_help() {
     println!("{}", help_text());
 }
 
+fn print_refresh_models_usage() {
+    eprintln!("usage: codexhub refresh-models [--restart-codex]");
+}
+
 fn help_text() -> String {
     format!(
         "\
@@ -507,13 +570,13 @@ CodexHub CLI
 Usage:
   codexhub app
   codexhub status
-  codexhub switch <official|custom> [--auto-sync|--no-auto-sync]
+  codexhub switch <official|custom> [--auto-sync|--no-auto-sync] [--restart-codex]
   codexhub start
   codexhub stop
   codexhub restart
-  codexhub refresh-models
+  codexhub refresh-models [--restart-codex]
   codexhub sync-history
-  codexhub sync-catalog
+  codexhub sync-catalog [--restart-codex]
   codexhub list-providers
   codexhub list-models
   codexhub set-autostart [true|false]
@@ -526,7 +589,9 @@ Usage:
 
 #[cfg(test)]
 mod tests {
-    use super::{help_text, parse_set_autostart_enabled, run, run_switch_command};
+    use super::{
+        help_text, parse_restart_codex_flag, parse_set_autostart_enabled, run, run_switch_command,
+    };
     use crate::config::{self, CommandOutcome, CommandRunner, ConfigPaths};
     use std::cell::RefCell;
     use std::fs;
@@ -595,6 +660,16 @@ mod tests {
     }
 
     #[test]
+    fn refresh_models_restart_flag_defaults_safe_and_rejects_unknown_values() {
+        assert_eq!(parse_restart_codex_flag(&[]), Ok(false));
+        assert_eq!(
+            parse_restart_codex_flag(&["--restart-codex".to_string()]),
+            Ok(true)
+        );
+        assert_eq!(parse_restart_codex_flag(&["--force".to_string()]), Err(()));
+    }
+
+    #[test]
     fn switch_no_auto_sync_flag_skips_history_overlay() {
         let root = temp_root("cli-switch-no-auto-sync");
         let paths = test_paths(&root);
@@ -604,7 +679,8 @@ mod tests {
         let exit = run_switch_command(
             &args,
             || panic!("explicit flag should not read settings"),
-            |mode, auto_sync| {
+            |mode, auto_sync, restart_codex| {
+                assert!(!restart_codex);
                 config::switch_mode_with_paths(
                     mode,
                     auto_sync,
@@ -632,7 +708,8 @@ mod tests {
         let exit = run_switch_command(
             &args,
             || panic!("explicit flag should not read settings"),
-            |mode, auto_sync| {
+            |mode, auto_sync, restart_codex| {
+                assert!(!restart_codex);
                 config::switch_mode_with_paths(
                     mode,
                     auto_sync,
@@ -660,7 +737,8 @@ mod tests {
         let exit = run_switch_command(
             &args,
             || panic!("switch default should not read settings"),
-            |mode, auto_sync| {
+            |mode, auto_sync, restart_codex| {
+                assert!(!restart_codex);
                 config::switch_mode_with_paths(
                     mode,
                     auto_sync,
@@ -673,6 +751,42 @@ mod tests {
 
         assert_eq!(exit, 0);
         assert_eq!(runner.commands.borrow().len(), 1);
+    }
+
+    #[test]
+    fn switch_restart_codex_flag_is_forwarded_explicitly() {
+        let args = vec!["custom".to_string(), "--restart-codex".to_string()];
+        let observed = std::cell::Cell::new(false);
+
+        let exit = run_switch_command(
+            &args,
+            || panic!("switch flag should not read settings"),
+            |_mode, _auto_sync, restart_codex| {
+                observed.set(restart_codex);
+                Ok(crate::AppStatus::scaffold("switched"))
+            },
+        );
+
+        assert_eq!(exit, 0);
+        assert!(observed.get());
+    }
+
+    #[test]
+    fn switch_failed_reopened_is_serialized_but_exits_failure() {
+        let args = vec!["custom".to_string(), "--restart-codex".to_string()];
+
+        let exit = run_switch_command(
+            &args,
+            || panic!("switch flag should not read settings"),
+            |_mode, _auto_sync, _restart_codex| {
+                let mut status = crate::AppStatus::scaffold("switch failed; reopened");
+                status.codex_restart_result =
+                    Some(crate::codex_desktop::CodexRestartResult::SwitchFailedReopened);
+                Ok(status)
+            },
+        );
+
+        assert_eq!(exit, 1);
     }
 
     #[derive(Debug, Clone)]
@@ -945,8 +1059,8 @@ gateway_exported = true
         }
 
         #[test]
-        fn managed_client_config_codex_volc_without_catalog_never_writes_dangling_catalog_reference()
-        {
+        fn managed_client_config_codex_volc_without_catalog_never_writes_dangling_catalog_reference(
+        ) {
             let root = temp_root("mcc-codex-volc-no-catalog");
             let (settings_path, providers_path) = write_settings_and_providers(&root);
             let isolated = root.join("isolated");

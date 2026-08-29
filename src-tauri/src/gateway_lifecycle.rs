@@ -1094,6 +1094,7 @@ mod tests {
             gateway_lifecycle,
             history_sync_status: None,
             history_sync_message: None,
+            codex_restart_result: None,
         }
     }
 }

@@ -5,13 +5,14 @@ use crate::{
 };
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -58,13 +59,45 @@ const KNOWN_PROVIDER_ENDPOINT_SUFFIXES: &[&str] = &[
     "/models",
 ];
 
-/// Acquire a new Direct Official snapshot.  Callers that need to make refresh
-/// scheduling decisions must use this path so a cache fallback is never
-/// mistaken for a successful Direct acquisition.
-pub(crate) fn refresh_official_models_direct() -> Result<Vec<Model>, String> {
+#[derive(Debug, Clone)]
+pub(crate) struct OfficialModelsAcquisition {
+    subscription_models: Vec<OfficialSubscriptionModel>,
+    models: Vec<Model>,
+    visibility_diagnostics: Value,
+    native_cache: Option<String>,
+}
+
+pub(crate) fn acquire_official_models_direct() -> Result<OfficialModelsAcquisition, String> {
+    acquire_official_models_direct_with_runner(&ProcessAppServerModelListRunner)
+}
+
+pub(crate) fn prepare_official_models_acquisition(
+    acquisition: &OfficialModelsAcquisition,
+) -> Result<(Vec<Model>, Vec<crate::file_transaction::PreparedTextFile>), String> {
     let paths = ModelPaths::runtime()?;
-    let runner = ProcessAppServerModelListRunner;
-    refresh_official_models_direct_with_runner(&paths, &runner)
+    let metadata_text = serde_json::to_string_pretty(&acquisition.models)
+        .map_err(|error| format!("failed to serialize model metadata: {error}"))?;
+    let seed_text = official_subscription_seed_text(
+        &acquisition.subscription_models,
+        &acquisition.visibility_diagnostics,
+    )?;
+    let mut files = vec![
+        crate::file_transaction::PreparedTextFile::runtime(
+            paths.metadata_cache_path(),
+            format!("{metadata_text}\n"),
+        ),
+        crate::file_transaction::PreparedTextFile::runtime(
+            paths.official_subscription_cache_path(),
+            seed_text,
+        ),
+    ];
+    if let Some(native_cache) = acquisition.native_cache.clone() {
+        files.push(crate::file_transaction::PreparedTextFile::codex_target_owner_only(
+            runtime_paths::codex_target_home_dir()?.join("models_cache.json"),
+            native_cache,
+        ));
+    }
+    Ok((acquisition.models.clone(), files))
 }
 
 pub(crate) fn list_cached_official_models() -> Result<Vec<Model>, String> {
@@ -267,14 +300,6 @@ fn model_test_payload(
     }
 }
 
-pub fn generate_catalog() -> Result<Vec<Model>, String> {
-    let paths = ModelPaths::runtime()?;
-    let python = find_python()?;
-    let runner = ProcessCatalogSyncRunner;
-
-    generate_catalog_with_runner(&paths, &python, &runner)
-}
-
 pub fn list_models() -> Result<Vec<Model>, String> {
     Ok(list_models_with_presence()?.unwrap_or_default())
 }
@@ -319,6 +344,10 @@ pub(crate) fn list_cached_official_subscription_models_with_presence(
 }
 
 pub fn refresh_model_metadata() -> Result<Vec<Model>, String> {
+    crate::codex_desktop::serialize_config_writer(refresh_model_metadata_with_existing_lock)
+}
+
+fn refresh_model_metadata_with_existing_lock() -> Result<Vec<Model>, String> {
     let paths = ModelPaths::runtime()?;
     let metadata = builtin_model_metadata();
     write_models_json(&paths.metadata_cache_path(), &metadata)?;
@@ -326,6 +355,12 @@ pub fn refresh_model_metadata() -> Result<Vec<Model>, String> {
 }
 
 pub fn save_model_metadata_override(model: Model) -> Result<Model, String> {
+    crate::codex_desktop::serialize_config_writer(|| {
+        save_model_metadata_override_with_existing_lock(model)
+    })
+}
+
+fn save_model_metadata_override_with_existing_lock(model: Model) -> Result<Model, String> {
     let paths = ModelPaths::runtime()?;
     let mut overrides = read_metadata_overrides(&paths).unwrap_or_default();
     if let Some(existing) = overrides.iter_mut().find(|item| item.id == model.id) {
@@ -341,10 +376,24 @@ pub fn save_model_metadata_override(model: Model) -> Result<Model, String> {
 /// catalog ownership sidecar and immediately rematerialize the effective
 /// catalog.  The identity is exact (`openai`/`official`/canonical model slug)
 /// and only the pinned Code Mode models are eligible.
-pub fn save_official_multi_agent_version(
+#[derive(Debug, Clone, Serialize)]
+pub struct OfficialMultiAgentSaveOutcome {
+    pub model: Model,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+pub(crate) struct PreparedOfficialMultiAgentSave {
+    fallback_model: Model,
+    canonical: String,
+    desired_version: String,
+    files: Vec<crate::file_transaction::PreparedTextFile>,
+}
+
+pub(crate) fn prepare_official_multi_agent_version(
     model_id: String,
     version: Option<String>,
-) -> Result<Model, String> {
+) -> Result<PreparedOfficialMultiAgentSave, String> {
     let paths = ModelPaths::runtime()?;
     let known_official_models = config::known_official_model_ids(&config::ConfigPaths::runtime()?);
     let canonical = config::normalize_official_model_id(&model_id, &known_official_models)
@@ -359,12 +408,8 @@ pub fn save_official_multi_agent_version(
         }
     }
 
-    // Reconcile the current generated catalog before reading the sidecar.  A
-    // stale effective catalog can otherwise cause the sync process to discard
-    // an older sidecar entry as if the user had manually cleared it.
-    generate_catalog()?;
     let current_models = list_models_with_presence()?.unwrap_or_default();
-    let visible_official_row = current_models.iter().any(|model| {
+    let visible_official_row = current_models.iter().find(|model| {
         let model_id = model
             .id
             .strip_prefix("openai/")
@@ -373,10 +418,9 @@ pub fn save_official_multi_agent_version(
             && model_id == canonical
             && model_has_exact_official_upstream(model, &canonical)
             && model_is_catalog_visible(model)
-    });
-    if !visible_official_row {
-        return Err("selected Official model is not a visible qualified catalog row".to_string());
-    }
+    }).cloned().ok_or_else(|| {
+        "selected Official model is not a visible qualified catalog row".to_string()
+    })?;
     let baseline_version = read_managed_catalog_multi_agent_version(&paths, &canonical)
         .or_else(|| {
             builtin_model_metadata()
@@ -402,28 +446,99 @@ pub fn save_official_multi_agent_version(
         return Err("catalog overrides have an unsupported schema".to_string());
     }
     update_catalog_override_payload(&mut payload, &canonical, version.as_deref())?;
-
-    // The catalog sync process intentionally removes a sidecar entry when the
-    // current effective row equals the managed baseline.  Publish the desired
-    // effective value first, then publish the sidecar, so a newly selected V2
-    // value cannot be lost during the same save operation.  Clearing uses the
-    // pinned managed baseline and therefore leaves no stale user value in the
-    // generated catalog.
-    set_catalog_multi_agent_version(
-        &paths,
-        &canonical,
-        version.as_deref().unwrap_or(baseline_version.as_str()),
-    )?;
-    let text = serde_json::to_string_pretty(&payload)
+    let sidecar_text = serde_json::to_string_pretty(&payload)
         .map_err(|error| format!("failed to serialize catalog overrides: {error}"))?;
-    safe_file::write_text_atomic(&path, &format!("{text}\n"))
-        .map_err(|error| format!("failed to write catalog overrides: {error}"))?;
+    let desired_version = version
+        .as_deref()
+        .unwrap_or(baseline_version.as_str())
+        .to_string();
 
-    let models = list_models_with_presence()?.unwrap_or_default();
-    models
-        .into_iter()
-        .find(|model| model.id == canonical)
-        .ok_or_else(|| "selected Official model is not present in the generated catalog".to_string())
+    let catalog_path = paths.generated_catalog_path();
+    let catalog_text = catalog_multi_agent_version_text(&catalog_path, &canonical, &desired_version)?;
+    Ok(PreparedOfficialMultiAgentSave {
+        fallback_model: visible_official_row,
+        canonical,
+        desired_version,
+        files: vec![
+            crate::file_transaction::PreparedTextFile::new(catalog_path, catalog_text),
+            crate::file_transaction::PreparedTextFile::new(path, format!("{sidecar_text}\n")),
+        ],
+    })
+}
+
+pub(crate) fn publish_official_multi_agent_version(
+    prepared: PreparedOfficialMultiAgentSave,
+) -> Result<OfficialMultiAgentSaveOutcome, crate::codex_desktop::SwitchMutationError> {
+    publish_collaboration_files_with(&prepared.files, |files| {
+        crate::file_transaction::publish_prepared_text_files(files)
+    })?;
+    finish_official_multi_agent_save(
+        prepared.fallback_model,
+        &prepared.canonical,
+        prepared.desired_version,
+        Ok(()),
+        list_models_with_presence(),
+    )
+    .map_err(Into::into)
+}
+
+fn publish_collaboration_files_with<Publish>(
+    files: &[crate::file_transaction::PreparedTextFile],
+    publish: Publish,
+) -> Result<(), crate::file_transaction::FileTransactionError>
+where
+    Publish: FnOnce(&[crate::file_transaction::PreparedTextFile]) -> Result<(), String>,
+{
+    let transaction_paths = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    crate::file_transaction::with_text_file_rollback(&transaction_paths, || publish(files))
+}
+
+fn finish_official_multi_agent_save(
+    mut fallback_model: Model,
+    canonical: &str,
+    desired_version: String,
+    sidecar_write: Result<(), String>,
+    catalog_readback: Result<Option<Vec<Model>>, String>,
+) -> Result<OfficialMultiAgentSaveOutcome, String> {
+    let mut warnings = Vec::new();
+    if let Err(error) = sidecar_write {
+        warnings.push(format!(
+            "Collaboration catalog was committed, but its override sidecar could not be persisted: {error}"
+        ));
+    }
+
+    fallback_model.multi_agent_version = Some(desired_version);
+    let model = match catalog_readback {
+        Ok(Some(models)) => models
+            .into_iter()
+            .find(|model| model.id == canonical)
+            .unwrap_or_else(|| {
+                warnings.push(
+                    "Collaboration catalog was committed, but the selected model was absent from readback"
+                        .to_string(),
+                );
+                fallback_model.clone()
+            }),
+        Ok(None) => {
+            warnings.push(
+                "Collaboration catalog was committed, but catalog readback was unavailable".to_string(),
+            );
+            fallback_model
+        }
+        Err(error) => {
+            warnings.push(format!(
+                "Collaboration catalog was committed, but catalog readback failed: {error}"
+            ));
+            fallback_model
+        }
+    };
+    Ok(OfficialMultiAgentSaveOutcome {
+        model,
+        warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+    })
 }
 
 fn update_catalog_override_payload(
@@ -639,13 +754,19 @@ fn refresh_official_models_from_endpoint(
 }
 
 trait AppServerModelListRunner {
-    fn read_model_list(&self) -> Result<Value, String>;
+    fn read_model_list(&self) -> Result<AppServerModelListSnapshot, String>;
+}
+
+#[derive(Debug, Clone)]
+struct AppServerModelListSnapshot {
+    payload: Value,
+    native_cache: Option<String>,
 }
 
 struct ProcessAppServerModelListRunner;
 
 impl AppServerModelListRunner for ProcessAppServerModelListRunner {
-    fn read_model_list(&self) -> Result<Value, String> {
+    fn read_model_list(&self) -> Result<AppServerModelListSnapshot, String> {
         read_codex_app_server_model_list()
     }
 }
@@ -664,26 +785,34 @@ fn refresh_official_models_with_runner(
     })
 }
 
+#[cfg(test)]
 fn refresh_official_models_direct_with_runner(
     paths: &ModelPaths,
     runner: &dyn AppServerModelListRunner,
 ) -> Result<Vec<Model>, String> {
-    let subscription_models = runner
-        .read_model_list()
-        .and_then(|payload| {
-            let visibility_diagnostics = visibility_diagnostics_from_payload(&payload);
-            let subscription_models = subscription_models_from_app_server_payload(&payload)?;
-            Ok((subscription_models, visibility_diagnostics))
-        })?;
-    let (subscription_models, visibility_diagnostics) = subscription_models;
-    let models = subscription_models_to_metadata_models(&subscription_models);
+    let acquisition = acquire_official_models_direct_with_runner(runner)?;
     write_official_subscription_caches(
         paths,
-        &subscription_models,
-        &models,
-        &visibility_diagnostics,
+        &acquisition.subscription_models,
+        &acquisition.models,
+        &acquisition.visibility_diagnostics,
     )?;
-    Ok(models)
+    Ok(acquisition.models)
+}
+
+fn acquire_official_models_direct_with_runner(
+    runner: &dyn AppServerModelListRunner,
+) -> Result<OfficialModelsAcquisition, String> {
+    let snapshot = runner.read_model_list()?;
+    let visibility_diagnostics = visibility_diagnostics_from_payload(&snapshot.payload);
+    let subscription_models = subscription_models_from_app_server_payload(&snapshot.payload)?;
+    let models = subscription_models_to_metadata_models(&subscription_models);
+    Ok(OfficialModelsAcquisition {
+        subscription_models,
+        models,
+        visibility_diagnostics,
+        native_cache: snapshot.native_cache,
+    })
 }
 
 fn visibility_diagnostics_from_payload(payload: &Value) -> Value {
@@ -720,17 +849,83 @@ fn visibility_diagnostics_from_payload(payload: &Value) -> Value {
     Value::Object(counts)
 }
 
-fn read_codex_app_server_model_list() -> Result<Value, String> {
+fn read_codex_app_server_model_list() -> Result<AppServerModelListSnapshot, String> {
     let codex = find_codex_executable()?;
+    let target_home = runtime_paths::codex_target_home_dir()?;
+    let staging = StagedCodexHome::new(&target_home)?;
     let mut command = Command::new(&codex);
     command.args(["app-server", "--stdio"]);
-    let cache_path = runtime_paths::codex_target_home_dir()?.join("models_cache.json");
-    read_codex_app_server_model_list_with_cache_path(
+    command.env("CODEX_HOME", staging.path());
+    let cache_path = staging.path().join("models_cache.json");
+    let payload = read_codex_app_server_model_list_with_cache_path(
         command,
         CODEX_APP_SERVER_MODEL_LIST_TIMEOUT,
         &cache_path,
         CODEX_APP_SERVER_NATIVE_CACHE_GRACE,
-    )
+    )?;
+    let native_cache = fs::read_to_string(&cache_path).ok();
+    Ok(AppServerModelListSnapshot {
+        payload,
+        native_cache,
+    })
+}
+
+struct StagedCodexHome {
+    path: PathBuf,
+}
+
+impl StagedCodexHome {
+    fn new(source_home: &Path) -> Result<Self, String> {
+        static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(1);
+        let staging_id = NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "codexhub-official-refresh-{}-{staging_id}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).map_err(|error| {
+            format!("failed to create isolated Official refresh staging directory: {error}")
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                format!("failed to secure Official refresh staging directory: {error}")
+            })?;
+        }
+
+        let staging = Self { path };
+        let source_auth = source_home.join("auth.json");
+        if source_auth.exists() {
+            let metadata = fs::symlink_metadata(&source_auth)
+                .map_err(|error| format!("failed to inspect Codex auth for refresh: {error}"))?;
+            if !metadata.file_type().is_file() {
+                return Err("Codex auth path is not a regular file; refusing staged refresh".to_string());
+            }
+            let staged_auth = staging.path.join("auth.json");
+            fs::copy(&source_auth, &staged_auth)
+                .map_err(|error| format!("failed to stage Codex auth for Official refresh: {error}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&staged_auth, fs::Permissions::from_mode(0o600)).map_err(
+                    |error| format!("failed to secure staged Codex auth: {error}"),
+                )?;
+            }
+        }
+        Ok(staging)
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for StagedCodexHome {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.path) {
+            log::warn!("failed to remove isolated Official refresh staging directory: {error}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1372,6 +1567,7 @@ fn subscription_model_display_name(
     official_short_display_name(raw)
 }
 
+#[cfg(test)]
 fn write_official_subscription_caches(
     paths: &ModelPaths,
     subscription_models: &[OfficialSubscriptionModel],
@@ -1407,6 +1603,7 @@ fn read_official_subscription_models_from_cache(paths: &ModelPaths) -> Result<Ve
     }
 }
 
+#[cfg(test)]
 fn write_official_subscription_seed(
     path: &Path,
     subscription_models: &[OfficialSubscriptionModel],
@@ -1416,6 +1613,19 @@ fn write_official_subscription_seed(
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create official model cache directory: {error}"))?;
     }
+    let text = official_subscription_seed_text(subscription_models, visibility_diagnostics)?;
+    safe_file::write_text_atomic(path, &text).map_err(|error| {
+        format!(
+            "failed to write official model cache {}: {error}",
+            path.display()
+        )
+    })
+}
+
+fn official_subscription_seed_text(
+    subscription_models: &[OfficialSubscriptionModel],
+    visibility_diagnostics: &Value,
+) -> Result<String, String> {
     let models: Vec<Value> = subscription_models
         .iter()
         .map(official_subscription_seed_model)
@@ -1428,12 +1638,7 @@ fn write_official_subscription_seed(
     });
     let text = serde_json::to_string_pretty(&payload)
         .map_err(|error| format!("failed to serialize official model cache: {error}"))?;
-    safe_file::write_text_atomic(path, &format!("{text}\n")).map_err(|error| {
-        format!(
-            "failed to write official model cache {}: {error}",
-            path.display()
-        )
-    })
+    Ok(format!("{text}\n"))
 }
 
 fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value {
@@ -2256,6 +2461,7 @@ impl ModelPaths {
         }
     }
 
+    #[cfg(test)]
     fn catalog_sync_script(&self) -> PathBuf {
         self.repo_root.join("src-python").join("catalog_sync.py")
     }
@@ -2338,13 +2544,12 @@ fn model_has_exact_official_upstream(model: &Model, canonical_model_id: &str) ->
         .unwrap_or(false)
 }
 
-fn set_catalog_multi_agent_version(
-    paths: &ModelPaths,
+fn catalog_multi_agent_version_text(
+    path: &Path,
     canonical_model_id: &str,
     version: &str,
-) -> Result<(), String> {
-    let path = paths.generated_catalog_path();
-    let text = fs::read_to_string(&path)
+) -> Result<String, String> {
+    let text = fs::read_to_string(path)
         .map_err(|error| format!("failed to read generated catalog: {error}"))?;
     let mut payload: Value = serde_json::from_str(&text)
         .map_err(|error| format!("generated catalog is invalid: {error}"))?;
@@ -2387,7 +2592,18 @@ fn set_catalog_multi_agent_version(
 
     let serialized = serde_json::to_string_pretty(&payload)
         .map_err(|error| format!("failed to serialize generated catalog: {error}"))?;
-    safe_file::write_text_atomic(&path, &format!("{serialized}\n"))
+    Ok(format!("{serialized}\n"))
+}
+
+#[cfg(test)]
+fn set_catalog_multi_agent_version(
+    paths: &ModelPaths,
+    canonical_model_id: &str,
+    version: &str,
+) -> Result<(), String> {
+    let path = paths.generated_catalog_path();
+    let text = catalog_multi_agent_version_text(&path, canonical_model_id, version)?;
+    safe_file::write_text_atomic(&path, &text)
         .map_err(|error| format!("failed to publish generated catalog: {error}"))
 }
 
@@ -2471,6 +2687,7 @@ fn apply_catalog_multi_agent_overrides(paths: &ModelPaths, models: &mut [Model])
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct CatalogCommandOutcome {
     code: Option<i32>,
@@ -2478,6 +2695,7 @@ struct CatalogCommandOutcome {
     stderr: String,
 }
 
+#[cfg(test)]
 trait CatalogSyncRunner {
     fn run_sync(
         &self,
@@ -2487,36 +2705,7 @@ trait CatalogSyncRunner {
     ) -> Result<CatalogCommandOutcome, String>;
 }
 
-struct ProcessCatalogSyncRunner;
-
-impl CatalogSyncRunner for ProcessCatalogSyncRunner {
-    fn run_sync(
-        &self,
-        python: &Path,
-        script: &Path,
-        codex_dir: &Path,
-    ) -> Result<CatalogCommandOutcome, String> {
-        let mut command = runtime_paths::configured_python_command(python);
-        let target_home = runtime_paths::codex_target_home_dir()
-            .unwrap_or_else(|_| codex_dir.to_path_buf());
-        command
-            .arg(script)
-            .arg("--sync")
-            .env("CODEX_HOME", codex_dir)
-            .env("CODEXHUB_CODEX_TARGET_HOME", target_home);
-        configure_no_window(&mut command);
-        let output = command
-            .output()
-            .map_err(|error| format!("failed to start catalog sync: {error}"))?;
-
-        Ok(CatalogCommandOutcome {
-            code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        })
-    }
-}
-
+#[cfg(test)]
 fn generate_catalog_with_runner(
     paths: &ModelPaths,
     python: &Path,
@@ -3183,17 +3372,20 @@ fn codex_executable_candidates() -> Vec<&'static str> {
 mod tests {
     use super::{
         desktop_codex_exe_from_local_appdata, discover_provider_models_with_timeout,
-        enrich_models_with_ollama_show, generate_catalog_with_runner, list_model_metadata,
+        enrich_models_with_ollama_show, finish_official_multi_agent_save,
+        generate_catalog_with_runner, list_model_metadata,
         list_models, list_official_multi_agent_baselines, list_official_multi_agent_overrides,
         load_json_file,
         merge_metadata_with_overrides, ollama_show_endpoint,
+        publish_collaboration_files_with,
         provider_api_endpoint,
         provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
         refresh_official_models_with_runner, resolve_gateway_api_key_for_settings,
         resolve_provider_discovery_api_key,
         subscription_models_from_payload, subscription_models_to_metadata_models,
         test_model_endpoint_with_timeout, visibility_diagnostics_from_payload,
-        AppServerModelListRunner, CatalogCommandOutcome, CatalogSyncRunner, ModelPaths,
+        AppServerModelListRunner, AppServerModelListSnapshot, CatalogCommandOutcome,
+        CatalogSyncRunner, ModelPaths, StagedCodexHome,
     };
     use crate::{MetadataProvenance, Model, Settings, ToolSurfaceStrategy, UpstreamFormat};
     use reqwest::blocking::Client;
@@ -3290,6 +3482,32 @@ mod tests {
         loop {
             thread::park();
         }
+    }
+
+    #[test]
+    fn official_direct_acquisition_stages_auth_without_touching_the_real_codex_home() {
+        let root = temp_root("official-direct-staging");
+        let source_home = root.join("codex-home");
+        fs::create_dir_all(&source_home).unwrap();
+        fs::write(source_home.join("auth.json"), r#"{"token":"test-only"}"#).unwrap();
+        fs::write(source_home.join("models_cache.json"), "original-cache").unwrap();
+
+        let staging = StagedCodexHome::new(&source_home).expect("isolated Codex home");
+        let staging_path = staging.path().to_path_buf();
+        assert_ne!(staging_path, source_home);
+        assert_eq!(
+            fs::read_to_string(staging_path.join("auth.json")).unwrap(),
+            r#"{"token":"test-only"}"#
+        );
+        fs::write(staging_path.join("models_cache.json"), "staged-cache").unwrap();
+        assert_eq!(
+            fs::read_to_string(source_home.join("models_cache.json")).unwrap(),
+            "original-cache"
+        );
+
+        drop(staging);
+        assert!(!staging_path.exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     fn responding_app_server_test_process_command(liveness_path: &Path) -> std::process::Command {
@@ -3758,12 +3976,26 @@ for line in sys.stdin:
     }
 
     struct StaticAppServerModelListRunner {
-        result: Result<Value, String>,
+        result: Result<AppServerModelListSnapshot, String>,
     }
 
     impl StaticAppServerModelListRunner {
         fn ok(value: Value) -> Self {
-            Self { result: Ok(value) }
+            Self {
+                result: Ok(AppServerModelListSnapshot {
+                    payload: value,
+                    native_cache: None,
+                }),
+            }
+        }
+
+        fn ok_with_cache(value: Value, native_cache: &str) -> Self {
+            Self {
+                result: Ok(AppServerModelListSnapshot {
+                    payload: value,
+                    native_cache: Some(native_cache.to_string()),
+                }),
+            }
         }
 
         fn err(message: &str) -> Self {
@@ -3774,9 +4006,33 @@ for line in sys.stdin:
     }
 
     impl AppServerModelListRunner for StaticAppServerModelListRunner {
-        fn read_model_list(&self) -> Result<Value, String> {
+        fn read_model_list(&self) -> Result<AppServerModelListSnapshot, String> {
             self.result.clone()
         }
+    }
+
+    #[test]
+    fn direct_acquisition_retains_the_native_context_cache_for_transactional_publication() {
+        let runner = StaticAppServerModelListRunner::ok_with_cache(
+            json!({
+                "data": [{
+                    "id": "gpt-5.6-luna",
+                    "display_name": "Luna",
+                    "visibility": "list",
+                    "context_window": 272000,
+                    "effective_context_window_percent": 95
+                }]
+            }),
+            r#"{"etag":"fresh","models":[]}"#,
+        );
+
+        let acquisition = super::acquire_official_models_direct_with_runner(&runner)
+            .expect("Direct acquisition with native cache");
+
+        assert_eq!(
+            acquisition.native_cache.as_deref(),
+            Some(r#"{"etag":"fresh","models":[]}"#)
+        );
     }
 
     #[test]
@@ -4523,6 +4779,62 @@ for line in sys.stdin:
         assert_eq!(payload["models"][0]["multi_agent_version"], "v2");
         assert_eq!(payload["models"][1]["multi_agent_version"], "v1");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collaboration_publish_failure_restores_catalog_and_sidecar_exactly() {
+        let root = temp_root("collaboration-transaction-rollback");
+        fs::create_dir_all(&root).unwrap();
+        let catalog = root.join("catalog.json");
+        let sidecar = root.join("sidecar.json");
+        fs::write(&catalog, "old-catalog\n").unwrap();
+        fs::write(&sidecar, "old-sidecar\n").unwrap();
+        let files = vec![
+            crate::file_transaction::PreparedTextFile::new(
+                catalog.clone(),
+                "new-catalog\n".to_string(),
+            ),
+            crate::file_transaction::PreparedTextFile::new(
+                sidecar.clone(),
+                "new-sidecar\n".to_string(),
+            ),
+        ];
+
+        let error = publish_collaboration_files_with(&files, |files| {
+            fs::write(&files[0].path, &files[0].text).unwrap();
+            Err("injected sidecar publish failure".to_string())
+        })
+        .expect_err("partial Collaboration publication must roll back");
+
+        assert!(error
+            .to_string()
+            .contains("injected sidecar publish failure"));
+        assert_eq!(fs::read_to_string(catalog).unwrap(), "old-catalog\n");
+        assert_eq!(fs::read_to_string(sidecar).unwrap(), "old-sidecar\n");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn committed_collaboration_catalog_reports_sidecar_and_readback_failures_as_warning() {
+        let fallback = Model {
+            id: "gpt-5.6-luna".to_string(),
+            multi_agent_version: Some("v1".to_string()),
+            ..Model::default()
+        };
+
+        let outcome = finish_official_multi_agent_save(
+            fallback,
+            "gpt-5.6-luna",
+            "v2".to_string(),
+            Err("sidecar read-only".to_string()),
+            Err("catalog readback unavailable".to_string()),
+        )
+        .expect("post-commit failures are partial success");
+
+        assert_eq!(outcome.model.multi_agent_version.as_deref(), Some("v2"));
+        let warning = outcome.warning.expect("partial-success warning");
+        assert!(warning.contains("sidecar read-only"));
+        assert!(warning.contains("catalog readback unavailable"));
     }
 
     #[test]

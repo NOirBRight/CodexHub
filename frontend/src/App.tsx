@@ -44,6 +44,7 @@ import type {
 } from "./lib/types";
 import { GatewayPage } from "./pages/GatewayPage";
 import { ProvidersPage } from "./pages/ProvidersPage";
+import type { CodexSwitchRequest } from "./pages/ProvidersPage";
 
 type TrayToastPayload = {
   id: string;
@@ -252,6 +253,7 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>("load");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
+  const [codexSwitchRequest, setCodexSwitchRequest] = useState<CodexSwitchRequest | null>(null);
   const [updateBusy, setUpdateBusy] = useState<"check" | null>(null);
   const [updateInstallStatus, setUpdateInstallStatus] = useState<AppUpdateInstallStatus | null>(null);
   const [updateInstallSource, setUpdateInstallSource] = useState<"settings" | "toast" | null>(null);
@@ -262,6 +264,7 @@ export default function App() {
   const updateAvailableToastId = useRef<string | null>(null);
   const updateInstallToastId = useRef<string | null>(null);
   const trayToastIds = useRef<Map<string, string>>(new Map());
+  const nextCodexSwitchRequestId = useRef(1);
   runtimeRef.current = runtime;
   const settingsLoaded = Boolean(runtime.settings.data);
 
@@ -745,6 +748,38 @@ export default function App() {
   }, [showToast, updateToast]);
 
   useEffect(() => {
+    if (!window.__TAURI_INTERNALS__) {
+      return;
+    }
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<"official" | "custom">("codexhub:request-codex-switch", (event) => {
+      if (event.payload !== "official" && event.payload !== "custom") {
+        return;
+      }
+      selectTab("codexhub");
+      setCodexSwitchRequest({
+        id: nextCodexSwitchRequestId.current++,
+        mode: event.payload,
+      });
+    })
+      .then((nextUnlisten) => {
+        if (disposed) {
+          nextUnlisten();
+        } else {
+          unlisten = nextUnlisten;
+        }
+      })
+      .catch(() => {
+        // The bridge-only frontend has no native tray event surface.
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [selectTab]);
+
+  useEffect(() => {
     if (startupUpdateCheckStarted.current || !settingsLoaded) {
       return;
     }
@@ -1075,6 +1110,10 @@ export default function App() {
                 onSettingsChanged={updateSettingsCache}
                 onStatusChanged={updateStatusCache}
                 onStartProxy={startProxyQuiet}
+                codexSwitchRequest={codexSwitchRequest}
+                onCodexSwitchRequestHandled={(id) => {
+                  setCodexSwitchRequest((current) => current?.id === id ? null : current);
+                }}
               />
             </div>
           </section>

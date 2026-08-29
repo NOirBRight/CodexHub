@@ -1,14 +1,26 @@
-use crate::{config, models, runtime_paths, Model};
+use crate::{
+    config,
+    file_transaction::{PreparedFileNamespace, PreparedTextFile},
+    models, runtime_paths, Model,
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const GENERATED_STATE_FILE: &str = "codex-proxy-state.json";
 const CODEX_TARGET_HOME_ENV: &str = "CODEXHUB_CODEX_TARGET_HOME";
 const MAX_DIAGNOSTIC_COUNT: u64 = 100;
+const PREPARED_CATALOG_FILES: &[(&str, bool)] = &[
+    (GENERATED_CATALOG_FILE, false),
+    ("codexhub-model-catalog-baseline.json", false),
+    ("codexhub-model-catalog-overrides.json", false),
+    (GENERATED_STATE_FILE, false),
+    (".codexhub-catalog-owner-key", true),
+];
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct CatalogOverrideDiagnostics {
@@ -18,17 +30,204 @@ pub struct CatalogOverrideDiagnostics {
     pub reasons: BTreeMap<String, u64>,
 }
 
-pub fn generate_catalog() -> Result<Vec<Model>, String> {
-    sync_catalog()?;
+pub(crate) fn generate_catalog_with_existing_lock() -> Result<Vec<Model>, String> {
+    sync_catalog_with_existing_lock()?;
     models::list_models()
 }
 
-pub fn sync_catalog() -> Result<String, String> {
+pub(crate) fn sync_catalog_with_existing_lock() -> Result<String, String> {
     let paths = CatalogPaths::runtime()?;
     let python = config::find_python()?;
     let runner = ProcessCatalogSyncCommandRunner;
 
     sync_catalog_with_paths(&paths, &python, &runner)
+}
+
+pub(crate) struct PreparedCatalogPublication {
+    files: Vec<PreparedTextFile>,
+    catalog_payload: Value,
+}
+
+impl PreparedCatalogPublication {
+    pub(crate) fn catalog_payload(&self) -> &Value {
+        &self.catalog_payload
+    }
+
+    pub(crate) fn into_files(self) -> Vec<PreparedTextFile> {
+        self.files
+    }
+}
+
+/// Run discovery and catalog construction in an isolated runtime. The result
+/// contains only bounded text replacements for the final commit gate; no
+/// production cache, catalog, or Codex target file is written here.
+pub(crate) fn prepare_catalog(
+    overlays: &[PreparedTextFile],
+) -> Result<PreparedCatalogPublication, String> {
+    let actual = CatalogPaths::runtime()?;
+    let python = config::find_python()?;
+    prepare_catalog_with_paths(
+        &actual,
+        overlays,
+        &python,
+        &ProcessCatalogSyncCommandRunner,
+    )
+}
+
+fn prepare_catalog_with_paths(
+    actual: &CatalogPaths,
+    overlays: &[PreparedTextFile],
+    python: &Path,
+    runner: &dyn CatalogSyncCommandRunner,
+) -> Result<PreparedCatalogPublication, String> {
+    let staging = CatalogStaging::new()?;
+    let staged = CatalogPaths::new(
+        staging.runtime_dir(),
+        staging.target_dir(),
+        actual.repo_root.clone(),
+    );
+    copy_catalog_inputs(actual, &staged)?;
+    for overlay in overlays {
+        let staged_path = staged_path_for_overlay(actual, &staged, overlay)?;
+        crate::safe_file::write_text_atomic_with_mode(
+            &staged_path,
+            &overlay.text,
+            overlay.unix_mode,
+        )?;
+    }
+
+    sync_catalog_with_paths(&staged, python, runner)?;
+
+    let staged_catalog_dir = staged.codex_dir.join("model-catalogs");
+    let actual_catalog_dir = actual.codex_dir.join("model-catalogs");
+    let mut files = overlays.to_vec();
+    for (name, owner_only) in PREPARED_CATALOG_FILES {
+        let text = fs::read_to_string(staged_catalog_dir.join(name))
+            .map_err(|error| format!("failed to read prepared catalog output {name}: {error}"))?;
+        let target = actual_catalog_dir.join(name);
+        files.retain(|file| file.path != target);
+        files.push(if *owner_only {
+            PreparedTextFile::owner_only(target, text)
+        } else {
+            PreparedTextFile::new(target, text)
+        });
+    }
+    let catalog_payload = serde_json::from_str(
+        &fs::read_to_string(staged.generated_catalog_path()).map_err(|error| {
+            format!("failed to read prepared Official context catalog: {error}")
+        })?,
+    )
+    .map_err(|error| format!("failed to parse prepared Official context catalog: {error}"))?;
+    Ok(PreparedCatalogPublication {
+        files,
+        catalog_payload,
+    })
+}
+
+struct CatalogStaging {
+    root: PathBuf,
+}
+
+impl CatalogStaging {
+    fn new() -> Result<Self, String> {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "codexhub-catalog-prepare-{}-{id}",
+            std::process::id()
+        ));
+        fs::create_dir(&root)
+            .map_err(|error| format!("failed to create catalog staging directory: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                format!("failed to secure catalog staging directory: {error}")
+            })?;
+        }
+        Ok(Self { root })
+    }
+
+    fn runtime_dir(&self) -> PathBuf {
+        self.root.join("runtime")
+    }
+
+    fn target_dir(&self) -> PathBuf {
+        self.root.join("target")
+    }
+}
+
+impl Drop for CatalogStaging {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.root) {
+            log::warn!("failed to remove isolated catalog staging directory: {error}");
+        }
+    }
+}
+
+fn copy_catalog_inputs(actual: &CatalogPaths, staged: &CatalogPaths) -> Result<(), String> {
+    for relative in [
+        "model-catalogs/openai-plus-ollama-cloud.json",
+        "model-catalogs/ollama-cloud.json",
+        "model-catalogs/codexhub-model-catalog.json",
+        "model-catalogs/codex-proxy-official-ollama.json",
+        "model-catalogs/codexhub-model-catalog-baseline.json",
+        "model-catalogs/codexhub-model-catalog-overrides.json",
+        "model-catalogs/codex-proxy-state.json",
+        "model-catalogs/.codexhub-catalog-owner-key",
+        "proxy/settings.json",
+        "proxy/config/providers.toml",
+    ] {
+        copy_regular_file_if_present(
+            &actual.codex_dir.join(relative),
+            &staged.codex_dir.join(relative),
+        )?;
+    }
+    copy_regular_file_if_present(
+        &actual.codex_target_dir.join("models_cache.json"),
+        &staged.codex_target_dir.join("models_cache.json"),
+    )
+}
+
+fn copy_regular_file_if_present(source: &Path, target: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("failed to inspect catalog staging input: {error}")),
+    };
+    if !metadata.file_type().is_file() {
+        return Err("catalog staging input is not a regular file".to_string());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create catalog staging input directory: {error}"))?;
+    }
+    fs::copy(source, target)
+        .map(|_| ())
+        .map_err(|error| format!("failed to copy catalog staging input: {error}"))
+}
+
+fn staged_path_for_overlay(
+    actual: &CatalogPaths,
+    staged: &CatalogPaths,
+    overlay: &PreparedTextFile,
+) -> Result<PathBuf, String> {
+    let (actual_root, staged_root) = match overlay.namespace {
+        PreparedFileNamespace::Runtime => (&actual.codex_dir, &staged.codex_dir),
+        PreparedFileNamespace::CodexTarget => {
+            (&actual.codex_target_dir, &staged.codex_target_dir)
+        }
+        PreparedFileNamespace::Absolute => {
+            return Err(
+                "prepared catalog overlay is missing an explicit runtime or Codex target namespace"
+                    .to_string(),
+            )
+        }
+    };
+    let relative = overlay.path.strip_prefix(actual_root).map_err(|_| {
+        "prepared catalog overlay is outside its declared managed root".to_string()
+    })?;
+    Ok(staged_root.join(relative))
 }
 
 /// Read the bounded catalog ownership diagnostics emitted by Python sync.
@@ -219,10 +418,11 @@ impl CatalogSyncCommandRunner for ProcessCatalogSyncCommandRunner {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_catalog_override_diagnostics, sync_catalog_with_paths, CatalogCommandOutcome,
-        CatalogOverrideDiagnostics, CatalogPaths, CatalogSyncCommandRunner, CODEX_TARGET_HOME_ENV,
-        GENERATED_CATALOG_FILE,
+        prepare_catalog_with_paths, read_catalog_override_diagnostics, sync_catalog_with_paths,
+        CatalogCommandOutcome, CatalogOverrideDiagnostics, CatalogPaths,
+        CatalogSyncCommandRunner, CODEX_TARGET_HOME_ENV, GENERATED_CATALOG_FILE,
     };
+    use crate::file_transaction::PreparedTextFile;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::fs;
@@ -297,6 +497,84 @@ mod tests {
         assert!(error.contains("--sync"));
         assert!(error.contains("printed stdout"));
         assert!(error.contains("printed stderr"));
+    }
+
+    #[test]
+    fn catalog_preparation_uses_isolated_overlays_and_does_not_touch_runtime_files() {
+        let root = temp_root("catalog-prepare-isolated");
+        let actual = test_paths(&root);
+        let actual_catalog = actual.generated_catalog_path();
+        let actual_seed = actual
+            .codex_dir
+            .join("model-catalogs/openai-plus-ollama-cloud.json");
+        fs::create_dir_all(actual_catalog.parent().unwrap()).unwrap();
+        fs::write(&actual_catalog, "old-catalog\n").unwrap();
+        fs::write(&actual_seed, "old-seed\n").unwrap();
+        let overlays = vec![PreparedTextFile::runtime(
+            actual_seed.clone(),
+            "prepared-seed\n".to_string(),
+        )];
+        let runner = PreparingCatalogRunner;
+
+        let prepared = prepare_catalog_with_paths(
+            &actual,
+            &overlays,
+            Path::new("python-test"),
+            &runner,
+        )
+        .expect("isolated catalog preparation");
+
+        assert_eq!(fs::read_to_string(&actual_catalog).unwrap(), "old-catalog\n");
+        assert_eq!(fs::read_to_string(&actual_seed).unwrap(), "old-seed\n");
+        assert_eq!(
+            prepared.catalog_payload()["models"][0]["slug"],
+            "gpt-5.6-luna"
+        );
+        let prepared_catalog = prepared
+            .into_files()
+            .into_iter()
+            .find(|file| file.path == actual_catalog)
+            .expect("prepared generated catalog");
+        assert!(prepared_catalog.text.contains("gpt-5.6-luna"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalog_preparation_keeps_runtime_and_target_overlays_distinct_when_roots_match() {
+        let root = temp_root("catalog-prepare-shared-root");
+        let shared_home = root.join("codex-home");
+        let actual = CatalogPaths::new(&shared_home, &shared_home, root.join("repo-root"));
+        let seed = shared_home.join("model-catalogs/openai-plus-ollama-cloud.json");
+        let native_cache = shared_home.join("models_cache.json");
+        fs::create_dir_all(seed.parent().unwrap()).unwrap();
+        fs::write(&seed, "old-seed\n").unwrap();
+        fs::write(&native_cache, "old-native-cache\n").unwrap();
+        let overlays = vec![
+            PreparedTextFile::runtime(seed.clone(), "prepared-seed\n".to_string()),
+            PreparedTextFile::codex_target_owner_only(
+                native_cache.clone(),
+                "prepared-native-cache\n".to_string(),
+            ),
+        ];
+
+        let prepared = prepare_catalog_with_paths(
+            &actual,
+            &overlays,
+            Path::new("python-test"),
+            &SharedRootPreparingCatalogRunner,
+        )
+        .expect("shared-root catalog preparation");
+
+        assert_eq!(fs::read_to_string(&seed).unwrap(), "old-seed\n");
+        assert_eq!(
+            fs::read_to_string(&native_cache).unwrap(),
+            "old-native-cache\n"
+        );
+        assert_eq!(
+            prepared.catalog_payload()["models"][0]["slug"],
+            "gpt-5.6-luna"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -399,6 +677,95 @@ mod tests {
                 env: env.iter().cloned().collect(),
             });
             Ok(self.outcome.clone())
+        }
+    }
+
+    struct PreparingCatalogRunner;
+
+    impl CatalogSyncCommandRunner for PreparingCatalogRunner {
+        fn run(
+            &self,
+            _program: &Path,
+            _args: &[String],
+            env: &[(String, PathBuf)],
+        ) -> Result<CatalogCommandOutcome, String> {
+            let env = env.iter().cloned().collect::<BTreeMap<_, _>>();
+            let runtime = env.get("CODEX_HOME").expect("staged runtime");
+            let catalog_dir = runtime.join("model-catalogs");
+            assert_eq!(
+                fs::read_to_string(catalog_dir.join("openai-plus-ollama-cloud.json")).unwrap(),
+                "prepared-seed\n"
+            );
+            for (name, text) in [
+                (
+                    "codexhub-model-catalog.json",
+                    r#"{"models":[{"slug":"gpt-5.6-luna"}]}"#,
+                ),
+                ("codexhub-model-catalog-baseline.json", r#"{"models":[]}"#),
+                ("codexhub-model-catalog-overrides.json", r#"{"overrides":[]}"#),
+                ("codex-proxy-state.json", r#"{"visible_models":[]}"#),
+                (
+                    ".codexhub-catalog-owner-key",
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                ),
+            ] {
+                fs::write(catalog_dir.join(name), format!("{text}\n")).unwrap();
+            }
+            Ok(CatalogCommandOutcome {
+                code: Some(0),
+                stdout: "prepared".to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    struct SharedRootPreparingCatalogRunner;
+
+    impl CatalogSyncCommandRunner for SharedRootPreparingCatalogRunner {
+        fn run(
+            &self,
+            _program: &Path,
+            _args: &[String],
+            env: &[(String, PathBuf)],
+        ) -> Result<CatalogCommandOutcome, String> {
+            let env = env.iter().cloned().collect::<BTreeMap<_, _>>();
+            let runtime = env.get("CODEX_HOME").expect("staged runtime");
+            let target = env
+                .get(CODEX_TARGET_HOME_ENV)
+                .expect("staged Codex target");
+            assert_ne!(runtime, target);
+            assert_eq!(
+                fs::read_to_string(
+                    runtime.join("model-catalogs/openai-plus-ollama-cloud.json")
+                )
+                .unwrap(),
+                "prepared-seed\n"
+            );
+            assert_eq!(
+                fs::read_to_string(target.join("models_cache.json")).unwrap(),
+                "prepared-native-cache\n"
+            );
+            let catalog_dir = runtime.join("model-catalogs");
+            for (name, text) in [
+                (
+                    "codexhub-model-catalog.json",
+                    r#"{"models":[{"slug":"gpt-5.6-luna"}]}"#,
+                ),
+                ("codexhub-model-catalog-baseline.json", r#"{"models":[]}"#),
+                ("codexhub-model-catalog-overrides.json", r#"{"overrides":[]}"#),
+                ("codex-proxy-state.json", r#"{"visible_models":[]}"#),
+                (
+                    ".codexhub-catalog-owner-key",
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                ),
+            ] {
+                fs::write(catalog_dir.join(name), format!("{text}\n")).unwrap();
+            }
+            Ok(CatalogCommandOutcome {
+                code: Some(0),
+                stdout: "prepared".to_string(),
+                stderr: String::new(),
+            })
         }
     }
 
