@@ -202,10 +202,14 @@ def write_targets(root: Path, client: str, model: str, mode: str) -> None:
             stderr=subprocess.DEVNULL,
         )
     elif mode == "target-over-bound":
+        nested_source = root / "nested" / "codex-target" / "config.toml"
+        nested_source.parent.mkdir(parents=True)
+        source.replace(nested_source)
+        source.parent.rmdir()
         noise = root / "noise"
         noise.mkdir()
         for index in range(65):
-            (noise / f"entry-{index:02d}.txt").write_text("fixture", encoding="utf-8")
+            (noise / f"entry-{index:02d}").mkdir()
 
 
 def main() -> None:
