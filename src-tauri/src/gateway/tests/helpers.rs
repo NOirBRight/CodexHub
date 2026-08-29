@@ -53,12 +53,20 @@ impl Drop for ReplacementLock {
     fn drop(&mut self) {
         #[cfg(windows)]
         {
-            use std::os::windows::fs::PermissionsExt;
-            const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
-            if let Ok(metadata) = fs::metadata(&self.path) {
-                let mut permissions = metadata.permissions();
-                permissions.set_attributes(permissions.attributes() & !FILE_ATTRIBUTE_READONLY);
-                let _ = fs::set_permissions(&self.path, permissions);
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_READONLY,
+                INVALID_FILE_ATTRIBUTES,
+            };
+            let path = self
+                .path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
+            if attributes != INVALID_FILE_ATTRIBUTES {
+                unsafe { SetFileAttributesW(path.as_ptr(), attributes & !FILE_ATTRIBUTE_READONLY) };
             }
         }
         #[cfg(unix)]
