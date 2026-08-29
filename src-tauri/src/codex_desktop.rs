@@ -16,6 +16,7 @@ pub(crate) const SWITCH_RELAUNCH_FAILED_ERROR: &str =
     "codex_desktop_switched_relaunch_failed";
 pub(crate) const SWITCH_STATE_UNCERTAIN_ERROR: &str = "codex_desktop_switch_state_uncertain";
 pub(crate) const BECAME_RUNNING_ERROR: &str = "codex_desktop_became_running_before_commit";
+const CODEX_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SwitchMutationError {
@@ -77,7 +78,7 @@ pub(crate) struct CoordinatedSwitch<T> {
 
 pub(crate) trait CodexDesktopLifecycle {
     fn status(&self) -> Result<CodexDesktopStatus, String>;
-    fn request_close(&self) -> Result<(), String>;
+    fn request_close(&self, timeout: Duration) -> Result<(), String>;
     fn wait_for_running(&self, running: bool, timeout: Duration) -> Result<bool, String>;
     fn launch(&self) -> Result<(), String>;
 }
@@ -193,6 +194,21 @@ where
     F: FnOnce() -> Result<T, E>,
     E: Into<SwitchMutationError>,
 {
+    coordinate_switch_with_timeout(backend, lock_path, restart_codex, CODEX_CLOSE_TIMEOUT, switch)
+}
+
+fn coordinate_switch_with_timeout<T, B, F, E>(
+    backend: &B,
+    lock_path: &Path,
+    restart_codex: bool,
+    close_timeout: Duration,
+    switch: F,
+) -> Result<CoordinatedSwitch<T>, String>
+where
+    B: CodexDesktopLifecycle,
+    F: FnOnce() -> Result<T, E>,
+    E: Into<SwitchMutationError>,
+{
     let _lock = acquire_switch_lock(lock_path)?;
     let status = backend.status()?;
     let initially_running = status.running;
@@ -208,8 +224,16 @@ where
     }
 
     if initially_running {
-        backend.request_close()?;
-        if !backend.wait_for_running(false, Duration::from_secs(10))? {
+        let close_started = Instant::now();
+        backend.request_close(close_timeout)?;
+        let elapsed = close_started.elapsed();
+        if elapsed >= close_timeout {
+            return Err(format!(
+                "{CLOSE_TIMEOUT_ERROR}: Codex Desktop close exceeded 10 seconds; configuration was not changed"
+            ));
+        }
+        let remaining = close_timeout - elapsed;
+        if !backend.wait_for_running(false, remaining)? {
             return Err(format!(
                 "{CLOSE_TIMEOUT_ERROR}: Codex Desktop did not exit within 10 seconds; configuration was not changed"
             ));
@@ -254,8 +278,17 @@ where
                                 .to_string(),
                         );
                     }
-                    backend.request_close()?;
-                    if backend.wait_for_running(false, Duration::from_secs(10))? {
+                    let close_started = Instant::now();
+                    backend.request_close(close_timeout)?;
+                    let elapsed = close_started.elapsed();
+                    if elapsed >= close_timeout {
+                        return Err(
+                            "Codex Desktop close exceeded 10 seconds after the rollback failure"
+                                .to_string(),
+                        );
+                    }
+                    let remaining = close_timeout - elapsed;
+                    if backend.wait_for_running(false, remaining)? {
                         Ok(())
                     } else {
                         Err(
@@ -442,7 +475,7 @@ impl CodexDesktopLifecycle for SystemCodexDesktopLifecycle {
         })
     }
 
-    fn request_close(&self) -> Result<(), String> {
+    fn request_close(&self, _timeout: Duration) -> Result<(), String> {
         let installation = detect_linux_installation().ok_or_else(|| {
             "Codex Desktop is not installed or its executable path cannot be normalized".to_string()
         })?;
@@ -554,6 +587,229 @@ $aumid = $package.PackageFamilyName + '!' + [string]$application.Id
 "#;
 
 #[cfg(any(target_os = "windows", test))]
+const WINDOWS_RESTART_MANAGER_TYPE: &str = r#"
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+public static class CodexHubRestartManager
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTime
+    {
+        public uint Low;
+        public uint High;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UniqueProcess
+    {
+        public uint ProcessId;
+        public FileTime StartTime;
+    }
+
+    private const uint ProcessQueryLimitedInformation = 0x1000;
+    private const uint WaitTimeout = 258;
+    private static int lastCancellationRequested;
+
+    public static bool LastCancellationRequested {
+        get { return Interlocked.CompareExchange(ref lastCancellationRequested, 0, 0) != 0; }
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(
+        uint desiredAccess,
+        bool inheritHandle,
+        uint processId
+    );
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(
+        IntPtr process,
+        uint flags,
+        StringBuilder executablePath,
+        ref uint executablePathLength
+    );
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessTimes(
+        IntPtr process,
+        out FileTime creationTime,
+        out FileTime exitTime,
+        out FileTime kernelTime,
+        out FileTime userTime
+    );
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    private static extern uint RmStartSession(
+        out uint sessionHandle,
+        uint sessionFlags,
+        StringBuilder sessionKey
+    );
+
+    [DllImport("rstrtmgr.dll")]
+    private static extern uint RmRegisterResources(
+        uint sessionHandle,
+        uint fileCount,
+        IntPtr fileNames,
+        uint applicationCount,
+        [In] UniqueProcess[] applications,
+        uint serviceCount,
+        IntPtr serviceNames
+    );
+
+    [DllImport("rstrtmgr.dll")]
+    private static extern uint RmShutdown(
+        uint sessionHandle,
+        uint actionFlags,
+        IntPtr statusCallback
+    );
+
+    [DllImport("rstrtmgr.dll")]
+    private static extern uint RmEndSession(uint sessionHandle);
+
+    [DllImport("rstrtmgr.dll")]
+    private static extern uint RmCancelCurrentTask(uint sessionHandle);
+
+    public static uint ProbeSession()
+    {
+        uint sessionHandle;
+        var sessionKey = new StringBuilder(64);
+        uint result = RmStartSession(out sessionHandle, 0, sessionKey);
+        if (result == 0) RmEndSession(sessionHandle);
+        return result;
+    }
+
+    public static uint GracefulShutdown(
+        uint processId,
+        string expectedExecutablePath,
+        int timeoutMilliseconds
+    )
+    {
+        Interlocked.Exchange(ref lastCancellationRequested, 0);
+        var preparationDeadline = System.Diagnostics.Stopwatch.StartNew();
+        IntPtr processHandle = OpenProcess(ProcessQueryLimitedInformation, false, processId);
+        if (processHandle == IntPtr.Zero)
+            throw new InvalidOperationException(
+                "OpenProcess failed with code " + Marshal.GetLastWin32Error() + "."
+            );
+
+        uint sessionHandle = 0;
+        var sessionKey = new StringBuilder(64);
+        bool sessionStarted = false;
+        try
+        {
+            var actualExecutablePath = new StringBuilder(32768);
+            uint actualExecutablePathLength = (uint)actualExecutablePath.Capacity;
+            if (!QueryFullProcessImageName(
+                processHandle,
+                0,
+                actualExecutablePath,
+                ref actualExecutablePathLength
+            ))
+                throw new InvalidOperationException(
+                    "QueryFullProcessImageName failed with code " +
+                    Marshal.GetLastWin32Error() + "."
+                );
+            if (!String.Equals(
+                Path.GetFullPath(actualExecutablePath.ToString()),
+                Path.GetFullPath(expectedExecutablePath),
+                StringComparison.OrdinalIgnoreCase
+            ))
+                throw new InvalidOperationException(
+                    "The Codex Desktop process identity changed before shutdown."
+                );
+
+            FileTime creationTime;
+            FileTime exitTime;
+            FileTime kernelTime;
+            FileTime userTime;
+            if (!GetProcessTimes(
+                processHandle,
+                out creationTime,
+                out exitTime,
+                out kernelTime,
+                out userTime
+            ))
+                throw new InvalidOperationException(
+                    "GetProcessTimes failed with code " + Marshal.GetLastWin32Error() + "."
+                );
+
+            uint result = RmStartSession(out sessionHandle, 0, sessionKey);
+            if (result != 0) return result;
+            sessionStarted = true;
+            var process = new UniqueProcess {
+                ProcessId = processId,
+                StartTime = creationTime
+            };
+            result = RmRegisterResources(
+                sessionHandle,
+                0,
+                IntPtr.Zero,
+                1,
+                new[] { process },
+                0,
+                IntPtr.Zero
+            );
+            if (result != 0) return result;
+
+            int shutdownTimeoutMilliseconds = timeoutMilliseconds -
+                (int)preparationDeadline.ElapsedMilliseconds;
+            if (shutdownTimeoutMilliseconds <= 0) return WaitTimeout;
+
+            var shutdownFinished = new ManualResetEvent(false);
+            var watchdogThread = new Thread(() => {
+                if (!shutdownFinished.WaitOne(shutdownTimeoutMilliseconds))
+                {
+                    Interlocked.Exchange(ref lastCancellationRequested, 1);
+                    RmCancelCurrentTask(sessionHandle);
+                }
+            });
+            watchdogThread.IsBackground = true;
+            watchdogThread.Start();
+            uint shutdownResult;
+            try
+            {
+                shutdownResult = RmShutdown(sessionHandle, 0, IntPtr.Zero);
+            }
+            finally
+            {
+                shutdownFinished.Set();
+                watchdogThread.Join();
+                shutdownFinished.Dispose();
+            }
+            return shutdownResult;
+        }
+        finally
+        {
+            if (sessionStarted) RmEndSession(sessionHandle);
+            CloseHandle(processHandle);
+        }
+    }
+}
+'@
+"#;
+
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_RESTART_MANAGER_CLOSE: &str = r#"
+$matches = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $executable })
+if ($matches.Count -eq 0) { exit 0 }
+$matchIds = @($matches | ForEach-Object { [uint32]$_.ProcessId })
+$roots = @($matches | Where-Object { $matchIds -notcontains [uint32]$_.ParentProcessId })
+if ($roots.Count -ne 1) { throw 'Expected exactly one Codex Desktop process-tree root.' }
+$root = $roots[0]
+$restartManagerTimeoutMilliseconds = [int]($closeTimeoutMilliseconds - $closeDeadline.ElapsedMilliseconds - 500)
+if ($restartManagerTimeoutMilliseconds -le 0) { throw 'Codex Desktop close deadline expired before Restart Manager shutdown.' }
+$result = [CodexHubRestartManager]::GracefulShutdown([uint32]$root.ProcessId, $executable, $restartManagerTimeoutMilliseconds)
+if ($result -ne 0) { throw "Restart Manager graceful shutdown failed with code $result." }
+"#;
+
+#[cfg(any(target_os = "windows", test))]
 fn parse_windows_status(output: &str) -> Result<CodexDesktopStatus, String> {
     match output.trim() {
         "unsupported" => Ok(CodexDesktopStatus {
@@ -587,12 +843,12 @@ impl CodexDesktopLifecycle for SystemCodexDesktopLifecycle {
         )?)
     }
 
-    fn request_close(&self) -> Result<(), String> {
+    fn request_close(&self, timeout: Duration) -> Result<(), String> {
+        let timeout_ms = timeout.as_millis();
         let script = format!(
-            "{}\n$matches = @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $executable }})\n$closed = 0\nforeach ($item in $matches) {{ $process = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue; if ($process -and $process.MainWindowHandle -ne 0 -and $process.CloseMainWindow()) {{ $closed++ }} }}\nif ($matches.Count -gt 0 -and $closed -eq 0) {{ throw 'The exact Codex Desktop process has no closeable main window.' }}",
-            WINDOWS_APPX_RESOLUTION
+            "$closeDeadline = [Diagnostics.Stopwatch]::StartNew()\n$closeTimeoutMilliseconds = {timeout_ms}\n{WINDOWS_APPX_RESOLUTION}\n{WINDOWS_RESTART_MANAGER_TYPE}\n{WINDOWS_RESTART_MANAGER_CLOSE}"
         );
-        run_windows_lifecycle_script(&script, Duration::from_secs(5)).map(|_| ())
+        run_windows_lifecycle_script(&script, timeout).map(|_| ())
     }
 
     fn wait_for_running(&self, running: bool, timeout: Duration) -> Result<bool, String> {
@@ -631,7 +887,7 @@ impl CodexDesktopLifecycle for SystemCodexDesktopLifecycle {
         })
     }
 
-    fn request_close(&self) -> Result<(), String> {
+    fn request_close(&self, _timeout: Duration) -> Result<(), String> {
         Err(RESTART_UNSUPPORTED_ERROR.to_string())
     }
 
@@ -678,7 +934,7 @@ mod tests {
             })
         }
 
-        fn request_close(&self) -> Result<(), String> {
+        fn request_close(&self, _timeout: Duration) -> Result<(), String> {
             self.events.borrow_mut().push("close");
             Ok::<(), String>(())
         }
@@ -1076,13 +1332,198 @@ mod tests {
     }
 
     #[test]
-    fn windows_lifecycle_contract_uses_exact_appx_identity_and_graceful_close() {
+    fn windows_lifecycle_contract_uses_exact_appx_identity_and_non_forced_restart_manager_close() {
         assert!(WINDOWS_APPX_RESOLUTION.contains("$ErrorActionPreference = 'Stop'"));
         assert!(WINDOWS_APPX_RESOLUTION.contains("Get-AppxPackage -Name 'OpenAI.Codex'"));
         assert!(WINDOWS_APPX_RESOLUTION.contains("Windows.FullTrustApplication"));
         assert!(WINDOWS_APPX_RESOLUTION.contains("$packages.Count -ne 1"));
         assert!(WINDOWS_APPX_RESOLUTION.contains("$applications.Count -ne 1"));
         assert!(WINDOWS_APPX_RESOLUTION.contains("Test-Path -LiteralPath $executable"));
+        assert!(WINDOWS_RESTART_MANAGER_TYPE.contains("RmRegisterResources"));
+        assert!(WINDOWS_RESTART_MANAGER_TYPE.contains("RmShutdown(sessionHandle, 0"));
+        assert!(WINDOWS_RESTART_MANAGER_TYPE.contains("OpenProcess"));
+        assert!(WINDOWS_RESTART_MANAGER_TYPE.contains("QueryFullProcessImageName"));
+        assert!(WINDOWS_RESTART_MANAGER_TYPE.contains("GetProcessTimes"));
+        assert!(WINDOWS_RESTART_MANAGER_TYPE.contains("RmCancelCurrentTask"));
+        assert!(WINDOWS_RESTART_MANAGER_CLOSE.contains("$roots.Count -ne 1"));
+        assert!(
+            WINDOWS_RESTART_MANAGER_CLOSE
+                .find("$roots.Count -ne 1")
+                .unwrap()
+                < WINDOWS_RESTART_MANAGER_CLOSE
+                    .find("$restartManagerTimeoutMilliseconds =")
+                    .unwrap()
+        );
+        assert!(WINDOWS_RESTART_MANAGER_TYPE.contains("preparationDeadline.ElapsedMilliseconds"));
+        assert!(WINDOWS_RESTART_MANAGER_TYPE.contains("watchdogThread.Join()"));
+        assert!(!WINDOWS_RESTART_MANAGER_TYPE.contains("RmForceShutdown"));
+        assert!(!WINDOWS_RESTART_MANAGER_CLOSE.contains("Stop-Process"));
+        assert!(!WINDOWS_RESTART_MANAGER_CLOSE.contains("taskkill"));
+    }
+
+    struct TimedCloseLifecycle {
+        running: Cell<bool>,
+        close_wait_budget: Cell<Option<Duration>>,
+        close_delay: Duration,
+    }
+
+    impl CodexDesktopLifecycle for TimedCloseLifecycle {
+        fn status(&self) -> Result<CodexDesktopStatus, String> {
+            Ok(CodexDesktopStatus {
+                running: self.running.get(),
+                restart_supported: true,
+            })
+        }
+
+        fn request_close(&self, _timeout: Duration) -> Result<(), String> {
+            thread::sleep(self.close_delay);
+            Ok(())
+        }
+
+        fn wait_for_running(&self, running: bool, timeout: Duration) -> Result<bool, String> {
+            if !running {
+                self.close_wait_budget.set(Some(timeout));
+            }
+            self.running.set(running);
+            Ok(true)
+        }
+
+        fn launch(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn close_request_and_exit_poll_share_one_ten_second_deadline() {
+        let backend = TimedCloseLifecycle {
+            running: Cell::new(true),
+            close_wait_budget: Cell::new(None),
+            close_delay: Duration::from_millis(25),
+        };
+
+        coordinate_switch_with(&backend, &lock_path("shared-close-deadline"), true, || {
+            Ok::<(), String>(())
+        })
+        .expect("coordinated switch");
+
+        let wait_budget = backend
+            .close_wait_budget
+            .get()
+            .expect("close wait budget should be recorded");
+        assert!(wait_budget < CODEX_CLOSE_TIMEOUT);
+    }
+
+    #[test]
+    fn exhausted_close_deadline_aborts_without_status_poll_or_mutation() {
+        let backend = TimedCloseLifecycle {
+            running: Cell::new(true),
+            close_wait_budget: Cell::new(None),
+            close_delay: Duration::from_millis(25),
+        };
+        let mutated = Cell::new(false);
+
+        let error = coordinate_switch_with_timeout(
+            &backend,
+            &lock_path("exhausted-close-deadline"),
+            true,
+            Duration::from_millis(10),
+            || {
+                mutated.set(true);
+                Ok::<(), String>(())
+            },
+        )
+        .expect_err("an exhausted close deadline must fail closed");
+
+        assert!(error.contains(CLOSE_TIMEOUT_ERROR));
+        assert_eq!(backend.close_wait_budget.get(), None);
+        assert!(!mutated.get());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_restart_manager_helper_compiles_and_rejects_a_reused_process_identity() {
+        let wrong_executable = std::env::temp_dir().join("not-the-powershell-host.exe");
+        let escaped = wrong_executable
+            .to_string_lossy()
+            .replace('\'', "''");
+        let script = format!(
+            "{WINDOWS_RESTART_MANAGER_TYPE}\ntry {{ [CodexHubRestartManager]::GracefulShutdown([uint32]$PID, '{escaped}', 100) | Out-Null; Write-Output 'unexpected-accept' }} catch {{ Write-Output $_.Exception.ToString() }}"
+        );
+        let output = run_windows_lifecycle_script(&script, Duration::from_secs(5))
+            .expect("Restart Manager helper should compile and reject the wrong executable");
+
+        assert!(output.contains("process identity changed"), "{output}");
+        assert!(!output.contains("unexpected-accept"), "{output}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires an interactive Windows session; strict E2E runs it explicitly"]
+    fn windows_restart_manager_gracefully_closes_a_controlled_gui_fixture() {
+        let script = format!(
+            r#"{WINDOWS_RESTART_MANAGER_TYPE}
+$fixtureExecutable = (Get-Command powershell.exe -ErrorAction Stop).Source
+$fixtureCommand = 'Add-Type -AssemblyName System.Windows.Forms; $form = New-Object Windows.Forms.Form; $form.Text = ''CodexHub Restart Manager Fixture''; [Windows.Forms.Application]::Run($form)'
+$encodedFixtureCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($fixtureCommand))
+$fixture = $null
+try {{
+    $fixture = Start-Process -FilePath $fixtureExecutable -ArgumentList @('-NoProfile', '-STA', '-EncodedCommand', $encodedFixtureCommand) -PassThru
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    do {{
+        Start-Sleep -Milliseconds 50
+        $fixture.Refresh()
+    }} while (-not $fixture.HasExited -and $fixture.MainWindowHandle -eq 0 -and $deadline.ElapsedMilliseconds -lt 5000)
+    if ($fixture.HasExited -or $fixture.MainWindowHandle -eq 0) {{ throw 'The controlled GUI fixture did not create a main window.' }}
+    $result = [CodexHubRestartManager]::GracefulShutdown([uint32]$fixture.Id, $fixtureExecutable, 3000)
+    if ($result -ne 0) {{ throw "Restart Manager returned $result for the controlled GUI fixture." }}
+    if (-not $fixture.WaitForExit(5000)) {{ throw 'The controlled GUI fixture did not exit after graceful shutdown.' }}
+    Write-Output 'graceful-close=1'
+}}
+finally {{
+    if ($fixture -and -not $fixture.HasExited) {{ Stop-Process -Id $fixture.Id -Force -ErrorAction SilentlyContinue }}
+}}
+"#
+        );
+        let output = run_windows_lifecycle_script(&script, Duration::from_secs(15))
+            .expect("Restart Manager should gracefully close the controlled GUI fixture");
+
+        assert_eq!(output, "graceful-close=1");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires an interactive Windows session; strict E2E runs it explicitly"]
+    fn windows_restart_manager_cancels_a_temporarily_unresponsive_gui_and_cleans_the_session() {
+        let script = format!(
+            r#"{WINDOWS_RESTART_MANAGER_TYPE}
+$fixtureExecutable = (Get-Command powershell.exe -ErrorAction Stop).Source
+$fixtureCommand = 'Add-Type -AssemblyName System.Windows.Forms; $form = New-Object Windows.Forms.Form; $form.Text = ''CodexHub Unresponsive Restart Manager Fixture''; $form.Add_Shown({{ Start-Sleep -Seconds 3 }}); [Windows.Forms.Application]::Run($form)'
+$encodedFixtureCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($fixtureCommand))
+$fixture = $null
+try {{
+    $fixture = Start-Process -FilePath $fixtureExecutable -ArgumentList @('-NoProfile', '-STA', '-EncodedCommand', $encodedFixtureCommand) -PassThru
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    do {{
+        Start-Sleep -Milliseconds 50
+        $fixture.Refresh()
+    }} while (-not $fixture.HasExited -and $fixture.MainWindowHandle -eq 0 -and $deadline.ElapsedMilliseconds -lt 5000)
+    if ($fixture.HasExited -or $fixture.MainWindowHandle -eq 0) {{ throw 'The unresponsive GUI fixture did not create a main window.' }}
+    $result = [CodexHubRestartManager]::GracefulShutdown([uint32]$fixture.Id, $fixtureExecutable, 500)
+    $fixture.Refresh()
+    if (-not [CodexHubRestartManager]::LastCancellationRequested) {{ throw "Restart Manager cancellation was not requested; result=$result." }}
+    $probeResult = [CodexHubRestartManager]::ProbeSession()
+    if ($probeResult -ne 0) {{ throw "Restart Manager session cleanup probe failed with code $probeResult." }}
+    Write-Output 'cancelled=1 session-clean=1'
+}}
+finally {{
+    if ($fixture -and -not $fixture.HasExited) {{ Stop-Process -Id $fixture.Id -Force -ErrorAction SilentlyContinue }}
+}}
+"#
+        );
+        let output = run_windows_lifecycle_script(&script, Duration::from_secs(10))
+            .expect("Restart Manager should cancel without force-killing the controlled fixture");
+
+        assert_eq!(output, "cancelled=1 session-clean=1");
     }
 
     #[cfg(target_os = "windows")]
@@ -1145,7 +1586,7 @@ mod tests {
             })
         }
 
-        fn request_close(&self) -> Result<(), String> {
+        fn request_close(&self, _timeout: Duration) -> Result<(), String> {
             unreachable!()
         }
 
