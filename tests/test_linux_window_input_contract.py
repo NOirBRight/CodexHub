@@ -3,6 +3,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from scripts.e2e_linux_window_input import drawer_cycle_has_required_transitions
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -34,6 +36,11 @@ def test_pointer_input_e2e_public_self_test_rejects_tray_window() -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PASS: Linux pointer-input E2E self-test" in result.stdout
+
+
+def test_pointer_input_e2e_accepts_a_complete_drawer_cycle_after_async_page_updates() -> None:
+    assert drawer_cycle_has_required_transitions(0.534, 0.560, 0.421, 0.487)
+    assert not drawer_cycle_has_required_transitions(0.534, 0.560, 0.020, 0.487)
 
 
 def test_deb_package_runs_recoverable_launcher_migration_at_install_time(tmp_path: Path) -> None:

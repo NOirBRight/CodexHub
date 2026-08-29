@@ -413,6 +413,17 @@ def changed_pixel_fraction(before: tuple[int, ...], after: tuple[int, ...]) -> f
     return sum(left != right for left, right in zip(before, after, strict=True)) / len(before)
 
 
+def drawer_cycle_has_required_transitions(
+    opened: float,
+    closed: float,
+    reopened: float,
+    reclosed: float,
+    *,
+    minimum: float = 0.25,
+) -> bool:
+    return all(fraction >= minimum for fraction in (opened, closed, reopened, reclosed))
+
+
 @contextmanager
 def retrying_temporary_directory(*, prefix: str):
     path = Path(tempfile.mkdtemp(prefix=prefix))
@@ -557,9 +568,8 @@ def run_probe(binary: Path) -> int:
                 return 1
 
             # The open drawer renders a full-height backdrop over the left side
-            # of this 820px test window. Requiring a physical backdrop click to
-            # restore the stable baseline distinguishes the drawer from
-            # unrelated startup updates or a transient focus/hover effect.
+            # of this 820px test window. A physical click there must produce a
+            # large close transition without reaching the background probe.
             x11.pending_button_presses()
             x11.click(
                 app_x + min(100, app_width - 1),
@@ -577,14 +587,60 @@ def run_probe(binary: Path) -> int:
                 response_width,
                 response_height,
             )
-            closed_fraction = changed_pixel_fraction(before_response, closed_response)
             close_transition = changed_pixel_fraction(after_response, closed_response)
-            if close_transition < 0.25 or closed_fraction > 0.05:
+
+            # Reopen and close the drawer a second time. The page underneath
+            # can legitimately finish asynchronous startup work while the
+            # first drawer cycle is open, so it need not return pixel-for-pixel
+            # to the old baseline. Two complete physical cycles prove the DOM
+            # handled both buttons without depending on stale page pixels.
+            x11.pending_button_presses()
+            x11.click(
+                app_x + max(0, app_width - 142),
+                app_y + min(28, app_height - 1),
+            )
+            if x11.pending_button_presses():
+                print("FAIL: second settings-button click passed through to the background window")
+                return 1
+            x11.move_pointer(5, 5)
+            reopened_response = wait_for_stable_pixels(
+                x11,
+                x11.root_window(),
+                response_x,
+                app_y,
+                response_width,
+                response_height,
+            )
+            reopened_transition = changed_pixel_fraction(closed_response, reopened_response)
+
+            x11.pending_button_presses()
+            x11.click(
+                app_x + min(100, app_width - 1),
+                app_y + min(300, app_height - 1),
+            )
+            if x11.pending_button_presses():
+                print("FAIL: second settings-drawer backdrop click passed through to the background window")
+                return 1
+            x11.move_pointer(5, 5)
+            reclosed_response = wait_for_stable_pixels(
+                x11,
+                x11.root_window(),
+                response_x,
+                app_y,
+                response_width,
+                response_height,
+            )
+            reclosed_transition = changed_pixel_fraction(reopened_response, reclosed_response)
+            if not drawer_cycle_has_required_transitions(
+                opened_fraction,
+                close_transition,
+                reopened_transition,
+                reclosed_transition,
+            ):
                 print(
-                    "FAIL: settings drawer did not close back to its stable DOM baseline; "
-                    f"open_change={opened_fraction:.3f} "
-                    f"close_change={close_transition:.3f} "
-                    f"residual={closed_fraction:.3f}"
+                    "FAIL: settings drawer did not complete two physical DOM cycles; "
+                    f"transitions=({opened_fraction:.3f}, {close_transition:.3f}, "
+                    f"{reopened_transition:.3f}, {reclosed_transition:.3f})"
                 )
                 return 1
 
@@ -604,9 +660,10 @@ def run_probe(binary: Path) -> int:
 
             print(
                 "PASS: CodexHub settings drawer opened and closed through physical input, "
-                "and 11 clicks stayed inside the full input region; "
+                "and 13 clicks stayed inside the full input region; "
                 f"window={app_width}x{app_height} rectangles={rectangles} "
-                f"drawer_change={opened_fraction:.3f} residual={closed_fraction:.3f}"
+                f"drawer_transitions=({opened_fraction:.3f}, {close_transition:.3f}, "
+                f"{reopened_transition:.3f}, {reclosed_transition:.3f})"
             )
             return 0
         finally:
