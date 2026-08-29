@@ -109,6 +109,73 @@ function flattenKeys(value, prefix = "") {
   });
 }
 
+function readRustRawStringConst(source, name) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const declaration = new RegExp(`^const\\s+${escapedName}:\\s*&str\\s*=\\s*r(#+)"`, "gm");
+  const matches = [...source.matchAll(declaration)];
+  assert.equal(matches.length, 1, `${name} should have exactly one Rust raw-string definition`);
+  const [match] = matches;
+  const hashes = match[1];
+  const bodyStart = match.index + match[0].length;
+  const terminator = `"${hashes};`;
+  const end = source.indexOf(terminator, bodyStart);
+  assert.ok(end >= bodyStart, `${name} should have a matching Rust raw-string terminator`);
+  return source.slice(match.index, end + terminator.length);
+}
+
+function readWindowsCodexCloseContract(source) {
+  const normalizedSource = source.replace(/\r\n/g, "\n");
+  const implStartMarker = '#[cfg(target_os = "windows")]\nimpl CodexDesktopLifecycle for SystemCodexDesktopLifecycle {';
+  const implEndMarker = '#[cfg(not(any(target_os = "linux", target_os = "windows")))]';
+  const implStart = normalizedSource.indexOf(implStartMarker);
+  const implEnd = normalizedSource.indexOf(implEndMarker, implStart);
+  assert.ok(implStart >= 0 && implEnd > implStart, "Windows lifecycle implementation should be uniquely bounded");
+  assert.equal(normalizedSource.indexOf(implStartMarker, implStart + 1), -1, "Windows lifecycle implementation should be unique");
+  const windowsImpl = normalizedSource.slice(implStart, implEnd);
+  const requestClose = windowsImpl.match(/\n    fn request_close\([\s\S]*?(?=\n    fn wait_for_running\()/g) ?? [];
+  assert.equal(requestClose.length, 1, "Windows request_close should have exactly one implementation");
+  assert.match(requestClose[0], /WINDOWS_APPX_RESOLUTION/);
+  assert.match(requestClose[0], /WINDOWS_RESTART_MANAGER_TYPE/);
+  assert.match(requestClose[0], /WINDOWS_RESTART_MANAGER_CLOSE/);
+  assert.match(requestClose[0], /run_windows_lifecycle_script\(&script, timeout\)/);
+  return [
+    readRustRawStringConst(normalizedSource, "WINDOWS_RESTART_MANAGER_TYPE"),
+    readRustRawStringConst(normalizedSource, "WINDOWS_RESTART_MANAGER_CLOSE"),
+    requestClose[0],
+  ].join("\n");
+}
+
+function assertWindowsCodexCloseIsGraceful(contract) {
+  const shutdownCalls = [...contract.matchAll(/RmShutdown\s*\(\s*sessionHandle\s*,\s*([^,\r\n]+)/g)];
+  assert.deepEqual(shutdownCalls.map((match) => match[1].trim()), ["0"]);
+  assert.match(contract, /RmCancelCurrentTask/);
+  assert.doesNotMatch(
+    contract,
+    /RmForceShutdown|Stop-Process|taskkill|\.kill\s*\(|TerminateProcess|kill\s+-9|SIGKILL/i,
+  );
+}
+
+test("Rust raw-string contract extraction is unique and respects hash delimiters", () => {
+  const source = [
+    'const FIRST: &str = r#"safe"#;',
+    'const SECOND: &str = r##"Stop-Process',
+    '"#;',
+    'still second"##;',
+  ].join("\n");
+
+  assert.doesNotMatch(readRustRawStringConst(source, "FIRST"), /Stop-Process/);
+  assert.match(readRustRawStringConst(source, "SECOND"), /still second/);
+  assert.throws(
+    () => readRustRawStringConst(`${source}\nconst FIRST: &str = r#"duplicate"#;`, "FIRST"),
+    /exactly one Rust raw-string definition/,
+  );
+  const gracefulContract = "RmCancelCurrentTask(sessionHandle);\nRmShutdown(sessionHandle, 0, IntPtr.Zero);";
+  assertWindowsCodexCloseIsGraceful(gracefulContract);
+  for (const forcedClose of ["process.Kill();", "TerminateProcess(processHandle, 1);"]) {
+    assert.throws(() => assertWindowsCodexCloseIsGraceful(`${gracefulContract}\n${forcedClose}`));
+  }
+});
+
 test("i18n locales are registered and keep matching translation keys", async () => {
   const [indexSource, enSource, zhSource] = await Promise.all([
     readFile(i18nIndexPath, "utf8"),
@@ -486,6 +553,7 @@ test("runtime header removes flow chips and exposes desktop window controls", as
   assert.doesNotMatch(css, /-webkit-app-region:\s*drag/);
   assert.doesNotMatch(css, /-webkit-app-region:\s*no-drag/);
   const capability = JSON.parse(tauriDefaultCapability);
+  const windowsCloseContract = readWindowsCodexCloseContract(codexDesktopSource);
   assert.deepEqual(capability.windows, ["main"]);
   assert.ok(capability.permissions.includes("core:default"));
   assert.ok(capability.permissions.includes("core:window:allow-start-dragging"));
@@ -497,14 +565,13 @@ test("runtime header removes flow chips and exposes desktop window controls", as
   assert.match(tauriSource, /TrayIconBuilder::with_id\("codexhub"\)/);
   assert.match(tauriSource, /Connect Codex to CodexHub/);
   assert.doesNotMatch(tauriSource, /Restart Codex App/);
-  assert.doesNotMatch(codexDesktopSource, /Stop-Process/);
   assert.match(codexDesktopSource, /Get-AppxPackageManifest/);
   assert.match(codexDesktopSource, /Get-AppxPackage -Name 'OpenAI\.Codex'/);
   assert.match(codexDesktopSource, /\$ErrorActionPreference = 'Stop'/);
   assert.match(codexDesktopSource, /Windows\.FullTrustApplication/);
   assert.match(codexDesktopSource, /lifecycle command timed out/);
   assert.doesNotMatch(codexDesktopSource, /OpenAI\.Codex\*/);
-  assert.match(codexDesktopSource, /CloseMainWindow/);
+  assertWindowsCodexCloseIsGraceful(windowsCloseContract);
   assert.doesNotMatch(tauriSource, /Restart CodexHub/);
   assert.equal(JSON.parse(tauriConfig).app.windows[0].decorations, false);
 });
@@ -3140,8 +3207,8 @@ test("Codex route switches require explicit confirmation and use the bounded exa
   assert.match(codexDesktopSource, /Duration::from_secs\(15\)/);
   assert.match(codexDesktopSource, /linux_main_process_ids\(Path::new\("\/proc"\)/);
   assert.match(codexDesktopSource, /Get-AppxPackageManifest/);
-  assert.match(codexDesktopSource, /CloseMainWindow/);
-  assert.doesNotMatch(codexDesktopSource, /kill\s+-9|SIGKILL|Stop-Process/);
+  const windowsLineEndingsSource = codexDesktopSource.replace(/\r?\n/g, "\r\n");
+  assertWindowsCodexCloseIsGraceful(readWindowsCodexCloseContract(windowsLineEndingsSource));
 });
 
 test("catalog and metadata writers share the lifecycle and publication lock", async () => {
