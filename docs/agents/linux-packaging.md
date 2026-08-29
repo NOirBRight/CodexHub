@@ -14,6 +14,16 @@ Each flavor produces:
 | AppImage | `CodexHub_<version>[_debug]_amd64.AppImage` |
 | Debian | `CodexHub_<version>[_debug]_amd64.deb` |
 
+The Debian package identity is always `codex-hub`, so `apt`/`dpkg` upgrades
+replace the installed package instead of creating side-by-side versions. The
+package owns the single `/usr/share/applications/CodexHub.desktop` launcher.
+Its recoverable post-install migration archives exact legacy CodexHub-generated
+user launchers as `*.codexhub-legacy-backup`; customized desktop entries are
+left untouched. The root package hook only enumerates eligible accounts; it
+drops to each target UID/GID with cleared groups and capabilities before
+touching that user's launcher directory. AppImage upgrades likewise rewrite
+one stable managed user launcher rather than adding per-version entries.
+
 Updater platform key: `linux-x86_64`. Add that platform to the existing
 `latest.json` / `latest-debug.json` payload; do not invent a second product
 channel.
@@ -41,6 +51,13 @@ Windows installers embed CPython. Linux packages currently use a host Python
 and copied into the artifact. Gateway discovery already looks for that path.
 
 ## Linux E2E
+
+Every complete Linux candidate runs `./scripts/verify-linux.sh`. Its mandatory,
+90-second-bounded pointer-input leg starts the real app in isolated D-Bus and
+Xvfb sessions, verifies the full native input shape, sends physical XTest
+clicks above a background probe, and requires the settings button to produce a
+rendered DOM drawer-state change.
+The host needs `xvfb`, `xauth`, and `x11-utils`.
 
 Linux GUI preflight:
 
