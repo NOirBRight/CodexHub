@@ -149,8 +149,15 @@ if (Test-Path -LiteralPath $portableZip) {
 New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $targetRoot "release\codexhub.exe") -Destination (Join-Path $portableDir $portableExecutable)
-foreach ($resource in @("config", "src-python", "python")) {
-    Copy-Item -LiteralPath (Join-Path $targetRoot "release\$resource") -Destination $portableDir -Recurse
+foreach ($resource in @("config", "src-python", "python", "scripts")) {
+    $source = Join-Path $targetRoot "release\$resource"
+    if (Test-Path -LiteralPath $source) {
+        Copy-Item -LiteralPath $source -Destination $portableDir -Recurse
+    }
+}
+$xaiHelper = Join-Path $portableDir "scripts\xai_device_login.py"
+if (-not (Test-Path -LiteralPath $xaiHelper)) {
+    throw "portable build is missing scripts/xai_device_login.py"
 }
 Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $portableZip -CompressionLevel Optimal
 

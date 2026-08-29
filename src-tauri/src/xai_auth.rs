@@ -27,6 +27,10 @@ pub fn xai_logout_blocking() -> Result<Value, String> {
     run_xai_cli(&["logout"], None)
 }
 
+pub fn xai_usage_snapshot_blocking() -> Result<Value, String> {
+    run_xai_cli(&["usage"], Some(Duration::from_secs(20)))
+}
+
 pub fn xai_access_token_blocking() -> Result<String, String> {
     access_token_from_cli_payload(&run_xai_cli(&["access-token"], Some(Duration::from_secs(30)))?)
 }
@@ -59,6 +63,11 @@ pub async fn xai_poll_device_login(device_json: String) -> Result<Value, String>
 #[tauri::command]
 pub async fn xai_logout() -> Result<Value, String> {
     spawn_xai_cli(xai_logout_blocking).await
+}
+
+#[tauri::command]
+pub async fn xai_usage_snapshot() -> Result<Value, String> {
+    spawn_xai_cli(xai_usage_snapshot_blocking).await
 }
 
 pub fn xai_open_verification_url_blocking(url: String) -> Result<String, String> {

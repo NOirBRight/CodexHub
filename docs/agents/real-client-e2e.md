@@ -239,9 +239,12 @@ than weakening isolation.
 
 After the `refresh-models` bootstrap, the runner starts the candidate in a
 kill-on-close Windows Job Object and waits for a successful `/health` response
-plus the isolated diagnostics path. Bootstrap and readiness share one 30-second
-budget (or the smaller `-TimeoutSeconds` value); bootstrap does not receive a
-second timeout window. A missing or stale Official catalog after `refresh-models`
+plus the isolated diagnostics path. Official bootstrap is killed at
+`min(-TimeoutSeconds, 120)` seconds so the wrapper outlives the candidate's
+8-second `model/list` wait, 20-second native `models_cache.json` grace, isolated
+Codex cold start, and one returned native-cache retry. Listener and `/health`
+readiness use a separate 30-second window (or the smaller `-TimeoutSeconds`
+value) after bootstrap returns. A missing or stale Official catalog after `refresh-models`
 is classified as `candidate_gateway_bootstrap_failed_context_budget`; other
 bootstrap failures and timeouts use `candidate_gateway_bootstrap_failed` and
 `candidate_gateway_bootstrap_timeout`. A missing Python lifecycle, listener,
@@ -312,8 +315,13 @@ contracts; accepting a newer version never relaxes these shapes:
 
 - every automated prompt names `./sentinel.txt` explicitly instead of asking
   the model to discover an unnamed file;
-- Codex CLI receives the prompt once through stdin and binds the case root with
-  `-C`;
+- Codex CLI receives the prompt once through stdin, binds the case root with
+  `-C`, and keeps `-s read-only`. On Windows, Codex CLI `0.149.1` exec-policy
+  rejects the unattended `pwsh.exe Get-Content` read of `./sentinel.txt`, so
+  the runner also passes `--dangerously-bypass-approvals-and-sandbox` (the
+  same unattended override used by the Beta3 protocol qualifier). The case
+  still requires exactly one completed `command_execution` whose command names
+  `sentinel.txt`, `status = completed`, and integer `exit_code = 0`;
 - OpenCode binds the case root with `--dir`, uses a fixed title, and runs
   `--pure`;
 - Pi receives the complete prompt as one quoted positional message, enables

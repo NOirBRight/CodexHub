@@ -25,6 +25,8 @@ AUTH_ISSUER = "https://auth.x.ai"
 DISCOVERY_URL = f"{AUTH_ISSUER}/.well-known/openid-configuration"
 API_HOST_SUFFIXES = (".x.ai",)
 API_HOSTS = {"x.ai", "api.x.ai", "auth.x.ai", "accounts.x.ai"}
+BILLING_HOSTS = {"cli-chat-proxy.grok.com", "grok.com"}
+BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 TOKEN_FILENAME = "xai_auth.json"
 PRIVATE_AUTH_FILE_MODE = 0o600
 # Public Grok-CLI OAuth client. auth.x.ai only issues device codes to this
@@ -78,6 +80,24 @@ def pin_https_xai_url(url: str) -> str:
     if host not in API_HOSTS and not any(host.endswith(suffix) for suffix in API_HOST_SUFFIXES):
         raise SubscriptionAuthError(
             f"xAI OAuth URL host is not pinned to x.ai: {host}",
+            classification="not-eligible",
+        )
+    return url
+
+
+def pin_https_xai_billing_url(url: str) -> str:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise SubscriptionAuthError(
+            "xAI billing URL must be HTTPS",
+            classification="not-eligible",
+        )
+    host = (parsed.hostname or "").lower()
+    if host not in BILLING_HOSTS:
+        raise SubscriptionAuthError(
+            f"xAI billing URL host is not pinned to grok.com: {host}",
             classification="not-eligible",
         )
     return url
@@ -330,6 +350,134 @@ def register_default() -> None:
 
 
 register_default()
+
+
+def fetch_usage(*, opener: Any = None) -> dict[str, Any]:
+    token = access_token(opener=opener)
+    pinned = pin_https_xai_billing_url(BILLING_URL)
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+        "x-xai-token-auth": "xai-grok-cli",
+        "user-agent": "xai-grok-cli",
+    }
+    request = Request(pinned, headers=headers, method="GET")
+    open_fn = opener if opener is not None else urlopen
+    try:
+        with open_fn(request, timeout=20.0) as response:
+            raw = response.read()
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace") if exc.fp else str(exc)
+        raise SubscriptionAuthError(
+            f"xAI billing HTTP {exc.code}: {detail[:200]}",
+            classification="refresh-failed",
+        ) from exc
+    except (URLError, RemoteDisconnected, ConnectionResetError, TimeoutError) as exc:
+        raise SubscriptionAuthError(
+            f"xAI billing transport error: {exc}",
+            classification="auth-required",
+        ) from exc
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SubscriptionAuthError(
+            f"xAI billing returned non-JSON: {exc}",
+            classification="refresh-failed",
+        ) from exc
+    return _usage_snapshot_from_payload(payload)
+
+
+_PRODUCT_LIMIT_NAMES = {
+    "grokbuild": "Grok Build",
+    "grok-build": "Grok Build",
+    "grokchat": "Grok Chat",
+    "grok-chat": "Grok Chat",
+}
+
+
+def _usage_snapshot_from_payload(payload: Any) -> dict[str, Any]:
+    config = payload.get("config") if isinstance(payload, dict) else None
+    source = config if isinstance(config, dict) else payload if isinstance(payload, dict) else {}
+    used_percent = _optional_float(
+        source.get("creditUsagePercent")
+        or source.get("credit_usage_percent")
+        or source.get("usedPercent")
+    )
+    remaining_percent = _optional_float(
+        source.get("remainingPercent") or source.get("remaining_percent")
+    )
+    period = source.get("currentPeriod") if isinstance(source.get("currentPeriod"), dict) else {}
+    if used_percent is None:
+        on_demand_used = _cent_value(source.get("onDemandUsed"))
+        on_demand_cap = _cent_value(source.get("onDemandCap"))
+        if on_demand_cap and on_demand_cap > 0 and on_demand_used is not None:
+            used_percent = max(0.0, min(100.0, on_demand_used / on_demand_cap * 100.0))
+        elif period or source.get("billingPeriodEnd"):
+            used_percent = 0.0
+    if remaining_percent is None and used_percent is not None:
+        remaining_percent = max(0.0, min(100.0, 100.0 - used_percent))
+    if used_percent is None and remaining_percent is not None:
+        used_percent = max(0.0, min(100.0, 100.0 - remaining_percent))
+    resets_at = period.get("end") or source.get("billingPeriodEnd") or source.get("resetsAt")
+    reset_value = resets_at if isinstance(resets_at, str) else None
+    limits = [
+        {
+            "key": "week",
+            "name": "Weekly",
+            "period": "week",
+            "limit": 100.0,
+            "used": used_percent,
+            "remaining": remaining_percent,
+            "resets_at": reset_value,
+        }
+    ]
+    products = source.get("productUsage") or source.get("product_usage")
+    if isinstance(products, list):
+        for item in products:
+            if not isinstance(item, dict):
+                continue
+            product = item.get("product")
+            percent = _optional_float(item.get("usagePercent") or item.get("usage_percent"))
+            if not isinstance(product, str) or not product.strip() or percent is None:
+                continue
+            key = canonical_product_limit_key(product)
+            if not key or key in {"week", "weekly"}:
+                continue
+            limits.append(
+                {
+                    "key": key,
+                    "name": _PRODUCT_LIMIT_NAMES.get(key, product.strip()),
+                    "period": "product",
+                    "limit": 100.0,
+                    "used": percent,
+                    "remaining": max(0.0, min(100.0, 100.0 - percent)),
+                    "resets_at": reset_value,
+                }
+            )
+    return {"signed_in": True, "limits": limits}
+
+
+def canonical_product_limit_key(product: str) -> str:
+    return product.strip().lower().replace("_", "-")
+
+
+def _cent_value(value: Any) -> float | None:
+    if isinstance(value, Mapping):
+        return _optional_float(value.get("val"))
+    return _optional_float(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 def logout() -> None:

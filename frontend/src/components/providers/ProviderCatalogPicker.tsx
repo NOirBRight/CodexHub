@@ -82,10 +82,11 @@ export function ProviderCatalogPicker({
                         </span>
                       ) : null}
                     </span>
-                    <span className="truncate text-xs text-slate-500">{provider.base_url}</span>
-                    {provider.id === "xai" ? (
-                      <span className="text-xs text-slate-600">{t("providers.catalogProviderXaiHint")}</span>
-                    ) : null}
+                    {provider.onboarding_hint ? (
+                      <span className="text-xs text-slate-600">{t(provider.onboarding_hint)}</span>
+                    ) : (
+                      <span className="truncate text-xs text-slate-500">{provider.base_url}</span>
+                    )}
                   </button>
                 );
               })}

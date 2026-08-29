@@ -65,6 +65,9 @@ export interface Provider {
   reports_cached_input_tokens?: boolean | null;
   supports_developer_role?: boolean | null;
   display_prefix?: string | null;
+  auth_capabilities?: string[] | null;
+  onboarding_hint?: string | null;
+  discovery_policy?: string | null;
   sort_order?: number | null;
   enabled: boolean;
   locked?: boolean;
@@ -244,6 +247,11 @@ export interface CodexAuthStatus {
 
 export interface XaiAuthStatus {
   signed_in: boolean;
+}
+
+export interface XaiUsageSnapshot {
+  signed_in?: boolean;
+  limits: OpenAIUsageLimit[];
 }
 
 export interface XaiDeviceLogin {

@@ -121,12 +121,16 @@ if [[ ! -x "$binary" ]]; then
 fi
 cp -a "$binary" "$portable_dir/$executableBaseName"
 
-for resource in config src-python python; do
+for resource in config src-python python scripts; do
   src="$targetRoot/release/$resource"
   if [[ -e "$src" ]]; then
     cp -a "$src" "$portable_dir/"
   fi
 done
+if [[ ! -f "$portable_dir/scripts/xai_device_login.py" ]]; then
+  echo "portable build is missing scripts/xai_device_login.py" >&2
+  exit 1
+fi
 
 if [[ ! -e "$portable_dir/python" ]]; then
   cat > "$portable_dir/LINUX_RUNTIME.txt" <<NOTE

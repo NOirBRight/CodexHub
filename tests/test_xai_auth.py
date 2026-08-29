@@ -29,6 +29,85 @@ class _FakeResponse:
         return None
 
 
+def test_pin_https_xai_billing_url_accepts_grok_proxy() -> None:
+    assert xai_auth.pin_https_xai_billing_url(
+        "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+    ).startswith("https://cli-chat-proxy.grok.com/")
+    with pytest.raises(SubscriptionAuthError, match="not pinned"):
+        xai_auth.pin_https_xai_billing_url("https://api.x.ai/v1/billing")
+
+
+def test_usage_snapshot_maps_credit_percent(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "xai_auth.json"
+    monkeypatch.setenv("CODEXHUB_XAI_AUTH_PATH", str(path))
+    xai_auth.persist_tokens(
+        {"access_token": "live-token", "refresh_token": "r1", "token_type": "Bearer"}
+    )
+
+    def opener(request: Any, timeout: float = 20.0) -> _FakeResponse:
+        assert request.full_url.startswith("https://cli-chat-proxy.grok.com/v1/billing")
+        assert request.get_header("Authorization") == "Bearer live-token"
+        return _FakeResponse(
+            {
+                "config": {
+                    "creditUsagePercent": 35,
+                    "currentPeriod": {"end": "2026-09-01T00:00:00Z"},
+                }
+            }
+        )
+
+    snapshot = xai_auth.fetch_usage(opener=opener)
+    assert snapshot["limits"][0]["remaining"] == 65.0
+    assert snapshot["limits"][0]["used"] == 35.0
+    assert snapshot["limits"][0]["period"] == "week"
+    assert snapshot["limits"][0]["resets_at"] == "2026-09-01T00:00:00Z"
+
+
+def test_usage_snapshot_includes_product_rows(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "xai_auth.json"
+    monkeypatch.setenv("CODEXHUB_XAI_AUTH_PATH", str(path))
+    xai_auth.persist_tokens(
+        {"access_token": "live-token", "refresh_token": "r1", "token_type": "Bearer"}
+    )
+
+    def opener(request: Any, timeout: float = 20.0) -> _FakeResponse:
+        return _FakeResponse(
+            {
+                "config": {
+                    "creditUsagePercent": 16,
+                    "currentPeriod": {"end": "2026-08-30T16:26:18Z"},
+                    "productUsage": [
+                        {"product": "GrokBuild", "usagePercent": 15.0},
+                        {"product": "GrokChat", "usagePercent": 1.0},
+                        {"product": "GrokImagine", "usagePercent": None},
+                    ],
+                }
+            }
+        )
+
+    snapshot = xai_auth.fetch_usage(opener=opener)
+    assert [row["key"] for row in snapshot["limits"]] == ["week", "grokbuild", "grokchat"]
+    assert snapshot["limits"][1]["name"] == "Grok Build"
+    assert snapshot["limits"][1]["used"] == 15.0
+    assert snapshot["limits"][1]["remaining"] == 85.0
+    assert snapshot["limits"][1]["period"] == "product"
+
+
+def test_usage_snapshot_treats_open_period_without_percent_as_zero(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "xai_auth.json"
+    monkeypatch.setenv("CODEXHUB_XAI_AUTH_PATH", str(path))
+    xai_auth.persist_tokens(
+        {"access_token": "live-token", "refresh_token": "r1", "token_type": "Bearer"}
+    )
+
+    def opener(request: Any, timeout: float = 20.0) -> _FakeResponse:
+        return _FakeResponse({"config": {"currentPeriod": {"end": "2026-09-01T00:00:00Z"}}})
+
+    snapshot = xai_auth.fetch_usage(opener=opener)
+    assert snapshot["limits"][0]["used"] == 0.0
+    assert snapshot["limits"][0]["remaining"] == 100.0
+
+
 def test_pin_https_xai_url_rejects_non_xai_hosts() -> None:
     with pytest.raises(SubscriptionAuthError, match="not pinned"):
         xai_auth.pin_https_xai_url("https://evil.example/token")

@@ -411,7 +411,9 @@ const zhCN = {
     xaiSignedInTitle: "已使用 SuperGrok 登录",
     xaiSignInBody:
       "用 xAI 设备码登录 SuperGrok 或 X Premium+。若推理返回 403，请保留该会话并改设 XAI_API_KEY 作为回退。",
-    xaiSignedInBody: "SuperGrok 会话已就绪。已填入 xAI 接口和 Grok 4，可在 Codex 中选用。",
+    xaiSignedInBody: "SuperGrok 会话已就绪。接口和模型来自预设，可在 Codex 中选用。",
+    catalogProviderSubscriptionHint: "用账号登录即可，接口和模型已由预设填好。",
+    xaiRefreshUsage: "刷新 xAI 额度",
     xaiCatalogReady: "已启用 Grok 4，可在 Codex 中使用",
     xaiStartDeviceLogin: "开始设备码登录",
     xaiStartingDeviceLogin: "正在启动 xAI 设备码登录",
@@ -458,6 +460,8 @@ const zhCN = {
     generatingCatalog: "正在生成模型目录...",
     gatewayFacingMetadata: "面向 Gateway 的模型元数据",
     gatewayFacingModelName: "面向 Gateway 的模型名称和限制",
+    codexRouteChangedHistoryIssueRestart:
+      "{{status}}，但历史对话同步未完成：{{message}} 请重启 Codex App 使路由生效，然后在设置中重试历史对话同步。",
     codexRouteChangedRestart: "{{status}}；请重启 Codex App 使其生效",
     hoursShort: "小时",
     includeOfficialModels: "包含官方模型",

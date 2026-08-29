@@ -3,11 +3,19 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useToasts } from "../PageToast";
 import { api, messageFromError } from "../../lib/tauri";
-import type { XaiAuthStatus, XaiDeviceLogin } from "../../lib/types";
+import type { OpenAIUsageLimit, XaiAuthStatus, XaiDeviceLogin } from "../../lib/types";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
-export function XaiLoginCard({ onSignedIn }: { onSignedIn?: () => void }) {
+export function XaiLoginCard({
+  onAuthChange,
+  onSignedIn,
+  onUsage,
+}: {
+  onAuthChange?: (signedIn: boolean) => void;
+  onSignedIn?: () => void;
+  onUsage?: (limits: OpenAIUsageLimit[]) => void;
+}) {
   const { t } = useTranslation();
   const translate = t as Translate;
   const { showToast, updateToast } = useToasts();
@@ -40,10 +48,28 @@ export function XaiLoginCard({ onSignedIn }: { onSignedIn?: () => void }) {
     try {
       const next = await api.xaiAuthStatus();
       setStatus(next);
-      return next.signed_in === true;
+      const signedIn = next.signed_in === true;
+      onAuthChange?.(signedIn);
+      if (signedIn) {
+        await refreshUsage();
+      } else {
+        onUsage?.([]);
+      }
+      return signedIn;
     } catch {
       setStatus({ signed_in: false });
+      onAuthChange?.(false);
+      onUsage?.([]);
       return false;
+    }
+  }
+
+  async function refreshUsage() {
+    try {
+      const snapshot = await api.xaiUsageSnapshot();
+      onUsage?.(snapshot.limits ?? []);
+    } catch {
+      onUsage?.([]);
     }
   }
 
