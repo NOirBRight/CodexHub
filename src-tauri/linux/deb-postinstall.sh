@@ -4,6 +4,36 @@
 # migration. Backups deliberately do not end in .desktop, so menus ignore them.
 set -eu
 
+write_package_launcher() {
+  path=$1
+  parent=${path%/*}
+  [ "$parent" != "$path" ] || return 1
+  [ -d "$parent" ] || return 1
+  [ ! -L "$parent" ] || return 1
+  [ ! -L "$path" ] || return 1
+
+  temporary=$(mktemp "$parent/.CodexHub.desktop.XXXXXX") || return 1
+  if ! {
+    printf '%s\n' \
+      '[Desktop Entry]' \
+      'Type=Application' \
+      'Name=CodexHub' \
+      'Comment=CodexHub desktop backend and CLI' \
+      'Exec=/usr/bin/codexhub' \
+      'Icon=codexhub' \
+      'Terminal=false' \
+      'Categories=Development;' \
+      'StartupNotify=true' \
+      'StartupWMClass=com.codexhub.app' \
+      'X-GNOME-UsesNotifications=true' > "$temporary" &&
+      chmod 0644 "$temporary" &&
+      mv -f -- "$temporary" "$path"
+  }; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+}
+
 is_codexhub_generated_launcher() {
   awk '
     {
@@ -61,17 +91,54 @@ archive_launcher() {
   return 1
 }
 
+archive_legacy_command() {
+  home=$1
+  expected_uid=$2
+  directory="$home/.local/bin"
+  path="$directory/codexhub"
+  [ -d "$directory" ] || return 0
+  [ ! -L "$directory" ] || return 0
+  [ "$(stat -c %u "$directory")" = "$expected_uid" ] || return 0
+  [ -L "$path" ] || return 0
+  [ "$(stat -c %u "$path")" = "$expected_uid" ] || return 0
+
+  resolved=$(readlink -f -- "$path" 2>/dev/null || true)
+  expected=$(readlink -f -- "$home/Applications/CodexHub.AppImage" 2>/dev/null || true)
+  [ -n "$expected" ] || return 0
+  [ "$resolved" = "$expected" ] || return 0
+
+  index=0
+  while [ "$index" -lt 100 ]; do
+    suffix=""
+    [ "$index" -eq 0 ] || suffix=".$index"
+    backup="$path.codexhub-legacy-backup$suffix"
+    if [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
+      mv -- "$path" "$backup"
+      return 0
+    fi
+    index=$((index + 1))
+  done
+  return 1
+}
+
 cleanup_home() {
   home=$1
   expected_uid=$2
-  apps="$home/.local/share/applications"
-  for directory in "$home" "$home/.local" "$home/.local/share" "$apps"; do
+  for directory in "$home" "$home/.local"; do
     [ -d "$directory" ] || return 0
     [ ! -L "$directory" ] || return 0
     [ "$(stat -c %u "$directory")" = "$expected_uid" ] || return 0
   done
-  archive_launcher "$apps/codexhub.desktop"
-  archive_launcher "$apps/com.codexhub.app.desktop"
+
+  apps="$home/.local/share/applications"
+  if [ -d "$home/.local/share" ] && [ -d "$apps" ] &&
+    [ ! -L "$home/.local/share" ] && [ ! -L "$apps" ] &&
+    [ "$(stat -c %u "$home/.local/share")" = "$expected_uid" ] &&
+    [ "$(stat -c %u "$apps")" = "$expected_uid" ]; then
+    archive_launcher "$apps/codexhub.desktop"
+    archive_launcher "$apps/com.codexhub.app.desktop"
+  fi
+  archive_legacy_command "$home" "$expected_uid"
 }
 
 dispatch_cleanup() {
@@ -132,11 +199,19 @@ if [ "${1-}" = "--test-home" ]; then
   exit 0
 fi
 
+if [ "${1-}" = "--test-system-launcher" ]; then
+  [ "$#" -eq 2 ] || exit 2
+  write_package_launcher "$2"
+  exit 0
+fi
+
 if [ "${1-}" = "--test-passwd" ]; then
   [ "$#" -eq 3 ] || exit 2
   cleanup_passwd_users "$3" 0 < "$2"
   exit 0
 fi
+
+write_package_launcher /usr/share/applications/CodexHub.desktop
 
 invoking_uid=${PKEXEC_UID:-${SUDO_UID:-}}
 case "$invoking_uid" in
