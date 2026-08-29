@@ -19,10 +19,16 @@ replace the installed package instead of creating side-by-side versions. The
 package owns the single `/usr/share/applications/CodexHub.desktop` launcher.
 Its recoverable post-install migration archives exact legacy CodexHub-generated
 user launchers as `*.codexhub-legacy-backup`; customized desktop entries are
-left untouched. The root package hook only enumerates eligible accounts; it
-drops to each target UID/GID with cleared groups and capabilities before
-touching that user's launcher directory. AppImage upgrades likewise rewrite
-one stable managed user launcher rather than adding per-version entries.
+left untouched. The package launcher is atomically normalized to
+`Exec=/usr/bin/codexhub`, so a stale user `PATH` entry cannot redirect desktop
+launches to an older AppImage. If `~/.local/bin/codexhub` is a user-owned link
+that resolves exactly to `~/Applications/CodexHub.AppImage`, the hook archives
+only that link with the same recoverable suffix. It retains the AppImage
+payload and preserves every custom command target. The root package hook only
+enumerates eligible accounts; it drops to each target UID/GID with cleared
+groups and capabilities before touching that user's launcher directory.
+AppImage upgrades likewise rewrite one stable managed user launcher rather
+than adding per-version entries.
 
 Updater platform key: `linux-x86_64`. Add that platform to the existing
 `latest.json` / `latest-debug.json` payload; do not invent a second product

@@ -82,6 +82,88 @@ X-GNOME-UsesNotifications=true
         assert (apps / f"{name}.codexhub-legacy-backup").read_text(encoding="utf-8") == legacy
 
 
+def test_deb_postinstall_pins_the_package_launcher_to_usr_bin(tmp_path: Path) -> None:
+    hook = ROOT / "src-tauri" / "linux" / "deb-postinstall.sh"
+    launcher = tmp_path / "CodexHub.desktop"
+    launcher.write_text(
+        """[Desktop Entry]
+Categories=
+Comment=CodexHub desktop backend and CLI
+Exec=codexhub
+StartupWMClass=codexhub
+Icon=codexhub
+Name=CodexHub
+Terminal=false
+Type=Application
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["sh", str(hook), "--test-system-launcher", str(launcher)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    content = launcher.read_text(encoding="utf-8")
+    assert "Exec=/usr/bin/codexhub\n" in content
+    assert "StartupWMClass=com.codexhub.app\n" in content
+    assert "Exec=codexhub\n" not in content
+
+
+def test_deb_launcher_migration_archives_the_owned_legacy_appimage_command(tmp_path: Path) -> None:
+    hook = ROOT / "src-tauri" / "linux" / "deb-postinstall.sh"
+    (tmp_path / ".local" / "share" / "applications").mkdir(parents=True)
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir()
+    applications = tmp_path / "Applications"
+    applications.mkdir()
+    appimage = applications / "CodexHub.AppImage"
+    appimage.write_bytes(b"legacy appimage")
+    command = local_bin / "codexhub"
+    command.symlink_to(appimage)
+
+    result = subprocess.run(
+        ["sh", str(hook), "--test-home", str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not command.exists()
+    backup = command.with_name("codexhub.codexhub-legacy-backup")
+    assert backup.is_symlink()
+    assert backup.resolve() == appimage
+    assert appimage.read_bytes() == b"legacy appimage"
+
+
+def test_deb_launcher_migration_preserves_a_custom_local_command(tmp_path: Path) -> None:
+    hook = ROOT / "src-tauri" / "linux" / "deb-postinstall.sh"
+    (tmp_path / ".local" / "share" / "applications").mkdir(parents=True)
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir()
+    command = local_bin / "codexhub"
+    command.symlink_to("/custom/codexhub")
+
+    result = subprocess.run(
+        ["sh", str(hook), "--test-home", str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert command.is_symlink()
+    assert os.readlink(command) == "/custom/codexhub"
+    assert not command.with_name("codexhub.codexhub-legacy-backup").exists()
+
+
 def test_deb_launcher_migration_refuses_symlinked_home_ancestors(tmp_path: Path) -> None:
     hook = ROOT / "src-tauri" / "linux" / "deb-postinstall.sh"
     home = tmp_path / "home"
