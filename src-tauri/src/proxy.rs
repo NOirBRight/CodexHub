@@ -3160,12 +3160,25 @@ fn child_process_start_id(child: &Child) -> Result<String, String> {
 
 #[cfg(not(windows))]
 fn child_process_start_id(child: &Child) -> Result<String, String> {
-    match inspect_process(child.id())? {
-        InspectedProcess::Running(info) => info
-            .process_start_id
-            .ok_or_else(|| "spawned Gateway process has no process creation identity".to_string()),
-        InspectedProcess::Missing => Err("spawned Gateway process disappeared".to_string()),
-    }
+    linux_process_start_id(child.id())
+}
+
+#[cfg(not(windows))]
+fn linux_process_start_id(pid: u32) -> Result<String, String> {
+    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(format!("Gateway process {pid} disappeared"));
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to read Gateway process creation identity from /proc/{pid}/stat: {error}"
+            ));
+        }
+    };
+    process_start_ticks(&stat)
+        .map(|ticks| format!("proc-start-ticks:{ticks}"))
+        .ok_or_else(|| format!("Gateway process {pid} /proc/stat is missing starttime"))
 }
 
 #[cfg(windows)]
@@ -3343,23 +3356,19 @@ fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
         }
     };
 
-    if bytes.is_empty() {
-        return Ok(InspectedProcess::Running(
-            ProcessInfo::from_args(Vec::new()),
-        ));
-    }
-
     let args = bytes
         .split(|byte| *byte == 0)
         .filter(|part| !part.is_empty())
         .map(|part| String::from_utf8_lossy(part).to_string())
         .collect::<Vec<_>>();
-    let process_start_id = fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| process_start_ticks(&stat).map(str::to_string))
-        .map(|ticks| format!("proc-start-ticks:{ticks}"));
     let mut info = ProcessInfo::from_args(args);
-    info.process_start_id = process_start_id;
+    // Command line can be empty for zombies, mid-exec children, and some
+    // Python shutdown races. Creation identity still lives in /proc/pid/stat.
+    info.process_start_id = match linux_process_start_id(pid) {
+        Ok(process_start_id) => Some(process_start_id),
+        Err(_) if bytes.is_empty() => None,
+        Err(error) => return Err(error),
+    };
     Ok(InspectedProcess::Running(info))
 }
 
@@ -3535,6 +3544,90 @@ mod tests {
             }
             panic!("process {pid} did not disappear within the bounded window: {last}");
         }
+    }
+
+    #[cfg(not(windows))]
+    fn spawn_unreaped_child(program: &str, args: &[&str]) -> std::process::Child {
+        std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap_or_else(|error| panic!("failed to spawn {program}: {error}"))
+    }
+
+    #[cfg(not(windows))]
+    fn wait_until_zombie(pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+                if super::process_start_ticks(&stat).is_some()
+                    && stat
+                        .rsplit_once(')')
+                        .and_then(|(_, rest)| rest.split_whitespace().next())
+                        == Some("Z")
+                {
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn linux_spawned_child_has_process_creation_identity() {
+        let mut child = spawn_unreaped_child("sleep", &["5"]);
+        let start_id = super::child_process_start_id(&child);
+        let _ = child.kill();
+        let _ = child.wait();
+        let start_id = start_id.expect("spawned child should have a process creation identity");
+        assert!(
+            start_id.starts_with("proc-start-ticks:"),
+            "unexpected start identity {start_id}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn linux_spawned_zombie_keeps_process_creation_identity() {
+        let mut child = spawn_unreaped_child("true", &[]);
+        let pid = child.id();
+        wait_until_zombie(pid);
+        let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        assert!(
+            cmdline.is_empty(),
+            "zombie cmdline should be empty so this matches the Linux spawn race; got {cmdline:?}"
+        );
+        let start_id = super::child_process_start_id(&child);
+        let inspected = super::inspect_process(pid);
+        let _ = child.wait();
+        let start_id = start_id.unwrap_or_else(|error| {
+            panic!("spawned Gateway process has no process creation identity: {error}")
+        });
+        assert!(
+            start_id.starts_with("proc-start-ticks:"),
+            "unexpected start identity {start_id}"
+        );
+        match inspected.expect("zombie /proc entry should still be inspectable") {
+            InspectedProcess::Running(info) => {
+                assert_eq!(info.process_start_id.as_deref(), Some(start_id.as_str()));
+            }
+            InspectedProcess::Missing => {
+                panic!("zombie should not be reported missing before wait")
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn process_start_ticks_reads_starttime_after_comm() {
+        let stat = "1234 (python3.13) S 1 1 1 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 987654 0 0\n";
+        assert_eq!(super::process_start_ticks(stat), Some("987654"));
+        let live = fs::read_to_string("/proc/self/stat").expect("read /proc/self/stat");
+        let ticks = super::process_start_ticks(&live).expect("self stat should include starttime");
+        assert!(ticks.chars().all(|ch| ch.is_ascii_digit()), "{ticks}");
     }
 
     #[cfg(windows)]

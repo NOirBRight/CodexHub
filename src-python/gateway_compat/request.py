@@ -975,6 +975,11 @@ def compatible_request_body(
         if _official_passthrough._apply_ollama_reasoning_effort_alias(payload):
             changed = True
 
+    if _response._sanitize_unsupported_compaction_input_items(payload):
+        changed = True
+    if host._sanitize_third_party_reasoning_items(payload):
+        changed = True
+
     if not changed:
         return body
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")

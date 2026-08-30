@@ -5,6 +5,7 @@ import opencodeIcon from "../assets/opencode-icon.png";
 import piIcon from "../assets/pi-icon.png";
 import dshIcon from "../assets/dsh-icon.svg";
 import zcodeIcon from "../assets/zcode-icon.png";
+import codexIcon from "../assets/codex-logo.svg";
 import { cx } from "../lib/format";
 import type { GatewayClientContract, GatewayClientInfo } from "../lib/types";
 import { SwitchControl } from "./SettingsDrawer";
@@ -204,6 +205,10 @@ function ClientLogo({ id, name }: { id: string; name: string }) {
 
 function clientIcon(id: string) {
   switch (id) {
+    case "codex":
+    case "codex-app":
+    case "chatgpt":
+      return codexIcon;
     case "dsh":
       return dshIcon;
     case "opencode":
@@ -220,7 +225,7 @@ function clientIcon(id: string) {
 }
 
 function clientIconClass(id: string) {
-  if (id === "dsh") {
+  if (id === "codex" || id === "dsh") {
     return "h-8 w-8 object-contain";
   }
   if (id === "pi") {

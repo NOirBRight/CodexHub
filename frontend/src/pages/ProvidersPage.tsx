@@ -294,7 +294,10 @@ function ProvidersPageImpl({
       return;
     }
     void primeOfficialOpenAIUsage();
-    const usageRefreshTimer = window.setInterval(() => void loadOfficialOpenAIUsage(false), OPENAI_USAGE_REFRESH_INTERVAL_MS);
+    const usageRefreshTimer = window.setInterval(
+      () => void loadOfficialOpenAIUsage(false, false, undefined, { showBusy: false }),
+      OPENAI_USAGE_REFRESH_INTERVAL_MS,
+    );
     return () => window.clearInterval(usageRefreshTimer);
   }, [codexAuthState, selectedId]);
 
@@ -499,7 +502,7 @@ function ProvidersPageImpl({
     if (!officialUsageSnapshotRef.current) {
       await loadOfficialOpenAIUsage(false, false, undefined, { showBusy: false });
     }
-    void loadOfficialOpenAIUsage(false);
+    void loadOfficialOpenAIUsage(false, false, undefined, { showBusy: false });
   }
 
   async function loadOfficialOpenAIUsage(

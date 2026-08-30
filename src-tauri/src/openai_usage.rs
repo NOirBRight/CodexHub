@@ -411,7 +411,7 @@ fn enrich_usage_with_local_rate_limits(
     usage: &mut CodexAccountUsageResponse,
     rate_limit_dir: Option<&Path>,
 ) {
-    if response_has_usage_limits(usage) {
+    if usage_has_windowed_quotas(usage) {
         return;
     }
     let Some(codex_dir) = rate_limit_dir else {
@@ -422,16 +422,27 @@ fn enrich_usage_with_local_rate_limits(
     }
 }
 
-fn response_has_usage_limits(usage: &CodexAccountUsageResponse) -> bool {
+fn usage_has_windowed_quotas(usage: &CodexAccountUsageResponse) -> bool {
+    fn is_windowed(limit: &CodexAccountUsageLimit) -> bool {
+        let text = format!(
+            "{} {} {}",
+            limit.id.as_deref().unwrap_or(""),
+            limit.period.as_deref().unwrap_or(""),
+            limit.name.as_deref().unwrap_or("")
+        )
+        .to_ascii_lowercase();
+        text.contains("week")
+            || ((text.contains('5') || text.contains("five")) && text.contains("hour"))
+    }
     usage
         .usage_limits
         .as_ref()
-        .is_some_and(|limits| !limits.is_empty())
+        .is_some_and(|limits| limits.iter().any(is_windowed))
         || usage
             .summary
             .usage_limits
             .as_ref()
-            .is_some_and(|limits| !limits.is_empty())
+            .is_some_and(|limits| limits.iter().any(is_windowed))
 }
 
 #[derive(Debug)]
@@ -1500,6 +1511,49 @@ mod tests {
         assert_eq!(snapshot.limits.len(), 2);
         assert_eq!(snapshot.limits[0].period, "five_hours");
         assert_eq!(snapshot.limits[0].used, Some(26.0));
+        assert_eq!(snapshot.limits[1].period, "week");
+        assert_eq!(snapshot.limits[1].remaining, Some(96.0));
+    }
+
+    #[test]
+    fn primary_credits_account_limits_still_enrich_windowed_local_quotas() {
+        let root = temp_root("openai-usage-primary-credits-enrich");
+        let cache_path = root.join("proxy").join("usage-cache.json");
+        let sessions_dir = root.join("sessions").join("2026").join("07").join("07");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join("rollout.jsonl"),
+            r#"{"timestamp":"2026-07-07T03:55:58.964Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":26,"window_minutes":300,"resets_at":1783406493},"secondary":{"used_percent":4,"window_minutes":10080,"resets_at":1783993293},"plan_type":"pro"}}}"#,
+        )
+        .unwrap();
+        write_test_cache(
+            &cache_path,
+            10_000,
+            r#"{
+              "summary": { "lifetimeTokens": 41 },
+              "usageLimits": [
+                {"id": "primary", "period": "primary", "limit": 100, "used": 3, "remaining": 97, "resetsAt": "1788643292"},
+                {"id": "credits", "period": "credits", "limit": 100, "used": 0, "remaining": 100}
+              ],
+              "dailyUsageBuckets": [
+                {"startDate": "2026-07-06", "tokens": 41}
+              ]
+            }"#,
+        );
+
+        let snapshot = openai_usage_completions_with_cache_and_rate_limit_dir(
+            1_783_296_000,
+            1_783_382_400,
+            false,
+            &cache_path,
+            Some(&root),
+            10_000,
+            || panic!("fresh cache should not refresh"),
+        )
+        .expect("primary/credits cache should still overlay week/five-hour windows");
+
+        assert_eq!(snapshot.limits.len(), 2);
+        assert_eq!(snapshot.limits[0].period, "five_hours");
         assert_eq!(snapshot.limits[1].period, "week");
         assert_eq!(snapshot.limits[1].remaining, Some(96.0));
     }

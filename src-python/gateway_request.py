@@ -263,6 +263,90 @@ def strip_reasoning_encrypted_content(value: Any) -> bool:
 _strip_reasoning_encrypted_content = strip_reasoning_encrypted_content
 
 
+def _third_party_reasoning_part_text(part: Any) -> str | None:
+    if isinstance(part, str) and part:
+        return part
+    if not isinstance(part, dict):
+        return None
+    for key in ("text", "summary"):
+        value = part.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _third_party_reasoning_summary_parts(value: Any) -> list[dict[str, str]]:
+    if value is None:
+        return []
+    if isinstance(value, str) and value:
+        return [{"type": "summary_text", "text": value}]
+    if not isinstance(value, list):
+        return []
+    parts: list[dict[str, str]] = []
+    for item in value:
+        text = _third_party_reasoning_part_text(item)
+        if text:
+            parts.append({"type": "summary_text", "text": text})
+    return parts
+
+
+def sanitize_third_party_reasoning_items(value: Any) -> bool:
+    # Codex App history stores Official/xAI reasoning blobs that other
+    # Responses providers cannot decrypt, plus content: null which xAI rejects
+    # as "invalid type: null, expected a sequence".
+    changed = False
+
+    if isinstance(value, list):
+        index = 0
+        while index < len(value):
+            item = value[index]
+            if isinstance(item, dict) and item.get("type") == "encrypted_content":
+                del value[index]
+                changed = True
+                continue
+            if sanitize_third_party_reasoning_items(item):
+                changed = True
+            index += 1
+        return changed
+
+    if not isinstance(value, dict):
+        return False
+
+    include = value.get("include")
+    if isinstance(include, list):
+        filtered = [item for item in include if item != "reasoning.encrypted_content"]
+        if len(filtered) != len(include):
+            if filtered:
+                value["include"] = filtered
+            else:
+                value.pop("include", None)
+            changed = True
+
+    if value.get("type") == "reasoning":
+        if "encrypted_content" in value:
+            value.pop("encrypted_content", None)
+            changed = True
+        summary_parts = _third_party_reasoning_summary_parts(value.get("summary"))
+        content_parts = _third_party_reasoning_summary_parts(value.get("content"))
+        if not summary_parts:
+            summary_parts = content_parts
+        if value.get("content") != []:
+            value["content"] = []
+            changed = True
+        if value.get("summary") != summary_parts:
+            value["summary"] = summary_parts
+            changed = True
+
+    for nested in list(value.values()):
+        if sanitize_third_party_reasoning_items(nested):
+            changed = True
+
+    return changed
+
+
+_sanitize_third_party_reasoning_items = sanitize_third_party_reasoning_items
+
+
 def has_browser_context_signal(value: Any) -> bool:
     for fragment in _stream_semantics.collect_text_fragments(value):
         lowered = fragment.lower()

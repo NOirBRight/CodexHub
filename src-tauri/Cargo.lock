@@ -494,10 +494,11 @@ dependencies = [
 
 [[package]]
 name = "codexhub"
-version = "0.1.9-beta.3.10"
+version = "0.1.9-beta.3.11"
 dependencies = [
  "cairo-rs",
  "dirs 5.0.1",
+ "gdk-pixbuf",
  "glib",
  "gtk",
  "log",

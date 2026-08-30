@@ -1228,11 +1228,14 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
   assert.match(providersSource, /storeOfficialOpenAIUsageSnapshot\(snapshot\)/);
   assert.match(providersSource, /async function primeOfficialOpenAIUsage\(\)/);
   assert.match(providersSource, /await loadOfficialOpenAIUsage\(false, false, undefined, \{ showBusy: false \}\)/);
-  assert.match(providersSource, /void loadOfficialOpenAIUsage\(false\)/);
+  assert.match(providersSource, /void loadOfficialOpenAIUsage\(false, false, undefined, \{ showBusy: false \}\)/);
   assert.match(providersSource, /async function loadOfficialOpenAIUsage\([\s\S]*forceRefresh = true[\s\S]*notify = false[\s\S]*toastId\?: string[\s\S]*options\?: \{ showBusy\?: boolean \}/);
   assert.match(providersSource, /api\.openaiUsageCompletions\(\{[\s\S]*forceRefresh[\s\S]*\}\)/);
   assert.match(providersSource, /void primeOfficialOpenAIUsage\(\)/);
-  assert.match(providersSource, /window\.setInterval\(\(\) => void loadOfficialOpenAIUsage\(false\), OPENAI_USAGE_REFRESH_INTERVAL_MS\)/);
+  assert.match(
+    providersSource,
+    /window\.setInterval\(\s*\(\) => void loadOfficialOpenAIUsage\(false, false, undefined, \{ showBusy: false \}\),\s*OPENAI_USAGE_REFRESH_INTERVAL_MS,\s*\)/,
+  );
   assert.match(providersSource, /if \(officialUsageSnapshotRef\.current\) \{[\s\S]*setOfficialUsageError\(null\);[\s\S]*setOfficialUsageHidden\(false\);[\s\S]*return;[\s\S]*\}/);
   assert.match(providersSource, /selectedId === OFFICIAL_ID[\s\S]*loadOfficialOpenAIUsage/);
   assert.match(providersSource, /if \(selectedId !== OFFICIAL_ID \|\| codexAuthState !== "authorized"\) \{/);
@@ -2028,6 +2031,12 @@ test("settings save restarts running gateway when retry or image proxy runtime s
   assert.doesNotMatch(appSource, /setBanner\(saveMessage\)/);
 });
 
+test("gateway client card shows the Codex App logo", async () => {
+  const cardSource = await readFile(gatewayClientCardPath, "utf8");
+  assert.match(cardSource, /import codexIcon from "\.\.\/assets\/codex-logo\.svg"/);
+  assert.match(cardSource, /case "codex":/);
+});
+
 test("gateway client card does not render a disabled fake updater", async () => {
   const cardSource = await readFile(gatewayClientCardPath, "utf8");
 
@@ -2332,13 +2341,17 @@ test("Luna Collaboration selector shows only V1/V2 and marks the live catalog de
   ]);
   const modelSection = providersSource.match(/function ModelSection[\s\S]*?function providerQualifiedModelId/)?.[0] ?? "";
 
-  assert.match(modelSection, /value=\{collaboration\.effective\}/);
+  assert.match(modelSection, /data-value=\{collaboration\.effective\}/);
   assert.match(modelSection, /officialCollaborationVersionOptions\([\s\S]*officialCollaborationBaselines/);
-  assert.equal([...modelSection.matchAll(/<option value="v[12]">/g)].length, 2);
-  assert.doesNotMatch(modelSection, /<option value="">/);
+  const collaborationChip = modelSection.match(/function CollaborationVersionChip[\s\S]*?function ModelCapabilityChip/)?.[0] ?? "";
+  assert.ok(collaborationChip, "CollaborationVersionChip should be present");
+  assert.doesNotMatch(collaborationChip, /<select/);
+  assert.match(collaborationChip, /<ChevronDown/);
+  assert.match(modelSection, /rounded-panel bg-surface p-1 shadow-floating/);
+  assert.equal([...modelSection.matchAll(/value: "v[12]" as const/g)].length, 2);
   assert.match(modelSection, /collaboration\.baseline === "v1"/);
   assert.match(modelSection, /collaboration\.baseline === "v2"/);
-  assert.match(modelSection, /selected === collaboration\.baseline \? null : selected/);
+  assert.match(modelSection, /selectedVersion === collaboration\.baseline \? null : selectedVersion/);
   assert.match(enSource, /collaborationVersionDefault: "\(Default\)"/);
   assert.match(zhSource, /collaborationVersionDefault: "（默认）"/);
 });
