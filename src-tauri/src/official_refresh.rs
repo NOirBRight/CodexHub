@@ -9,10 +9,10 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) const OFFICIAL_REFRESH_INTERVAL_SECONDS: u64 = 12 * 60 * 60;
+const DEFERRED_REFRESH_RETRY_SECONDS: u64 = 60;
 const REFRESH_STATE_FILE: &str = "official-refresh-state.json";
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
-const FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE: &str =
-    "fresh_direct_official_cache_authority";
+const FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE: &str = "fresh_direct_official_cache_authority";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefreshTrigger {
@@ -74,6 +74,10 @@ struct PublishedOfficialBudget {
 pub(crate) struct OfficialRefreshResult {
     pub models: Vec<Model>,
     pub restart_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_restart_result: Option<crate::codex_desktop::CodexRestartResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,17 +86,18 @@ struct RefreshOutcome {
     models: Vec<Model>,
     snapshot_available: bool,
     restart_required: bool,
+    warning: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct FlightRun<T> {
-    result: Result<T, String>,
+    result: Result<T, crate::codex_desktop::SwitchMutationError>,
     joined: bool,
 }
 
 struct FlightState<T> {
     active: bool,
-    completed: Option<Result<T, String>>,
+    completed: Option<Result<T, crate::codex_desktop::SwitchMutationError>>,
 }
 
 impl<T> Default for FlightState<T> {
@@ -119,7 +124,10 @@ impl<T> Default for SingleFlight<T> {
 }
 
 impl<T: Clone> SingleFlight<T> {
-    fn run(&self, work: impl FnOnce() -> Result<T, String>) -> FlightRun<T> {
+    fn run(
+        &self,
+        work: impl FnOnce() -> Result<T, crate::codex_desktop::SwitchMutationError>,
+    ) -> FlightRun<T> {
         let mut state = self
             .state
             .lock()
@@ -133,7 +141,9 @@ impl<T: Clone> SingleFlight<T> {
             }
             return FlightRun {
                 result: state.completed.clone().unwrap_or_else(|| {
-                    Err("Official refresh single-flight lost its result".to_string())
+                    Err("Official refresh single-flight lost its result"
+                        .to_string()
+                        .into())
                 }),
                 joined: true,
             };
@@ -164,7 +174,9 @@ fn refresh_flight() -> &'static SingleFlight<RefreshOutcome> {
 }
 
 pub(crate) fn refresh_at_startup() -> Result<(), String> {
-    refresh(RefreshTrigger::Startup).map(|_| ())
+    refresh_unattended(RefreshTrigger::Startup)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 // Retained for callers that explicitly require the legacy activation gate;
@@ -174,7 +186,12 @@ pub(crate) fn refresh_before_official_activation() -> Result<(), String> {
     if !config::get_settings()?.include_official_models {
         return Ok(());
     }
-    let outcome = refresh(RefreshTrigger::Activation)?;
+    let Some(outcome) = refresh_unattended(RefreshTrigger::Activation)
+        .map_err(|error| error.to_string())?
+    else {
+        log::info!("deferred Official activation refresh while Codex Desktop is running");
+        return Ok(());
+    };
     allow_activation_without_official_snapshot(outcome)
 }
 
@@ -189,34 +206,64 @@ fn allow_activation_without_official_snapshot(outcome: RefreshOutcome) -> Result
     }
 }
 
-pub(crate) fn refresh_manual() -> Result<OfficialRefreshResult, String> {
+pub(crate) fn refresh_manual(
+) -> Result<OfficialRefreshResult, crate::codex_desktop::SwitchMutationError> {
     let outcome = refresh(RefreshTrigger::Manual)?;
     let restart_required = outcome.restart_required;
+    let (models, delivery_warning) = manual_refresh_models(
+        outcome.snapshot_available,
+        outcome.models,
+        published_official_catalog_models,
+    );
     Ok(OfficialRefreshResult {
         // The generated catalog is atomically published before refresh()
         // succeeds.  Never let the raw acquisition vector (which can retain
         // stale metadata defaults) bypass that resolved snapshot in the UI.
-        models: manual_refresh_models(
-            outcome.snapshot_available,
-            outcome.models,
-            published_official_catalog_models,
-        )?,
+        models,
         restart_required,
+        warning: combine_warnings(outcome.warning, delivery_warning),
+        codex_restart_result: None,
     })
+}
+
+pub(crate) fn acknowledge_codex_restart() -> Result<(), String> {
+    let state_path = refresh_state_path()?;
+    let mut state = read_state(&state_path);
+    if !state.outstanding_restart_required {
+        return Ok(());
+    }
+    state.outstanding_restart_required = false;
+    write_state(&state_path, &state)
 }
 
 fn manual_refresh_models<LoadPublishedCatalog>(
     snapshot_available: bool,
     outcome_models: Vec<Model>,
     load_published_catalog: LoadPublishedCatalog,
-) -> Result<Vec<Model>, String>
+) -> (Vec<Model>, Option<String>)
 where
     LoadPublishedCatalog: FnOnce() -> Result<Vec<Model>, String>,
 {
     if snapshot_available {
-        load_published_catalog()
+        match load_published_catalog() {
+            Ok(models) => (models, None),
+            Err(error) => (
+                outcome_models,
+                Some(format!(
+                    "Official runtime projection was committed, but the published catalog could not be reloaded: {error}"
+                )),
+            ),
+        }
     } else {
-        Ok(outcome_models)
+        (outcome_models, None)
+    }
+}
+
+fn combine_warnings(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first}; {second}")),
+        (Some(warning), None) | (None, Some(warning)) => Some(warning),
+        (None, None) => None,
     }
 }
 
@@ -242,7 +289,9 @@ fn published_official_models_from_catalog(models: Vec<Model>) -> Result<Vec<Mode
 }
 
 pub(crate) fn refresh_after_resume() -> Result<(), String> {
-    refresh(RefreshTrigger::Resume).map(|_| ())
+    refresh_unattended(RefreshTrigger::Resume)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn start_scheduled_refresh_loop() {
@@ -252,24 +301,56 @@ pub(crate) fn start_scheduled_refresh_loop() {
             .name("codexhub-official-refresh".to_string())
             .spawn(|| loop {
                 thread::sleep(next_automatic_wait());
-                if let Err(error) = refresh(RefreshTrigger::Scheduled) {
+                let result = refresh_unattended(RefreshTrigger::Scheduled);
+                if let Err(error) = &result {
                     log::warn!("scheduled Official model refresh failed: {error}");
+                }
+                let backoff = scheduled_refresh_backoff(&result);
+                if !backoff.is_zero() {
+                    thread::sleep(backoff);
                 }
             });
     });
 }
 
-fn refresh(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
+fn scheduled_refresh_backoff(
+    result: &Result<Option<RefreshOutcome>, crate::codex_desktop::SwitchMutationError>,
+) -> Duration {
+    if matches!(result, Ok(Some(outcome)) if outcome.warning.is_none()) {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(DEFERRED_REFRESH_RETRY_SECONDS)
+    }
+}
+
+fn refresh(
+    trigger: RefreshTrigger,
+) -> Result<RefreshOutcome, crate::codex_desktop::SwitchMutationError> {
     refresh_with_flight(refresh_flight(), trigger, refresh_once)
+}
+
+fn refresh_unattended(
+    trigger: RefreshTrigger,
+) -> Result<Option<RefreshOutcome>, crate::codex_desktop::SwitchMutationError> {
+    let outcome = crate::codex_desktop::coordinate_unattended(|| refresh(trigger))?;
+    if outcome.is_none() {
+        log::info!(
+            "deferred {} Official model refresh while Codex Desktop is running",
+            trigger.as_str()
+        );
+    }
+    Ok(outcome)
 }
 
 fn refresh_with_flight<F>(
     flight: &SingleFlight<RefreshOutcome>,
     trigger: RefreshTrigger,
     mut work: F,
-) -> Result<RefreshOutcome, String>
+) -> Result<RefreshOutcome, crate::codex_desktop::SwitchMutationError>
 where
-    F: FnMut(RefreshTrigger) -> Result<RefreshOutcome, String>,
+    F: FnMut(
+        RefreshTrigger,
+    ) -> Result<RefreshOutcome, crate::codex_desktop::SwitchMutationError>,
 {
     loop {
         let flight_run = flight.run(|| work(trigger));
@@ -284,7 +365,9 @@ where
     }
 }
 
-fn refresh_once(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
+fn refresh_once(
+    trigger: RefreshTrigger,
+) -> Result<RefreshOutcome, crate::codex_desktop::SwitchMutationError> {
     let settings = config::get_settings()?;
     if !settings.include_official_models {
         return Ok(RefreshOutcome {
@@ -292,6 +375,7 @@ fn refresh_once(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
             models: Vec::new(),
             snapshot_available: false,
             restart_required: false,
+            warning: None,
         });
     }
 
@@ -307,69 +391,209 @@ fn refresh_once(trigger: RefreshTrigger) -> Result<RefreshOutcome, String> {
             snapshot_available: current_published_snapshot_available(&state),
             models,
             restart_required: state.outstanding_restart_required,
+            warning: None,
         });
     }
 
     record_attempt(&mut state, trigger, now, false);
-    write_state(&state_path, &state)?;
 
-    match models::refresh_official_models_direct() {
-        Ok(models) => {
-            let publication = publish_resolved_snapshot(&state_path, &mut state, now, true)
-                .map_err(|error| persist_failed_publication(&state_path, &mut state, error))?;
+    match models::acquire_official_models_direct() {
+        Ok(acquisition) => {
+            let (models, overlays) = models::prepare_official_models_acquisition(&acquisition)
+                .map_err(|error| {
+                    persist_failed_publication_if_stopped(&state_path, &mut state, error)
+                })?;
+            let (files, budgets) = prepare_catalog_publication(&overlays).map_err(|error| {
+                persist_failed_publication_if_stopped(&state_path, &mut state, error)
+            })?;
+            let committed = commit_refresh_if_codex_stopped(|| {
+                publish_prepared_snapshot(
+                    &state_path,
+                    &mut state,
+                    now,
+                    true,
+                    &files,
+                    budgets,
+                )
+            });
+            let publication = match committed {
+                Ok(Some(publication)) => publication,
+                Ok(None) => return Err(commit_race_error().into()),
+                Err(error) if error.rollback_failed() => {
+                    return Err(error);
+                }
+                Err(error) => {
+                    return Err(persist_failed_publication_if_stopped(
+                        &state_path,
+                        &mut state,
+                        error.to_string(),
+                    )
+                    .into());
+                }
+            };
             Ok(RefreshOutcome {
                 trigger,
                 models,
                 snapshot_available: true,
                 restart_required: publication.restart_required,
+                warning: publication.warning,
             })
         }
         Err(direct_error) => {
             let models = models::list_cached_official_models().unwrap_or_default();
-            let publication = publish_resolved_snapshot(&state_path, &mut state, now, false)
-                .map_err(|publication_error| {
-                    persist_failed_publication(
+            let (files, budgets) = prepare_catalog_publication(&[]).map_err(|error| {
+                persist_failed_publication_if_stopped(
+                    &state_path,
+                    &mut state,
+                    direct_official_refresh_failure_message(&direct_error, Some(&error)),
+                )
+            })?;
+            let committed = commit_refresh_if_codex_stopped(|| {
+                publish_prepared_snapshot(
+                    &state_path,
+                    &mut state,
+                    now,
+                    false,
+                    &files,
+                    budgets,
+                )
+            });
+            let publication = match committed {
+                Ok(Some(publication)) => publication,
+                Ok(None) => return Err(commit_race_error().into()),
+                Err(publication_error) if publication_error.rollback_failed() => {
+                    return Err(publication_error);
+                }
+                Err(publication_error) => {
+                    let error = direct_official_refresh_failure_message(
+                        &direct_error,
+                        Some(&publication_error.to_string()),
+                    );
+                    return Err(persist_failed_publication_if_stopped(
                         &state_path,
                         &mut state,
-                        direct_official_refresh_failure_message(
-                            &direct_error,
-                            Some(&publication_error),
-                        ),
+                        error,
                     )
-                })?;
+                    .into());
+                }
+            };
             if !current_published_snapshot_available(&state) {
-                return Err(direct_official_refresh_failure_message(&direct_error, None));
+                return Err(direct_official_refresh_failure_message(&direct_error, None).into());
             }
             Ok(RefreshOutcome {
                 trigger,
                 snapshot_available: true,
                 models,
                 restart_required: publication.restart_required,
+                warning: publication.warning,
             })
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PublicationOutcome {
-    restart_required: bool,
+fn prepare_catalog_publication(
+    overlays: &[crate::file_transaction::PreparedTextFile],
+) -> Result<
+    (
+        Vec<crate::file_transaction::PreparedTextFile>,
+        BTreeMap<String, PublishedOfficialBudget>,
+    ),
+    String,
+> {
+    let prepared = catalog::prepare_catalog(overlays)?;
+    let budgets = published_context_budgets_from_catalog_payload(prepared.catalog_payload())?;
+    if budgets.is_empty() {
+        return Err(
+            "prepared Official catalog contains no safe resolved context budget".to_string(),
+        );
+    }
+    Ok((prepared.into_files(), budgets))
 }
 
-fn publish_resolved_snapshot(
+fn commit_refresh_if_codex_stopped<T>(
+    publish: impl FnOnce() -> Result<T, crate::codex_desktop::SwitchMutationError>,
+) -> Result<Option<T>, crate::codex_desktop::SwitchMutationError> {
+    commit_refresh_with_gate(publish, crate::codex_desktop::run_if_stopped)
+}
+
+fn commit_refresh_with_gate<T, Publish, Gate, E>(
+    publish: Publish,
+    gate: Gate,
+) -> Result<Option<T>, E>
+where
+    Publish: FnOnce() -> Result<T, E>,
+    Gate: FnOnce(Publish) -> Result<Option<T>, E>,
+{
+    gate(publish)
+}
+
+fn commit_race_error() -> String {
+    format!(
+        "{}: Codex Desktop started before the Official refresh commit; no Official cache, catalog, Codex configuration, or refresh state was written",
+        crate::codex_desktop::BECAME_RUNNING_ERROR
+    )
+}
+
+#[derive(Debug, Clone)]
+struct PublicationOutcome {
+    restart_required: bool,
+    warning: Option<String>,
+}
+
+fn publish_prepared_snapshot(
     state_path: &Path,
     state: &mut OfficialRefreshState,
     now: u64,
     direct_success: bool,
-) -> Result<PublicationOutcome, String> {
-    let outcome = finalize_published_snapshot(
-        state,
-        now,
-        direct_success,
-        || catalog::sync_catalog().map(|_| ()),
-        published_context_budgets_from_catalog,
+    files: &[crate::file_transaction::PreparedTextFile],
+    budgets: BTreeMap<String, PublishedOfficialBudget>,
+) -> Result<PublicationOutcome, crate::codex_desktop::SwitchMutationError> {
+    let mut transaction_paths = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    transaction_paths.extend(config::managed_codex_projection_transaction_paths()?);
+    transaction_paths.push(state_path.to_path_buf());
+    let mut next_state = state.clone();
+    let outcome = commit_publication_transaction(&transaction_paths, || {
+        crate::file_transaction::publish_prepared_text_files(files)?;
+        let outcome = finalize_published_snapshot(
+            &mut next_state,
+            now,
+            direct_success,
+            || Ok(()),
+            || Ok(budgets),
+            project_runtime_with_process_fence,
+        )?;
+        finish_publication_state_write(outcome, write_state(state_path, &next_state))
+    })
+    .map_err(crate::codex_desktop::SwitchMutationError::from)?;
+    *state = next_state;
+    Ok(outcome)
+}
+
+fn commit_publication_transaction<T>(
+    transaction_paths: &[PathBuf],
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, crate::file_transaction::FileTransactionError> {
+    crate::file_transaction::with_text_file_rollback(transaction_paths, operation)
+}
+
+fn project_runtime_with_process_fence() -> Result<bool, String> {
+    let changed = crate::codex_desktop::run_if_stopped(
         config::republish_managed_codex_context_budget,
-    )?;
-    write_state(state_path, state)?;
+    )?
+    .ok_or_else(commit_race_error)?;
+    crate::codex_desktop::run_if_stopped(|| Ok::<(), String>(()))?
+        .ok_or_else(commit_race_error)?;
+    Ok(changed)
+}
+
+fn finish_publication_state_write(
+    outcome: PublicationOutcome,
+    state_write: Result<(), String>,
+) -> Result<PublicationOutcome, String> {
+    state_write?;
     Ok(outcome)
 }
 
@@ -409,6 +633,7 @@ where
     }
     Ok(PublicationOutcome {
         restart_required: state.outstanding_restart_required,
+        warning: None,
     })
 }
 
@@ -423,6 +648,25 @@ fn persist_failed_publication(
         Ok(()) => error,
         Err(persist_error) => format!(
             "{error}; additionally failed to persist the unsafe publication fence: {persist_error}"
+        ),
+    }
+}
+
+fn persist_failed_publication_if_stopped(
+    state_path: &Path,
+    state: &mut OfficialRefreshState,
+    error: String,
+) -> String {
+    match crate::codex_desktop::run_if_stopped(|| {
+        Ok::<String, String>(persist_failed_publication(state_path, state, error.clone()))
+    }) {
+        Ok(Some(error)) => error,
+        Ok(None) => format!(
+            "{error}; {} before the unsafe publication fence could be persisted",
+            crate::codex_desktop::BECAME_RUNNING_ERROR
+        ),
+        Err(status_error) => format!(
+            "{error}; failed to verify Codex Desktop before persisting the unsafe publication fence: {status_error}"
         ),
     }
 }
@@ -442,8 +686,8 @@ fn direct_official_refresh_failure_message(
         "authentication required",
         "unauthorized",
     ]
-        .iter()
-        .any(|marker| normalized.contains(*marker))
+    .iter()
+    .any(|marker| normalized.contains(*marker))
     {
         return "Codex sign-in is required before a safe CodexHub Official snapshot can be published."
             .to_string();
@@ -576,7 +820,9 @@ fn published_context_budgets_from_catalog(
 pub(crate) fn published_official_context_windows() -> Result<BTreeMap<String, u32>, String> {
     let budgets = published_context_budgets_from_catalog()?;
     if budgets.is_empty() {
-        return Err("published Official catalog contains no safe resolved context budget".to_string());
+        return Err(
+            "published Official catalog contains no safe resolved context budget".to_string(),
+        );
     }
     Ok(budgets
         .into_iter()
@@ -622,7 +868,10 @@ fn published_context_budgets_from_catalog_payload(
         let trusted = matches!(
             (source, freshness),
             (Some("current_direct_official"), Some("fresh"))
-                | (Some(FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE), Some("fresh"))
+                | (
+                    Some(FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE),
+                    Some("fresh")
+                )
                 | (Some("degraded_last_known_official"), _)
         );
         if !trusted {
@@ -717,11 +966,15 @@ fn unix_timestamp() -> u64 {
 mod tests {
     use super::{
         allow_activation_without_official_snapshot, automatic_refresh_due,
-        finalize_published_snapshot, manual_refresh_models, read_state, record_attempt,
-        published_context_budgets_from_catalog_payload, published_official_models_from_catalog,
-        refresh_with_flight, should_attempt, direct_official_refresh_failure_message,
-        update_published_context_budgets, write_state, OfficialRefreshState, PublishedOfficialBudget,
-        RefreshOutcome, RefreshTrigger, SingleFlight, OFFICIAL_REFRESH_INTERVAL_SECONDS,
+        commit_publication_transaction, commit_refresh_with_gate,
+        direct_official_refresh_failure_message, finalize_published_snapshot,
+        finish_publication_state_write, manual_refresh_models,
+        published_context_budgets_from_catalog_payload,
+        published_official_models_from_catalog, read_state, record_attempt, refresh_with_flight,
+        scheduled_refresh_backoff, should_attempt, update_published_context_budgets, write_state,
+        OfficialRefreshState, PublicationOutcome, PublishedOfficialBudget, RefreshOutcome,
+        RefreshTrigger, SingleFlight, DEFERRED_REFRESH_RETRY_SECONDS,
+        OFFICIAL_REFRESH_INTERVAL_SECONDS,
     };
     use crate::Model;
     use serde_json::json;
@@ -740,13 +993,7 @@ mod tests {
         let state = OfficialRefreshState {
             last_success_at: Some(1_000),
             publication_ready: true,
-            published_context_budgets: budget_map(
-                "gpt-5.6-terra",
-                272_000,
-                95,
-                258_400,
-                240_000,
-            ),
+            published_context_budgets: budget_map("gpt-5.6-terra", 272_000, 95, 258_400, 240_000),
             ..OfficialRefreshState::default()
         };
         let before_due = 1_000 + OFFICIAL_REFRESH_INTERVAL_SECONDS - 1;
@@ -763,6 +1010,47 @@ mod tests {
             &state,
             1_000 + OFFICIAL_REFRESH_INTERVAL_SECONDS,
         ));
+    }
+
+    #[test]
+    fn deferred_and_failed_scheduled_refreshes_have_nonzero_backoff() {
+        assert_eq!(
+            scheduled_refresh_backoff(&Ok(None)),
+            Duration::from_secs(DEFERRED_REFRESH_RETRY_SECONDS)
+        );
+        assert_eq!(
+            scheduled_refresh_backoff(&Err("status unavailable".to_string().into())),
+            Duration::from_secs(DEFERRED_REFRESH_RETRY_SECONDS)
+        );
+        let mut partial = outcome(RefreshTrigger::Scheduled, true);
+        partial.warning = Some("refresh state persistence failed".to_string());
+        assert_eq!(
+            scheduled_refresh_backoff(&Ok(Some(partial))),
+            Duration::from_secs(DEFERRED_REFRESH_RETRY_SECONDS)
+        );
+        assert_eq!(
+            scheduled_refresh_backoff(&Ok(Some(outcome(
+                RefreshTrigger::Scheduled,
+                true,
+            )))),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn official_refresh_commit_gate_prevents_all_publication_when_codex_reappears() {
+        let publication_calls = AtomicUsize::new(0);
+        let result = commit_refresh_with_gate(
+            || {
+                publication_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), String>(())
+            },
+            |_publish| Ok(None),
+        )
+        .expect("running Codex should defer the commit without a status error");
+
+        assert!(result.is_none());
+        assert_eq!(publication_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -861,27 +1149,54 @@ mod tests {
             },
         ];
 
-        let models = manual_refresh_models(true, vec![prepublication_model.clone()], || {
+        let (models, warning) = manual_refresh_models(true, vec![prepublication_model.clone()], || {
             published_official_models_from_catalog(catalog_models)
-        })
-        .expect("published Official catalog models");
+        });
 
+        assert!(warning.is_none());
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "openai/gpt-5.6-terra");
         assert_eq!(models[0].context_window, Some(272_000));
         assert_eq!(models[0].max_context_window, Some(272_000));
-        assert_ne!(models[0].context_window, prepublication_model.context_window);
-        assert_ne!(models[0].max_context_window, prepublication_model.max_context_window);
+        assert_ne!(
+            models[0].context_window,
+            prepublication_model.context_window
+        );
+        assert_ne!(
+            models[0].max_context_window,
+            prepublication_model.max_context_window
+        );
     }
 
     #[test]
     fn manual_refresh_preserves_disabled_official_models_as_an_empty_result() {
-        let models = manual_refresh_models(false, Vec::new(), || {
+        let (models, warning) = manual_refresh_models(false, Vec::new(), || {
             Err("disabled Official models must not reload a prior catalog".to_string())
-        })
-        .expect("disabled Official models preserve the original refresh outcome");
+        });
 
         assert!(models.is_empty());
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn manual_refresh_falls_back_after_post_commit_catalog_reload_failure() {
+        let committed_models = vec![Model {
+            id: "gpt-5.6-terra".to_string(),
+            ..Model::default()
+        }];
+
+        let (models, warning) = manual_refresh_models(true, committed_models.clone(), || {
+            Err("catalog readback unavailable".to_string())
+        });
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, committed_models[0].id);
+        assert!(warning
+            .as_deref()
+            .is_some_and(|value| value.contains("runtime projection was committed")));
+        assert!(warning
+            .as_deref()
+            .is_some_and(|value| value.contains("catalog readback unavailable")));
     }
 
     #[test]
@@ -1128,6 +1443,7 @@ mod tests {
         .expect("catalog and managed runtime projection publish");
 
         assert!(publication.restart_required);
+        assert!(publication.warning.is_none());
         assert_eq!(state.last_success_at, Some(2_000));
         assert_eq!(state.last_attempt_success, Some(true));
         assert!(state.publication_ready);
@@ -1135,7 +1451,61 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_runtime_change_persists_restart_requirement_for_later_manual_same_budget_refresh() {
+    fn post_projection_state_failure_aborts_the_transaction() {
+        let error = finish_publication_state_write(
+            PublicationOutcome {
+                restart_required: true,
+                warning: None,
+            },
+            Err("state directory became read-only".to_string()),
+        )
+        .expect_err("state persistence is part of the atomic publication");
+
+        assert!(error.contains("state directory became read-only"));
+    }
+
+    #[test]
+    fn every_publication_failure_point_restores_cache_catalog_config_and_state() {
+        for fail_after in 0..=4 {
+            let root = temp_root("publication-failure-injection");
+            fs::create_dir_all(&root).unwrap();
+            let paths = [
+                root.join("cache.json"),
+                root.join("catalog.json"),
+                root.join("config.toml"),
+                root.join("state.json"),
+            ];
+            for (index, path) in paths.iter().enumerate() {
+                fs::write(path, format!("old-{index}")).unwrap();
+            }
+            let writes = std::cell::Cell::new(0usize);
+
+            let error = commit_publication_transaction(&paths, || {
+                for (index, path) in paths.iter().enumerate() {
+                    if writes.get() == fail_after {
+                        return Err(format!("injected failure after {fail_after} writes"));
+                    }
+                    fs::write(path, format!("new-{index}")).unwrap();
+                    writes.set(writes.get() + 1);
+                }
+                if writes.get() == fail_after {
+                    return Err(format!("injected failure after {fail_after} writes"));
+                }
+                Ok(())
+            })
+            .expect_err("publication failure must roll back all formal outputs");
+
+            assert!(error.to_string().contains("file_transaction_rolled_back"));
+            for (index, path) in paths.iter().enumerate() {
+                assert_eq!(fs::read_to_string(path).unwrap(), format!("old-{index}"));
+            }
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn scheduled_runtime_change_persists_restart_requirement_for_later_manual_same_budget_refresh()
+    {
         let root = temp_root("scheduled-restart-requirement");
         let path = root.join("official-refresh-state.json");
         fs::create_dir_all(&root).unwrap();
@@ -1218,6 +1588,7 @@ mod tests {
             models: Vec::new(),
             snapshot_available,
             restart_required: false,
+            warning: None,
         }
     }
 

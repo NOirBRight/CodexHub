@@ -3,6 +3,7 @@ import { COMMANDS, type CommandName } from "./commands";
 import type {
   AppFlavorInfo,
   AppStatus,
+  CodexDesktopStatus,
   AppUpdateCompletionStatus,
   AppUpdateInstallResult,
   AppUpdateInstallStatus,
@@ -29,6 +30,7 @@ import type {
   GatewayUsageSummary,
   Model,
   ModelEndpointTestResult,
+  OfficialMultiAgentSaveResult,
   OfficialRefreshResult,
   OpenAIUsageQueryWindow,
   OpenAIUsageSnapshot,
@@ -195,8 +197,17 @@ export const api = {
     call<AppUpdateCompletionStatus | null>(COMMANDS.consumeAppUpdateCompletion),
   installAppUpdate: () => call<AppUpdateInstallResult>(COMMANDS.installAppUpdate),
   getStatus: () => call<AppStatus>(COMMANDS.getStatus),
-  switchMode: (mode: string, autoSync: boolean, forceTakeover = false) =>
-    call<AppStatus>(COMMANDS.switchMode, { mode, autoSync, forceTakeover, force_takeover: forceTakeover }),
+  getCodexDesktopStatus: () =>
+    call<CodexDesktopStatus>(COMMANDS.getCodexDesktopStatus),
+  switchMode: (mode: string, autoSync: boolean, forceTakeover = false, restartCodex = false) =>
+    call<AppStatus>(COMMANDS.switchMode, {
+      mode,
+      autoSync,
+      forceTakeover,
+      force_takeover: forceTakeover,
+      restartCodex,
+      restart_codex: restartCodex,
+    }),
   startProxy: () => call<AppStatus>(COMMANDS.startProxy),
   stopProxy: () => call<AppStatus>(COMMANDS.stopProxy),
   restartProxy: () => call<AppStatus>(COMMANDS.restartProxy),
@@ -212,9 +223,17 @@ export const api = {
     ),
   getCodexContextGuardStatus: () =>
     call<CodexContextGuardStatus>(COMMANDS.getCodexContextGuardStatus),
-  setCodexContextGuard: (enabled: boolean) =>
-    call<CodexContextGuardStatus>(COMMANDS.setCodexContextGuard, { enabled }),
-  refreshOfficialModels: () => call<OfficialRefreshResult>(COMMANDS.refreshOfficialModels),
+  setCodexContextGuard: (enabled: boolean, restartCodex = false) =>
+    call<CodexContextGuardStatus>(COMMANDS.setCodexContextGuard, {
+      enabled,
+      restartCodex,
+      restart_codex: restartCodex,
+    }),
+  refreshOfficialModels: (restartCodex = false) =>
+    call<OfficialRefreshResult>(COMMANDS.refreshOfficialModels, {
+      restartCodex,
+      restart_codex: restartCodex,
+    }),
   openaiUsageCompletions: (window?: OpenAIUsageQueryWindow | null) =>
     call<OpenAIUsageSnapshot>(COMMANDS.openaiUsageCompletions, openaiUsageWindowArgs(window)),
   discoverProviderModels: (baseUrl: string, apiKey: string, providerId?: string | null) =>
@@ -315,7 +334,11 @@ export const api = {
   syncGatewayClients: (model?: string | null) =>
     call<GatewayClientSyncSummary>(COMMANDS.syncGatewayClients, { model: model ?? null }),
   subagentMatrixStatus: () => call<SubagentMatrixStatus>(COMMANDS.subagentMatrixStatus),
-  generateCatalog: () => call<Model[]>(COMMANDS.generateCatalog),
+  generateCatalog: (restartCodex = false) =>
+    call<Model[]>(COMMANDS.generateCatalog, {
+      restartCodex,
+      restart_codex: restartCodex,
+    }),
   catalogOverrideDiagnostics: () =>
     call<CatalogOverrideDiagnostics>(COMMANDS.getCatalogOverrideDiagnostics),
   listModels: () => call<Model[]>(COMMANDS.listModels),
@@ -323,10 +346,12 @@ export const api = {
   listModelMetadata: () => call<Model[]>(COMMANDS.listModelMetadata),
   saveModelMetadataOverride: (model: Model) =>
     call<Model>(COMMANDS.saveModelMetadataOverride, { model }),
-  saveOfficialMultiAgentVersion: (modelId: string, version: "v1" | "v2" | null) =>
-    call<Model>(COMMANDS.saveOfficialMultiAgentVersion, {
+  saveOfficialMultiAgentVersion: (modelId: string, version: "v1" | "v2" | null, restartCodex = false) =>
+    call<OfficialMultiAgentSaveResult>(COMMANDS.saveOfficialMultiAgentVersion, {
       modelId,
       version,
+      restartCodex,
+      restart_codex: restartCodex,
     }),
   listOfficialMultiAgentOverrides: () =>
     call<Record<string, "v1" | "v2">>(COMMANDS.listOfficialMultiAgentOverrides),
@@ -348,7 +373,11 @@ export const api = {
     call<UnifiedHistoryResult>(COMMANDS.syncConversationHistory, { targetProvider: targetProvider ?? null }),
   diagnoseConversationHistory: (fullScan = true) =>
     call<UnifiedHistoryResult>(COMMANDS.diagnoseConversationHistory, { fullScan }),
-  syncCatalog: () => call<string>(COMMANDS.syncCatalog),
+  syncCatalog: (restartCodex = false) =>
+    call<string>(COMMANDS.syncCatalog, {
+      restartCodex,
+      restart_codex: restartCodex,
+    }),
   setAutostart: (enabled: boolean) => call<string>(COMMANDS.setAutostart, { enabled }),
   removeAutostart: () => call<string>(COMMANDS.removeAutostart),
   getAutostartStatus: () => call<AutostartStatus>(COMMANDS.getAutostartStatus),

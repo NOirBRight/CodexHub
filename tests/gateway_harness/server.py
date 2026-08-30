@@ -173,6 +173,14 @@ class GatewayHarness:
                                 "upstream_model": "glm-5.2",
                             },
                         },
+                        {
+                            "slug": "xai/grok-4.6",
+                            "codex_proxy_metadata": {
+                                "provider": "xai",
+                                "upstream_name": "xai",
+                                "upstream_model": "grok-4.6",
+                            },
+                        },
                     ]
                 },
             )
@@ -227,6 +235,24 @@ class GatewayHarness:
                 "supports_developer_role": True,
                 "supported_reasoning_levels": (),
                 "input_modalities": ("text",),
+            }
+        if slug in {"xai/grok-4.6", "grok-4.6"}:
+            return {
+                "name": "xai",
+                "provider_id": "xai",
+                "model_id": "xai/grok-4.6",
+                "base_url": self.stub_base_url,
+                "auth": "api_key",
+                "api_key": "xai-test-token",
+                "upstream_model": "grok-4.6",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+                "tool_surface_strategy": "eager",
+                "native_responses_tool_codec": "none",
+                "reports_cached_input_tokens": False,
+                "supports_developer_role": True,
+                "supported_reasoning_levels": (),
+                "input_modalities": ("text", "image"),
             }
         raise gateway_errors.ModelIdentityResolutionError(
             f"model is not in the characterization catalog: {slug}",

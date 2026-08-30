@@ -2659,7 +2659,7 @@ function Publish-ManagedClientTargets {
     $destinations = switch ($Client) {
         'codex' { @{ 'config.toml' = '.codex\config.toml' } }
         'opencode' { @{ 'opencode.json' = '.config\opencode\opencode.json' } }
-        'pi' { @{ 'settings.json' = '.pi\agent\settings.json'; 'models.json' = '.pi\agent\models.json' } }
+        'pi' { @{ 'models.json' = '.pi\agent\models.json' } }
         'omp' { @{ 'config.yml' = '.omp\agent\config.yml'; 'models.yml' = '.omp\agent\models.yml' } }
         'zcode' { @{
             'codexhub.json' = 'appdata\roaming\ZCode\model-providers\codexhub.json'

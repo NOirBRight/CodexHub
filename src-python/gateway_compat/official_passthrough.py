@@ -11,6 +11,8 @@ import json
 import re
 import uuid
 
+import gateway_stream_semantics as _stream_semantics
+
 from apply_patch_adapter import (
     ApplyPatchAdapter,
     ApplyPatchFacts,
@@ -77,7 +79,7 @@ from . import host
 def _compatible_compaction_message(item: Mapping[str, Any]) -> dict[str, str] | None:
     seen: set[str] = set()
     fragments: list[str] = []
-    for fragment in _collect_text_fragments(dict(item)):
+    for fragment in _stream_semantics.collect_text_fragments(dict(item)):
         if fragment not in seen:
             seen.add(fragment)
             fragments.append(fragment)

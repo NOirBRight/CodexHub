@@ -31,6 +31,14 @@ export type CatalogVisibility = "list" | "hide" | "unknown";
 export interface OfficialRefreshResult {
   models: Model[];
   restart_required: boolean;
+  warning?: string | null;
+  codex_restart_result?: "not_running" | "restarted" | "switch_failed_reopened" | "switched_relaunch_failed" | null;
+}
+
+export interface OfficialMultiAgentSaveResult {
+  model: Model;
+  warning?: string | null;
+  codex_restart_result?: "not_running" | "restarted" | "switch_failed_reopened" | "switched_relaunch_failed" | null;
 }
 
 export interface ModelPricing {
@@ -116,6 +124,12 @@ export interface AppStatus {
   gateway_lifecycle: "unavailable" | "stopped" | "starting" | "running" | "stopping" | "restarting" | "failed";
   history_sync_status?: string | null;
   history_sync_message?: string | null;
+  codex_restart_result?: "not_running" | "restarted" | "switch_failed_reopened" | "switched_relaunch_failed" | null;
+}
+
+export interface CodexDesktopStatus {
+  running: boolean;
+  restart_supported: boolean;
 }
 
 export interface UnifiedHistoryResult {
@@ -561,6 +575,7 @@ export interface CodexContextGuardStatus {
   model_context_window?: number | null;
   model_auto_compact_token_limit?: number | null;
   global_override_conflict?: boolean;
+  codex_restart_result?: "not_running" | "restarted" | "switch_failed_reopened" | "switched_relaunch_failed" | null;
 }
 
 export type TabId = "codexhub" | "gateway";

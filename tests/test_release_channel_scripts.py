@@ -44,7 +44,7 @@ def test_official_transport_wheel_is_pinned_and_packaged():
 
 
 def test_release_version_is_consistent_across_manifests():
-    expected = "0.1.9-beta.3.9"
+    expected = "0.1.9-beta.3.10"
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     cargo = tomllib.loads((ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
     cargo_lock = tomllib.loads((ROOT / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8"))
@@ -306,7 +306,8 @@ def test_portable_rejects_invalid_flavor_before_building(tmp_path):
 
     assert result.returncode != 0
     normalized_error = "".join(result.stderr.split())
-    assert "parameter'Flavor'" in normalized_error
+    assert "ParameterArgumentValidationError" in normalized_error
+    assert "invalid" in normalized_error
 
 
 def _git(repo: Path, *args: str) -> str:

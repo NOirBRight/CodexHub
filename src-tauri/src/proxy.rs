@@ -276,6 +276,7 @@ impl GatewayLifecycleBackend for ProxyLifecycleBackend {
             gateway_lifecycle: phase,
             history_sync_status: None,
             history_sync_message: None,
+            codex_restart_result: None,
         })
     }
 
@@ -479,6 +480,7 @@ fn reconciled_snapshot_with_controls(
                 gateway_lifecycle: GatewayLifecyclePhase::Stopped,
                 history_sync_status: None,
                 history_sync_message: None,
+                codex_restart_result: None,
             },
             identity: None,
         });
@@ -645,6 +647,7 @@ fn reconciled_snapshot_with_controls(
             gateway_lifecycle: GatewayLifecyclePhase::Running,
             history_sync_status: None,
             history_sync_message: None,
+            codex_restart_result: None,
         },
         identity: Some(identity),
     })
@@ -684,6 +687,7 @@ fn status_with_paths(paths: &ProxyPaths) -> Result<AppStatus, String> {
         },
         history_sync_status: None,
         history_sync_message: None,
+        codex_restart_result: None,
     })
 }
 
@@ -1386,6 +1390,7 @@ fn stopped_gateway_status(mode: String, port: u16, message: String) -> Result<Ap
         gateway_lifecycle: GatewayLifecyclePhase::Stopped,
         history_sync_status: None,
         history_sync_message: None,
+        codex_restart_result: None,
     })
 }
 
@@ -1612,6 +1617,7 @@ fn stop_with_paths_and_controls(
             gateway_lifecycle: GatewayLifecyclePhase::Stopped,
             history_sync_status: None,
             history_sync_message: None,
+            codex_restart_result: None,
         });
     }
 
@@ -1648,6 +1654,7 @@ fn stop_with_paths_and_controls(
         gateway_lifecycle: GatewayLifecyclePhase::Stopped,
         history_sync_status: None,
         history_sync_message: None,
+        codex_restart_result: None,
     })
 }
 
@@ -1747,6 +1754,7 @@ fn stop_when_health_unavailable(
         gateway_lifecycle: GatewayLifecyclePhase::Stopped,
         history_sync_status: None,
         history_sync_message: None,
+        codex_restart_result: None,
     })
 }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -14,6 +15,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+import run_issue_62_live_control
 from run_issue_62_live_control import (
     BoundedPhaseRunner,
     CandidateIdentity,
@@ -30,6 +32,18 @@ IDENTITY = CandidateIdentity(
     catalog_digest="e713f769e059423784ca1f689f34957f764eedd8439f036d50c09b65c32ee7a6",
     route_digest="a" * 64,
 )
+
+
+class _OsProxy:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(os, name)
+
+
+def _patch_windows_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run_issue_62_live_control, "os", _OsProxy("nt"))
 
 
 def _records(root: Path) -> list[dict[str, Any]]:
@@ -63,6 +77,8 @@ class _FakeProcess:
         self.return_code = return_code
         self.pid = 12345
         self.terminated = False
+        self.terminate_calls = 0
+        self.kill_calls = 0
 
     def poll(self) -> int | None:
         return self.return_code
@@ -73,12 +89,18 @@ class _FakeProcess:
         return self.return_code
 
     def terminate(self) -> None:
+        self.terminate_calls += 1
         self.terminated = True
         self.return_code = 0
 
     def kill(self) -> None:
+        self.kill_calls += 1
         self.terminated = True
         self.return_code = -9
+
+    def mark_tree_terminated(self) -> None:
+        self.terminated = True
+        self.return_code = 0
 
 
 class _BlockingFakeProcess(_FakeProcess):
@@ -94,6 +116,27 @@ class _BlockingFakeProcess(_FakeProcess):
         return self.return_code
 
 
+def _patch_successful_tree_termination(
+    monkeypatch: pytest.MonkeyPatch,
+    process: _FakeProcess,
+) -> list[list[str]]:
+    taskkill_calls: list[list[str]] = []
+    if os.name == "nt":
+
+        def fake_taskkill(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            taskkill_calls.append(argv)
+            process.mark_tree_terminated()
+            return subprocess.CompletedProcess(argv, 0)
+
+        monkeypatch.setattr("run_issue_62_live_control.subprocess.run", fake_taskkill)
+    else:
+        monkeypatch.setattr(
+            "run_issue_62_live_control.os.killpg",
+            lambda pid, sig: process.terminate(),
+        )
+    return taskkill_calls
+
+
 def test_timeout_is_terminal_and_cleanup_is_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     process = _FakeProcess()
 
@@ -101,7 +144,6 @@ def test_timeout_is_terminal_and_cleanup_is_fail_closed(tmp_path: Path, monkeypa
         return process
 
     monkeypatch.setattr("run_issue_62_live_control.subprocess.Popen", fake_popen)
-    monkeypatch.setattr("run_issue_62_live_control.subprocess.run", lambda *args, **kwargs: None)
     # Move the deadline forward without sleeping for 30 seconds.
     clock = iter([0.0, 0.0, 31.0])
     monkeypatch.setattr(
@@ -110,13 +152,15 @@ def test_timeout_is_terminal_and_cleanup_is_fail_closed(tmp_path: Path, monkeypa
     )
 
     runner = BoundedPhaseRunner(tmp_path, IDENTITY)
-    monkeypatch.setattr(
-        "run_issue_62_live_control.os.killpg",
-        lambda pid, sig: process.terminate(),
-    )
+    taskkill_calls = _patch_successful_tree_termination(monkeypatch, process)
     result = runner.run_subprocess("cli", ["fixture", "secret"])
     assert result.status == "timed_out"
     assert process.terminated is True
+    if os.name == "nt":
+        assert taskkill_calls == [["taskkill", "/PID", "12345", "/T", "/F"]]
+        assert process.kill_calls == 0
+    else:
+        assert process.terminate_calls == 1
     records = _records(tmp_path)
     assert records[-1]["status_code"] == "phase_timeout"
     assert runner.cleanup()["cleanup_completed"] is True
@@ -148,13 +192,9 @@ def test_cancellation_of_active_process_terminates_it(
     monkeypatch.setattr(
         "run_issue_62_live_control.subprocess.Popen", lambda *args, **kwargs: process
     )
-    monkeypatch.setattr("run_issue_62_live_control.subprocess.run", lambda *args, **kwargs: None)
     cancel = threading.Event()
     runner = BoundedPhaseRunner(tmp_path, IDENTITY)
-    monkeypatch.setattr(
-        "run_issue_62_live_control.os.killpg",
-        lambda pid, sig: process.terminate(),
-    )
+    taskkill_calls = _patch_successful_tree_termination(monkeypatch, process)
     result_box: list[CommandResult] = []
 
     worker = threading.Thread(
@@ -169,6 +209,11 @@ def test_cancellation_of_active_process_terminates_it(
     assert not worker.is_alive()
     assert result_box[0].status == "cancelled"
     assert process.terminated is True
+    if os.name == "nt":
+        assert taskkill_calls == [["taskkill", "/PID", "12345", "/T", "/F"]]
+        assert process.kill_calls == 0
+    else:
+        assert process.terminate_calls == 1
     assert runner.cleanup()["cleanup_completed"] is True
 
 
@@ -208,13 +253,59 @@ def test_nested_extra_artifact_is_rejected(tmp_path: Path) -> None:
 def test_windows_cleanup_uses_taskkill_tree_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     process = _BlockingFakeProcess()
     calls: list[tuple[object, dict[str, object]]] = []
-    monkeypatch.setattr("run_issue_62_live_control.os.name", "nt")
-    monkeypatch.setattr(
-        "run_issue_62_live_control.subprocess.run",
-        lambda *args, **kwargs: calls.append((args[0], kwargs)),
-    )
+    _patch_windows_platform(monkeypatch)
+
+    def fake_taskkill(*args: object, **kwargs: object) -> subprocess.CompletedProcess[object]:
+        calls.append((args[0], kwargs))
+        process.mark_tree_terminated()
+        return subprocess.CompletedProcess(args[0], 0)
+
+    monkeypatch.setattr("run_issue_62_live_control.subprocess.run", fake_taskkill)
 
     assert _terminate_process(process) is True
     assert calls[0][0] == ["taskkill", "/PID", "12345", "/T", "/F"]
     assert calls[0][1]["stdout"] is subprocess.DEVNULL
     assert calls[0][1]["stderr"] is subprocess.DEVNULL
+    assert process.kill_calls == 0
+
+
+@pytest.mark.parametrize("failure", ["nonzero", "exception"])
+def test_windows_cleanup_fails_closed_when_taskkill_tree_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    process = _FakeProcess()
+    _patch_windows_platform(monkeypatch)
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0, raising=False)
+    monkeypatch.setattr(
+        "run_issue_62_live_control.subprocess.Popen",
+        lambda *args, **kwargs: process,
+    )
+
+    if failure == "exception":
+
+        def fail_taskkill(*args: object, **kwargs: object) -> None:
+            raise OSError("taskkill unavailable")
+    else:
+
+        def fail_taskkill(*args: object, **kwargs: object) -> subprocess.CompletedProcess[object]:
+            return subprocess.CompletedProcess(args[0], 1)
+
+    monkeypatch.setattr("run_issue_62_live_control.subprocess.run", fail_taskkill)
+    clock = iter([0.0, 0.0, 31.0])
+    monkeypatch.setattr(
+        "run_issue_62_live_control.time.monotonic",
+        lambda: next(clock, 31.0),
+    )
+
+    runner = BoundedPhaseRunner(tmp_path, IDENTITY)
+    result = runner.run_subprocess("cli", ["fixture"])
+
+    assert result.status == "timed_out"
+    assert result.status_code == "termination_failed"
+    assert result.terminated is False
+    assert process.kill_calls == 0
+    receipt = runner.cleanup()
+    assert receipt["cleanup_completed"] is False
+    assert receipt["child_processes_terminated"] is False

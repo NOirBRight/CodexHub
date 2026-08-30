@@ -15,7 +15,9 @@ pub fn get_bundled_providers() -> Result<Vec<Provider>, String> {
 }
 
 pub fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
-    save_providers_with_paths(providers, &ConfigPaths::runtime()?)
+    crate::codex_desktop::serialize_config_writer(|| {
+        save_providers_with_paths(providers, &ConfigPaths::runtime()?)
+    })
 }
 
 pub fn get_settings() -> Result<Settings, String> {
@@ -23,7 +25,9 @@ pub fn get_settings() -> Result<Settings, String> {
 }
 
 pub fn save_settings(settings: Settings) -> Result<Settings, String> {
-    save_settings_with_paths(settings, &ConfigPaths::runtime()?)
+    crate::codex_desktop::serialize_config_writer(|| {
+        save_settings_with_paths(settings, &ConfigPaths::runtime()?)
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +38,8 @@ pub struct CodexContextGuardStatus {
     pub model_context_window: Option<u32>,
     pub model_auto_compact_token_limit: Option<u32>,
     pub global_override_conflict: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_restart_result: Option<crate::codex_desktop::CodexRestartResult>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +72,48 @@ pub(crate) fn republish_managed_codex_context_budget() -> Result<bool, String> {
     republish_managed_codex_context_budget_with_paths(&paths, &python, &ProcessCommandRunner)
 }
 
+pub(crate) fn managed_codex_projection_transaction_paths() -> Result<Vec<PathBuf>, String> {
+    let paths = ConfigPaths::runtime()?;
+    Ok(managed_codex_projection_transaction_paths_with_paths(
+        &paths,
+        crate::app_flavor::current().routing_owner(),
+    ))
+}
+
+fn managed_codex_projection_transaction_paths_with_paths(
+    paths: &ConfigPaths,
+    current_owner: crate::app_flavor::RoutingOwner,
+) -> Vec<PathBuf> {
+    let mut transaction_paths = vec![
+        paths.codex_config_path(),
+        paths.context_guard_state_path(),
+        paths.settings_path(),
+    ];
+    for target_owner in [
+        crate::app_flavor::RoutingOwner::Release,
+        crate::app_flavor::RoutingOwner::Beta,
+    ] {
+        let backup = paths.config_backup_path_for_target_owner(current_owner, target_owner);
+        if !transaction_paths.contains(&backup) {
+            transaction_paths.push(backup.clone());
+        }
+        let takeover_metadata = takeover_metadata_path(&backup);
+        if !transaction_paths.contains(&takeover_metadata) {
+            transaction_paths.push(takeover_metadata);
+        }
+    }
+    transaction_paths
+}
+
+fn takeover_metadata_path(backup_path: &Path) -> PathBuf {
+    let mut name = backup_path
+        .file_name()
+        .unwrap_or_default()
+        .to_os_string();
+    name.push(".takeover.json");
+    backup_path.with_file_name(name)
+}
+
 /// Migrate legacy CodexHub-owned global context values without changing the
 /// active route.  This is deliberately independent of the overlay owner and
 /// selected model so an upgraded install is repaired even when a Stable/Beta
@@ -86,15 +134,11 @@ pub fn switch_mode_with_takeover(
     let runner = ProcessCommandRunner;
 
     if mode == "custom" {
-        crate::catalog::generate_catalog()?;
+        crate::catalog::generate_catalog_with_existing_lock()?;
     }
     let mut status =
         switch_mode_with_paths_takeover(mode, auto_sync, force_takeover, &paths, &python, &runner)?;
-    let lifecycle = crate::proxy::status()?;
-    status.proxy_running = lifecycle.proxy_running;
-    status.proxy_port = lifecycle.proxy_port;
-    status.proxy_build = lifecycle.proxy_build;
-    status.gateway_lifecycle = lifecycle.gateway_lifecycle;
+    merge_post_switch_gateway_status(&mut status, crate::proxy::status());
     let settings = get_settings_with_paths(&paths).unwrap_or_default();
     let target_provider = if mode == "custom" || settings.unified_codex_history {
         "custom"
@@ -107,6 +151,27 @@ pub fn switch_mode_with_takeover(
     );
 
     Ok(status)
+}
+
+fn merge_post_switch_gateway_status(status: &mut AppStatus, lifecycle: Result<AppStatus, String>) {
+    match lifecycle {
+        Ok(lifecycle) => {
+            status.proxy_running = lifecycle.proxy_running;
+            status.proxy_port = lifecycle.proxy_port;
+            status.proxy_build = lifecycle.proxy_build;
+            status.gateway_lifecycle = lifecycle.gateway_lifecycle;
+        }
+        Err(error) => {
+            // The route overlay is already durably committed at this point.
+            // A best-effort Gateway readback must not turn that success into a
+            // switch failure, otherwise the lifecycle coordinator would reopen
+            // Codex under the newly written route while reporting it as old.
+            status.message = format!(
+                "{}; route committed, but Gateway status readback failed: {error}",
+                status.message
+            );
+        }
+    }
 }
 
 fn apply_history_sync_result(
@@ -281,6 +346,18 @@ pub(crate) struct CommandOutcome {
     pub(crate) code: Option<i32>,
     pub(crate) stdout: String,
     pub(crate) stderr: String,
+}
+
+const COMMITTED_CLEANUP_WARNING_PREFIX: &str =
+    "warning: route committed; backup cleanup deferred (";
+
+impl CommandOutcome {
+    fn committed_cleanup_warning(&self) -> Option<&str> {
+        self.stderr
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with(COMMITTED_CLEANUP_WARNING_PREFIX))
+    }
 }
 
 pub(crate) trait CommandRunner {
@@ -576,7 +653,9 @@ fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String
     load_providers_from_path(&path)
 }
 
-pub(crate) fn get_bundled_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String> {
+pub(crate) fn get_bundled_providers_with_paths(
+    paths: &ConfigPaths,
+) -> Result<Vec<Provider>, String> {
     load_providers_from_path(&paths.bundled_providers_path())
 }
 
@@ -676,13 +755,13 @@ fn get_codex_context_guard_status_with_paths(
         ],
         runner,
     )?;
-    let codex_status: CodexConfigContextGuardStatus =
-        serde_json::from_str(outcome.stdout.trim()).map_err(|error| {
-            format!(
-                "failed to parse context guard status JSON: {error}; stdout: {}",
-                outcome.stdout.trim()
-            )
-        })?;
+    let codex_status: CodexConfigContextGuardStatus = serde_json::from_str(outcome.stdout.trim())
+        .map_err(|error| {
+        format!(
+            "failed to parse context guard status JSON: {error}; stdout: {}",
+            outcome.stdout.trim()
+        )
+    })?;
     let gateway_enabled = get_settings_with_paths(paths)?.openai_context_guard_enabled;
     Ok(combined_context_guard_status(codex_status, gateway_enabled))
 }
@@ -701,8 +780,7 @@ fn set_codex_context_guard_with_paths(
         .as_deref()
         .and_then(codex_overlay_owner)
         .unwrap_or(current_app_owner);
-    let backup_path =
-        paths.config_backup_path_for_target_owner(current_app_owner, target_owner);
+    let backup_path = paths.config_backup_path_for_target_owner(current_app_owner, target_owner);
     let script_args = |value: bool| {
         vec![
             "context-guard-set".to_string(),
@@ -716,7 +794,10 @@ fn set_codex_context_guard_with_paths(
                 .to_string_lossy()
                 .into_owned(),
             "--catalog".to_string(),
-            paths.generated_catalog_path().to_string_lossy().into_owned(),
+            paths
+                .generated_catalog_path()
+                .to_string_lossy()
+                .into_owned(),
             "--enabled".to_string(),
             value.to_string(),
         ]
@@ -850,8 +931,7 @@ pub(crate) fn migrate_legacy_context_guard_with_paths(
         crate::app_flavor::RoutingOwner::Release,
         crate::app_flavor::RoutingOwner::Beta,
     ] {
-        let candidate =
-            paths.config_backup_path_for_target_owner(current_app_owner, target_owner);
+        let candidate = paths.config_backup_path_for_target_owner(current_app_owner, target_owner);
         if candidate.exists() && !backup_paths.contains(&candidate) {
             backup_paths.push(candidate);
         }
@@ -886,9 +966,10 @@ pub(crate) fn migrate_legacy_context_guard_with_paths(
         args,
         runner,
     )?;
-    let backups_changed = backup_paths.iter().zip(before_backups).any(|(path, before)| {
-        before != fs::read(path).unwrap_or_default()
-    });
+    let backups_changed = backup_paths
+        .iter()
+        .zip(before_backups)
+        .any(|(path, before)| before != fs::read(path).unwrap_or_default());
     Ok(before_config != fs::read(&config_path).unwrap_or_default() || backups_changed)
 }
 
@@ -924,6 +1005,7 @@ fn combined_context_guard_status(
         model_context_window: codex_status.model_context_window,
         model_auto_compact_token_limit: codex_status.model_auto_compact_token_limit,
         global_override_conflict: codex_status.global_override_conflict,
+        codex_restart_result: None,
     }
 }
 
@@ -1091,17 +1173,24 @@ fn switch_mode_with_paths_takeover_as_owner_and_catalog(
             runner,
         )
     };
-    overlay_result?;
+    let overlay_result = overlay_result?;
+    let cleanup_warning = overlay_result.committed_cleanup_warning();
 
     Ok(AppStatus {
         mode: mode.to_string(),
         proxy_running: false,
         proxy_port: settings.proxy_port,
         proxy_build: None,
-        message: format!("Switched to {mode} mode; Gateway lifecycle is handled separately"),
+        message: match cleanup_warning {
+            Some(warning) => format!(
+                "Switched to {mode} mode; Gateway lifecycle is handled separately; {warning}"
+            ),
+            None => format!("Switched to {mode} mode; Gateway lifecycle is handled separately"),
+        },
         gateway_lifecycle: crate::gateway_transaction::GatewayLifecyclePhase::Unavailable,
         history_sync_status: None,
         history_sync_message: None,
+        codex_restart_result: None,
     })
 }
 
@@ -1148,6 +1237,9 @@ pub(crate) fn run_python_script(
         .map_err(|error| format!("{label} failed to start: {error}"))?;
 
     if outcome.code == Some(0) {
+        if let Some(warning) = outcome.committed_cleanup_warning() {
+            log::warn!("{label} completed with deferred cleanup: {warning}");
+        }
         return Ok(outcome);
     }
 
@@ -1217,15 +1309,21 @@ pub(crate) fn populate_isolated_repo_resources(paths: &ConfigPaths) -> Result<()
         .map_err(|error| format!("failed to create isolated src-python: {error}"))?;
     let src_python_source = production_root.join("src-python");
     if src_python_source.is_dir() {
-        for entry in fs::read_dir(&src_python_source).map_err(|error| {
-            format!("failed to read production src-python: {error}")
-        })? {
-            let entry = entry.map_err(|error| format!("failed to read src-python entry: {error}"))?;
+        for entry in fs::read_dir(&src_python_source)
+            .map_err(|error| format!("failed to read production src-python: {error}"))?
+        {
+            let entry =
+                entry.map_err(|error| format!("failed to read src-python entry: {error}"))?;
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) == Some("py") {
-                let name = path.file_name().ok_or_else(|| "src-python entry has no file name".to_string())?;
+                let name = path
+                    .file_name()
+                    .ok_or_else(|| "src-python entry has no file name".to_string())?;
                 fs::copy(&path, src_python_target.join(name)).map_err(|error| {
-                    format!("failed to copy production src-python module {}: {error}", path.display())
+                    format!(
+                        "failed to copy production src-python module {}: {error}",
+                        path.display()
+                    )
                 })?;
             }
         }
@@ -1239,14 +1337,13 @@ pub(crate) fn populate_isolated_repo_resources(paths: &ConfigPaths) -> Result<()
                 for entry in fs::read_dir(&package_source).map_err(|error| {
                     format!("failed to read production {package_name} package: {error}")
                 })? {
-                    let entry = entry.map_err(|error| {
-                        format!("failed to read {package_name} entry: {error}")
-                    })?;
+                    let entry = entry
+                        .map_err(|error| format!("failed to read {package_name} entry: {error}"))?;
                     let path = entry.path();
                     if path.extension().and_then(|value| value.to_str()) == Some("py") {
-                        let name = path.file_name().ok_or_else(|| {
-                            format!("{package_name} entry has no file name")
-                        })?;
+                        let name = path
+                            .file_name()
+                            .ok_or_else(|| format!("{package_name} entry has no file name"))?;
                         fs::copy(&path, package_target.join(name)).map_err(|error| {
                             format!(
                                 "failed to copy production {package_name} module {}: {error}",
@@ -1263,9 +1360,8 @@ pub(crate) fn populate_isolated_repo_resources(paths: &ConfigPaths) -> Result<()
         .map_err(|error| format!("failed to create isolated config dir: {error}"))?;
     let bundled_providers_source = production_root.join("config").join("providers.toml");
     if bundled_providers_source.is_file() {
-        fs::copy(&bundled_providers_source, paths.bundled_providers_path()).map_err(|error| {
-            format!("failed to copy production providers.toml: {error}")
-        })?;
+        fs::copy(&bundled_providers_source, paths.bundled_providers_path())
+            .map_err(|error| format!("failed to copy production providers.toml: {error}"))?;
     }
     Ok(())
 }
@@ -1332,8 +1428,7 @@ pub(crate) fn preview_codex_config_isolated(
         .to_string()];
     // Build the overlay args that apply would invoke, expressed as relative
     // tokens so the structured output never leaks absolute paths.
-    let overlay_args_relative =
-        build_codex_overlay_args_relative(paths, mode, model, catalog_path);
+    let overlay_args_relative = build_codex_overlay_args_relative(paths, mode, model, catalog_path);
     Ok(IsolatedCodexPreview {
         client_id: "codex".to_string(),
         selector: format!("{CODEX_OVERLAY_PROVIDER_ID}/{model}"),
@@ -1402,16 +1497,18 @@ pub(crate) fn readback_codex_config_isolated(
     if provider.as_deref() != Some(CODEX_OVERLAY_PROVIDER_ID) {
         return Err(format!(
             "readback failed: Codex config model_provider is {:?}; expected {:?}",
-            provider,
-            CODEX_OVERLAY_PROVIDER_ID
+            provider, CODEX_OVERLAY_PROVIDER_ID
         ));
     }
-    let wire_api = section_toml_value(&text, &format!("model_providers.{CODEX_OVERLAY_PROVIDER_ID}"), "wire_api");
+    let wire_api = section_toml_value(
+        &text,
+        &format!("model_providers.{CODEX_OVERLAY_PROVIDER_ID}"),
+        "wire_api",
+    );
     if wire_api.as_deref() != Some(CODEX_OVERLAY_ROUTE_PROTOCOL) {
         return Err(format!(
             "readback failed: Codex config custom wire_api is {:?}; expected {:?}",
-            wire_api,
-            CODEX_OVERLAY_ROUTE_PROTOCOL
+            wire_api, CODEX_OVERLAY_ROUTE_PROTOCOL
         ));
     }
     Ok(IsolatedCodexReadback {
@@ -1503,7 +1600,11 @@ fn build_codex_overlay_args_relative(
         .and_then(|name| name.to_str())
         .unwrap_or("config.toml.release.backup")
         .to_string();
-    let command = if mode == "official" { "restore" } else { "apply" };
+    let command = if mode == "official" {
+        "restore"
+    } else {
+        "apply"
+    };
     let mut args = vec![
         command.to_string(),
         "--config".to_string(),

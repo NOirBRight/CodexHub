@@ -2070,6 +2070,26 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertEqual(config_path.read_text(encoding="utf-8"), "overlay")
             self.assertEqual(backup_path.read_text(encoding="utf-8"), "original")
 
+    def test_restore_overlay_cleanup_failure_is_post_commit_warning(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text("overlay", encoding="utf-8")
+            backup_path.write_text("original", encoding="utf-8")
+
+            with patch.object(Path, "unlink", side_effect=OSError("simulated cleanup failure")):
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    status = restore_overlay(config_path, backup_path)
+
+            self.assertEqual(status, "disabled")
+            self.assertEqual(config_path.read_text(encoding="utf-8"), "original")
+            self.assertTrue(backup_path.exists())
+            warning = stderr.getvalue()
+            self.assertIn("route committed", warning)
+            self.assertIn("cleanup deferred", warning)
+            self.assertNotIn(str(tmp), warning)
+
     def test_unified_history_injection_replaces_explicit_openai_provider(self):
         original = "\n".join(
             [

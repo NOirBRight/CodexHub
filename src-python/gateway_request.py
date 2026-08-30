@@ -264,7 +264,7 @@ _strip_reasoning_encrypted_content = strip_reasoning_encrypted_content
 
 
 def has_browser_context_signal(value: Any) -> bool:
-    for fragment in _stream_semantics._collect_text_fragments(value):
+    for fragment in _stream_semantics.collect_text_fragments(value):
         lowered = fragment.lower()
         if any(marker in lowered for marker in BROWSER_CONTEXT_MARKERS):
             return True
@@ -277,7 +277,7 @@ _has_browser_context_signal = has_browser_context_signal
 def _has_browser_context_guidance(value: Any) -> bool:
     return any(
         BROWSER_CONTEXT_GUIDANCE_SENTINEL in fragment
-        for fragment in _stream_semantics._collect_text_fragments(value)
+        for fragment in _stream_semantics.collect_text_fragments(value)
     )
 
 

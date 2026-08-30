@@ -7,8 +7,10 @@ mod autostart;
 mod build_info;
 mod catalog;
 mod cli;
+mod codex_desktop;
 mod config;
 mod diagnostics;
+mod file_transaction;
 mod gateway;
 mod gateway_lifecycle;
 mod gateway_transaction;
@@ -29,7 +31,6 @@ mod web_bridge;
 mod xai_auth;
 
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::{
@@ -51,6 +52,7 @@ const TRAY_STOP_GATEWAY: &str = "stop_gateway";
 const TRAY_RESTART_GATEWAY: &str = "restart_gateway";
 const TRAY_EXIT: &str = "exit";
 const TRAY_TOAST_EVENT: &str = "codexhub:toast";
+const TRAY_CODEX_SWITCH_REQUEST_EVENT: &str = "codexhub:request-codex-switch";
 
 #[derive(Debug, Clone, Serialize)]
 struct TrayToast {
@@ -76,11 +78,19 @@ impl<'de> Deserialize<'de> for CatalogVisibility {
         D: serde::Deserializer<'de>,
     {
         let value = Option::<serde_json::Value>::deserialize(deserializer)?;
-        Ok(match value.as_ref().and_then(serde_json::Value::as_str).map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-            Some("list") => Self::List,
-            Some("hide") => Self::Hide,
-            _ => Self::Unknown,
-        })
+        Ok(
+            match value
+                .as_ref()
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("list") => Self::List,
+                Some("hide") => Self::Hide,
+                _ => Self::Unknown,
+            },
+        )
     }
 }
 
@@ -248,6 +258,8 @@ pub struct AppStatus {
     pub history_sync_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_sync_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_restart_result: Option<codex_desktop::CodexRestartResult>,
 }
 
 impl AppStatus {
@@ -261,6 +273,7 @@ impl AppStatus {
             gateway_lifecycle: crate::gateway_transaction::GatewayLifecyclePhase::Unavailable,
             history_sync_status: None,
             history_sync_message: None,
+            codex_restart_result: None,
         }
     }
 }
@@ -369,8 +382,52 @@ fn switch_mode(
     mode: String,
     auto_sync: bool,
     force_takeover: Option<bool>,
+    restart_codex: Option<bool>,
 ) -> Result<AppStatus, String> {
-    config::switch_mode_with_takeover(&mode, auto_sync, force_takeover.unwrap_or(false))
+    let coordinated = codex_desktop::coordinate_switch(restart_codex.unwrap_or(false), || {
+        config::switch_mode_with_takeover(&mode, auto_sync, force_takeover.unwrap_or(false))
+    })?;
+    finish_app_status_switch(coordinated, proxy::status)
+}
+
+fn finish_app_status_switch<Readback>(
+    coordinated: codex_desktop::CoordinatedSwitch<AppStatus>,
+    readback: Readback,
+) -> Result<AppStatus, String>
+where
+    Readback: FnOnce() -> Result<AppStatus, String>,
+{
+    let Some(mut status) = coordinated.value else {
+        let error = coordinated
+            .switch_error
+            .unwrap_or_else(|| "configuration switch failed".to_string());
+        let mut status = readback().unwrap_or_else(|readback_error| {
+            AppStatus::scaffold(format!(
+                "configuration switch failed: {error}; status readback failed: {readback_error}"
+            ))
+        });
+        status.message = format!(
+            "configuration switch failed; the original Codex Desktop was reopened: {error}"
+        );
+        status.codex_restart_result = Some(codex_desktop::CodexRestartResult::SwitchFailedReopened);
+        return Ok(status);
+    };
+    status.codex_restart_result = Some(coordinated.restart_result);
+    if coordinated.restart_result == codex_desktop::CodexRestartResult::SwitchedRelaunchFailed {
+        status.message = format!(
+            "{}; configuration switched, but Codex Desktop could not be reopened: {}. Start Codex Desktop manually.",
+            status.message,
+            coordinated
+                .switch_error
+                .unwrap_or_else(|| "unknown relaunch failure".to_string())
+        );
+    }
+    Ok(status)
+}
+
+#[tauri::command]
+fn get_codex_desktop_status() -> Result<codex_desktop::CodexDesktopStatus, String> {
+    codex_desktop::status()
 }
 
 #[tauri::command]
@@ -424,13 +481,58 @@ fn get_codex_context_guard_status() -> Result<config::CodexContextGuardStatus, S
 }
 
 #[tauri::command]
-fn set_codex_context_guard(enabled: bool) -> Result<config::CodexContextGuardStatus, String> {
-    config::set_codex_context_guard(enabled)
+fn set_codex_context_guard(
+    enabled: bool,
+    restart_codex: Option<bool>,
+) -> Result<config::CodexContextGuardStatus, String> {
+    let coordinated = codex_desktop::coordinate_switch(restart_codex.unwrap_or(false), || {
+        config::set_codex_context_guard(enabled)
+    })?;
+    let Some(mut status) = coordinated.value else {
+        return Err(format!(
+            "codex_desktop_switch_failed_reopened: {}",
+            coordinated
+                .switch_error
+                .unwrap_or_else(|| "context guard update failed".to_string())
+        ));
+    };
+    status.codex_restart_result = Some(coordinated.restart_result);
+    Ok(status)
 }
 
 #[tauri::command]
-async fn refresh_official_models() -> Result<official_refresh::OfficialRefreshResult, String> {
-    run_blocking("refresh_official_models", official_refresh::refresh_manual).await
+async fn refresh_official_models(
+    restart_codex: Option<bool>,
+) -> Result<official_refresh::OfficialRefreshResult, String> {
+    run_blocking("refresh_official_models", move || {
+        refresh_official_models_coordinated(restart_codex.unwrap_or(false))
+    })
+    .await
+}
+
+fn refresh_official_models_coordinated(
+    restart_codex: bool,
+) -> Result<official_refresh::OfficialRefreshResult, String> {
+    let coordinated =
+        codex_desktop::coordinate_switch(restart_codex, official_refresh::refresh_manual)?;
+    let Some(mut result) = coordinated.value else {
+        return Err(format!(
+            "codex_desktop_switch_failed_reopened: {}",
+            coordinated
+                .switch_error
+                .unwrap_or_else(|| "Official catalog refresh failed".to_string())
+        ));
+    };
+    result.codex_restart_result = Some(coordinated.restart_result);
+    if coordinated.restart_result == codex_desktop::CodexRestartResult::Restarted {
+        match official_refresh::acknowledge_codex_restart() {
+            Ok(()) => result.restart_required = false,
+            Err(error) => log::warn!(
+                "Codex Desktop restarted, but the Official restart requirement could not be acknowledged: {error}"
+            ),
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -446,7 +548,11 @@ async fn openai_usage_completions(
 }
 
 #[tauri::command]
-fn discover_provider_models(base_url: String, api_key: String, provider_id: Option<String>) -> Result<Vec<Model>, String> {
+fn discover_provider_models(
+    base_url: String,
+    api_key: String,
+    provider_id: Option<String>,
+) -> Result<Vec<Model>, String> {
     models::discover_provider_models(&base_url, &api_key, provider_id.as_deref())
 }
 
@@ -653,8 +759,15 @@ fn subagent_matrix_status() -> Result<gateway::SubagentMatrixStatus, String> {
 }
 
 #[tauri::command]
-async fn generate_catalog() -> Result<Vec<Model>, String> {
-    run_blocking("generate_catalog", catalog::generate_catalog).await
+async fn generate_catalog(restart_codex: Option<bool>) -> Result<Vec<Model>, String> {
+    run_blocking("generate_catalog", move || {
+        generate_catalog_coordinated(restart_codex.unwrap_or(false))
+    })
+    .await
+}
+
+fn generate_catalog_coordinated(restart_codex: bool) -> Result<Vec<Model>, String> {
+    coordinated_catalog_write(restart_codex, catalog::generate_catalog_with_existing_lock)
 }
 
 #[tauri::command]
@@ -686,20 +799,86 @@ fn save_model_metadata_override(model: Model) -> Result<Model, String> {
 async fn save_official_multi_agent_version(
     model_id: String,
     version: Option<String>,
-) -> Result<Model, String> {
+    restart_codex: Option<bool>,
+) -> Result<OfficialMultiAgentSaveResult, String> {
     run_blocking("save_official_multi_agent_version", move || {
-        models::save_official_multi_agent_version(model_id, version)
+        save_official_multi_agent_version_coordinated(
+            model_id,
+            version,
+            restart_codex.unwrap_or(false),
+        )
     })
     .await
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct OfficialMultiAgentSaveResult {
+    model: Model,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex_restart_result: Option<codex_desktop::CodexRestartResult>,
+}
+
+fn save_official_multi_agent_version_coordinated(
+    model_id: String,
+    version: Option<String>,
+    restart_codex: bool,
+) -> Result<OfficialMultiAgentSaveResult, String> {
+    let coordinated = codex_desktop::coordinate_switch(restart_codex, || {
+        prepare_then_commit_official_multi_agent(
+            || {
+                models::prepare_official_multi_agent_version(model_id, version)
+                    .map_err(codex_desktop::SwitchMutationError::from)
+            },
+            models::publish_official_multi_agent_version,
+            |prepared, publish| codex_desktop::run_if_stopped(|| publish(prepared)),
+        )?
+        .ok_or_else(|| {
+            codex_desktop::SwitchMutationError::from(format!(
+                "{}: Codex Desktop started before the Collaboration catalog commit; no catalog or Codex configuration was written",
+                codex_desktop::BECAME_RUNNING_ERROR
+            ))
+        })
+    })?;
+    let Some(outcome) = coordinated.value else {
+        return Err(format!(
+            "codex_desktop_switch_failed_reopened: {}",
+            coordinated
+                .switch_error
+                .unwrap_or_else(|| "Collaboration catalog update failed".to_string())
+        ));
+    };
+    Ok(OfficialMultiAgentSaveResult {
+        model: outcome.model,
+        warning: outcome.warning,
+        codex_restart_result: Some(coordinated.restart_result),
+    })
+}
+
+fn prepare_then_commit_official_multi_agent<Prepared, Output, Prepare, Publish, Gate, Error>(
+    prepare: Prepare,
+    publish: Publish,
+    gate: Gate,
+) -> Result<Option<Output>, Error>
+where
+    Prepare: FnOnce() -> Result<Prepared, Error>,
+    Publish: FnOnce(Prepared) -> Result<Output, Error>,
+    Gate: FnOnce(Prepared, Publish) -> Result<Option<Output>, Error>,
+{
+    let prepared = prepare()?;
+    gate(prepared, publish)
+}
+
 #[tauri::command]
-fn list_official_multi_agent_overrides() -> Result<std::collections::HashMap<String, String>, String> {
+fn list_official_multi_agent_overrides() -> Result<std::collections::HashMap<String, String>, String>
+{
     models::list_official_multi_agent_overrides()
 }
 
 #[tauri::command]
-fn list_official_multi_agent_baselines() -> Result<std::collections::HashMap<String, String>, String> {
+fn list_official_multi_agent_baselines() -> Result<std::collections::HashMap<String, String>, String>
+{
     models::list_official_multi_agent_baselines()
 }
 
@@ -779,8 +958,44 @@ async fn diagnose_conversation_history(
 }
 
 #[tauri::command]
-fn sync_catalog() -> Result<String, String> {
-    catalog::sync_catalog()
+fn sync_catalog(restart_codex: Option<bool>) -> Result<String, String> {
+    sync_catalog_coordinated(restart_codex.unwrap_or(false))
+}
+
+fn sync_catalog_coordinated(restart_codex: bool) -> Result<String, String> {
+    coordinated_catalog_write(restart_codex, catalog::sync_catalog_with_existing_lock)
+}
+
+fn coordinated_catalog_write<T>(
+    restart_codex: bool,
+    write: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let coordinated = codex_desktop::coordinate_switch(restart_codex, write)?;
+    finish_catalog_write(coordinated)
+}
+
+fn finish_catalog_write<T>(
+    coordinated: codex_desktop::CoordinatedSwitch<T>,
+) -> Result<T, String> {
+    if coordinated.restart_result
+        == codex_desktop::CodexRestartResult::SwitchedRelaunchFailed
+    {
+        return Err(format!(
+            "{}: catalog publication succeeded, but Codex Desktop could not be reopened ({}). Start Codex Desktop manually.",
+            codex_desktop::SWITCH_RELAUNCH_FAILED_ERROR,
+            coordinated
+                .switch_error
+                .unwrap_or_else(|| "unknown relaunch failure".to_string())
+        ));
+    }
+    coordinated.value.ok_or_else(|| {
+        format!(
+            "codex_desktop_switch_failed_reopened: {}",
+            coordinated
+                .switch_error
+                .unwrap_or_else(|| "catalog publication failed".to_string())
+        )
+    })
 }
 
 #[tauri::command]
@@ -962,18 +1177,10 @@ fn run_tray_action(app: &AppHandle, id: &str) {
     match id {
         TRAY_SHOW => show_main_window(app),
         TRAY_CONNECT_OFFICIAL => {
-            report_tray_action(
-                app,
-                "Connect Codex to Official",
-                switch_mode("official".to_string(), false, None),
-            );
+            request_tray_codex_switch(app, "official");
         }
         TRAY_CONNECT_HUB => {
-            report_tray_action(
-                app,
-                "Connect Codex to CodexHub",
-                switch_mode("custom".to_string(), false, None),
-            );
+            request_tray_codex_switch(app, "custom");
         }
         TRAY_START_GATEWAY => {
             run_tray_lifecycle_action(app, "Start Gateway", start_proxy, false);
@@ -993,9 +1200,11 @@ fn run_tray_action(app: &AppHandle, id: &str) {
     }
 }
 
-fn report_tray_action(app: &AppHandle, action: &str, result: Result<AppStatus, String>) {
-    let toast = tray_toast_for(next_tray_toast_id(), action, result);
-    emit_tray_toast(app, toast);
+fn request_tray_codex_switch(app: &AppHandle, mode: &str) {
+    show_main_window(app);
+    if let Err(error) = app.emit(TRAY_CODEX_SWITCH_REQUEST_EVENT, mode) {
+        log::warn!("failed to transfer tray Codex switch request to the main window: {error}");
+    }
 }
 
 fn run_tray_lifecycle_action(
@@ -1078,91 +1287,9 @@ fn next_tray_toast_id() -> String {
     )
 }
 
-#[cfg(target_os = "windows")]
-fn run_codex_app_script(label: &str, script: &str) -> Result<String, String> {
-    let mut command = Command::new("powershell");
-    command.args([
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        script,
-    ]);
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let output = command
-        .output()
-        .map_err(|error| format!("failed to run Codex App {label} command: {error}"))?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(if stdout.is_empty() {
-            format!("Codex App {label} command completed")
-        } else {
-            stdout
-        })
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(if stderr.is_empty() {
-            format!(
-                "Codex App {label} failed with exit code {}",
-                output.status.code().unwrap_or(-1)
-            )
-        } else {
-            stderr
-        })
-    }
-}
-
-#[cfg(target_os = "windows")]
 fn launch_codex_app() -> Result<String, String> {
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-$app = Get-StartApps |
-  Where-Object { $_.AppID -like 'OpenAI.Codex_*' -or $_.Name -eq 'Codex' } |
-  Select-Object -First 1
-if (-not $app) {
-  throw 'Codex App is not installed or does not expose a Start menu AppID.'
-}
-Start-Process ('shell:AppsFolder\' + $app.AppID)
-Write-Output ('Opened Codex App via ' + $app.AppID)
-"#;
-
-    run_codex_app_script("open", script)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn launch_codex_app() -> Result<String, String> {
-    let path = detect_codex_desktop_executable().ok_or_else(|| {
-        "Codex App is not installed. Install the ChatGPT desktop package or set CODEXHUB_CODEX_DESKTOP.".to_string()
-    })?;
-    Command::new(&path)
-        .spawn()
-        .map_err(|error| format!("failed to open Codex App at {}: {error}", path.display()))?;
-    Ok(format!("Opened Codex App via {}", path.display()))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn detect_codex_desktop_executable() -> Option<std::path::PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(path) = std::env::var_os("CODEXHUB_CODEX_DESKTOP")
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-    {
-        candidates.push(path);
-    }
-    if let Ok(path) = which::which("chatgpt") {
-        candidates.push(path);
-    }
-    candidates.push(std::path::PathBuf::from("/usr/lib/chatgpt/codex-launcher"));
-    candidates.push(std::path::PathBuf::from("/usr/bin/chatgpt"));
-    if let Ok(path) = which::which("Codex") {
-        candidates.push(path);
-    }
-    candidates.into_iter().find(|path| path.is_file())
+    codex_desktop::launch()?;
+    Ok("Opened Codex Desktop".to_string())
 }
 
 #[cfg(desktop)]
@@ -1244,6 +1371,7 @@ fn run_gui() {
             app_updates::consume_app_update_completion,
             app_updates::install_app_update,
             get_status,
+            get_codex_desktop_status,
             switch_mode,
             start_proxy,
             stop_proxy,
@@ -1339,8 +1467,12 @@ fn start_gateway_on_launch() {
         // Migrate legacy top-level context caps before reading startup
         // settings.  This path must run even when settings.json is damaged or
         // the Official snapshot is fresh enough to skip network refresh.
-        if let Err(error) = config::migrate_legacy_context_guard() {
-            log::warn!("startup context guard migration failed: {error}");
+        match codex_desktop::coordinate_unattended(config::migrate_legacy_context_guard) {
+            Ok(Some(_)) => {}
+            Ok(None) => log::info!(
+                "deferred startup context guard migration while Codex Desktop is running"
+            ),
+            Err(error) => log::warn!("startup context guard migration failed: {error}"),
         }
         let Ok(settings) = config::get_settings() else {
             return;
@@ -1429,11 +1561,70 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        gateway_retirement_warning_for_locale, run_app_lifecycle_action,
-        start_gateway_after_startup, tray_loading_toast, tray_retiring_gateway_loading_toast,
-        tray_toast_for, AppLifecycleAction, AppStatus,
+        finish_app_status_switch, finish_catalog_write, gateway_retirement_warning_for_locale,
+        prepare_then_commit_official_multi_agent, run_app_lifecycle_action,
+        start_gateway_after_startup,
+        tray_loading_toast, tray_retiring_gateway_loading_toast, tray_toast_for,
+        AppLifecycleAction, AppStatus,
     };
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn failed_switch_reopened_is_a_public_structured_status() {
+        let coordinated = crate::codex_desktop::CoordinatedSwitch {
+            value: None,
+            restart_result: crate::codex_desktop::CodexRestartResult::SwitchFailedReopened,
+            switch_error: Some("atomic write rejected".to_string()),
+        };
+
+        let status = finish_app_status_switch(coordinated, || Ok(AppStatus::scaffold("official")))
+            .expect("structured failure status");
+
+        assert_eq!(
+            status.codex_restart_result,
+            Some(crate::codex_desktop::CodexRestartResult::SwitchFailedReopened)
+        );
+        assert!(status.message.contains("original Codex Desktop was reopened"));
+        assert!(status.message.contains("atomic write rejected"));
+    }
+
+    #[test]
+    fn catalog_publication_reports_partial_success_when_codex_relaunch_fails() {
+        let coordinated = crate::codex_desktop::CoordinatedSwitch {
+            value: Some("published"),
+            restart_result: crate::codex_desktop::CodexRestartResult::SwitchedRelaunchFailed,
+            switch_error: Some("launcher unavailable".to_string()),
+        };
+
+        let error = finish_catalog_write(coordinated).expect_err("partial success must be visible");
+
+        assert!(error.starts_with(crate::codex_desktop::SWITCH_RELAUNCH_FAILED_ERROR));
+        assert!(error.contains("catalog publication succeeded"));
+        assert!(error.contains("launcher unavailable"));
+        assert!(error.contains("Start Codex Desktop manually"));
+    }
+
+    #[test]
+    fn collaboration_prepares_before_final_gate_and_skips_publish_if_codex_reappears() {
+        let prepares = Cell::new(0);
+        let writes = Cell::new(0);
+        let result = prepare_then_commit_official_multi_agent(
+            || {
+                prepares.set(prepares.get() + 1);
+                Ok::<&str, String>("prepared-catalog")
+            },
+            |_prepared| {
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+            |_prepared, _publish| Ok(None),
+        )
+        .expect("Codex reappearance should cancel only the final publication");
+
+        assert!(result.is_none());
+        assert_eq!(prepares.get(), 1);
+        assert_eq!(writes.get(), 0);
+    }
 
     #[test]
     fn auto_start_propagates_coordinated_precondition_failure_once() {
@@ -1551,6 +1742,7 @@ mod tests {
             gateway_lifecycle: crate::gateway_transaction::GatewayLifecyclePhase::Stopped,
             history_sync_status: None,
             history_sync_message: None,
+            codex_restart_result: None,
         }
     }
 }

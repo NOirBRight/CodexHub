@@ -11,6 +11,8 @@ import json
 import re
 import uuid
 
+import gateway_stream_semantics as _stream_semantics
+
 from apply_patch_adapter import (
     ApplyPatchAdapter,
     ApplyPatchFacts,
@@ -121,7 +123,7 @@ def _worker_subagent_finalization_message() -> dict[str, str]:
 def _has_worker_subagent_finalization_guidance(value: Any) -> bool:
     return any(
         "worker_subagent_finalization_required" in fragment
-        for fragment in _collect_text_fragments(value)
+        for fragment in _stream_semantics.collect_text_fragments(value)
     )
 
 

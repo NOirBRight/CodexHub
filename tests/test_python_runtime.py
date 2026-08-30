@@ -96,22 +96,27 @@ def _powershell() -> str:
     return executable
 
 
-def _find_incompatible_python() -> str | None:
+def _find_incompatible_python(*, require_pytest: bool = False) -> str | None:
     """Find a real pre-3.13 interpreter even when the wrapper changed PATH."""
 
     candidates: list[str] = []
     if os.name == "nt":
         where = shutil.which("where.exe")
         if where:
-            result = subprocess.run(
-                [where, "python"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-            )
-            candidates.extend(line.strip() for line in result.stdout.splitlines() if line.strip())
+            try:
+                result = subprocess.run(
+                    [where, "python"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=False,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                result = None
+            if result is not None:
+                candidates.extend(line.strip() for line in result.stdout.splitlines() if line.strip())
     else:
         python = shutil.which("python")
         if python:
@@ -123,14 +128,18 @@ def _find_incompatible_python() -> str | None:
         if normalized in seen:
             continue
         seen.add(normalized)
-        result = subprocess.run(
-            [candidate, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                [candidate, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            continue
         if result.returncode != 0:
             continue
         try:
@@ -138,6 +147,21 @@ def _find_incompatible_python() -> str | None:
         except (ValueError, TypeError):
             continue
         if (major, minor) < (3, 13):
+            if require_pytest:
+                try:
+                    pytest_probe = subprocess.run(
+                        [candidate, "-c", "import pytest"],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        check=False,
+                        timeout=5,
+                    )
+                except subprocess.TimeoutExpired:
+                    continue
+                if pytest_probe.returncode != 0:
+                    continue
             return candidate
     return None
 
@@ -280,7 +304,7 @@ def test_relative_windows_entrypoints_keep_the_repository_runtime_contract() -> 
         "-DryRun",
     )
     assert portable_plan.returncode == 0, portable_plan.stdout + portable_plan.stderr
-    assert '"version":"0.1.9-beta.3.9"' in portable_plan.stdout
+    assert '"version":"0.1.9-beta.3.10"' in portable_plan.stdout
 
     runtime_check = _run_relative_powershell_script(
         r".\scripts\Prepare-PythonRuntime.ps1", "-CheckOnly"
@@ -965,7 +989,7 @@ def test_fixture_launcher_requires_an_explicit_runtime_binding() -> None:
 
 
 def test_pytest_preflight_rejects_python_311_before_source_collection() -> None:
-    ambient = _find_incompatible_python()
+    ambient = _find_incompatible_python(require_pytest=True)
     if ambient is None:
         pytest.skip("an incompatible Python executable is unavailable")
 

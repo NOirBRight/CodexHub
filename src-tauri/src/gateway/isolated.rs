@@ -339,13 +339,19 @@ pub(in crate::gateway) fn selector_and_route(
     Ok((groups.default_selector, resolved, protocol))
 }
 
-pub(in crate::gateway) fn target_relative_names(
+pub(in crate::gateway) fn published_target_relative_names(
+    client_id: &str,
     targets: &IsolatedClientApplyTargets,
     root: &Path,
 ) -> Vec<String> {
     targets
         .writable_paths()
         .iter()
+        .filter(|path| {
+            // ADR-0004: Pi settings.json is user-owned input. It participates
+            // in readback/backup but Apply only materializes models.json.
+            client_id != "pi" || path.file_name().is_some_and(|name| name == "models.json")
+        })
         .map(|path| {
             path.strip_prefix(root)
                 .unwrap_or(path)
@@ -436,12 +442,13 @@ pub fn isolated_client_preview(
         "codex" => isolated_preview_text(),
         other => return Err(format!("unsupported managed client for preview: {other}")),
     };
+    let target_names = published_target_relative_names(&client_id, &targets, root);
     Ok(IsolatedClientPreview {
         client_id,
         selector,
         model: resolved_model,
         route_protocol: protocol,
-        target_names: target_relative_names(&targets, root),
+        target_names,
         next_redacted,
     })
 }
@@ -569,13 +576,14 @@ pub fn apply_gateway_client_config_isolated_with_provenance(
         .as_ref()
         .and_then(|p| p.strip_prefix(root).ok())
         .map(|p| p.to_string_lossy().replace('\\', "/"));
+    let target_names = published_target_relative_names(&client_id, &targets, root);
     Ok(IsolatedClientApplyResult {
         client_id,
         applied: applied.applied,
         selector,
         model: resolved_model,
         route_protocol: protocol,
-        target_names: target_relative_names(&targets, root),
+        target_names,
         backup_dir_relative,
     })
 }

@@ -70,6 +70,7 @@ type ProviderNavItem =
   { id: string; sort_order: number; provider: Provider };
 type CodexAuthState = "authorized" | "missing" | "unknown";
 type ConnectionMode = "official" | "custom";
+export type CodexSwitchRequest = { id: number; mode: ConnectionMode };
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
 type ProvidersPageProps = {
@@ -86,6 +87,8 @@ type ProvidersPageProps = {
   onSettingsChanged?: (settings: Settings) => void;
   onStartProxy?: () => Promise<AppStatus | null>;
   onStatusChanged?: (status: AppStatus) => void;
+  codexSwitchRequest?: CodexSwitchRequest | null;
+  onCodexSwitchRequestHandled?: (id: number) => void;
 };
 
 function ProvidersPageImpl({
@@ -100,6 +103,8 @@ function ProvidersPageImpl({
   onSettingsChanged,
   onStartProxy,
   onStatusChanged,
+  codexSwitchRequest,
+  onCodexSwitchRequestHandled,
   providers: providersSnapshot,
   settings: settingsSnapshot,
 }: ProvidersPageProps) {
@@ -130,6 +135,7 @@ function ProvidersPageImpl({
       ? withDefaultFastVariants(settingsSnapshot).official_model_sort_order
       : [],
   });
+  const handledCodexSwitchRequestRef = useRef<number | null>(null);
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(appStatusSnapshot);
   const [connectionPendingMode, setConnectionPendingMode] = useState<ConnectionMode | null>(null);
   const [codexTargetOwnerOverride, setCodexTargetOwnerOverride] =
@@ -195,6 +201,7 @@ function ProvidersPageImpl({
     saveProviders,
     updateGatewayAfterCatalog,
   } = useProviderCatalogActions({
+    authorizeCodexRestart,
     form,
     officialModelOrderDraft,
     onProvidersChanged,
@@ -606,6 +613,10 @@ function ProvidersPageImpl({
   }
 
   async function saveSettings(next: Settings, regenerateCatalog = false, successMessage?: string, toastId?: string) {
+    const restartCodex = regenerateCatalog ? await authorizeCodexRestart() : false;
+    if (restartCodex === null) {
+      return;
+    }
     setBusy("settings");
     const activeToastId = toastId ?? showToast(successMessage ? `${successMessage}...` : t("settings.savingSettings"), "loading");
     try {
@@ -615,7 +626,7 @@ function ProvidersPageImpl({
       onSettingsChanged?.(saved);
       let syncResult: GatewayClientSyncSummary | null = null;
       if (regenerateCatalog) {
-        syncResult = await updateGatewayAfterCatalog(saved, activeToastId);
+        syncResult = await updateGatewayAfterCatalog(saved, activeToastId, { restartCodex });
       }
       const toastMessage = catalogSyncToastMessage(successMessage ?? t("settings.settingsSaved"), syncResult);
       if (syncResult?.failed) {
@@ -769,17 +780,54 @@ function ProvidersPageImpl({
     await applyCodexHubConnection(nextMode, Boolean(appFlavor?.codex_takeover_required));
   }
 
+  async function authorizeCodexRestart(): Promise<boolean | null> {
+    const desktopStatus = await api.getCodexDesktopStatus();
+    if (!desktopStatus.running) {
+      return false;
+    }
+    if (!desktopStatus.restart_supported) {
+      throw new Error(t("providers.codexRestartUnsupported"));
+    }
+    const confirmed = await confirmAction({
+      cancelLabel: t("common.cancel"),
+      confirmLabel: t("providers.restartCodexAndContinue"),
+      message: t("providers.codexRestartConfirmation"),
+      title: t("providers.codexRestartTitle"),
+    });
+    return confirmed ? true : null;
+  }
+
   async function applyCodexHubConnection(nextMode: ConnectionMode, forceTakeover: boolean) {
+    let restartCodex: boolean | null;
+    try {
+      restartCodex = await authorizeCodexRestart();
+    } catch (err) {
+      setError(messageFromError(err));
+      return;
+    }
+    if (restartCodex === null) {
+      return;
+    }
     const actionLabel = nextMode === "custom" ? t("providers.connectingToHub") : t("providers.disconnectingFromHub");
     setConnectionPendingMode(nextMode);
     setBusy("route");
     const toastId = showToast(`${actionLabel}...`, "loading");
     try {
       let status = forceTakeover
-        ? await api.switchMode(nextMode, false, true)
-        : await api.switchMode(nextMode, false);
+        ? await api.switchMode(nextMode, false, true, restartCodex)
+        : await api.switchMode(nextMode, false, false, restartCodex);
       const historySyncStatus = status.history_sync_status;
       const historySyncMessage = status.history_sync_message;
+      const codexRestartResult = status.codex_restart_result;
+      if (codexRestartResult === "switch_failed_reopened") {
+        setConnectionPendingMode(null);
+        updateToast(toastId, {
+          action: null,
+          text: status.message,
+          tone: "error",
+        });
+        return;
+      }
       if (nextMode === "custom" && !status.proxy_running) {
         updateToast(toastId, {
           action: null,
@@ -787,7 +835,9 @@ function ProvidersPageImpl({
           tone: "loading",
         });
         const refreshedStatus = await startProxyForHubConnection();
-        status = refreshedStatus ?? status;
+        status = refreshedStatus
+          ? { ...refreshedStatus, codex_restart_result: codexRestartResult }
+          : status;
       }
       setCodexStatus(status);
       setCodexTargetOwnerOverride(nextMode === "custom" ? appFlavor?.routing_owner ?? null : "official");
@@ -813,9 +863,17 @@ function ProvidersPageImpl({
       }
       updateToast(toastId, {
         action: null,
-        text: t("providers.codexRouteChangedRestart", {
-          status: codexHubConnectionSuccessMessage(nextMode, tr),
-        }),
+        text: status.codex_restart_result === "restarted"
+          ? t("providers.codexRouteChangedRestarted", {
+              status: codexHubConnectionSuccessMessage(nextMode, tr),
+            })
+          : status.codex_restart_result === "switched_relaunch_failed"
+            ? t("providers.codexRouteChangedRelaunchFailed", {
+                status: codexHubConnectionSuccessMessage(nextMode, tr),
+              })
+            : t("providers.codexRouteChangedRestart", {
+                status: codexHubConnectionSuccessMessage(nextMode, tr),
+              }),
         tone: "success",
       });
     } catch (err) {
@@ -842,6 +900,20 @@ function ProvidersPageImpl({
       setBusy(null);
     }
   }
+
+  useEffect(() => {
+    if (
+      !codexSwitchRequest
+      || handledCodexSwitchRequestRef.current === codexSwitchRequest.id
+    ) {
+      return;
+    }
+    handledCodexSwitchRequestRef.current = codexSwitchRequest.id;
+    void applyCodexHubConnection(
+      codexSwitchRequest.mode,
+      Boolean(appFlavor?.codex_takeover_required),
+    ).finally(() => onCodexSwitchRequestHandled?.(codexSwitchRequest.id));
+  }, [codexSwitchRequest]);
 
   async function reorderOfficialModels(models: Model[]) {
     const nextModels = renumberModels(models);
@@ -1004,6 +1076,7 @@ function ProvidersPageImpl({
                 officialIncluded={settings?.include_official_models ?? false}
                 authIssue={gatewayStatus?.codex_auth?.issue ?? null}
                 onCopyLoginCommand={() => void copyCodexLoginCommand()}
+                onAuthorizeCodexRestart={authorizeCodexRestart}
                 onContextGuardChanged={reflectContextGuardSetting}
                 onOpenCodexApp={() => void openCodexAppForLogin()}
                 onRefresh={(options) => refreshOfficialModelsAndCollaborationState(options)}
@@ -1598,6 +1671,7 @@ function OfficialDetail({
   officialDisabledModels,
   officialIncluded,
   onCopyLoginCommand,
+  onAuthorizeCodexRestart,
   onContextGuardChanged,
   onOpenCodexApp,
   onRefresh,
@@ -1626,6 +1700,7 @@ function OfficialDetail({
   officialDisabledModels: string[];
   officialIncluded: boolean;
   onCopyLoginCommand: () => void;
+  onAuthorizeCodexRestart: () => Promise<boolean | null>;
   onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
   onRefresh: (options?: { quiet?: boolean; throwOnError?: boolean }) => Promise<boolean>;
@@ -1675,13 +1750,23 @@ function OfficialDetail({
     if (contextGuardBusy) {
       return;
     }
+    let restartCodex: boolean | null;
+    try {
+      restartCodex = await onAuthorizeCodexRestart();
+    } catch (err) {
+      showToast(t("providers.contextGuardUpdateFailed", { message: messageFromError(err) }), "error");
+      return;
+    }
+    if (restartCodex === null) {
+      return;
+    }
     setContextGuardBusy(true);
     const toastId = showToast(
       enabled ? t("providers.enablingContextGuard") : t("providers.disablingContextGuard"),
       "loading",
     );
     try {
-      const status = await api.setCodexContextGuard(enabled);
+      const status = await api.setCodexContextGuard(enabled, restartCodex);
       setContextGuardStatus(status);
       onContextGuardChanged(status.gateway_enabled);
       let syncResult: GatewayClientSyncSummary | null = null;
@@ -1699,9 +1784,13 @@ function OfficialDetail({
         }
         await onRefreshClients?.().catch(() => undefined);
       }
-      const restartMessage = enabled
-        ? t("providers.contextGuardEnabledRestartCodex")
-        : t("providers.contextGuardDisabledRestartCodex");
+      const restartMessage = status.codex_restart_result === "restarted"
+        ? t("providers.contextGuardCodexRestarted")
+        : status.codex_restart_result === "switched_relaunch_failed"
+          ? t("providers.contextGuardCodexRelaunchFailed")
+          : enabled
+            ? t("providers.contextGuardEnabledRestartCodex")
+            : t("providers.contextGuardDisabledRestartCodex");
       const appliedClientCount = syncResult?.applied ?? 0;
       const failedClientCount = syncResult?.failed ?? 0;
       let clientSyncFeedback: { text: string; tone: "error" | "success" };
@@ -1777,12 +1866,22 @@ function OfficialDetail({
   }
 
   async function changeOfficialCollaborationVersion(modelId: string, version: "v1" | "v2" | null) {
+    let restartCodex: boolean | null;
+    try {
+      restartCodex = await onAuthorizeCodexRestart();
+    } catch (err) {
+      showToast(t("providers.collaborationVersionSaveFailed", { message: messageFromError(err) }), "error");
+      return;
+    }
+    if (restartCodex === null) {
+      return;
+    }
     const toastId = showToast(
       t("providers.savingCollaborationVersion", { version: version ?? t("providers.catalogBaseline") }),
       "loading",
     );
     try {
-      await api.saveOfficialMultiAgentVersion(modelId, version);
+      const result = await api.saveOfficialMultiAgentVersion(modelId, version, restartCodex);
       const canonical = normalizeOfficialModelId(modelId) ?? modelId;
       const next = { ...officialCollaborationOverrides };
       if (version === null) {
@@ -1791,11 +1890,20 @@ function OfficialDetail({
         next[canonical] = version;
       }
       onOfficialCollaborationOverridesChanged(next);
-      await onRefresh({ quiet: true, throwOnError: true });
+      const savedMessage = result.codex_restart_result === "restarted"
+        ? t("providers.collaborationVersionSavedCodexRestarted")
+        : result.codex_restart_result === "switched_relaunch_failed"
+          ? t("providers.collaborationVersionSavedCodexRelaunchFailed")
+          : t("providers.collaborationVersionSaved");
       updateToast(toastId, {
         action: null,
-        text: `${t("providers.collaborationVersionSaved")} ${t("providers.officialCatalogRestartRequired")}`,
-        tone: "success",
+        text: result.warning?.trim()
+          ? t("providers.collaborationVersionSavedWithWarning", {
+              message: result.warning.trim(),
+              status: savedMessage,
+            })
+          : savedMessage,
+        tone: result.warning?.trim() ? "error" : "success",
       });
     } catch (err) {
       updateToast(toastId, {

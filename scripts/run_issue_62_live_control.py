@@ -237,7 +237,7 @@ def _terminate_process(process: subprocess.Popen[bytes]) -> bool:
             # ``terminate`` only signals the direct child on Windows.  The
             # Gateway/CLI can spawn grandchildren, so use taskkill's tree mode
             # and suppress all command output.
-            subprocess.run(
+            taskkill = subprocess.run(
                 ["taskkill", "/PID", str(int(process.pid)), "/T", "/F"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -245,16 +245,20 @@ def _terminate_process(process: subprocess.Popen[bytes]) -> bool:
                 check=False,
                 timeout=5,
             )
+            if taskkill.returncode != 0:
+                return False
         else:
             os.killpg(int(process.pid), signal.SIGTERM)
         process.wait(timeout=5)
         return True
     except Exception:
+        if os.name == "nt":
+            # A direct-child kill cannot prove that taskkill's process-tree
+            # contract was satisfied.  Fail closed so evidence never claims
+            # that possible grandchildren were released.
+            return False
         try:
-            if os.name == "nt":
-                process.kill()
-            else:
-                os.killpg(int(process.pid), signal.SIGKILL)
+            os.killpg(int(process.pid), signal.SIGKILL)
             process.wait(timeout=5)
             return True
         except Exception:

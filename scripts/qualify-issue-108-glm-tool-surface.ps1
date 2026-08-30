@@ -1246,7 +1246,8 @@ import os
 import sys
 
 sys.path.insert(0, os.getcwd())
-import codex_proxy
+import gateway_compat
+from gateway_compat import response as gateway_compat_response
 
 
 PATCH = "*** Begin Patch\\n*** Update File: target.txt\\n@@\\n-before\\n+after\\n*** End Patch"
@@ -1323,17 +1324,17 @@ def profile(payload):
     }
 
 
-original_adapter = codex_proxy._adapt_apply_patch_custom_tool_history
+original_adapter = gateway_compat_response._adapt_apply_patch_custom_tool_history
 
 
 def disabled_adapter(input_items, *, event_context):
     return input_items, set(), False
 
 
-codex_proxy._adapt_apply_patch_custom_tool_history = disabled_adapter
-disabled = profile(json.loads(codex_proxy.compatible_request_body(BODY, UPSTREAM, inject_codex_tools=False)))
-codex_proxy._adapt_apply_patch_custom_tool_history = original_adapter
-adapted = profile(json.loads(codex_proxy.compatible_request_body(BODY, UPSTREAM, inject_codex_tools=False)))
+gateway_compat_response._adapt_apply_patch_custom_tool_history = disabled_adapter
+disabled = profile(json.loads(gateway_compat.compatible_request_body(BODY, UPSTREAM, inject_codex_tools=False)))
+gateway_compat_response._adapt_apply_patch_custom_tool_history = original_adapter
+adapted = profile(json.loads(gateway_compat.compatible_request_body(BODY, UPSTREAM, inject_codex_tools=False)))
 
 report = {
     "disabled_structured_history_pair_count": disabled["structured_history_pair_count"],
@@ -1637,23 +1638,7 @@ function Invoke-CaptureGatewayDigestReplay {
         $gatewayStubPath = Join-Path $runRoot 'codex_proxy.py'
         $gatewayStub = @'
 import json
-
-
-def compatible_request_body(body, *args, **kwargs):
-    return body
-
-
-def compatible_sse_line(line, *args, **kwargs):
-    return line
-
-
-class _ThirdPartyApplyPatchStreamAdapter:
-    def events_for_event(self, event):
-        return []
-
-
-def _adapt_apply_patch_custom_tool_history(input_items, *, event_context):
-    return input_items, set(), False
+import gateway_compat
 
 
 def main():
@@ -1669,9 +1654,41 @@ def main():
         ],
     }
     body = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return 0 if compatible_request_body(body, {"name": "ollama_cloud"}) == body else 2
+    return 0 if gateway_compat.compatible_request_body(body, {"name": "ollama_cloud"}) == body else 2
 '@
         [System.IO.File]::WriteAllText($gatewayStubPath, $gatewayStub, [System.Text.UTF8Encoding]::new($false))
+        $gatewayCompatDir = Join-Path $runRoot 'gateway_compat'
+        New-Item -ItemType Directory -Force -Path $gatewayCompatDir | Out-Null
+        $gatewayCompatInit = @'
+from . import response
+
+
+def compatible_request_body(body, *args, **kwargs):
+    return body
+
+
+def compatible_sse_line(line, *args, **kwargs):
+    return line
+'@
+        $gatewayCompatResponse = @'
+class _ThirdPartyApplyPatchStreamAdapter:
+    def events_for_event(self, event):
+        return []
+
+
+def _adapt_apply_patch_custom_tool_history(input_items, *, event_context):
+    return input_items, set(), False
+'@
+        [System.IO.File]::WriteAllText(
+            (Join-Path $gatewayCompatDir '__init__.py'),
+            $gatewayCompatInit,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        [System.IO.File]::WriteAllText(
+            (Join-Path $gatewayCompatDir 'response.py'),
+            $gatewayCompatResponse,
+            [System.Text.UTF8Encoding]::new($false)
+        )
         [System.IO.File]::WriteAllText($capturePhasePath, 'acceptance', [System.Text.UTF8Encoding]::new($false))
 
         $pythonCommand = Resolve-RepositoryPythonPath
@@ -2057,6 +2074,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.getcwd())
 import codex_proxy
+import gateway_compat
+from gateway_compat import response as gateway_compat_response
 
 
 _capture_path = Path(os.environ["CODEXHUB_REQUEST_TOOL_SHAPE_PATH"])
@@ -2069,10 +2088,10 @@ _post_success_tool_choice_recorded = False
 _apply_patch_failure_recorded = False
 _history_adapter_negative_control = os.environ.get("CODEXHUB_HISTORY_ADAPTER_NEGATIVE_CONTROL") == "1"
 _expected_post_success_tool_choice = "apply_patch" if _history_adapter_negative_control else "shell_command"
-_original_compatible_request_body = codex_proxy.compatible_request_body
-_original_compatible_sse_line = codex_proxy.compatible_sse_line
-_original_apply_patch_events_for_event = codex_proxy._ThirdPartyApplyPatchStreamAdapter.events_for_event
-_original_apply_patch_history_adapter = codex_proxy._adapt_apply_patch_custom_tool_history
+_original_compatible_request_body = gateway_compat.compatible_request_body
+_original_compatible_sse_line = gateway_compat.compatible_sse_line
+_original_apply_patch_events_for_event = gateway_compat_response._ThirdPartyApplyPatchStreamAdapter.events_for_event
+_original_apply_patch_history_adapter = gateway_compat_response._adapt_apply_patch_custom_tool_history
 _apply_patch_item_ids = set()
 
 
@@ -2564,10 +2583,10 @@ def _apply_patch_events_for_event_with_capture(self, event):
     return _original_apply_patch_events_for_event(self, event)
 
 
-codex_proxy.compatible_request_body = _compatible_request_body_with_capture
-codex_proxy.compatible_sse_line = _compatible_sse_line_with_capture
-codex_proxy._ThirdPartyApplyPatchStreamAdapter.events_for_event = _apply_patch_events_for_event_with_capture
-codex_proxy._adapt_apply_patch_custom_tool_history = _adapt_apply_patch_history_with_negative_control
+gateway_compat.compatible_request_body = _compatible_request_body_with_capture
+gateway_compat.compatible_sse_line = _compatible_sse_line_with_capture
+gateway_compat_response._ThirdPartyApplyPatchStreamAdapter.events_for_event = _apply_patch_events_for_event_with_capture
+gateway_compat_response._adapt_apply_patch_custom_tool_history = _adapt_apply_patch_history_with_negative_control
 _append_capture_record(
     {
         "stage": "history_adapter_mode",

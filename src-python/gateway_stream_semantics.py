@@ -75,20 +75,20 @@ REASONING_TEXT_EVENT_PREFIXES = (
 REASONING_SUMMARY_EVENT_PREFIX = "response.reasoning_summary_text."
 
 
-def _collect_text_fragments(value: Any) -> list[str]:
+def collect_text_fragments(value: Any) -> list[str]:
     if isinstance(value, str):
         text = value.strip()
         return [text] if text else []
     if isinstance(value, list):
         fragments: list[str] = []
         for item in value:
-            fragments.extend(_collect_text_fragments(item))
+            fragments.extend(collect_text_fragments(item))
         return fragments
     if isinstance(value, dict):
         fragments: list[str] = []
         for key in ("text", "content", "summary", "message"):
             if key in value:
-                fragments.extend(_collect_text_fragments(value[key]))
+                fragments.extend(collect_text_fragments(value[key]))
         return fragments
     return []
 
@@ -838,7 +838,7 @@ def _downstream_stream_status_payload(
 def chat_content_text(value: Any) -> str:
     if isinstance(value, str):
         return value
-    fragments = _collect_text_fragments(value)
+    fragments = collect_text_fragments(value)
     return "\n".join(fragments)
 _chat_content_text = chat_content_text
 
@@ -855,8 +855,8 @@ def _tail_text_for_compact_detection(payload: Mapping[str, Any], inbound_format:
 
     input_items = payload.get("input")
     if isinstance(input_items, list):
-        return "\n".join(_collect_text_fragments(input_items[-5:]))
-    return "\n".join(_collect_text_fragments(input_items))
+        return "\n".join(collect_text_fragments(input_items[-5:]))
+    return "\n".join(collect_text_fragments(input_items))
 
 
 def _is_compact_summary_payload(payload: Mapping[str, Any], inbound_format: str) -> bool:
@@ -1773,7 +1773,7 @@ def _events_to_responses_body(
 def _response_body_to_response_sse_events(body: bytes) -> list[dict[str, Any]]:
     return response_body_to_response_sse_events(
         body,
-        collect_text_fragments=_collect_text_fragments,
+        collect_text_fragments=collect_text_fragments,
     )
 
 

@@ -814,8 +814,10 @@ unsafe extern "system" {
 mod tests {
     use super::{
         install_test_pre_open_hook, lock_state, parse_legacy_pid, write_text_atomic,
-        write_text_atomic_with_mode, write_text_locked, FileLock, LockState, LOCK_PROTOCOL,
+        write_text_locked, FileLock, LockState, LOCK_PROTOCOL,
     };
+    #[cfg(unix)]
+    use super::write_text_atomic_with_mode;
     use std::{
         fs,
         io::{BufRead, Read, Write},
