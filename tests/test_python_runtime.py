@@ -96,6 +96,28 @@ def _powershell() -> str:
     return executable
 
 
+def _resolves_to_one_of(path: Path, directories: set[Path]) -> bool:
+    try:
+        return path.resolve() in directories
+    except OSError:
+        return False
+
+
+def test_resolves_to_one_of_ignores_an_unresolvable_path_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    broken = Path("broken-path-entry")
+    directories = {Path("managed-directory").resolve()}
+    original_resolve = Path.resolve
+
+    def resolve_or_raise(path: Path, *, strict: bool = False) -> Path:
+        if path == broken:
+            raise OSError("invalid reparse point")
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve_or_raise)
+
+    assert not _resolves_to_one_of(broken, directories)
+
+
 def _find_incompatible_python(*, require_pytest: bool = False) -> str | None:
     """Find a real pre-3.13 interpreter even when the wrapper changed PATH."""
 
@@ -322,10 +344,11 @@ def test_fresh_shell_pytest_selector_skips_a_3_13_runtime_without_pytest() -> No
 
     host_directory = Path(sys.executable).resolve().parent
     path_entries = [bundled.parent, host_directory]
+    managed_directories = {entry.resolve() for entry in path_entries}
     path_entries.extend(
         Path(entry)
         for entry in os.environ.get("PATH", "").split(os.pathsep)
-        if entry and Path(entry).resolve() not in {entry.resolve() for entry in path_entries}
+        if entry and not _resolves_to_one_of(Path(entry), managed_directories)
     )
     child_env = {
         "PATH": os.pathsep.join(str(entry) for entry in path_entries),
@@ -746,7 +769,7 @@ def test_interactive_activation_rebinds_bare_python_and_pytest() -> None:
     child_env["PATH"] = os.pathsep.join(
         entry
         for entry in child_env["PATH"].split(os.pathsep)
-        if entry and Path(entry).resolve() not in managed_directories
+        if entry and not _resolves_to_one_of(Path(entry), managed_directories)
     )
     command = (
         f". '{ACTIVATION}'; "
@@ -795,7 +818,7 @@ def test_interactive_activation_accepts_relative_dot_source(shell_name: str) -> 
     child_env["PATH"] = os.pathsep.join(
         entry
         for entry in child_env["PATH"].split(os.pathsep)
-        if entry and Path(entry).resolve() not in managed_directories
+        if entry and not _resolves_to_one_of(Path(entry), managed_directories)
     )
     result = subprocess.run(
         [
