@@ -280,6 +280,21 @@ base_url = "https://ollama.com/v1"
 }
 
 #[test]
+fn bundled_catalog_toml_includes_kimi_presets() {
+    let root = temp_root("providers-kimi-catalog");
+    let paths = test_paths(&root);
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../config/providers.toml");
+    fs::create_dir_all(paths.bundled_providers_path().parent().unwrap()).unwrap();
+    fs::copy(&source, paths.bundled_providers_path()).expect("copy bundled catalog");
+    let bundled =
+        get_bundled_providers_with_paths(&paths).expect("parse repo providers.toml");
+    let ids: Vec<&str> = bundled.iter().map(|provider| provider.id.as_str()).collect();
+    assert!(ids.contains(&"kimi"), "{ids:?}");
+    assert!(ids.contains(&"kimi-cn"), "{ids:?}");
+    assert!(ids.contains(&"ollama-cloud"), "{ids:?}");
+}
+
+#[test]
 fn get_providers_applies_resolved_limits_used_by_the_gateway() {
     let root = temp_root("providers-resolved-limits");
     let paths = test_paths(&root);

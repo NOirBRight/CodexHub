@@ -24,24 +24,52 @@ export function instantiateCatalogProvider(preset: Provider, sortOrder: number):
   };
 }
 
+function mergeOfficialModelDefaults(model: Model, official: Model): Model {
+  return {
+    ...model,
+    supported_reasoning_levels: (model.supported_reasoning_levels ?? []).length
+      ? model.supported_reasoning_levels
+      : official.supported_reasoning_levels,
+    default_reasoning_level: model.default_reasoning_level ?? official.default_reasoning_level ?? null,
+    thinking_mode: model.thinking_mode ?? official.thinking_mode ?? null,
+    input_modalities: (official.input_modalities ?? []).includes("image") &&
+      !(model.input_modalities ?? []).includes("image")
+      ? official.input_modalities
+      : model.input_modalities?.length
+        ? model.input_modalities
+        : official.input_modalities ?? model.input_modalities,
+  };
+}
+
 export function applyPresetReasoningDefaults(models: Model[], preset: Provider | null | undefined): Model[] {
-  const template = preset?.models.find((model) => (model.supported_reasoning_levels ?? []).length > 0);
-  if (!template) {
-    return models;
-  }
+  const byId = new Map((preset?.models ?? []).map((model) => [model.id, model]));
   return models.map((model) => {
-    if ((model.supported_reasoning_levels ?? []).length > 0) {
+    const official = byId.get(model.id);
+    if (!official) {
       return model;
     }
-    return {
-      ...model,
-      supported_reasoning_levels: template.supported_reasoning_levels,
-      default_reasoning_level: model.default_reasoning_level ?? template.default_reasoning_level ?? null,
-      input_modalities: model.input_modalities?.length
-        ? model.input_modalities
-        : template.input_modalities ?? model.input_modalities,
-    };
+    return mergeOfficialModelDefaults(model, official);
   });
+}
+
+export function mergeOfficialPresetModels(existing: Model[], presetModels: Model[]): Model[] {
+  if (existing.length === 0) {
+    return presetModels.map((model) => ({ ...model }));
+  }
+  const seen = new Set(existing.map((model) => model.id));
+  const merged = existing.map((model) => {
+    const official = presetModels.find((candidate) => candidate.id === model.id);
+    if (!official) {
+      return model;
+    }
+    return mergeOfficialModelDefaults(model, official);
+  });
+  for (const official of presetModels) {
+    if (!seen.has(official.id)) {
+      merged.push({ ...official });
+    }
+  }
+  return merged;
 }
 
 export function applyCatalogPresetDefaults(
@@ -54,7 +82,23 @@ export function applyCatalogPresetDefaults(
   }
   const includeModels = options?.includeModels !== false;
   const needsBaseUrl = existing.base_url.trim() === "";
-  const needsModels = includeModels && existing.models.length === 0 && preset.models.length > 0;
+  const mergedModels = includeModels
+    ? mergeOfficialPresetModels(existing.models, preset.models)
+    : existing.models;
+  const needsModels =
+    includeModels &&
+    (mergedModels.length !== existing.models.length ||
+      existing.models.some((model, index) => {
+        const next = mergedModels[index];
+        return (
+          !next ||
+          model.id !== next.id ||
+          (model.supported_reasoning_levels ?? []).join() !== (next.supported_reasoning_levels ?? []).join() ||
+          (model.default_reasoning_level ?? null) !== (next.default_reasoning_level ?? null) ||
+          (model.thinking_mode ?? null) !== (next.thinking_mode ?? null) ||
+          (model.input_modalities ?? []).join() !== (next.input_modalities ?? []).join()
+        );
+      }));
   const needsFormats =
     !(existing.available_upstream_formats && existing.available_upstream_formats.length > 0) &&
     Boolean(preset.available_upstream_formats && preset.available_upstream_formats.length > 0);
@@ -92,6 +136,6 @@ export function applyCatalogPresetDefaults(
     auth_capabilities: needsAuthCapabilities ? preset.auth_capabilities : existing.auth_capabilities,
     onboarding_hint: needsOnboardingHint ? preset.onboarding_hint : existing.onboarding_hint,
     discovery_policy: needsDiscoveryPolicy ? preset.discovery_policy : existing.discovery_policy,
-    models: needsModels ? preset.models.map((model) => ({ ...model })) : existing.models,
+    models: needsModels ? mergedModels : existing.models,
   };
 }

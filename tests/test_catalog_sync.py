@@ -2774,7 +2774,7 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["volc/glm-5.2"]["default_reasoning_level"], "high")
         self.assertEqual(
             [item["effort"] for item in by_slug["volc/glm-5.2"]["supported_reasoning_levels"]],
-            ["low", "medium", "high", "xhigh", "max"],
+            ["high", "low", "max", "xhigh"],
         )
         self.assertEqual(by_slug["volc/minimax-m3"]["priority"], 201)
         self.assertEqual(by_slug["volc/minimax-m3"]["input_modalities"], ["text", "image"])
@@ -2835,7 +2835,7 @@ class CatalogSyncTests(unittest.TestCase):
 
         self.assertEqual(
             [item["effort"] for item in model["supported_reasoning_levels"]],
-            ["low", "medium", "high", "xhigh", "max"],
+            ["high", "low", "max", "xhigh"],
         )
         self.assertEqual(model["default_reasoning_level"], "max")
 
@@ -2917,7 +2917,7 @@ class CatalogSyncTests(unittest.TestCase):
 
         model = catalog_sync.build_external_provider_model(external_model, self.policy, None)
 
-        self.assertEqual(model["default_reasoning_level"], "xhigh")
+        self.assertEqual(model["default_reasoning_level"], "max")
 
     def test_external_reasoning_sanitizes_fallback_template_ultra_metadata(self):
         fallback_template = {
@@ -2940,9 +2940,9 @@ class CatalogSyncTests(unittest.TestCase):
 
         self.assertEqual(
             [item["effort"] for item in model["supported_reasoning_levels"]],
-            ["low", "medium", "high", "xhigh", "max"],
+            ["high", "max"],
         )
-        self.assertEqual(model["default_reasoning_level"], "xhigh")
+        self.assertEqual(model["default_reasoning_level"], "max")
         self.assertNotIn("ultra", json.dumps(model).lower())
 
     def test_external_reasoning_uses_safe_defaults_when_fallback_has_no_valid_levels(self):
@@ -2961,9 +2961,9 @@ class CatalogSyncTests(unittest.TestCase):
 
         self.assertEqual(
             [item["effort"] for item in model["supported_reasoning_levels"]],
-            ["low", "medium", "high", "xhigh", "max"],
+            ["high", "max"],
         )
-        self.assertEqual(model["default_reasoning_level"], "xhigh")
+        self.assertEqual(model["default_reasoning_level"], "max")
 
     def test_sync_catalog_ignores_provider_alias_entries_for_external_catalog_state(self):
         providers = [

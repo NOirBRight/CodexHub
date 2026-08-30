@@ -15,6 +15,10 @@ _Avoid_: Image conversion, image workaround
 **Route Plan**:
 The immutable per-request decision snapshot the Gateway computes after the user selects a Provider/model: ordered upstream protocol attempts, retry/streaming/mutation policies, and the Vision Proxy decision. Fixed for the life of the request; its identity core is the ResolvedRoute of ADR-0002.
 
+**Maintained Catalog**:
+The repository-owned table of official model identity for Maintained Providers: display name, family, thinking mode, reasoning levels, default level, and per-endpoint context/output limits (ADR-0009). `catalog_sync` consumes it; it is not a Gateway owning module.
+_Avoid_: five-level fill, guessed effort grades
+
 **Owning module**:
 The single Gateway Python module that holds one seam (catalog, transport, events, compatibility, stream semantics, request boundary, relay, or handler methods). The process entry only wires HTTP. Tests patch the owning module, not the entry. Cross-SCC calls import the module object and read the attribute at call time (ADR-0007); they do not go through `lookup()`, `api`, or `RelaySymbols`.
 _Avoid_: facade, runtime proxy module, exec dump

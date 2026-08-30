@@ -129,6 +129,8 @@ pub struct Model {
     pub input_modalities: Option<Vec<String>>,
     pub supported_reasoning_levels: Option<Vec<String>>,
     pub default_reasoning_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_mode: Option<String>,
     pub pricing: Option<ModelPricing>,
     pub metadata_provenance: Option<MetadataProvenance>,
     pub sort_order: Option<i32>,
@@ -160,6 +162,7 @@ impl Default for Model {
             input_modalities: None,
             supported_reasoning_levels: None,
             default_reasoning_level: None,
+            thinking_mode: None,
             pricing: None,
             metadata_provenance: None,
             sort_order: None,
@@ -1102,7 +1105,7 @@ fn toggle_linux_window_maximize(window: Window) -> Result<(), String> {
 fn window_close_to_tray(window: Window) -> Result<(), String> {
     run_app_lifecycle_action(
         AppLifecycleAction::CloseToTray,
-        proxy::stop_for_app_close,
+        || Ok(false),
         || {
             window
                 .hide()
@@ -1358,7 +1361,7 @@ fn run_gui() {
                 api.prevent_close();
                 let _ = run_app_lifecycle_action(
                     AppLifecycleAction::CloseToTray,
-                    proxy::stop_for_app_close,
+                    || Ok(false),
                     || window.hide(),
                 );
             }

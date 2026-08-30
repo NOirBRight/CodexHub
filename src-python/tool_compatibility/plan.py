@@ -1,10 +1,9 @@
 """Request-scoped runtime tool compatibility for the selected Gateway route.
 
 This module deliberately knows only about declaration shape and protocol
-capabilities.  It does not select a Provider, execute a tool, or repair a
-model response.  The request plan is immutable; stream assembly lives in
-``stream``.  Isolated Collaboration V1 repair and V2 adaptation are dispatched
-to sibling modules that must not import each other.
+capabilities. Immutable request planning delegates bounded third-party response
+repair to collaboration siblings; stream assembly lives in ``stream``. V1/V2
+adaptation remains isolated.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ from .collab_v2 import (
     CollaborationV2PlanMixin,
     apply_v2_namespace_decode,
     is_opaque_v2_history_item,
+    repair_external_v2_spawn_agent_response_arguments,
     strip_encrypted_annotations as strip_v2_encrypted_annotations,
     validate_v2_fields,
     validate_v2_native_arguments,
@@ -1898,16 +1898,46 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
         self._validate_collaboration_v2_items(result, surface=surface)
         return result, changed
 
+    def _repair_external_v2_spawn_response_items(self, items: Any) -> tuple[Any, bool]:
+        """Repair only aliased V2 spawn calls received in a provider response."""
+
+        if not isinstance(items, list):
+            return items, False
+        repaired_items: list[Any] = []
+        changed = False
+        for item in items:
+            if not isinstance(item, Mapping) or item.get("type") != "function_call":
+                repaired_items.append(item)
+                continue
+            record = self.registry.record_for_alias(item.get("name"))
+            if not (
+                record is not None
+                and record.family == NAMESPACE
+                and record.version == "v2"
+                and record.namespace == "collaboration"
+                and record.child_name == "spawn_agent"
+            ):
+                repaired_items.append(item)
+                continue
+            repaired, item_changed = repair_external_v2_spawn_agent_response_arguments(item)
+            repaired_items.append(repaired)
+            changed = changed or item_changed
+        return (repaired_items if changed else items), changed
+
     def decode_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result = _copy_mapping(payload)
         for key in ("output", "input", "history"):
             if key in result:
+                encoded_items = result[key]
+                repair_changed = False
+                if key == "output":
+                    encoded_items, repair_changed = self._repair_external_v2_spawn_response_items(encoded_items)
                 decoded, item_changed = self._decode_items(
-                    result[key],
+                    encoded_items,
                     reject_omitted_response=key == "output",
                     decode_agent_messages=key != "output",
                 )
-                if item_changed:
+                if item_changed or repair_changed:
                     result[key] = decoded
         return result
 

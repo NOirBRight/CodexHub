@@ -20,7 +20,7 @@ const moduleExports = {};
 new Function(
   "exports",
   jsOutput +
-    "\nexports.applyCatalogPresetDefaults = applyCatalogPresetDefaults; exports.subscriptionAuthAdapter = subscriptionAuthAdapter; exports.usesSubscriptionAuth = usesSubscriptionAuth; exports.applyPresetReasoningDefaults = applyPresetReasoningDefaults; exports.instantiateCatalogProvider = instantiateCatalogProvider;",
+    "\nexports.applyCatalogPresetDefaults = applyCatalogPresetDefaults; exports.subscriptionAuthAdapter = subscriptionAuthAdapter; exports.usesSubscriptionAuth = usesSubscriptionAuth; exports.applyPresetReasoningDefaults = applyPresetReasoningDefaults; exports.instantiateCatalogProvider = instantiateCatalogProvider; exports.mergeOfficialPresetModels = mergeOfficialPresetModels;",
 )(moduleExports);
 const {
   applyCatalogPresetDefaults,
@@ -28,6 +28,7 @@ const {
   usesSubscriptionAuth,
   applyPresetReasoningDefaults,
   instantiateCatalogProvider,
+  mergeOfficialPresetModels,
 } = moduleExports;
 
 function makeProvider(overrides = {}) {
@@ -107,13 +108,30 @@ test("subscription auth is declared on the preset, not by provider id", () => {
   );
 });
 
-test("discovered grok models inherit preset thinking levels when discovery omits them", () => {
+test("discovered models inherit thinking metadata only from the matching official id", () => {
   const filled = applyPresetReasoningDefaults(
-    [{ id: "grok-4.6", enabled: true }],
+    [
+      { id: "grok-4", enabled: true },
+      { id: "grok-4.6", enabled: true },
+    ],
     catalogXai,
   );
   assert.deepEqual(filled[0].supported_reasoning_levels, ["low", "medium", "high", "xhigh", "max"]);
   assert.equal(filled[0].default_reasoning_level, "high");
+  assert.equal(filled[1].supported_reasoning_levels, undefined);
+});
+
+test("additive merge inserts missing official models without re-enabling user-disabled rows", () => {
+  const merged = mergeOfficialPresetModels(
+    [{ id: "grok-4", enabled: false, display_name: "My Grok" }],
+    catalogXai.models.concat([{ id: "grok-4.5", enabled: true, display_name: "Grok 4.5" }]),
+  );
+  assert.equal(merged[0].id, "grok-4");
+  assert.equal(merged[0].enabled, false);
+  assert.equal(merged[0].display_name, "My Grok");
+  assert.deepEqual(merged[0].supported_reasoning_levels, ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(merged[1].id, "grok-4.5");
+  assert.equal(merged[1].enabled, true);
 });
 
 test("missing preset is a no-op", () => {
@@ -170,4 +188,43 @@ test("instantiate catalog xAI keeps subscription metadata and drops the env api 
   assert.deepEqual(draft.auth_capabilities, ["subscription:xai_oauth"]);
   assert.equal(draft.onboarding_hint, "providers.catalogProviderSubscriptionHint");
   assert.equal(draft.discovery_policy, "retain-intersection");
+});
+
+test("merge upgrades text-only official rows to catalog vision without dropping extra models", () => {
+  const merged = mergeOfficialPresetModels(
+    [
+      {
+        id: "gpt-5.6-sol",
+        display_name: "Command Code gpt-5.6-sol",
+        enabled: true,
+        input_modalities: ["text"],
+        supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max"],
+        default_reasoning_level: "medium",
+        sort_order: 1,
+      },
+    ],
+    [
+      {
+        id: "gpt-5.6-sol",
+        display_name: "Command Code gpt-5.6-sol",
+        enabled: true,
+        input_modalities: ["text", "image"],
+        supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max"],
+        default_reasoning_level: "high",
+        sort_order: 1,
+      },
+      {
+        id: "qwen/qwen3.8-max",
+        display_name: "Command Code qwen3.8-max",
+        enabled: true,
+        input_modalities: ["text", "image"],
+        supported_reasoning_levels: ["low", "medium", "xhigh"],
+        default_reasoning_level: "xhigh",
+        sort_order: 2,
+      },
+    ],
+  );
+  assert.deepEqual(merged[0].input_modalities, ["text", "image"]);
+  assert.equal(merged[0].default_reasoning_level, "medium");
+  assert.equal(merged[1].id, "qwen/qwen3.8-max");
 });

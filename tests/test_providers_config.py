@@ -70,14 +70,16 @@ class ProvidersConfigTests(unittest.TestCase):
             "none",
         )
         self.assertEqual(index["kimi-k2.7-code"]["context_window"], 262144)
-        self.assertEqual(index["kimi-k2.7-code"]["max_output_tokens"], 32768)
-        self.assertNotIn("kimi-k2.6", index)
-        self.assertNotIn("ollama-cloud/kimi-k2.6", index)
+        self.assertEqual(index["kimi-k2.7-code"]["max_output_tokens"], 262144)
+        self.assertEqual(index["kimi-k2.6"]["native_responses_tool_codec"], "none")
+        self.assertEqual(index["ollama-cloud/kimi-k2.6"]["native_responses_tool_codec"], "none")
         self.assertEqual(index["minimax-m3"]["native_responses_tool_codec"], "none")
 
         external_index = build_external_model_index(providers, require_api_key=False)
-        self.assertEqual(external_index["volc/kimi-k2.6"]["native_responses_tool_codec"], "none")
+        self.assertEqual(external_index["volc/kimi-k2.7-code"]["native_responses_tool_codec"], "none")
         self.assertEqual(external_index["minimax-cn/minimax-m3"]["native_responses_tool_codec"], "none")
+        self.assertIn("kimi/kimi-k3", external_index)
+        self.assertIn("kimi-cn/kimi-k3", external_index)
 
     def test_discover_official_models_fetches_gpt_models_sorted_with_limits(self):
         payload = {
@@ -1413,15 +1415,15 @@ enabled = true
 
         self.assertEqual(
             [provider.id for provider in providers],
-            ["ollama-cloud", "volc", "minimax-cn", "xai"],
+            ["ollama-cloud", "volc", "minimax-cn", "kimi-cn", "kimi", "commandcode", "opencode-go", "xai"],
         )
         xai = next(provider for provider in providers if provider.id == "xai")
         grok = next(model for model in xai.models if model.id == "grok-4")
-        self.assertEqual(grok.supported_reasoning_levels, ("low", "medium", "high", "xhigh", "max"))
+        self.assertEqual(grok.supported_reasoning_levels, ("low", "medium", "high", "xhigh"))
         self.assertEqual(grok.default_reasoning_level, "high")
         self.assertEqual(grok.input_modalities, ("text", "image"))
 
-    def test_default_config_external_aliases_exclude_volc_minimax_m3_by_default(self):
+    def test_default_config_external_aliases_include_enabled_official_models(self):
         with (
             patch.dict(
                 "os.environ",
@@ -1429,6 +1431,7 @@ enabled = true
                     "OLLAMA_API_KEY": "ollama-secret",
                     "VOLCENGINE_API_KEY": "volc-secret",
                     "MINIMAX_API_KEY": "minimax-secret",
+                    "MOONSHOT_API_KEY": "kimi-secret",
                 },
                 clear=True,
             ),
@@ -1437,20 +1440,16 @@ enabled = true
             index = build_external_model_index(load_providers(DEFAULT_PROVIDERS_PATH))
             volc_minimax = resolve_external_model_alias("volc/minimax-m3", providers_path=DEFAULT_PROVIDERS_PATH)
 
-        self.assertEqual(
-            sorted(index),
-            [
-                "minimax-cn/MiniMax-M3",
-                "minimax-cn/minimax-m3",
-                "volc/glm-5.2",
-                "volc/kimi-k2.6",
-            ],
-        )
-        self.assertNotIn("volc/minimax-m3", index)
+        self.assertIn("minimax-cn/MiniMax-M3", index)
+        self.assertIn("minimax-cn/minimax-m3", index)
+        self.assertIn("volc/glm-5.3", index)
+        self.assertIn("volc/minimax-m3", index)
+        self.assertIn("volc/kimi-k2.7-code", index)
+        self.assertIn("kimi/kimi-k3", index)
+        self.assertNotIn("volc/glm-5.2", index)
         self.assertEqual(index["minimax-cn/MiniMax-M3"]["upstream_model"], "MiniMax-M3")
         self.assertEqual(index["minimax-cn/minimax-m3"]["alias"], "minimax-cn/MiniMax-M3")
-        self.assertEqual(index["volc/kimi-k2.6"]["upstream_model"], "kimi-k2.6")
-        self.assertIsNone(volc_minimax)
+        self.assertIsNotNone(volc_minimax)
 
     def test_default_policy_preserves_provider_qualified_catalog_models(self):
         from catalog import load_policy
@@ -1460,21 +1459,22 @@ enabled = true
         self.assertTrue(
             {
                 "ollama-cloud/glm-5.2",
+                "ollama-cloud/glm-5.3",
                 "ollama-cloud/minimax-m3",
                 "ollama-cloud/kimi-k2.6",
                 "ollama-cloud/kimi-k2.7-code",
+                "ollama-cloud/kimi-k3",
                 "volc/ark-code-latest",
                 "volc/doubao-seed-2.0-code",
-                "volc/doubao-seed-2.0-pro",
-                "volc/doubao-seed-2.0-lite",
-                "volc/glm-5.2",
-                "volc/deepseek-v4-pro",
-                "volc/deepseek-v4-flash",
-                "volc/kimi-k2.6",
+                "volc/glm-5.3",
+                "volc/kimi-k2.7-code",
                 "minimax-cn/MiniMax-M3",
+                "kimi/kimi-k3",
+                "kimi-cn/kimi-k3",
             }.issubset(policy.allowed_provider_models)
         )
-        self.assertNotIn("minimax-cn/minimax-m3", policy.allowed_provider_models)
+        self.assertIn("minimax-cn/minimax-m3", policy.allowed_provider_models)
+        self.assertIn("glm-5.1", policy.allowed_ollama_cloud_models)
         self.assertIn("glm-5.2", policy.allowed_ollama_cloud_models)
 
     def test_load_parses_providers_models_and_sorts_by_sort_order(self):

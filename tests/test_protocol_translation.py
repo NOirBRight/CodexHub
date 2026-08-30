@@ -1242,7 +1242,6 @@ class ProtocolTranslationTests(unittest.TestCase):
 
     def test_chat_response_semantics_without_responses_equivalents_fail_closed(self):
         messages = {
-            "reasoning": {"role": "assistant", "content": None, "reasoning_content": "private"},
             "refusal": {"role": "assistant", "content": None, "refusal": "I cannot help with that."},
             "search": {"role": "assistant", "content": None, "tool_calls": [{"type": "web_search"}]},
             "custom_tool": {"role": "assistant", "content": None, "tool_calls": [{"type": "custom", "name": "apply_patch"}]},
@@ -1657,6 +1656,35 @@ class ProtocolTranslationTests(unittest.TestCase):
             {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
         )
 
+    def test_chat_completion_to_response_maps_commandcode_reasoning_details(self):
+        body = json.dumps(
+            {
+                "id": "gen_1",
+                "object": "chat.completion",
+                "model": "deepseek/deepseek-v4-flash",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "CC_OK",
+                            "reasoning": "plan",
+                            "reasoning_details": [
+                                {"type": "reasoning.text", "text": "plan", "format": "unknown"}
+                            ],
+                        },
+                    }
+                ],
+            }
+        ).encode("utf-8")
+
+        translated = json.loads(protocol_translation.chat_completion_to_response_body(body))
+        types = [item.get("type") for item in translated["output"]]
+        self.assertEqual(types[0], "reasoning")
+        self.assertEqual(translated["output"][0]["summary"][0]["text"], "plan")
+        self.assertEqual(types[-1], "message")
+
     def test_chat_stream_rejects_unknown_tool_fields_and_non_string_arguments(self):
         tool_calls = (
             {
@@ -1981,15 +2009,12 @@ class ProtocolTranslationTests(unittest.TestCase):
                 responses_to_chat.chunks_for_event(response_events[1])
             self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
 
-        chat_chunk = {"choices": [{"delta": {"reasoning_content": "private"}, "finish_reason": "stop"}]}
-        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
-            protocol_translation.chat_stream_chunks_to_response_events([chat_chunk])
-        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
-
+        chat_chunk = {"choices": [{"delta": {"reasoning_content": "private", "content": "ok"}, "finish_reason": "stop"}]}
+        events = protocol_translation.chat_stream_chunks_to_response_events([chat_chunk])
+        self.assertEqual(events[-1]["type"], "response.completed")
         chat_to_responses = protocol_translation.ChatToResponsesStreamConverter()
-        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
-            chat_to_responses.events_for_chunk(chat_chunk)
-        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+        streamed = chat_to_responses.events_for_chunk(chat_chunk)
+        self.assertTrue(any(event.get("type") == "response.completed" or event.get("type", "").startswith("response.") for event in streamed))
 
     def test_stream_refusal_content_part_fails_closed_for_chat(self):
         events = [

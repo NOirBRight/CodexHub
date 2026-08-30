@@ -647,6 +647,41 @@ def test_v2_external_plaintext_agent_message_uses_reversible_provider_envelope()
     assert plan.decode_payload({"input": [message]})["input"] == [item]
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"agent_type": "worker", "message": "do work"},
+        {"agent_type": "worker", "message": "do work", "fork_context": False},
+    ],
+    ids=["missing-task-name", "legacy-fork-context"],
+)
+def test_v2_external_spawn_response_repairs_known_v1_shape(arguments: dict[str, object]) -> None:
+    plan = _v2_plan()
+    alias = plan.entries[0].aliases[4]
+
+    decoded = plan.decode_payload(
+        {
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "v2-spawn-item",
+                    "call_id": "v2-spawn-call",
+                    "name": alias,
+                    "arguments": json.dumps(arguments),
+                }
+            ]
+        }
+    )
+
+    repaired = decoded["output"][0]
+    assert repaired["name"] == "spawn_agent"
+    assert json.loads(repaired["arguments"]) == {
+        "agent_type": "worker",
+        "message": "do work",
+        "task_name": "worker",
+    }
+
+
 def test_v2_adapted_response_marks_message_arguments_as_plaintext() -> None:
     plan = _v2_plan()
     alias = plan.entries[0].aliases[3]

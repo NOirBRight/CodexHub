@@ -1656,6 +1656,37 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(rewritten, 0)
         self.assertEqual(next_body, body)
 
+    def test_normalize_tool_schema_breaks_recursive_refs_for_opencode(self):
+        body = json.dumps({
+            "model": "muse-spark-1.2-contributor",
+            "tools": [{
+                "type": "function",
+                "name": "tree",
+                "parameters": {
+                    "type": "object",
+                    "$defs": {
+                        "Node": {
+                            "type": "object",
+                            "properties": {
+                                "child": {"$ref": "#/$defs/Node"},
+                            },
+                        },
+                    },
+                    "properties": {
+                        "root": {"$ref": "#/$defs/Node"},
+                    },
+                },
+            }],
+        }).encode("utf-8")
+
+        next_body, rewritten = gateway_compat.normalize_transparent_tool_schema_booleans(body)
+        self.assertGreater(rewritten, 0)
+        params = json.loads(next_body)["tools"][0]["parameters"]
+        self.assertNotIn("$ref", json.dumps(params["properties"]["root"]))
+        child = params["properties"]["root"]["properties"]["child"]
+        self.assertEqual(child.get("type"), "object")
+        self.assertNotIn("$ref", child)
+
     def test_normalize_tool_schema_booleans_without_tools_is_byte_identical(self):
         body = json.dumps({
             "model": "k3",

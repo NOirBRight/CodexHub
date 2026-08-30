@@ -107,13 +107,40 @@ def _responses_usage_to_chat_usage(usage: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _raise_for_unsupported_chat_message_semantics(message: Mapping[str, Any]) -> None:
-    for field in ("refusal", "audio", "annotations", "reasoning", "reasoning_content"):
+    for field in ("refusal", "audio", "annotations"):
         value = message.get(field)
         if value not in (None, "", [], {}):
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
                 f"Cannot translate Chat Completions message field {field!r} to Responses without losing it.",
             )
+
+
+def _chat_reasoning_output(message: Mapping[str, Any]) -> dict[str, Any] | None:
+    texts: list[str] = []
+
+    def add_text(value: Any) -> None:
+        if isinstance(value, str):
+            text = value.strip()
+            if text and text not in texts:
+                texts.append(text)
+
+    add_text(message.get("reasoning"))
+    add_text(message.get("reasoning_content"))
+    details = message.get("reasoning_details")
+    if isinstance(details, list):
+        for part in details:
+            if isinstance(part, Mapping):
+                add_text(part.get("text") or part.get("summary"))
+            else:
+                add_text(part)
+    if not texts:
+        return None
+    return {
+        "type": "reasoning",
+        "status": "completed",
+        "summary": [{"type": "summary_text", "text": text} for text in texts],
+    }
 
 
 def _require_supported_chat_message_fields(message: Mapping[str, Any], label: str) -> None:
@@ -130,6 +157,7 @@ def _require_supported_chat_message_fields(message: Mapping[str, Any], label: st
             "annotations",
             "reasoning",
             "reasoning_content",
+            "reasoning_details",
         },
         "tool": {"role", "content", "tool_call_id"},
     }
@@ -1323,6 +1351,9 @@ def chat_completion_to_response_body(
                     "Cannot translate a Chat Completions response choice without an object message.",
                 )
             _require_supported_chat_message_fields(message, "Chat Completions response message")
+            reasoning_output = _chat_reasoning_output(message)
+            if reasoning_output is not None:
+                output.append(reasoning_output)
             tool_outputs = _chat_completion_tool_outputs(
                 message,
                 chat_content_text=chat_content_text,
@@ -1712,6 +1743,7 @@ def _validate_chat_stream_source(source: Mapping[str, Any]) -> None:
             "annotations",
             "reasoning",
             "reasoning_content",
+            "reasoning_details",
         },
         "Chat Completions stream delta",
     )

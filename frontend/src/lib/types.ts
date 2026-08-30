@@ -20,6 +20,7 @@ export interface Model {
   input_modalities?: string[] | null;
   supported_reasoning_levels?: string[] | null;
   default_reasoning_level?: string | null;
+  thinking_mode?: "none" | "always_on" | "toggle" | null;
   pricing?: ModelPricing | null;
   metadata_provenance?: MetadataProvenance | null;
   sort_order?: number | null;
@@ -295,6 +296,7 @@ export interface GatewayModel {
   input_modalities?: string[] | null;
   supported_reasoning_levels?: string[] | null;
   default_reasoning_level?: string | null;
+  thinking_mode?: "none" | "always_on" | "toggle" | null;
 }
 
 export interface GatewayUsageSummary {

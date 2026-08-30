@@ -570,6 +570,10 @@ const zhCN = {
     testModelTitle: "测试模型 {{id}}",
     thisProvider: "此供应商",
     thinking: "推理",
+    thinkingAlwaysOn: "该模型始终开启思考。",
+    thinkingToggle: "该模型可开关思考，默认开启。",
+    thinkingNone: "该模型不提供思考控制。",
+    officialThinkingLocked: "官方思考档位不可编辑。",
     unsavedChanges: "{{name}} 有未保存的更改。",
     updateProviderCatalog: "正在更新供应商目录...",
     upstreamFormats: {

@@ -154,15 +154,33 @@ def test_sanitize_third_party_reasoning_items_replaces_null_content_with_empty_s
     item = payload["input"][1]
     assert item["content"] == []
     assert item["summary"][0]["text"] == "thought"
+    assert "id" not in item
 
 
-def test_sanitize_third_party_reasoning_items_replaces_null_summary_with_empty_sequence():
+def test_sanitize_third_party_reasoning_items_drops_stale_response_references():
+    payload = {
+        "previous_response_id": "resp_stale",
+        "input": [
+            {"type": "item_reference", "id": "rs_missing"},
+            {"type": "reasoning", "id": "rs_missing", "summary": []},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+
+    changed = gateway_request.sanitize_third_party_reasoning_items(payload)
+
+    assert changed is True
+    assert "previous_response_id" not in payload
+    assert [item.get("type") for item in payload["input"]] == ["message"]
+
+
+def test_sanitize_third_party_reasoning_items_drops_empty_reasoning_after_null_summary():
     payload = {"input": [{"type": "reasoning", "id": "rs_null_summary", "summary": None}]}
 
     changed = gateway_request.sanitize_third_party_reasoning_items(payload)
 
     assert changed is True
-    assert payload["input"][0]["summary"] == []
+    assert payload["input"] == []
 
 
 def test_sanitize_third_party_reasoning_items_strips_encrypted_content_everywhere():
@@ -220,6 +238,7 @@ def test_xai_v2_codex_app_history_is_safe_for_strict_responses_deserializers():
     assert any(item.get("name") == "apply_patch" for item in transformed["input"] if isinstance(item, dict))
     for item in transformed["input"]:
         if item.get("type") == "reasoning":
+            assert "id" not in item
             assert item.get("content") == []
             assert isinstance(item.get("summary"), list)
             for part in item["summary"]:

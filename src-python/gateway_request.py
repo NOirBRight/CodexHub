@@ -23,6 +23,7 @@ import proxy_telemetry
 import vision_proxy
 from catalog import canonical_model_id
 import gateway_catalog_runtime as _catalog
+import maintained_catalog
 import gateway_stream_semantics as _stream_semantics
 from gateway_errors import safe_upstream_error_detail
 import gateway_settings
@@ -49,7 +50,15 @@ DECODE_ERRORS = (OSError, zlib.error) + ((zstandard.ZstdError,) if zstandard is 
 
 OFFICIAL_ULTRA_REASONING_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra"}
 OFFICIAL_ALIAS_PREFIX = "openai/"
-UNSUPPORTED_REASONING_MODEL_PREFIXES = ("kimi-k2.6", "kimi-k2.7")
+UNSUPPORTED_REASONING_MODEL_PREFIXES = ()  # retained for tests; catalog drives drop now
+_UPSTREAM_TO_PROVIDER = {
+    "ollama_cloud": "ollama-cloud",
+    "volcengine": "volc",
+    "minimax_cn": "minimax-cn",
+    "kimi": "kimi",
+    "commandcode": "commandcode",
+    "opencode_go": "opencode-go",
+}
 OFFICIAL_ENCRYPTED_CONTENT_PREFIX = "gAAAA"
 BROWSER_CONTEXT_MARKERS = (
     "# in app browser",
@@ -290,7 +299,12 @@ def _third_party_reasoning_summary_parts(value: Any) -> list[dict[str, str]]:
     return parts
 
 
-def sanitize_third_party_reasoning_items(value: Any) -> bool:
+def sanitize_third_party_reasoning_items(
+    value: Any,
+    *,
+    preserve_collaboration_agent_message_encryption: bool = False,
+    inside_collaboration_agent_message: bool = False,
+) -> bool:
     # Codex App history stores Official/xAI reasoning blobs that other
     # Responses providers cannot decrypt, plus content: null which xAI rejects
     # as "invalid type: null, expected a sequence".
@@ -300,17 +314,43 @@ def sanitize_third_party_reasoning_items(value: Any) -> bool:
         index = 0
         while index < len(value):
             item = value[index]
-            if isinstance(item, dict) and item.get("type") == "encrypted_content":
+            if (
+                isinstance(item, dict)
+                and item.get("type") in {"encrypted_content", "item_reference"}
+                and not (
+                    preserve_collaboration_agent_message_encryption
+                    and inside_collaboration_agent_message
+                    and item.get("type") == "encrypted_content"
+                )
+            ):
                 del value[index]
                 changed = True
                 continue
-            if sanitize_third_party_reasoning_items(item):
+            if sanitize_third_party_reasoning_items(
+                item,
+                preserve_collaboration_agent_message_encryption=preserve_collaboration_agent_message_encryption,
+                inside_collaboration_agent_message=inside_collaboration_agent_message,
+            ):
                 changed = True
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "reasoning"
+                and not item.get("summary")
+                and item.get("content") == []
+                and "id" not in item
+            ):
+                del value[index]
+                changed = True
+                continue
             index += 1
         return changed
 
     if not isinstance(value, dict):
         return False
+
+    if isinstance(value.get("previous_response_id"), str):
+        value.pop("previous_response_id", None)
+        changed = True
 
     include = value.get("include")
     if isinstance(include, list):
@@ -323,6 +363,9 @@ def sanitize_third_party_reasoning_items(value: Any) -> bool:
             changed = True
 
     if value.get("type") == "reasoning":
+        if "id" in value:
+            value.pop("id", None)
+            changed = True
         if "encrypted_content" in value:
             value.pop("encrypted_content", None)
             changed = True
@@ -337,8 +380,19 @@ def sanitize_third_party_reasoning_items(value: Any) -> bool:
             value["summary"] = summary_parts
             changed = True
 
+    nested_inside_agent_message = (
+        inside_collaboration_agent_message
+        or (
+            preserve_collaboration_agent_message_encryption
+            and value.get("type") == "agent_message"
+        )
+    )
     for nested in list(value.values()):
-        if sanitize_third_party_reasoning_items(nested):
+        if sanitize_third_party_reasoning_items(
+            nested,
+            preserve_collaboration_agent_message_encryption=preserve_collaboration_agent_message_encryption,
+            inside_collaboration_agent_message=nested_inside_agent_message,
+        ):
             changed = True
 
     return changed
@@ -368,14 +422,69 @@ def _has_browser_context_guidance(value: Any) -> bool:
 def reasoning_param_is_unsupported(upstream_name: Any, requested_model: Any, upstream_model: Any) -> bool:
     if upstream_name == "official":
         return False
+    controls = _thinking_controls_for(upstream_name, requested_model, upstream_model)
+    return bool(controls and controls.drop_reasoning_effort)
+
+
+def _thinking_controls_for(
+    upstream_name: Any, requested_model: Any, upstream_model: Any
+) -> maintained_catalog.ThinkingPayload | None:
+    provider_id = _UPSTREAM_TO_PROVIDER.get(str(upstream_name or ""))
+    if not provider_id:
+        return None
+    wire = ""
     for model in (upstream_model, requested_model):
-        if not isinstance(model, str) or not model:
-            continue
-        model_key = canonical_model_id(model).lower()
-        if any(model_key.startswith(prefix) for prefix in UNSUPPORTED_REASONING_MODEL_PREFIXES):
-            return True
-    return False
+        if isinstance(model, str) and model.strip():
+            wire = canonical_model_id(model)
+            break
+    if not wire:
+        return None
+    return maintained_catalog.thinking_payload(provider_id, wire)
+
+
+def apply_maintained_thinking_controls(
+    payload: dict[str, Any],
+    upstream_name: Any,
+    requested_model: Any,
+    upstream_model: Any,
+) -> bool:
+    """Strip unsupported effort grades and attach vendor thinking JSON."""
+    controls = _thinking_controls_for(upstream_name, requested_model, upstream_model)
+    if controls is None:
+        return False
+    changed = False
+    inbound_thinking = payload.get("thinking")
+    thinking_enabled = None
+    if isinstance(inbound_thinking, dict):
+        thinking_type = str(inbound_thinking.get("type") or "").strip().lower()
+        if thinking_type == "disabled":
+            thinking_enabled = False
+        elif thinking_type in {"enabled", "adaptive"}:
+            thinking_enabled = True
+    if thinking_enabled is not None:
+        controls = maintained_catalog.thinking_payload(
+            _UPSTREAM_TO_PROVIDER.get(str(upstream_name or "")),
+            canonical_model_id(str(upstream_model or requested_model or "")),
+            effort=None,
+            thinking_enabled=thinking_enabled,
+        )
+    if controls.drop_reasoning_effort:
+        for key in ("reasoning", "reasoning_effort"):
+            if key in payload:
+                del payload[key]
+                changed = True
+        template = payload.get("chat_template_kwargs")
+        if isinstance(template, dict) and "reasoning_effort" in template:
+            template.pop("reasoning_effort", None)
+            if not template:
+                payload.pop("chat_template_kwargs", None)
+            changed = True
+    if controls.thinking is not None and not isinstance(inbound_thinking, dict):
+        payload["thinking"] = dict(controls.thinking)
+        changed = True
+    return changed
 _reasoning_param_is_unsupported = reasoning_param_is_unsupported
+_apply_maintained_thinking_controls = apply_maintained_thinking_controls
 
 
 def _request_carries_reasoning_control(payload: Mapping[str, Any]) -> bool:

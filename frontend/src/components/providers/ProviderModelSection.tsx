@@ -422,7 +422,10 @@ function ModelEditorOverlay({
 }) {
   const { t } = useTranslation();
   const [draft, setDraft] = useState<Model>(() => normalizeModel(model));
-  const reasoningEnabled = (draft.supported_reasoning_levels ?? []).length > 0;
+  const officialThinking = draft.thinking_mode === "none" || draft.thinking_mode === "always_on" || draft.thinking_mode === "toggle";
+  const reasoningEnabled = officialThinking
+    ? draft.thinking_mode !== "none" || (draft.supported_reasoning_levels ?? []).length > 0
+    : (draft.supported_reasoning_levels ?? []).length > 0;
 
   useEffect(() => {
     setDraft(normalizeModel(model));
@@ -546,7 +549,16 @@ function ModelEditorOverlay({
                 />
               </label>
             </div>
-            {reasoningEnabled && (
+            {officialThinking && (
+              <p className="text-xs text-slate-500">
+                {draft.thinking_mode === "toggle"
+                  ? t("providers.thinkingToggle")
+                  : draft.thinking_mode === "none"
+                    ? t("providers.thinkingNone")
+                    : t("providers.thinkingAlwaysOn")}
+              </p>
+            )}
+            {reasoningEnabled && (draft.supported_reasoning_levels ?? []).length > 0 && (
               <div className="grid gap-3 rounded-control border border-line bg-white p-3 lg:grid-cols-[minmax(0,1fr)_190px]">
                 <div className="grid gap-2">
                   <span className="text-xs font-semibold uppercase text-slate-500">{t("providers.reasoningLevels")}</span>
@@ -802,7 +814,12 @@ function modelCapabilityTags(model: Model): Array<"vision" | "thinking"> {
   if (hasVision(model)) {
     tags.push("vision");
   }
-  if ((model.supported_reasoning_levels ?? []).length || model.default_reasoning_level) {
+  if (
+    (model.supported_reasoning_levels ?? []).length ||
+    model.default_reasoning_level ||
+    model.thinking_mode === "always_on" ||
+    model.thinking_mode === "toggle"
+  ) {
     tags.push("thinking");
   }
   return tags;

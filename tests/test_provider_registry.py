@@ -27,7 +27,7 @@ class ProviderRegistryTests(unittest.TestCase):
                             "apiKey": "volc-secret",
                         },
                         "models": {
-                            "glm-5.2": {
+                            "glm-5.3": {
                                 "limit": {"context": 1024000, "output": 4096},
                                 "modalities": {"input": ["text"], "output": ["text"]},
                             },
@@ -42,10 +42,10 @@ class ProviderRegistryTests(unittest.TestCase):
 
         models = configured_external_models(path)
 
-        self.assertEqual([model.alias for model in models], ["volc/glm-5.2"])
+        self.assertEqual([model.alias for model in models], ["volc/glm-5.3"])
         self.assertEqual(models[0].base_url, "https://ark.example.test/api/coding/v3")
         self.assertEqual(models[0].api_key, "volc-secret")
-        self.assertEqual(models[0].upstream_model, "glm-5.2")
+        self.assertEqual(models[0].upstream_model, "glm-5.3")
         self.assertEqual(models[0].context_window, 1024000)
         self.assertEqual(models[0].max_output_tokens, 8192)
         self.assertEqual(models[0].max_output_source, "live_probe_2026-06-28")

@@ -143,17 +143,34 @@ def deny_match_model_id(model_id: str) -> str:
 def load_policy(path: Path) -> CatalogPolicy:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     visibility = data.get("visibility", {})
+    import maintained_catalog
+
+    denied_models = {canonical_model_id(x) for x in visibility.get("denied_models", [])}
+    display_names = dict(maintained_catalog.display_names())
+    display_names.update({canonical_model_id(k): str(v) for k, v in data.get("display_names", {}).items()})
+    allowed_ollama = tuple(
+        dict.fromkeys(
+            [
+                *(canonical_model_id(str(x)) for x in visibility.get("allowed_ollama_cloud_models", [])),
+                *maintained_catalog.allowed_ollama_cloud_model_ids(),
+            ]
+        )
+    )
+    allowed_providers = tuple(
+        dict.fromkeys(
+            [
+                *(canonical_model_id(str(x)) for x in visibility.get("allowed_provider_models", [])),
+                *maintained_catalog.allowed_provider_slugs(),
+            ]
+        )
+    )
     return CatalogPolicy(
-        denied_models={canonical_model_id(x) for x in visibility.get("denied_models", [])},
+        denied_models=denied_models,
         denied_substrings={str(x).lower() for x in visibility.get("denied_substrings", [])},
-        display_names={canonical_model_id(k): str(v) for k, v in data.get("display_names", {}).items()},
+        display_names=display_names,
         official_models=tuple(canonical_model_id(str(x)) for x in visibility.get("official_models", [])),
-        allowed_ollama_cloud_models=tuple(
-            canonical_model_id(str(x)) for x in visibility.get("allowed_ollama_cloud_models", [])
-        ),
-        allowed_provider_models=tuple(
-            canonical_model_id(str(x)) for x in visibility.get("allowed_provider_models", [])
-        ),
+        allowed_ollama_cloud_models=allowed_ollama,
+        allowed_provider_models=allowed_providers,
         auto_include_ollama_cloud=bool(visibility.get("auto_include_ollama_cloud", False)),
     )
 

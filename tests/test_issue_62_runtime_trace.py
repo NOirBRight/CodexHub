@@ -2,6 +2,7 @@ import json
 import importlib.util
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,32 @@ SOURCE_CONTRACT = ROOT / "docs" / "evidence" / "issue-62" / "codex-0.146-source-
 WIRE_FIXTURE = ROOT / "docs" / "evidence" / "issue-62" / "codexhub-runtime-wire-fixture.json"
 AUDIT = ROOT / "docs" / "evidence" / "issue-62" / "read-only-gate-audit.json"
 REPLAY_SCRIPT = ROOT / "scripts" / "check-codex-thread-tool-surface.ps1"
+_POWERSHELL_REPLAY_TESTS = frozenset(
+    {
+        "test_identity_replay_passes",
+        "test_negative_replays_fail_visibly",
+        "test_inventory_identity_replay_passes",
+        "test_inventory_check_rejects_generated_artifact_drift",
+        "test_inventory_check_rejects_stale_response_identity_pointer",
+        "test_powershell_accepts_pass_non_direct_state_like_python",
+        "test_powershell_rejects_historical_capture_provenance_drift",
+        "test_powershell_rejects_source_contract_family_schema_drift",
+        "test_powershell_rejects_unknown_source_contract_fields",
+        "test_powershell_rejects_unknown_nested_source_contract_fields",
+        "test_powershell_rejects_source_contract_request_shape_value_mutations",
+        "test_negative_inventory_replays_fail_visibly",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _skip_unavailable_powershell_replays(request) -> None:
+    if request.function.__name__ not in _POWERSHELL_REPLAY_TESTS:
+        return
+    if sys.platform != "win32":
+        pytest.skip("Windows PowerShell replay tests skip on Linux")
+    if shutil.which("powershell") is None and shutil.which("powershell.exe") is None:
+        pytest.skip("Windows PowerShell is required for replay tests")
 
 
 def run_replay(case: str) -> subprocess.CompletedProcess[str]:

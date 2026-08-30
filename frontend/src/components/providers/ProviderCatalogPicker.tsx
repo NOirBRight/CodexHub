@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
+import { ProviderLogo } from "../../lib/providerLogos";
 import type { Provider } from "../../lib/types";
 
 export function ProviderCatalogPicker({
@@ -75,7 +76,10 @@ export function ProviderCatalogPicker({
                     onClick={() => onSelectPreset(provider)}
                   >
                     <span className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-semibold text-ink">{provider.name}</span>
+                      <span className="flex min-w-0 items-center gap-2">
+                        <ProviderLogo providerId={provider.id} />
+                        <span className="truncate text-sm font-semibold text-ink">{provider.name}</span>
+                      </span>
                       {alreadyAdded ? (
                         <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                           {t("providers.catalogProviderAlreadyAdded")}

@@ -1936,8 +1936,8 @@ fn pi_stable_takeover_adopts_beta_legacy_baseline() {
             beta_root(beta_backups.clone()),
         ],
         &settings,
-        &[],
-        "openai/gpt-5.5",
+        &client_export_test_providers(),
+        "minimax/minimax-m3",
     )
     .unwrap();
 

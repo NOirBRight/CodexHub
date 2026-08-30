@@ -39,12 +39,21 @@ Instantiate fills empty URL, models, formats, and prefix only; bundled
 updates must not overwrite user-owned URL, protocol, enabled models, or
 ordering.
 
-The bundled catalog of Maintained Providers is:
+The bundled catalog of Provider Presets is:
 
 - `ollama-cloud`
 - `volc`
 - `minimax-cn`
+- `kimi-cn`
+- `kimi`
+- `commandcode`
+- `opencode-go`
 - `xai`
+
+Catalog-maintained Preset model names, thinking levels, and defaults live in
+the Maintained Catalog (ADR-0009). The standalone xAI Preset owns its rows.
+Missing official model ids are inserted additively; other instantiate fields
+stay empty-only.
 
 Xunfei is removed from the bundle only. A user-added Xunfei row on disk is
 never deleted. Official is not a Preset. Custom is the empty Preset.

@@ -1538,6 +1538,7 @@ fn subscription_models_to_metadata_models(
                 .default_reasoning_level
                 .clone()
                 .or_else(|| defaults.and_then(|model| model.default_reasoning_level.clone())),
+            thinking_mode: defaults.and_then(|model| model.thinking_mode.clone()),
             pricing: defaults.and_then(|model| model.pricing.clone()),
             metadata_provenance: Some(MetadataProvenance {
                 source: "codex_subscription".to_string(),
@@ -2907,6 +2908,7 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
         default_reasoning_level: override_model
             .default_reasoning_level
             .or(base.default_reasoning_level.take()),
+        thinking_mode: override_model.thinking_mode.or(base.thinking_mode.take()),
         pricing: override_model.pricing.or(base.pricing.take()),
         metadata_provenance: override_model.metadata_provenance,
         sort_order: override_model.sort_order.or(base.sort_order),
@@ -3216,6 +3218,10 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
             .and_then(reasoning_efforts),
         default_reasoning_level: object
             .get("default_reasoning_level")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
+        thinking_mode: object
+            .get("thinking_mode")
             .and_then(Value::as_str)
             .and_then(nonblank),
         sort_order: object.get("priority").and_then(optional_i32),

@@ -28,6 +28,7 @@ import {
 } from "../components/providers/OfficialOpenAIUsagePanel";
 import { AddProviderPanel, ProviderDetail } from "../components/providers/ProviderEditor";
 import { ProviderCatalogPicker } from "../components/providers/ProviderCatalogPicker";
+import { providerLogoSrc } from "../lib/providerLogos";
 import { HeaderRow } from "../components/providers/ProviderFormControls";
 import {
   isOfficialModelDisabled,
@@ -1533,6 +1534,7 @@ function CodexHubProviderCard({
                 active={selectedId === item.provider.id}
                 enabled={item.provider.enabled}
                 label={item.provider.name}
+                logoSrc={providerLogoSrc(item.provider.id)}
                 meta={t("providers.modelCount", {
                   enabled: item.provider.models.filter((model) => model.enabled).length,
                   total: item.provider.models.length,
@@ -1614,6 +1616,7 @@ function ProviderNavButton({
   enabled,
   highlightShape = "full",
   label,
+  logoSrc,
   meta,
   onClick,
   onToggle,
@@ -1625,6 +1628,7 @@ function ProviderNavButton({
   enabled: boolean;
   highlightShape?: "full" | "right";
   label: string;
+  logoSrc?: string | null;
   meta: string;
   onClick: () => void;
   onToggle: (enabled: boolean) => void;
@@ -1647,7 +1651,14 @@ function ProviderNavButton({
       )}
     >
       <button type="button" className="focus-ring min-w-0 text-left" onClick={onClick}>
-        <span className="block truncate font-semibold">{label}</span>
+        <span className="flex min-w-0 items-center gap-2">
+          {logoSrc ? (
+            <span className="grid h-6 w-6 shrink-0 place-items-center overflow-hidden">
+              <img src={logoSrc} alt="" className="max-h-5 max-w-5 object-contain" aria-hidden="true" />
+            </span>
+          ) : null}
+          <span className="block truncate font-semibold">{label}</span>
+        </span>
         <span className="block truncate text-xs text-slate-500">{meta}</span>
       </button>
       <SwitchControl

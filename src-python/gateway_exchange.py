@@ -440,6 +440,10 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, h
         return prepared_exchange, hooks.official_mutation(body, payload, upstream, model_id=request.inbound.model)
     if policy is MutationPolicy.GATEWAY_COMPATIBILITY and not pre_compatibility_applied:
         body = hooks.compatibility_mutation(body, upstream, model_id=request.inbound.model, event_context=request.event_context, inject_codex_tools=request.route_plan.tool_exposure.gateway_schema_injection, tool_protocol_override=attempt.tool_protocol, tool_surface_strategy_override=attempt.tool_surface_strategy, native_responses_tool_codec_override=attempt.native_responses_tool_codec)
+    if policy is MutationPolicy.GATEWAY_COMPATIBILITY:
+        body, schema_rewrites = hooks.normalize_tool_schema_booleans(body)
+        if schema_rewrites:
+            request.proxy_request_context["tool_schema_rewrites"] = schema_rewrites
     return prepared_exchange, body
 
 def execute_exchange(request: ExchangeRequest, hooks: ExchangeHooks, *, progress: ExchangeProgress | None = None) -> ExchangeResult:

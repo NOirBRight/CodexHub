@@ -1757,45 +1757,139 @@ _TOOL_SCHEMA_VALUE_KEYS = (
 _TOOL_SCHEMA_LIST_KEYS = ("allOf", "anyOf", "oneOf", "prefixItems")
 
 
-def _normalize_tool_json_schema_items(value: list[Any], state: dict[str, int]) -> list[Any]:
+def _json_pointer_get(root: Any, pointer: str) -> Any:
+    if pointer in {"#", ""}:
+        return root
+    if not pointer.startswith("#/"):
+        return None
+    node: Any = root
+    for raw_part in pointer[2:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+    return node
+
+
+def _normalize_tool_json_schema_items(
+    value: list[Any],
+    state: dict[str, int],
+    *,
+    root: Any,
+    visiting: set[str],
+) -> list[Any]:
     return [
-        _normalize_tool_json_schema(item, state) if isinstance(item, (dict, bool)) else item
+        _normalize_tool_json_schema(item, state, root=root, visiting=visiting)
+        if isinstance(item, (dict, bool))
+        else item
         for item in value
     ]
 
 
-def _normalize_tool_json_schema(node: Any, state: dict[str, int]) -> Any:
-    """Replace boolean subschemas with equivalent object forms.
+def _normalize_tool_json_schema(
+    node: Any,
+    state: dict[str, int],
+    *,
+    root: Any | None = None,
+    visiting: set[str] | None = None,
+) -> Any:
+    """Normalize tool JSON Schema for third-party upstreams.
 
-    ``true`` and ``{}`` accept any instance; ``false`` and ``{"not": {}}``
-    accept none. Some upstreams (for example Moonshot-flavored validators)
-    reject boolean property schemas outright, so transparent routes normalize
-    them without changing validation semantics.
+    Boolean subschemas become objects (``true`` -> ``{}``, ``false`` ->
+    ``{"not": {}}``). Local ``$ref`` values are inlined; recursive refs are
+    replaced with an open object so providers such as OpenCode Go do not reject
+    the request with "Recursive JSON schemas are not currently supported".
     """
+    if visiting is None:
+        visiting = set()
+    if root is None:
+        root = node
     if isinstance(node, bool):
         state["rewritten"] += 1
         return {} if node else {"not": {}}
     if not isinstance(node, dict):
         return node
     next_node = dict(node)
+    ref = next_node.get("$ref")
+    if not isinstance(ref, str):
+        ref = next_node.get("$dynamicRef")
+    if isinstance(ref, str) and ref.startswith("#"):
+        if ref in visiting:
+            state["rewritten"] += 1
+            leftover = {
+                key: value
+                for key, value in next_node.items()
+                if key not in {"$ref", "$dynamicRef"}
+            }
+            return leftover or {"type": "object"}
+        target = _json_pointer_get(root, ref)
+        if isinstance(target, (dict, bool)):
+            visiting.add(ref)
+            inlined = _normalize_tool_json_schema(target, state, root=root, visiting=visiting)
+            visiting.discard(ref)
+            state["rewritten"] += 1
+            merged = dict(inlined) if isinstance(inlined, dict) else {"type": "object"}
+            for key, value in next_node.items():
+                if key in {"$ref", "$dynamicRef"} or key in merged:
+                    continue
+                merged[key] = (
+                    _normalize_tool_json_schema(value, state, root=root, visiting=visiting)
+                    if isinstance(value, (dict, bool))
+                    else value
+                )
+            return merged
     for key in _TOOL_SCHEMA_MAP_KEYS:
         value = next_node.get(key)
         if isinstance(value, dict):
             next_node[key] = {
-                name: _normalize_tool_json_schema(subschema, state) if isinstance(subschema, (dict, bool)) else subschema
+                name: _normalize_tool_json_schema(subschema, state, root=root, visiting=visiting)
+                if isinstance(subschema, (dict, bool))
+                else subschema
                 for name, subschema in value.items()
             }
     for key in _TOOL_SCHEMA_VALUE_KEYS:
         value = next_node.get(key)
         if isinstance(value, (dict, bool)):
-            next_node[key] = _normalize_tool_json_schema(value, state)
+            next_node[key] = _normalize_tool_json_schema(value, state, root=root, visiting=visiting)
         elif isinstance(value, list):
-            next_node[key] = _normalize_tool_json_schema_items(value, state)
+            next_node[key] = _normalize_tool_json_schema_items(value, state, root=root, visiting=visiting)
     for key in _TOOL_SCHEMA_LIST_KEYS:
         value = next_node.get(key)
         if isinstance(value, list):
-            next_node[key] = _normalize_tool_json_schema_items(value, state)
+            next_node[key] = _normalize_tool_json_schema_items(value, state, root=root, visiting=visiting)
+    leftover_ref = False
+    for key in ("$ref", "$dynamicRef"):
+        if isinstance(next_node.get(key), str):
+            leftover_ref = True
+            next_node.pop(key, None)
+    if leftover_ref:
+        state["rewritten"] += 1
+        if not next_node:
+            return {"type": "object"}
     return next_node
+
+
+def _rewrite_tool_entry_schemas(tool: Any, state: dict[str, int]) -> Any:
+    if not isinstance(tool, dict):
+        return tool
+    next_tool = dict(tool)
+    function = next_tool.get("function")
+    if isinstance(function, dict):
+        next_function = dict(function)
+        for key in ("parameters", "input_schema"):
+            schema = next_function.get(key)
+            if isinstance(schema, (dict, bool)):
+                next_function[key] = _normalize_tool_json_schema(schema, state)
+        next_tool["function"] = next_function
+    for key in ("parameters", "input_schema"):
+        schema = next_tool.get(key)
+        if isinstance(schema, (dict, bool)):
+            next_tool[key] = _normalize_tool_json_schema(schema, state)
+    nested = next_tool.get("tools")
+    if isinstance(nested, list):
+        next_tool["tools"] = [_rewrite_tool_entry_schemas(item, state) for item in nested]
+    return next_tool
 
 
 def _normalize_transparent_tool_schema_booleans(body: bytes) -> tuple[bytes, int]:
@@ -1806,17 +1900,7 @@ def _normalize_transparent_tool_schema_booleans(body: bytes) -> tuple[bytes, int
     if not isinstance(tools, list):
         return body, 0
     state = {"rewritten": 0}
-    next_tools: list[Any] = []
-    for tool in tools:
-        if isinstance(tool, dict):
-            function = tool.get("function")
-            if isinstance(function, dict):
-                parameters = function.get("parameters")
-                if isinstance(parameters, (dict, bool)):
-                    parameters = _normalize_tool_json_schema(parameters, state)
-                    function = {**function, "parameters": parameters}
-                    tool = {**tool, "function": function}
-        next_tools.append(tool)
+    next_tools = [_rewrite_tool_entry_schemas(tool, state) for tool in tools]
     if not state["rewritten"]:
         return body, 0
     next_payload = dict(payload)

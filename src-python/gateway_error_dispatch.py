@@ -801,7 +801,7 @@ def dispatch_proxy_post_exception(exc: BaseException, live: PostRequestLiveState
             return
         identity = _retry_identity_from_context(adapter_event_context)
         detail = safe_upstream_error_detail(exc, redact_identity=identity)
-        logger.error("unexpected proxy error request_id=%s detail=%s", request_id, detail)
+        logger.exception("unexpected proxy error request_id=%s detail=%s", request_id, detail)
         write_proxy_event(
             "request_error",
             request_id=request_id,

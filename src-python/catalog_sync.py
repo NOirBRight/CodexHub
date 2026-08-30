@@ -22,6 +22,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from atomic_io import atomic_read_or_create_text, atomic_write_text
+import maintained_catalog
 from catalog import (
     CatalogVisibility,
     CatalogPolicy,
@@ -417,10 +418,13 @@ def sanitize_third_party_reasoning_levels(value: Any) -> list[dict[str, str]]:
     return sanitized
 
 
-def complete_third_party_reasoning_levels(value: Any) -> list[dict[str, str]]:
-    configured = {
-        item["effort"]: item for item in sanitize_third_party_reasoning_levels(value)
-    }
+def complete_third_party_reasoning_levels(
+    value: Any, *, fill_missing: bool = True
+) -> list[dict[str, str]]:
+    sanitized = sanitize_third_party_reasoning_levels(value)
+    if not fill_missing:
+        return sanitized
+    configured = {item["effort"]: item for item in sanitized}
     return [
         configured.get(effort)
         or {"effort": effort, "description": REASONING_LEVEL_DESCRIPTIONS[effort]}
@@ -445,6 +449,7 @@ def catalog_cache_dependency_paths() -> tuple[Path, ...]:
         Path(__file__).resolve(),
         PROXY_DIR / "catalog.py",
         PROXY_DIR / "providers_config.py",
+        PROXY_DIR / "maintained_catalog.py",
         MANAGED_CATALOG_BASELINE_PATH,
         CATALOG_OVERRIDES_PATH,
         catalog_owner_secret_path(),
@@ -2327,13 +2332,25 @@ def build_ollama_model(
     model.setdefault("visibility", "list")
     model.setdefault("supported_in_api", True)
     apply_ollama_model_limits(model, slug, model_metadata or {})
+    maintained = maintained_catalog.resolve_model("ollama-cloud", slug)
+    if maintained is not None:
+        model["supported_reasoning_levels"] = complete_third_party_reasoning_levels(
+            maintained.reasoning_levels, fill_missing=False
+        )
+        if maintained.reasoning_levels and maintained.default_reasoning_level:
+            model["default_reasoning_level"] = maintained.default_reasoning_level
+        else:
+            model.pop("default_reasoning_level", None)
+        dynamic_modalities = (model_metadata or {}).get(slug, {}).get("input_modalities")
+        if not (isinstance(dynamic_modalities, list) and dynamic_modalities):
+            model["input_modalities"] = list(maintained.input_modalities)
     multi_agent_version = (model_metadata or {}).get(slug, {}).get("multi_agent_version")
     if multi_agent_version in {"v1", "v2"}:
         model["multi_agent_version"] = multi_agent_version
     inherited_metadata = model.get("codex_proxy_metadata")
     safe_metadata = {
         key: inherited_metadata[key]
-        for key in ("context_source", "max_output_source")
+        for key in ("context_source", "max_output_source", "thinking_mode")
         if isinstance(inherited_metadata, dict) and key in inherited_metadata
     }
     safe_metadata.update(
@@ -2343,6 +2360,8 @@ def build_ollama_model(
             "upstream_model": slug,
         }
     )
+    if maintained is not None:
+        safe_metadata["thinking_mode"] = maintained.thinking_mode
     model["codex_proxy_metadata"] = safe_metadata
     _disable_responses_only_capabilities_for_chat(
         model,
@@ -2448,29 +2467,56 @@ def build_external_provider_model(
     model.setdefault("supported_in_api", True)
     model["input_modalities"] = list(external_model.get("input_modalities") or ("text",))
 
+    provider_alias = str(external_model.get("provider_alias") or "")
+    upstream_model = str(external_model.get("upstream_model") or "")
+    maintained = maintained_catalog.resolve_model(provider_alias, upstream_model)
+    if maintained is not None and model["input_modalities"] == ["text"]:
+        model["input_modalities"] = list(maintained.input_modalities)
+
     explicit_reasoning_levels = external_model.get("supported_reasoning_levels")
     has_explicit_reasoning_levels = (
         isinstance(explicit_reasoning_levels, (list, tuple)) and bool(explicit_reasoning_levels)
     )
-    reasoning_levels_source = (
-        explicit_reasoning_levels
-        if has_explicit_reasoning_levels
-        else model.get("supported_reasoning_levels")
+    if has_explicit_reasoning_levels:
+        reasoning_levels_source = explicit_reasoning_levels
+        fill_missing = maintained is None
+    elif maintained is not None:
+        reasoning_levels_source = maintained.reasoning_levels
+        fill_missing = False
+    else:
+        reasoning_levels_source = model.get("supported_reasoning_levels")
+        fill_missing = True
+    sanitized_reasoning_levels = complete_third_party_reasoning_levels(
+        reasoning_levels_source, fill_missing=fill_missing
     )
-    sanitized_reasoning_levels = complete_third_party_reasoning_levels(reasoning_levels_source)
     model["supported_reasoning_levels"] = sanitized_reasoning_levels
 
     configured_default = external_model.get("default_reasoning_level")
-    default_source = (
-        configured_default
-        if isinstance(configured_default, str) and configured_default.strip()
-        else model.get("default_reasoning_level")
-    )
-    normalized_default = str(default_source).strip().lower()
+    if isinstance(configured_default, str) and configured_default.strip():
+        default_source = configured_default
+    elif maintained is not None:
+        default_source = maintained.default_reasoning_level
+    else:
+        default_source = model.get("default_reasoning_level")
     supported_efforts = [item["effort"] for item in sanitized_reasoning_levels]
-    if normalized_default not in supported_efforts:
-        normalized_default = "xhigh" if "xhigh" in supported_efforts else supported_efforts[0]
-    model["default_reasoning_level"] = normalized_default
+    if not supported_efforts:
+        model.pop("default_reasoning_level", None)
+    else:
+        normalized_default = str(default_source or "").strip().lower()
+        if normalized_default not in supported_efforts:
+            catalog_default = maintained.default_reasoning_level if maintained is not None else None
+            if catalog_default in supported_efforts:
+                normalized_default = catalog_default
+            elif "xhigh" in supported_efforts:
+                normalized_default = "xhigh"
+            else:
+                normalized_default = supported_efforts[0]
+        model["default_reasoning_level"] = normalized_default
+
+    if maintained is not None:
+        proxy_thinking = dict(model.get("codex_proxy_metadata") or {})
+        proxy_thinking["thinking_mode"] = maintained.thinking_mode
+        model["codex_proxy_metadata"] = proxy_thinking
 
     context_window = external_model.get("context_window")
     if isinstance(context_window, int) and context_window > 0:
@@ -2485,7 +2531,7 @@ def build_external_provider_model(
     inherited_metadata = model.get("codex_proxy_metadata")
     proxy_metadata = {
         key: inherited_metadata[key]
-        for key in ("context_source", "max_output_source")
+        for key in ("context_source", "max_output_source", "thinking_mode")
         if isinstance(inherited_metadata, dict) and key in inherited_metadata
     }
     proxy_metadata.update(

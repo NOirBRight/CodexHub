@@ -571,6 +571,10 @@ const enUS = {
     testModelTitle: "Test model {{id}}",
     thisProvider: "This provider",
     thinking: "Thinking",
+    thinkingAlwaysOn: "Thinking is always on for this model.",
+    thinkingToggle: "Thinking can be turned on or off. Default is on.",
+    thinkingNone: "This model does not expose thinking controls.",
+    officialThinkingLocked: "Official thinking levels cannot be edited.",
     unsavedChanges: "{{name}} has unsaved changes.",
     updateProviderCatalog: "Updating provider catalog...",
     upstreamFormats: {

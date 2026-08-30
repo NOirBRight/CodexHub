@@ -11,7 +11,29 @@ pub fn get_providers() -> Result<Vec<Provider>, String> {
 }
 
 pub fn get_bundled_providers() -> Result<Vec<Provider>, String> {
-    get_bundled_providers_with_paths(&ConfigPaths::runtime()?)
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("config").join("providers.toml"));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("config").join("providers.toml"));
+    }
+    let paths = ConfigPaths::runtime()?;
+    candidates.push(paths.bundled_providers_path());
+    let mut last_error = String::from("bundled providers.toml not found");
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        match load_providers_from_path(&path) {
+            Ok(providers) if !providers.is_empty() => return Ok(providers),
+            Ok(_) => last_error = format!("bundled providers.toml is empty: {}", path.display()),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(last_error)
 }
 
 pub fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
@@ -653,6 +675,7 @@ fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String
     load_providers_from_path(&path)
 }
 
+#[cfg(test)]
 pub(crate) fn get_bundled_providers_with_paths(
     paths: &ConfigPaths,
 ) -> Result<Vec<Provider>, String> {

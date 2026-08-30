@@ -1,3 +1,5 @@
+# Bundled Maintained Provider presets. Model identity is owned by maintained_catalog.py (ADR-0009).
+
 [[providers]]
 id = "ollama-cloud"
 name = "Ollama Cloud"
@@ -6,17 +8,32 @@ api_key = "{env:OLLAMA_API_KEY}"
 display_prefix = "Ollama"
 upstream_format = "responses"
 available_upstream_formats = ["responses"]
-# Set true only when an external provider returns truthful cached-input-token counts.
 reports_cached_input_tokens = false
 sort_order = 1
 enabled = true
 
   [[providers.models]]
-  id = "minimax-m3"
-  display_name = "Ollama MiniMax-M3"
-  context_window = 512000
-  max_output_tokens = 524288
+  id = "glm-5.3"
+  display_name = "Ollama GLM-5.3"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
   sort_order = 1
+  enabled = true
+
+  [[providers.models]]
+  id = "glm-5.3-flash"
+  display_name = "Ollama GLM-5.3 Flash"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 2
   enabled = true
 
   [[providers.models]]
@@ -24,18 +41,196 @@ enabled = true
   display_name = "Ollama GLM-5.2"
   context_window = 1000000
   max_output_tokens = 131072
-  sort_order = 2
-  enabled = true
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
   tool_surface_strategy = "deferred_core"
   native_responses_tool_codec = "strict_apply_patch"
   multi_agent_version = "v2"
+  sort_order = 3
+  enabled = true
+
+  [[providers.models]]
+  id = "glm-5.1"
+  display_name = "Ollama GLM-5.1"
+  context_window = 202752
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 4
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k3"
+  display_name = "Ollama Kimi K3"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 5
+  enabled = true
 
   [[providers.models]]
   id = "kimi-k2.7-code"
   display_name = "Ollama Kimi K2.7 Code"
   context_window = 262144
+  max_output_tokens = 262144
+  input_modalities = ["text", "image"]
+  thinking_mode = "always_on"
+  sort_order = 6
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k2.6"
+  display_name = "Ollama Kimi K2.6"
+  context_window = 262144
+  max_output_tokens = 262144
+  input_modalities = ["text", "image"]
+  thinking_mode = "toggle"
+  sort_order = 7
+  enabled = true
+
+  [[providers.models]]
+  id = "minimax-m3"
+  display_name = "Ollama MiniMax-M3"
+  context_window = 512000
+  max_output_tokens = 524288
+  input_modalities = ["text", "image"]
+  thinking_mode = "toggle"
+  sort_order = 8
+  enabled = true
+
+  [[providers.models]]
+  id = "minimax-m2.7"
+  display_name = "Ollama MiniMax-M2.7"
+  context_window = 196608
+  max_output_tokens = 196608
+  input_modalities = ["text"]
+  thinking_mode = "always_on"
+  sort_order = 9
+  enabled = true
+
+  [[providers.models]]
+  id = "deepseek-v4-pro"
+  display_name = "Ollama DeepSeek V4 Pro"
+  context_window = 1048576
+  max_output_tokens = 1048576
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 10
+  enabled = true
+
+  [[providers.models]]
+  id = "deepseek-v4-flash"
+  display_name = "Ollama DeepSeek V4 Flash"
+  context_window = 1048576
+  max_output_tokens = 1048576
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 11
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen3.5:397b"
+  display_name = "Ollama Qwen 3.5 397B"
+  context_window = 262144
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 12
+  enabled = true
+
+  [[providers.models]]
+  id = "gemma4:31b"
+  display_name = "Ollama Gemma 4 31B"
+  context_window = 262144
+  max_output_tokens = 262144
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 13
+  enabled = true
+
+  [[providers.models]]
+  id = "gpt-oss:120b"
+  display_name = "Ollama GPT-OSS 120B"
+  context_window = 131072
   max_output_tokens = 32768
-  sort_order = 3
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "medium"
+  thinking_mode = "always_on"
+  sort_order = 14
+  enabled = true
+
+  [[providers.models]]
+  id = "gpt-oss:20b"
+  display_name = "Ollama GPT-OSS 20B"
+  context_window = 131072
+  max_output_tokens = 32768
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "medium"
+  thinking_mode = "always_on"
+  sort_order = 15
+  enabled = true
+
+  [[providers.models]]
+  id = "nemotron-3-ultra"
+  display_name = "Ollama Nemotron 3 Ultra"
+  context_window = 262144
+  max_output_tokens = 128000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["medium", "high"]
+  default_reasoning_level = "medium"
+  thinking_mode = "always_on"
+  sort_order = 16
+  enabled = true
+
+  [[providers.models]]
+  id = "nemotron-3-super"
+  display_name = "Ollama Nemotron 3 Super"
+  context_window = 262144
+  max_output_tokens = 65536
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high"]
+  default_reasoning_level = "low"
+  thinking_mode = "always_on"
+  sort_order = 17
+  enabled = true
+
+  [[providers.models]]
+  id = "nemotron-3-nano:30b"
+  display_name = "Ollama Nemotron 3 Nano 30B"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high"]
+  default_reasoning_level = "low"
+  thinking_mode = "always_on"
+  sort_order = 18
+  enabled = true
+
+  [[providers.models]]
+  id = "mistral-large-3:675b"
+  display_name = "Ollama Mistral Large 3"
+  context_window = 262144
+  max_output_tokens = 262144
+  input_modalities = ["text", "image"]
+  thinking_mode = "none"
+  sort_order = 19
   enabled = true
 
 [[providers]]
@@ -50,27 +245,119 @@ sort_order = 2
 enabled = true
 
   [[providers.models]]
-  id = "glm-5.2"
-  display_name = "Volc GLM-5.2"
-  context_window = 1024000
-  max_output_tokens = 8192
+  id = "glm-5.3"
+  display_name = "Volc GLM-5.3"
+  context_window = 128000
+  max_output_tokens = 32000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
   sort_order = 1
+  enabled = true
+
+  [[providers.models]]
+  id = "doubao-seed-2.1-turbo"
+  display_name = "Volc Doubao Seed 2.1 Turbo"
+  context_window = 256000
+  max_output_tokens = 256000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 2
+  enabled = true
+
+  [[providers.models]]
+  id = "doubao-seed-evolving"
+  display_name = "Volc Doubao Seed Evolving"
+  context_window = 1000000
+  max_output_tokens = 256000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 3
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k2.7-code"
+  display_name = "Volc Kimi K2.7 Code"
+  context_window = 256000
+  max_output_tokens = 32000
+  input_modalities = ["text", "image"]
+  thinking_mode = "always_on"
+  sort_order = 4
   enabled = true
 
   [[providers.models]]
   id = "minimax-m3"
   display_name = "Volc MiniMax-M3"
-  context_window = 1000000
-  max_output_tokens = 8192
-  sort_order = 2
-  enabled = false
+  context_window = 512000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  thinking_mode = "toggle"
+  sort_order = 5
+  enabled = true
 
   [[providers.models]]
-  id = "kimi-k2.6"
-  display_name = "Volc Kimi K2.6"
+  id = "deepseek-v4-pro"
+  display_name = "Volc DeepSeek V4 Pro"
+  context_window = 1024000
+  max_output_tokens = 384000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 6
+  enabled = true
+
+  [[providers.models]]
+  id = "deepseek-v4-flash"
+  display_name = "Volc DeepSeek V4 Flash"
+  context_window = 1024000
+  max_output_tokens = 384000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 7
+  enabled = true
+
+  [[providers.models]]
+  id = "doubao-seed-2.0-code"
+  display_name = "Volc Doubao Seed 2.0 Code"
   context_window = 256000
-  max_output_tokens = 8192
-  sort_order = 3
+  max_output_tokens = 256000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 8
+  enabled = true
+
+  [[providers.models]]
+  id = "doubao-seed-2.0-pro"
+  display_name = "Volc Doubao Seed 2.0 Pro"
+  context_window = 256000
+  max_output_tokens = 256000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 9
+  enabled = true
+
+  [[providers.models]]
+  id = "doubao-seed-2.0-lite"
+  display_name = "Volc Doubao Seed 2.0 Lite"
+  context_window = 256000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 10
   enabled = true
 
 [[providers]]
@@ -79,16 +366,1134 @@ name = "MiniMax.cn"
 base_url = "https://api.minimaxi.com/v1"
 api_key = "{env:MINIMAX_API_KEY}"
 display_prefix = "MiniMax.cn"
+upstream_format = "chat_completions"
+available_upstream_formats = ["chat_completions"]
 sort_order = 3
 enabled = true
 
   [[providers.models]]
   id = "MiniMax-M3"
   aliases = ["minimax-m3"]
-  display_name = "MiniMax-M3"
+  display_name = "MiniMax M3"
   context_window = 1000000
   max_output_tokens = 524288
+  input_modalities = ["text", "image"]
+  thinking_mode = "toggle"
   sort_order = 1
+  enabled = true
+
+  [[providers.models]]
+  id = "MiniMax-M2.7"
+  display_name = "MiniMax M2.7"
+  context_window = 204800
+  max_output_tokens = 204800
+  input_modalities = ["text"]
+  thinking_mode = "always_on"
+  sort_order = 2
+  enabled = true
+
+  [[providers.models]]
+  id = "MiniMax-M2.7-highspeed"
+  display_name = "MiniMax M2.7 Highspeed"
+  context_window = 204800
+  max_output_tokens = 204800
+  input_modalities = ["text"]
+  thinking_mode = "always_on"
+  sort_order = 3
+  enabled = true
+
+  [[providers.models]]
+  id = "MiniMax-M2.5"
+  display_name = "MiniMax M2.5"
+  context_window = 204800
+  max_output_tokens = 204800
+  input_modalities = ["text"]
+  thinking_mode = "always_on"
+  sort_order = 4
+  enabled = true
+
+  [[providers.models]]
+  id = "MiniMax-M2.5-highspeed"
+  display_name = "MiniMax M2.5 Highspeed"
+  context_window = 204800
+  max_output_tokens = 204800
+  input_modalities = ["text"]
+  thinking_mode = "always_on"
+  sort_order = 5
+  enabled = true
+
+  [[providers.models]]
+  id = "MiniMax-M2.1"
+  display_name = "MiniMax M2.1"
+  context_window = 204800
+  max_output_tokens = 204800
+  input_modalities = ["text"]
+  thinking_mode = "always_on"
+  sort_order = 6
+  enabled = true
+
+  [[providers.models]]
+  id = "MiniMax-M2.1-highspeed"
+  display_name = "MiniMax M2.1 Highspeed"
+  context_window = 204800
+  max_output_tokens = 204800
+  input_modalities = ["text"]
+  thinking_mode = "always_on"
+  sort_order = 7
+  enabled = true
+
+  [[providers.models]]
+  id = "MiniMax-M2"
+  display_name = "MiniMax M2"
+  context_window = 204800
+  max_output_tokens = 204800
+  input_modalities = ["text"]
+  thinking_mode = "always_on"
+  sort_order = 8
+  enabled = true
+
+[[providers]]
+id = "kimi-cn"
+name = "Kimi"
+base_url = "https://api.moonshot.cn/v1"
+api_key = "{env:MOONSHOT_CN_API_KEY}"
+display_prefix = "Kimi CN"
+upstream_format = "chat_completions"
+available_upstream_formats = ["chat_completions"]
+supports_developer_role = false
+sort_order = 4
+enabled = true
+
+  [[providers.models]]
+  id = "kimi-k3"
+  display_name = "Kimi CN K3"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 1
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k2.7-code"
+  display_name = "Kimi CN K2.7 Code"
+  context_window = 262144
+  max_output_tokens = 32768
+  input_modalities = ["text", "image"]
+  thinking_mode = "always_on"
+  sort_order = 2
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k2.7-code-highspeed"
+  display_name = "Kimi CN K2.7 Code Highspeed"
+  context_window = 262144
+  max_output_tokens = 32768
+  input_modalities = ["text", "image"]
+  thinking_mode = "always_on"
+  sort_order = 3
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k2.6"
+  display_name = "Kimi CN K2.6"
+  context_window = 262144
+  max_output_tokens = 32768
+  input_modalities = ["text", "image"]
+  thinking_mode = "toggle"
+  sort_order = 4
+  enabled = true
+
+[[providers]]
+id = "kimi"
+name = "Kimi Global"
+base_url = "https://api.moonshot.ai/v1"
+api_key = "{env:MOONSHOT_API_KEY}"
+display_prefix = "Kimi"
+upstream_format = "chat_completions"
+available_upstream_formats = ["chat_completions"]
+supports_developer_role = false
+sort_order = 5
+enabled = true
+
+  [[providers.models]]
+  id = "kimi-k3"
+  display_name = "Kimi K3"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 1
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k2.7-code"
+  display_name = "Kimi K2.7 Code"
+  context_window = 262144
+  max_output_tokens = 32768
+  input_modalities = ["text", "image"]
+  thinking_mode = "always_on"
+  sort_order = 2
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k2.7-code-highspeed"
+  display_name = "Kimi K2.7 Code Highspeed"
+  context_window = 262144
+  max_output_tokens = 32768
+  input_modalities = ["text", "image"]
+  thinking_mode = "always_on"
+  sort_order = 3
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k2.6"
+  display_name = "Kimi K2.6"
+  context_window = 262144
+  max_output_tokens = 32768
+  input_modalities = ["text", "image"]
+  thinking_mode = "toggle"
+  sort_order = 4
+  enabled = true
+
+[[providers]]
+id = "commandcode"
+name = "Command Code"
+base_url = "https://api.commandcode.ai/provider/v1"
+api_key = "{env:COMMANDCODE_API_KEY}"
+display_prefix = "Command Code"
+upstream_format = "chat_completions"
+available_upstream_formats = ["chat_completions", "responses"]
+sort_order = 6
+enabled = true
+
+  [[providers.models]]
+  id = "claude-sonnet-5"
+  display_name = "Command Code claude-sonnet-5"
+  context_window = 1000000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 1
+  enabled = true
+
+  [[providers.models]]
+  id = "claude-sonnet-4-6"
+  display_name = "Command Code claude-sonnet-4-6"
+  context_window = 1000000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 2
+  enabled = true
+
+  [[providers.models]]
+  id = "claude-fable-5"
+  display_name = "Command Code claude-fable-5"
+  context_window = 1000000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 3
+  enabled = true
+
+  [[providers.models]]
+  id = "claude-opus-5"
+  display_name = "Command Code claude-opus-5"
+  context_window = 1000000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 4
+  enabled = true
+
+  [[providers.models]]
+  id = "claude-opus-4-8"
+  display_name = "Command Code claude-opus-4-8"
+  context_window = 1000000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 5
+  enabled = true
+
+  [[providers.models]]
+  id = "claude-opus-4-7"
+  display_name = "Command Code claude-opus-4-7"
+  context_window = 1000000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 6
+  enabled = true
+
+  [[providers.models]]
+  id = "claude-haiku-4-5-20251001"
+  display_name = "Command Code claude-haiku-4-5-20251001"
+  context_window = 200000
+  max_output_tokens = 64000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 7
+  enabled = true
+
+  [[providers.models]]
+  id = "gpt-5.6-sol"
+  display_name = "Command Code gpt-5.6-sol"
+  context_window = 1048576
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 8
+  enabled = true
+
+  [[providers.models]]
+  id = "gpt-5.6-terra"
+  display_name = "Command Code gpt-5.6-terra"
+  context_window = 1048576
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 9
+  enabled = true
+
+  [[providers.models]]
+  id = "gpt-5.6-luna"
+  display_name = "Command Code gpt-5.6-luna"
+  context_window = 1050000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 10
+  enabled = true
+
+  [[providers.models]]
+  id = "gpt-5.5"
+  display_name = "Command Code gpt-5.5"
+  context_window = 256000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 11
+  enabled = true
+
+  [[providers.models]]
+  id = "gpt-5.4"
+  display_name = "Command Code gpt-5.4"
+  context_window = 256000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 12
+  enabled = true
+
+  [[providers.models]]
+  id = "gpt-5.3-codex"
+  display_name = "Command Code gpt-5.3-codex"
+  context_window = 256000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 13
+  enabled = true
+
+  [[providers.models]]
+  id = "gpt-5.4-mini"
+  display_name = "Command Code gpt-5.4-mini"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 14
+  enabled = true
+
+  [[providers.models]]
+  id = "deepseek/deepseek-v4-pro"
+  display_name = "Command Code deepseek-v4-pro"
+  context_window = 1000000
+  max_output_tokens = 384000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 15
+  enabled = true
+
+  [[providers.models]]
+  id = "deepseek/deepseek-v4-flash"
+  display_name = "Command Code deepseek-v4-flash"
+  context_window = 1000000
+  max_output_tokens = 384000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 16
+  enabled = true
+
+  [[providers.models]]
+  id = "deepseek/deepseek-v4-flash-vision-exp"
+  display_name = "Command Code deepseek-v4-flash-vision-exp"
+  context_window = 1000000
+  max_output_tokens = 384000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 17
+  enabled = true
+
+  [[providers.models]]
+  id = "moonshotai/kimi-k2.7-code"
+  display_name = "Command Code kimi-k2.7-code"
+  context_window = 262144
+  max_output_tokens = 32768
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 18
+  enabled = true
+
+  [[providers.models]]
+  id = "moonshotai/kimi-k2.7-code-highspeed"
+  display_name = "Command Code kimi-k2.7-code-highspeed"
+  context_window = 262144
+  max_output_tokens = 32768
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 19
+  enabled = true
+
+  [[providers.models]]
+  id = "moonshotai/kimi-k2.6"
+  display_name = "Command Code kimi-k2.6"
+  context_window = 262144
+  max_output_tokens = 32768
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "toggle"
+  sort_order = 20
+  enabled = true
+
+  [[providers.models]]
+  id = "moonshotai/kimi-k2.5"
+  display_name = "Command Code kimi-k2.5"
+  context_window = 262144
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "toggle"
+  sort_order = 21
+  enabled = true
+
+  [[providers.models]]
+  id = "z-ai/glm-5.3-flash"
+  display_name = "Command Code glm-5.3-flash"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 22
+  enabled = true
+
+  [[providers.models]]
+  id = "zai-org/glm-5.3"
+  display_name = "Command Code glm-5.3"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 23
+  enabled = true
+
+  [[providers.models]]
+  id = "zai-org/glm-5.2"
+  display_name = "Command Code glm-5.2"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 24
+  enabled = true
+
+  [[providers.models]]
+  id = "minimax/minimax-m2.7-free"
+  display_name = "Command Code minimax-m2.7-free"
+  context_window = 204800
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 25
+  enabled = true
+
+  [[providers.models]]
+  id = "minimaxai/minimax-m2.5"
+  display_name = "Command Code minimax-m2.5"
+  context_window = 204800
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 26
+  enabled = true
+
+  [[providers.models]]
+  id = "xiaomi/mimo-v2.5-pro"
+  display_name = "Command Code mimo-v2.5-pro"
+  context_window = 1048576
+  max_output_tokens = 128000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 27
+  enabled = true
+
+  [[providers.models]]
+  id = "xiaomi/mimo-v2.5"
+  display_name = "Command Code mimo-v2.5"
+  context_window = 1000000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 28
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen/qwen3.8-max"
+  display_name = "Command Code qwen3.8-max"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 29
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen/qwen3.8-27b"
+  display_name = "Command Code qwen3.8-27b"
+  context_window = 262144
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 30
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen/qwen3.8-flash"
+  display_name = "Command Code qwen3.8-flash"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 31
+  enabled = true
+
+  [[providers.models]]
+  id = "stepfun/step-3.7-flash"
+  display_name = "Command Code step-3.7-flash"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 32
+  enabled = true
+
+  [[providers.models]]
+  id = "stepfun/step-3.5-flash"
+  display_name = "Command Code step-3.5-flash"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 33
+  enabled = true
+
+  [[providers.models]]
+  id = "tencent/hy3"
+  display_name = "Command Code hy3"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 34
+  enabled = true
+
+  [[providers.models]]
+  id = "tencent/hy3-paid"
+  display_name = "Command Code hy3-paid"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 35
+  enabled = true
+
+  [[providers.models]]
+  id = "google/gemini-3.7-flash"
+  display_name = "Command Code gemini-3.7-flash"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 36
+  enabled = true
+
+  [[providers.models]]
+  id = "google/gemini-3.6-flash"
+  display_name = "Command Code gemini-3.6-flash"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 37
+  enabled = true
+
+  [[providers.models]]
+  id = "google/gemini-3.5-flash"
+  display_name = "Command Code gemini-3.5-flash"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 38
+  enabled = true
+
+  [[providers.models]]
+  id = "google/gemini-3.5-flash-lite"
+  display_name = "Command Code gemini-3.5-flash-lite"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 39
+  enabled = true
+
+  [[providers.models]]
+  id = "google/gemini-3.1-flash-lite"
+  display_name = "Command Code gemini-3.1-flash-lite"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 40
+  enabled = true
+
+  [[providers.models]]
+  id = "sakana/fugu-ultra"
+  display_name = "Command Code fugu-ultra"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 41
+  enabled = true
+
+  [[providers.models]]
+  id = "meta/muse-spark-1.1"
+  display_name = "Command Code muse-spark-1.1"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 42
+  enabled = true
+
+  [[providers.models]]
+  id = "meta/muse-spark-1.2"
+  display_name = "Command Code muse-spark-1.2"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 43
+  enabled = true
+
+  [[providers.models]]
+  id = "meta/muse-spark-1.2-contributor"
+  display_name = "Command Code muse-spark-1.2-contributor"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 44
+  enabled = true
+
+  [[providers.models]]
+  id = "xai/grok-4.5"
+  display_name = "Command Code grok-4.5"
+  context_window = 500000
+  max_output_tokens = 500000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 45
+  enabled = true
+
+  [[providers.models]]
+  id = "xai/grok-4.6"
+  display_name = "Command Code grok-4.6"
+  context_window = 500000
+  max_output_tokens = 500000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 46
+  enabled = true
+
+[[providers]]
+id = "opencode-go"
+name = "OpenCode Go"
+base_url = "https://opencode.ai/zen/go/v1"
+api_key = "{env:OPENCODE_API_KEY}"
+display_prefix = "OpenCode"
+upstream_format = "auto"
+available_upstream_formats = ["chat_completions", "responses"]
+sort_order = 7
+enabled = true
+
+  [[providers.models]]
+  id = "grok-4.6"
+  display_name = "OpenCode Grok 4.6"
+  context_window = 500000
+  max_output_tokens = 500000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 1
+  enabled = true
+
+  [[providers.models]]
+  id = "grok-4.5"
+  display_name = "OpenCode Grok 4.5"
+  context_window = 500000
+  max_output_tokens = 500000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 2
+  enabled = true
+
+  [[providers.models]]
+  id = "gpt-5.6-luna"
+  display_name = "OpenCode GPT 5.6 Luna"
+  context_window = 1050000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 3
+  enabled = true
+
+  [[providers.models]]
+  id = "muse-spark-1.2-contributor"
+  display_name = "OpenCode Muse Spark 1.2 Contributor"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 4
+  enabled = true
+
+  [[providers.models]]
+  id = "glm-5.3-flash"
+  display_name = "OpenCode GLM-5.3 Flash"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 5
+  enabled = true
+
+  [[providers.models]]
+  id = "glm-5.3"
+  display_name = "OpenCode GLM-5.3"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 6
+  enabled = true
+
+  [[providers.models]]
+  id = "glm-5.2"
+  display_name = "OpenCode GLM-5.2"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 7
+  enabled = true
+
+  [[providers.models]]
+  id = "glm-5.1"
+  display_name = "OpenCode GLM-5.1"
+  context_window = 202752
+  max_output_tokens = 32768
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 8
+  enabled = true
+
+  [[providers.models]]
+  id = "glm-5"
+  display_name = "OpenCode GLM-5"
+  context_window = 202752
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 9
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k3"
+  display_name = "OpenCode Kimi K3"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 10
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k2.7-code"
+  display_name = "OpenCode Kimi K2.7 Code"
+  context_window = 262144
+  max_output_tokens = 262144
+  input_modalities = ["text", "image"]
+  thinking_mode = "always_on"
+  sort_order = 11
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k2.6"
+  display_name = "OpenCode Kimi K2.6"
+  context_window = 262144
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  thinking_mode = "toggle"
+  sort_order = 12
+  enabled = true
+
+  [[providers.models]]
+  id = "kimi-k2.5"
+  display_name = "OpenCode Kimi K2.5"
+  context_window = 262144
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "toggle"
+  sort_order = 13
+  enabled = true
+
+  [[providers.models]]
+  id = "longcat-2.0"
+  display_name = "OpenCode LongCat 2.0"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 14
+  enabled = true
+
+  [[providers.models]]
+  id = "deepseek-v4-pro"
+  display_name = "OpenCode DeepSeek V4 Pro"
+  context_window = 1000000
+  max_output_tokens = 384000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 15
+  enabled = true
+
+  [[providers.models]]
+  id = "deepseek-v4-flash"
+  display_name = "OpenCode DeepSeek V4 Flash"
+  context_window = 1000000
+  max_output_tokens = 384000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 16
+  enabled = true
+
+  [[providers.models]]
+  id = "deepseek-v4-flash-vision-exp"
+  display_name = "OpenCode DeepSeek V4 Flash Vision Exp"
+  context_window = 1000000
+  max_output_tokens = 384000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 17
+  enabled = true
+
+  [[providers.models]]
+  id = "mimo-v2.5"
+  display_name = "OpenCode MiMo V2.5"
+  context_window = 1000000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "low"
+  thinking_mode = "always_on"
+  sort_order = 18
+  enabled = true
+
+  [[providers.models]]
+  id = "mimo-v2.5-pro"
+  display_name = "OpenCode MiMo V2.5 Pro"
+  context_window = 1048576
+  max_output_tokens = 128000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 19
+  enabled = true
+
+  [[providers.models]]
+  id = "mimo-v2-pro"
+  display_name = "OpenCode MiMo V2 Pro"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 20
+  enabled = true
+
+  [[providers.models]]
+  id = "mimo-v2-omni"
+  display_name = "OpenCode MiMo V2 Omni"
+  context_window = 262144
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "low"
+  thinking_mode = "always_on"
+  sort_order = 21
+  enabled = true
+
+  [[providers.models]]
+  id = "hy3"
+  display_name = "OpenCode Hy3"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 22
+  enabled = true
+
+  [[providers.models]]
+  id = "hy3-preview"
+  display_name = "OpenCode Hy3 Preview"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 23
+  enabled = true
+
+  [[providers.models]]
+  id = "minimax-m3"
+  display_name = "OpenCode MiniMax M3"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  thinking_mode = "toggle"
+  sort_order = 24
+  enabled = true
+
+  [[providers.models]]
+  id = "minimax-m2.7"
+  display_name = "OpenCode MiniMax M2.7"
+  context_window = 204800
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  thinking_mode = "always_on"
+  sort_order = 25
+  enabled = true
+
+  [[providers.models]]
+  id = "minimax-m2.5"
+  display_name = "OpenCode MiniMax M2.5"
+  context_window = 196608
+  max_output_tokens = 131072
+  input_modalities = ["text"]
+  thinking_mode = "always_on"
+  sort_order = 26
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen3.8-max"
+  display_name = "OpenCode Qwen3.8 Max"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "low"
+  thinking_mode = "always_on"
+  sort_order = 27
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen3.7-max"
+  display_name = "OpenCode Qwen3.7 Max"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 28
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen3.7-plus"
+  display_name = "OpenCode Qwen3.7 Plus"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 29
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen3.6-plus"
+  display_name = "OpenCode Qwen3.6 Plus"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 30
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen3.5-plus"
+  display_name = "OpenCode Qwen3.5 Plus"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 31
   enabled = true
 
 [[providers]]
@@ -103,7 +1508,7 @@ reports_cached_input_tokens = false
 auth_capabilities = ["subscription:xai_oauth"]
 onboarding_hint = "providers.catalogProviderSubscriptionHint"
 discovery_policy = "retain-intersection"
-sort_order = 5
+sort_order = 8
 enabled = true
 
   [[providers.models]]
@@ -112,7 +1517,8 @@ enabled = true
   context_window = 256000
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
   default_reasoning_level = "high"
+  thinking_mode = "always_on"
   sort_order = 1
   enabled = true

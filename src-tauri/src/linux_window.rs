@@ -181,14 +181,11 @@ fn apply_opaque_window_css(gtk_window: &gtk::ApplicationWindow) {
     {
         return;
     }
-    let Some(screen) = gtk::prelude::WidgetExt::screen(gtk_window) else {
-        return;
-    };
-    gtk::StyleContext::add_provider_for_screen(
-        &screen,
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    // Scope to the main window only. add_provider_for_screen also restyles the
+    // ayatana tray popup: dark-theme menu labels become white-on-#f8f8f7.
+    gtk_window
+        .style_context()
+        .add_provider(&provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
 }
 
 fn install_hicolor_icon() {

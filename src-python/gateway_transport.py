@@ -65,6 +65,7 @@ from gateway_settings import (
     gateway_capacity_retry_elapsed_limit_seconds,
     gateway_retry_delay_seconds,
 )
+from route_primitives import UPSTREAM_USER_AGENT
 from route_primitives import authentication_strategy as _authentication_strategy
 from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
@@ -1239,6 +1240,9 @@ def build_upstream_headers(
         if drop_content_encoding and lowered == "content-encoding":
             continue
         outgoing[key] = value
+
+    if not any(key.lower() == "user-agent" for key in outgoing):
+        outgoing["User-Agent"] = UPSTREAM_USER_AGENT
 
     if adapter is not None:
         outgoing["Authorization"] = _subscription_authorization(

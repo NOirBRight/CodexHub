@@ -663,6 +663,8 @@ class CollaborationAdapter:
             state = {"items": {}}
             event_context[self.facts.stream_binding_state_field] = state
         event_type = value.get("type")
+        if not isinstance(event_type, str):
+            return
         if event_type in {"response.output_item.added", "response.output_item.done"}:
             self.remember_stream_item(
                 state,

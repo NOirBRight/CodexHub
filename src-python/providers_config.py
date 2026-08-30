@@ -43,7 +43,12 @@ EXTERNAL_PROVIDER_UPSTREAM_NAMES = {
     "ollama-cloud": "ollama_cloud",
     "minimax-cn": "minimax_cn",
     "volc": "volcengine",
+    "kimi-cn": "kimi",
+    "kimi": "kimi",
+    "commandcode": "commandcode",
+    "opencode-go": "opencode_go",
 }
+THINKING_MODES = {"none", "always_on", "toggle"}
 EXTERNAL_PROVIDER_EXCLUDED_IDS = {"ollama-cloud"}
 UPSTREAM_FORMATS = {"auto", "responses", "chat_completions", "anthropic_messages"}
 TOOL_PROTOCOLS = {"auto", "responses_structured", "chat_tools", "text_compat", "none"}
@@ -63,6 +68,7 @@ class ModelConfig:
     input_modalities: tuple[str, ...] = ("text",)
     supported_reasoning_levels: tuple[str, ...] = ()
     default_reasoning_level: str | None = None
+    thinking_mode: str | None = None
     tool_surface_strategy: str | None = None
     native_responses_tool_codec: str | None = None
     multi_agent_version: str | None = None
@@ -124,6 +130,8 @@ class ProviderConfig:
         match = ENV_PLACEHOLDER_RE.fullmatch(configured_api_key)
         if match:
             env_api_key = os.environ.get(match.group(1))
+            if env_api_key is None and match.group(1) == "MOONSHOT_CN_API_KEY":
+                env_api_key = os.environ.get("MOONSHOT_API_KEY")
             if env_api_key is None:
                 return None
             resolved_api_key = env_api_key.strip()
@@ -264,6 +272,7 @@ def build_external_model_index(
                 "input_modalities": model.input_modalities or ("text",),
                 "supported_reasoning_levels": model.supported_reasoning_levels,
                 "default_reasoning_level": model.default_reasoning_level,
+                "thinking_mode": model.thinking_mode,
                 "context_source": "providers_toml",
                 "max_output_source": "providers_toml",
                 "priority_base": _provider_priority_base(provider),
@@ -346,6 +355,7 @@ def build_ollama_cloud_model_index(
                 "input_modalities": model.input_modalities or ("text",),
                 "supported_reasoning_levels": model.supported_reasoning_levels,
                 "default_reasoning_level": model.default_reasoning_level,
+                "thinking_mode": model.thinking_mode,
                 "context_source": "providers_toml",
                 "max_output_source": "providers_toml",
                 "priority_base": _provider_priority_base(provider),
@@ -464,6 +474,7 @@ def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
                 input_modalities=_string_tuple_field(raw_model.get("input_modalities"), ("text",)),
                 supported_reasoning_levels=_string_tuple_field(raw_model.get("supported_reasoning_levels"), ()),
                 default_reasoning_level=_optional_string_field(raw_model.get("default_reasoning_level")),
+                thinking_mode=_thinking_mode_field(raw_model.get("thinking_mode")),
                 tool_surface_strategy=_tool_surface_strategy_field(
                     raw_model.get("tool_surface_strategy"), default=None
                 ),
@@ -773,6 +784,8 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
                 chunks.append(_toml_string_list_line("supported_reasoning_levels", model.supported_reasoning_levels, indent="  "))
             if model.default_reasoning_level is not None:
                 chunks.append(_toml_string_line("default_reasoning_level", model.default_reasoning_level, indent="  "))
+            if model.thinking_mode is not None:
+                chunks.append(_toml_string_line("thinking_mode", model.thinking_mode, indent="  "))
             model_tool_surface_strategy = _tool_surface_strategy_field(
                 model.tool_surface_strategy, default=None
             )
@@ -907,6 +920,15 @@ def _optional_string_field(value: Any) -> str | None:
     if value is None:
         return None
     return _string_field(value)
+
+
+def _thinking_mode_field(value: Any) -> str | None:
+    if value is None:
+        return None
+    mode = _string_field(value).strip().lower()
+    if mode not in THINKING_MODES:
+        raise ValueError(f"thinking_mode must be one of {sorted(THINKING_MODES)}")
+    return mode
 
 
 def _string_tuple_field(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:

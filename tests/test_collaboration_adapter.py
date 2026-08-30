@@ -176,6 +176,15 @@ def test_v2_context_bypasses_worker_sidecars_and_stream_ledger(tmp_path):
     assert WORKER_REQUESTED_BINDING_FIELD not in value
 
 
+def test_remember_stream_event_ignores_non_string_type_values(tmp_path):
+    adapter, _ = _adapter(tmp_path)
+    context: dict = {}
+
+    adapter.remember_stream_event({"type": {"unexpected": "object"}}, context)
+
+    assert context["_worker_stream_binding_state"] == {"items": {}}
+
+
 def test_hmac_fail_closed_rejects_tampered_sidecar(tmp_path):
     adapter, events = _adapter(tmp_path)
     requested = {"agent_type": "worker", "model": "glm-5.2", "reasoning": "high"}

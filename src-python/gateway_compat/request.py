@@ -75,6 +75,36 @@ from . import official_passthrough as _official_passthrough
 from . import response as _response
 from . import host
 
+def _wrap_chat_function_tools(payload: dict[str, Any]) -> bool:
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+    next_tools: list[Any] = []
+    changed = False
+    for tool in tools:
+        if (
+            isinstance(tool, dict)
+            and tool.get("type") == "function"
+            and "function" not in tool
+            and isinstance(tool.get("name"), str)
+            and tool["name"]
+        ):
+            function: dict[str, Any] = {"name": tool["name"]}
+            if isinstance(tool.get("description"), str):
+                function["description"] = tool["description"]
+            if isinstance(tool.get("parameters"), dict):
+                function["parameters"] = tool["parameters"]
+            if isinstance(tool.get("strict"), bool):
+                function["strict"] = tool["strict"]
+            next_tools.append({"type": "function", "function": function})
+            changed = True
+        else:
+            next_tools.append(tool)
+    if changed:
+        payload["tools"] = next_tools
+    return changed
+
+
 def compatible_request_body(
     body: bytes,
     upstream: Mapping[str, Any],
@@ -971,14 +1001,47 @@ def compatible_request_body(
         )
         changed = True
 
+    if host._apply_maintained_thinking_controls(
+        payload, upstream_name, requested_model, upstream_model
+    ):
+        changed = True
+
     if upstream_name == "ollama_cloud":
         if _official_passthrough._apply_ollama_reasoning_effort_alias(payload):
             changed = True
 
     if _response._sanitize_unsupported_compaction_input_items(payload):
         changed = True
-    if host._sanitize_third_party_reasoning_items(payload):
+    if host._sanitize_third_party_reasoning_items(
+        payload,
+        preserve_collaboration_agent_message_encryption=(
+            collaboration_protocol == _COLLABORATION_V2
+        ),
+    ):
         changed = True
+
+    if upstream_name != "official":
+        if payload.get("tool_choice") not in (None, "auto"):
+            payload["tool_choice"] = "auto"
+            changed = True
+        native_v2_namespace = bool(
+            collaboration_v2
+            and runtime_tool_plan is not None
+            and any(
+                getattr(entry, "family", None) == "namespace"
+                and getattr(entry, "version", None) == "v2"
+                and getattr(entry, "disposition", None) == "native"
+                for entry in runtime_tool_plan.entries
+            )
+        )
+        if not native_v2_namespace:
+            encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+            flattened, schema_rewrites = _official_passthrough._normalize_transparent_tool_schema_booleans(encoded)
+            if schema_rewrites:
+                payload = json.loads(flattened.decode("utf-8"))
+                changed = True
+        if isinstance(payload.get("messages"), list) and _wrap_chat_function_tools(payload):
+            changed = True
 
     if not changed:
         return body

@@ -361,7 +361,10 @@ def test_runtime_plan_aliases_do_not_change_with_tool_choice_policy():
 
     aliases = [payload["tools"][0]["name"] for payload in (automatic, required, specific)]
     assert aliases[0] == aliases[1] == aliases[2]
-    assert specific["tool_choice"] == {"type": "function", "name": aliases[0]}
+    # Third-party providers such as Muse and Command Code reject named and
+    # required choices, even when their generated alias is otherwise valid.
+    assert required["tool_choice"] == "auto"
+    assert specific["tool_choice"] == "auto"
 
 
 def test_runtime_plan_alias_seed_normalizes_and_covers_capability_set():
@@ -838,7 +841,7 @@ Execution constraints:
     assert fields["tool_choice_required"] is True
     assert fields["required_tool_family"] in {"namespace", "plain_function", "unknown"}
     assert "__codexhub_" not in json.dumps(fields)
-    assert json.loads(transformed)["tool_choice"]["type"] == "function"
+    assert json.loads(transformed)["tool_choice"] == "auto"
 
 
 def test_changing_only_model_slug_does_not_change_compatibility_dispositions():

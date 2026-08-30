@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import gateway_request
 from gateway_request import (
     EMBEDDED_MODEL_RE,
     has_browser_context_signal as _has_browser_context_signal,
@@ -31,6 +32,12 @@ from gateway_stream_semantics import (
 )
 
 # Compatibility-pipeline constants owned by the host after the facade removal.
+
+
+def _apply_maintained_thinking_controls(*args: Any, **kwargs: Any) -> Any:
+    return gateway_request.apply_maintained_thinking_controls(*args, **kwargs)
+
+
 EXCESSIVE_TOOL_LOOP_BOUND = 3
 EXCESSIVE_TOOL_LOOP_ERROR_CODE = "excessive_tool_loop"
 NATIVE_RESPONSES_TOOL_CONTRACT_ERROR_CODE = "invalid_native_responses_tool_contract"

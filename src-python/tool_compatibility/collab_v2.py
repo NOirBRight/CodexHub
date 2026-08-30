@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from collaboration_runtime_contract import (
     COLLABORATION_V2,
+    EXPECTED_PARAMETER_SCHEMAS,
     CollaborationContractError,
     validate_agent_message,
     validate_collaboration_arguments,
@@ -71,6 +72,68 @@ def validate_v2_native_arguments(item: Mapping[str, Any], *, surface: str) -> No
             exc.classification,
             surface=surface,
         ) from exc
+
+
+def repair_external_v2_spawn_agent_response_arguments(
+    item: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], bool]:
+    """Project a known cross-version spawn shape onto the frozen V2 contract.
+
+    This is deliberately response-only at the caller: completed third-party
+    calls may carry the V1 ``fork_context`` field or use ``agent_type`` as the
+    task label.  History remains an exact, fail-closed contract boundary.
+    """
+
+    arguments = item.get("arguments")
+    if not isinstance(arguments, str):
+        return item, False
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError
+            result[key] = value
+        return result
+
+    def reject_non_json_constant(_value: str) -> None:
+        raise ValueError
+
+    try:
+        parsed = json.loads(
+            arguments,
+            object_pairs_hook=unique_object,
+            parse_constant=reject_non_json_constant,
+        )
+    except (TypeError, ValueError):
+        return item, False
+    if not isinstance(parsed, Mapping):
+        return item, False
+
+    schema = EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]["spawn_agent"]
+    properties = schema.get("properties")
+    if not isinstance(properties, Mapping):
+        return item, False
+    projected = {key: value for key, value in parsed.items() if key in properties}
+    task_name = projected.get("task_name")
+    agent_type = projected.get("agent_type")
+    if task_name is None and isinstance(agent_type, str) and agent_type:
+        projected["task_name"] = agent_type
+    if projected == parsed:
+        return item, False
+
+    repaired_arguments = json.dumps(projected, ensure_ascii=True, separators=(",", ":"))
+    try:
+        validate_collaboration_arguments(
+            COLLABORATION_V2,
+            "spawn_agent",
+            repaired_arguments,
+        )
+    except CollaborationContractError:
+        return item, False
+    repaired = dict(item)
+    repaired["arguments"] = repaired_arguments
+    return repaired, True
 
 
 class CollaborationV2PlanMixin:

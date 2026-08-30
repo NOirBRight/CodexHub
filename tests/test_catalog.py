@@ -54,18 +54,29 @@ class CatalogPolicyTests(unittest.TestCase):
         self.assertFalse(should_include_model("glm-5.1", self.policy))
         self.assertFalse(should_include_model("glm-5.1:cloud", self.policy))
 
-    def test_real_policy_denies_glm_5_1_tagged_variants(self):
+    def test_load_policy_preserves_user_disabled_retired_model(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            policy_path = Path(tmpdir) / "catalog_policy.toml"
+            policy_path.write_text(
+                "[visibility]\ndenied_models = [\"glm-5.1\"]\n",
+                encoding="utf-8",
+            )
+
+            self.assertIn("glm-5.1", load_policy(policy_path).denied_models)
+
+    def test_real_policy_allows_current_official_cloud_models(self):
         policy = load_policy(POLICY_PATH)
 
-        self.assertFalse(should_include_model("glm-5.1:latest", policy))
-        self.assertFalse(should_include_model("glm-5.1:cloud", policy))
+        self.assertTrue(should_include_model("glm-5.1", policy))
+        self.assertTrue(should_include_model("glm-5.1:cloud", policy))
         self.assertTrue(should_include_model("glm-5.2:cloud", policy))
+        self.assertTrue(should_include_model("glm-5.3:cloud", policy))
         self.assertTrue(should_include_model("minimax-m3", policy))
-        self.assertTrue(should_include_model("volc/glm-5.2", policy))
+        self.assertTrue(should_include_model("volc/glm-5.3", policy))
         self.assertTrue(should_include_model("minimax-cn/MiniMax-M3", policy))
-        self.assertFalse(should_include_model("minimax-cn/minimax-m3", policy))
-        self.assertFalse(should_include_model("volc/minimax-m3", policy))
-        self.assertNotIn("minimax-cn/minimax-m3", policy.display_names)
+        self.assertTrue(should_include_model("minimax-cn/minimax-m3", policy))
+        self.assertTrue(should_include_model("volc/minimax-m3", policy))
+        self.assertTrue(should_include_model("kimi/kimi-k3", policy))
         self.assertFalse(should_include_model("volc/minimax-m2.7", policy))
         self.assertFalse(should_include_model("gemma3:12b", policy))
         self.assertTrue(should_include_model("gpt-5.5", policy))
@@ -75,7 +86,7 @@ class CatalogPolicyTests(unittest.TestCase):
 
         self.assertTrue(should_include_external_provider_model("volc/minimax-m3", policy))
         self.assertFalse(should_include_external_provider_model("volc/qwen3-embedding", policy))
-        self.assertFalse(should_include_external_provider_model("ollama-cloud/glm-5.1", policy))
+        self.assertTrue(should_include_external_provider_model("ollama-cloud/glm-5.1", policy))
 
     def test_provider_namespace_tags_are_not_base_matched(self):
         policy = CatalogPolicy(

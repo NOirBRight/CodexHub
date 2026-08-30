@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from probe_upstream_format import (
+    PROBE_USER_AGENT,
     UPSTREAM_FORMAT_ANTHROPIC,
     UPSTREAM_FORMAT_AUTO,
     UPSTREAM_FORMAT_CHAT,
@@ -11,8 +12,10 @@ from probe_upstream_format import (
     anthropic_text_ok,
     chat_stream_tool_ok,
     endpoint_url,
+    headers,
     model_ids_from_payload,
     probe,
+    probe_inconclusive_reason,
     recommended_format,
     recommended_tool_protocol,
     responses_stream_tool_ok,
@@ -20,6 +23,18 @@ from probe_upstream_format import (
 
 
 class ProbeUpstreamFormatTests(unittest.TestCase):
+    def test_probe_headers_send_a_non_python_user_agent(self) -> None:
+        result = headers("secret", json_body=True)
+        self.assertEqual(result["User-Agent"], PROBE_USER_AGENT)
+        self.assertNotIn("Python-urllib", result["User-Agent"])
+        self.assertEqual(result["Authorization"], "Bearer secret")
+
+    def test_cloudflare_1010_is_not_classified_as_authentication(self) -> None:
+        reason = probe_inconclusive_reason(
+            [(403, '{"type":"https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/"}')]
+        )
+        self.assertEqual(reason, "request_failed")
+
     def test_endpoint_url_does_not_duplicate_version_suffix(self) -> None:
         self.assertEqual(endpoint_url("https://example.test/v1", "/models"), "https://example.test/v1/models")
         self.assertEqual(endpoint_url("https://example.test/v2", "/models"), "https://example.test/v2/models")

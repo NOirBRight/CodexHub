@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from python_runtime_contract import require_python_313
+from route_primitives import UPSTREAM_USER_AGENT
 
 require_python_313(__file__)
 
@@ -69,8 +70,14 @@ def base_has_version_suffix(base_url: str) -> bool:
     return bool(re.fullmatch(r"v\d+(?:\.\d+)?", path.rsplit("/", 1)[-1].lower()))
 
 
+PROBE_USER_AGENT = UPSTREAM_USER_AGENT
+
+
 def headers(api_key: str, *, json_body: bool = False) -> dict[str, str]:
-    result = {"Accept": "application/json"}
+    result = {
+        "Accept": "application/json",
+        "User-Agent": PROBE_USER_AGENT,
+    }
     if json_body:
         result["Content-Type"] = "application/json"
     stripped = api_key.strip()
@@ -288,6 +295,9 @@ def transient_probe_failure(status: int | None, detail: str | None) -> bool:
 
 def probe_inconclusive_reason(failures: list[tuple[int | None, str | None]]) -> str | None:
     statuses = {status for status, _detail in failures}
+    details = " ".join(detail or "" for _status, detail in failures).lower()
+    if "error-1010" in details or "cloudflare" in details and "1010" in details:
+        return "request_failed"
     if statuses & {401, 403}:
         return "authentication_failed"
     if statuses & {402, 429}:

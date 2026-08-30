@@ -61,8 +61,6 @@ allowed_provider_models = [
   "xunfei/xopqwen35397b",
 ]
 denied_models = [
-  "glm-5.1",
-  "glm-5.1:cloud",
   "qwen3-embedding",
   "qwen3-embedding:latest",
 ]

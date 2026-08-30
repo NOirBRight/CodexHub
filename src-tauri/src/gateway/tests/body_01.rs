@@ -1017,7 +1017,11 @@ fn gateway_models_skip_disabled_official_models_and_fast_variants() {
         ..Settings::default()
     };
 
-    let models = gateway_models_from_config(&settings, &[]);
+    let models = official_models_from_metadata(
+        &settings,
+        None,
+        &published_context_windows(&[("gpt-5.5", 258_400), ("gpt-5.4", 258_400)]),
+    );
 
     assert!(models.iter().any(|model| model.id == "gpt-5.5"));
     assert!(models.iter().any(|model| model.id == "gpt-5.5-fast"));
