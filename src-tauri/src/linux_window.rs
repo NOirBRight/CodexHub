@@ -12,6 +12,8 @@ use tauri::{Manager, WebviewWindow};
 const APP_ICON_PNG: &[u8] = include_bytes!("../icons/128x128.png");
 const APPIMAGE_DESKTOP_FILE: &str = "com.codexhub.app.desktop";
 const LEGACY_DESKTOP_FILE: &str = "codexhub.desktop";
+const OPAQUE_WINDOW_WIDGET_NAME: &str = "codexhub-main";
+const OPAQUE_WINDOW_CSS: &str = "#codexhub-main { background-color: #f8f8f7; }";
 
 pub fn install(app: &tauri::App) {
     glib::set_prgname(Some("com.codexhub.app"));
@@ -54,6 +56,7 @@ fn configure_shell(window: &WebviewWindow) -> Result<(), String> {
     }
     let _ = window.set_skip_taskbar(false);
     apply_window_icon(&gtk_window);
+    gtk_window.set_widget_name(OPAQUE_WINDOW_WIDGET_NAME);
     apply_opaque_window_css(&gtk_window);
     hook_full_input_region(&gtk_window);
     fill_webview_on_resize(&gtk_window);
@@ -175,14 +178,13 @@ fn apply_opaque_window_css(gtk_window: &gtk::ApplicationWindow) {
     let provider = gtk::CssProvider::new();
     // Do not set border-radius here: GTK then picks an RGBA visual and
     // WebKitGTK paints a black webview on X11/XWayland.
-    if provider
-        .load_from_data(b"window { background-color: #f8f8f7; }")
-        .is_err()
-    {
+    // The named selector prevents this application provider from matching
+    // Ayatana's GtkWindow(POPUP), which otherwise gives dark-theme labels a
+    // white-on-light background. The name is assigned by configure_shell.
+    if let Err(error) = provider.load_from_data(OPAQUE_WINDOW_CSS.as_bytes()) {
+        log::warn!("Linux opaque-window CSS failed to load: {error}");
         return;
     }
-    // Scope to the main window only. add_provider_for_screen also restyles the
-    // ayatana tray popup: dark-theme menu labels become white-on-#f8f8f7.
     gtk_window
         .style_context()
         .add_provider(&provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -393,7 +395,10 @@ fn write_if_changed(path: &std::path::Path, body: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{reconcile_desktop_entries, APPIMAGE_DESKTOP_FILE, LEGACY_DESKTOP_FILE};
+    use super::{
+        reconcile_desktop_entries, APPIMAGE_DESKTOP_FILE, LEGACY_DESKTOP_FILE, OPAQUE_WINDOW_CSS,
+        OPAQUE_WINDOW_WIDGET_NAME,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -439,6 +444,33 @@ mod tests {
              StartupWMClass=com.codexhub.app\n\
              X-GNOME-UsesNotifications=true\n"
         )
+    }
+
+    #[test]
+    fn opaque_window_css_is_exactly_scoped_to_the_named_main_window() {
+        assert_eq!(OPAQUE_WINDOW_WIDGET_NAME, "codexhub-main");
+        assert_eq!(
+            OPAQUE_WINDOW_CSS,
+            "#codexhub-main { background-color: #f8f8f7; }"
+        );
+    }
+
+    #[test]
+    fn opaque_window_css_provider_stays_window_scoped() {
+        let production_source = include_str!("linux_window.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("source contains the production module");
+        assert!(production_source.contains("set_widget_name(OPAQUE_WINDOW_WIDGET_NAME)"));
+        assert!(production_source.contains(".style_context()"));
+        assert!(production_source
+            .contains(".add_provider(&provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION)"));
+        let screen_provider = ["add_provider", "for_screen"].join("_");
+        let bare_window_selector = ["window", " {"].concat();
+        let universal_selector = ["*", " {"].concat();
+        assert!(!production_source.contains(&screen_provider));
+        assert!(!production_source.contains(&bare_window_selector));
+        assert!(!production_source.contains(&universal_selector));
     }
 
     #[test]
