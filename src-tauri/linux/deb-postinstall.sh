@@ -212,6 +212,22 @@ if [ "${1-}" = "--test-passwd" ]; then
 fi
 
 write_package_launcher /usr/share/applications/CodexHub.desktop
+write_package_launcher /usr/share/applications/com.codexhub.app.desktop
+write_package_launcher /usr/share/applications/codexhub.desktop
+for identity in /usr/share/applications/com.codexhub.app.desktop /usr/share/applications/codexhub.desktop; do
+  if [ -f "$identity" ] && ! grep -q '^NoDisplay=' "$identity"; then
+    printf '%s
+' 'NoDisplay=true' >> "$identity"
+  fi
+done
+for icon in /usr/share/icons/hicolor/*/apps/codexhub.png; do
+  [ -f "$icon" ] || continue
+  cp -f -- "$icon" "${icon%/*}/com.codexhub.app.png"
+done
+if [ -f /usr/share/icons/hicolor/index.theme ]; then
+  gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
+fi
+update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 
 invoking_uid=${PKEXEC_UID:-${SUDO_UID:-}}
 case "$invoking_uid" in

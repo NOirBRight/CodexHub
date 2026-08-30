@@ -15,6 +15,7 @@ from gateway_request import (
     reasoning_param_is_unsupported as _reasoning_param_is_unsupported,
     sanitize_official_input_reasoning_items as _sanitize_official_input_reasoning_items,
     sanitize_official_reasoning_items as _sanitize_official_reasoning_items,
+    sanitize_third_party_reasoning_items as _sanitize_third_party_reasoning_items,
     strip_reasoning_encrypted_content as _strip_reasoning_encrypted_content,
 )
 from gateway_stream_semantics import (

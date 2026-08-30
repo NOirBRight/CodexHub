@@ -1,6 +1,6 @@
-import { Brain, Cable, Check, Copy, Eye, Plus, RefreshCcw, Trash2, X } from "lucide-react";
+import { Brain, Cable, Check, ChevronDown, Copy, Eye, Plus, RefreshCcw, Trash2, X } from "lucide-react";
 import type * as React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SortableList } from "../SortableList";
 import { useVerticalOverflow } from "../../hooks/useVerticalOverflow";
@@ -156,42 +156,13 @@ export function ModelSection({
           if (!collaboration) {
             return null;
           }
-          const overridden = collaboration.explicit !== null;
           return (
-            <label
-              className={cx(
-                "inline-flex h-7 items-center gap-1 rounded-full border px-2 text-[11px] font-semibold",
-                overridden
-                  ? "border-action/40 bg-blue-50 text-action"
-                  : "border-line bg-panel text-slate-600",
-              )}
-              title={t("providers.collaborationVersionDetails", {
-                baseline: collaboration.baseline,
-                effective: collaboration.effective,
-              })}
-              onClick={(event) => event.stopPropagation()}
-            >
-              <span>{t("providers.collaborationVersion")}</span>
-              <select
-                className="h-5 bg-transparent text-[11px] font-semibold outline-none"
-                value={collaboration.effective}
-                disabled={interactionDisabled}
-                aria-label={t("providers.collaborationVersionForModel", { model: model.id })}
-                onChange={(event) => {
-                  event.stopPropagation();
-                  const selected = event.target.value === "v1" || event.target.value === "v2"
-                    ? event.target.value
-                    : null;
-                  onOfficialCollaborationVersionChange(
-                    model.id,
-                    selected === collaboration.baseline ? null : selected,
-                  );
-                }}
-              >
-                <option value="v1">V1{collaboration.baseline === "v1" ? ` ${t("providers.collaborationVersionDefault")}` : ""}</option>
-                <option value="v2">V2{collaboration.baseline === "v2" ? ` ${t("providers.collaborationVersionDefault")}` : ""}</option>
-              </select>
-            </label>
+            <CollaborationVersionChip
+              collaboration={collaboration}
+              disabled={interactionDisabled}
+              modelId={model.id}
+              onChange={onOfficialCollaborationVersionChange}
+            />
           );
         })()}
         {disabled && onToggleOfficialModel && (
@@ -664,6 +635,102 @@ function CapabilityChip({ icon, label, title }: { icon?: React.ReactNode; label:
       {icon}
       {label}
     </span>
+  );
+}
+
+function CollaborationVersionChip({
+  collaboration,
+  disabled,
+  modelId,
+  onChange,
+}: {
+  collaboration: { baseline: "v1" | "v2"; effective: "v1" | "v2"; explicit: "v1" | "v2" | null };
+  disabled: boolean;
+  modelId: string;
+  onChange: (modelId: string, version: "v1" | "v2" | null) => void;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const overridden = collaboration.explicit !== null;
+  const options = [
+    { value: "v1" as const, label: `V1${collaboration.baseline === "v1" ? ` ${t("providers.collaborationVersionDefault")}` : ""}` },
+    { value: "v2" as const, label: `V2${collaboration.baseline === "v2" ? ` ${t("providers.collaborationVersionDefault")}` : ""}` },
+  ];
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    function onPointerDown(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
+  return (
+    <div
+      ref={rootRef}
+      className="relative"
+      data-value={collaboration.effective}
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      <button
+        type="button"
+        className={cx(
+          "inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[11px] font-semibold leading-none",
+          overridden ? "border-action/40 bg-blue-50 text-action" : "border-line bg-panel text-slate-600",
+        )}
+        disabled={disabled}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label={t("providers.collaborationVersionForModel", { model: modelId })}
+        title={t("providers.collaborationVersionDetails", {
+          baseline: collaboration.baseline,
+          effective: collaboration.effective,
+        })}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="leading-none">{t("providers.collaborationVersion")}</span>
+        <span className="leading-none text-ink">{collaboration.effective.toUpperCase()}</span>
+        <ChevronDown size={12} className={cx("text-slate-500 transition-transform", open && "rotate-180")} />
+      </button>
+      {open && (
+        <div
+          className="absolute right-0 top-7 z-20 min-w-[136px] space-y-1 rounded-panel bg-surface p-1 shadow-floating"
+          role="listbox"
+        >
+          {options.map((option) => {
+            const selected = collaboration.effective === option.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                className={
+                  selected
+                    ? "flex h-7 w-full items-center justify-between rounded-control bg-panel px-2.5 text-left text-[11px] font-semibold text-ink"
+                    : "flex h-7 w-full items-center justify-between rounded-control px-2.5 text-left text-[11px] font-semibold text-ink hover:bg-panel"
+                }
+                onClick={() => {
+                  setOpen(false);
+                  const selectedVersion = option.value;
+                  onChange(modelId, selectedVersion === collaboration.baseline ? null : selectedVersion);
+                }}
+              >
+                {option.label}
+                {selected ? <Check size={14} /> : null}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 

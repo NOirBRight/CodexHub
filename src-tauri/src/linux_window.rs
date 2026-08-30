@@ -14,8 +14,9 @@ const APPIMAGE_DESKTOP_FILE: &str = "com.codexhub.app.desktop";
 const LEGACY_DESKTOP_FILE: &str = "codexhub.desktop";
 
 pub fn install(app: &tauri::App) {
-    glib::set_prgname(Some("codexhub"));
+    glib::set_prgname(Some("com.codexhub.app"));
     glib::set_application_name("CodexHub");
+    gdk::set_program_class("com.codexhub.app");
     install_desktop_entry();
     install_hicolor_icon();
     let Some(window) = app.get_webview_window("main") else {
@@ -52,6 +53,7 @@ fn configure_shell(window: &WebviewWindow) -> Result<(), String> {
         }
     }
     let _ = window.set_skip_taskbar(false);
+    apply_window_icon(&gtk_window);
     apply_opaque_window_css(&gtk_window);
     hook_full_input_region(&gtk_window);
     fill_webview_on_resize(&gtk_window);
@@ -157,6 +159,15 @@ fn resize_native_children(gtk_window: &gtk::ApplicationWindow, width: i32, heigh
     };
     for child in gdk_window.children() {
         child.move_resize(0, 0, width, height);
+    }
+}
+
+fn apply_window_icon(gtk_window: &gtk::ApplicationWindow) {
+    gtk::Window::set_default_icon_name("codexhub");
+    gtk_window.set_icon_name(Some("codexhub"));
+    if let Ok(pixbuf) = gdk_pixbuf::Pixbuf::from_read(std::io::Cursor::new(APP_ICON_PNG)) {
+        gtk::Window::set_default_icon(&pixbuf);
+        gtk_window.set_icon(Some(&pixbuf));
     }
 }
 

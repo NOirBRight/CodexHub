@@ -1832,6 +1832,30 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertIn("# owner = beta", text)
             self.assertIn("http://127.0.0.1:9109/v1", text)
 
+    def test_apply_overlay_clears_stale_remote_host_selection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config = tmp / "config.toml"
+            backup = tmp / "backup.toml"
+            catalog = tmp / "catalog.json"
+            state = tmp / ".codex-global-state.json"
+            state.write_text(
+                json.dumps(
+                    {
+                        "selected-remote-host-id": "remote-ssh-discovered:am01",
+                        "project-order": ["keep-me"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            apply_overlay(config, backup, catalog, "http://127.0.0.1:9099")
+
+            repaired = json.loads(state.read_text(encoding="utf-8"))
+            self.assertNotIn("selected-remote-host-id", repaired)
+            self.assertEqual(repaired["project-order"], ["keep-me"])
+            self.assertTrue((tmp / "backup.toml.global-state").exists())
+
     def test_apply_overlay_rejects_unknown_custom_provider_without_mutation(self):
         original = "\n".join(
             [

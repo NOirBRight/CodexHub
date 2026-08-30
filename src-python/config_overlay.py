@@ -1084,6 +1084,20 @@ def apply_overlay(
     ) + cleaned.lstrip()
     updated = insert_provider_section(updated, build_provider_section(base_url, gateway_key))
     atomic_write_text(config_path, updated, encoding="utf-8")
+    _repair_codex_desktop_global_state(config_path, backup_path)
+
+
+def _repair_codex_desktop_global_state(config_path: Path, backup_path: Path) -> None:
+    # Codex Desktop stores the selected remote host outside config.toml. Leaving
+    # a stale remote-ssh/remote-control selection after Gateway overlay makes
+    # the App keep retrying chatgpt.com remote-control websockets and show a
+    # connection timeout even though the local Gateway is healthy.
+    state_path = config_path.parent / ".codex-global-state.json"
+    if not state_path.exists():
+        return
+    from global_state_repair import repair_global_state
+
+    repair_global_state(state_path, backup_path.parent / f"{backup_path.name}.global-state")
 
 
 def _preserve_user_catalog_path(current: str, restored: str) -> str:

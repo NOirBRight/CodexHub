@@ -16,7 +16,9 @@ Each flavor produces:
 
 The Debian package identity is always `codex-hub`, so `apt`/`dpkg` upgrades
 replace the installed package instead of creating side-by-side versions. The
-package owns the single `/usr/share/applications/CodexHub.desktop` launcher.
+package owns the visible `/usr/share/applications/CodexHub.desktop` launcher
+and hidden identity files `com.codexhub.app.desktop` and `codexhub.desktop`
+so GNOME can map the running Wayland window without a second app-grid entry.
 Its recoverable post-install migration archives exact legacy CodexHub-generated
 user launchers as `*.codexhub-legacy-backup`; customized desktop entries are
 left untouched. The package launcher is atomically normalized to

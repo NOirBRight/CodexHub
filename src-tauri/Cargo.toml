@@ -1,6 +1,6 @@
 [package]
 name = "codexhub"
-version = "0.1.9-beta.3.10"
+version = "0.1.9-beta.3.11"
 description = "CodexHub desktop backend and CLI"
 authors = ["CodexHub"]
 license = "MIT"
@@ -44,6 +44,7 @@ serde_yaml = "0.9"
 gtk = { version = "0.18", features = ["v3_24"] }
 glib = "0.18"
 cairo-rs = "0.18"
+gdk-pixbuf = "0.18"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
