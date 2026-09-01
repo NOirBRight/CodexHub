@@ -1,7 +1,7 @@
 {
   "name": "codexhub-frontend",
   "private": true,
-  "version": "0.1.9-beta.3.13",
+  "version": "0.1.9-beta.3.14",
   "license": "MIT",
   "type": "module",
   "scripts": {
