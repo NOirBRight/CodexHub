@@ -1,6 +1,6 @@
 [package]
 name = "codexhub"
-version = "0.1.9-beta.3.15"
+version = "0.1.9-beta.3.16"
 description = "CodexHub desktop backend and CLI"
 authors = ["CodexHub"]
 license = "MIT"
