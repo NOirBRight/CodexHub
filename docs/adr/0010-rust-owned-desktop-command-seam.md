@@ -31,7 +31,7 @@ Rust owns the command interface. TypeScript is a checked client adapter, not a
 second source of truth.
 
 1. **One registry module** `src-tauri/src/desktop_commands/` owns the command
-   table: canonical name, Tauri handler path, Web Bridge decoder/handler,
+   table through a declarative macro: canonical name, Tauri handler path, Web Bridge decoder/handler,
    `frontend_exposed`, `bridge_exposed`, `desktop_only`, and argument alias
    metadata. The registry macro expands to the literal
    `tauri::generate_handler![...]` expression, the typed Web Bridge match, and
@@ -65,3 +65,10 @@ second source of truth.
 - The Rust phases require a working `cargo` in the verification environment;
   no campaign completion claim without `cargo test --locked -- --test-threads=1`
   and `cargo clippy --locked --all-targets -- -D warnings`.
+
+## Implementation status
+
+The registry macro now emits `CommandMeta`, parsing/name helpers, the static
+Tauri handler expression, and the typed Web Bridge match from one row list.
+Contract tests invoke a Rust test to write a temporary manifest and compare
+structured JSON; no generated manifest is checked into the repository.

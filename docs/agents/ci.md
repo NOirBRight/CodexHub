@@ -129,8 +129,9 @@ On a Linux host, `./scripts/verify-linux.sh` runs Python core (excluding
 `tests/test_real_client_e2e.py`), the Python partition completeness checker,
 `cargo test --locked`, clippy, a fresh frontend/custom-protocol app build, and
 the watchdog-bounded physical pointer-input E2E in isolated D-Bus and Xvfb
-sessions. The E2E checks full native input coverage, background click-through,
-and a rendered DOM state transition. Use this complete Linux suite whenever the
+sessions. The E2E checks the desktop `WM_CLASS`/`StartupWMClass` identity, full
+native input coverage, background click-through, and a rendered DOM state
+transition. Use this complete Linux suite whenever the
 changed boundary includes frontend, Gateway, process-lifecycle, packaging, or
 Rust code. Install `xvfb`, `xauth`, and `x11-utils` first. The synthetic
 real-client partition remains Windows-watchdog-only. Windows cmd/PowerShell

@@ -23,7 +23,7 @@ pub fn run(args: &[String]) -> i32 {
         Some("restart") => print_result(crate::restart_proxy()),
         Some("refresh-models") => match parse_restart_codex_flag(&args[1..]) {
             Ok(restart_codex) => {
-                print_result(crate::refresh_official_models_coordinated(restart_codex))
+                print_result(crate::refresh_official_models_published_coordinated(restart_codex))
             }
             Err(()) => {
                 print_refresh_models_usage();

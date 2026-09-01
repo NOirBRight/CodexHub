@@ -4,47 +4,49 @@
 //! HTTP envelope (origin, body, response) and calls dispatch_web.
 
 use crate::{
-    app_updates, autostart, catalog, config, gateway, history, models, openai_usage, proxy, xai_auth,
+    app_updates, autostart, catalog, config, gateway, history, models, openai_usage, proxy,
+    xai_auth,
 };
 use serde_json::Value;
 use tauri::AppHandle;
 
-pub fn dispatch_web(
-    command: &str,
-    args: &Value,
-    app: Option<AppHandle>,
-) -> Result<Value, String> {
-    if crate::desktop_commands::command_meta(command).is_none() {
-        return Err(format!("unknown CodexHub command: {command}"));
+use crate::desktop_commands::Command;
+
+pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Result<Value, String> {
+    let command_name = command;
+    let meta = crate::desktop_commands::command_meta(command_name)
+        .ok_or_else(|| format!("unknown CodexHub command: {command_name}"))?;
+    if !meta.bridge_exposed {
+        return Err(format!("unknown CodexHub command: {command_name}"));
     }
+    let command =
+        crate::desktop_commands::parse_command(command_name).expect("manifest metadata must parse");
     match command {
-        "get_app_version" => to_value(Ok(app_updates::get_app_version(desktop_app(&app)?))),
-        "check_app_update" => to_value(tauri::async_runtime::block_on(
+        Command::GetAppVersion => to_value(Ok(app_updates::get_app_version(desktop_app(&app)?))),
+        Command::CheckAppUpdate => to_value(tauri::async_runtime::block_on(
             app_updates::check_app_update(desktop_app(&app)?),
         )),
-        "start_app_update_install" => {
+        Command::StartAppUpdateInstall => {
             to_value(app_updates::start_app_update_install(desktop_app(&app)?))
         }
-        "get_app_update_install_status" => to_value(Ok(
+        Command::GetAppUpdateInstallStatus => to_value(Ok(
             app_updates::get_app_update_install_status(desktop_app(&app)?),
         )),
-        "consume_app_update_completion" => to_value(app_updates::consume_app_update_completion(
-            desktop_app(&app)?,
-        )),
-        "install_app_update" => to_value(tauri::async_runtime::block_on(
+        Command::ConsumeAppUpdateCompletion => to_value(
+            app_updates::consume_app_update_completion(desktop_app(&app)?),
+        ),
+        Command::InstallAppUpdate => to_value(tauri::async_runtime::block_on(
             app_updates::install_app_update(desktop_app(&app)?),
         )),
-        "get_status" => to_value(proxy::status()),
-        "get_codex_desktop_status" => to_value(crate::codex_desktop::status()),
-        "switch_mode" => {
-            let mode = string_arg(args, "mode")?;
-            let auto_sync = bool_arg(args, "autoSync")?;
+        Command::GetStatus => to_value(proxy::status()),
+        Command::GetCodexDesktopStatus => to_value(crate::codex_desktop::status()),
+        Command::SwitchMode => {
+            let mode = registry_string_arg(args, command, "mode")?;
+            let auto_sync = registry_bool_arg(args, command, "auto_sync")?;
             let force_takeover =
-                optional_bool_arg(args, &["forceTakeover", "force_takeover"])
-                    .unwrap_or(false);
+                registry_optional_bool_arg(args, command, "force_takeover").unwrap_or(false);
             let restart_codex =
-                optional_bool_arg(args, &["restartCodex", "restart_codex"])
-                    .unwrap_or(false);
+                registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
             to_value(crate::switch_mode(
                 mode,
                 auto_sync,
@@ -52,71 +54,68 @@ pub fn dispatch_web(
                 Some(restart_codex),
             ))
         }
-        "start_proxy" => to_value(crate::start_proxy()),
-        "stop_proxy" => to_value(proxy::stop()),
-        "restart_proxy" => to_value(crate::restart_proxy()),
-        "get_providers" => to_value(config::get_providers()),
-        "get_bundled_providers" => to_value(config::get_bundled_providers()),
-        "save_providers" => {
+        Command::StartProxy => to_value(crate::start_proxy()),
+        Command::StopProxy => to_value(proxy::stop()),
+        Command::RestartProxy => to_value(crate::restart_proxy()),
+        Command::GetProviders => to_value(config::get_providers()),
+        Command::GetBundledProviders => to_value(config::get_bundled_providers()),
+        Command::SaveProviders => {
             let providers = serde_json::from_value(
-                args
-                    .get("providers")
+                args.get("providers")
                     .cloned()
                     .ok_or_else(|| "providers argument is required".to_string())?,
             )
             .map_err(|error| format!("invalid providers argument: {error}"))?;
             to_value(config::save_providers(providers))
         }
-        "get_settings" => to_value(config::get_settings().and_then(autostart::reconcile_settings)),
-        "get_app_flavor" => to_value(Ok(crate::app_flavor::current_info())),
-        "save_settings" => {
+        Command::GetSettings => {
+            to_value(config::get_settings().and_then(autostart::reconcile_settings))
+        }
+        Command::GetAppFlavor => to_value(Ok(crate::app_flavor::current_info())),
+        Command::SaveSettings => {
             let settings = serde_json::from_value(
-                args
-                    .get("settings")
+                args.get("settings")
                     .cloned()
                     .ok_or_else(|| "settings argument is required".to_string())?,
             )
             .map_err(|error| format!("invalid settings argument: {error}"))?;
             to_value(config::save_settings(settings))
         }
-        "get_codex_context_guard_status" => to_value(config::get_codex_context_guard_status()),
-        "set_codex_context_guard" => {
+        Command::GetCodexContextGuardStatus => to_value(config::get_codex_context_guard_status()),
+        Command::SetCodexContextGuard => {
             let enabled = bool_arg(args, "enabled")?;
             let restart_codex =
-                optional_bool_arg(args, &["restartCodex", "restart_codex"])
-                    .unwrap_or(false);
+                registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
             to_value(crate::set_codex_context_guard(enabled, Some(restart_codex)))
         }
-        "refresh_official_models" => {
+        Command::RefreshOfficialModels => {
             let restart_codex =
-                optional_bool_arg(args, &["restartCodex", "restart_codex"])
-                    .unwrap_or(false);
+                registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
             to_value(crate::refresh_official_models_coordinated(restart_codex))
         }
-        "openai_usage_completions" => {
-            let start_time = optional_u64_arg(args, &["startTime", "start_time"]);
-            let end_time = optional_u64_arg(args, &["endTime", "end_time"]);
-            let force_refresh =
-                optional_bool_arg(args, &["forceRefresh", "force_refresh"]);
+        Command::OpenaiUsageCompletions => {
+            let start_time = registry_optional_u64_arg(args, command, "start_time");
+            let end_time = registry_optional_u64_arg(args, command, "end_time");
+            let force_refresh = registry_optional_bool_arg(args, command, "force_refresh");
             to_value(openai_usage::openai_usage_completions(
                 start_time,
                 end_time,
                 force_refresh,
             ))
         }
-        "discover_provider_models" => {
-            let base_url = string_arg(args, "baseUrl")?;
-            let api_key = string_arg(args, "apiKey")?;
-            let provider_id = optional_string_arg(args, &["providerId", "provider_id"]);
+        Command::DiscoverProviderModels => {
+            let base_url = registry_string_arg(args, command, "base_url")?;
+            let api_key = registry_string_arg(args, command, "api_key")?;
+            let provider_id = registry_optional_string_arg(args, command, "provider_id");
             to_value(models::discover_provider_models(
                 &base_url,
                 &api_key,
                 provider_id.as_deref(),
             ))
         }
-        "probe_upstream_format" => {
-            let base_url = string_arg(args, "baseUrl")?;
-            let api_key = string_arg(args, "apiKey")?;
+        Command::ProbeUpstreamFormat => {
+            let base_url = registry_string_arg(args, command, "base_url")?;
+            let api_key = registry_string_arg(args, command, "api_key")?;
             let model = args
                 .get("model")
                 .and_then(Value::as_str)
@@ -127,21 +126,20 @@ pub fn dispatch_web(
                 model.as_deref(),
             ))
         }
-        "provider_probe_upstream_format" => {
-            let provider_id = string_arg(args, "providerId")?;
+        Command::ProviderProbeUpstreamFormat => {
+            let provider_id = registry_string_arg(args, command, "provider_id")?;
             let model = args
                 .get("model")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             to_value(gateway::provider_probe_upstream_format(provider_id, model))
         }
-        "test_model_endpoint" => {
-            let base_url = string_arg(args, "baseUrl")?;
-            let api_key = string_arg(args, "apiKey")?;
-            let model = string_arg(args, "model")?;
+        Command::TestModelEndpoint => {
+            let base_url = registry_string_arg(args, command, "base_url")?;
+            let api_key = registry_string_arg(args, command, "api_key")?;
+            let model = registry_string_arg(args, command, "model")?;
             let upstream_format = serde_json::from_value(
-                args
-                    .get("upstreamFormat")
+                registry_value(args, command, "upstream_format")
                     .cloned()
                     .ok_or_else(|| "upstreamFormat argument is required".to_string())?,
             )
@@ -153,11 +151,10 @@ pub fn dispatch_web(
                 &upstream_format,
             ))
         }
-        "gateway_status" => to_value(gateway::gateway_status()),
-        "gateway_test_request" => {
+        Command::GatewayStatus => to_value(gateway::gateway_status()),
+        Command::GatewayTestRequest => {
             let kind = serde_json::from_value(
-                args
-                    .get("kind")
+                args.get("kind")
                     .cloned()
                     .ok_or_else(|| "kind argument is required".to_string())?,
             )
@@ -168,89 +165,82 @@ pub fn dispatch_web(
                 .map(ToOwned::to_owned);
             to_value(gateway::gateway_test_request(kind, model))
         }
-        "gateway_recent_events" => {
+        Command::GatewayRecentEvents => {
             let limit = args
                 .get("limit")
                 .and_then(Value::as_u64)
                 .and_then(|value| usize::try_from(value).ok());
-            let since_ts = optional_string_arg(args, &["sinceTs", "since_ts"]);
+            let since_ts = registry_optional_string_arg(args, command, "since_ts");
             to_value(gateway::gateway_recent_events(limit, since_ts))
         }
-        "gateway_usage_summary" => {
-            let start_ts = optional_string_arg(args, &["startTs", "start_ts"]);
-            let end_ts = optional_string_arg(args, &["endTs", "end_ts"]);
+        Command::GatewayUsageSummary => {
+            let start_ts = registry_optional_string_arg(args, command, "start_ts");
+            let end_ts = registry_optional_string_arg(args, command, "end_ts");
             to_value(gateway::gateway_usage_summary(start_ts, end_ts))
         }
-        "gateway_usage_snapshot" => {
+        Command::GatewayUsageSnapshot => {
             let limit = args
                 .get("limit")
                 .and_then(Value::as_u64)
                 .and_then(|value| usize::try_from(value).ok());
-            let start_ts = optional_string_arg(args, &["startTs", "start_ts"]);
-            let end_ts = optional_string_arg(args, &["endTs", "end_ts"]);
+            let start_ts = registry_optional_string_arg(args, command, "start_ts");
+            let end_ts = registry_optional_string_arg(args, command, "end_ts");
             to_value(gateway::gateway_usage_snapshot(limit, start_ts, end_ts))
         }
-        "gateway_usage_events" => {
+        Command::GatewayUsageEvents => {
             let limit = args
                 .get("limit")
                 .and_then(Value::as_u64)
                 .and_then(|value| usize::try_from(value).ok());
-            let start_ts = optional_string_arg(args, &["startTs", "start_ts"]);
-            let end_ts = optional_string_arg(args, &["endTs", "end_ts"]);
+            let start_ts = registry_optional_string_arg(args, command, "start_ts");
+            let end_ts = registry_optional_string_arg(args, command, "end_ts");
             to_value(gateway::gateway_usage_events(limit, start_ts, end_ts))
         }
-        "gateway_copy_client_config" => {
-            let client_kind = args
-                .get("clientKind")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
+        Command::GatewayCopyClientConfig => {
+            let client_kind = registry_optional_string_arg(args, command, "client_kind");
             let model = args
                 .get("model")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             to_value(gateway::gateway_copy_client_config(client_kind, model))
         }
-        "list_gateway_clients" => {
-            let include_versions = args
-                .get("includeVersions")
-                .or_else(|| args.get("include_versions"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+        Command::ListGatewayClients => {
+            let include_versions =
+                registry_optional_bool_arg(args, command, "include_versions").unwrap_or(false);
             to_value(gateway::list_gateway_clients(include_versions))
         }
-        "dsh_client_info" => to_value(Ok(gateway::detect_dsh_client())),
-        "dsh_client_connect" => to_value(gateway::dsh_client_connect()),
-        "dsh_client_disconnect" => to_value(gateway::dsh_client_disconnect()),
-        "dsh_client_readback" => to_value(gateway::dsh_client_readback()),
-        "preview_gateway_client_config" => {
-            let client_id = string_arg(args, "clientId")?;
+        Command::DshClientInfo => to_value(Ok(gateway::detect_dsh_client())),
+        Command::DshClientConnect => to_value(gateway::dsh_client_connect()),
+        Command::DshClientDisconnect => to_value(gateway::dsh_client_disconnect()),
+        Command::DshClientReadback => to_value(gateway::dsh_client_readback()),
+        Command::PreviewGatewayClientConfig => {
+            let client_id = registry_string_arg(args, command, "client_id")?;
             let model = args
                 .get("model")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             to_value(gateway::preview_gateway_client_config(client_id, model))
         }
-        "apply_gateway_client_config" => {
-            let client_id = string_arg(args, "clientId")?;
+        Command::ApplyGatewayClientConfig => {
+            let client_id = registry_string_arg(args, command, "client_id")?;
             let model = args
                 .get("model")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             to_value(gateway::apply_gateway_client_config(client_id, model))
         }
-        "restore_gateway_client_config" => {
-            let client_id = string_arg(args, "clientId")?;
+        Command::RestoreGatewayClientConfig => {
+            let client_id = registry_string_arg(args, command, "client_id")?;
             to_value(gateway::restore_gateway_client_config(client_id))
         }
-        "switch_gateway_client_route" => {
-            let client_id = string_arg(args, "clientId")?;
-            let mode = string_arg(args, "mode")?;
+        Command::SwitchGatewayClientRoute => {
+            let client_id = registry_string_arg(args, command, "client_id")?;
+            let mode = registry_string_arg(args, command, "mode")?;
             let model = args
                 .get("model")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
-            let force_takeover =
-                optional_bool_arg(args, &["forceTakeover", "force_takeover"]);
+            let force_takeover = registry_optional_bool_arg(args, command, "force_takeover");
             to_value(gateway::switch_gateway_client_route(
                 client_id,
                 mode,
@@ -258,143 +248,130 @@ pub fn dispatch_web(
                 force_takeover,
             ))
         }
-        "sync_gateway_clients" => {
+        Command::SyncGatewayClients => {
             let model = args
                 .get("model")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             to_value(gateway::sync_gateway_clients(model))
         }
-        "subagent_matrix_status" => to_value(gateway::subagent_matrix_status()),
-        "generate_catalog" => {
-            let restart_codex = optional_bool_arg(
-                args,
-                &["restartCodex", "restart_codex"],
-            )
-            .unwrap_or(false);
+        Command::SubagentMatrixStatus => to_value(gateway::subagent_matrix_status()),
+        Command::GenerateCatalog => {
+            let restart_codex =
+                registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
             to_value(crate::generate_catalog_coordinated(restart_codex))
         }
-        "get_catalog_override_diagnostics" => to_value(catalog::catalog_override_diagnostics()),
-        "list_models" => to_value(models::list_models()),
-        "refresh_model_metadata" => to_value(models::refresh_model_metadata()),
-        "list_model_metadata" => to_value(models::list_model_metadata()),
-        "save_model_metadata_override" => {
+        Command::GetCatalogOverrideDiagnostics => to_value(catalog::catalog_override_diagnostics()),
+        Command::ListModels => to_value(models::list_models()),
+        Command::RefreshModelMetadata => to_value(models::refresh_model_metadata()),
+        Command::ListModelMetadata => to_value(models::list_model_metadata()),
+        Command::SaveModelMetadataOverride => {
             let model = serde_json::from_value(
-                args
-                    .get("model")
+                args.get("model")
                     .cloned()
                     .ok_or_else(|| "model argument is required".to_string())?,
             )
             .map_err(|error| format!("invalid model argument: {error}"))?;
             to_value(models::save_model_metadata_override(model))
         }
-        "save_official_multi_agent_version" => {
-            let model_id = optional_string_arg(args, &["modelId", "model_id"])
+        Command::SaveOfficialMultiAgentVersion => {
+            let model_id = registry_optional_string_arg(args, command, "model_id")
                 .ok_or_else(|| "modelId argument is required".to_string())?;
             let version = args
                 .get("version")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            let restart_codex = optional_bool_arg(
-                args,
-                &["restartCodex", "restart_codex"],
-            )
-            .unwrap_or(false);
+            let restart_codex =
+                registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
             to_value(crate::save_official_multi_agent_version_coordinated(
                 model_id,
                 version,
                 restart_codex,
             ))
         }
-        "list_official_multi_agent_overrides" => {
+        Command::ListOfficialMultiAgentOverrides => {
             to_value(models::list_official_multi_agent_overrides())
         }
-        "list_official_multi_agent_baselines" => {
+        Command::ListOfficialMultiAgentBaselines => {
             to_value(models::list_official_multi_agent_baselines())
         }
-        "sync_history" => {
-            let target_provider = args
-                .get("targetProvider")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
+        Command::SyncHistory => {
+            let target_provider = registry_optional_string_arg(args, command, "target_provider");
             to_value(history::sync_history(target_provider.as_deref()))
         }
-        "reconcile_after_route_switch" => {
-            let target_provider = args
-                .get("targetProvider")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
+        Command::ReconcileAfterRouteSwitch => {
+            let target_provider = registry_optional_string_arg(args, command, "target_provider");
             to_value(history::reconcile_after_route_switch(
                 target_provider.as_deref(),
             ))
         }
-        "migrate_official_history_to_unified" => {
+        Command::MigrateOfficialHistoryToUnified => {
             to_value(history::migrate_official_history_to_unified())
         }
-        "restore_official_history_from_unified" => {
+        Command::RestoreOfficialHistoryFromUnified => {
             to_value(history::restore_official_history_from_unified())
         }
-        "preflight_unified_history" => {
-            let apply_repairs = optional_bool_arg(
-                args,
-                &[
-                    "applyRepairs",
-                    "apply_repairs",
-                    "requestRestart",
-                    "request_restart",
-                ],
-            )
-            .unwrap_or(false);
-            let target_unified =
-                optional_bool_arg(args, &["targetUnified", "target_unified"]);
+        Command::PreflightUnifiedHistory => {
+            let apply_repairs = registry_optional_bool_arg(args, command, "apply_repairs")
+                .or_else(|| registry_optional_bool_arg(args, command, "request_restart"))
+                .unwrap_or(false);
+            let target_unified = registry_optional_bool_arg(args, command, "target_unified");
             to_value(history::preflight_unified_history(
                 apply_repairs,
                 target_unified,
             ))
         }
-        "get_conversation_sync_status" => to_value(history::preflight_unified_history(false, None)),
-        "sync_conversation_history" => {
-            let target_provider = args.get("targetProvider").and_then(Value::as_str);
+        Command::GetConversationSyncStatus => {
+            to_value(history::preflight_unified_history(false, None))
+        }
+        Command::SyncConversationHistory => {
+            let target_provider = registry_optional_string_arg(args, command, "target_provider");
             to_value(history::preflight_unified_history(
                 true,
                 target_provider.map(|value| value != "openai"),
             ))
         }
-        "diagnose_conversation_history" => {
-            let full_scan =
-                optional_bool_arg(args, &["fullScan", "full_scan"]).unwrap_or(true);
+        Command::DiagnoseConversationHistory => {
+            let full_scan = registry_optional_bool_arg(args, command, "full_scan").unwrap_or(true);
             to_value(history::diagnose_unified_history(full_scan))
         }
-        "sync_catalog" => {
-            let restart_codex = optional_bool_arg(
-                args,
-                &["restartCodex", "restart_codex"],
-            )
-            .unwrap_or(false);
+        Command::SyncCatalog => {
+            let restart_codex =
+                registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
             to_value(crate::sync_catalog_coordinated(restart_codex))
         }
-        "set_autostart" => to_value(autostart::set_autostart(bool_arg(
-            args,
-            "enabled",
+        Command::SetAutostart => to_value(autostart::set_autostart(registry_bool_arg(
+            args, command, "enabled",
         )?)),
-        "remove_autostart" => to_value(autostart::remove_autostart()),
-        "get_autostart_status" => to_value(autostart::get_autostart_status()),
-        "open_codex_app" => to_value(crate::open_codex_app()),
-        "xai_auth_status" => to_value(xai_auth::xai_auth_status_blocking()),
-        "xai_start_device_login" => to_value(xai_auth::xai_start_device_login_blocking()),
-        "xai_poll_device_login" => {
-            let device_json = optional_string_arg(args, &["deviceJson", "device_json"])
+        Command::RemoveAutostart => to_value(autostart::remove_autostart()),
+        Command::GetAutostartStatus => to_value(autostart::get_autostart_status()),
+        Command::OpenCodexApp => to_value(crate::open_codex_app()),
+        Command::XaiAuthStatus => to_value(xai_auth::xai_auth_status_blocking()),
+        Command::XaiStartDeviceLogin => to_value(xai_auth::xai_start_device_login_blocking()),
+        Command::XaiPollDeviceLogin => {
+            let device_json = registry_optional_string_arg(args, command, "device_json")
                 .ok_or_else(|| "deviceJson argument is required".to_string())?;
             to_value(xai_auth::xai_poll_device_login_blocking(device_json))
         }
-        "xai_logout" => to_value(xai_auth::xai_logout_blocking()),
-        "xai_usage_snapshot" => to_value(xai_auth::xai_usage_snapshot_blocking()),
-        "xai_open_verification_url" => {
+        Command::XaiLogout => to_value(xai_auth::xai_logout_blocking()),
+        Command::XaiUsageSnapshot => to_value(xai_auth::xai_usage_snapshot_blocking()),
+        Command::XaiOpenVerificationUrl => {
             let url = optional_string_arg(args, &["url"])
                 .ok_or_else(|| "url argument is required".to_string())?;
             to_value(xai_auth::xai_open_verification_url_blocking(url))
         }
-        command => Err(format!("unknown CodexHub command: {command}")),
+        // These commands are registered for the desktop handler or retained
+        // as an internal compatibility entry, but deliberately have no Web
+        // Bridge implementation. Keep them explicit so adding a registry row
+        // cannot silently produce an untyped fallback arm.
+        Command::DiagnosticsStatus
+        | Command::DiagnosticsManualMark
+        | Command::DiagnosticsPause
+        | Command::DiagnosticsResume
+        | Command::DiagnosticsDeleteIncident
+        | Command::WindowMinimize
+        | Command::WindowToggleMaximize
+        | Command::WindowCloseToTray => Err(format!("unknown CodexHub command: {command_name}")),
     }
 }
 
@@ -408,11 +385,59 @@ fn to_value<T: serde::Serialize>(result: Result<T, String>) -> Result<Value, Str
         serde_json::to_value(value).map_err(|error| format!("failed to encode response: {error}"))
     })
 }
-fn string_arg(args: &Value, name: &str) -> Result<String, String> {
-    args.get(name)
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("{name} argument is required"))
+
+/// Resolve a wire argument from the aliases declared on the registry row.
+/// Aliases are tried in declaration order, then the canonical snake_case key,
+/// so legacy camelCase callers retain their precedence without another list
+/// of command-specific names in this adapter.
+fn registry_argument_names(command: Command, canonical: &str) -> Vec<&str> {
+    let mut names = crate::desktop_commands::COMMANDS
+        .iter()
+        .find(|meta| meta.command == command)
+        .map(|meta| {
+            meta.argument_aliases
+                .iter()
+                .filter_map(|(alias, target)| (*target == canonical).then_some(*alias))
+                .chain(std::iter::once(canonical))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![canonical]);
+    names.dedup();
+    names
+}
+
+fn registry_string_arg(args: &Value, command: Command, canonical: &str) -> Result<String, String> {
+    let names = registry_argument_names(command, canonical);
+    optional_string_arg(args, &names).ok_or_else(|| format!("{} argument is required", names[0]))
+}
+
+fn registry_bool_arg(args: &Value, command: Command, canonical: &str) -> Result<bool, String> {
+    let names = registry_argument_names(command, canonical);
+    names
+        .iter()
+        .find_map(|name| args.get(*name).and_then(Value::as_bool))
+        .ok_or_else(|| format!("{} argument is required", names[0]))
+}
+
+fn registry_value<'a>(args: &'a Value, command: Command, canonical: &str) -> Option<&'a Value> {
+    registry_argument_names(command, canonical)
+        .iter()
+        .find_map(|name| args.get(*name))
+}
+
+fn registry_optional_string_arg(args: &Value, command: Command, canonical: &str) -> Option<String> {
+    let names = registry_argument_names(command, canonical);
+    optional_string_arg(args, &names)
+}
+
+fn registry_optional_u64_arg(args: &Value, command: Command, canonical: &str) -> Option<u64> {
+    let names = registry_argument_names(command, canonical);
+    optional_u64_arg(args, &names)
+}
+
+fn registry_optional_bool_arg(args: &Value, command: Command, canonical: &str) -> Option<bool> {
+    let names = registry_argument_names(command, canonical);
+    optional_bool_arg(args, &names)
 }
 
 fn bool_arg(args: &Value, name: &str) -> Result<bool, String> {

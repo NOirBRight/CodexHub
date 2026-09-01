@@ -8,6 +8,7 @@ bodies and SSE frames. Host helpers are imported from their owning modules in
 from __future__ import annotations
 
 import route_plan as route_plan
+import collaboration_adapter as _collaboration_adapter
 
 from . import host as host
 from . import multi_agent as multi_agent
@@ -50,7 +51,7 @@ def normalize_transparent_tool_schema_booleans(*args, **kwargs):
 
 
 def resolve_collaboration_boundary(*args, **kwargs):
-    return host._resolve_collaboration_boundary(*args, **kwargs)
+    return _collaboration_adapter.resolve_boundary(*args, **kwargs)
 
 
 def rewrite_structured_tool_input_items(*args, **kwargs):

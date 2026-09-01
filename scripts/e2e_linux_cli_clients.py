@@ -25,6 +25,7 @@ from typing import NamedTuple
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
+CLI_CONTRACT_PATH = ROOT / "scripts" / "real_client_cli_contract.v1.json"
 SENTINEL_PREFIX = "SENTINEL:codexhub-linux-cli-e2e:"
 PROMPT_TEMPLATE = (
     "Use exactly one read-only tool call to read ./sentinel.txt. "
@@ -41,70 +42,54 @@ class Case(NamedTuple):
     gateway_model: str
 
 
-CASES = tuple(
-    Case(
-        f"{client}-{provider}",
-        client,
-        provider,
-        managed_model,
-        selector,
-        gateway_model,
-    )
-    for client, selectors in {
-        "codex": (
-            ("openai", "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-luna"),
-            (
-                "opencode-go",
-                "opencode-go/muse-spark-1.2-contributor",
-                "opencode-go/muse-spark-1.2-contributor",
-                "opencode-go/muse-spark-1.2-contributor",
-            ),
-        ),
-        "opencode": (
-            (
-                "openai",
-                "openai/gpt-5.6-luna",
-                "codexhub-openai/gpt-5.6-luna",
-                "gpt-5.6-luna",
-            ),
-            (
-                "opencode-go",
-                "opencode-go/muse-spark-1.2-contributor",
-                "codexhub-opencode-go/muse-spark-1.2-contributor",
-                "opencode-go/muse-spark-1.2-contributor",
-            ),
-        ),
-        "pi": (
-            (
-                "openai",
-                "openai/gpt-5.6-luna",
-                "codexhub-openai/gpt-5.6-luna",
-                "gpt-5.6-luna",
-            ),
-            (
-                "opencode-go",
-                "opencode-go/muse-spark-1.2-contributor",
-                "codexhub-opencode-go/muse-spark-1.2-contributor",
-                "opencode-go/muse-spark-1.2-contributor",
-            ),
-        ),
-        "omp": (
-            (
-                "openai",
-                "openai/gpt-5.6-luna",
-                "codexhub-openai/gpt-5.6-luna",
-                "gpt-5.6-luna",
-            ),
-            (
-                "opencode-go",
-                "opencode-go/muse-spark-1.2-contributor",
-                "codexhub-opencode-go/muse-spark-1.2-contributor",
-                "opencode-go/muse-spark-1.2-contributor",
-            ),
-        ),
-    }.items()
-    for provider, managed_model, selector, gateway_model in selectors
-)
+def load_cli_contract() -> dict[str, object]:
+    try:
+        contract = json.loads(CLI_CONTRACT_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"invalid CLI E2E contract: {CLI_CONTRACT_PATH}: {error}") from error
+    if not isinstance(contract, dict) or contract.get("schema") != "codexhub.real-client-cli-contract.v1":
+        raise RuntimeError("invalid CLI E2E contract schema")
+    return contract
+
+
+CLI_CONTRACT = load_cli_contract()
+
+
+def _contract_cases() -> tuple[Case, ...]:
+    platforms = CLI_CONTRACT["platforms"]
+    assert isinstance(platforms, dict)
+    linux = platforms["linux"]
+    assert isinstance(linux, dict)
+    client_names = linux["client_names"]
+    provider_names = linux["provider_names"]
+    assert isinstance(client_names, dict) and isinstance(provider_names, dict)
+    raw_cases = CLI_CONTRACT["cases"]
+    assert isinstance(raw_cases, list)
+    cases: list[Case] = []
+    for raw in raw_cases:
+        assert isinstance(raw, dict)
+        client_kind = str(raw["client"])
+        provider_id = str(raw["provider_id"])
+        models = raw["models"]
+        ids = raw["case_ids"]
+        assert isinstance(models, dict) and isinstance(ids, dict)
+        overrides = raw.get("platform_overrides", {}).get("linux", {})
+        assert isinstance(overrides, dict)
+        gateway_model = str(overrides.get("gateway", models["gateway"]))
+        cases.append(
+            Case(
+                str(ids["linux"]),
+                str(client_names[client_kind]),
+                str(provider_names[provider_id]),
+                str(models["managed"]),
+                str(models["selector"]),
+                gateway_model,
+            )
+        )
+    return tuple(cases)
+
+
+CASES = _contract_cases()
 
 
 def _run(

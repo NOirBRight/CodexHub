@@ -26,31 +26,26 @@ Run on the authoritative machine-bound local dedicated Windows host
 environment `codexhub-real-client-e2e` with a new output root, dedicated Codex
 login input, and no reused host user session or client configuration. Do not
 supply Ollama credentials. Use `isolated/credentials/opencode-go.json`. A VM or named snapshot is not required. The runner
-verifies each native installed version against these compatibility floors
-before launching the candidate or a client:
+verifies each native installed version against the versioned CLI contract
+(`scripts/real_client_cli_contract.v1.json`) before launching the candidate or
+a client. Desktop and ZCode GUI floors remain owned by this Windows runner.
 
 | Client | Minimum stable version | Version source |
 |---|---:|---|
 | Codex Desktop | `26.715.8383.0` | `OpenAI.Codex` AppX package identity and install location |
-| Codex CLI | `0.144.5` | `--version` |
 | ZCode | `3.3.6` | Authoritative Windows uninstall identity and install root |
-| OpenCode | `1.18.4` | `--version` |
-| Pi | `0.80.6` | `--version` |
-| OMP | `17.0.3` | `--version` |
 
 Codex CLI, OpenCode, Pi, and OMP must each emit exactly one normalized stable
-three-part version token at or above the table's floor. Codex CLI `0.145.0` is accepted.
+three-part version token at or above the floor recorded in the CLI contract.
 Suffixes, prereleases, four-part forms, unparseable output, and mixed
 or repeated version tokens fail. Only ZCode permits its separately verified
 numeric executable build suffix.
 
 Do not install or upgrade a client during a qualification run. OpenCode
-`1.18.4` is the minimum stable release because it contains the upstream
-response-header-timeout fix from commit
-`67caf894e0843ee370e72839e8265e483233479b`. The old `1.18.3` release and any
-prerelease or ambiguous suffix fail closed; newer stable releases remain
-subject to the complete parser, routing, terminal, streaming, retry, and
-evidence matrix.
+uses the contract's minimum stable release because it contains the upstream
+response-header-timeout fix. Older, prerelease, or ambiguous suffixes fail
+closed; newer stable releases remain subject to the complete parser, routing,
+terminal, streaming, retry, and evidence matrix.
 
 Desktop's passed executable must reside beneath the matching `OpenAI.Codex`
 AppX `InstallLocation`. Its Chromium `ProductVersion` is not the Desktop
@@ -278,26 +273,14 @@ and hard links fail as host-session reuse.
 
 ## Matrix and measurement
 
-The fixed case order and selectors are:
-
-| Case | Client | Provider | Client selector | Gateway canonical route | Protocol | Finalization |
-|---|---|---|---|---|---|---|
-| `desktop-luna` | Codex Desktop | Official | `gpt-5.6-luna` | `gpt-5.6-luna` | `responses` | human GUI |
-| `desktop-opencode-go` | Codex Desktop | OpenCode Go | `opencode-go/muse-spark-1.2-contributor` | `opencode-go/muse-spark-1.2-contributor` | `responses` | human GUI |
-| `codex-cli-luna` | Codex CLI | Official | `gpt-5.6-luna` | `gpt-5.6-luna` | `responses` | automated |
-| `codex-cli-opencode-go` | Codex CLI | OpenCode Go | `opencode-go/muse-spark-1.2-contributor` | `opencode-go/muse-spark-1.2-contributor` | `responses` | automated |
-| `opencode-luna` | OpenCode | Official | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | `responses` | automated |
-| `opencode-opencode-go` | OpenCode | OpenCode Go | `codexhub-opencode-go/muse-spark-1.2-contributor` | `opencode-go/muse-spark-1.2-contributor` | `responses` | automated |
-| `zcode-luna` | ZCode | Official | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | `responses` | human GUI |
-| `zcode-opencode-go` | ZCode | OpenCode Go | `codexhub-opencode-go/muse-spark-1.2-contributor` | `opencode-go/muse-spark-1.2-contributor` | `responses` | human GUI |
-| `pi-luna` | Pi | Official | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | `responses` | automated |
-| `pi-opencode-go` | Pi | OpenCode Go | `codexhub-opencode-go/muse-spark-1.2-contributor` | `opencode-go/muse-spark-1.2-contributor` | `responses` | automated |
-| `omp-luna` | OMP | Official | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | `responses` | automated |
-| `omp-opencode-go` | OMP | OpenCode Go | `codexhub-opencode-go/muse-spark-1.2-contributor` | `opencode-go/muse-spark-1.2-contributor` | `responses` | automated |
-
-The live Windows gate is `-CliOnly`: four Official Luna CLI cases plus four
-OpenCode Go Muse Spark CLI cases. Desktop/ZCode GUI rows stay in the table for
-archive only and are not run. Ollama remains prohibited.
+The fixed case order, platform name mappings, selectors, model routes, protocol,
+minimum versions, and shared evidence fields are defined in
+`scripts/real_client_cli_contract.v1.json`. Both platform runners read that
+contract; historical Windows and Linux case IDs remain unchanged. The live
+Windows gate is `-CliOnly`: four Official Luna CLI cases plus four OpenCode Go
+Muse Spark CLI cases. Desktop/ZCode GUI rows are outside the CLI contract and
+remain available only to the non-CLI Windows workflow. Ollama remains
+prohibited.
 
 ### CLI-only verification
 
@@ -334,19 +317,19 @@ contracts; accepting a newer version never relaxes these shapes:
 - OMP binds the case root with `--cwd`, enables only `read`, disables title
   generation, extensions, skills, and rules, and does not persist a session.
 
-- Codex CLI `0.144.5`: `thread.started`, `item.completed` command/agent
+- Codex CLI (contract baseline): `thread.started`, `item.completed` command/agent
   items, and `turn.completed`; the read command must explicitly report
   `status = completed` and integer `exit_code = 0`;
-- OpenCode `1.18.4`: `step_start`, completed `tool_use`, `text`, and
+- OpenCode (contract baseline): `step_start`, completed `tool_use`, `text`, and
   the final `step_finish` whose reason is `stop`; the intermediate
   `tool-calls` finish is not a terminal;
-- Pi `0.80.6` and OMP `17.0.3`: `tool_execution_end`, assistant
+- Pi and OMP (contract baselines): `tool_execution_end`, assistant
   `message_end`, and `agent_end`. The final assistant message must have
   `stopReason = stop`, no `errorMessage`, and exactly one later `agent_end`.
   `error`, `aborted`, `length`, missing/unknown reasons, error messages,
   contradictory ordering, and duplicate/missing agent ends fail closed.
 
-OMP's `17.0.3` compatibility baseline is launched through its one-shot JSON interface as
+OMP's contract compatibility baseline is launched through its one-shot JSON interface as
 `omp --print --mode json --model <selector> --no-session --no-title --tools
 read --no-extensions --no-skills --no-rules --cwd <case-root> <prompt>`. It
 has no `run` subcommand, and `--format` is not a supported launch flag.

@@ -17,7 +17,7 @@ if [[ "${1:-}" == "--list" && "$#" -eq 1 ]]; then
     "Python test partition completeness" \
     "Rust tests" \
     "Rust clippy" \
-    "Linux physical pointer input E2E (90s watchdog; requires timeout, dbus-run-session, xvfb-run, xwininfo)"
+    "Linux physical pointer input E2E (90s watchdog; requires timeout, dbus-run-session, xvfb-run, xwininfo, xprop)"
   exit 0
 fi
 if [[ "$#" -ne 0 ]]; then
@@ -58,7 +58,7 @@ run_leg "Rust clippy" bash -c 'cd "$1/src-tauri" && cargo clippy --locked --all-
 
 run_linux_input_e2e() {
   local dependency
-  for dependency in timeout dbus-run-session xvfb-run xwininfo; do
+  for dependency in timeout dbus-run-session xvfb-run xwininfo xprop; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
       echo "error: $dependency is required for the Linux pointer-input E2E" >&2
       return 1

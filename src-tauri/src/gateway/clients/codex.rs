@@ -124,7 +124,3 @@ pub(in crate::gateway) fn isolated_preview_text() -> String {
 pub(in crate::gateway) fn isolated_apply_unsupported<T>() -> Result<T, String> {
     Err("codex apply must be invoked through config::apply_codex_config_isolated".to_string())
 }
-
-pub(in crate::gateway) fn isolated_readback_unsupported<T>() -> Result<T, String> {
-    Err("codex readback must be invoked through config::readback_codex_config_isolated".to_string())
-}

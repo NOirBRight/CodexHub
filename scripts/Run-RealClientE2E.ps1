@@ -210,18 +210,87 @@ catch {
     # Bounded taskkill/descendant cleanup remains available as fallback.
 }
 
+$script:CliContractPath = Join-Path $script:ScriptDirectory 'real_client_cli_contract.v1.json'
+try {
+    $script:CliContract = Get-Content -LiteralPath $script:CliContractPath -Raw -Encoding UTF8 |
+        ConvertFrom-Json -ErrorAction Stop
+    if ($script:CliContract.schema -cne 'codexhub.real-client-cli-contract.v1' -or
+        $null -eq $script:CliContract.cases -or $script:CliContract.cases.Count -ne 8) {
+        throw 'invalid contract shape'
+    }
+}
+catch {
+    throw 'preflight_cli_contract_invalid'
+}
+$script:CliContractCases = @($script:CliContract.cases)
+$script:OfficialCodexCliCase = @($script:CliContractCases | Where-Object {
+    [string]$_.client -ceq 'codex_cli' -and [string]$_.provider_id -ceq 'official'
+})[0]
+$script:OfficialOpenCodeCase = @($script:CliContractCases | Where-Object {
+    [string]$_.client -ceq 'opencode' -and [string]$_.provider_id -ceq 'official'
+})[0]
+$script:ThirdPartyOpenCodeCase = @($script:CliContractCases | Where-Object {
+    [string]$_.client -ceq 'opencode' -and [string]$_.provider_id -ceq 'opencode-go'
+})[0]
+if ($null -eq $script:OfficialCodexCliCase -or $null -eq $script:OfficialOpenCodeCase -or
+    $null -eq $script:ThirdPartyOpenCodeCase) {
+    throw 'preflight_cli_contract_invalid'
+}
+$script:OfficialCodexManagedModel = [string]$script:OfficialCodexCliCase.models.managed
+$script:OfficialGatewayModel = [string]$script:OfficialOpenCodeCase.models.gateway
+$script:ThirdPartyManagedModel = [string]$script:ThirdPartyOpenCodeCase.models.managed
+$script:ThirdPartyCanonicalModel = [string]$script:ThirdPartyOpenCodeCase.models.canonical
+$script:CanonicalModels = @($script:CliContractCases | ForEach-Object {
+    [string]$_.models.canonical
+} | Select-Object -Unique)
+$script:OfficialCatalogModels = @($script:CliContractCases | Where-Object {
+    [string]$_.provider_id -ceq 'official'
+} | ForEach-Object {
+    @(
+        [string]$_.models.managed,
+        [string]$_.models.selector,
+        [string]$_.models.canonical,
+        [string]$_.models.gateway
+    )
+    # Contract rows may omit platform_overrides. StrictMode treats a missing
+    # PSCustomObject property as an error, so inspect the property bag before
+    # reading optional platform-specific routes.
+    $platformOverridesProperty = $_.PSObject.Properties['platform_overrides']
+    if ($null -ne $platformOverridesProperty -and $null -ne $platformOverridesProperty.Value) {
+        $platformOverrides = $platformOverridesProperty.Value
+        $linuxProperty = $platformOverrides.PSObject.Properties['linux']
+        if ($null -ne $linuxProperty -and $null -ne $linuxProperty.Value) {
+            $linuxGatewayProperty = $linuxProperty.Value.PSObject.Properties['gateway']
+            if ($null -ne $linuxGatewayProperty) {
+                [string]$linuxGatewayProperty.Value
+            }
+        }
+        $windowsProperty = $platformOverrides.PSObject.Properties['windows']
+        if ($null -ne $windowsProperty -and $null -ne $windowsProperty.Value) {
+            $windowsGatewayProperty = $windowsProperty.Value.PSObject.Properties['gateway']
+            if ($null -ne $windowsGatewayProperty) {
+                [string]$windowsGatewayProperty.Value
+            }
+        }
+    }
+} | Where-Object { $_ } | Select-Object -Unique)
+$script:ThirdPartyUpstreamModel = if ($script:ThirdPartyManagedModel -match '/(.+)$') {
+    $Matches[1]
+} else {
+    $script:ThirdPartyManagedModel
+}
 $script:MinimumVersions = [ordered]@{
     desktop = '26.715.8383.0'
-    codex_cli = '0.144.5'
     zcode = '3.3.6'
-    opencode = '1.18.4'
-    pi = '0.80.6'
-    omp = '17.0.3'
+    codex_cli = [string]$script:CliContract.minimum_versions.codex_cli
+    opencode = [string]$script:CliContract.minimum_versions.opencode
+    pi = [string]$script:CliContract.minimum_versions.pi
+    omp = [string]$script:CliContract.minimum_versions.omp
 }
 $script:CliOnly = [bool]$CliOnly
 $script:VerificationScope = if ($script:CliOnly) { 'cli_only' } else { 'gui_and_cli' }
 $script:VersionKeys = if ($script:CliOnly) {
-    @('codex_cli', 'opencode', 'pi', 'omp')
+    @($script:CliContract.minimum_versions.PSObject.Properties.Name)
 } else {
     @($script:MinimumVersions.Keys)
 }
@@ -401,7 +470,7 @@ function Get-FailureSummaryValue {
         outcome = 'failed'
         failure_classification = $FailureClassification
         pinned_versions = Get-ReportedClientVersions
-        canonical_models = @('gpt-5.6-luna', 'opencode-go/muse-spark-1.2-contributor', 'codexhub-openai/gpt-5.6-luna', 'codexhub-opencode-go/muse-spark-1.2-contributor')
+        canonical_models = @($script:CanonicalModels)
         counts = [ordered]@{
             case_count = 0
             passed_count = 0
@@ -1669,10 +1738,12 @@ function Test-CanonicalModelMatch {
     if ($Actual -ceq $Expected) {
         return $true
     }
-    if ($Expected -ceq 'gpt-5.6-luna' -and $Actual -ceq 'openai/gpt-5.6-luna') {
+    if ($Expected -ceq [string]$script:OfficialCodexCliCase.models.canonical -and
+        $Actual -ceq [string]$script:OfficialGatewayModel) {
         return $true
     }
-    if ($Expected -ceq 'opencode-go/muse-spark-1.2-contributor' -and $Actual -ceq 'codexhub-opencode-go/muse-spark-1.2-contributor') {
+    if ($Expected -ceq [string]$script:ThirdPartyOpenCodeCase.models.managed -and
+        $Actual -ceq [string]$script:ThirdPartyCanonicalModel) {
         return $true
     }
     return $false
@@ -2560,7 +2631,7 @@ function Invoke-ManagedClientConfigVerb {
         '--settings-path', $SettingsPath,
         '--providers-path', $ProvidersPath
     )
-    if ($CatalogPath -and $Model -in @('gpt-5.6-luna', 'openai/gpt-5.6-luna', 'codexhub-openai/gpt-5.6-luna')) {
+    if ($CatalogPath -and $Model -in $script:OfficialCatalogModels) {
         $arguments += @('--catalog-path', $CatalogPath)
     }
     $result = Invoke-IsolatedProcess -Executable $script:ManagedClientConfigBuild -Arguments $arguments -CaseRoot $ProcessRoot -Environment @{
@@ -3121,7 +3192,7 @@ available_upstream_formats = ["responses"]
 enabled = true
 
   [[providers.models]]
-  id = "muse-spark-1.2-contributor"
+  id = "$($script:ThirdPartyUpstreamModel)"
   display_name = "OpenCode Muse Spark 1.2 Contributor"
   context_window = 1000000
   max_output_tokens = 131072
@@ -3196,7 +3267,7 @@ catch {
 $script:CliOnly = [bool]$CliOnly
 $script:VerificationScope = if ($script:CliOnly) { 'cli_only' } else { 'gui_and_cli' }
 $script:VersionKeys = if ($script:CliOnly) {
-    @('codex_cli', 'opencode', 'pi', 'omp')
+    @($script:CliContract.minimum_versions.PSObject.Properties.Name)
 } else {
     @($script:MinimumVersions.Keys)
 }
@@ -3217,10 +3288,10 @@ if ($CandidateSha -notmatch '^[0-9a-f]{40}$') {
 if ($ManagedClientConfigSha -notmatch '^[0-9a-f]{40}$') {
     throw 'preflight_materializer_sha_invalid'
 }
-if ($LunaModel -cne 'codexhub-openai/gpt-5.6-luna') {
+if ($LunaModel -cne [string]$script:OfficialOpenCodeCase.models.selector) {
     throw 'preflight_luna_model_invalid'
 }
-if ($ThirdPartyModel -cne 'codexhub-opencode-go/muse-spark-1.2-contributor') {
+if ($ThirdPartyModel -cne [string]$script:ThirdPartyOpenCodeCase.models.selector) {
     throw 'preflight_third_party_model_invalid'
 }
 if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 900 -or
@@ -3387,11 +3458,15 @@ if ($script:WindowsInstallMetadata) {
 }
 $actualVersions = [ordered]@{}
 Set-RunnerPhase -Phase 'client_materialization'
+$windowsClientNames = @{}
+foreach ($property in $script:CliContract.platforms.windows.client_names.PSObject.Properties) {
+    $windowsClientNames[[string]$property.Name] = [string]$property.Value
+}
 $versionTargets = @(
-    [pscustomobject]@{ client = 'codex-cli'; key = 'codex_cli' },
-    [pscustomobject]@{ client = 'opencode'; key = 'opencode' },
-    [pscustomobject]@{ client = 'pi'; key = 'pi' },
-    [pscustomobject]@{ client = 'omp'; key = 'omp' }
+    foreach ($property in $script:CliContract.minimum_versions.PSObject.Properties) {
+        $key = [string]$property.Name
+        [pscustomobject]@{ client = $windowsClientNames[$key]; key = $key }
+    }
 )
 if (-not $CliOnly) {
     $versionTargets = @(
@@ -3420,21 +3495,27 @@ $manualCases = if ($CliOnly) {
     @()
 } else {
     @(
-        [pscustomobject]@{ case_id = 'desktop-luna'; client = 'desktop'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = 'gpt-5.6-luna'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna'; endpoint_binding = '/v1/responses'; protocol = 'responses'; seed_slot = 'desktop-luna'; legacy_seed_slot = '' },
-        [pscustomobject]@{ case_id = 'desktop-opencode-go'; client = 'desktop'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = 'opencode-go/muse-spark-1.2-contributor'; canonical_model = 'opencode-go/muse-spark-1.2-contributor'; gateway_model = 'opencode-go/muse-spark-1.2-contributor'; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses'; seed_slot = 'desktop-third-party'; legacy_seed_slot = 'desktop-volc' },
-        [pscustomobject]@{ case_id = 'zcode-luna'; client = 'zcode'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses'; seed_slot = 'zcode-luna'; legacy_seed_slot = '' },
-        [pscustomobject]@{ case_id = 'zcode-opencode-go'; client = 'zcode'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'opencode-go/muse-spark-1.2-contributor'; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses'; seed_slot = 'zcode-third-party'; legacy_seed_slot = 'zcode-volc' }
+        [pscustomobject]@{ case_id = 'desktop-luna'; client = 'desktop'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $script:OfficialCodexManagedModel; canonical_model = $script:OfficialCodexManagedModel; gateway_model = $script:OfficialCodexManagedModel; endpoint_binding = '/v1/responses'; protocol = 'responses'; seed_slot = 'desktop-luna'; legacy_seed_slot = '' },
+        [pscustomobject]@{ case_id = 'desktop-opencode-go'; client = 'desktop'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $script:ThirdPartyManagedModel; canonical_model = $script:ThirdPartyManagedModel; gateway_model = $script:ThirdPartyManagedModel; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses'; seed_slot = 'desktop-third-party'; legacy_seed_slot = 'desktop-volc' },
+        [pscustomobject]@{ case_id = 'zcode-luna'; client = 'zcode'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = $script:OfficialGatewayModel; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses'; seed_slot = 'zcode-luna'; legacy_seed_slot = '' },
+        [pscustomobject]@{ case_id = 'zcode-opencode-go'; client = 'zcode'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = $script:ThirdPartyManagedModel; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses'; seed_slot = 'zcode-third-party'; legacy_seed_slot = 'zcode-volc' }
     )
 }
 $automatedCases = @(
-    [pscustomobject]@{ case_id = 'codex-cli-luna'; client = 'codex-cli'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = 'gpt-5.6-luna'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna'; endpoint_binding = '/v1/responses'; protocol = 'responses' },
-    [pscustomobject]@{ case_id = 'codex-cli-opencode-go'; client = 'codex-cli'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = 'opencode-go/muse-spark-1.2-contributor'; canonical_model = 'opencode-go/muse-spark-1.2-contributor'; gateway_model = 'opencode-go/muse-spark-1.2-contributor'; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses' },
-    [pscustomobject]@{ case_id = 'opencode-luna'; client = 'opencode'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses' },
-    [pscustomobject]@{ case_id = 'opencode-opencode-go'; client = 'opencode'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'opencode-go/muse-spark-1.2-contributor'; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses' },
-    [pscustomobject]@{ case_id = 'pi-luna'; client = 'pi'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses' },
-    [pscustomobject]@{ case_id = 'pi-opencode-go'; client = 'pi'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'opencode-go/muse-spark-1.2-contributor'; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses' },
-    [pscustomobject]@{ case_id = 'omp-luna'; client = 'omp'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses' },
-    [pscustomobject]@{ case_id = 'omp-opencode-go'; client = 'omp'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'opencode-go/muse-spark-1.2-contributor'; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses' }
+    foreach ($contractCase in $script:CliContract.cases) {
+        $models = $contractCase.models
+        [pscustomobject]@{
+            case_id = [string]$contractCase.case_ids.windows
+            client = $windowsClientNames[[string]$contractCase.client]
+            provider_id = [string]$contractCase.provider_id
+            diagnostic_provider_id = [string]$contractCase.diagnostic_provider_id
+            client_selector = [string]$models.selector
+            canonical_model = [string]$models.canonical
+            gateway_model = [string]$models.gateway
+            endpoint_binding = [string]$contractCase.endpoint_binding
+            protocol = [string]$contractCase.protocol
+        }
+    }
 )
 
 $runBinding = New-RunBinding
@@ -3526,7 +3607,7 @@ try {
         $caseConfigurations[$case.case_id] = $configuration
     }
     if (-not $CliOnly) {
-        [void](Initialize-ClientConfiguration -Client 'desktop' -CaseRoot $candidateRoot -Model 'gpt-5.6-luna' -CatalogPath $candidateCatalogPath)
+        [void](Initialize-ClientConfiguration -Client 'desktop' -CaseRoot $candidateRoot -Model $script:OfficialCodexManagedModel -CatalogPath $candidateCatalogPath)
     }
     $candidateStartupStopwatch.Stop()
     $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -3647,25 +3728,24 @@ try {
     foreach ($result in $manualResults) {
         $manualById[$result.case_id] = $result
     }
-    $caseOrder = if ($CliOnly) {
+    # Preserve the historical evidence order while deriving the CLI rows from
+    # the shared contract. Desktop and ZCode remain the two GUI-only slots;
+    # the four CLI clients stay grouped in contract order between them.
+    $orderedCases = if ($CliOnly) {
+        @($automatedCases)
+    }
+    else {
         @(
-            'codex-cli-luna', 'codex-cli-opencode-go',
-            'opencode-luna', 'opencode-opencode-go',
-            'pi-luna', 'pi-opencode-go',
-            'omp-luna', 'omp-opencode-go'
-        )
-    } else {
-        @(
-            'desktop-luna', 'desktop-opencode-go',
-            'codex-cli-luna', 'codex-cli-opencode-go',
-            'opencode-luna', 'opencode-opencode-go',
-            'zcode-luna', 'zcode-opencode-go',
-            'pi-luna', 'pi-opencode-go',
-            'omp-luna', 'omp-opencode-go'
+            @($manualCases | Where-Object { $_.client -ceq 'desktop' })
+            @($automatedCases | Where-Object { $_.client -ceq 'codex-cli' })
+            @($automatedCases | Where-Object { $_.client -ceq 'opencode' })
+            @($manualCases | Where-Object { $_.client -ceq 'zcode' })
+            @($automatedCases | Where-Object { $_.client -ceq 'pi' })
+            @($automatedCases | Where-Object { $_.client -ceq 'omp' })
         )
     }
-    $caseResults = @($caseOrder | ForEach-Object {
-        if ($manualById.ContainsKey($_)) { $manualById[$_] } else { $automatedById[$_] }
+    $caseResults = @($orderedCases | ForEach-Object {
+        if ($manualById.ContainsKey($_.case_id)) { $manualById[$_.case_id] } else { $automatedById[$_.case_id] }
     })
     $passedCount = @($caseResults | Where-Object { $_.outcome -ceq 'passed' }).Count
     $summary = [ordered]@{
@@ -3681,7 +3761,7 @@ try {
             managed_client_config_build = Get-Sha256 -Path $ManagedClientConfigBuild
         }
         pinned_versions = $actualVersions
-        canonical_models = @('gpt-5.6-luna', 'opencode-go/muse-spark-1.2-contributor', $LunaModel, $ThirdPartyModel)
+        canonical_models = @($script:CanonicalModels)
         counts = [ordered]@{
             case_count = $caseResults.Count
             passed_count = $passedCount
@@ -3727,7 +3807,7 @@ catch {
         outcome = 'failed'
         failure_classification = $failureClassification
         pinned_versions = Get-ReportedClientVersions
-        canonical_models = @('gpt-5.6-luna', 'opencode-go/muse-spark-1.2-contributor', 'codexhub-openai/gpt-5.6-luna', 'codexhub-opencode-go/muse-spark-1.2-contributor')
+        canonical_models = @($script:CanonicalModels)
         counts = [ordered]@{
             case_count = 0
             passed_count = 0

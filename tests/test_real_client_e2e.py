@@ -18,15 +18,42 @@ SCRIPT = ROOT / "scripts" / "Run-RealClientE2E.ps1"
 FIXTURES = ROOT / "tests" / "fixtures" / "real_client_e2e"
 MODEL_SWITCH_FIXTURE = FIXTURES / "model-switch-v1-v2.json"
 CANDIDATE_SHA = "a" * 40
-LUNA_MODEL = "codexhub-openai/gpt-5.6-luna"
-THIRD_PARTY_MODEL = "codexhub-opencode-go/muse-spark-1.2-contributor"
+CLI_CONTRACT_PATH = ROOT / "scripts" / "real_client_cli_contract.v1.json"
+CLI_CONTRACT = json.loads(CLI_CONTRACT_PATH.read_text(encoding="utf-8"))
+WINDOWS_CLIENT_NAMES = CLI_CONTRACT["platforms"]["windows"]["client_names"]
+CLI_CASES = tuple(CLI_CONTRACT["cases"])
+
+
+def _contract_case(*, client: str, provider_id: str) -> dict:
+    return next(
+        case
+        for case in CLI_CASES
+        if case["client"] == client and case["provider_id"] == provider_id
+    )
+
+
+OFFICIAL_CODEX_CASE = _contract_case(client="codex_cli", provider_id="official")
+OFFICIAL_OPENCODE_CASE = _contract_case(client="opencode", provider_id="official")
+THIRD_PARTY_OPENCODE_CASE = _contract_case(client="opencode", provider_id="opencode-go")
+OFFICIAL_CODEX_MODEL = OFFICIAL_CODEX_CASE["models"]["managed"]
+OFFICIAL_GATEWAY_MODEL = OFFICIAL_OPENCODE_CASE["models"]["gateway"]
+THIRD_PARTY_MANAGED_MODEL = THIRD_PARTY_OPENCODE_CASE["models"]["managed"]
+THIRD_PARTY_CANONICAL_MODEL = THIRD_PARTY_OPENCODE_CASE["models"]["canonical"]
+CLI_WINDOWS_CASE_IDS = tuple(case["case_ids"]["windows"] for case in CLI_CASES)
+CLI_CANONICAL_MODELS = frozenset(case["models"]["canonical"] for case in CLI_CASES)
+CLI_CASE_COUNT = len(CLI_CASES)
+GUI_CASE_COUNT = 4
+PI_OFFICIAL_CASE_ID = next(
+    case["case_ids"]["windows"]
+    for case in CLI_CASES
+    if case["client"] == "pi" and case["provider_id"] == "official"
+)
+LUNA_MODEL = OFFICIAL_OPENCODE_CASE["models"]["selector"]
+THIRD_PARTY_MODEL = THIRD_PARTY_OPENCODE_CASE["models"]["selector"]
 MINIMUM_VERSIONS = {
     "desktop": "26.715.8383.0",
-    "codex_cli": "0.144.5",
     "zcode": "3.3.6",
-    "opencode": "1.18.4",
-    "pi": "0.80.6",
-    "omp": "17.0.3",
+    **CLI_CONTRACT["minimum_versions"],
 }
 SUMMARY_KEYS = {
     "schema",
@@ -95,54 +122,18 @@ EXPECTED_CASE_BINDINGS = {
     "desktop-luna": {
         "client": "desktop",
         "provider_id": "official",
-        "client_selector": "gpt-5.6-luna",
-        "canonical_model": "gpt-5.6-luna",
-        "gateway_model": "gpt-5.6-luna",
+        "client_selector": OFFICIAL_CODEX_MODEL,
+        "canonical_model": OFFICIAL_CODEX_MODEL,
+        "gateway_model": OFFICIAL_CODEX_MODEL,
         "endpoint_binding": "/v1/responses",
         "protocol": "responses",
     },
     "desktop-opencode-go": {
         "client": "desktop",
         "provider_id": "opencode-go",
-        "client_selector": "opencode-go/muse-spark-1.2-contributor",
-        "canonical_model": "opencode-go/muse-spark-1.2-contributor",
-        "gateway_model": "opencode-go/muse-spark-1.2-contributor",
-        "endpoint_binding": "/v1/providers/opencode-go/responses",
-        "protocol": "responses",
-    },
-    "codex-cli-luna": {
-        "client": "codex-cli",
-        "provider_id": "official",
-        "client_selector": "gpt-5.6-luna",
-        "canonical_model": "gpt-5.6-luna",
-        "gateway_model": "gpt-5.6-luna",
-        "endpoint_binding": "/v1/responses",
-        "protocol": "responses",
-    },
-    "codex-cli-opencode-go": {
-        "client": "codex-cli",
-        "provider_id": "opencode-go",
-        "client_selector": "opencode-go/muse-spark-1.2-contributor",
-        "canonical_model": "opencode-go/muse-spark-1.2-contributor",
-        "gateway_model": "opencode-go/muse-spark-1.2-contributor",
-        "endpoint_binding": "/v1/providers/opencode-go/responses",
-        "protocol": "responses",
-    },
-    "opencode-luna": {
-        "client": "opencode",
-        "provider_id": "official",
-        "client_selector": LUNA_MODEL,
-        "canonical_model": LUNA_MODEL,
-        "gateway_model": "openai/gpt-5.6-luna",
-        "endpoint_binding": "/v1/providers/openai/responses",
-        "protocol": "responses",
-    },
-    "opencode-opencode-go": {
-        "client": "opencode",
-        "provider_id": "opencode-go",
-        "client_selector": THIRD_PARTY_MODEL,
-        "canonical_model": THIRD_PARTY_MODEL,
-        "gateway_model": "opencode-go/muse-spark-1.2-contributor",
+        "client_selector": THIRD_PARTY_MANAGED_MODEL,
+        "canonical_model": THIRD_PARTY_MANAGED_MODEL,
+        "gateway_model": THIRD_PARTY_MANAGED_MODEL,
         "endpoint_binding": "/v1/providers/opencode-go/responses",
         "protocol": "responses",
     },
@@ -151,7 +142,7 @@ EXPECTED_CASE_BINDINGS = {
         "provider_id": "official",
         "client_selector": LUNA_MODEL,
         "canonical_model": LUNA_MODEL,
-        "gateway_model": "openai/gpt-5.6-luna",
+        "gateway_model": OFFICIAL_GATEWAY_MODEL,
         "endpoint_binding": "/v1/providers/openai/responses",
         "protocol": "responses",
     },
@@ -160,47 +151,62 @@ EXPECTED_CASE_BINDINGS = {
         "provider_id": "opencode-go",
         "client_selector": THIRD_PARTY_MODEL,
         "canonical_model": THIRD_PARTY_MODEL,
-        "gateway_model": "opencode-go/muse-spark-1.2-contributor",
-        "endpoint_binding": "/v1/providers/opencode-go/responses",
-        "protocol": "responses",
-    },
-    "pi-luna": {
-        "client": "pi",
-        "provider_id": "official",
-        "client_selector": LUNA_MODEL,
-        "canonical_model": LUNA_MODEL,
-        "gateway_model": "openai/gpt-5.6-luna",
-        "endpoint_binding": "/v1/providers/openai/responses",
-        "protocol": "responses",
-    },
-    "pi-opencode-go": {
-        "client": "pi",
-        "provider_id": "opencode-go",
-        "client_selector": THIRD_PARTY_MODEL,
-        "canonical_model": THIRD_PARTY_MODEL,
-        "gateway_model": "opencode-go/muse-spark-1.2-contributor",
-        "endpoint_binding": "/v1/providers/opencode-go/responses",
-        "protocol": "responses",
-    },
-    "omp-luna": {
-        "client": "omp",
-        "provider_id": "official",
-        "client_selector": LUNA_MODEL,
-        "canonical_model": LUNA_MODEL,
-        "gateway_model": "openai/gpt-5.6-luna",
-        "endpoint_binding": "/v1/providers/openai/responses",
-        "protocol": "responses",
-    },
-    "omp-opencode-go": {
-        "client": "omp",
-        "provider_id": "opencode-go",
-        "client_selector": THIRD_PARTY_MODEL,
-        "canonical_model": THIRD_PARTY_MODEL,
-        "gateway_model": "opencode-go/muse-spark-1.2-contributor",
+        "gateway_model": THIRD_PARTY_MANAGED_MODEL,
         "endpoint_binding": "/v1/providers/opencode-go/responses",
         "protocol": "responses",
     },
 }
+
+
+for _case in CLI_CONTRACT["cases"]:
+    _models = _case["models"]
+    _expected = {
+        "client": WINDOWS_CLIENT_NAMES[_case["client"]],
+        "provider_id": _case["provider_id"],
+        "client_selector": _models["selector"],
+        "canonical_model": _models["canonical"],
+        "gateway_model": _models["gateway"],
+        "endpoint_binding": _case["endpoint_binding"],
+        "protocol": _case["protocol"],
+    }
+    EXPECTED_CASE_BINDINGS[_case["case_ids"]["windows"]] = _expected
+
+
+def _contract_gateway_model(case: dict, platform: str = "windows") -> str:
+    platform_override = case.get("platform_overrides", {}).get(platform, {})
+    return platform_override.get("gateway", case["models"]["gateway"])
+
+
+def _expected_managed_models() -> dict[str, set[str]]:
+    client_kind_by_managed_id = {
+        "codex": "codex_cli",
+        "opencode": "opencode",
+        "zcode": "opencode",
+        "pi": "pi",
+        "omp": "omp",
+    }
+    result: dict[str, set[str]] = {}
+    for managed_id, client_kind in client_kind_by_managed_id.items():
+        result[managed_id] = {
+            _contract_gateway_model(case)
+            for case in CLI_CASES
+            if case["client"] == client_kind
+        }
+    return result
+
+
+def _expected_official_models() -> set[tuple[str, str]]:
+    client_kind_by_managed_id = {
+        "codex": "codex_cli",
+        "opencode": "opencode",
+        "zcode": "opencode",
+        "pi": "pi",
+        "omp": "omp",
+    }
+    return {
+        (managed_id, _contract_gateway_model(_contract_case(client=client_kind, provider_id="official")))
+        for managed_id, client_kind in client_kind_by_managed_id.items()
+    }
 
 
 def _powershell() -> str:
@@ -275,7 +281,7 @@ def _prepare_run(
         json.dumps(
             {
                 "schema": "codexhub.real-client-opencode-go.v1",
-                "api_key": "fixture-ollama-private-token",
+                "api_key": "fixture-opencode-go-private-token",
             }
         ),
         encoding="utf-8",
@@ -567,7 +573,7 @@ def test_model_switch_fixture_is_a_bounded_cli_acceptance_contract():
     assert fixture["schema_version"] == "codexhub.model-switch.v1"
     assert fixture["turns"] == [
         {
-            "selected_model": "gpt-5.6-luna",
+            "selected_model": OFFICIAL_CODEX_MODEL,
             "collaboration_protocol": "collaboration_v2",
             "status": "completed",
         },
@@ -675,13 +681,7 @@ def test_runner_invokes_candidate_materializer_for_every_managed_client(tmp_path
             "apply",
             "readback",
         }
-    official_models = {
-        ("codex", "gpt-5.6-luna"),
-        ("opencode", "openai/gpt-5.6-luna"),
-        ("zcode", "openai/gpt-5.6-luna"),
-        ("pi", "openai/gpt-5.6-luna"),
-        ("omp", "openai/gpt-5.6-luna"),
-    }
+    official_models = _expected_official_models()
     assert all(
         "--catalog-path" in item["flags"]
         for item in invocations
@@ -705,13 +705,7 @@ def test_runner_invokes_candidate_materializer_for_every_managed_client(tmp_path
         }
         for client in {"codex", "opencode", "zcode", "pi", "omp"}
     }
-    assert applied_models == {
-        "codex": {"gpt-5.6-luna", "opencode-go/muse-spark-1.2-contributor"},
-        "opencode": {"openai/gpt-5.6-luna", "opencode-go/muse-spark-1.2-contributor"},
-        "zcode": {"openai/gpt-5.6-luna", "opencode-go/muse-spark-1.2-contributor"},
-        "pi": {"openai/gpt-5.6-luna", "opencode-go/muse-spark-1.2-contributor"},
-        "omp": {"openai/gpt-5.6-luna", "opencode-go/muse-spark-1.2-contributor"},
-    }
+    assert applied_models == _expected_managed_models()
     assert all(
         item["route_protocol"] == "responses"
         for item in invocations
@@ -725,7 +719,7 @@ def test_pi_publishes_only_the_generated_models_file(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     pi_root = (
-        tmp_path / "output" / "isolated" / "work" / "pi-luna" / ".pi" / "agent"
+        tmp_path / "output" / "isolated" / "work" / PI_OFFICIAL_CASE_ID / ".pi" / "agent"
     )
     assert (pi_root / "models.json").is_file()
     assert not (pi_root / "settings.json").exists()
@@ -931,7 +925,11 @@ def test_opencodex_appdata_shim_fails_under_case_local_isolation(tmp_path):
         case["case_id"]
         for case in summary["cases"]
         if case["outcome"] == "failed"
-    } == {"codex-cli-luna", "codex-cli-opencode-go"}
+    } == {
+        case["case_ids"]["windows"]
+        for case in CLI_CASES
+        if case["client"] == "codex_cli"
+    }
     markers = list(
         (tmp_path / "output" / "isolated" / "work").glob(
             "codex-cli-*/opencodex-appdata-isolated.marker"
@@ -1122,29 +1120,15 @@ def test_cli_only_matrix_skips_gui_requirements_and_marks_scope(tmp_path):
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8-sig"))
     _assert_exact_summary_schema(summary)
     assert summary["verification_scope"] == "cli_only"
-    assert set(summary["pinned_versions"]) == {
-        "codex_cli",
-        "opencode",
-        "pi",
-        "omp",
-    }
+    assert set(summary["pinned_versions"]) == set(CLI_CONTRACT["minimum_versions"])
     assert summary["counts"] == {
-        "case_count": 8,
-        "passed_count": 8,
+        "case_count": CLI_CASE_COUNT,
+        "passed_count": CLI_CASE_COUNT,
         "failed_count": 0,
         "manual_case_count": 0,
-        "automated_case_count": 8,
+        "automated_case_count": CLI_CASE_COUNT,
     }
-    assert [case["case_id"] for case in summary["cases"]] == [
-        "codex-cli-luna",
-        "codex-cli-opencode-go",
-        "opencode-luna",
-        "opencode-opencode-go",
-        "pi-luna",
-        "pi-opencode-go",
-        "omp-luna",
-        "omp-opencode-go",
-    ]
+    assert [case["case_id"] for case in summary["cases"]] == list(CLI_WINDOWS_CASE_IDS)
     assert not (output / "manual-evidence.template.json").exists()
     assert not (output / "manual-evidence.json").exists()
     assert not list((output / "isolated" / "work").glob("gui-*.launched"))
@@ -1165,25 +1149,20 @@ def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summar
     assert summary["candidate_sha"] == CANDIDATE_SHA
     assert summary["pinned_versions"] == MINIMUM_VERSIONS
     assert summary["counts"] == {
-        "case_count": 12,
-        "passed_count": 12,
+        "case_count": GUI_CASE_COUNT + CLI_CASE_COUNT,
+        "passed_count": GUI_CASE_COUNT + CLI_CASE_COUNT,
         "failed_count": 0,
-        "manual_case_count": 4,
-        "automated_case_count": 8,
+        "manual_case_count": GUI_CASE_COUNT,
+        "automated_case_count": CLI_CASE_COUNT,
     }
     assert [case["case_id"] for case in summary["cases"]] == [
         "desktop-luna",
         "desktop-opencode-go",
-        "codex-cli-luna",
-        "codex-cli-opencode-go",
-        "opencode-luna",
-        "opencode-opencode-go",
+        *CLI_WINDOWS_CASE_IDS[:2],
+        *CLI_WINDOWS_CASE_IDS[2:4],
         "zcode-luna",
         "zcode-opencode-go",
-        "pi-luna",
-        "pi-opencode-go",
-        "omp-luna",
-        "omp-opencode-go",
+        *CLI_WINDOWS_CASE_IDS[4:],
     ]
     assert {
         case["case_id"]: {
@@ -1219,7 +1198,7 @@ def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summar
     for secret in (
         "fixture-codex-access-token",
         "fixture-codex-refresh-token",
-        "fixture-ollama-private-token",
+        "fixture-opencode-go-private-token",
         "fixture-gateway-private-key",
     ):
         assert secret not in serialized
@@ -1322,11 +1301,16 @@ def test_codex_cli_accepts_the_official_canonical_diagnostic_alias(tmp_path):
     summary = json.loads(
         (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
     )
+    codex_luna_case_id = next(
+        case["case_ids"]["windows"]
+        for case in CLI_CASES
+        if case["client"] == "codex_cli" and case["provider_id"] == "official"
+    )
     codex_luna = next(
-        case for case in summary["cases"] if case["case_id"] == "codex-cli-luna"
+        case for case in summary["cases"] if case["case_id"] == codex_luna_case_id
     )
     assert codex_luna["outcome"] == "passed"
-    assert codex_luna["gateway_model"] == "gpt-5.6-luna"
+    assert codex_luna["gateway_model"] == OFFICIAL_CODEX_MODEL
 
 
 def test_windows_client_state_paths_are_isolated_per_case(tmp_path):
@@ -1354,7 +1338,11 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
         case["canonical_model"]
         for case in automated
         if case["case_id"].startswith(("opencode", "pi", "omp"))
-    } == {LUNA_MODEL, THIRD_PARTY_MODEL}
+    } == {
+        case["models"]["canonical"]
+        for case in CLI_CASES
+        if case["client"] == "opencode"
+    }
     opencode = [case for case in automated if case["case_id"].startswith("opencode-")]
     assert [case["duplicate_terminal_count"] for case in opencode] == [0, 0]
     diagnostics = list((tmp_path / "output").rglob("codex-proxy-events.jsonl"))
@@ -1362,11 +1350,10 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
     native = [json.loads(line) for line in diagnostics[0].read_text().splitlines()]
     completes = [event for event in native if event["event"] == "request_complete"]
     assert len(completes) == 16
-    assert {event["model_canonical"] for event in completes} == {
-        "gpt-5.6-luna",
-        "opencode-go/muse-spark-1.2-contributor",
-        "openai/gpt-5.6-luna",
-    }
+    assert {event["model_canonical"] for event in completes} == (
+        CLI_CANONICAL_MODELS
+        | {OFFICIAL_GATEWAY_MODEL}
+    )
     production_fields = {
         "event",
         "request_id",
@@ -1409,7 +1396,7 @@ def test_third_party_managed_client_probes_do_not_receive_catalog_path(tmp_path)
     assert all(
         "--catalog-path" not in item["flags"]
         for item in invocations
-        if item["model"] == "opencode-go/muse-spark-1.2-contributor"
+        if item["model"] == THIRD_PARTY_MANAGED_MODEL
     )
 
 
@@ -1872,17 +1859,16 @@ def test_opencode_compatibility_floor_records_upstream_header_timeout_fix():
     documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
     runner = SCRIPT.read_text()
 
-    assert "opencode = '1.18.4'" in runner
-    assert "OpenCode | `1.18.4`" in documentation
+    assert "real_client_cli_contract.v1.json" in runner
+    assert "real_client_cli_contract.v1.json" in documentation
     assert "response-header-timeout" in documentation
-    assert "67caf894e0843ee370e72839e8265e483233479b" in documentation
 
 
 def test_operator_docs_define_compatibility_floors_and_actual_version_evidence():
     documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
 
     assert "Minimum stable version" in documentation
-    assert "Codex CLI `0.145.0` is accepted" in documentation
+    assert "floor recorded in the CLI contract" in documentation
     assert "actual normalized versions" in documentation
     assert "pinned exactly" not in documentation
     assert "equal to the pin" not in documentation
@@ -2267,8 +2253,8 @@ def test_release_matrix_uses_opencode_go_native_responses(tmp_path):
         (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
     )
     canonical_models = summary["canonical_models"]
-    assert "opencode-go/muse-spark-1.2-contributor" in canonical_models
-    assert "codexhub-opencode-go/muse-spark-1.2-contributor" in canonical_models
+    assert THIRD_PARTY_MANAGED_MODEL in canonical_models
+    assert THIRD_PARTY_CANONICAL_MODEL in canonical_models
     assert "volc/glm-5.2" not in canonical_models
     assert "codexhub-volc/glm-5.2" not in canonical_models
 
@@ -2280,7 +2266,7 @@ def test_release_matrix_uses_opencode_go_native_responses(tmp_path):
             assert event["inbound_format"] == "responses"
             expected_provider = (
                 "opencode_go"
-                if event["model_canonical"] == "opencode-go/muse-spark-1.2-contributor"
+                if event["model_canonical"] == THIRD_PARTY_MANAGED_MODEL
                 else "official"
             )
             assert event["provider_id"] == expected_provider
@@ -2830,7 +2816,7 @@ def test_preflight_failure_emits_one_bounded_sanitized_summary(tmp_path):
     assert summary["cases"] == []
     assert summary["artifacts"] == []
     serialized = json.dumps(summary, sort_keys=True)
-    assert "fixture-ollama-private-token" not in serialized
+    assert "fixture-opencode-go-private-token" not in serialized
     assert str(tmp_path) not in serialized
 
 
@@ -3156,7 +3142,7 @@ def test_candidate_context_budget_bootstrap_failure_is_bounded_and_sanitized(tmp
     serialized = startup_path.read_text() + summaries[0].read_text()
     assert str(tmp_path) not in serialized
     assert "fixture-codex-access-token" not in serialized
-    assert "fixture-ollama-private-token" not in serialized
+    assert "fixture-opencode-go-private-token" not in serialized
     assert not list((tmp_path / "output" / "isolated" / "work").glob("gui-*.launched"))
 
 
@@ -3184,7 +3170,7 @@ def test_official_bootstrap_survives_hang_past_legacy_thirty_second_kill(tmp_pat
     )
     assert summary["verification_scope"] == "cli_only"
     assert summary["outcome"] == "passed"
-    assert summary["counts"]["automated_case_count"] == 8
+    assert summary["counts"]["automated_case_count"] == CLI_CASE_COUNT
 
 
 def test_official_bootstrap_hang_still_fails_closed_inside_timeout_seconds(tmp_path):
@@ -3625,9 +3611,9 @@ Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 def test_matrix_documentation_declares_native_responses_release_gate():
     documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
 
-    assert "OpenCode Go" in documentation and "muse-spark-1.2-contributor" in documentation
+    assert "OpenCode Go" in documentation and THIRD_PARTY_MANAGED_MODEL.split("/", 1)[1] in documentation
     assert "-CliOnly" in documentation
-    assert "codexhub-opencode-go/muse-spark-1.2-contributor" in documentation
+    assert THIRD_PARTY_MODEL in documentation
 
 
 def test_missing_credentials_fail_with_sanitized_summary_before_launch(tmp_path):

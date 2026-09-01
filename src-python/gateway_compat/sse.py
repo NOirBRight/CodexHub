@@ -11,6 +11,9 @@ import json
 import re
 import uuid
 
+import collaboration_adapter as _collaboration_adapter_module
+import gateway_events as _gateway_events
+
 from apply_patch_adapter import (
     ApplyPatchFacts,
     ThirdPartyApplyPatchStreamAdapter as _ApplyPatchStreamAdapterImpl,
@@ -77,14 +80,14 @@ def _remember_worker_stream_item(
     *,
     terminal: bool = False,
 ) -> None:
-    host._collaboration_adapter().remember_stream_item(state, item, terminal=terminal)
+    _collaboration_adapter_module.remember_stream_item(state, item, terminal=terminal)
 
 
 def _remember_worker_stream_event(
     value: Mapping[str, Any],
     event_context: Mapping[str, Any] | None,
 ) -> None:
-    host._collaboration_adapter().remember_stream_event(value, event_context)
+    _collaboration_adapter_module.remember_stream_event(value, event_context)
 
 
 def _raise_on_invalid_worker_stream_event(
@@ -93,7 +96,7 @@ def _raise_on_invalid_worker_stream_event(
     *,
     surface: str,
 ) -> None:
-    host._collaboration_adapter().raise_on_invalid_stream_event(
+    _collaboration_adapter_module.raise_on_invalid_stream_event(
         value,
         event_context,
         surface=surface,
@@ -627,7 +630,7 @@ def _write_required_subagent_repair_event(
     *,
     surface: str,
 ) -> None:
-    host._write_adapter_event(
+    _gateway_events.write_adapter_event(
         event_context,
         "required_subagent_call_repaired",
         surface=surface,
@@ -642,7 +645,7 @@ def _reject_missing_worker_selector_for_generated_call(
     *,
     surface: str,
 ) -> None:
-    host._collaboration_adapter().reject_missing_worker_selector_for_generated_call(
+    _collaboration_adapter_module.reject_missing_worker_selector_for_generated_call(
         spec,
         event_context,
         surface=surface,
@@ -753,7 +756,7 @@ def compatible_sse_line(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return line
 
-    collaboration_protocol = host._resolve_collaboration_boundary(
+    collaboration_protocol = _collaboration_adapter_module.resolve_boundary(
         payload,
         event_context,
         surface="stream",
@@ -762,7 +765,7 @@ def compatible_sse_line(
         selected_protocol = event_context.get("collaboration_protocol")
         if selected_protocol in {_COLLABORATION_V1, _COLLABORATION_V2}:
             collaboration_protocol = selected_protocol
-    event_context = host._collaboration_context_with_protocol(event_context, collaboration_protocol)
+    event_context = _collaboration_adapter_module.context_with_protocol(event_context, collaboration_protocol)
     if not runtime_tool_inverse_only:
         if collaboration_protocol != _COLLABORATION_V2:
             _remember_worker_stream_event(payload, event_context)
@@ -818,7 +821,7 @@ def compatible_sse_line(
     )
     payload, alias_changed = _official_passthrough._normalize_third_party_tool_call(payload, event_context, runtime_tool_plan)
     if alias_changed:
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             event_context,
             "third_party_tool_call_alias_normalized",
             upstream=upstream_name,

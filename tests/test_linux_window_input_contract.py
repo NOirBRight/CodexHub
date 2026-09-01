@@ -8,6 +8,7 @@ import pytest
 
 from scripts.e2e_linux_window_input import (
     drawer_cycle_has_required_transitions,
+    parse_wm_class,
     visual_frame_has_ui_content,
 )
 
@@ -30,6 +31,7 @@ def test_full_linux_suite_public_interface_lists_physical_pointer_gate() -> None
     assert "90s watchdog" in result.stdout
     assert "xvfb-run" in result.stdout
     assert "xwininfo" in result.stdout
+    assert "xprop" in result.stdout
 
 
 def test_pointer_input_e2e_public_self_test_rejects_tray_window() -> None:
@@ -54,6 +56,15 @@ def test_pointer_input_e2e_rejects_stable_blank_frames_before_clicking() -> None
     assert not visual_frame_has_ui_content((0xFFFFFF,) * 128)
     assert not visual_frame_has_ui_content((0xFFFFFF,) * 124 + (0xEEEEEE,) * 4)
     assert visual_frame_has_ui_content(tuple(range(16)) * 8)
+
+
+def test_pointer_input_e2e_parses_and_requires_the_desktop_window_class() -> None:
+    assert parse_wm_class('WM_CLASS(STRING) = "CodexHub", "com.codexhub.app"') == (
+        "CodexHub",
+        "com.codexhub.app",
+    )
+    with pytest.raises(RuntimeError, match="omitted WM_CLASS"):
+        parse_wm_class("WM_NAME(STRING) = \"CodexHub\"")
 
 
 def test_deb_package_runs_recoverable_launcher_migration_at_install_time(tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 import apply_patch_adapter as _apply_patch_adapter_module
+import collaboration_adapter as _collaboration_adapter_module
 import gateway_admission
 import gateway_catalog_runtime
 import gateway_compat
@@ -36,11 +37,7 @@ from gateway_admission import (
     GatewayUserRequestedShutdown,
     gateway_shutdown_controller_for_handler as _gateway_shutdown_controller_for_handler,
 )
-from gateway_compat.host import (
-    EXCESSIVE_TOOL_LOOP_BOUND,
-    EXCESSIVE_TOOL_LOOP_ERROR_CODE,
-    resolve_collaboration_boundary as _resolve_collaboration_boundary,
-)
+from gateway_compat.host import EXCESSIVE_TOOL_LOOP_BOUND, EXCESSIVE_TOOL_LOOP_ERROR_CODE
 from gateway_errors import (
     CompactEmptyResponseError,
     DownstreamErrorSpec,
@@ -797,7 +794,7 @@ class GatewayHandlerMixin:
                     )
                 )
             collaboration_protocol = (
-                _resolve_collaboration_boundary(
+                _collaboration_adapter_module.resolve_boundary(
                     inbound_payload,
                     proxy_request_context,
                     surface="request",

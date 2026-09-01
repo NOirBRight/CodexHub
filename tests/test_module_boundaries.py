@@ -195,6 +195,36 @@ def test_gateway_compat_does_not_import_the_facade() -> None:
         assert line_count < 2000, f"{path.name} is {line_count} lines"
 
 
+def test_gateway_compat_has_no_adapter_factories_or_host_adapter_calls() -> None:
+    """Compatibility must read owning module attributes directly at call time."""
+    import ast
+
+    package = Path(__file__).resolve().parents[1] / "src-python" / "gateway_compat"
+    forbidden_defs = {"_apply_patch_adapter", "_collaboration_adapter", "_tool_surface_adapter"}
+    forbidden_host_calls = forbidden_defs | {
+        "_catalog_output_limit",
+        "_collaboration_context_with_protocol",
+        "_is_collaboration_v2_context",
+        "_resolve_collaboration_boundary",
+        "_write_adapter_event",
+        "_apply_maintained_thinking_controls",
+    }
+    for path in sorted(package.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                assert node.name not in forbidden_defs, f"factory returned in {path.name}:{node.lineno}"
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            target = node.func.value
+            if (
+                isinstance(target, ast.Name)
+                and target.id == "host"
+                and node.func.attr in forbidden_host_calls
+            ):
+                raise AssertionError(f"host adapter seam returned in {path.name}:{node.lineno}")
+
+
 def test_gateway_events_does_not_import_the_facade() -> None:
     import gateway_events
 

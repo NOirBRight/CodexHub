@@ -36,6 +36,7 @@ use desktop_commands::{
 };
 pub(crate) use desktop_commands::{
     generate_catalog_coordinated, refresh_official_models_coordinated,
+    refresh_official_models_published_coordinated,
     save_official_multi_agent_version_coordinated, sync_catalog_coordinated,
 };
 use serde::{Deserialize, Serialize};
@@ -585,6 +586,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_gui() {
+    #[cfg(target_os = "linux")]
+    linux_window::initialize_identity();
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);

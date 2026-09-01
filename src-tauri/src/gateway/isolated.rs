@@ -1,4 +1,4 @@
-use super::managed_clients::adapter_for;
+use super::managed_clients::{apply_native_isolated, preview_native_isolated, readback_native_at};
 use super::*;
 use crate::{Provider, Settings};
 use serde::Serialize;
@@ -369,17 +369,14 @@ pub fn isolated_client_preview(
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let (selector, resolved_model, protocol) =
         selector_and_route(&input.settings, &input.providers, &model)?;
-    let adapter = adapter_for(&client_id).ok_or_else(|| {
-        format!("unsupported managed client for preview: {client_id}")
-    })?;
-    let next_redacted = adapter
-        .preview_isolated(
-            targets.writable_paths(),
-            &input.settings,
-            &input.providers,
-            &model,
-        )?
-        .next_redacted;
+    let next_redacted = preview_native_isolated(
+        &client_id,
+        targets.writable_paths(),
+        &input.settings,
+        &input.providers,
+        &model,
+    )?
+    .next_redacted;
     let target_names = published_target_relative_names(&client_id, &targets, root);
     Ok(IsolatedClientPreview {
         client_id,
@@ -447,10 +444,8 @@ pub fn apply_gateway_client_config_isolated_with_provenance(
         provenance_root,
         || -> Result<GatewayClientApplyResult, String> {
             let labeled_backup_root = (backup_root.clone(), BackupChannel::Stable);
-            let adapter = adapter_for(&client_id).ok_or_else(|| {
-                format!("unsupported managed client for apply: {client_id}")
-            })?;
-            adapter.apply_isolated(
+            apply_native_isolated(
+                &client_id,
                 targets.writable_paths(),
                 &backup_root,
                 std::slice::from_ref(&labeled_backup_root),
@@ -501,10 +496,8 @@ pub fn readback_gateway_client_config_isolated(
         ensure_path_beneath_root(root, path)?;
     }
 
-    let adapter = adapter_for(&client_id).ok_or_else(|| {
-        format!("unsupported managed client for readback: {client_id}")
-    })?;
-    adapter.readback_isolated(
+    readback_native_at(
+        &client_id,
         targets.writable_paths(),
         &input.settings,
         &input.providers,

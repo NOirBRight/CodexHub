@@ -1723,6 +1723,57 @@ fn omp_apply_writes_models_yml_and_model_roles_with_backup() {
 }
 
 #[test]
+fn omp_apply_migrates_legacy_codexhub_model_roles_to_selected_model() {
+    let root = unique_temp_dir("codexhub-omp-legacy-role-apply");
+    let config_path = root.join("config.yml");
+    let models_path = root.join("models.yml");
+    let backup_root = root.join("backups");
+    fs::create_dir_all(root.as_path()).unwrap();
+    fs::write(
+        &config_path,
+        "symbolPreset: unicode\nmodelRoles:\n  default: codexhub-openai/gpt-5.6-sol:low\n  vision: codexhub-openai/gpt-5.6-sol\n",
+    )
+    .unwrap();
+    fs::write(
+        &models_path,
+        "providers:\n  codexhub-openai:\n    baseUrl: \"http://127.0.0.1:9099/v1/providers/openai\"\n    api: openai-responses\n    apiKey: \"codexhub-proxy\"\n    models:\n      - id: \"gpt-5.6-sol\"\n",
+    )
+    .unwrap();
+    let settings = Settings {
+        include_official_models: false,
+        ..Settings::default()
+    };
+    let providers = case_sensitive_client_export_test_providers();
+
+    let result = super::apply_omp_config_with_paths(
+        &config_path,
+        &models_path,
+        &backup_root,
+        &settings,
+        &providers,
+        "ollama-cloud/glm-5.2",
+    )
+    .unwrap();
+
+    assert!(result.applied);
+    let config = fs::read_to_string(&config_path).unwrap();
+    assert!(config.contains("default: codexhub-ollama-cloud/glm-5.2"));
+    assert!(!config.contains("vision: codexhub-openai"));
+    assert!(!config.contains("codexhub-openai"));
+    let readback = super::verify_apply_readback(
+        "omp",
+        &[config_path, models_path],
+        &settings,
+        &providers,
+        "ollama-cloud/glm-5.2",
+    );
+    assert!(
+        readback.is_ok(),
+        "legacy role migration must round-trip: {readback:?}"
+    );
+}
+
+#[test]
 fn omp_apply_rejects_invalid_model_before_backup_side_effects() {
     let root = unique_temp_dir("codexhub-omp-invalid-model");
     let config_path = root.join("config.yml");
@@ -1777,6 +1828,121 @@ fn omp_route_mode_detects_split_provider_from_config_without_models_file() {
     };
 
     assert_eq!(super::omp_route_mode(&paths), "hub");
+}
+
+#[test]
+fn omp_readback_accepts_preserved_foreign_provider_blocks() {
+    let root = unique_temp_dir("codexhub-omp-readback-foreign");
+    let config_path = root.join("config.yml");
+    let models_path = root.join("models.yml");
+    let backup_root = root.join("backups");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &config_path,
+        "symbolPreset: unicode\nmodelRoles:\n  default: ollama/qwen\n",
+    )
+    .unwrap();
+    fs::write(
+        &models_path,
+        "providers:\n  ollama:\n    baseUrl: http://localhost:11434/v1\n    api: openai-completions\n    apiKey: ollama\n    models:\n      - id: qwen\n",
+    )
+    .unwrap();
+    let settings = Settings {
+        include_official_models: false,
+        ..Settings::default()
+    };
+    let providers = case_sensitive_client_export_test_providers();
+    let model = "ollama-cloud/glm-5.2";
+    let plan = super::plan_omp_apply(
+        &config_path,
+        &models_path,
+        &settings,
+        &providers,
+        model,
+    )
+    .unwrap();
+    super::publish_omp_apply(&plan, &backup_root).unwrap();
+
+    let result = super::verify_apply_readback(
+        "omp",
+        &[config_path, models_path],
+        &settings,
+        &providers,
+        model,
+    );
+    assert!(
+        result.is_ok(),
+        "preserved foreign provider should be accepted by readback: {result:?}"
+    );
+}
+
+#[test]
+fn omp_restore_without_backup_removes_managed_provider_blocks() {
+    let root = unique_temp_dir("codexhub-omp-restore-cleanup");
+    let config_path = root.join("config.yml");
+    let models_path = root.join("models.yml");
+    let backup_root = root.join("missing-backups");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &config_path,
+        "symbolPreset: unicode\nmodelRoles:\n  default: ollama/qwen\n",
+    )
+    .unwrap();
+    fs::write(
+        &models_path,
+        "providers:\n  ollama:\n    baseUrl: http://localhost:11434/v1\n    api: openai-completions\n    apiKey: ollama\n    models:\n      - id: qwen\n  codexhub-ollama-cloud:\n    baseUrl: \"http://127.0.0.1:9099/v1/providers/ollama-cloud\"\n    api: openai-responses\n    apiKey: \"codexhub-proxy\"\n    authHeader: true\n    models:\n      - id: \"glm-5.2\"\n",
+    )
+    .unwrap();
+
+    let result = super::restore_omp_config_with_paths(
+        &config_path,
+        &models_path,
+        &backup_root,
+    )
+    .expect("missing backups should fall back to bounded cleanup");
+    assert!(result.applied);
+    let models = fs::read_to_string(&models_path).unwrap();
+    assert!(models.contains("  ollama:"));
+    assert!(!models.contains("codexhub-ollama-cloud"));
+}
+
+#[test]
+fn omp_restore_without_backup_clears_legacy_codexhub_model_roles() {
+    let root = unique_temp_dir("codexhub-omp-restore-legacy-roles");
+    let config_path = root.join("config.yml");
+    let models_path = root.join("models.yml");
+    let backup_root = root.join("missing-backups");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &config_path,
+        "symbolPreset: unicode\nmodelRoles:\n  default: codexhub-openai/gpt-5.6-sol:low\n  vision: codexhub-openai/gpt-5.6-sol\n",
+    )
+    .unwrap();
+    fs::write(
+        &models_path,
+        "providers:\n  codexhub-openai:\n    baseUrl: \"http://127.0.0.1:9099/v1/providers/openai\"\n    api: openai-responses\n    apiKey: \"codexhub-proxy\"\n    models:\n      - id: \"gpt-5.6-sol\"\n",
+    )
+    .unwrap();
+
+    super::restore_omp_config_with_paths(&config_path, &models_path, &backup_root).unwrap();
+    let config = fs::read_to_string(&config_path).unwrap();
+    assert!(!config.contains("codexhub-openai"));
+    assert!(config.contains("symbolPreset: unicode"));
+    assert!(!models_path.exists());
+}
+
+#[test]
+fn omp_config_migrates_legacy_codexhub_model_roles() {
+    let current = "symbolPreset: unicode\nmodelRoles:\n  default: codexhub-openai/gpt-5.6-sol:low\n  vision: codexhub-openai/gpt-5.6-sol\n";
+    let next = super::omp_config_text(
+        Some(current),
+        "codexhub-ollama-cloud/glm-5.2",
+        Some("codexhub-ollama-cloud/glm-5.2"),
+        Some("low"),
+    );
+    assert!(next.contains("default: codexhub-ollama-cloud/glm-5.2:low"));
+    assert!(next.contains("vision: codexhub-ollama-cloud/glm-5.2"));
+    assert!(!next.contains("codexhub-openai"));
 }
 
 #[test]

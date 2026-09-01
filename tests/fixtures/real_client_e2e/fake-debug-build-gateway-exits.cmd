@@ -12,7 +12,7 @@ if not defined CODEXHUB_E2E_CANDIDATE_SHA exit /b 21
 if not defined CODEXHUB_RUNTIME_HOME exit /b 22
 if not defined CODEXHUB_CODEX_TARGET_HOME exit /b 23
 if not defined CODEX_PROXY_GATEWAY_CLIENT_KEY exit /b 24
-if not defined OLLAMA_API_KEY exit /b 25
+if not defined OPENCODE_API_KEY exit /b 25
 if /I not "%HOME%"=="%CD%" exit /b 29
 if /I not "%USERPROFILE%"=="%CD%" exit /b 30
 if /I not "%APPDATA%"=="%CD%\appdata\roaming" exit /b 31

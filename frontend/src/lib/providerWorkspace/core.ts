@@ -79,6 +79,20 @@ export type ProviderWorkspaceOutcome =
   | { kind: "blocked"; reason: string }
   | { kind: "error"; message: string };
 
+export type ProviderRefreshOptions = {
+  quiet?: boolean;
+  throwOnError?: boolean;
+};
+
+/** Build an async refresh intent without copying DOM event fields into it. */
+export function buildOfficialRefreshIntent(options?: ProviderRefreshOptions) {
+  return {
+    type: "refreshOfficialModels" as const,
+    quiet: options?.quiet,
+    throwOnError: options?.throwOnError,
+  };
+}
+
 /** Pure state updates; effects (I/O) happen in the hook. */
 export function providerWorkspaceReducer(
   state: ProviderWorkspaceState,

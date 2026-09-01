@@ -5,10 +5,12 @@ import { mergeDiscoveredModels } from "../lib/format";
 import { applyProviderProbeResult, probeSucceeded, shortProviderDiscoveryError } from "../lib/providerEndpoint";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type { GatewayClientSyncSummary, Model, Provider, Settings, UpstreamFormatProbeResult } from "../lib/types";
+import type { AddProviderForm } from "../lib/providerForm";
 import {
   ADD_ID,
   OFFICIAL_ID,
   applyDiscoveredModelsForProvider,
+  buildOfficialRefreshIntent,
   buildNextProviderFromForm,
   providerWorkspaceReducer,
   resolveOfficialRefresh,
@@ -18,6 +20,7 @@ import {
   type PendingProviderNavigation,
   type ProviderDraftState,
   type ProviderEditIntent,
+  type ProviderRefreshOptions,
   type ProviderWorkspaceOutcome,
   type ProviderWorkspaceState,
 } from "../lib/providerWorkspace/core";
@@ -39,11 +42,43 @@ export type WorkspaceSource = {
 
 export type ProviderWorkspaceHandle = {
   /** Read-only view model. */
-  state: ProviderWorkspaceState;
-  /** Synchronous intents: select, form edits, toggles, staging, reorders. */
-  edit: (intent: ProviderEditIntent) => void;
-  /** Asynchronous intents: save, discover, probe, refresh official, publish. */
-  act: (intent: ProviderActionIntent) => Promise<ProviderWorkspaceOutcome>;
+  state: Readonly<ProviderWorkspaceState>;
+  /** Workspace-owned staging operations. Reducer intents stay private. */
+  stageProviders: (providers: Provider[]) => void;
+  stageSettings: (settings: Settings | null | ((current: Settings | null) => Settings | null)) => void;
+  updateForm: (form: AddProviderForm) => void;
+  setProbeResult: (result: UpstreamFormatProbeResult | null) => void;
+  setDiscoveryError: (error: string | null) => void;
+  setOperationBusy: (busy: string | null) => void;
+  setOfficialModels: (models: Model[] | ((current: Model[]) => Model[])) => void;
+  setOfficialDisabledModels: (disabled: string[]) => void;
+  setOfficialModelOrder: (order: string[]) => void;
+  stageCatalogPreset: (preset: Provider) => void;
+  stagePendingProvider: (provider: Provider | null) => void;
+  setSelectedProviderId: (id: string) => void;
+  saveProviders: (providers: Provider[], options?: {
+    successMessage?: string;
+    toastId?: string;
+    skipPublish?: boolean;
+  }) => Promise<ProviderWorkspaceOutcome>;
+  saveSettings: (settings: Settings, options?: {
+    regenerateCatalog?: boolean;
+    successMessage?: string;
+    toastId?: string;
+  }) => Promise<ProviderWorkspaceOutcome>;
+  saveProvider: (provider: Provider, options?: { successMessage?: string; skipPublish?: boolean }) => Promise<ProviderWorkspaceOutcome>;
+  saveAddForm: (form: AddProviderForm, targetId?: string) => Promise<ProviderWorkspaceOutcome>;
+  discoverProviderModels: (providerId: string) => Promise<ProviderWorkspaceOutcome>;
+  discoverForForm: (form?: AddProviderForm) => Promise<ProviderWorkspaceOutcome>;
+  probeProvider: (input: {
+    baseUrl: string;
+    apiKey: string;
+    model?: string | null;
+    providerId?: string;
+    toastId?: string;
+  }) => Promise<ProviderWorkspaceOutcome>;
+  refreshOfficialModels: (options?: ProviderRefreshOptions) => Promise<ProviderWorkspaceOutcome>;
+  deleteProvider: (providerId: string) => Promise<ProviderWorkspaceOutcome>;
   /** The single dirty-navigation entry point. */
   navigation: {
     pending: PendingProviderNavigation<Provider, import("../lib/providerForm").AddProviderForm> | null;
@@ -52,11 +87,10 @@ export type ProviderWorkspaceHandle = {
   /** Selected provider projection. */
   selectedProvider: Provider | null;
   selectProvider: (id: string) => void;
-  setSelectedId: (id: string) => void;
   trackProviderDraft: (draft: ProviderDraftState<Provider>) => void;
 };
 
-export type ProviderActionIntent =
+type ProviderActionIntent =
   | { type: "saveProviders"; providers: Provider[]; successMessage?: string; toastId?: string; skipPublish?: boolean }
   | { type: "saveSettings"; settings: Settings; regenerateCatalog?: boolean; successMessage?: string; toastId?: string }
   | { type: "saveProvider"; provider: Provider; successMessage?: string; skipPublish?: boolean }
@@ -283,7 +317,7 @@ export function useProviderWorkspace(options: {
     [authorizeCodexRestart, catalogSyncToastMessage, onProvidersChanged, publishAndSync, showToast, t, updateToast, updateToastWithError],
   );
 
-  const act = useCallback(
+  const runAction = useCallback(
     async (intent: ProviderActionIntent): Promise<ProviderWorkspaceOutcome> => {
       switch (intent.type) {
         case "saveProviders":
@@ -489,15 +523,13 @@ export function useProviderWorkspace(options: {
           const quiet = intent.quiet ?? false;
           let toastId: string | null = null;
           try {
-            const restartCodex = quiet ? false : await authorizeCodexRestart();
-            if (restartCodex === null) {
-              return { kind: "cancelled" };
-            }
             if (!quiet) {
               dispatch({ type: "setBusy", busy: "official-refresh" });
               toastId = showToast(t("providers.refreshingOfficialModels"), "loading");
             }
-            const refreshResult = await api.refreshOfficialModels(restartCodex);
+            // Refresh reads the current Official model list. Applying a new
+            // Codex overlay is a separate, explicitly authorized mutation.
+            const refreshResult = await api.refreshOfficialModels(false);
             const resolved = resolveOfficialRefresh(state.officialModelOrderDraft, refreshResult.models);
             if (!resolved.followsAutomatic) {
               dispatch({ type: "setOfficialModelOrderDraft", order: resolved.nextOrder });
@@ -508,12 +540,17 @@ export function useProviderWorkspace(options: {
               dispatch({ type: "setDiscoveryError", error: null });
               return { kind: "ok" };
             }
-            const syncResult = await publishAndSync(
-              restartCodex,
-              sourceRef.current.settings,
-              (text, tone) => updateToast(toastId!, { action: null, text: t(text), tone }),
-              true,
-            );
+            // A read-only refresh does not publish a catalog. The coordinated
+            // path reports a restart result when it did publish while Codex
+            // was stopped, so only that path syncs bound clients.
+            const syncResult = refreshResult.codex_restart_result
+              ? await publishAndSync(
+                  false,
+                  sourceRef.current.settings,
+                  (text, tone) => updateToast(toastId!, { action: null, text: t(text), tone }),
+                  true,
+                )
+              : null;
             const refreshMessage = refreshResult.codex_restart_result === "restarted"
               ? t("providers.officialModelsRefreshedCodexRestarted")
               : refreshResult.codex_restart_result === "switched_relaunch_failed"
@@ -573,6 +610,117 @@ export function useProviderWorkspace(options: {
     [authorizeCodexRestart, catalogSyncToastMessage, onProvidersChanged, onSettingsChanged, publishAndSync, refreshGatewayState, saveProvidersCore, showToast, state, t, tr, updateProbeToast, updateToast, updateToastWithError],
   );
 
+  const stageProviders = useCallback((providers: Provider[]) => {
+    edit({ type: "setProviders", providers });
+  }, [edit]);
+
+  const stageSettings = useCallback(
+    (value: Settings | null | ((current: Settings | null) => Settings | null)) => {
+      const next = typeof value === "function" ? value(state.settings) : value;
+      if (next) {
+        edit({ type: "setSettings", settings: next });
+      }
+    },
+    [edit, state.settings],
+  );
+
+  const updateForm = useCallback((form: AddProviderForm) => {
+    edit({ type: "updateForm", form });
+  }, [edit]);
+
+  const setProbeResult = useCallback((result: UpstreamFormatProbeResult | null) => {
+    edit({ type: "setProbeResult", result });
+  }, [edit]);
+
+  const setDiscoveryError = useCallback((error: string | null) => {
+    edit({ type: "setDiscoveryError", error });
+  }, [edit]);
+
+  const setOperationBusy = useCallback((busy: string | null) => {
+    edit({ type: "setBusy", busy });
+  }, [edit]);
+
+  const setOfficialModels = useCallback(
+    (models: Model[] | ((current: Model[]) => Model[])) => {
+      const next = typeof models === "function" ? models(state.officialModels) : models;
+      edit({ type: "setOfficialModels", models: next });
+    },
+    [edit, state.officialModels],
+  );
+
+  const setOfficialDisabledModels = useCallback((disabled: string[]) => {
+    edit({ type: "setOfficialDisabledModelsDraft", disabled });
+  }, [edit]);
+
+  const setOfficialModelOrder = useCallback((order: string[]) => {
+    edit({ type: "setOfficialModelOrderDraft", order });
+  }, [edit]);
+
+  const stageCatalogPreset = useCallback((preset: Provider) => {
+    edit({ type: "stageCatalogPreset", preset });
+  }, [edit]);
+
+  const stagePendingProvider = useCallback((provider: Provider | null) => {
+    edit(provider
+      ? { type: "setPendingNewProvider", provider }
+      : { type: "clearPendingNewProvider" });
+  }, [edit]);
+
+  const setSelectedProviderId = useCallback((id: string) => {
+    edit({ type: "setSelectedId", selectedId: id });
+  }, [edit]);
+
+  const saveProviders = useCallback(
+    (providers: Provider[], options?: { successMessage?: string; toastId?: string; skipPublish?: boolean }) =>
+      runAction({ type: "saveProviders", providers, ...options }),
+    [runAction],
+  );
+
+  const saveSettings = useCallback(
+    (settings: Settings, options?: { regenerateCatalog?: boolean; successMessage?: string; toastId?: string }) =>
+      runAction({ type: "saveSettings", settings, ...options }),
+    [runAction],
+  );
+
+  const saveProvider = useCallback(
+    (provider: Provider, options?: { successMessage?: string; skipPublish?: boolean }) =>
+      runAction({ type: "saveProvider", provider, ...options }),
+    [runAction],
+  );
+
+  const saveAddForm = useCallback(
+    (form: AddProviderForm, targetId?: string) =>
+      runAction({ type: "saveAddForm", form, targetId }),
+    [runAction],
+  );
+
+  const discoverProviderModels = useCallback(
+    (providerId: string) => runAction({ type: "discoverProviderModels", providerId }),
+    [runAction],
+  );
+
+  const discoverForForm = useCallback(
+    (form?: AddProviderForm) => runAction({ type: "discoverForForm", form }),
+    [runAction],
+  );
+
+  const probeProvider = useCallback(
+    (input: { baseUrl: string; apiKey: string; model?: string | null; providerId?: string; toastId?: string }) =>
+      runAction({ type: "probe", ...input }),
+    [runAction],
+  );
+
+  const refreshOfficialModels = useCallback(
+    (options?: ProviderRefreshOptions) =>
+      runAction(buildOfficialRefreshIntent(options)),
+    [runAction],
+  );
+
+  const deleteProvider = useCallback(
+    (providerId: string) => runAction({ type: "deleteProvider", providerId }),
+    [runAction],
+  );
+
   const navigation = useMemo(
     () => ({
       pending: state.pendingNavigation,
@@ -596,9 +744,9 @@ export function useProviderWorkspace(options: {
           return { kind: "ok" };
         }
         if (pending.kind === "existing") {
-          await act({ type: "saveProvider", provider: pending.draft, skipPublish: true });
+          await runAction({ type: "saveProvider", provider: pending.draft, skipPublish: true });
         } else {
-          const result = await act({ type: "saveAddForm", form: pending.form, targetId: pending.targetId });
+          const result = await runAction({ type: "saveAddForm", form: pending.form, targetId: pending.targetId });
           if (result.kind === "error") {
             return result;
           }
@@ -609,7 +757,7 @@ export function useProviderWorkspace(options: {
         return { kind: "ok" };
       },
     }),
-    [act, state.pendingNavigation],
+    [runAction, state.pendingNavigation],
   );
 
   const selectedProvider = useMemo(() => selectSelectedProvider(state), [state]);
@@ -626,10 +774,6 @@ export function useProviderWorkspace(options: {
       return;
     }
     dirtyDraftRef.current = draft;
-  }, []);
-
-  const setSelectedId = useCallback((id: string) => {
-    dispatch({ type: "setSelectedId", selectedId: id });
   }, []);
 
   const selectProvider = useCallback((id: string) => {
@@ -663,12 +807,30 @@ export function useProviderWorkspace(options: {
 
   return {
     state,
-    edit,
-    act,
+    stageProviders,
+    stageSettings,
+    updateForm,
+    setProbeResult,
+    setDiscoveryError,
+    setOperationBusy,
+    setOfficialModels,
+    setOfficialDisabledModels,
+    setOfficialModelOrder,
+    stageCatalogPreset,
+    stagePendingProvider,
+    setSelectedProviderId,
+    saveProviders,
+    saveSettings,
+    saveProvider,
+    saveAddForm,
+    discoverProviderModels,
+    discoverForForm,
+    probeProvider,
+    refreshOfficialModels,
+    deleteProvider,
     navigation,
     selectedProvider,
     selectProvider,
-    setSelectedId,
     trackProviderDraft,
   };
 }

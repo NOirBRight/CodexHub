@@ -54,7 +54,6 @@ import type {
   OpenAIUsageSnapshot,
   Provider,
   Settings,
-  UpstreamFormatProbeResult,
 } from "../lib/types";
 
 type ProviderNavItem =
@@ -139,22 +138,29 @@ function ProvidersPageImpl({
     settings,
     settingsDraft,
   } = workspace.state;
-  const setProviders = (value: Provider[]) => workspace.edit({ type: "setProviders", providers: value });
-  const setSettings = (value: Settings | null | ((current: Settings | null) => Settings | null)) => {
-    const next = typeof value === "function" ? value(workspace.state.settings) : value;
-    if (next) workspace.edit({ type: "setSettings", settings: next });
-  };
-  const setSettingsDraft = setSettings;
-  const setOfficialDisabledModelsDraft = (disabled: string[]) =>
-    workspace.edit({ type: "setOfficialDisabledModelsDraft", disabled });
-  const setOfficialModelOrderDraft = (order: string[]) =>
-    workspace.edit({ type: "setOfficialModelOrderDraft", order });
-  const setForm = (next: AddProviderForm) => workspace.edit({ type: "updateForm", form: next });
-  const setProbeResult = (result: UpstreamFormatProbeResult | null) =>
-    workspace.edit({ type: "setProbeResult", result });
-  const setBusy = (next: string | null) => workspace.edit({ type: "setBusy", busy: next });
-  const setModelDiscoveryError = (error: string | null) =>
-    workspace.edit({ type: "setDiscoveryError", error });
+  const {
+    stageProviders,
+    stageSettings,
+    updateForm,
+    setProbeResult,
+    setDiscoveryError,
+    setOperationBusy,
+    setOfficialModels,
+    setOfficialDisabledModels,
+    setOfficialModelOrder,
+    stageCatalogPreset,
+    stagePendingProvider,
+    setSelectedProviderId,
+    saveProviders: saveWorkspaceProviders,
+    saveSettings: saveWorkspaceSettings,
+    saveAddForm,
+    discoverProviderModels,
+    discoverForForm: discoverWorkspaceForForm,
+    probeProvider,
+    refreshOfficialModels,
+    selectProvider,
+    trackProviderDraft,
+  } = workspace;
   const handledCodexSwitchRequestRef = useRef<number | null>(null);
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(appStatusSnapshot);
   const [connectionPendingMode, setConnectionPendingMode] = useState<ConnectionMode | null>(null);
@@ -177,50 +183,26 @@ function ProvidersPageImpl({
   const [catalogPresets, setCatalogPresets] = useState<Provider[] | null>(null);
   const selectedId = workspace.state.selectedId;
   const officialModels = workspace.state.officialModels;
-  const setOfficialModels = (value: Model[] | ((current: Model[]) => Model[])) => {
-    const next = typeof value === "function" ? value(workspace.state.officialModels) : value;
-    workspace.edit({ type: "setOfficialModels", models: next });
-  };
-  const { selectProvider, trackProviderDraft } = workspace;
-  const setSelectedId = (value: string | ((current: string) => string)) => {
-    const next = typeof value === "function" ? value(workspace.state.selectedId) : value;
-    workspace.setSelectedId(next);
-  };
   const pendingNewProvider = workspace.state.pendingNewProvider;
-  const setPendingNewProvider = (value: Provider | null | ((current: Provider | null) => Provider | null)) => {
-    const next = typeof value === "function" ? value(workspace.state.pendingNewProvider) : value;
-    if (next) {
-      workspace.edit({ type: "setPendingNewProvider", provider: next });
-    } else {
-      workspace.edit({ type: "clearPendingNewProvider" });
-    }
-  };
   function addCatalogProvider(preset: Provider) {
-    workspace.edit({ type: "setProviders", providers });
-    workspace.edit({ type: "stageCatalogPreset", preset });
+    stageCatalogPreset(preset);
   }
   const pendingProviderNavigation = workspace.navigation.pending;
   const cancelPendingProviderNavigation = () => {
     void workspace.navigation.resolve("cancel");
   };
   const discardPendingProviderNavigation = () => {
-    setForm(emptyProvider);
+    updateForm(emptyProvider);
     void workspace.navigation.resolve("discard");
   };
   const savePendingProviderNavigation = () => workspace.navigation.resolve("save");
-  const editWorkspace = workspace.edit;
-  useEffect(() => {
-    editWorkspace({ type: "updateForm", form });
-  }, [editWorkspace, form]);
   async function saveProviders(
     next: Provider[],
     regenerateCatalog = true,
     successMessage?: string,
     toastId?: string,
   ): Promise<Provider[]> {
-    const result = await workspace.act({
-      type: "saveProviders",
-      providers: next,
+    const result = await saveWorkspaceProviders(next, {
       successMessage,
       toastId,
       skipPublish: !regenerateCatalog,
@@ -234,16 +216,7 @@ function ProvidersPageImpl({
     return providers;
   }
   async function discoverForForm() {
-    setBusy("discover");
-    try {
-      const result = await workspace.act({ type: "discoverForForm", form });
-      if (result.kind === "ok" && result.form) {
-        setForm(result.form);
-      }
-      setModelDiscoveryError(result.kind === "error" ? result.message : null);
-    } finally {
-      setBusy(null);
-    }
+    await discoverWorkspaceForForm(form);
   }
   async function probeUpstreamFormat(
     baseUrl: string,
@@ -251,64 +224,31 @@ function ProvidersPageImpl({
     model?: string | null,
     providerId?: string,
   ) {
-    setBusy("probe");
-    setProbeResult(null);
-    try {
-      const result = await workspace.act({
-        type: "probe",
-        baseUrl,
-        apiKey,
-        model,
-        providerId,
-      });
-      if (result.kind === "ok" && result.probeResult) {
-        setProbeResult(result.probeResult);
-        if (result.providers) {
-          setProviders(result.providers);
-        }
-        setError(null);
-        return result.probeResult;
-      }
-      return null;
-    } finally {
-      setBusy(null);
+    const result = await probeProvider({
+      baseUrl,
+      apiKey,
+      model,
+      providerId,
+    });
+    if (result.kind === "ok") {
+      setError(null);
+      return result.probeResult ?? null;
     }
+    return null;
   }
   async function addProvider() {
-    setBusy("save");
-    try {
-      const result = await workspace.act({ type: "saveAddForm", form });
-      if (result.kind === "ok") {
-        if (result.providers) {
-          setProviders(result.providers);
-        }
-        setForm(emptyProvider);
-        setError(null);
-        return;
-      }
-      if (result.kind === "error") {
-        setError(result.message);
-      }
-    } finally {
-      setBusy(null);
+    const result = await saveAddForm(form);
+    if (result.kind === "ok") {
+      updateForm(emptyProvider);
+      setError(null);
+    } else if (result.kind === "error") {
+      setError(result.message);
     }
   }
   async function refreshProviderModels(provider: Provider) {
-    setBusy(provider.id);
-    try {
-      const result = await workspace.act({ type: "discoverProviderModels", providerId: provider.id });
-      if (result.kind === "ok") {
-        if (result.providers) {
-          setProviders(result.providers);
-        }
-        setModelDiscoveryError(null);
-        return;
-      }
-      if (result.kind === "error") {
-        setModelDiscoveryError(result.message);
-      }
-    } finally {
-      setBusy(null);
+    const result = await discoverProviderModels(provider.id);
+    if (result.kind === "error") {
+      setDiscoveryError(result.message);
     }
   }
 
@@ -359,7 +299,7 @@ function ProvidersPageImpl({
 
   useEffect(() => {
     setProbeResult(null);
-    setModelDiscoveryError(null);
+    setDiscoveryError(null);
   }, [selectedId]);
 
   const selectedProvider = workspace.selectedProvider;
@@ -493,7 +433,7 @@ function ProvidersPageImpl({
   }
 
   async function startBackendFromToast(toastId?: string) {
-    setBusy("start");
+    setOperationBusy("start");
     const activeToastId = toastId ?? showToast(t("gateway.startingBackend"), "loading");
     updateToast(activeToastId, {
       action: null,
@@ -520,7 +460,7 @@ function ProvidersPageImpl({
     } catch (err) {
       updateToastWithError(activeToastId, err);
     } finally {
-      setBusy(null);
+      setOperationBusy(null);
     }
   }
 
@@ -635,7 +575,7 @@ function ProvidersPageImpl({
   }
 
   async function refreshCodexAuthStatus() {
-    setBusy("auth-refresh");
+    setOperationBusy("auth-refresh");
     try {
       const gatewayStatus = await api.gatewayStatus();
       const authState = codexAuthStateFromGatewayStatus(gatewayStatus);
@@ -649,27 +589,24 @@ function ProvidersPageImpl({
     } catch (err) {
       setError(messageFromError(err));
     } finally {
-      setBusy(null);
+      setOperationBusy(null);
     }
   }
 
   async function saveSettings(next: Settings, regenerateCatalog = false, successMessage?: string, toastId?: string) {
-    const result = await workspace.act({
-      type: "saveSettings",
-      settings: next,
+    const result = await saveWorkspaceSettings(next, {
       regenerateCatalog,
       successMessage,
       toastId,
     });
     if (result.kind === "ok") {
-      setSettings(next);
-      setSettingsDraft(next);
+      stageSettings(next);
       setError(null);
     }
   }
 
   function reflectContextGuardSetting(enabled: boolean) {
-    setSettings((current) => {
+    stageSettings((current) => {
       if (!current) {
         return current;
       }
@@ -677,15 +614,12 @@ function ProvidersPageImpl({
       onSettingsChanged?.(next);
       return next;
     });
-    setSettingsDraft((current) => (
-      current ? { ...current, openai_context_guard_enabled: enabled } : current
-    ));
   }
 
   async function updateProvider(next: Provider, successMessage?: string) {
     if (pendingNewProvider && next.id === pendingNewProvider.id) {
       await saveProviders([...providers, next], true, successMessage);
-      setPendingNewProvider(null);
+      stagePendingProvider(null);
       return;
     }
     await saveProviders(
@@ -697,7 +631,7 @@ function ProvidersPageImpl({
 
   function toggleProviderEnabled(providerId: string, enabled: boolean) {
     if (pendingNewProvider?.id === providerId) {
-      setPendingNewProvider({ ...pendingNewProvider, enabled });
+      stagePendingProvider({ ...pendingNewProvider, enabled });
       return;
     }
     const providerName = providers.find((provider) => provider.id === providerId)?.name ?? providerId;
@@ -710,7 +644,7 @@ function ProvidersPageImpl({
     const nextProviders = providers.map((provider) =>
       provider.id === providerId ? { ...provider, enabled } : provider,
     );
-    setProviders(nextProviders);
+    stageProviders(nextProviders);
     void saveProviders(
       nextProviders,
       true,
@@ -737,11 +671,11 @@ function ProvidersPageImpl({
     if (pendingNewProvider) {
       const pendingIndex = items.findIndex((item) => item.id === pendingNewProvider.id);
       if (pendingIndex >= 0) {
-        setPendingNewProvider({ ...pendingNewProvider, sort_order: pendingIndex + 1 });
+        stagePendingProvider({ ...pendingNewProvider, sort_order: pendingIndex + 1 });
       }
     }
 
-    setProviders(nextProviders);
+    stageProviders(nextProviders);
     await saveProviders(nextProviders, true, t("providers.providerOrderSaved"));
   }
 
@@ -763,7 +697,7 @@ function ProvidersPageImpl({
     const nextDisabled = enabled
       ? current.filter((item) => !modelIdMatches(item, modelId))
       : [...new Set([...current, modelId])];
-    setOfficialDisabledModelsDraft(nextDisabled);
+    setOfficialDisabledModels(nextDisabled);
     setOfficialModels((currentModels) =>
       currentModels.map((model) => (modelIdMatches(model.id, modelId) ? { ...model, enabled } : model)),
     );
@@ -805,7 +739,7 @@ function ProvidersPageImpl({
     }
     const actionLabel = nextMode === "custom" ? t("providers.connectingToHub") : t("providers.disconnectingFromHub");
     setConnectionPendingMode(nextMode);
-    setBusy("route");
+    setOperationBusy("route");
     const toastId = showToast(`${actionLabel}...`, "loading");
     try {
       let status = forceTakeover
@@ -892,7 +826,7 @@ function ProvidersPageImpl({
         tone: "error",
       });
     } finally {
-      setBusy(null);
+      setOperationBusy(null);
     }
   }
 
@@ -913,7 +847,7 @@ function ProvidersPageImpl({
   async function reorderOfficialModels(models: Model[]) {
     const nextModels = renumberModels(models);
     setOfficialModels(nextModels);
-    setOfficialModelOrderDraft(nextModels.map((model) => model.id));
+    setOfficialModelOrder(nextModels.map((model) => model.id));
   }
 
   async function saveOfficialModels() {
@@ -934,11 +868,7 @@ function ProvidersPageImpl({
   async function refreshOfficialModelsAndCollaborationState(
     options?: { quiet?: boolean; throwOnError?: boolean },
   ) {
-    const refreshed = await workspace.act({
-      type: "refreshOfficialModels",
-      quiet: options?.quiet,
-      throwOnError: options?.throwOnError,
-    });
+    const refreshed = await refreshOfficialModels(options);
     try {
       const [overrides, baselines] = await Promise.all([
         api.listOfficialMultiAgentOverrides(),
@@ -964,10 +894,10 @@ function ProvidersPageImpl({
       }))) {
         return;
       }
-      setPendingNewProvider(null);
-      setSelectedId(OFFICIAL_ID);
+      stagePendingProvider(null);
+      setSelectedProviderId(OFFICIAL_ID);
       setProbeResult(null);
-      setModelDiscoveryError(null);
+      setDiscoveryError(null);
       setError(null);
       return;
     }
@@ -988,23 +918,23 @@ function ProvidersPageImpl({
     const previousProviders = providers;
     const previousSelectedId = selectedId;
     const next = providers.filter((provider) => provider.id !== providerId);
-    setSelectedId(next[0]?.id ?? OFFICIAL_ID);
-    setProviders(next);
+    setSelectedProviderId(next[0]?.id ?? OFFICIAL_ID);
+    stageProviders(next);
     try {
       const saved = await saveProviders(next, true, t("providers.providerDeleted", { name: target.name }));
       if (saved.some((provider) => provider.id === providerId)) {
-        setProviders(saved);
-        setSelectedId(providerId);
+        stageProviders(saved);
+        setSelectedProviderId(providerId);
         setError(t("providers.providerDeleteDidNotPersist", { name: target.name }));
         return;
       }
     } catch {
-      setProviders(previousProviders);
-      setSelectedId(previousSelectedId);
+      stageProviders(previousProviders);
+      setSelectedProviderId(previousSelectedId);
       return;
     }
     setProbeResult(null);
-    setModelDiscoveryError(null);
+    setDiscoveryError(null);
     setError(null);
   }
 
@@ -1057,7 +987,7 @@ function ProvidersPageImpl({
                 probeResult={probeResult}
                 onAdd={() => void addProvider()}
                 onDiscover={() => void discoverForForm()}
-                onFormChange={setForm}
+                onFormChange={updateForm}
                 onProbe={() =>
                   probeUpstreamFormat(form.base_url, form.api_key, formProbeModelFor(form))
                 }
@@ -1129,7 +1059,7 @@ function ProvidersPageImpl({
         onCancel={cancelPendingProviderNavigation}
         onDiscard={() => {
           if (pendingNewProvider && selectedId === pendingNewProvider.id) {
-            setPendingNewProvider(null);
+            stagePendingProvider(null);
           }
           discardPendingProviderNavigation();
         }}

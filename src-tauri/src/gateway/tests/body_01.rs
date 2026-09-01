@@ -804,6 +804,69 @@ fn client_route_model_preserves_valid_selection_and_falls_back_from_stale_select
     assert!(super::resolve_gateway_client_model_id(&settings, &providers, &fallback).is_ok());
 }
 
+#[test]
+fn list_gateway_clients_uses_current_exported_model_for_zcode_drift_check() {
+    let _guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root = unique_temp_dir("codexhub-zcode-current-model");
+    let runtime_home = root.join("runtime");
+    let catalog_path = root.join("zcode").join("model-providers").join("codexhub.json");
+    let v2_root = root.join("zcode").join("v2");
+    let v2_config_path = v2_root.join("config.json");
+    let v2_cache_path = v2_root.join("bots-model-cache.v2.json");
+    fs::create_dir_all(runtime_home.join("proxy")).unwrap();
+    fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(&v2_root).unwrap();
+    let settings = Settings {
+        include_official_models: false,
+        proxy_port: 9099,
+        ..Settings::default()
+    };
+    fs::write(
+        runtime_home.join("proxy").join("settings.json"),
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let previous_runtime = std::env::var_os("CODEXHUB_RUNTIME_HOME");
+    let previous_resource = std::env::var_os("CODEXHUB_RESOURCE_ROOT");
+    let previous_zcode = std::env::var_os("CODEXHUB_ZCODE_CONFIG");
+    let previous_zcode_v2 = std::env::var_os("CODEXHUB_ZCODE_V2_DIR");
+    let previous_zcode_exe = std::env::var_os("CODEXHUB_ZCODE_EXE");
+    std::env::set_var("CODEXHUB_RUNTIME_HOME", &runtime_home);
+    let resource_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::env::set_var("CODEXHUB_RESOURCE_ROOT", &resource_root);
+    std::env::set_var("CODEXHUB_ZCODE_CONFIG", &catalog_path);
+    std::env::set_var("CODEXHUB_ZCODE_V2_DIR", &v2_root);
+    std::env::set_var("CODEXHUB_ZCODE_EXE", root.join("missing-zcode"));
+
+    let loaded_settings = crate::config::get_settings().unwrap();
+    let loaded_providers = crate::config::get_providers().unwrap();
+    let model = super::default_gateway_client_sync_model(&loaded_settings, &loaded_providers)
+        .expect("bundled providers should export a fallback model");
+    let config = super::zcode_v2_config_text(&v2_config_path, &loaded_settings, &loaded_providers, &model).unwrap();
+    let catalog = super::zcode_catalog_text(&loaded_settings, &loaded_providers, &model).unwrap();
+    let cache = super::zcode_v2_cache_text(&loaded_settings, &loaded_providers, &model).unwrap();
+    fs::write(&v2_config_path, config).unwrap();
+    fs::write(&catalog_path, catalog).unwrap();
+    fs::write(&v2_cache_path, cache).unwrap();
+
+    let clients = super::list_gateway_clients(false).unwrap();
+    let zcode = clients.iter().find(|client| client.id == "zcode").unwrap();
+    assert_eq!(zcode.route_mode, "hub");
+
+    restore_env("CODEXHUB_RUNTIME_HOME", previous_runtime);
+    restore_env("CODEXHUB_RESOURCE_ROOT", previous_resource);
+    restore_env("CODEXHUB_ZCODE_CONFIG", previous_zcode);
+    restore_env("CODEXHUB_ZCODE_V2_DIR", previous_zcode_v2);
+    restore_env("CODEXHUB_ZCODE_EXE", previous_zcode_exe);
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn command_version_reads_supported_cmd_shim_from_path() {

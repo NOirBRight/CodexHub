@@ -9,8 +9,6 @@ pub(in crate::gateway) fn omp_config_text(
     vision_selector: Option<&str>,
     default_reasoning_effort: Option<&str>,
 ) -> String {
-    // ADR-0004 / #435: modelRoles stays user-owned. Only insert a codexhub
-    // default when the user has none (activation is the user's own action).
     let default_selector = match default_reasoning_effort {
         Some(effort) if !effort.is_empty() => format!("{selector}:{effort}"),
         _ => selector.to_string(),
@@ -22,12 +20,13 @@ pub(in crate::gateway) fn omp_config_text(
     if let Some(vision_selector) = vision_selector {
         block.push(format!("  vision: {vision_selector}"));
     }
-    // ADR-0004 / #435: if the user already has modelRoles, the config is
-    // user-owned — return it unchanged (activation is the user's action;
-    // only models.yml is managed).
     if let Some(current) = current {
-        if current.lines().any(|line| is_top_level_yaml_key(line, "modelRoles")) {
-            return current.to_string();
+        if current
+            .lines()
+            .any(|line| is_top_level_yaml_key(line, "modelRoles"))
+        {
+            return rewrite_omp_model_roles(current, &default_selector, vision_selector)
+                .unwrap_or_else(|| current.to_string());
         }
     }
     let mut output = Vec::new();
@@ -57,6 +56,71 @@ pub(in crate::gateway) fn omp_config_text(
     format!("{}\n", output.join("\n"))
 }
 
+/// Keep user-owned OMP roles untouched, except for selectors that point at a
+/// CodexHub provider from an older managed-takeover release.  Those selectors
+/// are an app-owned legacy seam: leaving them behind after a provider refresh
+/// makes OMP send requests to a provider that no longer exists.  Foreign
+/// selectors remain byte-for-byte unchanged, preserving ADR-0004 activation
+/// semantics.
+fn rewrite_omp_model_roles(
+    current: &str,
+    default_selector: &str,
+    vision_selector: Option<&str>,
+) -> Option<String> {
+    let mut lines = current
+        .lines()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<String>>();
+    let start = lines
+        .iter()
+        .position(|line| is_top_level_yaml_key(line, "modelRoles"))?;
+    let end = (start + 1..lines.len())
+        .find(|index| is_any_top_level_yaml_key(&lines[*index]))
+        .unwrap_or(lines.len());
+    let mut changed = false;
+    for line in &mut lines[start + 1..end] {
+        let trimmed = line.trim_start();
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if key != "default" && key != "vision" {
+            continue;
+        }
+        let value = value.trim().trim_matches(['"', '\'']);
+        if !is_codexhub_client_model_selector(value) {
+            continue;
+        }
+        let replacement = if key == "default" {
+            Some(default_selector)
+        } else {
+            vision_selector
+        };
+        let indent_len = line.len() - line.trim_start().len();
+        let indent = &line[..indent_len];
+        match replacement {
+            Some(replacement) => *line = format!("{indent}{key}: {replacement}"),
+            None => line.clear(),
+        }
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+
+    let newline = if current.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let trailing_newline = current.ends_with('\n');
+    let mut output = lines.join(newline);
+    if trailing_newline {
+        output.push_str(newline);
+    }
+    Some(output)
+}
+
 pub(in crate::gateway) fn omp_models_yml_text(
     current: Option<&str>,
     settings: &Settings,
@@ -72,10 +136,12 @@ pub(in crate::gateway) fn omp_models_yml_text(
     if let Some(current) = current {
         let mut block: Vec<String> = Vec::new();
         let mut in_providers = false;
+        let mut skip_block = false;
         for line in current.lines() {
             let trimmed = line.trim_start();
             if trimmed.starts_with("providers:") {
                 in_providers = true;
+                skip_block = false;
                 continue;
             }
             if !in_providers {
@@ -83,28 +149,36 @@ pub(in crate::gateway) fn omp_models_yml_text(
             }
             // a top-level key (column 0) ends the providers map
             if !line.starts_with(' ') && !line.trim().is_empty() {
-                if !block.is_empty() {
+                if !block.is_empty() && !skip_block {
                     foreign_blocks.push(block.join("\n"));
-                    block.clear();
                 }
+                block.clear();
+                skip_block = false;
                 continue;
             }
             // a new provider block starts with two-space indent + key
-            if line.starts_with("  ") && !line.starts_with("    ") && line.trim_end().ends_with(':') {
-                if !block.is_empty() {
+            if line.starts_with("  ") && !line.starts_with("    ") && line.trim_end().ends_with(':')
+            {
+                if !block.is_empty() && !skip_block {
                     foreign_blocks.push(block.join("\n"));
-                    block.clear();
                 }
+                block.clear();
                 let provider_key = line.trim().trim_end_matches(':');
-                if is_codexhub_client_provider_id(provider_key) {
-                    // skip the whole codexhub-managed block
-                    block = Vec::new();
-                    continue;
+                // Skip the whole CodexHub-managed block, including its
+                // indented fields.  Keeping an explicit flag is important on
+                // repeated applies; otherwise those fields get appended to
+                // the preceding foreign provider block.
+                skip_block = is_codexhub_client_provider_id(provider_key);
+                if !skip_block {
+                    block.push(line.to_string());
                 }
+                continue;
             }
-            block.push(line.to_string());
+            if !skip_block {
+                block.push(line.to_string());
+            }
         }
-        if !block.is_empty() {
+        if !block.is_empty() && !skip_block {
             foreign_blocks.push(block.join("\n"));
         }
     }
@@ -321,6 +395,7 @@ pub(in crate::gateway) fn preview_omp_config_with_paths(
     let current =
         combined_current_preview(&[("config.yml", config_path), ("models.yml", models_path)]);
     let current_config = fs::read_to_string(config_path).ok();
+    let current_models = fs::read_to_string(models_path).ok();
     let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let selector = gateway_client_model_selector(settings, providers, &model)?;
     let vision_selector = if gateway_exported_model_supports_image(settings, providers, &model) {
@@ -336,7 +411,7 @@ pub(in crate::gateway) fn preview_omp_config_with_paths(
         vision_selector,
         default_reasoning_effort.as_deref(),
     );
-    let next_models = omp_models_yml_text(None, settings, providers, &model)?;
+    let next_models = omp_models_yml_text(current_models.as_deref(), settings, providers, &model)?;
     let mut message =
         "Apply will snapshot OMP config/models, then route OMP through CodexHub Gateway."
             .to_string();
@@ -465,13 +540,237 @@ pub(in crate::gateway) fn restore_omp_config_with_paths(
             let models = fs::read_to_string(path.join("models.yml")).unwrap_or_default();
             is_omp_codexhub_config(&config, &models)
         },
-    )?;
+    );
+    match latest {
+        Ok(latest) => Ok(GatewayClientApplyResult {
+            client_id: "omp".to_string(),
+            applied: true,
+            config_path: Some(config_path.to_path_buf()),
+            backup_path: Some(latest),
+            message: "OMP official config restored.".to_string(),
+        }),
+        Err(_clean_error) => omp_ownership_bounded_cleanup(config_path, models_path),
+    }
+}
+
+/// Remove only provider blocks that CodexHub can positively identify as its
+/// own.  OMP's models.yml is YAML, but the injected shape is deliberately
+/// line-oriented and stable; keeping the cleanup parser this narrow avoids
+/// accepting malformed user YAML and accidentally deleting unrelated data.
+fn remove_omp_codexhub_provider_blocks(text: &str) -> (String, bool) {
+    let lines = text.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    let Some(providers_start) = lines
+        .iter()
+        .position(|line| is_top_level_yaml_key(line, "providers"))
+    else {
+        return (text.to_string(), false);
+    };
+    let providers_end = (providers_start + 1..lines.len())
+        .find(|index| is_any_top_level_yaml_key(&lines[*index]))
+        .unwrap_or(lines.len());
+    let mut entries = Vec::new();
+    let mut current_start = None;
+    for (index, line) in lines
+        .iter()
+        .enumerate()
+        .skip(providers_start + 1)
+        .take(providers_end.saturating_sub(providers_start + 1))
+    {
+        if is_omp_provider_entry(line) {
+            if let Some(start) = current_start.replace(index) {
+                entries.push((start, index));
+            }
+        }
+    }
+    if let Some(start) = current_start {
+        entries.push((start, providers_end));
+    }
+
+    let mut remove = vec![false; lines.len()];
+    let mut removed_any = false;
+    for (start, end) in entries {
+        let provider_id = lines[start]
+            .trim()
+            .trim_end_matches(':')
+            .trim_matches(['"', '\'']);
+        let block = lines[start..end].join("\n");
+        let managed = is_codexhub_client_provider_id(provider_id)
+            && (block.lines().any(|line| {
+                line.trim().strip_prefix("baseUrl:").is_some_and(|url| {
+                    let url = url.trim();
+                    is_local_gateway_url(url)
+                        && (url.contains("/v1/providers/")
+                            || url
+                                .trim_matches(['"', '\''])
+                                .trim_end_matches('/')
+                                .ends_with("/v1"))
+                })
+            }) || block.contains("CodexHub Gateway")
+                || block.contains("CodexHub "));
+        if managed {
+            for slot in &mut remove[start..end] {
+                *slot = true;
+            }
+            removed_any = true;
+        }
+    }
+    if !removed_any {
+        return (text.to_string(), false);
+    }
+
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let trailing_newline = text.ends_with('\n');
+    let mut output = lines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, line)| (!remove[index]).then_some(line))
+        .collect::<Vec<_>>()
+        .join(newline);
+    if trailing_newline {
+        output.push_str(newline);
+    }
+    (output, true)
+}
+
+fn is_omp_provider_entry(line: &str) -> bool {
+    line.starts_with("  ") && !line.starts_with("    ") && line.trim_end().ends_with(':')
+}
+
+/// Remove stale legacy selectors only when they name a recognized CodexHub
+/// provider.  A foreign OMP model role is never changed by detach.
+fn remove_omp_codexhub_model_roles(text: &str) -> (String, bool) {
+    let mut lines = text.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    let Some(start) = lines
+        .iter()
+        .position(|line| is_top_level_yaml_key(line, "modelRoles"))
+    else {
+        return (text.to_string(), false);
+    };
+    let end = (start + 1..lines.len())
+        .find(|index| is_any_top_level_yaml_key(&lines[*index]))
+        .unwrap_or(lines.len());
+    let mut changed = false;
+    for line in &mut lines[start + 1..end] {
+        let Some((key, value)) = line.trim_start().split_once(':') else {
+            continue;
+        };
+        if key.trim() != "default" && key.trim() != "vision" {
+            continue;
+        }
+        let value = value.trim().trim_matches(['"', '\'']);
+        if is_codexhub_client_model_selector(value) {
+            line.clear();
+            changed = true;
+        }
+    }
+    if !changed {
+        return (text.to_string(), false);
+    }
+    let mut output_lines = Vec::with_capacity(lines.len());
+    for (index, line) in lines.into_iter().enumerate() {
+        if index > start && index < end && line.is_empty() {
+            continue;
+        }
+        output_lines.push(line);
+    }
+    // If the roles map contained only legacy selectors, remove its now-empty
+    // header as well; otherwise leave the user's remaining roles intact.
+    let mut role_header = None;
+    let mut role_end = None;
+    for (index, line) in output_lines.iter().enumerate() {
+        if is_top_level_yaml_key(line, "modelRoles") {
+            role_header = Some(index);
+            role_end = (index + 1..output_lines.len())
+                .find(|next| is_any_top_level_yaml_key(&output_lines[*next]))
+                .or(Some(output_lines.len()));
+            break;
+        }
+    }
+    if let (Some(header), Some(end)) = (role_header, role_end) {
+        if output_lines[header + 1..end]
+            .iter()
+            .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
+        {
+            output_lines.drain(header..end);
+        }
+    }
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let trailing_newline = text.ends_with('\n');
+    let mut output = output_lines.join(newline);
+    if trailing_newline {
+        output.push_str(newline);
+    }
+    (output, true)
+}
+
+pub(in crate::gateway) fn omp_ownership_bounded_cleanup(
+    config_path: &Path,
+    models_path: &Path,
+) -> Result<GatewayClientApplyResult, String> {
+    let config_exists = config_path.exists();
+    let models_exists = models_path.exists();
+    if !config_exists && !models_exists {
+        return Ok(GatewayClientApplyResult {
+            client_id: "omp".to_string(),
+            applied: true,
+            config_path: None,
+            backup_path: None,
+            message: "OMP config was already absent.".to_string(),
+        });
+    }
+
+    let config = if config_exists {
+        Some(
+            fs::read_to_string(config_path)
+                .map_err(|_| "failed to read OMP config for cleanup.".to_string())?,
+        )
+    } else {
+        None
+    };
+    let models = if models_exists {
+        Some(
+            fs::read_to_string(models_path)
+                .map_err(|_| "failed to read OMP models for cleanup.".to_string())?,
+        )
+    } else {
+        None
+    };
+    let (next_config, config_changed) = config
+        .as_deref()
+        .map(remove_omp_codexhub_model_roles)
+        .unwrap_or_else(|| (String::new(), false));
+    let (next_models, models_changed) = models
+        .as_deref()
+        .map(remove_omp_codexhub_provider_blocks)
+        .unwrap_or_else(|| (String::new(), false));
+    if !config_changed && !models_changed {
+        return Err("OMP config is not managed by CodexHub; refusing cleanup.".to_string());
+    }
+
+    if config_changed {
+        if next_config.trim().is_empty() {
+            fs::remove_file(config_path)
+                .map_err(|_| "failed to remove cleaned OMP config.".to_string())?;
+        } else {
+            write_text_replace(config_path, &next_config)
+                .map_err(|_| "failed to write cleaned OMP config".to_string())?;
+        }
+    }
+    if models_changed {
+        if next_models.trim().is_empty() || next_models.trim() == "providers:" {
+            fs::remove_file(models_path)
+                .map_err(|_| "failed to remove cleaned OMP models.".to_string())?;
+        } else {
+            write_text_replace(models_path, &next_models)
+                .map_err(|_| "failed to write cleaned OMP models".to_string())?;
+        }
+    }
     Ok(GatewayClientApplyResult {
         client_id: "omp".to_string(),
         applied: true,
         config_path: Some(config_path.to_path_buf()),
-        backup_path: Some(latest),
-        message: "OMP official config restored.".to_string(),
+        backup_path: None,
+        message: "OMP CodexHub entries removed while preserving unrelated config.".to_string(),
     })
 }
 

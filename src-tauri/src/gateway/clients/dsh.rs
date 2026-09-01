@@ -115,7 +115,10 @@ fn dsh_adapter_ctx<'a>(
         providers,
         base_url,
         models,
-        client_root: root,
+        target: super::super::managed_clients::AdapterTarget::Live {
+            client_root: root,
+            backup_roots: Vec::new(),
+        },
     })
 }
 

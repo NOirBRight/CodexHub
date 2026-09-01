@@ -75,7 +75,9 @@ Linux GUI preflight:
 ./scripts/codexhub-python.sh scripts/e2e_linux_gui_clients.py
 ```
 
-Linux real-client CLI qualification is a separate eight-case gate. It builds
+Linux real-client CLI qualification is a separate eight-case gate. Its case,
+selector, route, protocol, evidence, and CLI-version contract lives at
+`scripts/real_client_cli_contract.v1.json`. It builds
 the current Rust candidate locally, starts its Gateway in an isolated runtime,
 materializes fresh client configuration, and runs Codex CLI, OpenCode, Pi, and
 OMP once against Official `gpt-5.6-luna` and once against OpenCode Go

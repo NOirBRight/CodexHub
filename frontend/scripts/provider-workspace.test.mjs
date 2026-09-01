@@ -55,11 +55,19 @@ async function loadCombinedModule() {
   const wrapped = new Function(
     "exports",
     "require",
-    js + "\nexports.providerWorkspaceReducer = providerWorkspaceReducer; exports.selectOfficialEnabledCount = selectOfficialEnabledCount; exports.selectOfficialModelDraftDirty = selectOfficialModelDraftDirty; exports.selectSelectedProvider = selectSelectedProvider; exports.catalogOverrideToastMessage = catalogOverrideToastMessage;",
+    js + "\nexports.buildOfficialRefreshIntent = buildOfficialRefreshIntent; exports.providerWorkspaceReducer = providerWorkspaceReducer; exports.selectOfficialEnabledCount = selectOfficialEnabledCount; exports.selectOfficialModelDraftDirty = selectOfficialModelDraftDirty; exports.selectSelectedProvider = selectSelectedProvider; exports.catalogOverrideToastMessage = catalogOverrideToastMessage;",
   );
   wrapped(moduleExports, mockRequire);
   return moduleExports;
 }
+
+test("official refresh intent ignores DOM event fields", async () => {
+  const m = await loadCombinedModule();
+  const intent = m.buildOfficialRefreshIntent({ type: "click", target: "button" });
+  assert.equal(intent.type, "refreshOfficialModels");
+  assert.equal(intent.quiet, undefined);
+  assert.equal(intent.throwOnError, undefined);
+});
 
 test("provider workspace reducer select intent updates selection", async () => {
   const m = await loadCombinedModule();

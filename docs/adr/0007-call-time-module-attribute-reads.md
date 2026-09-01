@@ -46,6 +46,12 @@ Cross-module imports use the owning module's public name. An AST gate in
 (`compatible_request_body`, `official_passthrough_request_body`, …). It does
 not implement `lookup()`, `api`, or `__getattr__`.
 
+The compatibility host no longer exposes adapter factories or one-line private
+forwarders. Compatibility modules import `apply_patch_adapter`,
+`collaboration_adapter`, `tool_surface_adapter`, `gateway_events`, and other
+owners as module objects and read their attributes at the call site. The AST
+boundary gate rejects factory definitions and calls through `host._*_adapter()`.
+
 ## DM-5 amendment: ports are adapters, not bags
 
 The Exchange ports introduced by campaign #491 DM-5 are typed protocols whose

@@ -253,12 +253,16 @@ class MaintainedThinkingRequestTests(unittest.TestCase):
 
 
 class MaintainedThinkingCompatibilitySeamTests(unittest.TestCase):
-    def test_host_reads_thinking_controls_from_owning_module_at_call_time(self):
-        from gateway_compat import host
+    def test_owning_module_exposes_thinking_controls_at_call_time(self):
+        import gateway_request
 
         payload = {"model": "kimi-k3"}
         with patch("gateway_request.apply_maintained_thinking_controls", return_value=True) as controls:
-            self.assertTrue(host._apply_maintained_thinking_controls(payload, "kimi", "kimi-k3", "kimi-k3"))
+            self.assertTrue(
+                gateway_request.apply_maintained_thinking_controls(
+                    payload, "kimi", "kimi-k3", "kimi-k3"
+                )
+            )
 
         controls.assert_called_once_with(payload, "kimi", "kimi-k3", "kimi-k3")
 

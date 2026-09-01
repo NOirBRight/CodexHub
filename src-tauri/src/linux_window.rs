@@ -15,10 +15,23 @@ const LEGACY_DESKTOP_FILE: &str = "codexhub.desktop";
 const OPAQUE_WINDOW_WIDGET_NAME: &str = "codexhub-main";
 const OPAQUE_WINDOW_CSS: &str = "#codexhub-main { background-color: #f8f8f7; }";
 
-pub fn install(app: &tauri::App) {
+/// Set the identity used by GTK/X11 window managers before Tauri creates the
+/// application window.  Ubuntu matches a running window to its desktop entry
+/// using the WM_CLASS class field; doing this in `setup` is too late because
+/// GTK has already created the native window by then.
+pub fn initialize_identity() {
+    if !gtk::is_initialized() {
+        if let Err(error) = gtk::init() {
+            log::warn!("Linux GTK identity initialization skipped: {error}");
+            return;
+        }
+    }
     glib::set_prgname(Some("com.codexhub.app"));
     glib::set_application_name("CodexHub");
     gdk::set_program_class("com.codexhub.app");
+}
+
+pub fn install(app: &tauri::App) {
     install_desktop_entry();
     install_hicolor_icon();
     let Some(window) = app.get_webview_window("main") else {

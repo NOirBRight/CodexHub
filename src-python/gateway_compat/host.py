@@ -1,15 +1,12 @@
-"""Host helpers for the compatibility pipeline, bound from owning modules.
+"""Stable constants and semantic helpers for the compatibility pipeline.
 
-Compatibility submodules read ``host.<name>`` at call time. Constants are
-owned here or imported from their owning module; functions that tests patch on
-owning modules are forwarded so those patches stay live.
+Compatibility submodules keep this module for immutable shared values. Mutable
+adapter behavior is imported as an owning module and read at the call site so
+tests and production both observe the same patchable seam.
 """
 
 from __future__ import annotations
 
-from typing import Any
-
-import gateway_request
 from gateway_request import (
     EMBEDDED_MODEL_RE,
     has_browser_context_signal as _has_browser_context_signal,
@@ -34,73 +31,8 @@ from gateway_stream_semantics import (
 # Compatibility-pipeline constants owned by the host after the facade removal.
 
 
-def _apply_maintained_thinking_controls(*args: Any, **kwargs: Any) -> Any:
-    return gateway_request.apply_maintained_thinking_controls(*args, **kwargs)
-
-
 EXCESSIVE_TOOL_LOOP_BOUND = 3
 EXCESSIVE_TOOL_LOOP_ERROR_CODE = "excessive_tool_loop"
 NATIVE_RESPONSES_TOOL_CONTRACT_ERROR_CODE = "invalid_native_responses_tool_contract"
 OLLAMA_REASONING_EFFORT_ALIASES = {"xhigh": "max"}
 STRUCTURED_TOOL_PROTOCOLS = {"responses_structured", "chat_tools"}
-
-
-def _apply_patch_adapter() -> Any:
-    import apply_patch_adapter as _module
-
-    return _module
-
-
-def _collaboration_adapter() -> Any:
-    import collaboration_adapter as _module
-
-    return _module
-
-
-def _tool_surface_adapter() -> Any:
-    import tool_surface_adapter as _module
-
-    return _module
-
-
-def _catalog_output_limit(model_id: str) -> tuple[int | None, bool]:
-    import gateway_catalog_runtime
-
-    return gateway_catalog_runtime.catalog_output_limit(model_id)
-
-
-def _collaboration_context_with_protocol(
-    event_context: Any,
-    protocol: str | None,
-) -> Any:
-    return _collaboration_adapter().context_with_protocol(event_context, protocol)
-
-
-def _is_collaboration_v2_context(event_context: Any) -> bool:
-    return _collaboration_adapter().is_v2_context(event_context)
-
-
-def resolve_collaboration_boundary(
-    payload: Any,
-    event_context: Any,
-    *,
-    surface: str = "request",
-) -> str | None:
-    return _collaboration_adapter().resolve_boundary(
-        payload,
-        event_context,
-        surface=surface,
-    )
-_resolve_collaboration_boundary = resolve_collaboration_boundary
-
-
-def _write_adapter_event(event_context: Any, event: str, **fields: Any) -> None:
-    import gateway_events
-
-    gateway_events.write_adapter_event(event_context, event, **fields)
-
-
-def write_proxy_event(event: str, **fields: Any) -> None:
-    import gateway_events
-
-    gateway_events.write_proxy_event(event, **fields)

@@ -115,7 +115,13 @@ pub fn verify_apply_readback(
                 vision,
                 reasoning.as_deref(),
             );
-            let expected_models = omp_models_yml_text(None, settings, providers, model)?;
+            // `models.yml` is a provider-injection document: the published
+            // CodexHub blocks are regenerated, while every foreign provider
+            // block is preserved.  Readback must therefore plan from the
+            // bytes that were actually written, not from an empty document;
+            // otherwise a user's unrelated provider makes every apply fail.
+            let expected_models =
+                omp_models_yml_text(Some(&written_models), settings, providers, model)?;
             if written_config != expected_config || written_models != expected_models {
                 return Err(
                     "readback failed: omp output does not round-trip production preview"

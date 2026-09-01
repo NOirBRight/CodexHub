@@ -13,7 +13,7 @@ if not defined CODEXHUB_E2E_CANDIDATE_SHA exit /b 21
 if not defined CODEXHUB_RUNTIME_HOME exit /b 22
 if not defined CODEXHUB_CODEX_TARGET_HOME exit /b 23
 if not defined CODEX_PROXY_GATEWAY_CLIENT_KEY exit /b 24
-if not defined OLLAMA_API_KEY exit /b 25
+if not defined OPENCODE_API_KEY exit /b 25
 call "%~dp0run-fixture-python.cmd" "%~dp0validate-managed-client-contract-probe.py" "%CODEXHUB_E2E_CONTRACT_PROBE_LOG%"
 if errorlevel 1 exit /b 51
 call "%~dp0run-fixture-python.cmd" "%~dp0fake-debug-gateway.py" --port %CODEXHUB_E2E_GATEWAY_PORT%

@@ -71,6 +71,12 @@ pub(crate) fn acquire_official_models_direct() -> Result<OfficialModelsAcquisiti
     acquire_official_models_direct_with_runner(&ProcessAppServerModelListRunner)
 }
 
+/// Read the current Codex subscription model list without publishing any
+/// CodexHub catalog or touching the running Codex Desktop configuration.
+pub(crate) fn read_official_models_direct() -> Result<Vec<Model>, String> {
+    acquire_official_models_direct().map(|acquisition| acquisition.models)
+}
+
 pub(crate) fn prepare_official_models_acquisition(
     acquisition: &OfficialModelsAcquisition,
 ) -> Result<(Vec<Model>, Vec<crate::file_transaction::PreparedTextFile>), String> {

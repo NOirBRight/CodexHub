@@ -11,6 +11,11 @@ import json
 import re
 import uuid
 
+import collaboration_adapter as _collaboration_adapter_module
+import gateway_catalog_runtime as _gateway_catalog_runtime
+import gateway_events as _gateway_events
+import gateway_request as _gateway_request
+
 from apply_patch_adapter import (
     ApplyPatchFacts,
     ThirdPartyApplyPatchStreamAdapter as _ApplyPatchStreamAdapterImpl,
@@ -148,7 +153,7 @@ def compatible_request_body(
     if official_passthrough:
         return _official_passthrough.official_passthrough_request_body(body, payload, upstream, model_id=model_id)
 
-    collaboration_protocol = host._resolve_collaboration_boundary(
+    collaboration_protocol = _collaboration_adapter_module.resolve_boundary(
         payload,
         event_context,
         surface="request",
@@ -254,7 +259,7 @@ def compatible_request_body(
             event_context.pop("_bounded_tool_search_query_digests", None)
     if _multi_agent._terminalize_bounded_empty_tool_search_misses(payload, bounded_tool_search_terminal_calls):
         for _query, count in bounded_tool_search_terminal_calls.values():
-            host.write_proxy_event(
+            _gateway_events.write_proxy_event(
                 "tool_search_empty_miss_bound",
                 query_classification=TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION,
                 count=count,
@@ -649,7 +654,7 @@ def compatible_request_body(
                 node_repl_alias,
             )
         input_items.append(state_hint)
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             event_context,
             "multi_agent_current_state_guidance_injected",
             upstream=upstream_name,
@@ -667,7 +672,7 @@ def compatible_request_body(
         and not _multi_agent._has_worker_subagent_finalization_guidance(input_items)
     ):
         input_items.append(_multi_agent._worker_subagent_finalization_message())
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             event_context,
             "worker_subagent_finalization_guidance_injected",
             upstream=upstream_name,
@@ -676,7 +681,7 @@ def compatible_request_body(
         changed = True
     if node_repl_single_step_complete and isinstance(input_items, list):
         input_items.append(_multi_agent._node_repl_single_step_complete_message())
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             event_context,
             "node_repl_single_step_complete_guidance_injected",
             upstream=upstream_name,
@@ -714,7 +719,7 @@ def compatible_request_body(
     if inject_codex_tools and allow_codex_tools and not raw_provider_probe and not collaboration_v2:
         if lifecycle_complete:
             if _multi_agent._hide_tools_for_completed_subagent_lifecycle(payload):
-                host._write_adapter_event(
+                _gateway_events.write_adapter_event(
                     event_context,
                     "subagent_lifecycle_complete_tools_hidden",
                     upstream=upstream_name,
@@ -781,7 +786,7 @@ def compatible_request_body(
                 payload,
                 compatibility_plan=runtime_tool_plan,
             ):
-                host._write_adapter_event(
+                _gateway_events.write_adapter_event(
                     event_context,
                     "subagent_worker_tools_restricted",
                     upstream=upstream_name,
@@ -793,7 +798,7 @@ def compatible_request_body(
                 include_node_repl_tools=include_node_repl_for_subagent_workflow,
                 compatibility_plan=runtime_tool_plan,
             ):
-                host._write_adapter_event(
+                _gateway_events.write_adapter_event(
                     event_context,
                     "subagent_coordinator_tools_restricted",
                     upstream=upstream_name,
@@ -871,7 +876,7 @@ def compatible_request_body(
                 }
             if explicit_tools_injected:
                 added_tool_names = sorted(_official_passthrough._function_tool_names(payload.get("tools")) - tool_names_before)
-                host._write_adapter_event(
+                _gateway_events.write_adapter_event(
                     event_context,
                     "explicit_codex_tools_injected",
                     upstream=upstream_name,
@@ -913,7 +918,7 @@ def compatible_request_body(
                     runtime_tool_plan,
                     required_tool_choice_name,
                 )
-                host.write_proxy_event(
+                _gateway_events.write_proxy_event(
                     "required_tool_tools_restricted",
                     tool_choice_required=True,
                     required_tool_family=required_tool_family,
@@ -956,14 +961,14 @@ def compatible_request_body(
         )
     if pending_tool_surface_event is not None:
         final_tools = payload.get("tools")
-        host.write_proxy_event(
+        _gateway_events.write_proxy_event(
             "external_tool_surface_prepared",
             **pending_tool_surface_event,
             final_tool_count=len(final_tools) if isinstance(final_tools, list) else 0,
         )
     model_id = payload.get("model")
     max_output_tokens, context_window_fallback = (
-        host._catalog_output_limit(model_id) if isinstance(model_id, str) else (None, False)
+        _gateway_catalog_runtime.catalog_output_limit(model_id) if isinstance(model_id, str) else (None, False)
     )
     if max_output_tokens is not None:
         requested_max_output_tokens = payload.get("max_output_tokens")
@@ -989,7 +994,7 @@ def compatible_request_body(
         and host._reasoning_param_is_unsupported(upstream_name, requested_model, upstream_model)
     ):
         del payload["reasoning"]
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             event_context,
             "unsupported_reasoning_removed",
             upstream=upstream_name,
@@ -998,7 +1003,7 @@ def compatible_request_body(
         )
         changed = True
 
-    if host._apply_maintained_thinking_controls(
+    if _gateway_request.apply_maintained_thinking_controls(
         payload, upstream_name, requested_model, upstream_model
     ):
         changed = True

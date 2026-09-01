@@ -1,7 +1,7 @@
 //! Thin Tauri command bodies owned by the Desktop Command seam (ADR-0010).
 //!
 //! Domain logic stays in config/catalog/models/proxy. This module is the
-//! handler inventory that main.rs and (later) the registry install.
+//! Handler bodies referenced by the registry in `desktop_commands::mod`.
 
 use serde::Serialize;
 use std::sync::Mutex;
@@ -443,6 +443,18 @@ pub async fn refresh_official_models(
 }
 
 pub(crate) fn refresh_official_models_coordinated(
+    restart_codex: bool,
+) -> Result<official_refresh::OfficialRefreshResult, String> {
+    // The frontend Refresh action is read-only. The legacy boolean remains
+    // accepted as an explicit opt-in for callers that intentionally apply the
+    // managed Codex overlay in the same transaction.
+    if !restart_codex {
+        return official_refresh::refresh_current_models();
+    }
+    refresh_official_models_published_coordinated(restart_codex)
+}
+
+pub(crate) fn refresh_official_models_published_coordinated(
     restart_codex: bool,
 ) -> Result<official_refresh::OfficialRefreshResult, String> {
     let coordinated =

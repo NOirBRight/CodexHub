@@ -11,6 +11,10 @@ import json
 import re
 import uuid
 
+import apply_patch_adapter as _apply_patch_adapter_module
+import collaboration_adapter as _collaboration_adapter_module
+import gateway_events as _gateway_events
+
 from apply_patch_adapter import (
     ApplyPatchFacts,
     ThirdPartyApplyPatchStreamAdapter as _ApplyPatchStreamAdapterImpl,
@@ -286,14 +290,14 @@ def _rewrite_v2_unsupported_tool_history(
         return False
     payload["input"] = rewritten_items
     if custom_rewritten_count:
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             event_context,
             "v2_custom_tool_history_rewritten",
             upstream=upstream_name,
             count=custom_rewritten_count,
         )
     if stale_function_pair_count:
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             event_context,
             "v2_stale_function_history_rewritten",
             upstream=upstream_name,
@@ -322,7 +326,7 @@ def _drop_v2_chat_reasoning_history(
         return False
 
     payload["input"] = rewritten_items
-    host._write_adapter_event(
+    _gateway_events.write_adapter_event(
         event_context,
         "v2_chat_reasoning_history_removed",
         upstream=upstream_name,
@@ -355,7 +359,7 @@ def _drop_chat_message_phase(
         return False
 
     payload["input"] = rewritten_items
-    host._write_adapter_event(
+    _gateway_events.write_adapter_event(
         event_context,
         "chat_message_phase_removed",
         upstream=upstream_name,
@@ -465,7 +469,7 @@ def _sanitize_official_invalid_tool_calls(payload: dict[str, Any]) -> bool:
 
 
 def _apply_patch_adapter_enabled(event_context: Mapping[str, Any] | None) -> bool:
-    return host._apply_patch_adapter().enabled(event_context)
+    return _apply_patch_adapter_module.enabled(event_context)
 
 
 def _adapt_apply_patch_custom_tool_history(
@@ -473,7 +477,7 @@ def _adapt_apply_patch_custom_tool_history(
     *,
     event_context: Mapping[str, Any] | None,
 ) -> tuple[list[Any], set[str], bool]:
-    return host._apply_patch_adapter().adapt_custom_tool_history(
+    return _apply_patch_adapter_module.adapt_custom_tool_history(
         input_items,
         event_context=event_context,
     )
@@ -483,7 +487,7 @@ def _adapt_third_party_apply_patch_response_body(
     payload: Any,
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
-    return host._apply_patch_adapter().adapt_response_body(payload, event_context)
+    return _apply_patch_adapter_module.adapt_response_body(payload, event_context)
 
 
 class _ThirdPartyApplyPatchStreamAdapter(_ApplyPatchStreamAdapterImpl):
@@ -496,7 +500,7 @@ def _adapt_third_party_apply_patch_stream_events(
     *,
     event_context: Mapping[str, Any] | None = None,
 ) -> tuple[list[Mapping[str, Any]], bool]:
-    return host._apply_patch_adapter().adapt_stream_events(events, event_context=event_context)
+    return _apply_patch_adapter_module.adapt_stream_events(events, event_context=event_context)
 
 
 def compatible_response_body(
@@ -512,12 +516,12 @@ def compatible_response_body(
     except (UnicodeDecodeError, json.JSONDecodeError):
         return body
 
-    collaboration_protocol = host._resolve_collaboration_boundary(
+    collaboration_protocol = _collaboration_adapter_module.resolve_boundary(
         payload,
         event_context,
         surface="response",
     )
-    event_context = host._collaboration_context_with_protocol(event_context, collaboration_protocol)
+    event_context = _collaboration_adapter_module.context_with_protocol(event_context, collaboration_protocol)
     changed = False
     runtime_tool_plan = _official_passthrough._runtime_tool_compatibility_plan_for_attempt(event_context)
     if runtime_tool_plan is not None:
@@ -547,7 +551,7 @@ def compatible_response_body(
     )
     payload, alias_changed = _official_passthrough._normalize_third_party_tool_call(payload, event_context, runtime_tool_plan)
     if alias_changed:
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             event_context,
             "third_party_tool_call_alias_normalized",
             upstream=upstream_name,

@@ -11,6 +11,9 @@ import json
 import re
 import uuid
 
+import gateway_events as _gateway_events
+import tool_surface_adapter as _tool_surface_adapter_module
+
 import gateway_stream_semantics as _stream_semantics
 
 from apply_patch_adapter import (
@@ -118,15 +121,15 @@ def _single_line_internal_field(value: Any) -> str:
 
 
 def _valid_tool_name(value: Any) -> bool:
-    return host._tool_surface_adapter().valid_tool_name(value)
+    return _tool_surface_adapter_module.valid_tool_name(value)
 
 
 def _is_tool_call_item(item: Mapping[str, Any]) -> bool:
-    return host._tool_surface_adapter().is_tool_call_item(item)
+    return _tool_surface_adapter_module.is_tool_call_item(item)
 
 
 def _has_invalid_tool_name(item: Mapping[str, Any]) -> bool:
-    return host._tool_surface_adapter().has_invalid_tool_name(item)
+    return _tool_surface_adapter_module.has_invalid_tool_name(item)
 
 
 def _transcript_text(title: str, item: Mapping[str, Any]) -> str:
@@ -192,54 +195,54 @@ def _dump_arguments_like(original: Any, arguments: Mapping[str, Any]) -> Any:
 
 
 def _tool_schema_name(value: Any) -> str | None:
-    return host._tool_surface_adapter().tool_schema_name(value)
+    return _tool_surface_adapter_module.tool_schema_name(value)
 
 
 def _tool_parameters_schema(value: Mapping[str, Any]) -> dict[str, Any]:
-    return host._tool_surface_adapter().tool_parameters_schema(value)
+    return _tool_surface_adapter_module.tool_parameters_schema(value)
 
 
 def _explicit_function_tool(name: str, description: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
-    return host._tool_surface_adapter().explicit_function_tool(name, description, parameters)
+    return _tool_surface_adapter_module.explicit_function_tool(name, description, parameters)
 
 
 def _supports_explicit_namespace_alias(namespace_name: str) -> bool:
-    return host._tool_surface_adapter().supports_explicit_namespace_alias(namespace_name)
+    return _tool_surface_adapter_module.supports_explicit_namespace_alias(namespace_name)
 
 
 def _looks_like_response_tool_name_fragment(value: Mapping[str, Any]) -> bool:
-    return host._tool_surface_adapter().looks_like_response_tool_name_fragment(value)
+    return _tool_surface_adapter_module.looks_like_response_tool_name_fragment(value)
 
 
 def _is_local_tool_gateway_tool_schema(value: Any) -> bool:
-    return host._tool_surface_adapter().is_local_tool_gateway_tool_schema(value)
+    return _tool_surface_adapter_module.is_local_tool_gateway_tool_schema(value)
 
 
 def _is_mcp_or_codex_app_tool_schema(value: Any) -> bool:
-    return host._tool_surface_adapter().is_mcp_or_codex_app_tool_schema(value)
+    return _tool_surface_adapter_module.is_mcp_or_codex_app_tool_schema(value)
 
 
 def _is_flattened_namespace_schema(value: Any) -> bool:
-    return host._tool_surface_adapter().is_flattened_namespace_schema(value)
+    return _tool_surface_adapter_module.is_flattened_namespace_schema(value)
 
 
 def _is_raw_namespace_schema(value: Any) -> bool:
-    return host._tool_surface_adapter().is_raw_namespace_schema(value)
+    return _tool_surface_adapter_module.is_raw_namespace_schema(value)
 
 
 def _valid_namespace_function_names(value: Any) -> tuple[str, tuple[str, ...]] | None:
-    return host._tool_surface_adapter().valid_namespace_function_names(value)
+    return _tool_surface_adapter_module.valid_namespace_function_names(value)
 
 
 def _deferred_namespace_surface_counts(
     source_tools: list[Any],
     final_tools: list[Any],
 ) -> tuple[int, int]:
-    return host._tool_surface_adapter().deferred_namespace_surface_counts(source_tools, final_tools)
+    return _tool_surface_adapter_module.deferred_namespace_surface_counts(source_tools, final_tools)
 
 
 def _flatten_namespace_function_tools(tools: list[Any]) -> list[dict[str, Any]]:
-    return host._tool_surface_adapter().flatten_namespace_function_tools(tools)
+    return _tool_surface_adapter_module.flatten_namespace_function_tools(tools)
 
 
 _RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY = "_runtime_tool_compatibility_plan"
@@ -464,7 +467,7 @@ def _prepare_runtime_tool_compatibility(
             collaboration_protocol=event_context.get("collaboration_protocol"),
         )
     except RuntimeToolCompatibilityError as exc:
-        host.write_proxy_event(
+        _gateway_events.write_proxy_event(
             "runtime_tool_compatibility_rejected",
             surface=exc.surface,
             outcome="rejected",
@@ -475,12 +478,11 @@ def _prepare_runtime_tool_compatibility(
     event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY, None)
     event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY, None)
     event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY, None)
-    host.write_proxy_event(
+    _gateway_events.write_proxy_event(
         "runtime_tool_compatibility_planned",
         counts=plan.diagnostics.as_dict()["counts"],
     )
     return False
-
 
 def _apply_runtime_tool_compatibility_plan(
     payload: dict[str, Any],
@@ -686,7 +688,7 @@ def _write_runtime_tool_adapter_request_evidence(
         or snapshot["adapted_history_output_count"]
     ):
         return
-    host._write_adapter_event(
+    _gateway_events.write_adapter_event(
         event_context,
         "runtime_tool_adapter_request",
         surface="request",
@@ -707,7 +709,7 @@ def _write_runtime_tool_adapter_response_evidence(
     wire_count = snapshot["wire_alias_call_count"] + snapshot["wire_alias_output_count"]
     if not wire_count or wire_value == decoded_value:
         return
-    host._write_adapter_event(
+    _gateway_events.write_adapter_event(
         event_context,
         "runtime_tool_adapter_response",
         surface=surface,
@@ -797,7 +799,7 @@ def _runtime_plan_has_native_plain_function(
     plan: RuntimeToolCompatibilityPlan | None,
     item: Mapping[str, Any],
 ) -> bool:
-    return host._tool_surface_adapter().runtime_plan_has_native_plain_function(plan, item)
+    return _tool_surface_adapter_module.runtime_plan_has_native_plain_function(plan, item)
 
 
 def _rewrite_generated_guidance_tool_name(value: Any, original: str, alias: str) -> Any:
@@ -838,7 +840,7 @@ def _raise_native_responses_tool_contract_error(
     reason: str,
     count: int = 1,
 ) -> NoReturn:
-    host._write_adapter_event(
+    _gateway_events.write_adapter_event(
         event_context,
         "native_responses_tool_codec",
         codec=codec,
@@ -957,7 +959,7 @@ def _adapt_native_responses_tool_declarations(
             count=len(apply_patch_tools),
         )
     if not apply_patch_tools:
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             event_context,
             "native_responses_tool_codec",
             codec=codec,
@@ -993,7 +995,7 @@ def _adapt_native_responses_tool_declarations(
     if not adapted:
         return False
     payload["tools"] = rewritten_tools
-    host._write_adapter_event(
+    _gateway_events.write_adapter_event(
         event_context,
         "native_responses_tool_codec",
         codec=codec,
@@ -1004,11 +1006,11 @@ def _adapt_native_responses_tool_declarations(
 
 
 def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
-    return host._tool_surface_adapter().structured_tool_function_call_item(item)
+    return _tool_surface_adapter_module.structured_tool_function_call_item(item)
 
 
 def _hoist_additional_tools_input_items(payload: dict[str, Any]) -> bool:
-    return host._tool_surface_adapter().hoist_additional_tools_input_items(payload)
+    return _tool_surface_adapter_module.hoist_additional_tools_input_items(payload)
 
 
 def _rewrite_structured_tool_input_items(
@@ -1017,13 +1019,13 @@ def _rewrite_structured_tool_input_items(
     upstream_name: str | None = None,
     compatibility_plan: RuntimeToolCompatibilityPlan | None = None,
 ) -> bool:
-    changed = host._tool_surface_adapter().rewrite_structured_tool_input_items(
+    changed = _tool_surface_adapter_module.rewrite_structured_tool_input_items(
         payload,
         event_context=event_context,
         compatibility_plan=compatibility_plan,
     )
     if changed:
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             event_context,
             "structured_tool_input_items_rewritten",
             upstream=upstream_name,
@@ -1053,7 +1055,7 @@ def _inject_explicit_codex_tools(
     close_agent_ids: list[str] | None = None,
     worker_selector_values: tuple[str, ...] = ("worker", "default"),
 ) -> bool:
-    return host._tool_surface_adapter().inject_explicit_codex_tools(
+    return _tool_surface_adapter_module.inject_explicit_codex_tools(
         payload,
         include_tool_search=include_tool_search,
         include_multi_agent_tools=include_multi_agent_tools,
@@ -1091,23 +1093,23 @@ def _restrict_tools_to_required_tool(payload: dict[str, Any], tool_name: str | N
 
 
 def _function_tool_names(value: Any) -> set[str]:
-    return host._tool_surface_adapter().function_tool_names(value)
+    return _tool_surface_adapter_module.function_tool_names(value)
 
 
 def _codex_apps_flat_alias_parts(name: Any) -> tuple[str, str] | None:
-    return host._tool_surface_adapter().codex_apps_flat_alias_parts(name)
+    return _tool_surface_adapter_module.codex_apps_flat_alias_parts(name)
 
 
 def _codex_apps_flat_alias_name(name: Any) -> str | None:
-    return host._tool_surface_adapter().codex_apps_flat_alias_name(name)
+    return _tool_surface_adapter_module.codex_apps_flat_alias_name(name)
 
 
 def _split_namespace_tool_alias(name: Any) -> tuple[str, str] | None:
-    return host._tool_surface_adapter().split_namespace_tool_alias(name)
+    return _tool_surface_adapter_module.split_namespace_tool_alias(name)
 
 
 def _codex_apps_namespace_flat_alias(namespace: Any, name: Any) -> str | None:
-    return host._tool_surface_adapter().codex_apps_namespace_flat_alias(namespace, name)
+    return _tool_surface_adapter_module.codex_apps_namespace_flat_alias(namespace, name)
 
 
 def _requested_reasoning_effort(payload: Mapping[str, Any]) -> Any:
@@ -1124,7 +1126,7 @@ def _normalize_third_party_tool_call(
     event_context: Mapping[str, Any] | None = None,
     compatibility_plan: Any = None,
 ) -> tuple[Any, bool]:
-    return host._tool_surface_adapter().normalize_third_party_tool_call(value, event_context, compatibility_plan)
+    return _tool_surface_adapter_module.normalize_third_party_tool_call(value, event_context, compatibility_plan)
 
 
 def _status_completed_agent_ids(status: Any) -> list[str]:
@@ -1469,7 +1471,7 @@ def _rewrite_internal_input_items(
                 and not item.get("tools")
             ):
                 item = _multi_agent._multi_agent_discovery_output_item(item)
-                host._write_adapter_event(
+                _gateway_events.write_adapter_event(
                     event_context,
                     "tool_search_discovery_fallback_applied",
                     upstream=upstream_name,
@@ -1489,7 +1491,7 @@ def _rewrite_internal_input_items(
 
 
 def _downgrade_invalid_third_party_tool_calls(value: Any, compatibility_plan: Any = None) -> tuple[Any, bool]:
-    return host._tool_surface_adapter().downgrade_invalid_third_party_tool_calls(value, compatibility_plan)
+    return _tool_surface_adapter_module.downgrade_invalid_third_party_tool_calls(value, compatibility_plan)
 
 
 def _function_call_namespace(item: Mapping[str, Any]) -> str | None:
@@ -1610,7 +1612,7 @@ def official_passthrough_request_body(
         changed = True
     reasoning_changed, reasoning_counts = host._sanitize_official_input_reasoning_items(next_payload)
     if reasoning_changed:
-        host.write_proxy_event(
+        _gateway_events.write_proxy_event(
             "official_reasoning_history_sanitized",
             upstream="official",
             reasoning_items_removed=reasoning_counts["removed_non_portable"],

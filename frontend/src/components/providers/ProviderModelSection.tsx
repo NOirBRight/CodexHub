@@ -258,7 +258,7 @@ export function ModelSection({
               disabled={interactionDisabled || refreshBusy}
               aria-label={t("common.refresh")}
               title={t("common.refresh")}
-              onClick={onRefresh}
+              onClick={() => onRefresh()}
             >
               <RefreshCcw size={16} />
               {!headerControl && t("common.refresh")}

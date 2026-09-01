@@ -45,8 +45,8 @@ use clients::omp::{
 };
 #[cfg(test)]
 use clients::omp::{
-    apply_omp_config_with_paths, omp_models_yml_text, omp_route_mode, plan_omp_apply,
-    restore_omp_config_with_paths,
+    apply_omp_config_with_paths, omp_config_text, omp_models_yml_text, omp_route_mode,
+    plan_omp_apply, publish_omp_apply, restore_omp_config_with_paths,
     OmpConfigPaths,
 };
 use clients::opencode::{
@@ -648,9 +648,19 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         || zcode_store_path.exists()
         || zcode_executable.is_some()
         || command_exists(&["zcode", "ZCode", "ZCode.exe"]);
-    let zcode_expected_stale =
-        zcode_route_mode_with_expected(&zcode_targets, &settings, &providers, DEFAULT_MODEL)
-            == "stale";
+    // Drift validation must use the same currently exported model that an
+    // apply/sync operation would resolve.  The historical builtin default
+    // (`gpt-5.5`) is not guaranteed to be exported (for example when the
+    // subscription catalog is unavailable), which otherwise labels a valid
+    // ZCode injection as stale forever.
+    let zcode_expected_model = default_gateway_client_sync_model(&settings, &providers)
+        .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+    let zcode_expected_stale = zcode_route_mode_with_expected(
+        &zcode_targets,
+        &settings,
+        &providers,
+        &zcode_expected_model,
+    ) == "stale";
     let zcode_route_details =
         detect_zcode_route_details(&zcode_targets, current_owner, settings.proxy_port);
     let zcode_stale = zcode_expected_stale

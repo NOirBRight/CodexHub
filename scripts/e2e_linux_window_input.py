@@ -55,6 +55,25 @@ def find_codexhub_window() -> int | None:
     return select_interactive_window(candidates)
 
 
+def parse_wm_class(output: str) -> tuple[str, str]:
+    """Return the X11 instance and class from ``xprop WM_CLASS`` output."""
+    match = re.search(r'WM_CLASS\(STRING\) = "([^"]*)", "([^"]*)"', output)
+    if match is None:
+        raise RuntimeError(f"xprop omitted WM_CLASS: {output.strip()!r}")
+    return match.group(1), match.group(2)
+
+
+def window_wm_class(window_id: int) -> tuple[str, str]:
+    result = subprocess.run(
+        ["xprop", "-id", f"0x{window_id:x}", "WM_CLASS"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    return parse_wm_class(result.stdout)
+
+
 def select_interactive_window(candidates: list[tuple[int, int, int]]) -> int | None:
     # AppIndicator also exposes a 16x16 window called CodexHub. Treat it as
     # infrastructure, not the interactive application under test.
@@ -521,6 +540,19 @@ def run_probe(binary: Path) -> int:
                 time.sleep(0.5)
             app_x, app_y, app_width, app_height = window_geometry(app_xid)
 
+            try:
+                wm_instance, wm_class = window_wm_class(app_xid)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                print(f"FAIL: could not read CodexHub WM_CLASS: {error}")
+                return 1
+            if wm_class != "com.codexhub.app":
+                print(
+                    "FAIL: CodexHub WM_CLASS does not match the desktop entry; "
+                    f'instance="{wm_instance}" class="{wm_class}" '
+                    'expected="com.codexhub.app"'
+                )
+                return 1
+
             rectangles = x11.input_rectangles(app_xid)
             points = [
                 (app_width * x_percent // 100, app_height * y_percent // 100)
@@ -679,6 +711,7 @@ def run_probe(binary: Path) -> int:
                 "PASS: CodexHub settings drawer opened and closed through physical input, "
                 "and 13 clicks stayed inside the full input region; "
                 f"window={app_width}x{app_height} rectangles={rectangles} "
+                f'wm_class=("{wm_instance}", "{wm_class}") '
                 f"drawer_transitions=({opened_fraction:.3f}, {close_transition:.3f}, "
                 f"{reopened_transition:.3f}, {reclosed_transition:.3f})"
             )
@@ -705,6 +738,12 @@ def main() -> int:
             return 1
         if visual_frame_has_ui_content((0xFFFFFF,) * 128):
             print("FAIL: stable blank frames are accepted as interactive UI")
+            return 1
+        if parse_wm_class('WM_CLASS(STRING) = "CodexHub", "com.codexhub.app"') != (
+            "CodexHub",
+            "com.codexhub.app",
+        ):
+            print("FAIL: WM_CLASS parser is not deterministic")
             return 1
         print("PASS: Linux pointer-input E2E self-test")
         return 0

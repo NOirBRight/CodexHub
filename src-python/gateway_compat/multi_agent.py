@@ -11,6 +11,10 @@ import json
 import re
 import uuid
 
+import collaboration_adapter as _collaboration_adapter_module
+import gateway_events as _gateway_events
+import tool_surface_adapter as _tool_surface_adapter_module
+
 import gateway_stream_semantics as _stream_semantics
 
 from apply_patch_adapter import (
@@ -135,7 +139,7 @@ def _multi_agent_explicit_function_tools(
     close_agent_ids: list[str] | None = None,
     worker_selector_values: tuple[str, ...] = ("worker", "default"),
 ) -> list[dict[str, Any]]:
-    return host._tool_surface_adapter().multi_agent_explicit_function_tools(
+    return _tool_surface_adapter_module.multi_agent_explicit_function_tools(
         include_spawn_agent=include_spawn_agent,
         include_wait_agent=include_wait_agent,
         include_close_agent=include_close_agent,
@@ -149,49 +153,49 @@ def _multi_agent_explicit_function_tools(
 
 
 def _is_multi_agent_namespace_name(name: str | None) -> bool:
-    return host._tool_surface_adapter().is_multi_agent_namespace_name(name)
+    return _tool_surface_adapter_module.is_multi_agent_namespace_name(name)
 
 
 def _is_multi_agent_explicit_tool_name(name: str) -> bool:
-    return host._tool_surface_adapter().is_multi_agent_explicit_tool_name(name)
+    return _tool_surface_adapter_module.is_multi_agent_explicit_tool_name(name)
 
 
 def _multi_agent_alias_tool_name(name: Any) -> str | None:
-    return host._tool_surface_adapter().multi_agent_alias_tool_name(name)
+    return _tool_surface_adapter_module.multi_agent_alias_tool_name(name)
 
 
 def _is_multi_agent_tool_schema(value: Any) -> bool:
-    return host._tool_surface_adapter().is_multi_agent_tool_schema(value)
+    return _tool_surface_adapter_module.is_multi_agent_tool_schema(value)
 
 
 def _is_node_repl_explicit_tool_name(name: str) -> bool:
-    return host._tool_surface_adapter().is_node_repl_explicit_tool_name(name)
+    return _tool_surface_adapter_module.is_node_repl_explicit_tool_name(name)
 
 
 def _is_node_repl_tool_schema(value: Any) -> bool:
-    return host._tool_surface_adapter().is_node_repl_tool_schema(value)
+    return _tool_surface_adapter_module.is_node_repl_tool_schema(value)
 
 
 def _multi_agent_function_call_name(item: Mapping[str, Any]) -> str | None:
-    return host._tool_surface_adapter().multi_agent_function_call_name(item)
+    return _tool_surface_adapter_module.multi_agent_function_call_name(item)
 
 
 def _node_repl_function_call_name(item: Mapping[str, Any]) -> str | None:
-    return host._tool_surface_adapter().node_repl_function_call_name(item)
+    return _tool_surface_adapter_module.node_repl_function_call_name(item)
 
 
 def _same_selected_v1_collaboration_function_call(
     item: Mapping[str, Any],
     event_context: Mapping[str, Any] | None,
 ) -> bool:
-    return host._tool_surface_adapter().same_selected_v1_collaboration_function_call(item, event_context)
+    return _tool_surface_adapter_module.same_selected_v1_collaboration_function_call(item, event_context)
 
 
 def _restore_deferred_core_node_repl_namespace(
     payload: dict[str, Any],
     source_tools: list[Any] | None,
 ) -> bool:
-    return host._tool_surface_adapter().restore_deferred_core_node_repl_namespace(payload, source_tools)
+    return _tool_surface_adapter_module.restore_deferred_core_node_repl_namespace(payload, source_tools)
 
 
 def _filter_tools_for_subagent_coordinator(
@@ -307,7 +311,7 @@ def _set_required_subagent_tool_choice(
     if payload.get("tool_choice") == desired:
         return False
     payload["tool_choice"] = desired
-    host._write_adapter_event(
+    _gateway_events.write_adapter_event(
         event_context,
         "required_subagent_tool_choice_set",
         upstream=upstream if isinstance(upstream, str) else None,
@@ -321,26 +325,26 @@ def _normalize_tool_search_arguments(value: Any) -> dict[str, Any] | None:
 
 
 def _bounded_empty_tool_search_terminal_calls(value: Any) -> dict[str, tuple[str, int]]:
-    return host._tool_surface_adapter().bounded_empty_tool_search_terminal_calls(value)
+    return _tool_surface_adapter_module.bounded_empty_tool_search_terminal_calls(value)
 
 
 def _terminalize_bounded_empty_tool_search_misses(
     payload: dict[str, Any],
     terminal_calls: Mapping[str, tuple[str, int]],
 ) -> bool:
-    return host._tool_surface_adapter().terminalize_bounded_empty_tool_search_misses(payload, terminal_calls)
+    return _tool_surface_adapter_module.terminalize_bounded_empty_tool_search_misses(payload, terminal_calls)
 
 
 def _restrict_bounded_tool_search_queries(payload: dict[str, Any], bounded_queries: set[str]) -> bool:
-    return host._tool_surface_adapter().restrict_bounded_tool_search_queries(payload, bounded_queries)
+    return _tool_surface_adapter_module.restrict_bounded_tool_search_queries(payload, bounded_queries)
 
 
 def _tool_search_query_digest(query: str) -> bytes:
-    return host._tool_surface_adapter().tool_search_query_digest(query)
+    return _tool_surface_adapter_module.tool_search_query_digest(query)
 
 
 def _bounded_tool_search_query_digests(event_context: Mapping[str, Any] | None) -> set[bytes]:
-    return host._tool_surface_adapter().bounded_tool_search_query_digests(event_context)
+    return _tool_surface_adapter_module.bounded_tool_search_query_digests(event_context)
 
 
 def _tool_search_call_arguments(
@@ -349,7 +353,7 @@ def _tool_search_call_arguments(
     candidate_item_ids: set[str] | None = None,
     allow_legacy_function: bool = False,
 ) -> dict[str, Any] | None:
-    return host._tool_surface_adapter().tool_search_call_arguments(
+    return _tool_surface_adapter_module.tool_search_call_arguments(
         value,
         candidate_item_ids=candidate_item_ids,
         allow_legacy_function=allow_legacy_function,
@@ -357,14 +361,14 @@ def _tool_search_call_arguments(
 
 
 def _bounded_tool_search_unavailable_message(item: Mapping[str, Any]) -> dict[str, Any]:
-    return host._tool_surface_adapter().bounded_tool_search_unavailable_message(item)
+    return _tool_surface_adapter_module.bounded_tool_search_unavailable_message(item)
 
 
 def _suppress_bounded_tool_search_calls(
     value: Any,
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
-    return host._tool_surface_adapter().suppress_bounded_tool_search_calls(value, event_context)
+    return _tool_surface_adapter_module.suppress_bounded_tool_search_calls(value, event_context)
 
 
 def _suppress_bounded_tool_search_calls_inner(
@@ -374,7 +378,7 @@ def _suppress_bounded_tool_search_calls_inner(
     suppressed_item_ids: set[str],
     allow_legacy_function: bool,
 ) -> tuple[Any, bool]:
-    return host._tool_surface_adapter()._suppress_bounded_tool_search_calls_inner(
+    return _tool_surface_adapter_module._suppress_bounded_tool_search_calls_inner(
         value,
         bounded_digests,
         candidate_item_ids,
@@ -384,7 +388,7 @@ def _suppress_bounded_tool_search_calls_inner(
 
 
 def _is_multi_agent_discovery_arguments(arguments: Mapping[str, Any] | None) -> bool:
-    return host._tool_surface_adapter().is_multi_agent_discovery_arguments(arguments)
+    return _tool_surface_adapter_module.is_multi_agent_discovery_arguments(arguments)
 
 
 def _multi_agent_discovery_arguments(value: Any) -> dict[str, Any] | None:
@@ -405,7 +409,7 @@ def _raise_worker_contract_error(
     classification: str,
     surface: str | None = None,
 ) -> None:
-    host._collaboration_adapter().raise_worker_contract_error(
+    _collaboration_adapter_module.raise_worker_contract_error(
         event=event,
         error_code=error_code,
         classification=classification,
@@ -419,7 +423,7 @@ def _validate_external_worker_selectors(
     *,
     surface: str,
 ) -> None:
-    host._collaboration_adapter().validate_external_worker_selectors(
+    _collaboration_adapter_module.validate_external_worker_selectors(
         value,
         event_context,
         surface=surface,
@@ -427,40 +431,40 @@ def _validate_external_worker_selectors(
 
 
 def _worker_caller_carrier_supported(event_context: Mapping[str, Any] | None) -> bool:
-    return host._collaboration_adapter().worker_caller_carrier_supported(event_context)
+    return _collaboration_adapter_module.worker_caller_carrier_supported(event_context)
 
 
 def _worker_requested_binding_signature_payload(binding: Mapping[str, Any], call_id: str) -> bytes:
-    return host._collaboration_adapter().requested_binding_signature_payload(binding, call_id)
+    return _collaboration_adapter_module.requested_binding_signature_payload(binding, call_id)
 
 
 def _requested_worker_binding_signature(binding: Mapping[str, Any], call_id: str) -> str:
-    return host._collaboration_adapter().requested_binding_signature(binding, call_id)
+    return _collaboration_adapter_module.requested_binding_signature(binding, call_id)
 
 
 def _worker_requested_binding_sidecar(
     requested: Mapping[str, Any],
     call_id: str,
 ) -> dict[str, Any]:
-    return host._collaboration_adapter().requested_binding_sidecar(requested, call_id)
+    return _collaboration_adapter_module.requested_binding_sidecar(requested, call_id)
 
 
 def _verified_worker_requested_binding(
     value: Any,
     call_id: str,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    return host._collaboration_adapter().verified_requested_binding(value, call_id)
+    return _collaboration_adapter_module.verified_requested_binding(value, call_id)
 
 
 def _is_legacy_native_worker_spawn_call(
     item: Mapping[str, Any],
     arguments: Mapping[str, Any] | None,
 ) -> bool:
-    return host._collaboration_adapter().is_legacy_native_worker_spawn_call(item, arguments)
+    return _collaboration_adapter_module.is_legacy_native_worker_spawn_call(item, arguments)
 
 
 def _is_legacy_native_worker_spawn_readback(value: Any) -> bool:
-    return host._collaboration_adapter().is_legacy_native_worker_spawn_readback(value)
+    return _collaboration_adapter_module.is_legacy_native_worker_spawn_readback(value)
 
 
 def _attach_worker_requested_binding_sidecars(
@@ -469,7 +473,7 @@ def _attach_worker_requested_binding_sidecars(
     *,
     capture_stream_event: bool = True,
 ) -> tuple[Any, bool]:
-    return host._collaboration_adapter().attach_requested_binding_sidecars(
+    return _collaboration_adapter_module.attach_requested_binding_sidecars(
         value,
         event_context,
         capture_stream_event=capture_stream_event,
@@ -485,7 +489,7 @@ def _apply_external_worker_response_contract(
     attach_sidecars: bool = True,
     capture_stream_event: bool = True,
 ) -> tuple[Any, bool]:
-    return host._collaboration_adapter().apply_external_worker_response_contract(
+    return _collaboration_adapter_module.apply_external_worker_response_contract(
         value,
         event_context,
         surface=surface,
@@ -498,7 +502,7 @@ def _apply_external_worker_response_contract(
 def _validate_worker_binding_history(
     payload: Mapping[str, Any],
 ) -> bool:
-    return host._collaboration_adapter().validate_worker_binding_history(payload)
+    return _collaboration_adapter_module.validate_worker_binding_history(payload)
 
 
 def _compatible_multi_agent_call_message(item: Mapping[str, Any], tool_name: str) -> dict[str, str]:
@@ -1189,7 +1193,7 @@ def _suppress_multi_agent_calls_after_lifecycle_final(
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
     context = event_context or {}
-    if _official_passthrough._is_raw_provider_probe_context(context) or host._is_collaboration_v2_context(context):
+    if _official_passthrough._is_raw_provider_probe_context(context) or _collaboration_adapter_module.is_v2_context(context):
         return value, False
     tool_protocol = str(context.get("tool_protocol") or "")
     if tool_protocol not in {"text_compat", "chat_tools", "responses_structured"}:
@@ -1251,7 +1255,7 @@ def _suppress_multi_agent_calls_after_lifecycle_final_inner(
         item_id = _post_final_multi_agent_suppressed_item_id(value)
         if item_id:
             state["suppressed_item_ids"].add(item_id)
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             state["event_context"],
             "subagent_post_final_multi_agent_call_suppressed",
             tool=direct_tool_name,
@@ -1269,7 +1273,7 @@ def _suppress_multi_agent_calls_after_lifecycle_final_inner(
             item_id = _post_final_multi_agent_suppressed_item_id(event_item)
             if item_id:
                 state["suppressed_item_ids"].add(item_id)
-            host._write_adapter_event(
+            _gateway_events.write_adapter_event(
                 state["event_context"],
                 "subagent_post_final_multi_agent_call_suppressed",
                 tool=event_tool_name,
@@ -1321,7 +1325,7 @@ def _suppress_coordinator_forbidden_tool_calls(
     if (
         bool(context.get("subagent_worker_context"))
         or _official_passthrough._is_raw_provider_probe_context(context)
-        or host._is_collaboration_v2_context(context)
+        or _collaboration_adapter_module.is_v2_context(context)
     ):
         return value, False
     tool_protocol = str(context.get("tool_protocol") or "")
@@ -1414,7 +1418,7 @@ def _suppress_coordinator_forbidden_tool_calls_inner(
         item_id = value.get("id")
         if isinstance(item_id, str) and item_id:
             suppressed_item_ids.add(item_id)
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             event_context,
             "subagent_coordinator_tool_call_suppressed",
             reason=reason,
@@ -1446,7 +1450,7 @@ def _suppress_worker_multi_agent_tool_calls(
     value: Any,
     event_context: Mapping[str, Any] | None,
 ) -> tuple[Any, bool]:
-    if host._is_collaboration_v2_context(event_context) or not bool((event_context or {}).get("subagent_worker_context")):
+    if _collaboration_adapter_module.is_v2_context(event_context) or not bool((event_context or {}).get("subagent_worker_context")):
         return value, False
     if isinstance(event_context, dict):
         suppressed = event_context.setdefault("_worker_suppressed_multi_agent_item_ids", set())
@@ -1492,7 +1496,7 @@ def _suppress_worker_multi_agent_tool_calls_inner(
         item_id = value.get("id")
         if isinstance(item_id, str) and item_id:
             suppressed_item_ids.add(item_id)
-        host._write_adapter_event(
+        _gateway_events.write_adapter_event(
             event_context,
             "worker_subagent_multi_agent_call_suppressed",
             tool=_multi_agent_function_call_name(value),

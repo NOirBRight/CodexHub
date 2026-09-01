@@ -13,9 +13,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::clients::codex::{
-    codex_home, isolated_apply_unsupported, isolated_preview_text, isolated_readback_unsupported,
-};
+use super::clients::codex::{codex_home, isolated_apply_unsupported, isolated_preview_text};
 use super::clients::omp::{
     detect_omp_config_paths, plan_omp_apply, preview_omp_config_with_paths, publish_omp_apply,
     restore_omp_config_with_paths,
@@ -61,6 +59,26 @@ pub struct ClientSnapshot {
 
 /// A pure mutation plan returned by an adapter. The coordinator performs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientPreview {
+    pub strategy: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackupStrategy {
+    None,
+    ChannelRoots(Vec<(PathBuf, super::BackupChannel)>),
+    SingleRoot(PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadbackStrategy {
+    None,
+    BlockFingerprint { expected: String },
+    NativeFiles(Vec<PathBuf>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientMutationPlan {
     pub client_id: String,
     pub intent: ClientIntent,
@@ -73,6 +91,65 @@ pub struct ClientMutationPlan {
     /// True when the plan mutates the client's global activation key
     /// (the Codex stable-bucket exception); normal clients are false.
     pub activation_touched: bool,
+    /// Redacted preview content, if the client can produce one without I/O.
+    pub preview: Option<ClientPreview>,
+    /// Backup policy selected by the adapter target.
+    pub backup: BackupStrategy,
+    /// Readback policy the coordinator must enforce after publication.
+    pub readback: ReadbackStrategy,
+    /// A non-empty value means the coordinator must report a copy-only or
+    /// otherwise unsupported operation instead of mutating files.
+    pub no_execution: Option<String>,
+}
+
+/// The adapter's destination. Live targets point at the user's client root;
+/// isolated targets carry all writable paths and backup channels supplied by
+/// the caller. Adapters never discover or mutate either target.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdapterTarget {
+    Live {
+        client_root: PathBuf,
+        backup_roots: Vec<(PathBuf, super::BackupChannel)>,
+    },
+    Isolated {
+        writable_paths: Vec<PathBuf>,
+        backup_root: PathBuf,
+        backup_roots: Vec<(PathBuf, super::BackupChannel)>,
+    },
+}
+
+impl AdapterTarget {
+    fn primary_root(&self) -> Option<&Path> {
+        match self {
+            Self::Live { client_root, .. } => Some(client_root),
+            Self::Isolated { writable_paths, .. } => writable_paths.first().map(PathBuf::as_path),
+        }
+    }
+
+    fn writable_paths(&self) -> Option<&[PathBuf]> {
+        match self {
+            Self::Live { .. } => None,
+            Self::Isolated { writable_paths, .. } => Some(writable_paths),
+        }
+    }
+
+    fn backup_strategy(&self) -> BackupStrategy {
+        match self {
+            Self::Live { backup_roots, .. } => BackupStrategy::ChannelRoots(backup_roots.clone()),
+            Self::Isolated {
+                backup_root,
+                backup_roots,
+                ..
+            } => {
+                if backup_roots.is_empty() {
+                    BackupStrategy::SingleRoot(backup_root.clone())
+                } else {
+                    BackupStrategy::ChannelRoots(backup_roots.clone())
+                }
+            }
+        }
+    }
 }
 
 /// Adapter context: everything an adapter needs to build a plan.
@@ -83,91 +160,27 @@ pub struct AdapterCtx<'a> {
     pub providers: &'a [Provider],
     pub base_url: String,
     pub models: Vec<String>,
-    pub client_root: PathBuf,
+    pub target: AdapterTarget,
 }
 
-/// The internal adapter interface. Adapters never publish files; they return
-/// pure plans and the coordinator performs the mutation with all guarantees.
+/// Static identity and capability metadata for one managed client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientMetadata {
+    pub id: &'static str,
+    pub supports_native: bool,
+}
+
+/// The internal adapter interface. Adapters only inspect and plan; the
+/// coordinator owns preview, publish, restore, and readback effects.
 pub trait ManagedClientAdapter: Send + Sync {
-    fn id(&self) -> &'static str;
-
-    /// Default true; copy-only clients override to false. Consumed by the
-    /// upcoming #434/#435 adapters.
-    #[allow(dead_code)]
-    fn supports_native(&self) -> bool {
-        true
-    }
-
-    fn config_present(&self) -> bool {
-        false
-    }
-
-    /// Consumed by the upcoming #434/#435 adapters.
+    fn metadata(&self) -> ClientMetadata;
     #[allow(dead_code)]
     fn inspect(&self, ctx: &AdapterCtx<'_>) -> Result<ClientSnapshot, String>;
-
     fn plan(
         &self,
         intent: ClientIntent,
         ctx: &AdapterCtx<'_>,
     ) -> Result<ClientMutationPlan, String>;
-
-    fn publish_apply(
-        &self,
-        _settings: &Settings,
-        _providers: &[Provider],
-        _model: &str,
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        Ok(copy_only_apply(self.id().to_owned()))
-    }
-
-    fn publish_restore(
-        &self,
-        _backup_roots: &[(PathBuf, super::BackupChannel)],
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        Ok(copy_only_restore(self.id().to_owned()))
-    }
-
-    fn publish_preview(
-        &self,
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientConfigPreview, String> {
-        copy_only_preview(self.id(), settings, providers, model)
-    }
-
-    fn apply_isolated(
-        &self,
-        _writable_paths: &[PathBuf],
-        _backup_root: &Path,
-        _backup_roots: &[(PathBuf, super::BackupChannel)],
-        _settings: &Settings,
-        _providers: &[Provider],
-        _model: &str,
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        Err(format!("unsupported managed client for apply: {}", self.id()))
-    }
-
-    fn preview_isolated(
-        &self,
-        _writable_paths: &[PathBuf],
-        _settings: &Settings,
-        _providers: &[Provider],
-        _model: &str,
-    ) -> Result<super::GatewayClientConfigPreview, String> {
-        Err(format!("unsupported managed client for preview: {}", self.id()))
-    }
-
-    fn readback_isolated(
-        &self,
-        paths: &[PathBuf],
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<(), String> {
-        readback_native_at(self.id(), paths, settings, providers, model)
-    }
 }
 
 /// The DSH reference adapter.
@@ -180,14 +193,35 @@ fn dsh_expectation_under(ctx: &AdapterCtx<'_>) -> ReadbackExpectation {
     }
 }
 
+fn target_root<'a>(ctx: &'a AdapterCtx<'_>) -> Result<&'a Path, String> {
+    ctx.target
+        .primary_root()
+        .ok_or_else(|| "managed client target is missing a writable root".to_owned())
+}
+
+fn target_write_paths(ctx: &AdapterCtx<'_>, fallback: Vec<PathBuf>) -> Vec<PathBuf> {
+    ctx.target
+        .writable_paths()
+        .filter(|paths| !paths.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or(fallback)
+}
+
+fn native_readback(write_paths: &[PathBuf]) -> ReadbackStrategy {
+    ReadbackStrategy::NativeFiles(write_paths.to_vec())
+}
+
 impl ManagedClientAdapter for DshAdapter {
-    fn id(&self) -> &'static str {
-        "dsh"
+    fn metadata(&self) -> ClientMetadata {
+        ClientMetadata {
+            id: "dsh",
+            supports_native: true,
+        }
     }
 
     fn inspect(&self, ctx: &AdapterCtx<'_>) -> Result<ClientSnapshot, String> {
         let expectation = dsh_expectation_under(ctx);
-        let report = injection::dsh_readback(&ctx.client_root, &expectation)?;
+        let report = injection::dsh_readback(target_root(ctx)?, &expectation)?;
         Ok(ClientSnapshot {
             client_id: "dsh".to_owned(),
             connected: report.connected,
@@ -210,18 +244,31 @@ impl ManagedClientAdapter for DshAdapter {
         // readback) lives in the coordinator path.
         let expectation = dsh_expectation_under(ctx);
         let descriptor = crate::injection::dsh_descriptor();
-        let fingerprint =
-            injection::expected_block_fingerprint(&descriptor, &expectation.base_url, &expectation.models);
+        let fingerprint = injection::expected_block_fingerprint(
+            &descriptor,
+            &expectation.base_url,
+            &expectation.models,
+        );
+        let write_paths = target_write_paths(
+            ctx,
+            vec![
+                target_root(ctx)?.join("settings.yaml"),
+                target_root(ctx)?.join(".credentials.yaml"),
+            ],
+        );
         Ok(ClientMutationPlan {
             client_id: "dsh".to_owned(),
             intent,
-            write_paths: vec![
-                ctx.client_root.join("settings.yaml"),
-                ctx.client_root.join(".credentials.yaml"),
-            ],
-            expected_fingerprint: Some(fingerprint),
+            write_paths: write_paths.clone(),
+            expected_fingerprint: Some(fingerprint.clone()),
             restart_required: "none".to_owned(),
             activation_touched: false,
+            preview: None,
+            backup: ctx.target.backup_strategy(),
+            readback: ReadbackStrategy::BlockFingerprint {
+                expected: fingerprint,
+            },
+            no_execution: None,
         })
     }
 }
@@ -232,135 +279,58 @@ impl ManagedClientAdapter for DshAdapter {
 pub struct CodexAdapter;
 
 impl ManagedClientAdapter for CodexAdapter {
-    fn id(&self) -> &'static str {
-        "codex"
-    }
-
-    fn config_present(&self) -> bool {
-        codex_home().join("config.toml").exists()
+    fn metadata(&self) -> ClientMetadata {
+        ClientMetadata {
+            id: "codex",
+            supports_native: true,
+        }
     }
 
     fn inspect(&self, _ctx: &AdapterCtx<'_>) -> Result<ClientSnapshot, String> {
-        Ok(native_snapshot(self.id(), self.config_present()))
+        Ok(native_snapshot(
+            self.metadata().id,
+            config_present_for(self.metadata().id),
+        ))
     }
 
     fn plan(
         &self,
         intent: ClientIntent,
-        _ctx: &AdapterCtx<'_>,
+        ctx: &AdapterCtx<'_>,
     ) -> Result<ClientMutationPlan, String> {
-        Ok(native_plan(
-            self.id(),
-            intent,
-            vec![codex_home().join("config.toml")],
-        ))
-    }
-
-    fn publish_apply(
-        &self,
-        _settings: &Settings,
-        _providers: &[Provider],
-        _model: &str,
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        Ok(super::GatewayClientApplyResult {
-            client_id: self.id().to_owned(),
-            applied: false,
-            config_path: None,
-            backup_path: None,
-            message: "Codex apply is owned by config_overlay.py.".to_string(),
-        })
-    }
-
-    fn publish_restore(
-        &self,
-        _backup_roots: &[(PathBuf, super::BackupChannel)],
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        Ok(super::GatewayClientApplyResult {
-            client_id: self.id().to_owned(),
-            applied: false,
-            config_path: None,
-            backup_path: None,
-            message: "Codex restore is owned by config_overlay.py.".to_string(),
-        })
-    }
-
-    fn publish_preview(
-        &self,
-        _settings: &Settings,
-        _providers: &[Provider],
-        _model: &str,
-    ) -> Result<super::GatewayClientConfigPreview, String> {
-        Ok(super::GatewayClientConfigPreview {
-            client_id: self.id().to_owned(),
-            can_apply: false,
-            strategy: "overlay".to_string(),
-            config_path: None,
-            current_redacted: None,
-            next_redacted: isolated_preview_text(),
-            backup_required: false,
-            message: "Codex preview is owned by config_overlay.py.".to_string(),
-        })
-    }
-
-    fn apply_isolated(
-        &self,
-        _writable_paths: &[PathBuf],
-        _backup_root: &Path,
-        _backup_roots: &[(PathBuf, super::BackupChannel)],
-        _settings: &Settings,
-        _providers: &[Provider],
-        _model: &str,
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        isolated_apply_unsupported()
-    }
-
-    fn preview_isolated(
-        &self,
-        _writable_paths: &[PathBuf],
-        _settings: &Settings,
-        _providers: &[Provider],
-        _model: &str,
-    ) -> Result<super::GatewayClientConfigPreview, String> {
-        Ok(super::GatewayClientConfigPreview {
-            client_id: self.id().to_owned(),
-            can_apply: false,
-            strategy: "overlay".to_string(),
-            config_path: None,
-            current_redacted: None,
-            next_redacted: isolated_preview_text(),
-            backup_required: false,
-            message: "Codex preview is owned by config_overlay.py.".to_string(),
-        })
-    }
-
-    fn readback_isolated(
-        &self,
-        _paths: &[PathBuf],
-        _settings: &Settings,
-        _providers: &[Provider],
-        _model: &str,
-    ) -> Result<(), String> {
-        isolated_readback_unsupported()
+        Ok(codex_plan(intent, ctx))
     }
 }
 
 /// Perform a plan with the coordinator's guarantees.
 pub fn perform_plan(
-    adapter: &dyn ManagedClientAdapter,
     plan: &ClientMutationPlan,
     ctx: &AdapterCtx<'_>,
 ) -> Result<ClientSnapshot, String> {
     if plan.activation_touched {
         return Err(format!(
             "{} adapter must not touch the activation key",
-            adapter.id()
+            plan.client_id
+        ));
+    }
+    if let Some(reason) = plan.no_execution.as_deref() {
+        return Err(reason.to_owned());
+    }
+    if plan.client_id != "dsh" {
+        return Err(format!(
+            "managed client lifecycle is not supported for {}",
+            plan.client_id
         ));
     }
     match plan.intent {
         ClientIntent::Connect => {
             let api_key = MaskedSecret::new(ctx.settings.gateway_client_key.clone());
-            let report =
-                injection::dsh_connect(&ctx.client_root, ctx.base_url.clone(), api_key, ctx.models.clone())?;
+            let report = injection::dsh_connect(
+                target_root(ctx)?,
+                ctx.base_url.clone(),
+                api_key,
+                ctx.models.clone(),
+            )?;
             Ok(ClientSnapshot {
                 client_id: report.client_id,
                 connected: report.connected,
@@ -373,7 +343,7 @@ pub fn perform_plan(
         }
         ClientIntent::Disconnect => {
             let expectation = dsh_expectation_under(ctx);
-            let report = injection::dsh_disconnect(&ctx.client_root, &expectation)?;
+            let report = injection::dsh_disconnect(target_root(ctx)?, &expectation)?;
             Ok(ClientSnapshot {
                 client_id: report.client_id,
                 connected: report.connected,
@@ -386,7 +356,7 @@ pub fn perform_plan(
         }
         ClientIntent::Republish => {
             let expectation = dsh_expectation_under(ctx);
-            let report = injection::dsh_readback(&ctx.client_root, &expectation)?;
+            let report = injection::dsh_readback(target_root(ctx)?, &expectation)?;
             Ok(ClientSnapshot {
                 client_id: report.client_id,
                 connected: report.connected,
@@ -405,23 +375,24 @@ pub fn perform_plan(
 /// the callers in gateway/clients/dsh.rs provide the live context.
 pub fn dsh_connect_plan(ctx: &AdapterCtx<'_>) -> Result<DshLifecycleReport, String> {
     let plan = DshAdapter.plan(ClientIntent::Connect, ctx)?;
-    perform_plan(&DshAdapter, &plan, ctx)?;
+    perform_plan(&plan, ctx)?;
     let expectation = dsh_expectation_under(ctx);
-    injection::dsh_readback(&ctx.client_root, &expectation)
+    injection::dsh_readback(target_root(ctx)?, &expectation)
 }
 
 pub fn dsh_disconnect_plan(ctx: &AdapterCtx<'_>) -> Result<DshLifecycleReport, String> {
     let plan = DshAdapter.plan(ClientIntent::Disconnect, ctx)?;
-    perform_plan(&DshAdapter, &plan, ctx)?;
+    perform_plan(&plan, ctx)?;
     let expectation = dsh_expectation_under(ctx);
-    injection::dsh_readback(&ctx.client_root, &expectation)
+    injection::dsh_readback(target_root(ctx)?, &expectation)
 }
 
 pub fn dsh_readback_plan(ctx: &AdapterCtx<'_>) -> Result<DshLifecycleReport, String> {
     let expectation = dsh_expectation_under(ctx);
-    injection::dsh_readback(&ctx.client_root, &expectation)
+    injection::dsh_readback(target_root(ctx)?, &expectation)
 }
 
+#[allow(dead_code)]
 fn native_snapshot(id: &'static str, present: bool) -> ClientSnapshot {
     ClientSnapshot {
         client_id: id.to_owned(),
@@ -460,10 +431,8 @@ fn copy_only_preview(
     _providers: &[Provider],
     model: &str,
 ) -> Result<super::GatewayClientConfigPreview, String> {
-    let config = super::gateway_copy_client_config(
-        Some(client_id.to_string()),
-        Some(model.to_string()),
-    )?;
+    let config =
+        super::gateway_copy_client_config(Some(client_id.to_string()), Some(model.to_string()))?;
     Ok(super::GatewayClientConfigPreview {
         client_id: client_id.to_string(),
         can_apply: false,
@@ -476,15 +445,41 @@ fn copy_only_preview(
     })
 }
 
-fn native_plan(id: &'static str, intent: ClientIntent, write_paths: Vec<PathBuf>) -> ClientMutationPlan {
+fn native_plan(
+    id: &'static str,
+    intent: ClientIntent,
+    write_paths: Vec<PathBuf>,
+    target: &AdapterTarget,
+) -> ClientMutationPlan {
     ClientMutationPlan {
         client_id: id.to_owned(),
         intent,
+        readback: native_readback(&write_paths),
         write_paths,
         expected_fingerprint: None,
         restart_required: "none".to_owned(),
         activation_touched: false,
+        preview: None,
+        backup: target.backup_strategy(),
+        no_execution: None,
     }
+}
+
+fn codex_plan(intent: ClientIntent, ctx: &AdapterCtx<'_>) -> ClientMutationPlan {
+    let mut plan = native_plan(
+        "codex",
+        intent,
+        target_write_paths(ctx, vec![codex_home().join("config.toml")]),
+        &ctx.target,
+    );
+    plan.preview = Some(ClientPreview {
+        strategy: "overlay".to_owned(),
+        content: isolated_preview_text(),
+    });
+    plan.readback = ReadbackStrategy::None;
+    plan.backup = BackupStrategy::None;
+    plan.no_execution = Some("Codex apply is owned by config_overlay.py.".to_owned());
+    plan
 }
 
 pub struct OpenCodeAdapter;
@@ -493,19 +488,18 @@ pub struct OmpAdapter;
 pub struct ZcodeAdapter;
 
 impl ManagedClientAdapter for OpenCodeAdapter {
-    fn id(&self) -> &'static str {
-        "opencode"
-    }
-
-    fn config_present(&self) -> bool {
-        detect_opencode_config_path()
-            .as_ref()
-            .map(|path| path.exists())
-            .unwrap_or(false)
+    fn metadata(&self) -> ClientMetadata {
+        ClientMetadata {
+            id: "opencode",
+            supports_native: true,
+        }
     }
 
     fn inspect(&self, _ctx: &AdapterCtx<'_>) -> Result<ClientSnapshot, String> {
-        Ok(native_snapshot(self.id(), self.config_present()))
+        Ok(native_snapshot(
+            self.metadata().id,
+            config_present_for(self.metadata().id),
+        ))
     }
 
     fn plan(
@@ -514,119 +508,27 @@ impl ManagedClientAdapter for OpenCodeAdapter {
         _ctx: &AdapterCtx<'_>,
     ) -> Result<ClientMutationPlan, String> {
         Ok(native_plan(
-            self.id(),
+            self.metadata().id,
             intent,
-            detect_opencode_config_path().into_iter().collect(),
+            target_write_paths(_ctx, detect_opencode_config_path().into_iter().collect()),
+            &_ctx.target,
         ))
-    }
-
-    fn publish_apply(
-        &self,
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        let path = detect_opencode_config_path()
-            .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
-        let backup_roots = super::client_backup_roots_for_apply("opencode");
-        apply_native_at(
-            NativeApplySpec::OpenCode {
-                path: &path,
-                backup_roots: &backup_roots,
-            },
-            settings,
-            providers,
-            model,
-        )
-    }
-
-    fn publish_restore(
-        &self,
-        backup_roots: &[(PathBuf, super::BackupChannel)],
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        let path = detect_opencode_config_path()
-            .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
-        restore_opencode_config_with_backup_roots(&path, backup_roots)
-    }
-
-    fn publish_preview(
-        &self,
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientConfigPreview, String> {
-        let path = detect_opencode_config_path()
-            .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
-        preview_native_at(
-            NativePreviewSpec::OpenCode { path: &path },
-            settings,
-            providers,
-            model,
-        )
-    }
-
-    fn apply_isolated(
-        &self,
-        writable_paths: &[PathBuf],
-        _backup_root: &Path,
-        backup_roots: &[(PathBuf, super::BackupChannel)],
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        let path = writable_paths
-            .first()
-            .ok_or_else(|| "opencode isolated targets are missing files".to_string())?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create opencode dir: {error}"))?;
-        }
-        if !path.exists() {
-            fs::write(path, r#"{"model":"anthropic/claude-sonnet-4"}"#)
-                .map_err(|error| format!("failed to seed opencode config: {error}"))?;
-        }
-        apply_native_at(
-            NativeApplySpec::OpenCode {
-                path,
-                backup_roots,
-            },
-            settings,
-            providers,
-            model,
-        )
-    }
-
-    fn preview_isolated(
-        &self,
-        writable_paths: &[PathBuf],
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientConfigPreview, String> {
-        let path = writable_paths
-            .first()
-            .ok_or_else(|| "opencode isolated targets are missing files".to_string())?;
-        preview_native_at(
-            NativePreviewSpec::OpenCode { path },
-            settings,
-            providers,
-            model,
-        )
     }
 }
 
 impl ManagedClientAdapter for PiAdapter {
-    fn id(&self) -> &'static str {
-        "pi"
-    }
-
-    fn config_present(&self) -> bool {
-        let paths = detect_pi_config_paths();
-        paths.settings_path.exists() || paths.models_path.exists()
+    fn metadata(&self) -> ClientMetadata {
+        ClientMetadata {
+            id: "pi",
+            supports_native: true,
+        }
     }
 
     fn inspect(&self, _ctx: &AdapterCtx<'_>) -> Result<ClientSnapshot, String> {
-        Ok(native_snapshot(self.id(), self.config_present()))
+        Ok(native_snapshot(
+            self.metadata().id,
+            config_present_for(self.metadata().id),
+        ))
     }
 
     fn plan(
@@ -636,116 +538,27 @@ impl ManagedClientAdapter for PiAdapter {
     ) -> Result<ClientMutationPlan, String> {
         let paths = detect_pi_config_paths();
         Ok(native_plan(
-            self.id(),
+            self.metadata().id,
             intent,
-            vec![paths.settings_path, paths.models_path],
+            target_write_paths(_ctx, vec![paths.settings_path, paths.models_path]),
+            &_ctx.target,
         ))
-    }
-
-    fn publish_apply(
-        &self,
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        let paths = detect_pi_config_paths();
-        let backup_roots = super::client_backup_roots_for_apply("pi");
-        apply_native_at(
-            NativeApplySpec::Pi {
-                settings_path: &paths.settings_path,
-                models_path: &paths.models_path,
-                backup_roots: &backup_roots,
-            },
-            settings,
-            providers,
-            model,
-        )
-    }
-
-    fn publish_restore(
-        &self,
-        backup_roots: &[(PathBuf, super::BackupChannel)],
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        let paths = detect_pi_config_paths();
-        restore_pi_config_with_paths(&paths.settings_path, &paths.models_path, backup_roots)
-    }
-
-    fn publish_preview(
-        &self,
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientConfigPreview, String> {
-        let paths = detect_pi_config_paths();
-        preview_native_at(
-            NativePreviewSpec::Pi {
-                settings_path: &paths.settings_path,
-                models_path: &paths.models_path,
-            },
-            settings,
-            providers,
-            model,
-        )
-    }
-
-    fn apply_isolated(
-        &self,
-        writable_paths: &[PathBuf],
-        _backup_root: &Path,
-        backup_roots: &[(PathBuf, super::BackupChannel)],
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        if writable_paths.len() < 2 {
-            return Err("pi isolated targets are missing files".to_string());
-        }
-        apply_native_at(
-            NativeApplySpec::Pi {
-                settings_path: &writable_paths[0],
-                models_path: &writable_paths[1],
-                backup_roots,
-            },
-            settings,
-            providers,
-            model,
-        )
-    }
-
-    fn preview_isolated(
-        &self,
-        writable_paths: &[PathBuf],
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientConfigPreview, String> {
-        if writable_paths.len() < 2 {
-            return Err("pi isolated targets are missing files".to_string());
-        }
-        preview_native_at(
-            NativePreviewSpec::Pi {
-                settings_path: &writable_paths[0],
-                models_path: &writable_paths[1],
-            },
-            settings,
-            providers,
-            model,
-        )
     }
 }
 
 impl ManagedClientAdapter for OmpAdapter {
-    fn id(&self) -> &'static str {
-        "omp"
-    }
-
-    fn config_present(&self) -> bool {
-        let paths = detect_omp_config_paths();
-        paths.config_path.exists() || paths.models_path.exists()
+    fn metadata(&self) -> ClientMetadata {
+        ClientMetadata {
+            id: "omp",
+            supports_native: true,
+        }
     }
 
     fn inspect(&self, _ctx: &AdapterCtx<'_>) -> Result<ClientSnapshot, String> {
-        Ok(native_snapshot(self.id(), self.config_present()))
+        Ok(native_snapshot(
+            self.metadata().id,
+            config_present_for(self.metadata().id),
+        ))
     }
 
     fn plan(
@@ -755,120 +568,27 @@ impl ManagedClientAdapter for OmpAdapter {
     ) -> Result<ClientMutationPlan, String> {
         let paths = detect_omp_config_paths();
         Ok(native_plan(
-            self.id(),
+            self.metadata().id,
             intent,
-            vec![paths.config_path, paths.models_path],
+            target_write_paths(_ctx, vec![paths.config_path, paths.models_path]),
+            &_ctx.target,
         ))
-    }
-
-    fn publish_apply(
-        &self,
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        let paths = detect_omp_config_paths();
-        let backup_root = super::client_backup_root("omp");
-        apply_native_at(
-            NativeApplySpec::Omp {
-                config_path: &paths.config_path,
-                models_path: &paths.models_path,
-                backup_root: &backup_root,
-            },
-            settings,
-            providers,
-            model,
-        )
-    }
-
-    fn publish_restore(
-        &self,
-        backup_roots: &[(PathBuf, super::BackupChannel)],
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        let paths = detect_omp_config_paths();
-        super::restore_with_backup_roots(backup_roots, |backup_root| {
-            restore_omp_config_with_paths(&paths.config_path, &paths.models_path, backup_root)
-        })
-    }
-
-    fn publish_preview(
-        &self,
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientConfigPreview, String> {
-        let paths = detect_omp_config_paths();
-        preview_native_at(
-            NativePreviewSpec::Omp {
-                config_path: &paths.config_path,
-                models_path: &paths.models_path,
-            },
-            settings,
-            providers,
-            model,
-        )
-    }
-
-    fn apply_isolated(
-        &self,
-        writable_paths: &[PathBuf],
-        backup_root: &Path,
-        _backup_roots: &[(PathBuf, super::BackupChannel)],
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        if writable_paths.len() < 2 {
-            return Err("omp isolated targets are missing files".to_string());
-        }
-        apply_native_at(
-            NativeApplySpec::Omp {
-                config_path: &writable_paths[0],
-                models_path: &writable_paths[1],
-                backup_root,
-            },
-            settings,
-            providers,
-            model,
-        )
-    }
-
-    fn preview_isolated(
-        &self,
-        writable_paths: &[PathBuf],
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientConfigPreview, String> {
-        if writable_paths.len() < 2 {
-            return Err("omp isolated targets are missing files".to_string());
-        }
-        preview_native_at(
-            NativePreviewSpec::Omp {
-                config_path: &writable_paths[0],
-                models_path: &writable_paths[1],
-            },
-            settings,
-            providers,
-            model,
-        )
     }
 }
 
 impl ManagedClientAdapter for ZcodeAdapter {
-    fn id(&self) -> &'static str {
-        "zcode"
-    }
-
-    fn config_present(&self) -> bool {
-        let targets = detect_zcode_config_targets();
-        targets.v2_config_path.exists()
-            || targets.catalog_path.exists()
-            || targets.v2_cache_path.exists()
+    fn metadata(&self) -> ClientMetadata {
+        ClientMetadata {
+            id: "zcode",
+            supports_native: true,
+        }
     }
 
     fn inspect(&self, _ctx: &AdapterCtx<'_>) -> Result<ClientSnapshot, String> {
-        Ok(native_snapshot(self.id(), self.config_present()))
+        Ok(native_snapshot(
+            self.metadata().id,
+            config_present_for(self.metadata().id),
+        ))
     }
 
     fn plan(
@@ -878,109 +598,18 @@ impl ManagedClientAdapter for ZcodeAdapter {
     ) -> Result<ClientMutationPlan, String> {
         let targets = detect_zcode_config_targets();
         Ok(native_plan(
-            self.id(),
+            self.metadata().id,
             intent,
-            vec![
-                targets.catalog_path,
-                targets.v2_config_path,
-                targets.v2_cache_path,
-            ],
+            target_write_paths(
+                _ctx,
+                vec![
+                    targets.catalog_path,
+                    targets.v2_config_path,
+                    targets.v2_cache_path,
+                ],
+            ),
+            &_ctx.target,
         ))
-    }
-
-    fn publish_apply(
-        &self,
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        let targets = detect_zcode_config_targets();
-        let backup_root = super::client_backup_root("zcode");
-        apply_native_at(
-            NativeApplySpec::Zcode {
-                targets: &targets,
-                backup_root: &backup_root,
-            },
-            settings,
-            providers,
-            model,
-        )
-    }
-
-    fn publish_restore(
-        &self,
-        backup_roots: &[(PathBuf, super::BackupChannel)],
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        let targets = detect_zcode_config_targets();
-        super::restore_with_backup_roots(backup_roots, |backup_root| {
-            restore_zcode_config_with_targets(&targets, backup_root)
-        })
-    }
-
-    fn publish_preview(
-        &self,
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientConfigPreview, String> {
-        let targets = detect_zcode_config_targets();
-        preview_native_at(
-            NativePreviewSpec::Zcode { targets: &targets },
-            settings,
-            providers,
-            model,
-        )
-    }
-
-    fn apply_isolated(
-        &self,
-        writable_paths: &[PathBuf],
-        backup_root: &Path,
-        _backup_roots: &[(PathBuf, super::BackupChannel)],
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientApplyResult, String> {
-        if writable_paths.len() < 3 {
-            return Err("zcode isolated targets are missing files".to_string());
-        }
-        let targets = ZcodeConfigTargets {
-            catalog_path: writable_paths[0].clone(),
-            v2_config_path: writable_paths[1].clone(),
-            v2_cache_path: writable_paths[2].clone(),
-        };
-        apply_native_at(
-            NativeApplySpec::Zcode {
-                targets: &targets,
-                backup_root,
-            },
-            settings,
-            providers,
-            model,
-        )
-    }
-
-    fn preview_isolated(
-        &self,
-        writable_paths: &[PathBuf],
-        settings: &Settings,
-        providers: &[Provider],
-        model: &str,
-    ) -> Result<super::GatewayClientConfigPreview, String> {
-        if writable_paths.len() < 3 {
-            return Err("zcode isolated targets are missing files".to_string());
-        }
-        let targets = ZcodeConfigTargets {
-            catalog_path: writable_paths[0].clone(),
-            v2_config_path: writable_paths[1].clone(),
-            v2_cache_path: writable_paths[2].clone(),
-        };
-        preview_native_at(
-            NativePreviewSpec::Zcode { targets: &targets },
-            settings,
-            providers,
-            model,
-        )
     }
 }
 
@@ -996,6 +625,27 @@ pub fn adapter_for(id: &str) -> Option<&'static dyn ManagedClientAdapter> {
     }
 }
 
+fn config_present_for(id: &str) -> bool {
+    match id {
+        "codex" => codex_home().join("config.toml").exists(),
+        "opencode" => detect_opencode_config_path().is_some_and(|path| path.exists()),
+        "pi" => {
+            let paths = detect_pi_config_paths();
+            paths.settings_path.exists() || paths.models_path.exists()
+        }
+        "omp" => {
+            let paths = detect_omp_config_paths();
+            paths.config_path.exists() || paths.models_path.exists()
+        }
+        "zcode" => {
+            let targets = detect_zcode_config_targets();
+            targets.v2_config_path.exists()
+                || targets.catalog_path.exists()
+                || targets.v2_cache_path.exists()
+        }
+        _ => false,
+    }
+}
 /// Resolved native apply targets. Live apply discovers these; isolated apply
 /// supplies them from the caller-owned root.
 pub enum NativeApplySpec<'a> {
@@ -1117,30 +767,127 @@ pub fn readback_native_at(
         "opencode" | "pi" | "omp" | "zcode" => {
             super::verify_apply_readback(client_id, paths, settings, providers, model)
         }
-        _ => Err(format!("unsupported managed client for readback: {client_id}")),
+        "codex" => Err(
+            "codex readback must be invoked through config::readback_codex_config_isolated"
+                .to_owned(),
+        ),
+        _ => Err(format!(
+            "unsupported managed client for readback: {client_id}"
+        )),
     }
 }
 
 /// Native apply dispatch owned by the coordinator. Live apply discovers host
 /// paths then calls apply_native_at.
+fn codex_apply_result() -> super::GatewayClientApplyResult {
+    super::GatewayClientApplyResult {
+        client_id: "codex".to_owned(),
+        applied: false,
+        config_path: None,
+        backup_path: None,
+        message: "Codex apply is owned by config_overlay.py.".to_string(),
+    }
+}
+
+fn codex_restore_result() -> super::GatewayClientApplyResult {
+    super::GatewayClientApplyResult {
+        client_id: "codex".to_owned(),
+        applied: false,
+        config_path: None,
+        backup_path: None,
+        message: "Codex restore is owned by config_overlay.py.".to_string(),
+    }
+}
+
+fn codex_preview() -> super::GatewayClientConfigPreview {
+    super::GatewayClientConfigPreview {
+        client_id: "codex".to_owned(),
+        can_apply: false,
+        strategy: "overlay".to_string(),
+        config_path: None,
+        current_redacted: None,
+        next_redacted: isolated_preview_text(),
+        backup_required: false,
+        message: "Codex preview is owned by config_overlay.py.".to_string(),
+    }
+}
+
 pub fn apply_native(
     client_id: String,
     settings: &Settings,
     providers: &[Provider],
     model: &str,
 ) -> Result<super::GatewayClientApplyResult, String> {
-    match adapter_for(&client_id) {
-        Some(adapter) => adapter.publish_apply(settings, providers, model),
-        None => Ok(copy_only_apply(client_id)),
+    match client_id.as_str() {
+        "opencode" => {
+            let path = detect_opencode_config_path()
+                .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
+            let backup_roots = super::client_backup_roots_for_apply("opencode");
+            apply_native_at(
+                NativeApplySpec::OpenCode {
+                    path: &path,
+                    backup_roots: &backup_roots,
+                },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "pi" => {
+            let paths = detect_pi_config_paths();
+            let backup_roots = super::client_backup_roots_for_apply("pi");
+            apply_native_at(
+                NativeApplySpec::Pi {
+                    settings_path: &paths.settings_path,
+                    models_path: &paths.models_path,
+                    backup_roots: &backup_roots,
+                },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "omp" => {
+            let paths = detect_omp_config_paths();
+            let backup_root = super::client_backup_root("omp");
+            apply_native_at(
+                NativeApplySpec::Omp {
+                    config_path: &paths.config_path,
+                    models_path: &paths.models_path,
+                    backup_root: &backup_root,
+                },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "zcode" => {
+            let targets = detect_zcode_config_targets();
+            let backup_root = super::client_backup_root("zcode");
+            apply_native_at(
+                NativeApplySpec::Zcode {
+                    targets: &targets,
+                    backup_root: &backup_root,
+                },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "codex" => Ok(codex_apply_result()),
+        "dsh" => Ok(copy_only_apply(client_id)),
+        _ => Ok(copy_only_apply(client_id)),
     }
 }
 
 pub fn has_existing_config(client_id: &str) -> bool {
-    adapter_for(client_id).is_some_and(ManagedClientAdapter::config_present)
+    adapter_for(client_id).is_some_and(|adapter| config_present_for(adapter.metadata().id))
 }
 
 pub enum NativePreviewSpec<'a> {
-    OpenCode { path: &'a Path },
+    OpenCode {
+        path: &'a Path,
+    },
     Pi {
         settings_path: &'a Path,
         models_path: &'a Path,
@@ -1149,7 +896,9 @@ pub enum NativePreviewSpec<'a> {
         config_path: &'a Path,
         models_path: &'a Path,
     },
-    Zcode { targets: &'a ZcodeConfigTargets },
+    Zcode {
+        targets: &'a ZcodeConfigTargets,
+    },
 }
 
 pub fn preview_native_at(
@@ -1183,9 +932,53 @@ pub fn preview_native(
     providers: &[Provider],
     model: &str,
 ) -> Result<super::GatewayClientConfigPreview, String> {
-    match adapter_for(client_id) {
-        Some(adapter) => adapter.publish_preview(settings, providers, model),
-        None => copy_only_preview(client_id, settings, providers, model),
+    match client_id {
+        "opencode" => {
+            let path = detect_opencode_config_path()
+                .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
+            preview_native_at(
+                NativePreviewSpec::OpenCode { path: &path },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "pi" => {
+            let paths = detect_pi_config_paths();
+            preview_native_at(
+                NativePreviewSpec::Pi {
+                    settings_path: &paths.settings_path,
+                    models_path: &paths.models_path,
+                },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "omp" => {
+            let paths = detect_omp_config_paths();
+            preview_native_at(
+                NativePreviewSpec::Omp {
+                    config_path: &paths.config_path,
+                    models_path: &paths.models_path,
+                },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "zcode" => {
+            let targets = detect_zcode_config_targets();
+            preview_native_at(
+                NativePreviewSpec::Zcode { targets: &targets },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "codex" => Ok(codex_preview()),
+        "dsh" => copy_only_preview(client_id, settings, providers, model),
+        _ => copy_only_preview(client_id, settings, providers, model),
     }
 }
 
@@ -1195,9 +988,183 @@ pub fn restore_native(
     client_id: String,
     backup_roots: &[(PathBuf, super::BackupChannel)],
 ) -> Result<super::GatewayClientApplyResult, String> {
-    match adapter_for(&client_id) {
-        Some(adapter) => adapter.publish_restore(backup_roots),
-        None => Ok(copy_only_restore(client_id)),
+    match client_id.as_str() {
+        "opencode" => {
+            let path = detect_opencode_config_path()
+                .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
+            restore_opencode_config_with_backup_roots(&path, backup_roots)
+        }
+        "pi" => {
+            let paths = detect_pi_config_paths();
+            restore_pi_config_with_paths(&paths.settings_path, &paths.models_path, backup_roots)
+        }
+        "omp" => {
+            let paths = detect_omp_config_paths();
+            super::restore_with_backup_roots(backup_roots, |backup_root| {
+                restore_omp_config_with_paths(&paths.config_path, &paths.models_path, backup_root)
+            })
+        }
+        "zcode" => {
+            let targets = detect_zcode_config_targets();
+            super::restore_with_backup_roots(backup_roots, |backup_root| {
+                restore_zcode_config_with_targets(&targets, backup_root)
+            })
+        }
+        "codex" => Ok(codex_restore_result()),
+        _ => Ok(copy_only_restore(client_id)),
+    }
+}
+
+pub fn preview_native_isolated(
+    client_id: &str,
+    writable_paths: &[PathBuf],
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<super::GatewayClientConfigPreview, String> {
+    match client_id {
+        "opencode" => {
+            let path = writable_paths
+                .first()
+                .ok_or_else(|| "opencode isolated targets are missing files".to_string())?;
+            preview_native_at(
+                NativePreviewSpec::OpenCode { path },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "pi" => {
+            if writable_paths.len() < 2 {
+                return Err("pi isolated targets are missing files".to_string());
+            }
+            preview_native_at(
+                NativePreviewSpec::Pi {
+                    settings_path: &writable_paths[0],
+                    models_path: &writable_paths[1],
+                },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "omp" => {
+            if writable_paths.len() < 2 {
+                return Err("omp isolated targets are missing files".to_string());
+            }
+            preview_native_at(
+                NativePreviewSpec::Omp {
+                    config_path: &writable_paths[0],
+                    models_path: &writable_paths[1],
+                },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "zcode" => {
+            if writable_paths.len() < 3 {
+                return Err("zcode isolated targets are missing files".to_string());
+            }
+            let targets = ZcodeConfigTargets {
+                catalog_path: writable_paths[0].clone(),
+                v2_config_path: writable_paths[1].clone(),
+                v2_cache_path: writable_paths[2].clone(),
+            };
+            preview_native_at(
+                NativePreviewSpec::Zcode { targets: &targets },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "codex" => Ok(codex_preview()),
+        _ => Err(format!(
+            "unsupported managed client for preview: {client_id}"
+        )),
+    }
+}
+
+pub fn apply_native_isolated(
+    client_id: &str,
+    writable_paths: &[PathBuf],
+    backup_root: &Path,
+    backup_roots: &[(PathBuf, super::BackupChannel)],
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<super::GatewayClientApplyResult, String> {
+    match client_id {
+        "opencode" => {
+            let path = writable_paths
+                .first()
+                .ok_or_else(|| "opencode isolated targets are missing files".to_string())?;
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("failed to create opencode dir: {error}"))?;
+            }
+            if !path.exists() {
+                fs::write(path, r#"{"model":"anthropic/claude-sonnet-4"}"#)
+                    .map_err(|error| format!("failed to seed opencode config: {error}"))?;
+            }
+            apply_native_at(
+                NativeApplySpec::OpenCode { path, backup_roots },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "pi" => {
+            if writable_paths.len() < 2 {
+                return Err("pi isolated targets are missing files".to_string());
+            }
+            apply_native_at(
+                NativeApplySpec::Pi {
+                    settings_path: &writable_paths[0],
+                    models_path: &writable_paths[1],
+                    backup_roots,
+                },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "omp" => {
+            if writable_paths.len() < 2 {
+                return Err("omp isolated targets are missing files".to_string());
+            }
+            apply_native_at(
+                NativeApplySpec::Omp {
+                    config_path: &writable_paths[0],
+                    models_path: &writable_paths[1],
+                    backup_root,
+                },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "zcode" => {
+            if writable_paths.len() < 3 {
+                return Err("zcode isolated targets are missing files".to_string());
+            }
+            let targets = ZcodeConfigTargets {
+                catalog_path: writable_paths[0].clone(),
+                v2_config_path: writable_paths[1].clone(),
+                v2_cache_path: writable_paths[2].clone(),
+            };
+            apply_native_at(
+                NativeApplySpec::Zcode {
+                    targets: &targets,
+                    backup_root,
+                },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "codex" => isolated_apply_unsupported(),
+        _ => Err(format!("unsupported managed client for apply: {client_id}")),
     }
 }
 
@@ -1216,7 +1183,10 @@ mod tests {
                 providers: &[],
                 base_url: "http://127.0.0.1:9109/v1".to_owned(),
                 models: vec![],
-                client_root: std::env::temp_dir(),
+                target: AdapterTarget::Live {
+                    client_root: std::env::temp_dir(),
+                    backup_roots: Vec::new(),
+                },
             },
         )
     }
@@ -1224,9 +1194,7 @@ mod tests {
     #[test]
     fn dsh_adapter_plan_is_pure_and_activation_safe() {
         let (_settings, ctx) = test_ctx();
-        let plan = DshAdapter
-            .plan(ClientIntent::Connect, &ctx)
-            .expect("plan");
+        let plan = DshAdapter.plan(ClientIntent::Connect, &ctx).expect("plan");
         assert_eq!(plan.client_id, "dsh");
         assert!(!plan.activation_touched, "activation must stay user-owned");
         assert!(plan.expected_fingerprint.is_some());
@@ -1237,13 +1205,19 @@ mod tests {
     #[test]
     fn perform_plan_rejects_activation_touching_adapters() {
         let (_settings, ctx) = test_ctx();
-        let mut plan = DshAdapter
-            .plan(ClientIntent::Connect, &ctx)
-            .expect("plan");
+        let mut plan = DshAdapter.plan(ClientIntent::Connect, &ctx).expect("plan");
         plan.activation_touched = true;
-        let result = perform_plan(&DshAdapter, &plan, &ctx);
+        let result = perform_plan(&plan, &ctx);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("activation"));
+    }
+
+    #[test]
+    fn perform_plan_honors_no_execution_plans_without_touching_dsh() {
+        let (_settings, ctx) = test_ctx();
+        let plan = CodexAdapter.plan(ClientIntent::Connect, &ctx).expect("plan");
+        let error = perform_plan(&plan, &ctx).expect_err("overlay plans are fail-closed");
+        assert!(error.contains("config_overlay.py"));
     }
 
     #[test]
@@ -1262,8 +1236,7 @@ mod tests {
 
     #[test]
     fn restore_native_unknown_client_is_copy_only() {
-        let result = restore_native("unknown".to_owned(), &[])
-            .expect("copy-only result");
+        let result = restore_native("unknown".to_owned(), &[]).expect("copy-only result");
         assert!(!result.applied);
         assert_eq!(result.client_id, "unknown");
         assert!(result.message.contains("copy-only"));
@@ -1275,8 +1248,8 @@ mod tests {
     #[test]
     fn preview_native_unknown_client_is_copy_only() {
         let settings = Settings::default();
-        let preview = preview_native("unknown", &settings, &[], "gpt-5.6-luna")
-            .expect("copy-only preview");
+        let preview =
+            preview_native("unknown", &settings, &[], "gpt-5.6-luna").expect("copy-only preview");
         assert!(!preview.can_apply);
         assert_eq!(preview.client_id, "unknown");
         assert_eq!(preview.strategy, "copy_only");
@@ -1299,7 +1272,7 @@ mod tests {
             let adapter = adapter_for(id).expect("registered adapter");
             assert_eq!(
                 has_existing_config(id),
-                adapter.config_present(),
+                config_present_for(adapter.metadata().id),
                 "{id} presence must come from the adapter"
             );
         }
@@ -1315,12 +1288,30 @@ mod tests {
 
     #[test]
     fn adapter_for_registers_native_clients_and_rejects_unknown() {
-        assert_eq!(adapter_for("opencode").map(ManagedClientAdapter::id), Some("opencode"));
-        assert_eq!(adapter_for("pi").map(ManagedClientAdapter::id), Some("pi"));
-        assert_eq!(adapter_for("omp").map(ManagedClientAdapter::id), Some("omp"));
-        assert_eq!(adapter_for("zcode").map(ManagedClientAdapter::id), Some("zcode"));
-        assert_eq!(adapter_for("dsh").map(ManagedClientAdapter::id), Some("dsh"));
-        assert_eq!(adapter_for("codex").map(ManagedClientAdapter::id), Some("codex"));
+        assert_eq!(
+            adapter_for("opencode").map(|adapter| adapter.metadata().id),
+            Some("opencode")
+        );
+        assert_eq!(
+            adapter_for("pi").map(|adapter| adapter.metadata().id),
+            Some("pi")
+        );
+        assert_eq!(
+            adapter_for("omp").map(|adapter| adapter.metadata().id),
+            Some("omp")
+        );
+        assert_eq!(
+            adapter_for("zcode").map(|adapter| adapter.metadata().id),
+            Some("zcode")
+        );
+        assert_eq!(
+            adapter_for("dsh").map(|adapter| adapter.metadata().id),
+            Some("dsh")
+        );
+        assert_eq!(
+            adapter_for("codex").map(|adapter| adapter.metadata().id),
+            Some("codex")
+        );
         assert!(adapter_for("unknown").is_none());
     }
 
@@ -1332,9 +1323,7 @@ mod tests {
             let snapshot = adapter.inspect(&ctx).expect("inspect");
             assert_eq!(snapshot.client_id, id);
             assert!(snapshot.activation.is_none());
-            let plan = adapter
-                .plan(ClientIntent::Connect, &ctx)
-                .expect("plan");
+            let plan = adapter.plan(ClientIntent::Connect, &ctx).expect("plan");
             assert_eq!(plan.client_id, id);
             assert!(!plan.activation_touched, "{id} must not touch activation");
             assert_eq!(plan.restart_required, "none");

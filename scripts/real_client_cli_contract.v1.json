@@ -1,0 +1,201 @@
+{
+  "schema": "codexhub.real-client-cli-contract.v1",
+  "platforms": {
+    "linux": {
+      "client_names": {
+        "codex_cli": "codex",
+        "opencode": "opencode",
+        "pi": "pi",
+        "omp": "omp"
+      },
+      "provider_names": {
+        "official": "openai",
+        "opencode-go": "opencode-go"
+      }
+    },
+    "windows": {
+      "client_names": {
+        "codex_cli": "codex-cli",
+        "opencode": "opencode",
+        "pi": "pi",
+        "omp": "omp"
+      }
+    }
+  },
+  "minimum_versions": {
+    "codex_cli": "0.144.5",
+    "opencode": "1.18.4",
+    "pi": "0.80.6",
+    "omp": "17.0.3"
+  },
+  "evidence_fields": [
+    "case_id",
+    "client",
+    "provider_id",
+    "client_selector",
+    "canonical_model",
+    "gateway_model",
+    "endpoint_binding",
+    "protocol",
+    "outcome",
+    "request_complete_count",
+    "http_status",
+    "read_only_tool_call_count",
+    "sentinel_chunk_count",
+    "streaming_request_count",
+    "fallback_count",
+    "error_event_count",
+    "duplicate_terminal_count",
+    "terminal_classification",
+    "reconnect_classification",
+    "retry_classification",
+    "artifact"
+  ],
+  "cases": [
+    {
+      "client": "codex_cli",
+      "provider_id": "official",
+      "diagnostic_provider_id": "official",
+      "models": {
+        "managed": "gpt-5.6-luna",
+        "selector": "gpt-5.6-luna",
+        "canonical": "gpt-5.6-luna",
+        "gateway": "gpt-5.6-luna"
+      },
+      "endpoint_binding": "/v1/responses",
+      "protocol": "responses",
+      "case_ids": {
+        "linux": "codex-openai",
+        "windows": "codex-cli-luna"
+      }
+    },
+    {
+      "client": "codex_cli",
+      "provider_id": "opencode-go",
+      "diagnostic_provider_id": "opencode_go",
+      "models": {
+        "managed": "opencode-go/muse-spark-1.2-contributor",
+        "selector": "opencode-go/muse-spark-1.2-contributor",
+        "canonical": "opencode-go/muse-spark-1.2-contributor",
+        "gateway": "opencode-go/muse-spark-1.2-contributor"
+      },
+      "endpoint_binding": "/v1/providers/opencode-go/responses",
+      "protocol": "responses",
+      "case_ids": {
+        "linux": "codex-opencode-go",
+        "windows": "codex-cli-opencode-go"
+      }
+    },
+    {
+      "client": "opencode",
+      "provider_id": "official",
+      "diagnostic_provider_id": "official",
+      "models": {
+        "managed": "openai/gpt-5.6-luna",
+        "selector": "codexhub-openai/gpt-5.6-luna",
+        "canonical": "codexhub-openai/gpt-5.6-luna",
+        "gateway": "openai/gpt-5.6-luna"
+      },
+      "platform_overrides": {
+        "linux": { "gateway": "gpt-5.6-luna" }
+      },
+      "endpoint_binding": "/v1/providers/openai/responses",
+      "protocol": "responses",
+      "case_ids": {
+        "linux": "opencode-openai",
+        "windows": "opencode-luna"
+      }
+    },
+    {
+      "client": "opencode",
+      "provider_id": "opencode-go",
+      "diagnostic_provider_id": "opencode_go",
+      "models": {
+        "managed": "opencode-go/muse-spark-1.2-contributor",
+        "selector": "codexhub-opencode-go/muse-spark-1.2-contributor",
+        "canonical": "codexhub-opencode-go/muse-spark-1.2-contributor",
+        "gateway": "opencode-go/muse-spark-1.2-contributor"
+      },
+      "endpoint_binding": "/v1/providers/opencode-go/responses",
+      "protocol": "responses",
+      "case_ids": {
+        "linux": "opencode-opencode-go",
+        "windows": "opencode-opencode-go"
+      }
+    },
+    {
+      "client": "pi",
+      "provider_id": "official",
+      "diagnostic_provider_id": "official",
+      "models": {
+        "managed": "openai/gpt-5.6-luna",
+        "selector": "codexhub-openai/gpt-5.6-luna",
+        "canonical": "codexhub-openai/gpt-5.6-luna",
+        "gateway": "openai/gpt-5.6-luna"
+      },
+      "platform_overrides": {
+        "linux": { "gateway": "gpt-5.6-luna" }
+      },
+      "endpoint_binding": "/v1/providers/openai/responses",
+      "protocol": "responses",
+      "case_ids": {
+        "linux": "pi-openai",
+        "windows": "pi-luna"
+      }
+    },
+    {
+      "client": "pi",
+      "provider_id": "opencode-go",
+      "diagnostic_provider_id": "opencode_go",
+      "models": {
+        "managed": "opencode-go/muse-spark-1.2-contributor",
+        "selector": "codexhub-opencode-go/muse-spark-1.2-contributor",
+        "canonical": "codexhub-opencode-go/muse-spark-1.2-contributor",
+        "gateway": "opencode-go/muse-spark-1.2-contributor"
+      },
+      "endpoint_binding": "/v1/providers/opencode-go/responses",
+      "protocol": "responses",
+      "case_ids": {
+        "linux": "pi-opencode-go",
+        "windows": "pi-opencode-go"
+      }
+    },
+    {
+      "client": "omp",
+      "provider_id": "official",
+      "diagnostic_provider_id": "official",
+      "models": {
+        "managed": "openai/gpt-5.6-luna",
+        "selector": "codexhub-openai/gpt-5.6-luna",
+        "canonical": "codexhub-openai/gpt-5.6-luna",
+        "gateway": "openai/gpt-5.6-luna"
+      },
+      "platform_overrides": {
+        "linux": { "gateway": "gpt-5.6-luna" }
+      },
+      "endpoint_binding": "/v1/providers/openai/responses",
+      "protocol": "responses",
+      "case_ids": {
+        "linux": "omp-openai",
+        "windows": "omp-luna"
+      }
+    },
+    {
+      "client": "omp",
+      "provider_id": "opencode-go",
+      "diagnostic_provider_id": "opencode_go",
+      "models": {
+        "managed": "opencode-go/muse-spark-1.2-contributor",
+        "selector": "codexhub-opencode-go/muse-spark-1.2-contributor",
+        "canonical": "codexhub-opencode-go/muse-spark-1.2-contributor",
+        "gateway": "opencode-go/muse-spark-1.2-contributor"
+      },
+      "endpoint_binding": "/v1/providers/opencode-go/responses",
+      "protocol": "responses",
+      "case_ids": {
+        "linux": "omp-opencode-go",
+        "windows": "omp-opencode-go"
+      }
+    }
+  ]
+}

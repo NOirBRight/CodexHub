@@ -226,6 +226,52 @@ pub(crate) fn refresh_manual(
     })
 }
 
+/// Read the current Official model list without publishing or coordinating
+/// the Codex Desktop process. This is the manual Refresh path while Codex is
+/// running; applying a new managed overlay remains a separate mutating flow.
+pub(crate) fn refresh_current_models() -> Result<OfficialRefreshResult, String> {
+    if !config::get_settings()?.include_official_models {
+        return Ok(OfficialRefreshResult {
+            models: Vec::new(),
+            restart_required: false,
+            warning: None,
+            codex_restart_result: None,
+        });
+    }
+    read_only_refresh_result(
+        models::read_official_models_direct(),
+        models::list_cached_official_models,
+    )
+}
+
+fn read_only_refresh_result(
+    live: Result<Vec<Model>, String>,
+    read_cache: impl FnOnce() -> Result<Vec<Model>, String>,
+) -> Result<OfficialRefreshResult, String> {
+    match live {
+        Ok(models) => Ok(OfficialRefreshResult {
+            models,
+            restart_required: false,
+            warning: None,
+            codex_restart_result: None,
+        }),
+        Err(live_error) => match read_cache() {
+            Ok(models) if !models.is_empty() => Ok(OfficialRefreshResult {
+                models,
+                restart_required: false,
+                warning: Some(
+                    "Live Official model list unavailable; showing cached models.".to_string(),
+                ),
+                codex_restart_result: None,
+            }),
+            Ok(_) => Err(live_error),
+            Err(cache_error) => Err(format!(
+                "Codex subscription model list unavailable: {live_error}; cached Official models unavailable: {cache_error}"
+            )),
+        },
+    }
+}
+
 pub(crate) fn acknowledge_codex_restart() -> Result<(), String> {
     let state_path = refresh_state_path()?;
     let mut state = read_state(&state_path);
@@ -968,7 +1014,7 @@ mod tests {
         allow_activation_without_official_snapshot, automatic_refresh_due,
         commit_publication_transaction, commit_refresh_with_gate,
         direct_official_refresh_failure_message, finalize_published_snapshot,
-        finish_publication_state_write, manual_refresh_models,
+        finish_publication_state_write, manual_refresh_models, read_only_refresh_result,
         published_context_budgets_from_catalog_payload,
         published_official_models_from_catalog, read_state, record_attempt, refresh_with_flight,
         scheduled_refresh_backoff, should_attempt, update_published_context_budgets, write_state,
@@ -1197,6 +1243,46 @@ mod tests {
         assert!(warning
             .as_deref()
             .is_some_and(|value| value.contains("catalog readback unavailable")));
+    }
+
+    #[test]
+    fn read_only_refresh_returns_current_models_without_a_restart_result() {
+        let models = vec![Model {
+            id: "gpt-5.6-luna".to_string(),
+            ..Model::default()
+        }];
+
+        let result = read_only_refresh_result(Ok(models.clone()), || {
+            panic!("cache should not be consulted after a live read")
+        })
+        .expect("live model read");
+
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.models[0].id, "gpt-5.6-luna");
+        assert!(!result.restart_required);
+        assert!(result.codex_restart_result.is_none());
+    }
+
+    #[test]
+    fn read_only_refresh_uses_cached_models_without_requesting_a_restart() {
+        let result = read_only_refresh_result(
+            Err("Codex app-server unavailable".to_string()),
+            || {
+                Ok(vec![Model {
+                    id: "gpt-5.5".to_string(),
+                    ..Model::default()
+                }])
+            },
+        )
+        .expect("cached model read");
+
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.models[0].id, "gpt-5.5");
+        assert!(result
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("cached")));
+        assert!(result.codex_restart_result.is_none());
     }
 
     #[test]

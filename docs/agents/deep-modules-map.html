@@ -627,11 +627,12 @@ SettingsStore::save(Settings) -> Settings   // sanitize once</pre>
       </tr>
     </tbody>
   </table>
-  <pre>OfficialCatalog::refresh(trigger) -> OfficialRefreshResult
-OfficialCatalog::published() -> Option&lt;Vec&lt;Model&gt;&gt;   // 绝不返回采集向量
-OfficialCatalog::sync_runtime() -> Path           // 一个 runner，两个 home
+  <pre>OfficialCatalog::read_current() -> OfficialRefreshResult  // UI Refresh，纯读取
+OfficialCatalog::refresh(trigger) -> OfficialRefreshResult  // CLI/后台发布
+OfficialCatalog::published() -> Option&lt;Vec&lt;Model&gt;&gt;         // 绝不返回采集向量
+OfficialCatalog::sync_runtime() -> Path                     // 一个 runner，两个 home
 OfficialCatalog::override_diagnostics() -> CatalogOverrideDiagnostics</pre>
-  <p>成功 refresh 必须先原子发布 catalog <b>和</b> managed Codex overlay，再亮 <code>publication_ready</code>。UI 读 published 路径，不读 acquisition 向量。硬编码 <code>OFFICIAL_MODELS</code> fallback 删掉，改 fail-closed 空列表。</p>
+  <p>UI 的 Refresh 只读取当前 Official 模型，不写 Codex 配置，也不重启 Codex。CLI/后台发布仍须先原子发布 catalog 和 managed Codex overlay，再亮 <code>publication_ready</code>。UI 读当前结果，不读未验证的采集向量；硬编码 <code>OFFICIAL_MODELS</code> fallback 删掉，改 fail-closed 空列表。</p>
   <div class="grid">
     <div class="card next">
       <span class="tag good">这一项做</span>
@@ -842,7 +843,7 @@ disconnect(target)
   </div>
 
   <h2 id="item-12">第十二项：CatalogPublish</h2>
-  <p class="sub"><code>useProviderCatalogActions</code> 是 20 字段 options、12 个返回函数的浅提取。有价值的是 <code>updateGatewayAfterCatalog</code>：persist → generate → sync Injected Blocks → diagnostics → 精确 restart。ProvidersPage 的 saveSettings 还复制了一份。</p>
+  <p class="sub">Provider 发布流程现在由 <code>useProviderWorkspace</code> 独占。有价值的是 <code>updateGatewayAfterCatalog</code>：persist → generate → sync Injected Blocks → diagnostics → 精确 restart；页面只保留 UI 局部状态。</p>
   <pre>publishCatalog({
   reason: "providers" | "official-settings" | "official-refresh" | "context-guard",
   persist?: () => Promise&lt;void&gt;,

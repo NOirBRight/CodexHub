@@ -1,8 +1,9 @@
 # ADR-0004: Coexistence Provider Injection over Managed Takeover for client integration
 
 Date: 2026-08-15
-Status: Accepted. Campaign 0.1.9 (#436); DSH (#430) is the first client built
-on these semantics. Recorded during 0.1.8-beta.4.2 wind-down.
+Status: Accepted. Campaign 0.1.9 (#436); DM-4 implementation complete in the
+current architecture candidate. DSH (#430) is the first client built on these
+semantics. Recorded during 0.1.8-beta.4.2 wind-down.
 
 ## Context
 
@@ -45,7 +46,11 @@ then opencode + omp + zcode):
 2. **Never activate.** Apply never touches the client's global default-model
    selection (e.g. DSH `agent-default-model`, codex `model_provider`).
    Pointing the client at the Gateway is always the user's own action; the
-   pointing state is surfaced read-only, never as drift.
+   pointing state is surfaced read-only, never as drift. The one migration
+   exception is a selector that already names a recognized CodexHub provider
+   from the legacy managed-takeover format: it may be rewritten to the
+   current injected provider during repair, or removed during detach, so a
+   stale app-owned selector cannot strand the client on a deleted provider.
 3. **Adopt, don't conflict.** A pre-existing same-named entry pointing at the
    local Gateway is adopted as the Injected Block.
 4. **Project the full enabled model set** into the injected entry, re-projected
@@ -99,12 +104,15 @@ The adapter interface stays internal to the Rust crate: metadata(), inspect(ctx)
 - Byte-compare readback remains in force for not-yet-migrated clients; the
   two readback semantics coexist during the campaign.
 
-## Campaign status (0.1.9-beta.3.13)
+## Campaign status (architecture candidate)
 
 Coordinator `adapter_for` now registers `dsh`, `codex`, `opencode`, `pi`,
-`omp`, and `zcode`. Native apply for opencode/pi/omp/zcode is
-`publish_apply` → `apply_native_at`. Codex live overlay stays in
+`omp`, and `zcode`. Native apply for opencode/pi/omp/zcode is coordinated
+directly through `apply_native_at`; publication, restore, preview, and
+readback are coordinator-owned operations. Codex live overlay stays in
 `config.rs` / `config_overlay.py` because of the stable-history-bucket
 exception above; `CodexAdapter` is the registry entry and keeps isolated
 gateway apply fail-closed to `apply_codex_config_isolated`. Isolated
-dispatch no longer special-cases `client_id == "codex"`.
+dispatch no longer special-cases `client_id == "codex"`. The internal adapter
+seam exposes exactly `metadata()`, `inspect(ctx)`, and `plan(intent, ctx)`;
+the coordinator owns all filesystem effects and result mapping.
