@@ -6,6 +6,13 @@ canonical routes. HTTP/configuration preflight alone is never an E2E pass. The
 authoritative Windows scope is permanently `-CliOnly`. Do not run Desktop or
 ZCode GUI/manual-evidence cases on Windows or Linux.
 
+Linux owns a separate self-built CLI gate in
+`scripts/e2e_linux_cli_clients.py`. Both operating systems must run the same
+eight live combinations: Codex CLI, OpenCode, Pi, and OMP against Official
+Luna and OpenCode Go Muse Spark. A pass on one operating system never replaces
+the other. See `docs/agents/linux-packaging.md` for the Linux command and input
+contract.
+
 Ollama remains prohibited. The live third-party CLI leg is OpenCode Go
 `muse-spark-1.2-contributor` (client selector
 `codexhub-opencode-go/muse-spark-1.2-contributor`, Gateway route

@@ -75,10 +75,27 @@ Linux GUI preflight:
 ./scripts/codexhub-python.sh scripts/e2e_linux_gui_clients.py
 ```
 
+Linux real-client CLI qualification is a separate eight-case gate. It builds
+the current Rust candidate locally, starts its Gateway in an isolated runtime,
+materializes fresh client configuration, and runs Codex CLI, OpenCode, Pi, and
+OMP once against Official `gpt-5.6-luna` and once against OpenCode Go
+`muse-spark-1.2-contributor`:
+
+```bash
+./scripts/codexhub-python.sh scripts/e2e_linux_cli_clients.py \
+  --output test-results/linux-cli-e2e.json
+```
+
+The default credential inputs are the current operator's Codex auth,
+`providers.toml`, settings, and Official catalog. They are copied only into a
+temporary isolated runtime and are never written to the report. Use `--auth`,
+`--providers`, `--settings`, and `--catalog` to select dedicated inputs. The
+report must contain eight successful apply/readback/live sentinel cases.
+
 This host's accepted floors are the same numeric floors as Windows: Codex
 Desktop `26.715.8383.0` (Debian package `chatgpt`) and ZCode `3.3.6`.
 `open_codex_app` on Linux launches `/usr/bin/chatgpt` / `codex-launcher`.
 
-Windows AppX real-client E2E remains required for the Windows installer. It is
-not a substitute for this Linux preflight, and this preflight is not a
-substitute for Windows.
+Windows CLI real-client E2E remains required for the Windows candidate. It is
+not a substitute for the Linux CLI gate, and the Linux gate is not a substitute
+for Windows.
