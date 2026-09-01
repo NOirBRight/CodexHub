@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useConfirmDialog } from "../components/ConfirmDialog";
 import { useToasts } from "../components/PageToast";
 import { api } from "../lib/tauri";
 import {
   createAppUpdateLifecycle,
+  type AppUpdateDeps,
   type AppUpdateLifecycle,
   type AppUpdateView,
 } from "../lib/appUpdateLifecycle";
@@ -14,17 +14,17 @@ import type { RuntimeSnapshot } from "../lib/runtimeStore";
  * React seam over the App Update Lifecycle module.
  *
  * The hook owns only composition: it builds the production ports from the
- * existing `api` surface and the shared Toast/confirm context, then exposes
+ * existing `api` surface and the shared Toast plus injected confirmation, then exposes
  * the module's small interface. All scheduling, polling, completion restore,
  * and dedupe live inside the module implementation.
  */
 export function useAppUpdateLifecycle(options: {
+  confirm: AppUpdateDeps["confirm"];
   getRuntime: () => RuntimeSnapshot;
   setRuntime: (update: (current: RuntimeSnapshot) => RuntimeSnapshot) => void;
   translate: (key: string, options?: Record<string, unknown>) => string;
 }) {
-  const { setRuntime, translate } = options;
-  const { confirm: confirmAction } = useConfirmDialog();
+  const { confirm, setRuntime, translate } = options;
   const { dismissToast, showToast, updateToast } = useToasts();
   const [view, setView] = useState<AppUpdateView>(() => ({
     busy: null,
@@ -42,7 +42,7 @@ export function useAppUpdateLifecycle(options: {
         setInterval: (callback, ms) => window.setInterval(callback, ms),
         setTimeout: (callback, ms) => window.setTimeout(callback, ms),
       },
-      confirm: confirmAction,
+      confirm,
       port: {
         check: () => api.checkAppUpdate(),
         consumeCompletion: () => api.consumeAppUpdateCompletion(),

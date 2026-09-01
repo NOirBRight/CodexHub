@@ -252,6 +252,7 @@ export default function App() {
   const settingsLoaded = Boolean(runtime.settings.data);
 
   const appUpdate = useAppUpdateLifecycle({
+    confirm: confirmAction,
     getRuntime: () => runtimeRef.current ?? runtime,
     setRuntime: (update) => setRuntime(update),
     translate: t,
