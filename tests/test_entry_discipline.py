@@ -15,9 +15,10 @@ PACKAGE_LINE_BUDGET = 2000
 GATEWAY_FILE_LINE_BUDGETS = {
     "gateway_handler_impl.py": 1972,
     "gateway_relay.py": 2986,
-    "gateway_exchange.py": 689,
+    "gateway_exchange.py": 1040,
     "gateway_exchange_bindings.py": 310,
-    "gateway_exchange_hooks.py": 575,
+    "gateway_exchange_ports.py": 130,
+    "gateway_exchange_adapters.py": 300,
     "gateway_error_dispatch.py": 920,
 }
 

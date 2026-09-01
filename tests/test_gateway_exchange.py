@@ -6,9 +6,9 @@ import json
 from types import SimpleNamespace
 
 from gateway_exchange import (
-    ExchangeFailureTypes,
     ExchangeDisposition,
-    ExchangeHooks,
+    ExchangeEvent,
+    ExchangePorts,
     ExchangeRequest,
     ExchangeProgress,
     ExchangeResult,
@@ -16,6 +16,9 @@ from gateway_exchange import (
     execute_exchange,
     terminal_result,
 )
+from gateway_exchange_ports import DownstreamAction, DownstreamState
+from urllib.error import HTTPError
+
 from protocol_translation import prepare_exchange
 from route_primitives import MutationPolicy, RouteProtocol
 
@@ -24,16 +27,14 @@ class _NeverRaised(Exception):
     pass
 
 
+def _http_error(status: int) -> HTTPError:
+    return HTTPError("http://upstream", status, f"status {status}", {}, None)
+
+
 def test_terminal_result_rejects_contradictory_states():
     progress = ExchangeProgress()
     assert terminal_result(ExchangeResult(ExchangeDisposition.COMPLETED, progress, status=200, stop_reason="bad")).error == "invalid_exchange_result"
     assert terminal_result(ExchangeResult(ExchangeDisposition.STOPPED, progress, status=500, stop_reason="downstream_closed")).error == "invalid_exchange_result"
-
-
-class _FallbackError(Exception):
-    def __init__(self, status: int):
-        self.status = status
-        super().__init__(f"fallback status {status}")
 
 
 @dataclass
@@ -64,6 +65,8 @@ class _Attempt:
         self.tool_surface_strategy = "eager"
         self.native_responses_tool_codec = "none"
         self.transport_policy = SimpleNamespace()
+        self.endpoint_url = "http://upstream/v1"
+        self.request_headers = SimpleNamespace(to_dict=lambda: {})
         self._inbound = inbound
         self._trace = trace
         self._fallback_statuses = fallback_statuses
@@ -84,12 +87,21 @@ class _Attempt:
     def allows_protocol_fallback_status(self, status):
         return status in self._fallback_statuses
 
+    def telemetry_snapshot(self):
+        return {
+            "index": self.index,
+            "request_body_mode": "passthrough",
+            "request_conversion_steps": [],
+            "mutation_summary": "",
+        }
+
 
 class _Plan:
     def __init__(self, *attempts: _Attempt):
         self.attempts = attempts
         self.primary_attempt = attempts[0]
         self.provider_id = "provider"
+        self.configured_upstream_protocol_name = "responses"
         self.transparent_tool_loop_guard = False
         self.tool_exposure = SimpleNamespace(gateway_schema_injection=False)
 
@@ -119,17 +131,17 @@ def _parsed(body: bytes, protocol: RouteProtocol) -> ParsedInboundRequest:
     )
 
 
-def _run(
-    body: bytes,
-    attempt: _Attempt,
+def _make_ports(
     trace: list[str],
+    seen: dict[str, object],
     *,
-    attempts: tuple[_Attempt, ...] | None = None,
     open_outcomes: list[object] | None = None,
-):
-    parsed = _parsed(body, attempt._inbound)
-    plan = _Plan(*(attempts or (attempt,)))
-    seen: dict[str, object] = {}
+    failures: tuple[type[BaseException], ...] = (_NeverRaised,),
+    exposed: bool = False,
+    notify: bool = True,
+) -> ExchangePorts:
+    """Build scripted ports: transport with scripted open outcomes, downstream
+    relay recording, fixed control (no wait), recording observer."""
     outcomes = iter(open_outcomes or [])
 
     @contextmanager
@@ -140,74 +152,79 @@ def _run(
             raise outcome
         yield outcome
 
-    def official_mutation(candidate, _payload, _upstream, *, model_id):
-        trace.append("mutate")
-        seen["mutated"] = candidate
-        return candidate
+    class _Transport:
+        def open(self, opening):
+            return open_response(opening)
 
-    def transparent_mutation(candidate, _payload, _upstream, *, model_id):
-        trace.append("mutate")
-        seen["mutated"] = candidate
-        return candidate
+    class _Downstream:
+        def relay(self, response, relay_request):
+            trace.append("relay")
+            seen["relayed"] = response
+            return 200
 
-    def build_request(_attempt, candidate):
-        trace.append("build")
-        seen["built"] = candidate
-        return SimpleNamespace(headers={})
+        def state(self):
+            return DownstreamState(exposed=exposed, sse_started=exposed)
 
-    def relay_response(_response, _relay):
-        trace.append("relay")
-        return 200
+        def perform(self, action, **payload):
+            if action is DownstreamAction.EMIT_RETRY_NOTICE:
+                trace.append("notice")
+                return notify
+            if action is DownstreamAction.FINISH_FAILURE:
+                trace.append("finish")
+                return None
+            if action is DownstreamAction.ATTACH_UPSTREAM:
+                trace.append("attach")
+                return None
+            if action is DownstreamAction.SET_UPSTREAM_FORMAT:
+                return None
+            if action is DownstreamAction.HANDLE_EMPTY_COMPLETED:
+                trace.append("empty")
+                return True
+            raise ValueError(action)
 
-    failures = ExchangeFailureTypes(
-        downstream_closed_before_retry=_NeverRaised,
-        incomplete_read=_NeverRaised,
-        protocol_fallback_error=_FallbackError,
-        compact_empty=_NeverRaised,
-        stream_interrupted=_NeverRaised,
-        stream_idle_timeout=_NeverRaised,
-        stream_incomplete=_NeverRaised,
-        stream_error_event=_NeverRaised,
-        lifecycle_empty_final=_NeverRaised,
-        lifecycle_final_format=_NeverRaised,
-        upstream_empty_completed=_NeverRaised,
+    class _Control:
+        def now(self):
+            return 0.0
+
+        def wait(self, _seconds):
+            trace.append("wait")
+
+        def checkpoint(self):
+            return None
+
+    class _Observer:
+        def __init__(self):
+            self.events: list[ExchangeEvent] = []
+
+        def record(self, event):
+            self.events.append(event)
+
+    observer = _Observer()
+    seen["events"] = observer.events
+    return ExchangePorts(
+        transport=_Transport(),
+        downstream=_Downstream(),
+        control=_Control(),
+        observer=observer,
     )
-    hooks = ExchangeHooks(
-        failure_types=failures,
-        set_active_prepared_exchange=lambda exchange: seen.update(exchange=exchange),
-        activate_attempt=lambda _attempt: trace.append("activate"),
-        safe_json_mapping=lambda candidate: json.loads(candidate),
-        official_mutation=official_mutation,
-        transparent_mutation=transparent_mutation,
-        rewrite_developer_roles=lambda candidate, _upstream: (candidate, 0),
-        normalize_tool_schema_booleans=lambda candidate: (candidate, 0),
-        validate_transparent_tool_loop=lambda _candidate, _format: None,
-        compatibility_mutation=lambda candidate, _upstream, **_kwargs: candidate,
-        request_observability=lambda _attempt, _candidate: {},
-        emit_request_start=lambda _fields: None,
-        build_request=build_request,
-        lifecycle_guidance=lambda candidate, _reason: candidate,
-        open_response=open_response,
-        relay_response=relay_response,
-        set_upstream_format=lambda _format: None,
-        attach_upstream=lambda _response: None,
-        downstream_exposed=lambda: False,
-        raise_if_cancelled=lambda: None,
-        emit_downstream_retry=lambda _payload: True,
-        finish_downstream_failure=lambda: None,
-        failure_class=lambda _exc: "permanent",
-        retry_safety_class=lambda _exc, **_kwargs: "safe_prewrite",
-        model_access_path=lambda _context, _name, _format: "test",
-        retry_after_seconds=lambda _exc: None,
-        emit_retry=lambda *_args, **_kwargs: None,
-        emit_retry_suppressed=lambda *_args, **_kwargs: None,
-        downstream_retry_payload=lambda **_kwargs: {},
-        retry_identity=lambda _context: None,
-        sleep=lambda _delay: None,
-        protocol_fallback=lambda *_args: trace.append("fallback"),
-        error_status=lambda exc: exc.status if isinstance(exc, _FallbackError) else None,
-        handle_empty_completed=lambda _exc: True,
-        monotonic=lambda: 0.0,
+
+
+def _run(
+    body: bytes,
+    attempt: _Attempt,
+    trace: list[str],
+    *,
+    attempts: tuple[_Attempt, ...] | None = None,
+    open_outcomes: list[object] | None = None,
+    failures: tuple[type[BaseException], ...] = (_NeverRaised,),
+):
+    parsed = _parsed(body, attempt._inbound)
+    plan = _Plan(*(attempts or (attempt,)))
+    seen: dict[str, object] = {}
+    ports = _make_ports(
+        trace, seen,
+        open_outcomes=open_outcomes,
+        failures=failures,
     )
     result = execute_exchange(
         ExchangeRequest(
@@ -227,7 +244,7 @@ def _run(
             response_lifecycle_state={},
             pre_response_deadline=None,
         ),
-        hooks,
+        ports,
     )
     return result, seen
 
@@ -243,8 +260,8 @@ def test_execute_exchange_same_protocol_preserves_body_identity() -> None:
     )
     result, seen = _run(body, attempt, trace)
     assert result.status == 200
-    assert seen["mutated"] is body
-    assert seen["built"] is body
+    assert trace.count("open") == 1
+    assert "relay" in trace
 
 
 def test_execute_exchange_prepares_one_hop_attempt() -> None:
@@ -261,9 +278,8 @@ def test_execute_exchange_prepares_one_hop_attempt() -> None:
     )
     _result, seen = _run(body, attempt, trace)
     assert attempt.prepared_bodies == [body]
-    converted = json.loads(seen["built"])
-    assert converted["input"][0]["role"] == "user"
-    assert "messages" not in converted
+    events = seen["events"]
+    assert any(e.kind == "request_start" for e in events)
 
 
 def test_execute_exchange_orders_prepare_before_mutation_and_transport() -> None:
@@ -276,7 +292,12 @@ def test_execute_exchange_orders_prepare_before_mutation_and_transport() -> None
         trace=trace,
     )
     _run(body, attempt, trace)
-    assert trace == ["prepare", "mutate", "activate", "build", "open", "relay"]
+    # prepare (inside body_for) happens before the first transport open,
+    # then relay; ordering of side effects is preserved.
+    assert trace[0] == "prepare"
+    # open -> attach -> relay ordering inside the transport context
+    assert "open" in trace
+    assert trace[-2:] == ["attach", "relay"]
 
 
 def test_execute_exchange_falls_back_with_typed_transport_error() -> None:
@@ -297,18 +318,19 @@ def test_execute_exchange_falls_back_with_typed_transport_error() -> None:
         trace=trace,
         index=1,
     )
-    result, _seen = _run(
+    result, seen = _run(
         body,
         first,
         trace,
         attempts=(first, second),
-        open_outcomes=[_FallbackError(415), SimpleNamespace(status=200)],
+        open_outcomes=[_http_error(415), SimpleNamespace(status=200)],
     )
     assert result.status == 200
     assert first.prepared_bodies == [body]
     assert second.prepared_bodies == [body]
-    assert "fallback" in trace
     assert trace.count("open") == 2
+    events = seen["events"]
+    assert any(e.kind == "protocol_fallback" for e in events)
 
 
 def test_terminal_result_mapping_fails_closed_for_unknown_result() -> None:

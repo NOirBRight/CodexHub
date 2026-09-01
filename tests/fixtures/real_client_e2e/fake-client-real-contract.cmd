@@ -20,12 +20,12 @@ if not defined CODEXHUB_E2E_CLIENT exit /b 12
 if not defined CODEXHUB_E2E_DIAGNOSTICS_PATH exit /b 13
 set "GATEWAY_MODEL=%CODEXHUB_E2E_MODEL%"
 if /I "%CODEXHUB_E2E_MODEL%"=="codexhub-openai/gpt-5.6-luna" set "GATEWAY_MODEL=openai/gpt-5.6-luna"
-if /I "%CODEXHUB_E2E_MODEL%"=="codexhub-ollama-cloud/glm-5.2" set "GATEWAY_MODEL=ollama-cloud/glm-5.2"
+if /I "%CODEXHUB_E2E_MODEL%"=="codexhub-opencode-go/muse-spark-1.2-contributor" set "GATEWAY_MODEL=opencode-go/muse-spark-1.2-contributor"
 if /I not "%GATEWAY_MODEL%"=="%CODEXHUB_E2E_GATEWAY_MODEL%" exit /b 17
 set "PROVIDER_ID=official"
 set "UPSTREAM_FORMAT=responses"
 set "INBOUND_FORMAT=responses"
-if /I "%GATEWAY_MODEL%"=="ollama-cloud/glm-5.2" set "PROVIDER_ID=ollama_cloud"
+if /I "%GATEWAY_MODEL%"=="opencode-go/muse-spark-1.2-contributor" set "PROVIDER_ID=opencode_go"
 if defined CODEXHUB_E2E_FORCE_ROUTE_CONTRADICTION (
   set "PROVIDER_ID=wrong-provider"
   set "UPSTREAM_FORMAT=chat_completions"

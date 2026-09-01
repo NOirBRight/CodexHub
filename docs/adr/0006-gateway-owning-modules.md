@@ -17,6 +17,14 @@ The Gateway process entry (`codex_proxy.py`) owns only HTTP wiring:
 `CodexProxyHandler`, `run_server`, and `main`. It stays under 500 lines and
 does not `exec` sibling sources or `setattr` handler methods.
 
+Campaign #491 DM-5 replaces the ExchangeHooks/ExchangeFailureTypes callback
+bags with four real ports owned by gateway_exchange: ExchangeTransport,
+DownstreamPort, ExecutionControl, and ExchangeObserver. Production adapters
+live in gateway_exchange_adapters.py and read owning-module attributes at call
+time (ADR-0007); scripted adapters are used in tests. Fixed request policy
+(mutation order, retry classification, protocol fallback, elapsed limits,
+event payload construction) stays inside the owning module.
+
 Each seam lives in one owning module. Tests patch and import that module:
 
 | Seam | Owning module |

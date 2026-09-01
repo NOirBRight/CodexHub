@@ -45,10 +45,49 @@ def _dsh_private_lock_target(path: Path) -> Path | None:
     return path.parent.parent / ".codexhub" / "locks" / "dsh" / path.name
 
 
+def _agent_client_lock_target(path: Path) -> Path | None:
+    if path.parent.name != "agent":
+        return None
+    client_dir = path.parent.parent
+    if client_dir.name == ".pi" and path.name in {"settings.json", "models.json"}:
+        namespace = "pi"
+    elif client_dir.name == ".omp" and path.name in {"config.yml", "config.yaml", "models.yml"}:
+        namespace = "omp"
+    else:
+        return None
+    return client_dir.parent / ".codexhub" / "locks" / namespace / path.name
+
+
+def _foreign_client_lock_target(path: Path) -> Path | None:
+    return _dsh_private_lock_target(path) or _agent_client_lock_target(path)
+
+
 def _lock_path_for(path: Path) -> Path:
-    """Return CodexHub's coordination path without occupying DSH's lock name."""
-    coordination_target = _dsh_private_lock_target(path) or path
+    """Return CodexHub's coordination path without occupying a foreign lock name."""
+    coordination_target = _foreign_client_lock_target(path) or path
     return coordination_target.with_name(f"{coordination_target.name}.lock")
+
+
+def _clear_displaced_adjacent_protocol_lock(path: Path) -> None:
+    lock_path = _lock_path_for(path)
+    adjacent = path.with_name(f"{path.name}.lock")
+    if adjacent == lock_path:
+        return
+    _remove_displaced_protocol_file(adjacent)
+    _remove_displaced_protocol_file(adjacent.with_name(f"{adjacent.name}.guard"))
+
+
+def _remove_displaced_protocol_file(path: Path) -> None:
+    try:
+        if not path.is_file() or path.is_symlink():
+            return
+        data = path.read_bytes()
+    except OSError:
+        return
+    if data and _classify_lock_bytes(data) != "protocol":
+        return
+    with contextlib.suppress(OSError):
+        path.unlink()
 
 
 @contextlib.contextmanager
@@ -56,6 +95,7 @@ def file_lock_for(path: Path) -> Iterator[Callable[[], None]]:
     """Hold the cross-language advisory lock and its namespace guard."""
     lock_path = _lock_path_for(path)
     namespace_path = lock_path.with_name(f"{lock_path.name}.guard")
+    _clear_displaced_adjacent_protocol_lock(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     namespace_fd = _acquire_namespace_guard(lock_path, started)

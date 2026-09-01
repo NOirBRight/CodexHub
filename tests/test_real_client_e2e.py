@@ -19,7 +19,7 @@ FIXTURES = ROOT / "tests" / "fixtures" / "real_client_e2e"
 MODEL_SWITCH_FIXTURE = FIXTURES / "model-switch-v1-v2.json"
 CANDIDATE_SHA = "a" * 40
 LUNA_MODEL = "codexhub-openai/gpt-5.6-luna"
-THIRD_PARTY_MODEL = "codexhub-ollama-cloud/glm-5.2"
+THIRD_PARTY_MODEL = "codexhub-opencode-go/muse-spark-1.2-contributor"
 MINIMUM_VERSIONS = {
     "desktop": "26.715.8383.0",
     "codex_cli": "0.144.5",
@@ -101,13 +101,13 @@ EXPECTED_CASE_BINDINGS = {
         "endpoint_binding": "/v1/responses",
         "protocol": "responses",
     },
-    "desktop-ollama-cloud": {
+    "desktop-opencode-go": {
         "client": "desktop",
-        "provider_id": "ollama-cloud",
-        "client_selector": "ollama-cloud/glm-5.2",
-        "canonical_model": "ollama-cloud/glm-5.2",
-        "gateway_model": "ollama-cloud/glm-5.2",
-        "endpoint_binding": "/v1/providers/ollama-cloud/responses",
+        "provider_id": "opencode-go",
+        "client_selector": "opencode-go/muse-spark-1.2-contributor",
+        "canonical_model": "opencode-go/muse-spark-1.2-contributor",
+        "gateway_model": "opencode-go/muse-spark-1.2-contributor",
+        "endpoint_binding": "/v1/providers/opencode-go/responses",
         "protocol": "responses",
     },
     "codex-cli-luna": {
@@ -119,13 +119,13 @@ EXPECTED_CASE_BINDINGS = {
         "endpoint_binding": "/v1/responses",
         "protocol": "responses",
     },
-    "codex-cli-ollama-cloud": {
+    "codex-cli-opencode-go": {
         "client": "codex-cli",
-        "provider_id": "ollama-cloud",
-        "client_selector": "ollama-cloud/glm-5.2",
-        "canonical_model": "ollama-cloud/glm-5.2",
-        "gateway_model": "ollama-cloud/glm-5.2",
-        "endpoint_binding": "/v1/providers/ollama-cloud/responses",
+        "provider_id": "opencode-go",
+        "client_selector": "opencode-go/muse-spark-1.2-contributor",
+        "canonical_model": "opencode-go/muse-spark-1.2-contributor",
+        "gateway_model": "opencode-go/muse-spark-1.2-contributor",
+        "endpoint_binding": "/v1/providers/opencode-go/responses",
         "protocol": "responses",
     },
     "opencode-luna": {
@@ -137,13 +137,13 @@ EXPECTED_CASE_BINDINGS = {
         "endpoint_binding": "/v1/providers/openai/responses",
         "protocol": "responses",
     },
-    "opencode-ollama-cloud": {
+    "opencode-opencode-go": {
         "client": "opencode",
-        "provider_id": "ollama-cloud",
+        "provider_id": "opencode-go",
         "client_selector": THIRD_PARTY_MODEL,
         "canonical_model": THIRD_PARTY_MODEL,
-        "gateway_model": "ollama-cloud/glm-5.2",
-        "endpoint_binding": "/v1/providers/ollama-cloud/responses",
+        "gateway_model": "opencode-go/muse-spark-1.2-contributor",
+        "endpoint_binding": "/v1/providers/opencode-go/responses",
         "protocol": "responses",
     },
     "zcode-luna": {
@@ -155,13 +155,13 @@ EXPECTED_CASE_BINDINGS = {
         "endpoint_binding": "/v1/providers/openai/responses",
         "protocol": "responses",
     },
-    "zcode-ollama-cloud": {
+    "zcode-opencode-go": {
         "client": "zcode",
-        "provider_id": "ollama-cloud",
+        "provider_id": "opencode-go",
         "client_selector": THIRD_PARTY_MODEL,
         "canonical_model": THIRD_PARTY_MODEL,
-        "gateway_model": "ollama-cloud/glm-5.2",
-        "endpoint_binding": "/v1/providers/ollama-cloud/responses",
+        "gateway_model": "opencode-go/muse-spark-1.2-contributor",
+        "endpoint_binding": "/v1/providers/opencode-go/responses",
         "protocol": "responses",
     },
     "pi-luna": {
@@ -173,13 +173,13 @@ EXPECTED_CASE_BINDINGS = {
         "endpoint_binding": "/v1/providers/openai/responses",
         "protocol": "responses",
     },
-    "pi-ollama-cloud": {
+    "pi-opencode-go": {
         "client": "pi",
-        "provider_id": "ollama-cloud",
+        "provider_id": "opencode-go",
         "client_selector": THIRD_PARTY_MODEL,
         "canonical_model": THIRD_PARTY_MODEL,
-        "gateway_model": "ollama-cloud/glm-5.2",
-        "endpoint_binding": "/v1/providers/ollama-cloud/responses",
+        "gateway_model": "opencode-go/muse-spark-1.2-contributor",
+        "endpoint_binding": "/v1/providers/opencode-go/responses",
         "protocol": "responses",
     },
     "omp-luna": {
@@ -191,13 +191,13 @@ EXPECTED_CASE_BINDINGS = {
         "endpoint_binding": "/v1/providers/openai/responses",
         "protocol": "responses",
     },
-    "omp-ollama-cloud": {
+    "omp-opencode-go": {
         "client": "omp",
-        "provider_id": "ollama-cloud",
+        "provider_id": "opencode-go",
         "client_selector": THIRD_PARTY_MODEL,
         "canonical_model": THIRD_PARTY_MODEL,
-        "gateway_model": "ollama-cloud/glm-5.2",
-        "endpoint_binding": "/v1/providers/ollama-cloud/responses",
+        "gateway_model": "opencode-go/muse-spark-1.2-contributor",
+        "endpoint_binding": "/v1/providers/opencode-go/responses",
         "protocol": "responses",
     },
 }
@@ -271,10 +271,10 @@ def _prepare_run(
         ),
         encoding="utf-8",
     )
-    (isolation / "credentials" / "ollama.json").write_text(
+    (isolation / "credentials" / "opencode-go.json").write_text(
         json.dumps(
             {
-                "schema": "codexhub.real-client-ollama.v1",
+                "schema": "codexhub.real-client-opencode-go.v1",
                 "api_key": "fixture-ollama-private-token",
             }
         ),
@@ -370,9 +370,9 @@ def _finalize_manual_evidence(
                 (work / f"gui-{case_id}.launched").is_file()
                 for case_id in (
                     "desktop-luna",
-                    "desktop-ollama-cloud",
+                    "desktop-opencode-go",
                     "zcode-luna",
-                    "zcode-ollama-cloud",
+                    "zcode-opencode-go",
                 )
             )
         ):
@@ -706,11 +706,11 @@ def test_runner_invokes_candidate_materializer_for_every_managed_client(tmp_path
         for client in {"codex", "opencode", "zcode", "pi", "omp"}
     }
     assert applied_models == {
-        "codex": {"gpt-5.6-luna", "ollama-cloud/glm-5.2"},
-        "opencode": {"openai/gpt-5.6-luna", "ollama-cloud/glm-5.2"},
-        "zcode": {"openai/gpt-5.6-luna", "ollama-cloud/glm-5.2"},
-        "pi": {"openai/gpt-5.6-luna", "ollama-cloud/glm-5.2"},
-        "omp": {"openai/gpt-5.6-luna", "ollama-cloud/glm-5.2"},
+        "codex": {"gpt-5.6-luna", "opencode-go/muse-spark-1.2-contributor"},
+        "opencode": {"openai/gpt-5.6-luna", "opencode-go/muse-spark-1.2-contributor"},
+        "zcode": {"openai/gpt-5.6-luna", "opencode-go/muse-spark-1.2-contributor"},
+        "pi": {"openai/gpt-5.6-luna", "opencode-go/muse-spark-1.2-contributor"},
+        "omp": {"openai/gpt-5.6-luna", "opencode-go/muse-spark-1.2-contributor"},
     }
     assert all(
         item["route_protocol"] == "responses"
@@ -931,7 +931,7 @@ def test_opencodex_appdata_shim_fails_under_case_local_isolation(tmp_path):
         case["case_id"]
         for case in summary["cases"]
         if case["outcome"] == "failed"
-    } == {"codex-cli-luna", "codex-cli-ollama-cloud"}
+    } == {"codex-cli-luna", "codex-cli-opencode-go"}
     markers = list(
         (tmp_path / "output" / "isolated" / "work").glob(
             "codex-cli-*/opencodex-appdata-isolated.marker"
@@ -1137,13 +1137,13 @@ def test_cli_only_matrix_skips_gui_requirements_and_marks_scope(tmp_path):
     }
     assert [case["case_id"] for case in summary["cases"]] == [
         "codex-cli-luna",
-        "codex-cli-ollama-cloud",
+        "codex-cli-opencode-go",
         "opencode-luna",
-        "opencode-ollama-cloud",
+        "opencode-opencode-go",
         "pi-luna",
-        "pi-ollama-cloud",
+        "pi-opencode-go",
         "omp-luna",
-        "omp-ollama-cloud",
+        "omp-opencode-go",
     ]
     assert not (output / "manual-evidence.template.json").exists()
     assert not (output / "manual-evidence.json").exists()
@@ -1173,17 +1173,17 @@ def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summar
     }
     assert [case["case_id"] for case in summary["cases"]] == [
         "desktop-luna",
-        "desktop-ollama-cloud",
+        "desktop-opencode-go",
         "codex-cli-luna",
-        "codex-cli-ollama-cloud",
+        "codex-cli-opencode-go",
         "opencode-luna",
-        "opencode-ollama-cloud",
+        "opencode-opencode-go",
         "zcode-luna",
-        "zcode-ollama-cloud",
+        "zcode-opencode-go",
         "pi-luna",
-        "pi-ollama-cloud",
+        "pi-opencode-go",
         "omp-luna",
-        "omp-ollama-cloud",
+        "omp-opencode-go",
     ]
     assert {
         case["case_id"]: {
@@ -1201,7 +1201,7 @@ def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summar
         for case in summary["cases"]
     } == EXPECTED_CASE_BINDINGS
     assert [case["provider_id"] for case in summary["cases"]].count("official") == 6
-    assert [case["provider_id"] for case in summary["cases"]].count("ollama-cloud") == 6
+    assert [case["provider_id"] for case in summary["cases"]].count("opencode-go") == 6
     assert all(case["protocol"] == "responses" for case in summary["cases"])
     assert all("volc" not in case["case_id"] for case in summary["cases"])
     assert all(case["outcome"] == "passed" for case in summary["cases"])
@@ -1226,7 +1226,7 @@ def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summar
     for relative in (
         "isolated/account/profile.json",
         "isolated/account/auth.json",
-        "isolated/credentials/ollama.json",
+        "isolated/credentials/opencode-go.json",
         "isolated/config/gateway.json",
         "isolated/config/host-environment.json",
         "manual-evidence.json",
@@ -1364,7 +1364,7 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
     assert len(completes) == 16
     assert {event["model_canonical"] for event in completes} == {
         "gpt-5.6-luna",
-        "ollama-cloud/glm-5.2",
+        "opencode-go/muse-spark-1.2-contributor",
         "openai/gpt-5.6-luna",
     }
     production_fields = {
@@ -1409,7 +1409,7 @@ def test_third_party_managed_client_probes_do_not_receive_catalog_path(tmp_path)
     assert all(
         "--catalog-path" not in item["flags"]
         for item in invocations
-        if item["model"] == "ollama-cloud/glm-5.2"
+        if item["model"] == "opencode-go/muse-spark-1.2-contributor"
     )
 
 
@@ -1454,7 +1454,7 @@ def test_zcode_gui_consumes_catalog_from_isolated_roaming_appdata(tmp_path):
         / "isolated"
         / "work"
         / "gui-zcode"
-        / "zcode-ollama-cloud"
+        / "zcode-opencode-go"
     )
     catalog = (
         case_root
@@ -1468,7 +1468,7 @@ def test_zcode_gui_consumes_catalog_from_isolated_roaming_appdata(tmp_path):
     assert not (case_root / "appdata" / "ZCode" / "model-providers" / "codexhub.json").exists()
     payload = json.loads(catalog.read_text(encoding="utf-8-sig"))
     provider_ids = {provider["id"] for provider in payload.get("providers", [])}
-    assert provider_ids == {"codexhub-openai", "codexhub-ollama-cloud"}
+    assert provider_ids == {"codexhub-openai", "codexhub-opencode-go"}
     assert "codexhub-volc" not in provider_ids
 
 
@@ -1556,7 +1556,7 @@ def test_pi_rejects_stop_with_contradictory_error_message(tmp_path):
 def test_empty_account_and_arbitrary_credential_cannot_pass_preflight(tmp_path):
     def invalidate_identity(_output, isolation, _debug):
         (isolation / "account" / "profile.json").write_text("{}", encoding="utf-8")
-        (isolation / "credentials" / "ollama.json").write_text(
+        (isolation / "credentials" / "opencode-go.json").write_text(
             '{"api_key":"arbitrary"}', encoding="utf-8"
         )
 
@@ -1571,7 +1571,7 @@ def test_preflight_return_does_not_leave_a_manual_finalizer_thread(tmp_path):
     result = _run(
         tmp_path,
         mutate=lambda _output, isolation, _debug: (
-            isolation / "credentials" / "ollama.json"
+            isolation / "credentials" / "opencode-go.json"
         ).unlink(),
     )
 
@@ -2152,7 +2152,7 @@ def test_desktop_gui_cases_open_projects_via_ready_second_instance(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     work = tmp_path / "output" / "isolated" / "work"
     observed = {}
-    for case_id in ("desktop-luna", "desktop-ollama-cloud"):
+    for case_id in ("desktop-luna", "desktop-opencode-go"):
         initial_log = work / f"gui-{case_id}.launched.argv"
         initial_arguments = initial_log.read_text(encoding="ascii").strip()
         project_log = work / f"gui-{case_id}.launched.project.argv"
@@ -2171,7 +2171,7 @@ def test_desktop_gui_cases_open_projects_via_ready_second_instance(tmp_path):
             str(expected_workspace).casefold()
         )
         observed[case_id] = (initial_arguments, project_arguments)
-    assert observed["desktop-luna"] != observed["desktop-ollama-cloud"]
+    assert observed["desktop-luna"] != observed["desktop-opencode-go"]
 
 
 def test_gateway_exit_during_manual_evidence_fails_fast(tmp_path):
@@ -2207,7 +2207,7 @@ def test_zcode_gui_cases_open_their_case_local_workspaces(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     work = tmp_path / "output" / "isolated" / "work"
-    for case_id in ("zcode-luna", "zcode-ollama-cloud"):
+    for case_id in ("zcode-luna", "zcode-opencode-go"):
         arguments = (
             work / f"gui-{case_id}.launched.argv"
         ).read_text(encoding="ascii").strip()
@@ -2217,7 +2217,7 @@ def test_zcode_gui_cases_open_their_case_local_workspaces(tmp_path):
         )
 
 
-def test_candidate_runtime_declares_ollama_cloud_native_responses_route(tmp_path):
+def test_candidate_runtime_declares_opencode_go_native_responses_route(tmp_path):
     result = _run(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -2233,8 +2233,8 @@ def test_candidate_runtime_declares_ollama_cloud_native_responses_route(tmp_path
     )
     providers = (runtime_config / "providers.toml").read_text(encoding="utf-8")
     settings = json.loads((runtime_config.parent / "settings.json").read_text(encoding="utf-8-sig"))
-    assert 'id = "ollama-cloud"' in providers
-    assert 'base_url = "https://ollama.com/v1"' in providers
+    assert 'id = "opencode-go"' in providers
+    assert 'base_url = "https://opencode.ai/zen/go/v1"' in providers
     assert 'upstream_format = "responses"' in providers
     assert 'available_upstream_formats = ["responses"]' in providers
     assert "volc" not in providers.lower()
@@ -2242,7 +2242,7 @@ def test_candidate_runtime_declares_ollama_cloud_native_responses_route(tmp_path
     assert settings["gateway_enable_chat_completions"] is False
 
 
-def test_release_matrix_uses_ollama_cloud_native_responses(tmp_path):
+def test_release_matrix_uses_opencode_go_native_responses(tmp_path):
     result = _run(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -2257,8 +2257,8 @@ def test_release_matrix_uses_ollama_cloud_native_responses(tmp_path):
         / "config"
         / "providers.toml"
     ).read_text(encoding="utf-8")
-    assert 'id = "ollama-cloud"' in providers
-    assert 'base_url = "https://ollama.com/v1"' in providers
+    assert 'id = "opencode-go"' in providers
+    assert 'base_url = "https://opencode.ai/zen/go/v1"' in providers
     assert 'upstream_format = "responses"' in providers
     assert "volc" not in providers.lower()
     assert "localhost:11434" not in providers
@@ -2267,8 +2267,8 @@ def test_release_matrix_uses_ollama_cloud_native_responses(tmp_path):
         (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
     )
     canonical_models = summary["canonical_models"]
-    assert "ollama-cloud/glm-5.2" in canonical_models
-    assert "codexhub-ollama-cloud/glm-5.2" in canonical_models
+    assert "opencode-go/muse-spark-1.2-contributor" in canonical_models
+    assert "codexhub-opencode-go/muse-spark-1.2-contributor" in canonical_models
     assert "volc/glm-5.2" not in canonical_models
     assert "codexhub-volc/glm-5.2" not in canonical_models
 
@@ -2279,8 +2279,8 @@ def test_release_matrix_uses_ollama_cloud_native_responses(tmp_path):
             assert event["upstream_format"] == "responses"
             assert event["inbound_format"] == "responses"
             expected_provider = (
-                "ollama_cloud"
-                if event["model_canonical"] == "ollama-cloud/glm-5.2"
+                "opencode_go"
+                if event["model_canonical"] == "opencode-go/muse-spark-1.2-contributor"
                 else "official"
             )
             assert event["provider_id"] == expected_provider
@@ -2306,14 +2306,14 @@ def test_gui_cases_copy_reusable_state_into_fresh_isolated_roots(tmp_path):
         ("desktop-luna", "desktop-luna", "browser-profile/Preferences", "desktop-luna-state"),
         (
             "desktop-third-party",
-            "desktop-ollama-cloud",
+            "desktop-opencode-go",
             "browser-profile/Preferences",
             "desktop-third-party-state",
         ),
         ("zcode-luna", "zcode-luna", ".zcode/v2/telemetry-state.json", "zcode-luna-state"),
         (
             "zcode-third-party",
-            "zcode-ollama-cloud",
+            "zcode-opencode-go",
             ".zcode/v2/telemetry-state.json",
             "zcode-third-party-state",
         ),
@@ -2342,13 +2342,13 @@ def test_legacy_volc_gui_seed_falls_back_without_mutating_source(tmp_path):
     seeded_files = [
         (
             "desktop-volc",
-            "desktop-ollama-cloud",
+            "desktop-opencode-go",
             "browser-profile/Preferences",
             "legacy-desktop-state",
         ),
         (
             "zcode-volc",
-            "zcode-ollama-cloud",
+            "zcode-opencode-go",
             ".zcode/v2/telemetry-state.json",
             "legacy-zcode-state",
         ),
@@ -2391,7 +2391,7 @@ def test_desktop_gui_seed_preserves_onboarding_without_stale_identity_or_history
 
     seed_cases = (
         ("desktop-luna", "desktop-luna"),
-        ("desktop-third-party", "desktop-ollama-cloud"),
+        ("desktop-third-party", "desktop-opencode-go"),
     )
 
     def seed_gui_state(_output, isolation, _debug):
@@ -2601,7 +2601,7 @@ def test_desktop_gui_preserves_windows_identity_for_sandbox_acl_setup(
 
     assert result.returncode == 0, result.stdout + result.stderr
     work = tmp_path / "output" / "isolated" / "work"
-    for case_id in ("desktop-luna", "desktop-ollama-cloud"):
+    for case_id in ("desktop-luna", "desktop-opencode-go"):
         identity = (work / f"gui-{case_id}.launched.identity").read_text(
             encoding="ascii"
         )
@@ -2622,7 +2622,7 @@ def test_desktop_gui_launches_from_invocation_local_manifest_payload(tmp_path):
     staged_executable = staged_root / source_executable.name
     assert staged_executable.read_bytes() == source_executable.read_bytes()
     assert staged_executable.stat().st_ino != source_executable.stat().st_ino
-    for case_id in ("desktop-luna", "desktop-ollama-cloud"):
+    for case_id in ("desktop-luna", "desktop-opencode-go"):
         launch_path = (
             work / f"gui-{case_id}.launched.executable"
         ).read_text(encoding="ascii")
@@ -2816,7 +2816,7 @@ def test_manual_evidence_cannot_predate_template_and_gui_launch(tmp_path):
 
 def test_preflight_failure_emits_one_bounded_sanitized_summary(tmp_path):
     def remove_credentials(_output, isolation, _debug):
-        (isolation / "credentials" / "ollama.json").unlink()
+        (isolation / "credentials" / "opencode-go.json").unlink()
 
     result = _run(tmp_path, mutate=remove_credentials, finalize_manual=False)
 
@@ -2836,7 +2836,7 @@ def test_preflight_failure_emits_one_bounded_sanitized_summary(tmp_path):
 
 def test_supervisor_preserves_space_containing_authoritative_path_arguments(tmp_path):
     def remove_credentials(_output, isolation, _debug):
-        (isolation / "credentials" / "ollama.json").unlink()
+        (isolation / "credentials" / "opencode-go.json").unlink()
 
     run_root = tmp_path / "Authoritative Host Run"
     result = _run(
@@ -2947,9 +2947,9 @@ def test_manual_evidence_merge_is_deterministic_for_reordered_input(tmp_path):
     ]
     assert manual_ids == [
         "desktop-luna",
-        "desktop-ollama-cloud",
+        "desktop-opencode-go",
         "zcode-luna",
-        "zcode-ollama-cloud",
+        "zcode-opencode-go",
     ]
 
 
@@ -3625,15 +3625,14 @@ Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 def test_matrix_documentation_declares_native_responses_release_gate():
     documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
 
-    assert "Responses for the Official Luna leg and Native\nResponses for the Ollama Cloud leg" in documentation
-    assert "one full 12-case run is the Phase 0 / 0.1.7 release qualification" in documentation
-    assert "final frozen 0.1.7 candidate" in documentation
-    assert "previous Volc Chat Completions\npath remains available as ordinary, non-release regression coverage" in documentation
+    assert "OpenCode Go" in documentation and "muse-spark-1.2-contributor" in documentation
+    assert "-CliOnly" in documentation
+    assert "codexhub-opencode-go/muse-spark-1.2-contributor" in documentation
 
 
 def test_missing_credentials_fail_with_sanitized_summary_before_launch(tmp_path):
     def remove_credentials(_output, isolation, _debug):
-        (isolation / "credentials" / "ollama.json").unlink()
+        (isolation / "credentials" / "opencode-go.json").unlink()
 
     result = _run(tmp_path, mutate=remove_credentials)
 

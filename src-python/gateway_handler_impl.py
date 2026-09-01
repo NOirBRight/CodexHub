@@ -67,10 +67,8 @@ from gateway_error_dispatch import (
     emit_proxy_post_success,
     finish_proxy_post_downstream_write_failure,
 )
-from gateway_exchange_hooks import build_post_exchange_hooks
+from gateway_exchange_adapters import build_exchange_ports
 from gateway_exchange import (
-    ExchangeFailureTypes,
-    ExchangeHooks,
     ExchangeProgress,
     ExchangeRequest,
     InboundRequest,
@@ -1030,7 +1028,7 @@ class GatewayHandlerMixin:
             prepared_caller_body = body
 
             live = current_live()
-            exchange_hooks = build_post_exchange_hooks(live)
+            exchange_hooks = build_exchange_ports(live)
             exchange_progress = ExchangeProgress(
                 upstream_format=upstream_format,
                 downstream_sse_started=downstream_sse_started,

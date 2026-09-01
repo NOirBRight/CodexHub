@@ -86,7 +86,7 @@ def write_zcode(root: Path) -> None:
     gateway = "http://127.0.0.1:19190"
     specs = {
         "codexhub-openai": ("openai", "gpt-5.6-luna", "openai", "openai-responses", "responses"),
-        "codexhub-ollama-cloud": ("ollama-cloud", "glm-5.2", "openai", "openai-responses", "responses"),
+        "codexhub-opencode-go": ("opencode-go", "muse-spark-1.2-contributor", "openai", "openai-responses", "responses"),
     }
     catalog_providers = []
     cache_providers = []

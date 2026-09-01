@@ -1,25 +1,24 @@
 # Real-client E2E gate
 
-`scripts/Run-RealClientE2E.ps1` is the release-only Windows gate for proving
-that one candidate Debug build routes compatible clients through both canonical
-routes. HTTP/configuration preflight alone is never an E2E pass. Beta3 uses the
-explicit `-CliOnly` scope described below; the full GUI matrix remains available
-for a later release qualification.
+`scripts/Run-RealClientE2E.ps1` is the release-only Windows CLI-only gate for
+proving that one candidate Debug build routes compatible CLI clients through
+canonical routes. HTTP/configuration preflight alone is never an E2E pass. The
+authoritative Windows scope is permanently `-CliOnly`. Do not run Desktop or
+ZCode GUI/manual-evidence cases on Windows or Linux.
 
-Linux has its own GUI preflight, `scripts/e2e_linux_gui_clients.py`. It is
-required for a Linux ship and does not substitute for the Windows AppX host.
-On Linux, Codex Desktop is the installed `chatgpt` package (`codex-launcher`);
-CodexHub still calls it Codex Desktop. ZCode is `/opt/ZCode/zcode`. The Linux
-preflight checks package floors, isolated apply/readback, and an isolated-HOME
-GUI start/stop. Human finalization of `desktop-luna` / `zcode-luna` remains a
-separate Linux manual-evidence step.
+Ollama remains prohibited. The live third-party CLI leg is OpenCode Go
+`muse-spark-1.2-contributor` (client selector
+`codexhub-opencode-go/muse-spark-1.2-contributor`, Gateway route
+`opencode-go/muse-spark-1.2-contributor`). Dedicated input is
+`isolated/credentials/opencode-go.json` with schema
+`codexhub.real-client-opencode-go.v1`. Issue #497 tracks the Yoga credential.
 
 ## Authoritative host and compatibility baselines
 
 Run on the authoritative machine-bound local dedicated Windows host
 environment `codexhub-real-client-e2e` with a new output root, dedicated Codex
-login input, dedicated Ollama Cloud credential, and no reused host user session or
-client configuration. A VM or named snapshot is not required. The runner
+login input, and no reused host user session or client configuration. Do not
+supply Ollama credentials. Use `isolated/credentials/opencode-go.json`. A VM or named snapshot is not required. The runner
 verifies each native installed version against these compatibility floors
 before launching the candidate or a client:
 
@@ -87,7 +86,7 @@ Use a new output directory for every invocation. Before launch it contains:
       profile.json
       auth.json
     credentials/
-      ollama.json
+      opencode-go.json
     config/
       gateway.json
       host-environment.json
@@ -131,8 +130,8 @@ browser login state and is never uploaded.
 `auth.json` is freshly materialized directly in this invocation's isolated
 root; it is never discovered or copied from the current user's Codex home. It
 must use `chatgpt` mode and contain non-empty access and refresh tokens.
-`ollama.json` has schema
-`codexhub.real-client-ollama.v1` and one non-empty `api_key`. `gateway.json` has
+`opencode-go.json` has schema
+`codexhub.real-client-opencode-go.v1` and one non-empty `api_key`. `gateway.json` has
 schema `codexhub.real-client-gateway.v1`, a loopback `listen_port` below the
 Windows dynamic client range (`1024`–`49151`), and a dedicated
 `gateway_client_key`. Preflight must also be able to bind that port
@@ -193,10 +192,10 @@ Operators must not seed this state by hand or hard-code a context limit.
 
 After `refresh-models` succeeds, the runner contract-probes the actual passed
 `-ManagedClientConfigBuild` for Codex, OpenCode, ZCode, Pi, and OMP across both
-Official and Ollama Cloud selections. Each probe performs `preview`/`apply`/`readback`
+Official Luna selections. Each probe performs `preview`/`apply`/`readback`
 in the final case-local root, passing the explicit candidate runtime catalog
 via `--catalog-path` for every Official `gpt-5.6-luna` preview, apply, and
-readback probe. Ollama Cloud uses the production provider configuration
+readback probe. Official Luna uses `--catalog-path`; OpenCode Go Muse Spark uses the production provider configuration
 and its Native Responses route without a catalog-path override. The verified roots
 are then reused for the corresponding client launch. Thus the probe detects
 candidate #194 CLI schema drift and verifies that the candidate-managed catalog
@@ -258,14 +257,14 @@ Provider protocol selection comes only from #194 preview/apply/readback. The
 runner verifies those three results agree, then verifies the real Gateway
 diagnostics agree with the returned canonical route. Under the current
 production providers this yields Responses for the Official Luna leg and Native
-Responses for the Ollama Cloud leg; the runner contains no endpoint root, SDK, or
+Responses for Official Luna and OpenCode Go Muse Spark. The runner contains no endpoint root, SDK, or
 protocol-format generator.
 
 Every child receives a cleared environment with case-local `HOME`,
 `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `CODEX_HOME`, `XDG_CONFIG_HOME`,
 `TEMP`, and `TMP`. The candidate receives the production-consumed
 `CODEXHUB_RUNTIME_HOME`, `CODEXHUB_CODEX_TARGET_HOME`, exact verified
-`CODEXHUB_CODEX_PATH`, Gateway key, and Ollama environment values. The runner
+`CODEXHUB_CODEX_PATH`, and Gateway key. Do not inject Ollama environment values. The runner
 never discovers, copies, or modifies host shared sessions. Isolated inputs
 must be regular files under the invocation's `isolated/` root; reparse points
 and hard links fail as host-session reuse.
@@ -277,36 +276,33 @@ The fixed case order and selectors are:
 | Case | Client | Provider | Client selector | Gateway canonical route | Protocol | Finalization |
 |---|---|---|---|---|---|---|
 | `desktop-luna` | Codex Desktop | Official | `gpt-5.6-luna` | `gpt-5.6-luna` | `responses` | human GUI |
-| `desktop-ollama-cloud` | Codex Desktop | Ollama Cloud | `ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | `responses` | human GUI |
+| `desktop-opencode-go` | Codex Desktop | OpenCode Go | `opencode-go/muse-spark-1.2-contributor` | `opencode-go/muse-spark-1.2-contributor` | `responses` | human GUI |
 | `codex-cli-luna` | Codex CLI | Official | `gpt-5.6-luna` | `gpt-5.6-luna` | `responses` | automated |
-| `codex-cli-ollama-cloud` | Codex CLI | Ollama Cloud | `ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | `responses` | automated |
+| `codex-cli-opencode-go` | Codex CLI | OpenCode Go | `opencode-go/muse-spark-1.2-contributor` | `opencode-go/muse-spark-1.2-contributor` | `responses` | automated |
 | `opencode-luna` | OpenCode | Official | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | `responses` | automated |
-| `opencode-ollama-cloud` | OpenCode | Ollama Cloud | `codexhub-ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | `responses` | automated |
+| `opencode-opencode-go` | OpenCode | OpenCode Go | `codexhub-opencode-go/muse-spark-1.2-contributor` | `opencode-go/muse-spark-1.2-contributor` | `responses` | automated |
 | `zcode-luna` | ZCode | Official | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | `responses` | human GUI |
-| `zcode-ollama-cloud` | ZCode | Ollama Cloud | `codexhub-ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | `responses` | human GUI |
+| `zcode-opencode-go` | ZCode | OpenCode Go | `codexhub-opencode-go/muse-spark-1.2-contributor` | `opencode-go/muse-spark-1.2-contributor` | `responses` | human GUI |
 | `pi-luna` | Pi | Official | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | `responses` | automated |
-| `pi-ollama-cloud` | Pi | Ollama Cloud | `codexhub-ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | `responses` | automated |
+| `pi-opencode-go` | Pi | OpenCode Go | `codexhub-opencode-go/muse-spark-1.2-contributor` | `opencode-go/muse-spark-1.2-contributor` | `responses` | automated |
 | `omp-luna` | OMP | Official | `codexhub-openai/gpt-5.6-luna` | `openai/gpt-5.6-luna` | `responses` | automated |
-| `omp-ollama-cloud` | OMP | Ollama Cloud | `codexhub-ollama-cloud/glm-5.2` | `ollama-cloud/glm-5.2` | `responses` | automated |
+| `omp-opencode-go` | OMP | OpenCode Go | `codexhub-opencode-go/muse-spark-1.2-contributor` | `opencode-go/muse-spark-1.2-contributor` | `responses` | automated |
 
-The one full 12-case run is the Phase 0 / 0.1.7 release qualification and occurs
-only on the final frozen 0.1.7 candidate. Its third-party leg is the Ollama
-Cloud Native Responses path; the previous Volc Chat Completions
-path remains available as ordinary, non-release regression coverage and is not represented as
-Native Responses evidence in this matrix.
+The live Windows gate is `-CliOnly`: four Official Luna CLI cases plus four
+OpenCode Go Muse Spark CLI cases. Desktop/ZCode GUI rows stay in the table for
+archive only and are not run. Ollama remains prohibited.
 
-### Beta3 CLI-only verification
+### CLI-only verification
 
-Pass `-CliOnly` when the current release gate is limited to command-line
-clients. This mode runs exactly the eight automated cases for Codex CLI,
-OpenCode, Pi, and OMP (Official Luna and Ollama Cloud for each). It does not
-resolve or start Codex Desktop or ZCode, does not inspect GUI seeds, does not
+Always pass `-CliOnly` with `-ThirdPartyModel codexhub-opencode-go/muse-spark-1.2-contributor`.
+This runs eight automated cases for Codex CLI, OpenCode, Pi, and OMP (Official
+Luna and OpenCode Go Muse Spark 1.2 Contributor). The runner does not resolve
+or start Codex Desktop or ZCode GUI, does not inspect GUI seeds, does not
 require `gui_ready = true`, and never creates or waits for
 `manual-evidence.template.json` or `manual-evidence.json`. A CLI-only summary
-has `verification_scope = "cli_only"`, `manual_case_count = 0`, and
-`automated_case_count = 8`; its `pinned_versions` contains only the four CLI
-clients. The eight cases must still pass their normal model, route, streaming,
-tool, terminal, retry, and Gateway-correlation checks.
+has `verification_scope = "cli_only"` and `manual_case_count = 0`. All eight
+CLI cases must still pass their model, route, streaming, tool, terminal, retry,
+and Gateway-correlation checks.
 
 Each case creates one disposable `sentinel.txt`. The client must use exactly
 one successful read-only read tool, emit the named sentinel once, and finish
@@ -481,7 +477,7 @@ absolute path, or request/session/task identifier.
    modify any current user's Codex, ZCode, OpenCode, Pi, OMP, or provider
    session/configuration.
 2. Create a fresh output root and directly materialize its machine-bound host
-   manifest and dedicated Codex/Ollama Cloud inputs. Do not use links or copy an
+   manifest, dedicated Codex login, and OpenCode Go credential. Do not use Ollama credentials, links, or copy an
    existing host session, and do not create `isolated/work`.
 3. Check out the candidate. Run the exact `build-windows-portable.ps1 -Flavor
    debug -RepoRoot <absolute-repo-root>` command above, select the resulting
@@ -501,42 +497,21 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
   -ManagedClientConfigBuild <candidate-portable-path> `
   -ManagedClientConfigSha <candidate-materializer-sha> `
   -LunaModel codexhub-openai/gpt-5.6-luna `
-  -ThirdPartyModel codexhub-ollama-cloud/glm-5.2 `
+  -ThirdPartyModel codexhub-opencode-go/muse-spark-1.2-contributor `
   -OutputDirectory <path> `
   -HostEnvironmentManifest <path-to-host-environment.json> `
-  -OverallTimeoutSeconds 5400 `
-  -ManualEvidenceTimeoutSeconds 900
+  -CliOnly `
+  -OverallTimeoutSeconds 5400
 ```
 
-For the Beta3 CLI-only gate, add `-CliOnly` to the command. GUI seed
-directories, GUI executables, and manual evidence are not needed in that
-scope; the runner must exit `0` with `verification_scope` `cli_only` and eight
-passed cases.
+Always pass `-CliOnly`. Do not use Ollama credentials. GUI seed directories,
+GUI executables, and manual evidence are not needed.
 
-6. Wait for the template and four case-local GUI launches (Desktop and ZCode,
-   each with Luna and Ollama Cloud). Each launch consumes its own #194-applied
-   root.
-   Reusable Desktop GUI seeds preserve the browser profile and a normalized
-   allowlist of completed-onboarding state. The normalized `.codex` state
-   never copies project history, remote installation or host identity, session
-   databases, unknown fields, or stale workspace paths; browser-profile data
-   remains the dedicated-account login boundary.
-   Reusable ZCode GUI seeds preserve network/login state and durable UI
-   preferences, but the runner discards task databases and browser
-   local/session/IndexedDB state before launch. It also rewrites
-   `recentProjects` and `lastWorkspaceSession` to the fresh case root. This
-   prevents a copied task from silently resolving relative tools against an
-   older run while retaining the operator's completed setup.
-   Keep the candidate CodexHub window open (minimizing it is safe) until the
-   runner exits. Closing that window intentionally stops the current-session
-   Gateway before hiding CodexHub to the tray, so the manual matrix can no
-   longer produce valid evidence.
-   Complete and finalize the four GUI cases as described above while the
-   runner is waiting.
-7. Confirm exit `0`, summary outcome `passed`, all twelve cases passed, and the
-   SHA/run binding match. Upload only `summary.json` and the relative files in
-   its `artifacts` list. Never upload `isolated/`, the template, or manual
-   evidence.
+6. Official and OpenCode Go CLI cases run automated. ZCode is covered by
+   isolated `managed-client-config preview/apply/readback`, not GUI launch.
+7. Confirm all eight CLI cases passed and the SHA/run binding match. Upload
+   only `summary.json` and the relative files in its `artifacts` list. Never
+   upload `isolated/`.
 8. Repeat the Debug build and entire run after any candidate SHA change.
 
 The runner permits one retry only when the first attempt has a correlated
@@ -568,8 +543,8 @@ The legacy-named `pinned_versions` object contains the actual normalized version
 verified for this run, not the compatibility floors.
 Its `hashes` object contains exactly `debug_build` and
 `managed_client_config_build`; fingerprints of the host
-manifest, account profile/auth, Ollama credential, Gateway configuration, and
-manual evidence are forbidden. Failure summaries omit `run_binding_sha256`
+manifest, account profile/auth, Gateway configuration, and retired third-party
+credentials are forbidden. Failure summaries omit `run_binding_sha256`
 and `hashes`. Every successful per-case entry binds the client, Provider,
 client selector, canonical model, Gateway model, endpoint binding, and
 `responses` wire protocol alongside bounded timings and counts,

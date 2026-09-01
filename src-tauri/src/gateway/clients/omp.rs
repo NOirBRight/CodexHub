@@ -9,6 +9,8 @@ pub(in crate::gateway) fn omp_config_text(
     vision_selector: Option<&str>,
     default_reasoning_effort: Option<&str>,
 ) -> String {
+    // ADR-0004 / #435: modelRoles stays user-owned. Only insert a codexhub
+    // default when the user has none (activation is the user's own action).
     let default_selector = match default_reasoning_effort {
         Some(effort) if !effort.is_empty() => format!("{selector}:{effort}"),
         _ => selector.to_string(),
@@ -19,6 +21,14 @@ pub(in crate::gateway) fn omp_config_text(
     ];
     if let Some(vision_selector) = vision_selector {
         block.push(format!("  vision: {vision_selector}"));
+    }
+    // ADR-0004 / #435: if the user already has modelRoles, the config is
+    // user-owned — return it unchanged (activation is the user's action;
+    // only models.yml is managed).
+    if let Some(current) = current {
+        if current.lines().any(|line| is_top_level_yaml_key(line, "modelRoles")) {
+            return current.to_string();
+        }
     }
     let mut output = Vec::new();
     let mut inserted = false;
@@ -48,13 +58,62 @@ pub(in crate::gateway) fn omp_config_text(
 }
 
 pub(in crate::gateway) fn omp_models_yml_text(
+    current: Option<&str>,
     settings: &Settings,
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
     let groups = gateway_client_provider_groups(settings, providers, model)?;
     let api_key = yaml_scalar(&settings.gateway_client_key);
-    let mut output = "providers:\n".to_string();
+    // Provider Injection (#435): surgical merge. Preserve every user-owned
+    // provider block in the existing models.yml; only CodexHub provider
+    // entries are inserted/updated.
+    let mut foreign_blocks: Vec<String> = Vec::new();
+    if let Some(current) = current {
+        let mut block: Vec<String> = Vec::new();
+        let mut in_providers = false;
+        for line in current.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("providers:") {
+                in_providers = true;
+                continue;
+            }
+            if !in_providers {
+                continue;
+            }
+            // a top-level key (column 0) ends the providers map
+            if !line.starts_with(' ') && !line.trim().is_empty() {
+                if !block.is_empty() {
+                    foreign_blocks.push(block.join("\n"));
+                    block.clear();
+                }
+                continue;
+            }
+            // a new provider block starts with two-space indent + key
+            if line.starts_with("  ") && !line.starts_with("    ") && line.trim_end().ends_with(':') {
+                if !block.is_empty() {
+                    foreign_blocks.push(block.join("\n"));
+                    block.clear();
+                }
+                let provider_key = line.trim().trim_end_matches(':');
+                if is_codexhub_client_provider_id(provider_key) {
+                    // skip the whole codexhub-managed block
+                    block = Vec::new();
+                    continue;
+                }
+            }
+            block.push(line.to_string());
+        }
+        if !block.is_empty() {
+            foreign_blocks.push(block.join("\n"));
+        }
+    }
+    let mut output = String::new();
+    output.push_str("providers:\n");
+    for block in &foreign_blocks {
+        output.push_str(block);
+        output.push('\n');
+    }
     for group in &groups.providers {
         let base_url = yaml_scalar(&group.base_url);
         let api = group.endpoint_selection.pi_api();
@@ -277,7 +336,7 @@ pub(in crate::gateway) fn preview_omp_config_with_paths(
         vision_selector,
         default_reasoning_effort.as_deref(),
     );
-    let next_models = omp_models_yml_text(settings, providers, &model)?;
+    let next_models = omp_models_yml_text(None, settings, providers, &model)?;
     let mut message =
         "Apply will snapshot OMP config/models, then route OMP through CodexHub Gateway."
             .to_string();
@@ -301,28 +360,32 @@ pub(in crate::gateway) fn preview_omp_config_with_paths(
     })
 }
 
-pub(in crate::gateway) fn apply_omp_config_with_paths(
+pub(in crate::gateway) struct OmpApplyPlan {
+    pub config_path: PathBuf,
+    pub models_path: PathBuf,
+    pub next_config: String,
+    pub next_models: String,
+    pub skip_snapshot: bool,
+    pub vision_omitted: bool,
+}
+
+/// Pure next-text plan. Does not create backups or write the target files.
+pub(in crate::gateway) fn plan_omp_apply(
     config_path: &Path,
     models_path: &Path,
-    backup_root: &Path,
     settings: &Settings,
     providers: &[Provider],
     model: &str,
-) -> Result<GatewayClientApplyResult, String> {
+) -> Result<OmpApplyPlan, String> {
     let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let current_config = fs::read_to_string(config_path).unwrap_or_default();
     let current_models = fs::read_to_string(models_path).unwrap_or_default();
-    let backup_path = create_snapshot_backup(
-        "omp",
-        backup_root,
-        &[("config.yml", config_path), ("models.yml", models_path)],
-        is_omp_codexhub_config(&current_config, &current_models),
-    )?;
     let selector = gateway_client_model_selector(settings, providers, &model)?;
-    let vision_selector = if gateway_exported_model_supports_image(settings, providers, &model) {
-        Some(selector.as_str())
-    } else {
+    let vision_omitted = !gateway_exported_model_supports_image(settings, providers, &model);
+    let vision_selector = if vision_omitted {
         None
+    } else {
+        Some(selector.as_str())
     };
     let default_reasoning_effort =
         gateway_exported_model_default_reasoning_effort(settings, providers, &model);
@@ -332,11 +395,49 @@ pub(in crate::gateway) fn apply_omp_config_with_paths(
         vision_selector,
         default_reasoning_effort.as_deref(),
     );
-    let next_models = omp_models_yml_text(settings, providers, &model)?;
-    write_text_replace(config_path, &next_config)?;
-    write_text_replace(models_path, &next_models)?;
+    let next_models = omp_models_yml_text(Some(&current_models), settings, providers, &model)?;
+    Ok(OmpApplyPlan {
+        config_path: config_path.to_path_buf(),
+        models_path: models_path.to_path_buf(),
+        skip_snapshot: is_omp_codexhub_config(&current_config, &current_models),
+        vision_omitted,
+        next_config,
+        next_models,
+    })
+}
+
+#[cfg(test)]
+pub(in crate::gateway) fn apply_omp_config_with_paths(
+    config_path: &Path,
+    models_path: &Path,
+    backup_root: &Path,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<GatewayClientApplyResult, String> {
+    publish_omp_apply(
+        &plan_omp_apply(config_path, models_path, settings, providers, model)?,
+        backup_root,
+    )
+}
+
+pub(in crate::gateway) fn publish_omp_apply(
+    plan: &OmpApplyPlan,
+    backup_root: &Path,
+) -> Result<GatewayClientApplyResult, String> {
+    let backup_path = create_snapshot_backup(
+        "omp",
+        backup_root,
+        &[
+            ("config.yml", &plan.config_path),
+            ("models.yml", &plan.models_path),
+        ],
+        plan.skip_snapshot,
+    )?;
+    write_text_replace(&plan.config_path, &plan.next_config)?;
+    write_text_replace(&plan.models_path, &plan.next_models)?;
     let mut message = "OMP now routes through CodexHub Gateway.".to_string();
-    if vision_selector.is_none() {
+    if plan.vision_omitted {
         message.push_str(
             " OMP modelRoles.vision is omitted because the selected model is exported text-only.",
         );
@@ -344,7 +445,7 @@ pub(in crate::gateway) fn apply_omp_config_with_paths(
     Ok(GatewayClientApplyResult {
         client_id: "omp".to_string(),
         applied: true,
-        config_path: Some(config_path.to_path_buf()),
+        config_path: Some(plan.config_path.clone()),
         backup_path,
         message,
     })

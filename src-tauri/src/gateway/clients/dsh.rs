@@ -98,50 +98,45 @@ pub fn detect_dsh_client() -> DshClientInfo {
     }
 }
 
-fn dsh_expectation(
-    settings: &Settings,
-    providers: &[Provider],
-) -> crate::injection::ReadbackExpectation {
-    crate::injection::ReadbackExpectation {
-        base_url: endpoints(settings.proxy_port).base_url,
-        models: gateway_models_from_config(settings, providers)
-            .into_iter()
-            .map(|m| m.id)
-            .collect(),
-    }
-}
-
-pub fn dsh_client_connect() -> Result<crate::injection::DshLifecycleReport, String> {
-    let settings = config::get_settings()?;
-    let providers = config::get_providers()?;
+fn dsh_adapter_ctx<'a>(
+    settings: &'a Settings,
+    providers: &'a [Provider],
+) -> Result<super::super::managed_clients::AdapterCtx<'a>, String> {
     let root = crate::injection::dsh_descriptor()
         .client_home()
         .ok_or_else(|| "home directory could not be resolved".to_owned())?;
-    let request = crate::injection::MaskedSecret::new(settings.gateway_client_key.clone());
     let base_url = endpoints(settings.proxy_port).base_url;
-    let models = gateway_models_from_config(&settings, &providers)
+    let models = gateway_models_from_config(settings, providers)
         .into_iter()
         .map(|m| m.id)
         .collect();
-    crate::injection::dsh_connect(&root, base_url, request, models)
+    Ok(super::super::managed_clients::AdapterCtx {
+        settings,
+        providers,
+        base_url,
+        models,
+        client_root: root,
+    })
+}
+
+pub fn dsh_client_connect() -> Result<crate::injection::DshLifecycleReport, String> {
+    // DM-4: DSH lifecycle goes through the managed-client coordinator seam.
+    let settings = config::get_settings()?;
+    let providers = config::get_providers()?;
+    let ctx = dsh_adapter_ctx(&settings, &providers)?;
+    super::super::managed_clients::dsh_connect_plan(&ctx)
 }
 
 pub fn dsh_client_disconnect() -> Result<crate::injection::DshLifecycleReport, String> {
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
-    let root = crate::injection::dsh_descriptor()
-        .client_home()
-        .ok_or_else(|| "home directory could not be resolved".to_owned())?;
-    let expectation = dsh_expectation(&settings, &providers);
-    crate::injection::dsh_disconnect(&root, &expectation)
+    let ctx = dsh_adapter_ctx(&settings, &providers)?;
+    super::super::managed_clients::dsh_disconnect_plan(&ctx)
 }
 
 pub fn dsh_client_readback() -> Result<crate::injection::DshLifecycleReport, String> {
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
-    let root = crate::injection::dsh_descriptor()
-        .client_home()
-        .ok_or_else(|| "home directory could not be resolved".to_owned())?;
-    let expectation = dsh_expectation(&settings, &providers);
-    crate::injection::dsh_readback(&root, &expectation)
+    let ctx = dsh_adapter_ctx(&settings, &providers)?;
+    super::super::managed_clients::dsh_readback_plan(&ctx)
 }

@@ -39,8 +39,9 @@ MANAGED_CATALOG_FILENAMES = {
     "codexhub-model-catalog.json",
     "codex-proxy-official-ollama.json",
 }
+# ADR-0004 Codex exception: user-owned model_providers.openai is preserved.
+# Only Gateway-managed sections are stale (removed by the overlay rewrite).
 STALE_PROXY_PROVIDER_SECTIONS = (
-    "model_providers.openai",
     "model_providers.custom",
     "model_providers.codex_proxy",
 )

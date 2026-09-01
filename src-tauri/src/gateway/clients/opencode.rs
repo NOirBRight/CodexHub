@@ -12,10 +12,15 @@ pub(in crate::gateway) fn opencode_reasoning_variants(
 }
 
 pub(in crate::gateway) fn opencode_config_text(
+    current: Option<&str>,
     settings: &Settings,
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
+    // Provider Injection (ADR-0004 / #435): surgical merge. Preserve every
+    // user-owned provider and setting in the existing opencode.json; only
+    // the CodexHub provider entry is inserted/updated. model/small_model
+    // stay user-owned (never forced).
     let groups = gateway_client_provider_groups(settings, providers, model)?;
     let mut provider_map = Map::new();
     for group in &groups.providers {
@@ -64,14 +69,29 @@ pub(in crate::gateway) fn opencode_config_text(
             }),
         );
     }
-    let body = json!({
-        "$schema": "https://opencode.ai/config.json",
-        "model": groups.default_selector,
-        "small_model": groups.default_selector,
-        "provider": Value::Object(provider_map),
-    });
-    serde_json::to_string_pretty(&body)
-        .map(|text| format!("{text}\n"))
+
+    let mut base: Value = match current {
+        Some(text) if !text.trim().is_empty() => {
+            serde_json::from_str(text).unwrap_or(Value::Object(Map::new()))
+        }
+        _ => Value::Object(Map::new()),
+    };
+    if !base.is_object() {
+        base = Value::Object(Map::new());
+    }
+    let object = base.as_object_mut().ok_or_else(|| "OpenCode config root must be a JSON object".to_string())?;
+    // Preserve user-owned providers; drop stale codexhub entries.
+    if let Some(providers_object) = object.get_mut("provider").and_then(Value::as_object_mut) {
+        remove_codexhub_client_provider_entries(providers_object);
+        for (key, value) in provider_map {
+            providers_object.insert(key, value);
+        }
+    } else {
+        object.insert("provider".to_string(), Value::Object(provider_map));
+    }
+    serde_json::to_string_pretty(&base)
+        .map(|text| format!("{text}
+"))
         .map_err(|error| format!("failed to serialize OpenCode config: {error}"))
 }
 
@@ -426,23 +446,62 @@ pub(in crate::gateway) fn preview_opencode_config_with_path(
     let current = fs::read_to_string(config_path)
         .ok()
         .map(|text| sanitize_text(&text));
-    let next = opencode_config_text(settings, providers, model)?;
+    let next = opencode_config_text(current.as_deref(), settings, providers, model)?;
     Ok(GatewayClientConfigPreview {
         client_id: "opencode".to_string(),
         can_apply: config_path.exists(),
-        strategy: "managed_overwrite".to_string(),
+        strategy: "provider_injection".to_string(),
         config_path: Some(config_path.to_path_buf()),
         current_redacted: current,
         next_redacted: sanitize_text(&next),
         backup_required: true,
         message: if config_path.exists() {
-            "Apply will back up the current OpenCode config, then overwrite it with CodexHub managed config.".to_string()
+            "Apply will back up the current OpenCode config, then surgically add the CodexHub provider while preserving your own providers and settings.".to_string()
         } else {
             "OpenCode config does not exist yet; auto-apply is disabled until there is an official config to back up.".to_string()
         },
     })
 }
 
+pub(in crate::gateway) struct OpenCodeApplyPlan {
+    pub config_path: PathBuf,
+    pub next: String,
+    pub skip_snapshot: bool,
+}
+
+pub(in crate::gateway) enum OpenCodeApplyDecision {
+    NotApplied(GatewayClientApplyResult),
+    Apply(OpenCodeApplyPlan),
+}
+
+/// Pure next-text plan. Does not create backups or write the target file.
+pub(in crate::gateway) fn plan_opencode_apply(
+    config_path: &Path,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<OpenCodeApplyDecision, String> {
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    if !config_path.exists() {
+        return Ok(OpenCodeApplyDecision::NotApplied(GatewayClientApplyResult {
+            client_id: "opencode".to_string(),
+            applied: false,
+            config_path: Some(config_path.to_path_buf()),
+            backup_path: None,
+            message: "OpenCode config was not found; refusing managed overwrite without an official config backup.".to_string(),
+        }));
+    }
+    let current = fs::read_to_string(config_path)
+        .map_err(|error| format!("failed to read OpenCode config: {error}"))?;
+    let next = opencode_config_text(Some(&current), settings, providers, &model)?;
+    Ok(OpenCodeApplyDecision::Apply(OpenCodeApplyPlan {
+        config_path: config_path.to_path_buf(),
+        skip_snapshot: is_opencode_codexhub_config(&current),
+        next,
+    }))
+}
+
+#[cfg(test)]
 pub(in crate::gateway) fn apply_opencode_config_with_paths(
     config_path: &Path,
     backup_roots: &[(PathBuf, BackupChannel)],
@@ -450,39 +509,36 @@ pub(in crate::gateway) fn apply_opencode_config_with_paths(
     providers: &[Provider],
     model: &str,
 ) -> Result<GatewayClientApplyResult, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
-    if !config_path.exists() {
-        return Ok(GatewayClientApplyResult {
-            client_id: "opencode".to_string(),
-            applied: false,
-            config_path: Some(config_path.to_path_buf()),
-            backup_path: None,
-            message: "OpenCode config was not found; refusing managed overwrite without an official config backup.".to_string(),
-        });
+    match plan_opencode_apply(config_path, settings, providers, model)? {
+        OpenCodeApplyDecision::NotApplied(result) => Ok(result),
+        OpenCodeApplyDecision::Apply(plan) => publish_opencode_apply(&plan, backup_roots),
     }
+}
+
+pub(in crate::gateway) fn publish_opencode_apply(
+    plan: &OpenCodeApplyPlan,
+    backup_roots: &[(PathBuf, BackupChannel)],
+) -> Result<GatewayClientApplyResult, String> {
     let (backup_root, _) = backup_roots
         .first()
         .ok_or_else(|| "OpenCode apply requires at least one backup root".to_string())?;
     fs::create_dir_all(backup_root)
         .map_err(|error| format!("failed to create OpenCode backup directory: {error}"))?;
-    let current = fs::read_to_string(config_path)
-        .map_err(|error| format!("failed to read OpenCode config: {error}"))?;
-    let backup_path = if is_opencode_codexhub_config(&current) {
+    let backup_path = if plan.skip_snapshot {
         None
     } else {
         let path = backup_root.join(format!("opencode-{}.json", timestamp_millis()));
-        fs::copy(config_path, &path)
+        fs::copy(&plan.config_path, &path)
             .map_err(|error| format!("failed to back up OpenCode config: {error}"))?;
         Some(path)
     };
-    record_opencode_rollback_baseline(config_path, backup_roots)?;
-    let next = opencode_config_text(settings, providers, &model)?;
-    write_text_replace(config_path, &next)
+    record_opencode_rollback_baseline(&plan.config_path, backup_roots)?;
+    write_text_replace(&plan.config_path, &plan.next)
         .map_err(|_| "failed to write managed OpenCode config".to_string())?;
     Ok(GatewayClientApplyResult {
         client_id: "opencode".to_string(),
         applied: true,
-        config_path: Some(config_path.to_path_buf()),
+        config_path: Some(plan.config_path.clone()),
         backup_path,
         message: "OpenCode now routes through CodexHub Gateway.".to_string(),
     })

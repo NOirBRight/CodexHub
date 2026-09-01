@@ -46,6 +46,15 @@ Cross-module imports use the owning module's public name. An AST gate in
 (`compatible_request_body`, `official_passthrough_request_body`, …). It does
 not implement `lookup()`, `api`, or `__getattr__`.
 
+## DM-5 amendment: ports are adapters, not bags
+
+The Exchange ports introduced by campaign #491 DM-5 are typed protocols whose
+production implementations live in gateway_exchange_adapters.py. Each adapter
+method imports the owning module object and reads the attribute at call time —
+the same discipline as this ADR. Tests patch the owning module (e.g.
+gateway_transport.upstream_failure_class) after building the ports and assert
+the new implementation is observed without rebuilding them.
+
 ## Consequences
 
 New Gateway behavior is added on the owning module and called through a

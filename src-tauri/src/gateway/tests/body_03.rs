@@ -1648,6 +1648,32 @@ fn opencode_restore_empty_legacy_roots_classifies_bounded_cleanup() {
 }
 
 #[test]
+fn plan_omp_apply_does_not_write_or_backup() {
+    let root = unique_temp_dir("codexhub-omp-plan");
+    let config_path = root.join("config.yml");
+    let models_path = root.join("models.yml");
+    let original_config = "symbolPreset: unicode\nmodelRoles:\n  default: ollama/qwen\n";
+    let original_models = "providers:\n  ollama:\n    models:\n      - id: qwen\n";
+    fs::create_dir_all(root.as_path()).unwrap();
+    fs::write(&config_path, original_config).unwrap();
+    fs::write(&models_path, original_models).unwrap();
+    let settings = Settings::default();
+
+    let plan = super::plan_omp_apply(
+        &config_path,
+        &models_path,
+        &settings,
+        &[],
+        "openai/gpt-5.5",
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), original_config);
+    assert_eq!(fs::read_to_string(&models_path).unwrap(), original_models);
+    assert!(plan.next_models.contains("codexhub"));
+    assert!(!plan.skip_snapshot);
+}
+
+#[test]
 fn omp_apply_writes_models_yml_and_model_roles_with_backup() {
     let root = unique_temp_dir("codexhub-omp");
     let config_path = root.join("config.yml");
@@ -1682,10 +1708,13 @@ fn omp_apply_writes_models_yml_and_model_roles_with_backup() {
     assert!(backup_path.join("models.yml").exists());
     let config = fs::read_to_string(&config_path).unwrap();
     assert!(config.contains("symbolPreset: unicode"));
-    assert!(config.contains("modelRoles:\n  default: codexhub-openai/gpt-5.5"));
-    assert!(config.contains("  vision: codexhub-openai/gpt-5.5"));
+    // ADR-0004 / #435: user-owned modelRoles preserved unchanged.
+    assert!(config.contains("modelRoles:\n  default: ollama/qwen"));
+    assert!(config.contains("  vision: ollama/qwen-vision"));
     let models = fs::read_to_string(&models_path).unwrap();
-    assert!(models.contains("providers:\n  codexhub-openai:"));
+    // #435: foreign providers preserved first, codexhub provider merged in.
+    assert!(models.contains("providers:\n  ollama:"));
+    assert!(models.contains("\n  codexhub-openai:"));
     assert!(models.contains("baseUrl: \"http://127.0.0.1:9099/v1/providers/openai\""));
     assert!(models.contains("api: openai-responses"));
     assert!(models.contains("apiKey: \"codexhub-proxy\""));
@@ -1748,6 +1777,33 @@ fn omp_route_mode_detects_split_provider_from_config_without_models_file() {
     };
 
     assert_eq!(super::omp_route_mode(&paths), "hub");
+}
+
+#[test]
+fn plan_zcode_apply_does_not_write_or_backup() {
+    let root = unique_temp_dir("codexhub-zcode-plan");
+    let catalog_path = root.join("model-providers").join("codexhub.json");
+    let v2_config_path = root.join("v2").join("config.json");
+    let v2_cache_path = root.join("v2").join("bots-model-cache.v2.json");
+    fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(v2_config_path.parent().unwrap()).unwrap();
+    fs::write(&catalog_path, "{}").unwrap();
+    fs::write(&v2_config_path, "{}").unwrap();
+    fs::write(&v2_cache_path, "{}").unwrap();
+    let targets = super::ZcodeConfigTargets {
+        catalog_path: catalog_path.clone(),
+        v2_config_path: v2_config_path.clone(),
+        v2_cache_path: v2_cache_path.clone(),
+    };
+    let settings = Settings::default();
+
+    let plan = super::plan_zcode_apply(&targets, &settings, &[], "openai/gpt-5.5").unwrap();
+    assert_eq!(fs::read_to_string(&catalog_path).unwrap(), "{}");
+    assert_eq!(fs::read_to_string(&v2_config_path).unwrap(), "{}");
+    assert_eq!(fs::read_to_string(&v2_cache_path).unwrap(), "{}");
+    assert!(plan.next_catalog.contains("codexhub"));
+    assert!(plan.next_config.contains("codexhub"));
+    assert!(!plan.skip_snapshot);
 }
 
 #[test]

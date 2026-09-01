@@ -1,4 +1,47 @@
 #[test]
+fn omp_models_merge_preserves_foreign_providers_through_apply() {
+    // #435: surgical merge — user-owned providers survive apply.
+    let root = unique_temp_dir("codexhub-omp-merge");
+    let config_path = root.join("config.yml");
+    let models_path = root.join("models.yml");
+    fs::create_dir_all(root.as_path()).unwrap();
+    fs::write(&config_path, "modelRoles:
+  default: some-model
+").unwrap();
+    fs::write(
+        &models_path,
+        "providers:
+  ollama:
+    baseUrl: http://localhost:11434/v1
+    api: openai-completions
+    models:
+      - id: qwen2.5-coder:7b
+",
+    )
+    .unwrap();
+    let settings = Settings::default();
+    let providers = vec![];
+
+    let result = super::apply_omp_config_with_paths(
+        &config_path,
+        &models_path,
+        &root.join("backups"),
+        &settings,
+        &providers,
+        "openai/gpt-5.5",
+    )
+    .unwrap();
+    assert!(result.applied);
+    let written = fs::read_to_string(&models_path).unwrap();
+    // Foreign provider preserved, codexhub providers added.
+    assert!(written.contains("ollama:"), "foreign provider preserved: {written}");
+    assert!(written.contains("codexhub"), "codexhub provider present: {written}");
+    // User-owned modelRoles untouched.
+    let config = fs::read_to_string(&config_path).unwrap();
+    assert!(config.contains("some-model"), "user modelRoles preserved: {config}");
+}
+
+#[test]
 fn omp_models_omit_unknown_context_window_instead_of_inventing_a_default() {
     let settings = Settings {
         include_official_models: false,
@@ -31,7 +74,7 @@ fn omp_models_omit_unknown_context_window_instead_of_inventing_a_default() {
     }];
 
     let text =
-        omp_models_yml_text(&settings, &providers, "ollama-cloud/nemotron-3-nano:30b").unwrap();
+        omp_models_yml_text(None, &settings, &providers, "ollama-cloud/nemotron-3-nano:30b").unwrap();
 
     assert!(text.contains("codexhub-ollama-cloud:"));
     assert!(text.contains("id: \"nemotron-3-nano:30b\""));
@@ -773,6 +816,27 @@ fn usage_pricing_includes_official_cached_input_rates() {
 }
 
 #[test]
+fn plan_opencode_apply_does_not_write_or_backup() {
+    let root = unique_temp_dir("codexhub-opencode-plan");
+    let config_path = root.join("opencode.json");
+    let original = r#"{"model":"anthropic/claude-sonnet-4"}"#;
+    fs::create_dir_all(root.as_path()).unwrap();
+    fs::write(&config_path, original).unwrap();
+    let settings = Settings::default();
+
+    let decision = super::plan_opencode_apply(&config_path, &settings, &[], "openai/gpt-5.5")
+        .unwrap();
+    match decision {
+        super::OpenCodeApplyDecision::Apply(plan) => {
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+            assert!(plan.next.contains("codexhub"));
+            assert!(!plan.skip_snapshot);
+        }
+        super::OpenCodeApplyDecision::NotApplied(_) => panic!("expected apply plan"),
+    }
+}
+
+#[test]
 fn opencode_apply_creates_backup_before_managed_overwrite() {
     let root = unique_temp_dir("codexhub-opencode");
     let config_path = root.join("opencode.json");
@@ -795,7 +859,8 @@ fn opencode_apply_creates_backup_before_managed_overwrite() {
     let written = fs::read_to_string(&config_path).unwrap();
     assert!(written.contains("codexhub"));
     assert!(!written.contains("codexhub_managed"));
-    assert!(written.contains("openai/gpt-5.5"));
+    // ADR-0004 / #435: the user's model selection stays untouched.
+    assert!(written.contains("anthropic/claude-sonnet-4"));
     assert!(written.contains("codexhub-proxy"));
 }
 
@@ -829,7 +894,8 @@ fn opencode_apply_does_not_back_up_managed_config() {
         .unwrap_or(false));
     let written = fs::read_to_string(&config_path).unwrap();
     assert!(!written.contains("codexhub_managed"));
-    assert!(written.contains("openai/gpt-5.4"));
+    // ADR-0004 / #435: the existing model selection stays user-owned.
+    assert!(written.contains("codexhub/openai/gpt-5.5"));
 }
 
 #[test]
@@ -1097,6 +1163,33 @@ fn opencode_beta_takeover_adopts_stable_legacy_baseline() {
     assert!(fs::read_to_string(&config_path)
         .unwrap()
         .contains("anthropic/claude-sonnet-4-stable"));
+}
+
+#[test]
+fn plan_pi_apply_does_not_write_or_backup() {
+    let root = unique_temp_dir("codexhub-pi-plan");
+    let settings_path = root.join("settings.json");
+    let models_path = root.join("models.json");
+    let original_settings =
+        r#"{"defaultProvider":"anthropic","defaultModel":"claude-sonnet-4"}"#;
+    let original_models = r#"{"providers":{}}"#;
+    fs::create_dir_all(root.as_path()).unwrap();
+    fs::write(&settings_path, original_settings).unwrap();
+    fs::write(&models_path, original_models).unwrap();
+    let settings = Settings::default();
+
+    let plan = super::plan_pi_apply(
+        &settings_path,
+        &models_path,
+        &settings,
+        &[],
+        "openai/gpt-5.5",
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(&settings_path).unwrap(), original_settings);
+    assert_eq!(fs::read_to_string(&models_path).unwrap(), original_models);
+    assert!(plan.next_models.contains("codexhub"));
+    assert!(!plan.skip_snapshot);
 }
 
 #[test]

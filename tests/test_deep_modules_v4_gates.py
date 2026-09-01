@@ -12,9 +12,10 @@ COMPAT_ROOT = SRC_PYTHON / "gateway_compat"
 # Measured sizes + 10%, pinned so the files cannot grow back to the 3000 cap.
 HANDLER_IMPL_LINE_BUDGET = 1972  # 1812 <= 1972 (handler did not need a raise)
 RELAY_LINE_BUDGET = 2986  # 2715 * 1.10
-EXCHANGE_LINE_BUDGET = 689  # 627 * 1.10
+EXCHANGE_LINE_BUDGET = 1040  # policy moved into owning module (was 689)
 BINDINGS_LINE_BUDGET = 310  # 282 * 1.10
-HOOKS_LINE_BUDGET = 575  # 523 * 1.10
+PORTS_LINE_BUDGET = 130  # gateway_exchange_ports.py
+ADAPTERS_LINE_BUDGET = 300  # gateway_exchange_adapters.py
 DISPATCH_LINE_BUDGET = 920  # 837 * 1.10
 
 
@@ -113,19 +114,22 @@ def test_handler_impl_and_relay_line_budgets_are_ratcheted() -> None:
     relay_count = _line_count(SRC_PYTHON / "gateway_relay.py")
     exchange_count = _line_count(SRC_PYTHON / "gateway_exchange.py")
     bindings_count = _line_count(SRC_PYTHON / "gateway_exchange_bindings.py")
-    hooks_count = _line_count(SRC_PYTHON / "gateway_exchange_hooks.py")
+    ports_count = _line_count(SRC_PYTHON / "gateway_exchange_ports.py")
+    adapters_count = _line_count(SRC_PYTHON / "gateway_exchange_adapters.py")
     dispatch_count = _line_count(SRC_PYTHON / "gateway_error_dispatch.py")
     assert handler_count <= HANDLER_IMPL_LINE_BUDGET, f"gateway_handler_impl.py is {handler_count} lines"
     assert relay_count <= RELAY_LINE_BUDGET, f"gateway_relay.py is {relay_count} lines"
     assert exchange_count <= EXCHANGE_LINE_BUDGET, f"gateway_exchange.py is {exchange_count} lines"
     assert bindings_count <= BINDINGS_LINE_BUDGET, f"gateway_exchange_bindings.py is {bindings_count} lines"
-    assert hooks_count <= HOOKS_LINE_BUDGET, f"gateway_exchange_hooks.py is {hooks_count} lines"
+    assert ports_count <= PORTS_LINE_BUDGET, f"gateway_exchange_ports.py is {ports_count} lines"
+    assert adapters_count <= ADAPTERS_LINE_BUDGET, f"gateway_exchange_adapters.py is {adapters_count} lines"
     assert dispatch_count <= DISPATCH_LINE_BUDGET, f"gateway_error_dispatch.py is {dispatch_count} lines"
     assert HANDLER_IMPL_LINE_BUDGET < 3000
     assert RELAY_LINE_BUDGET < 3000
     assert EXCHANGE_LINE_BUDGET < 3000
     assert BINDINGS_LINE_BUDGET < 3000
-    assert HOOKS_LINE_BUDGET < 3000
+    assert PORTS_LINE_BUDGET < 3000
+    assert ADAPTERS_LINE_BUDGET < 3000
     assert DISPATCH_LINE_BUDGET < 3000
 
 
@@ -142,7 +146,7 @@ def _contains_handler_impl_import(source: str) -> bool:
 
 
 def test_extracted_post_modules_do_not_import_handler_impl() -> None:
-    for name in ("gateway_error_dispatch.py", "gateway_exchange_hooks.py"):
+    for name in ("gateway_error_dispatch.py", "gateway_exchange_adapters.py"):
         source = (SRC_PYTHON / name).read_text(encoding="utf-8")
         assert not _contains_handler_impl_import(source), f"{name} imports gateway_handler_impl"
         assert "post_request_live_from_locals" not in source
@@ -152,7 +156,7 @@ def test_extracted_post_modules_do_not_import_handler_impl() -> None:
 def test_extracted_post_modules_do_not_shadow_imported_modules() -> None:
     """Assignment like `route_plan = live.route_plan` must not hide `import route_plan`."""
 
-    for name in ("gateway_error_dispatch.py", "gateway_exchange_hooks.py"):
+    for name in ("gateway_error_dispatch.py", "gateway_exchange_adapters.py"):
         tree = ast.parse((SRC_PYTHON / name).read_text(encoding="utf-8"))
         imported: set[str] = set()
         for node in tree.body:

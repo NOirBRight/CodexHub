@@ -333,7 +333,9 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertIn("responses_websockets_v2 = false", updated)
             self.assertNotIn("openai_base_url", updated)
             self.assertNotIn("[model_providers.codex_proxy]", updated)
-            self.assertEqual(updated.count("[model_providers.openai]"), 0)
+            # ADR-0004 Codex exception: user-owned model_providers.openai is
+            # preserved through the overlay rewrite (foreign providers stay).
+            self.assertEqual(updated.count("[model_providers.openai]"), 1)
             self.assertLess(updated.index('model_reasoning_effort = "xhigh"'), updated.index("[model_providers.custom]"))
             self.assertLess(updated.index("[model_providers.custom]"), updated.index("[features]"))
 

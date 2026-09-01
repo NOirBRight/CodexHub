@@ -11,8 +11,8 @@ import { changeAppLocale } from "./i18n";
 import { cx } from "./lib/format";
 import { historyIssueKey } from "./lib/history";
 import { addDays, endOfDay, startOfDay } from "./lib/dateRange";
-import { AppUpdater } from "./lib/appUpdater";
 import { api, messageFromError } from "./lib/tauri";
+import { useAppUpdateLifecycle } from "./hooks/useAppUpdateLifecycle";
 import contract from "./lib/ui-contract.json";
 import {
   createEmptyRuntimeSnapshot,
@@ -24,7 +24,6 @@ import {
   type RuntimeData,
   type RuntimeSnapshot,
 } from "./lib/runtimeStore";
-import { isUpdateInstallActive, updateInstallToastText } from "./lib/updateStatus";
 import type {
   AppFlavorInfo,
   AppStatus,
@@ -74,9 +73,6 @@ type GatewayClientVersionCacheEntry = {
 };
 
 const GATEWAY_CLIENT_VERSION_CACHE_KEY = "codexhub.gatewayClientVersions.v1";
-const STARTUP_UPDATE_CHECK_DELAY_MS = 2500;
-const APP_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const UPDATE_INSTALL_STATUS_POLL_MS = 500;
 
 function defaultUsageWindow(): UsageQueryWindow {
   const end = startOfDay(new Date());
@@ -254,19 +250,22 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [codexSwitchRequest, setCodexSwitchRequest] = useState<CodexSwitchRequest | null>(null);
-  const [updateBusy, setUpdateBusy] = useState<"check" | null>(null);
-  const [updateInstallStatus, setUpdateInstallStatus] = useState<AppUpdateInstallStatus | null>(null);
-  const [updateInstallSource, setUpdateInstallSource] = useState<"settings" | "toast" | null>(null);
   const [usageWindow, setUsageWindow] = useState<UsageQueryWindow>(() => defaultUsageWindow());
   const runtimeInflight = useRef<Partial<Record<RuntimeCacheKey, Promise<unknown>>>>({});
   const runtimeRef = useRef<RuntimeSnapshot | null>(null);
-  const startupUpdateCheckStarted = useRef(false);
-  const updateAvailableToastId = useRef<string | null>(null);
-  const updateInstallToastId = useRef<string | null>(null);
   const trayToastIds = useRef<Map<string, string>>(new Map());
   const nextCodexSwitchRequestId = useRef(1);
   runtimeRef.current = runtime;
   const settingsLoaded = Boolean(runtime.settings.data);
+
+  const appUpdate = useAppUpdateLifecycle({
+    getRuntime: () => runtimeRef.current ?? runtime,
+    setRuntime: (update) => setRuntime(update),
+    translate: t,
+  });
+  const { view: updateView } = appUpdate;
+  const updateBusy = updateView.busy;
+  const updateInstallStatus = updateView.installStatus;
 
   const runCachedRequest = useCallback(async <K extends RuntimeCacheKey>(
     key: K,
@@ -487,126 +486,13 @@ export default function App() {
     }
   }, [runCachedRequest, t]);
 
-  const loadAppUpdateStatus = useCallback(async () => {
-    return runCachedRequest(
-      "updateStatus",
-      async () => {
-        const status = await AppUpdater.check();
-        if (!status) {
-          throw new Error(t("settings.desktopUpdatesUnavailable"));
-        }
-        return status;
-      },
-      {
-        force: true,
-        quiet: true,
-        apply: (current, nextStatus) =>
-          setCacheData(
-            setCacheData(current, "appVersion", { current_version: nextStatus.current_version }),
-            "updateStatus",
-            nextStatus,
-          ),
-      },
-    );
-  }, [runCachedRequest, t]);
 
-  const updateInstallToast = useCallback(
-    (status: AppUpdateInstallStatus, source: "settings" | "toast" | null = updateInstallSource) => {
-      if (!updateInstallToastId.current) {
-        return;
-      }
-      updateToast(updateInstallToastId.current, {
-        action: null,
-        text: updateInstallToastText(status, t),
-        tone: status.phase === "failed" ? "error" : isUpdateInstallActive(status) ? "loading" : "success",
-      });
-      if (!isUpdateInstallActive(status)) {
-        updateInstallToastId.current = null;
-      }
-    },
-    [t, updateInstallSource, updateToast],
-  );
 
-  const startAppUpdateInstall = useCallback(
-    async (source: "settings" | "toast" = "settings") => {
-      if (!(await confirmAction({
-        cancelLabel: t("common.cancel"),
-        confirmLabel: t("common.confirm"),
-        message: t("settings.updateInstallConfirm"),
-        title: t("common.confirm"),
-      }))) {
-        return;
-      }
-      const toastId = updateAvailableToastId.current;
-      if (toastId) {
-        dismissToast(toastId);
-        updateAvailableToastId.current = null;
-      }
 
-      setUpdateInstallSource(source);
-      {
-        updateInstallToastId.current = showToast({
-          dedupeKey: "app-update-install",
-          text: t("settings.downloadingUpdate"),
-          timeoutMs: null,
-          tone: "loading",
-        });
-      }
 
-      try {
-        const status = await AppUpdater.install();
-        if (!status) {
-          const unavailable = t("settings.desktopUpdatesUnavailable");
-          if (updateInstallToastId.current) {
-            updateToast(updateInstallToastId.current, {
-              action: null,
-              text: unavailable,
-              tone: "info",
-            });
-            updateInstallToastId.current = null;
-          } else {
-            showToast(unavailable, "info");
-          }
-          return;
-        }
-        setUpdateInstallStatus(status);
-        updateInstallToast(status, source);
-      } catch (err) {
-        const message = messageFromError(err);
-        const failedStatus = failedUpdateInstallStatus(
-          updateInstallStatus,
-          runtimeRef.current?.appVersion.data?.current_version ?? "",
-          runtimeRef.current?.updateStatus.data?.latest_version ?? null,
-          message,
-        );
-        setUpdateInstallStatus(failedStatus);
-        updateInstallToast(failedStatus, source);
-      }
-    },
-    [confirmAction, dismissToast, showToast, t, updateInstallStatus, updateInstallToast],
-  );
 
-  const checkForUpdates = useCallback(async () => {
-    setUpdateBusy("check");
-    try {
-      const status = await loadAppUpdateStatus();
-      showToast({
-        text: status.available && status.latest_version
-          ? t("settings.updateAvailable", { version: status.latest_version })
-          : t("settings.noUpdatesAvailable"),
-        tone: status.available ? "info" : "success",
-      });
-      return status;
-    } catch (err) {
-      showToast({
-        text: t("settings.updateCheckFailed", { message: messageFromError(err) }),
-        tone: "error",
-      });
-      return null;
-    } finally {
-      setUpdateBusy(null);
-    }
-  }, [loadAppUpdateStatus, showToast, t]);
+
+
 
   const repairConversationHistory = useCallback(async () => {
     setBusy("history");
@@ -655,26 +541,7 @@ export default function App() {
     }
   }, [dismissToast, showToast, t, updateToast]);
 
-  const runAutomaticUpdateCheck = useCallback(async () => {
-    try {
-      const status = await loadAppUpdateStatus();
-      if (!status?.available || !status.latest_version) {
-        return;
-      }
-      updateAvailableToastId.current = showToast({
-        dedupeKey: "app-update-available",
-        action: {
-          label: t("settings.update"),
-          onClick: () => void startAppUpdateInstall("toast"),
-        },
-        text: t("settings.updateAvailable", { version: status.latest_version }),
-        timeoutMs: null,
-        tone: "info",
-      });
-    } catch {
-      // Automatic update checks are best-effort and should not create noisy banners.
-    }
-  }, [loadAppUpdateStatus, showToast, startAppUpdateInstall, t]);
+
 
   const updateUsageWindow = useCallback((nextWindow: UsageQueryWindow) => {
     setUsageWindow((current) => {
@@ -780,80 +647,12 @@ export default function App() {
   }, [selectTab]);
 
   useEffect(() => {
-    if (startupUpdateCheckStarted.current || !settingsLoaded) {
-      return;
-    }
-    startupUpdateCheckStarted.current = true;
-    const timer = window.setTimeout(
-      () => void runAutomaticUpdateCheck(),
-      STARTUP_UPDATE_CHECK_DELAY_MS,
-    );
-    const interval = window.setInterval(() => void runAutomaticUpdateCheck(), APP_UPDATE_CHECK_INTERVAL_MS);
-    return () => {
-      window.clearTimeout(timer);
-      window.clearInterval(interval);
-    };
-  }, [runAutomaticUpdateCheck, settingsLoaded]);
+    appUpdate.startScheduling(settingsLoaded);
+  }, [appUpdate, settingsLoaded]);
 
-  useEffect(() => {
-    const timer = window.setTimeout(async () => {
-      try {
-        const completion = await api.consumeAppUpdateCompletion();
-        if (!completion?.completed) {
-          return;
-        }
-        showToast(t("settings.updateInstalled", { version: completion.current_version }), "success");
-        setRuntime((current) =>
-          setCacheData(current, "appVersion", { current_version: completion.current_version }),
-        );
-      } catch {
-        // Completion verification is best-effort; pending failures should not interrupt startup.
-      }
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [showToast, t]);
 
-  useEffect(() => {
-    if (!isUpdateInstallActive(updateInstallStatus)) {
-      return;
-    }
 
-    let cancelled = false;
-    const timer = window.setInterval(async () => {
-      try {
-        const status = await api.getAppUpdateInstallStatus();
-        if (cancelled) {
-          return;
-        }
-        setUpdateInstallStatus(status);
-        updateInstallToast(status);
-        if (updateInstallSource === "settings" && status.phase === "failed") {
-          showToast(t("settings.updateInstallFailed", { message: status.message }), "error");
-        }
-      } catch (err) {
-        if (cancelled || updateInstallStatus?.phase === "installing" || updateInstallStatus?.phase === "restarting") {
-          return;
-        }
-        const message = messageFromError(err);
-        const failedStatus = failedUpdateInstallStatus(
-          updateInstallStatus,
-          runtimeRef.current?.appVersion.data?.current_version ?? "",
-          runtimeRef.current?.updateStatus.data?.latest_version ?? null,
-          message,
-        );
-        setUpdateInstallStatus(failedStatus);
-        updateInstallToast(failedStatus);
-        if (updateInstallSource === "settings") {
-          showToast(t("settings.updateInstallFailed", { message }), "error");
-        }
-      }
-    }, UPDATE_INSTALL_STATUS_POLL_MS);
 
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [showToast, t, updateInstallSource, updateInstallStatus, updateInstallToast]);
 
   useEffect(() => {
     if (!settingsOpen || runtime.appVersion.data || runtime.appVersion.loading) {
@@ -1158,34 +957,19 @@ export default function App() {
         settings={settings}
         updateInstallStatus={updateInstallStatus}
         updateBusy={updateBusy}
-        updateStatus={runtime.updateStatus.data}
+        updateStatus={updateView.updateStatus ?? runtime.updateStatus.data}
         visionModels={visionModels}
-        onCheckUpdate={checkForUpdates}
+        onCheckUpdate={appUpdate.checkForUpdates}
         onClose={closeSettings}
-        onInstallUpdate={() => startAppUpdateInstall("settings")}
+        onInstallUpdate={async () => {
+          await appUpdate.startInstall("settings");
+        }}
         onSave={saveSettings}
         onSyncHistory={syncHistory}
       />
     </div>
     </FitStage>
   );
-}
-
-function failedUpdateInstallStatus(
-  previous: AppUpdateInstallStatus | null,
-  currentVersion: string,
-  targetVersion: string | null,
-  message: string,
-): AppUpdateInstallStatus {
-  return {
-    phase: "failed",
-    current_version: previous?.current_version || currentVersion,
-    target_version: previous?.target_version ?? targetVersion,
-    downloaded_bytes: previous?.downloaded_bytes ?? 0,
-    total_bytes: previous?.total_bytes ?? null,
-    message,
-    updated_at: new Date().toISOString(),
-  };
 }
 
 function runtimeActionLoadingMessage(label: string, t: (key: string) => string) {
