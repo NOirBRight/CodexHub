@@ -319,6 +319,47 @@ def test_dsh_writes_leave_the_foreign_lock_namespace_available(tmp_path: Path, n
     os.close(fd)
 
 
+@pytest.mark.parametrize(
+    ("client", "file_name", "namespace"),
+    [
+        (".pi", "models.json", "pi"),
+        (".pi", "settings.json", "pi"),
+        (".omp", "models.yml", "omp"),
+        (".omp", "config.yml", "omp"),
+    ],
+)
+def test_agent_client_writes_leave_the_foreign_lock_namespace_available(
+    tmp_path: Path, client: str, file_name: str, namespace: str
+) -> None:
+    agent = tmp_path / client / "agent"
+    target = agent / file_name
+
+    atomic_write_text(target, "new\n")
+
+    adjacent_lock = target.with_name(f"{file_name}.lock")
+    assert not adjacent_lock.exists()
+    assert not target.with_name(f"{file_name}.lock.guard").exists()
+    private_lock = tmp_path / ".codexhub" / "locks" / namespace / f"{file_name}.lock"
+    assert private_lock.read_text(encoding="ascii") == "codexhub-atomic-lock=1\n"
+    adjacent_lock.mkdir()
+
+
+def test_displaced_codexhub_protocol_file_is_cleared_from_pi_lock_namespace(tmp_path: Path) -> None:
+    agent = tmp_path / ".pi" / "agent"
+    target = agent / "settings.json"
+    adjacent_lock = target.with_name("settings.json.lock")
+    adjacent_guard = target.with_name("settings.json.lock.guard")
+    agent.mkdir(parents=True)
+    adjacent_lock.write_text("codexhub-atomic-lock=1\n", encoding="ascii")
+    adjacent_guard.write_text("", encoding="ascii")
+
+    atomic_write_text(target, "new\n")
+
+    assert not adjacent_lock.exists()
+    assert not adjacent_guard.exists()
+    adjacent_lock.mkdir()
+
+
 def test_crashed_codexhub_dsh_lock_does_not_occupy_the_foreign_namespace(tmp_path: Path) -> None:
     dsh = tmp_path / ".dsh"
     dsh.mkdir()

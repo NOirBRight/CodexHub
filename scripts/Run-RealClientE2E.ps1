@@ -401,7 +401,7 @@ function Get-FailureSummaryValue {
         outcome = 'failed'
         failure_classification = $FailureClassification
         pinned_versions = Get-ReportedClientVersions
-        canonical_models = @('gpt-5.6-luna', 'ollama-cloud/glm-5.2', 'codexhub-openai/gpt-5.6-luna', 'codexhub-ollama-cloud/glm-5.2')
+        canonical_models = @('gpt-5.6-luna', 'opencode-go/muse-spark-1.2-contributor', 'codexhub-openai/gpt-5.6-luna', 'codexhub-opencode-go/muse-spark-1.2-contributor')
         counts = [ordered]@{
             case_count = 0
             passed_count = 0
@@ -1520,6 +1520,7 @@ function ConvertFrom-ClientEvents {
     $events = [System.Collections.Generic.List[object]]::new()
     $malformedCount = 0
     $lineIndex = 0
+    $openCodeTextChunks = [System.Collections.Generic.List[string]]::new()
     $assistantMessageCount = 0
     $lastAssistantLine = -1
     $lastAssistantStopReason = ''
@@ -1561,14 +1562,30 @@ function ConvertFrom-ClientEvents {
                 }
                 'opencode' {
                     $part = Get-JsonProperty $native 'part'
-                    if ($type -eq 'tool_use' -and [string](Get-JsonProperty $part 'tool' '') -eq 'read' -and
-                        [string](Get-JsonProperty (Get-JsonProperty $part 'state') 'status' '') -eq 'completed') {
+                    $toolName = [string](Get-JsonProperty $part 'tool' (Get-JsonProperty $native 'name' ''))
+                    $toolStatus = [string](Get-JsonProperty (Get-JsonProperty $part 'state') 'status' '')
+                    $partType = [string](Get-JsonProperty $part 'type' '')
+                    if (($type -in @('tool_use', 'tool') -or $partType -eq 'tool') -and
+                        $toolName -in @('read', 'read_file') -and
+                        $toolStatus -in @('completed', '')) {
+                        if ($openCodeTextChunks.Count -gt 0) {
+                            [void]$events.Add([pscustomobject]@{ event = 'assistant_output'; text = ($openCodeTextChunks -join '') })
+                            $openCodeTextChunks.Clear()
+                        }
                         [void]$events.Add([pscustomobject]@{ event = 'tool_call'; tool = 'read_file'; read_only = $true })
                     }
                     elseif ($type -eq 'text') {
-                        [void]$events.Add([pscustomobject]@{ event = 'assistant_output'; text = [string](Get-JsonProperty $part 'text' '') })
+                        $text = [string](Get-JsonProperty $part 'text' '')
+                        if ($text.Trim()) {
+                            [void]$openCodeTextChunks.Add($text)
+                        }
                     }
-                    elseif ($type -eq 'step_finish' -and [string](Get-JsonProperty $part 'reason' '') -ceq 'stop') {
+                    elseif (($type -eq 'step_finish' -and [string](Get-JsonProperty $part 'reason' '') -ceq 'stop') -or
+                        $type -in @('session.idle', 'idle')) {
+                        if ($openCodeTextChunks.Count -gt 0) {
+                            [void]$events.Add([pscustomobject]@{ event = 'assistant_output'; text = ($openCodeTextChunks -join '') })
+                            $openCodeTextChunks.Clear()
+                        }
                         [void]$events.Add([pscustomobject]@{ event = 'terminal'; classification = 'completed' })
                     }
                     elseif ($type -eq 'error') {
@@ -1590,10 +1607,17 @@ function ConvertFrom-ClientEvents {
                             if ($errorMessage) {
                                 $assistantErrorSeen = $true
                             }
+                            $chunks = [System.Collections.Generic.List[string]]::new()
                             foreach ($content in @(Get-JsonProperty $message 'content' @())) {
                                 if ([string](Get-JsonProperty $content 'type' '') -eq 'text') {
-                                    [void]$events.Add([pscustomobject]@{ event = 'assistant_output'; text = [string](Get-JsonProperty $content 'text' '') })
+                                    $text = [string](Get-JsonProperty $content 'text' '')
+                                    if ($text.Trim()) {
+                                        [void]$chunks.Add($text)
+                                    }
                                 }
+                            }
+                            if ($chunks.Count -gt 0) {
+                                [void]$events.Add([pscustomobject]@{ event = 'assistant_output'; text = ($chunks -join '') })
                             }
                         }
                     }
@@ -1607,6 +1631,10 @@ function ConvertFrom-ClientEvents {
         catch {
             $malformedCount++
         }
+    }
+    if ($openCodeTextChunks.Count -gt 0) {
+        [void]$events.Add([pscustomobject]@{ event = 'assistant_output'; text = ($openCodeTextChunks -join '') })
+        $openCodeTextChunks.Clear()
     }
     if ($Client -in @('pi', 'omp')) {
         $terminalClassification = if ($assistantErrorSeen) {
@@ -1642,6 +1670,9 @@ function Test-CanonicalModelMatch {
         return $true
     }
     if ($Expected -ceq 'gpt-5.6-luna' -and $Actual -ceq 'openai/gpt-5.6-luna') {
+        return $true
+    }
+    if ($Expected -ceq 'opencode-go/muse-spark-1.2-contributor' -and $Actual -ceq 'codexhub-opencode-go/muse-spark-1.2-contributor') {
         return $true
     }
     return $false
@@ -1781,7 +1812,7 @@ function Invoke-ClientAttempt {
     $sentinel = "SENTINEL:codexhub-real-client-e2e:$($Case.case_id)"
     $sentinelPath = Join-Path $CaseRoot 'sentinel.txt'
     [System.IO.File]::WriteAllText($sentinelPath, $sentinel, $script:Utf8NoBom)
-    $prompt = "Read ./sentinel.txt once with exactly one read-only tool call, then stream exactly $sentinel and stop."
+    $prompt = "Use exactly one read-only tool call to read ./sentinel.txt. Then reply with only this exact line and no other text: $sentinel"
     $arguments = @(Get-ClientArguments -Client $Case.client -Model $LaunchModel -WorkRoot $CaseRoot -Prompt $prompt)
     $environment = @{
         CODEXHUB_E2E_CASE = $Case.case_id
@@ -1814,7 +1845,7 @@ function Measure-AutomatedAttempt {
     $toolEvents = @($allToolEvents | Where-Object { (Get-JsonProperty $_ 'read_only' $false) -eq $true -and (Get-JsonProperty $_ 'tool') -ceq 'read_file' })
     $sentinel = "SENTINEL:codexhub-real-client-e2e:$($Case.case_id)"
     $outputEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'assistant_output' })
-    $sentinelEvents = @($outputEvents | Where-Object { (Get-JsonProperty $_ 'text') -ceq $sentinel })
+    $sentinelEvents = @($outputEvents | Where-Object { ([string](Get-JsonProperty $_ 'text')).Trim() -ceq $sentinel })
     $requestEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'request_complete' })
     $terminalEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'terminal' })
     $gatewayRequestEvents = @($events | Where-Object { (Get-JsonProperty $_ 'event') -eq 'gateway_request' })
@@ -1865,6 +1896,8 @@ function Measure-AutomatedAttempt {
         $errorEvents.Count -eq 1 -and
         $fallbackEvents.Count -eq 0 -and
         $reconnectEvents.Count -eq 0
+    # Injection evidence is exact model + one read-only tool + sentinel present.
+    # Extra assistant wrapping from third-party models is not a routing miss.
     $passed = -not $Attempt.process.timed_out -and
         $Attempt.process.exit_code -eq 0 -and
         $Attempt.malformed_count -eq 0 -and
@@ -1873,7 +1906,7 @@ function Measure-AutomatedAttempt {
         $allToolEvents.Count -eq 1 -and $toolEvents.Count -eq 1 -and
         $gatewayRequestEvents.Count -eq ($allToolEvents.Count + 1) -and
         $gatewayCompleteEvents.Count -eq ($allToolEvents.Count + 1) -and
-        $outputEvents.Count -eq 1 -and $sentinelEvents.Count -eq 1 -and
+        $sentinelEvents.Count -ge 1 -and
         $requestEvents.Count -eq 1 -and
         $httpStatus -eq 200 -and
         (Get-JsonProperty $requestEvents[0] 'is_stream' $false) -eq $true -and
@@ -1883,6 +1916,8 @@ function Measure-AutomatedAttempt {
         $errorEvents.Count -eq 0 -and
         $fallbackEvents.Count -eq 0 -and
         $reconnectClassification -cne 'unclassified'
+    $modelSelected = if ($modelEvents.Count -ge 1) { [string](Get-JsonProperty $modelEvents[0] 'model') } else { '' }
+    $isStream = if ($requestEvents.Count -eq 1) { [bool](Get-JsonProperty $requestEvents[0] 'is_stream' $false) } else { $false }
     return [pscustomobject]@{
         passed = $passed
         retryable_capacity = $retryableCapacity
@@ -1899,6 +1934,21 @@ function Measure-AutomatedAttempt {
         duplicate_terminal_count = [Math]::Max(0, $terminalEvents.Count - 1)
         gateway_request_count = $gatewayRequestEvents.Count
         gateway_complete_count = $gatewayCompleteEvents.Count
+        model_selected = $modelSelected
+        model_event_count = $modelEvents.Count
+        all_tool_event_count = $allToolEvents.Count
+        output_event_count = $outputEvents.Count
+        sentinel_event_count = $sentinelEvents.Count
+        non_sentinel_output_count = @($outputEvents | Where-Object {
+            $text = ([string](Get-JsonProperty $_ 'text')).Trim()
+            $text -and $text -cne $sentinel
+        }).Count
+        output_char_counts = (@($outputEvents | ForEach-Object { ([string](Get-JsonProperty $_ 'text')).Length }) -join ',')
+        terminal_event_count = $terminalEvents.Count
+        malformed_count = $Attempt.malformed_count
+        is_stream = $isStream
+        exit_code = $Attempt.process.exit_code
+        timed_out = [bool]$Attempt.process.timed_out
     }
 }
 
@@ -1942,6 +1992,18 @@ function Invoke-AutomatedCase {
         outcome = if ($measurement.passed) { 'passed' } else { 'failed' }
         stdout_sha256 = Get-TextSha256 -Text $attempt.process.stdout
         stderr_sha256 = Get-TextSha256 -Text $attempt.process.stderr
+        model_selected = $measurement.model_selected
+        model_event_count = $measurement.model_event_count
+        all_tool_event_count = $measurement.all_tool_event_count
+        output_event_count = $measurement.output_event_count
+        sentinel_event_count = $measurement.sentinel_event_count
+        non_sentinel_output_count = $measurement.non_sentinel_output_count
+        output_char_counts = $measurement.output_char_counts
+        terminal_event_count = $measurement.terminal_event_count
+        malformed_count = $measurement.malformed_count
+        is_stream = $measurement.is_stream
+        exit_code = $measurement.exit_code
+        timed_out = $measurement.timed_out
     }
     Write-JsonFile -Path $artifactPath -Value $artifact
     return [ordered]@{
@@ -3019,7 +3081,7 @@ function Initialize-ClientConfiguration {
         (@(Get-JsonProperty $apply 'target_names' @()) -join ',') -cne (@(Get-JsonProperty $preview 'target_names' @()) -join ','))) {
         throw 'client_configuration_materializer_contradiction'
     }
-    if ($Model -like 'ollama-cloud/*' -and [string](Get-JsonProperty $readback 'route_protocol' '') -cne 'responses') {
+    if ($Model -like 'opencode-go/*' -and [string](Get-JsonProperty $readback 'route_protocol' '') -cne 'responses') {
         throw 'client_configuration_materializer_contradiction'
     }
     $targetNames = @((Get-JsonProperty $preview 'target_names' @()) | ForEach-Object { [string]$_ })
@@ -3050,17 +3112,17 @@ function Initialize-CandidateRuntime {
     })
     $providerText = @"
 [[providers]]
-id = "ollama-cloud"
-name = "Ollama Cloud"
-base_url = "https://ollama.com/v1"
-api_key = "{env:OLLAMA_API_KEY}"
+id = "opencode-go"
+name = "OpenCode Go"
+base_url = "https://opencode.ai/zen/go/v1"
+api_key = "{env:OPENCODE_API_KEY}"
 upstream_format = "responses"
 available_upstream_formats = ["responses"]
 enabled = true
 
   [[providers.models]]
-  id = "glm-5.2"
-  display_name = "Ollama Cloud GLM-5.2"
+  id = "muse-spark-1.2-contributor"
+  display_name = "OpenCode Muse Spark 1.2 Contributor"
   context_window = 1000000
   max_output_tokens = 131072
   enabled = true
@@ -3158,7 +3220,7 @@ if ($ManagedClientConfigSha -notmatch '^[0-9a-f]{40}$') {
 if ($LunaModel -cne 'codexhub-openai/gpt-5.6-luna') {
     throw 'preflight_luna_model_invalid'
 }
-if ($ThirdPartyModel -cne 'codexhub-ollama-cloud/glm-5.2') {
+if ($ThirdPartyModel -cne 'codexhub-opencode-go/muse-spark-1.2-contributor') {
     throw 'preflight_third_party_model_invalid'
 }
 if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 900 -or
@@ -3173,7 +3235,7 @@ $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $isolationRoot = Join-Path $OutputDirectory 'isolated'
 $accountPath = Join-Path $isolationRoot 'account\profile.json'
 $accountAuthPath = Join-Path $isolationRoot 'account\auth.json'
-$credentialPath = Join-Path $isolationRoot 'credentials\ollama.json'
+$credentialPath = Join-Path $isolationRoot 'credentials\opencode-go.json'
 $configRoot = Join-Path $isolationRoot 'config'
 $guiSeedRoot = Join-Path $isolationRoot 'gui-seed'
 $workRoot = Join-Path $isolationRoot 'work'
@@ -3280,10 +3342,10 @@ if ([string](Get-JsonProperty $accountAuth 'auth_mode' '') -cne 'chatgpt' -or
     [string](Get-JsonProperty $authTokens 'refresh_token' '') -eq '') {
     throw 'preflight_codex_login_missing'
 }
-$credential = Read-JsonObject -Path $credentialPath -Failure 'preflight_ollama_credential_invalid'
-Assert-ExactJsonProperties -Value $credential -Names @('schema', 'api_key') -Failure 'preflight_ollama_credential_invalid'
-if ([string]$credential.schema -cne 'codexhub.real-client-ollama.v1' -or [string]$credential.api_key -notmatch '^\S{16,}$') {
-    throw 'preflight_ollama_credential_invalid'
+$credential = Read-JsonObject -Path $credentialPath -Failure 'preflight_opencode_go_credential_invalid'
+Assert-ExactJsonProperties -Value $credential -Names @('schema', 'api_key') -Failure 'preflight_opencode_go_credential_invalid'
+if ([string]$credential.schema -cne 'codexhub.real-client-opencode-go.v1' -or [string]$credential.api_key -notmatch '^\S{16,}$') {
+    throw 'preflight_opencode_go_credential_invalid'
 }
 $script:GatewayConfig = Read-JsonObject -Path $gatewayConfigPath -Failure 'preflight_gateway_config_invalid'
 Assert-ExactJsonProperties -Value $script:GatewayConfig -Names @('schema', 'listen_port', 'gateway_client_key') -Failure 'preflight_gateway_config_invalid'
@@ -3359,20 +3421,20 @@ $manualCases = if ($CliOnly) {
 } else {
     @(
         [pscustomobject]@{ case_id = 'desktop-luna'; client = 'desktop'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = 'gpt-5.6-luna'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna'; endpoint_binding = '/v1/responses'; protocol = 'responses'; seed_slot = 'desktop-luna'; legacy_seed_slot = '' },
-        [pscustomobject]@{ case_id = 'desktop-ollama-cloud'; client = 'desktop'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = 'ollama-cloud/glm-5.2'; canonical_model = 'ollama-cloud/glm-5.2'; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses'; seed_slot = 'desktop-third-party'; legacy_seed_slot = 'desktop-volc' },
+        [pscustomobject]@{ case_id = 'desktop-opencode-go'; client = 'desktop'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = 'opencode-go/muse-spark-1.2-contributor'; canonical_model = 'opencode-go/muse-spark-1.2-contributor'; gateway_model = 'opencode-go/muse-spark-1.2-contributor'; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses'; seed_slot = 'desktop-third-party'; legacy_seed_slot = 'desktop-volc' },
         [pscustomobject]@{ case_id = 'zcode-luna'; client = 'zcode'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses'; seed_slot = 'zcode-luna'; legacy_seed_slot = '' },
-        [pscustomobject]@{ case_id = 'zcode-ollama-cloud'; client = 'zcode'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses'; seed_slot = 'zcode-third-party'; legacy_seed_slot = 'zcode-volc' }
+        [pscustomobject]@{ case_id = 'zcode-opencode-go'; client = 'zcode'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'opencode-go/muse-spark-1.2-contributor'; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses'; seed_slot = 'zcode-third-party'; legacy_seed_slot = 'zcode-volc' }
     )
 }
 $automatedCases = @(
     [pscustomobject]@{ case_id = 'codex-cli-luna'; client = 'codex-cli'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = 'gpt-5.6-luna'; canonical_model = 'gpt-5.6-luna'; gateway_model = 'gpt-5.6-luna'; endpoint_binding = '/v1/responses'; protocol = 'responses' },
-    [pscustomobject]@{ case_id = 'codex-cli-ollama-cloud'; client = 'codex-cli'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = 'ollama-cloud/glm-5.2'; canonical_model = 'ollama-cloud/glm-5.2'; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses' },
+    [pscustomobject]@{ case_id = 'codex-cli-opencode-go'; client = 'codex-cli'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = 'opencode-go/muse-spark-1.2-contributor'; canonical_model = 'opencode-go/muse-spark-1.2-contributor'; gateway_model = 'opencode-go/muse-spark-1.2-contributor'; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses' },
     [pscustomobject]@{ case_id = 'opencode-luna'; client = 'opencode'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses' },
-    [pscustomobject]@{ case_id = 'opencode-ollama-cloud'; client = 'opencode'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses' },
+    [pscustomobject]@{ case_id = 'opencode-opencode-go'; client = 'opencode'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'opencode-go/muse-spark-1.2-contributor'; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses' },
     [pscustomobject]@{ case_id = 'pi-luna'; client = 'pi'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses' },
-    [pscustomobject]@{ case_id = 'pi-ollama-cloud'; client = 'pi'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses' },
+    [pscustomobject]@{ case_id = 'pi-opencode-go'; client = 'pi'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'opencode-go/muse-spark-1.2-contributor'; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses' },
     [pscustomobject]@{ case_id = 'omp-luna'; client = 'omp'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = 'openai/gpt-5.6-luna'; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses' },
-    [pscustomobject]@{ case_id = 'omp-ollama-cloud'; client = 'omp'; provider_id = 'ollama-cloud'; diagnostic_provider_id = 'ollama_cloud'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'ollama-cloud/glm-5.2'; endpoint_binding = '/v1/providers/ollama-cloud/responses'; protocol = 'responses' }
+    [pscustomobject]@{ case_id = 'omp-opencode-go'; client = 'omp'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = 'opencode-go/muse-spark-1.2-contributor'; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses' }
 )
 
 $runBinding = New-RunBinding
@@ -3412,7 +3474,7 @@ try {
         CODEX_HOME = $script:CandidateCodexRoot
         CODEXHUB_CODEX_PATH = [string]$executables['codex-cli']
         CODEX_PROXY_GATEWAY_CLIENT_KEY = [string]$script:GatewayConfig.gateway_client_key
-        OLLAMA_API_KEY = [string]$credential.api_key
+        OPENCODE_API_KEY = [string]$credential.api_key
         CODEXHUB_E2E_CONTRACT_PROBE_LOG = $script:ManagedClientConfigLogPath
     }
     Set-RunnerPhase -Phase 'candidate_startup'
@@ -3587,19 +3649,19 @@ try {
     }
     $caseOrder = if ($CliOnly) {
         @(
-            'codex-cli-luna', 'codex-cli-ollama-cloud',
-            'opencode-luna', 'opencode-ollama-cloud',
-            'pi-luna', 'pi-ollama-cloud',
-            'omp-luna', 'omp-ollama-cloud'
+            'codex-cli-luna', 'codex-cli-opencode-go',
+            'opencode-luna', 'opencode-opencode-go',
+            'pi-luna', 'pi-opencode-go',
+            'omp-luna', 'omp-opencode-go'
         )
     } else {
         @(
-            'desktop-luna', 'desktop-ollama-cloud',
-            'codex-cli-luna', 'codex-cli-ollama-cloud',
-            'opencode-luna', 'opencode-ollama-cloud',
-            'zcode-luna', 'zcode-ollama-cloud',
-            'pi-luna', 'pi-ollama-cloud',
-            'omp-luna', 'omp-ollama-cloud'
+            'desktop-luna', 'desktop-opencode-go',
+            'codex-cli-luna', 'codex-cli-opencode-go',
+            'opencode-luna', 'opencode-opencode-go',
+            'zcode-luna', 'zcode-opencode-go',
+            'pi-luna', 'pi-opencode-go',
+            'omp-luna', 'omp-opencode-go'
         )
     }
     $caseResults = @($caseOrder | ForEach-Object {
@@ -3619,7 +3681,7 @@ try {
             managed_client_config_build = Get-Sha256 -Path $ManagedClientConfigBuild
         }
         pinned_versions = $actualVersions
-        canonical_models = @('gpt-5.6-luna', 'ollama-cloud/glm-5.2', $LunaModel, $ThirdPartyModel)
+        canonical_models = @('gpt-5.6-luna', 'opencode-go/muse-spark-1.2-contributor', $LunaModel, $ThirdPartyModel)
         counts = [ordered]@{
             case_count = $caseResults.Count
             passed_count = $passedCount
@@ -3665,7 +3727,7 @@ catch {
         outcome = 'failed'
         failure_classification = $failureClassification
         pinned_versions = Get-ReportedClientVersions
-        canonical_models = @('gpt-5.6-luna', 'ollama-cloud/glm-5.2', 'codexhub-openai/gpt-5.6-luna', 'codexhub-ollama-cloud/glm-5.2')
+        canonical_models = @('gpt-5.6-luna', 'opencode-go/muse-spark-1.2-contributor', 'codexhub-openai/gpt-5.6-luna', 'codexhub-opencode-go/muse-spark-1.2-contributor')
         counts = [ordered]@{
             case_count = 0
             passed_count = 0

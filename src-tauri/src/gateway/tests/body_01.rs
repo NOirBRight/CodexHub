@@ -1333,7 +1333,7 @@ fn opencode_config_exports_all_active_gateway_models() {
     let settings = Settings::default();
     let providers = client_export_test_providers();
 
-    let text = opencode_config_text(&settings, &providers, "openai/gpt-5.5").unwrap();
+    let text = opencode_config_text(None, &settings, &providers, "openai/gpt-5.5").unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     let openai_models = value
         .pointer("/provider/codexhub-openai/models")
@@ -1344,7 +1344,8 @@ fn opencode_config_exports_all_active_gateway_models() {
         .and_then(serde_json::Value::as_object)
         .unwrap();
 
-    assert_eq!(value["model"], "codexhub-openai/gpt-5.5");
+    // ADR-0004 / #435: model selection stays user-owned (never forced).
+    assert_eq!(value["model"], serde_json::Value::Null);
     assert!(openai_models.contains_key("gpt-5.5"));
     assert!(openai_models.contains_key("gpt-5.5-fast"));
     assert!(openai_models.contains_key("gpt-5.4-fast"));
@@ -1383,12 +1384,12 @@ fn client_exports_use_explicit_responses_provider_protocols() {
     let mut providers = client_export_test_providers();
     providers[0].upstream_format = Some(UpstreamFormat::Responses);
 
-    let opencode_text = opencode_config_text(&settings, &providers, "minimax/minimax-m3").unwrap();
+    let opencode_text = opencode_config_text(None, &settings, &providers, "minimax/minimax-m3").unwrap();
     let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
     let pi_text =
         pi_models_text(&models_path, &settings, &providers, "minimax/minimax-m3").unwrap();
     let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
-    let omp_text = omp_models_yml_text(&settings, &providers, "minimax/minimax-m3").unwrap();
+    let omp_text = omp_models_yml_text(None, &settings, &providers, "minimax/minimax-m3").unwrap();
     let zcode_text = zcode_catalog_text(&settings, &providers, "minimax/minimax-m3").unwrap();
     let zcode_value: serde_json::Value = serde_json::from_str(&zcode_text).unwrap();
     let zcode_provider = zcode_value
@@ -1474,12 +1475,12 @@ fn client_exports_use_explicit_chat_provider_protocols() {
     let mut providers = client_export_test_providers();
     providers[0].upstream_format = Some(UpstreamFormat::ChatCompletions);
 
-    let opencode_text = opencode_config_text(&settings, &providers, "minimax/minimax-m3").unwrap();
+    let opencode_text = opencode_config_text(None, &settings, &providers, "minimax/minimax-m3").unwrap();
     let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
     let pi_text =
         pi_models_text(&models_path, &settings, &providers, "minimax/minimax-m3").unwrap();
     let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
-    let omp_text = omp_models_yml_text(&settings, &providers, "minimax/minimax-m3").unwrap();
+    let omp_text = omp_models_yml_text(None, &settings, &providers, "minimax/minimax-m3").unwrap();
     let zcode_text = zcode_catalog_text(&settings, &providers, "minimax/minimax-m3").unwrap();
     let zcode_value: serde_json::Value = serde_json::from_str(&zcode_text).unwrap();
     let zcode_provider = zcode_value
@@ -1558,14 +1559,15 @@ fn opencode_config_resolves_selected_alias_and_exports_only_canonical_models() {
     let settings = Settings::default();
     let providers = case_sensitive_client_export_test_providers();
 
-    let text = opencode_config_text(&settings, &providers, "minimax-cn/minimax-m3").unwrap();
+    let text = opencode_config_text(None, &settings, &providers, "minimax-cn/minimax-m3").unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     let exported = value
         .pointer("/provider/codexhub-minimax-cn/models")
         .and_then(serde_json::Value::as_object)
         .unwrap();
 
-    assert_eq!(value["model"], "codexhub-minimax-cn/MiniMax-M3");
+    // ADR-0004 / #435: model selection stays user-owned (never forced).
+    assert_eq!(value["model"], serde_json::Value::Null);
     assert!(exported.contains_key("MiniMax-M3"));
     assert!(!exported.contains_key("minimax-m3"));
 }
@@ -1575,7 +1577,7 @@ fn client_configs_drop_case_insensitive_export_collisions() {
     let settings = Settings::default();
     let providers = case_collision_client_export_test_providers();
 
-    let text = opencode_config_text(&settings, &providers, "minimax-cn/MiniMax-M3").unwrap();
+    let text = opencode_config_text(None, &settings, &providers, "minimax-cn/MiniMax-M3").unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     let exported = value
         .pointer("/provider/codexhub-minimax-cn/models")
@@ -1612,7 +1614,7 @@ fn pi_and_omp_configs_keep_duplicate_glm_models_distinct() {
     .unwrap();
     let pi_models_text =
         pi_models_text(&models_path, &settings, &providers, "ollama-cloud/glm-5.2").unwrap();
-    let omp_text = omp_models_yml_text(&settings, &providers, "ollama-cloud/glm-5.2").unwrap();
+    let omp_text = omp_models_yml_text(None, &settings, &providers, "ollama-cloud/glm-5.2").unwrap();
     let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
     let pi_models_value: serde_json::Value = serde_json::from_str(&pi_models_text).unwrap();
     let ollama_models = pi_models_value
@@ -1671,7 +1673,7 @@ fn pi_and_omp_configs_emit_provider_supports_developer_role() {
     });
 
     let pi_models_text = pi_models_text(&models_path, &settings, &providers, "kimi/k3").unwrap();
-    let omp_text = omp_models_yml_text(&settings, &providers, "kimi/k3").unwrap();
+    let omp_text = omp_models_yml_text(None, &settings, &providers, "kimi/k3").unwrap();
     let pi_models_value: serde_json::Value = serde_json::from_str(&pi_models_text).unwrap();
 
     assert_eq!(
@@ -1701,7 +1703,7 @@ fn client_config_rejects_unexported_selected_model_case() {
     let settings = Settings::default();
     let providers = case_sensitive_client_export_test_providers();
 
-    let error = opencode_config_text(&settings, &providers, "minimax-cn/MINIMAX-M3").unwrap_err();
+    let error = opencode_config_text(None, &settings, &providers, "minimax-cn/MINIMAX-M3").unwrap_err();
 
     assert!(error.contains("Gateway model is not exported: minimax-cn/MINIMAX-M3"));
 }
@@ -1745,7 +1747,7 @@ fn client_config_keeps_official_fast_selection_as_client_pseudo_model() {
     let settings = Settings::default();
     let providers = client_export_test_providers();
 
-    let result = opencode_config_text(&settings, &providers, "openai/gpt-5.5-fast");
+    let result = opencode_config_text(None, &settings, &providers, "openai/gpt-5.5-fast");
     restore_env("CODEX_HOME", previous_codex_home);
     restore_env("CODEXHUB_RUNTIME_HOME", previous_runtime_home);
     let text = result.unwrap();
@@ -1755,8 +1757,9 @@ fn client_config_keeps_official_fast_selection_as_client_pseudo_model() {
         .and_then(serde_json::Value::as_object)
         .unwrap();
 
-    assert_eq!(value["model"], "codexhub-openai/gpt-5.5-fast");
-    assert_eq!(value["small_model"], "codexhub-openai/gpt-5.5-fast");
+    // ADR-0004 / #435: model/small_model selection stays user-owned.
+    assert_eq!(value["model"], serde_json::Value::Null);
+    assert_eq!(value["small_model"], serde_json::Value::Null);
     assert!(openai_models.contains_key("gpt-5.5"));
     assert!(openai_models.contains_key("gpt-5.5-fast"));
 }
@@ -1893,7 +1896,7 @@ fn omp_models_export_all_active_gateway_models() {
     let settings = Settings::default();
     let providers = client_export_test_providers();
 
-    let text = omp_models_yml_text(&settings, &providers, "openai/gpt-5.5").unwrap();
+    let text = omp_models_yml_text(None, &settings, &providers, "openai/gpt-5.5").unwrap();
 
     assert!(text.contains("codexhub-openai:"));
     assert!(text.contains("api: openai-responses"));
@@ -1955,7 +1958,7 @@ fn omp_models_yaml_keeps_implicitly_typed_scalars_as_strings() {
     ];
     let providers = vec![provider];
 
-    let text = omp_models_yml_text(&settings, &providers, "minimax/5.4").unwrap();
+    let text = omp_models_yml_text(None, &settings, &providers, "minimax/5.4").unwrap();
     let document: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
 
     let provider_doc = document
@@ -1993,7 +1996,7 @@ fn omp_models_yaml_official_numeric_display_names_parse_as_strings() {
     let settings = Settings::default();
     let providers = client_export_test_providers();
 
-    let text = omp_models_yml_text(&settings, &providers, "openai/gpt-5.5").unwrap();
+    let text = omp_models_yml_text(None, &settings, &providers, "openai/gpt-5.5").unwrap();
     let document: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
 
     let models = document
@@ -2072,7 +2075,7 @@ fn opencode_variants_preserve_official_catalog_reasoning_order() {
 fn opencode_config_preserves_configured_reasoning_variant_order() {
     let settings = Settings::default();
     let providers = reasoning_contract_client_export_test_providers();
-    let text = opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
+    let text = opencode_config_text(None, &settings, &providers, "volc/glm-5.2").unwrap();
 
     let variants_start = text.find("\"variants\"").expect("variants object");
     let variants_text = &text[variants_start..];
@@ -2089,7 +2092,7 @@ fn opencode_config_preserves_configured_reasoning_variant_order() {
 fn opencode_config_exports_configured_modalities_per_model() {
     let settings = Settings::default();
     let providers = reasoning_contract_client_export_test_providers();
-    let text = opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
+    let text = opencode_config_text(None, &settings, &providers, "volc/glm-5.2").unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
 
     assert_eq!(
@@ -2149,7 +2152,7 @@ fn client_exports_map_configured_reasoning_contract() {
         .pointer("/provider/codexhub-volc/models/glm-5.2-flash/reasoning")
         .is_none());
 
-    let opencode_text = opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
+    let opencode_text = opencode_config_text(None, &settings, &providers, "volc/glm-5.2").unwrap();
     let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
     let opencode_entry = |model_id: &str| {
         opencode_value
@@ -2191,7 +2194,7 @@ fn client_exports_map_configured_reasoning_contract() {
     assert!(pi_reasoning("glm-5.2"));
     assert!(!pi_reasoning("glm-5.2-flash"));
 
-    let omp_text = omp_models_yml_text(&settings, &providers, "volc/glm-5.2").unwrap();
+    let omp_text = omp_models_yml_text(None, &settings, &providers, "volc/glm-5.2").unwrap();
     let omp_block = |model_id: &str| {
         omp_text
             .split(&format!("      - id: \"{model_id}\"\n"))
@@ -2227,8 +2230,9 @@ fn omp_apply_writes_default_reasoning_effort_suffix_when_configured() {
 
     assert!(result.applied);
     let config = fs::read_to_string(&config_path).unwrap();
-    assert!(config.contains("  default: codexhub-volc/glm-5.2:high"));
-    assert!(config.contains("  vision: codexhub-volc/glm-5.2\n"));
+    // ADR-0004 / #435: user-owned modelRoles preserved, never forced.
+    assert!(config.contains("  default: ollama/qwen"));
+    assert!(!config.contains("codexhub-volc/glm-5.2:high"));
 }
 
 #[test]
@@ -2254,7 +2258,8 @@ fn omp_apply_keeps_bare_default_selector_without_reasoning_contract() {
 
     assert!(result.applied);
     let config = fs::read_to_string(&config_path).unwrap();
-    assert!(config.contains("  default: codexhub-volc/glm-5.2-flash\n"));
+    // ADR-0004 / #435: user-owned modelRoles preserved.
+    assert!(!config.contains("codexhub-volc/glm-5.2-flash"));
     assert!(!config.contains("glm-5.2-flash:"));
 }
 
@@ -2311,7 +2316,7 @@ fn client_exports_map_configured_image_capability_per_model() {
     let settings = Settings::default();
     let providers = image_capability_client_export_test_providers();
 
-    let omp_text = omp_models_yml_text(&settings, &providers, "volc/glm-5.2").unwrap();
+    let omp_text = omp_models_yml_text(None, &settings, &providers, "volc/glm-5.2").unwrap();
     let pi_text = pi_models_text(&models_path, &settings, &providers, "volc/glm-5.2").unwrap();
     let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
     let zcode_catalog = zcode_catalog_text(&settings, &providers, "volc/glm-5.2").unwrap();
@@ -2413,8 +2418,10 @@ fn omp_apply_omits_vision_role_and_reports_when_selected_model_is_text_only() {
 
     assert!(result.applied);
     let config = fs::read_to_string(&config_path).unwrap();
-    assert!(config.contains("  default: codexhub-volc/glm-5.2-coder"));
-    assert!(!config.contains("vision:"));
+    // ADR-0004 / #435: user-owned modelRoles preserved.
+    assert!(!config.contains("codexhub-volc/glm-5.2-coder"));
+    // ADR-0004 / #435: the user's own vision role stays.
+    assert!(!config.contains("vision: codexhub-volc"));
     assert!(result.message.contains("vision"));
     assert!(result.message.contains("text-only"));
 }
@@ -2442,7 +2449,8 @@ fn omp_apply_writes_vision_role_for_image_capable_selection() {
 
     assert!(result.applied);
     let config = fs::read_to_string(&config_path).unwrap();
-    assert!(config.contains("  default: codexhub-volc/glm-5.2"));
-    assert!(config.contains("  vision: codexhub-volc/glm-5.2"));
+    // ADR-0004 / #435: user-owned modelRoles preserved.
+    assert!(!config.contains("codexhub-volc/glm-5.2"));
+    assert!(!config.contains("vision: codexhub-volc"));
     assert!(!result.message.contains("text-only"));
 }

@@ -1,13 +1,4 @@
-use super::clients::codex::{
-    isolated_apply_unsupported, isolated_preview_text, isolated_readback_unsupported,
-};
-use super::clients::omp::{apply_omp_config_with_paths, omp_config_text, omp_models_yml_text};
-use super::clients::opencode::{apply_opencode_config_with_paths, opencode_config_text};
-use super::clients::pi::{apply_pi_config_with_paths, pi_models_text, pi_settings_text};
-use super::clients::zcode::{
-    apply_zcode_config_with_targets, zcode_catalog_text, zcode_targets_from_writable,
-    zcode_v2_cache_text, zcode_v2_config_text,
-};
+use super::managed_clients::adapter_for;
 use super::*;
 use crate::{Provider, Settings};
 use serde::Serialize;
@@ -378,70 +369,17 @@ pub fn isolated_client_preview(
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let (selector, resolved_model, protocol) =
         selector_and_route(&input.settings, &input.providers, &model)?;
-    let next_redacted = match client_id.as_str() {
-        "opencode" => sanitize_text(&opencode_config_text(
+    let adapter = adapter_for(&client_id).ok_or_else(|| {
+        format!("unsupported managed client for preview: {client_id}")
+    })?;
+    let next_redacted = adapter
+        .preview_isolated(
+            targets.writable_paths(),
             &input.settings,
             &input.providers,
             &model,
-        )?),
-        "pi" => {
-            let s = pi_settings_text(
-                &targets.writable_paths[0],
-                &input.settings,
-                &input.providers,
-                &model,
-            )?;
-            let m = pi_models_text(
-                &targets.writable_paths[1],
-                &input.settings,
-                &input.providers,
-                &model,
-            )?;
-            sanitize_text(&combined_named_text(&[
-                ("settings.json", &s),
-                ("models.json", &m),
-            ]))
-        }
-        "omp" => {
-            let selector =
-                gateway_client_model_selector(&input.settings, &input.providers, &model)?;
-            let vision =
-                if gateway_exported_model_supports_image(&input.settings, &input.providers, &model)
-                {
-                    Some(selector.as_str())
-                } else {
-                    None
-                };
-            let reasoning = gateway_exported_model_default_reasoning_effort(
-                &input.settings,
-                &input.providers,
-                &model,
-            );
-            let cfg = omp_config_text(None, &selector, vision, reasoning.as_deref());
-            let models = omp_models_yml_text(&input.settings, &input.providers, &model)?;
-            sanitize_text(&combined_named_text(&[
-                ("config.yml", &cfg),
-                ("models.yml", &models),
-            ]))
-        }
-        "zcode" => {
-            let catalog = zcode_catalog_text(&input.settings, &input.providers, &model)?;
-            let cache = zcode_v2_cache_text(&input.settings, &input.providers, &model)?;
-            let config = zcode_v2_config_text(
-                &targets.writable_paths[1],
-                &input.settings,
-                &input.providers,
-                &model,
-            )?;
-            sanitize_text(&combined_named_text(&[
-                ("codexhub.json", &catalog),
-                ("config.json", &config),
-                ("bots-model-cache.v2.json", &cache),
-            ]))
-        }
-        "codex" => isolated_preview_text(),
-        other => return Err(format!("unsupported managed client for preview: {other}")),
-    };
+        )?
+        .next_redacted;
     let target_names = published_target_relative_names(&client_id, &targets, root);
     Ok(IsolatedClientPreview {
         client_id,
@@ -509,68 +447,20 @@ pub fn apply_gateway_client_config_isolated_with_provenance(
         provenance_root,
         || -> Result<GatewayClientApplyResult, String> {
             let labeled_backup_root = (backup_root.clone(), BackupChannel::Stable);
-            match client_id.as_str() {
-                "opencode" => {
-                    let path = &targets.writable_paths[0];
-                    fs::create_dir_all(path.parent().unwrap())
-                        .map_err(|error| format!("failed to create opencode dir: {error}"))?;
-                    // Write a non-managed baseline so the apply path creates a backup.
-                    if !path.exists() {
-                        fs::write(path, r#"{"model":"anthropic/claude-sonnet-4"}"#)
-                            .map_err(|error| format!("failed to seed opencode config: {error}"))?;
-                    }
-                    apply_opencode_config_with_paths(
-                        path,
-                        std::slice::from_ref(&labeled_backup_root),
-                        &input.settings,
-                        &input.providers,
-                        &model,
-                    )
-                }
-                "pi" => apply_pi_config_with_paths(
-                    &targets.writable_paths[0],
-                    &targets.writable_paths[1],
-                    std::slice::from_ref(&labeled_backup_root),
-                    &input.settings,
-                    &input.providers,
-                    &model,
-                ),
-                "omp" => apply_omp_config_with_paths(
-                    &targets.writable_paths[0],
-                    &targets.writable_paths[1],
-                    &backup_root,
-                    &input.settings,
-                    &input.providers,
-                    &model,
-                ),
-                "zcode" => {
-                    let zcode_targets = zcode_targets_from_writable(&targets)?;
-                    apply_zcode_config_with_targets(
-                        &zcode_targets,
-                        &backup_root,
-                        &input.settings,
-                        &input.providers,
-                        &model,
-                    )
-                }
-                "codex" => isolated_apply_unsupported(),
-                other => Err(format!("unsupported managed client for apply: {other}")),
-            }
+            let adapter = adapter_for(&client_id).ok_or_else(|| {
+                format!("unsupported managed client for apply: {client_id}")
+            })?;
+            adapter.apply_isolated(
+                targets.writable_paths(),
+                &backup_root,
+                std::slice::from_ref(&labeled_backup_root),
+                &input.settings,
+                &input.providers,
+                &model,
+            )
         },
     )?;
-    // F2: the isolated CLI apply path must run the same fail-closed readback
-    // verifier as the production GUI/Web Bridge entrypoint, so a partial or
-    // tampered write is rejected before reporting success. This shares the
-    // single `verify_apply_readback` path with `apply_gateway_client_config_locked`.
-    if applied.applied {
-        verify_apply_readback(
-            &client_id,
-            targets.writable_paths(),
-            &input.settings,
-            &input.providers,
-            &model,
-        )?;
-    }
+    // apply_native_at already ran verify_apply_readback for native clients.
     let backup_dir_relative = applied
         .backup_path
         .as_ref()
@@ -611,21 +501,15 @@ pub fn readback_gateway_client_config_isolated(
         ensure_path_beneath_root(root, path)?;
     }
 
-    match client_id.as_str() {
-        "opencode" | "pi" | "omp" | "zcode" => {
-            verify_apply_readback(
-                &client_id,
-                targets.writable_paths(),
-                &input.settings,
-                &input.providers,
-                &model,
-            )?;
-        }
-        "codex" => {
-            return isolated_readback_unsupported();
-        }
-        other => return Err(format!("unsupported managed client for readback: {other}")),
-    }
+    let adapter = adapter_for(&client_id).ok_or_else(|| {
+        format!("unsupported managed client for readback: {client_id}")
+    })?;
+    adapter.readback_isolated(
+        targets.writable_paths(),
+        &input.settings,
+        &input.providers,
+        &model,
+    )?;
 
     Ok(IsolatedClientReadback {
         client_id,

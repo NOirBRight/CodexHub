@@ -57,6 +57,9 @@ const tauriCargoPath = new URL("../../src-tauri/Cargo.toml", import.meta.url);
 const tauriConfigSourcePath = new URL("../../src-tauri/src/config.rs", import.meta.url);
 const tauriCodexDesktopPath = new URL("../../src-tauri/src/codex_desktop.rs", import.meta.url);
 const tauriMainPath = new URL("../../src-tauri/src/main.rs", import.meta.url);
+const tauriHandlersPath = new URL("../../src-tauri/src/desktop_commands/handlers.rs", import.meta.url);
+const tauriWebAdapterPath = new URL("../../src-tauri/src/desktop_commands/web_adapter.rs", import.meta.url);
+const providerWorkspaceHookPath = new URL("../src/hooks/useProviderWorkspace.ts", import.meta.url);
 const tauriOpenAiUsagePath = new URL("../../src-tauri/src/openai_usage.rs", import.meta.url);
 const tauriModelsPath = new URL("../../src-tauri/src/models.rs", import.meta.url);
 const tauriOfficialRefreshPath = new URL("../../src-tauri/src/official_refresh.rs", import.meta.url);
@@ -188,13 +191,15 @@ test("i18n locales are registered and keep matching translation keys", async () 
 });
 
 test("history sync is explicit and never participates in startup or settings save", async () => {
-  const [appSource, tauriSource, typesSource, mainSource, historySource, webBridgeSource] = await Promise.all([
+  const [appSource, tauriSource, typesSource, mainSource, handlersSource, historySource, webBridgeSource, webAdapterSource] = await Promise.all([
     readFile(appPath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
     readFile(typesPath, "utf8"),
     readFile(tauriMainPath, "utf8"),
+    readFile(tauriHandlersPath, "utf8"),
     readFile(new URL("../../src-tauri/src/history.rs", import.meta.url), "utf8"),
     readFile(tauriWebBridgePath, "utf8"),
+    readFile(tauriWebAdapterPath, "utf8"),
   ]);
 
   assert.match(typesSource, /export interface UnifiedHistoryResult/);
@@ -203,8 +208,8 @@ test("history sync is explicit and never participates in startup or settings sav
   assert.match(tauriSource, /syncConversationHistory/);
   assert.match(tauriSource, /diagnoseConversationHistory/);
   assert.match(tauriSource, /call<UnifiedHistoryResult>\(COMMANDS.preflightUnifiedHistory/);
-  assert.match(mainSource, /fn preflight_unified_history\([\s\S]*apply_repairs: bool/);
-  assert.match(webBridgeSource, /"preflight_unified_history"/);
+  assert.match(handlersSource, /fn preflight_unified_history\([\s\S]*apply_repairs: bool/);
+  assert.match(webAdapterSource, /"preflight_unified_history"/);
   assert.doesNotMatch(appSource, /historyPreflightStarted/);
   assert.doesNotMatch(appSource, /api\.preflightUnifiedHistory\(false\)/);
   assert.match(appSource, /api\.syncConversationHistory\(\)/);
@@ -452,7 +457,7 @@ test("provider page state, editors, actions, and shared helpers stay in focused 
     readFile(new URL("../src/lib/providerForm.ts", import.meta.url), "utf8"),
   ]);
 
-  assert.match(pageSource, /useProviderNavigationGuard/);
+  assert.match(pageSource, /useProviderWorkspace/);
   assert.match(pageSource, /useProviderCatalogActions/);
   assert.doesNotMatch(pageSource, /function (ProviderDetail|AddProviderPanel|ModelSection|HeaderRow)\(/);
   assert.match(usageSource, /export function OfficialOpenAIUsagePanel/);
@@ -462,6 +467,14 @@ test("provider page state, editors, actions, and shared helpers stay in focused 
   assert.match(controlsSource, /export function HeaderRow/);
   assert.match(modelSource, /export function ModelSection/);
   assert.match(catalogActionsSource, /export function useProviderCatalogActions/);
+  // DM-2: the Provider Workspace deep module exists behind the page.
+  const workspaceCoreSource = await readFile(new URL("../src/lib/providerWorkspace/core.ts", import.meta.url), "utf8");
+  const workspaceHookSource = await readFile(new URL("../src/hooks/useProviderWorkspace.ts", import.meta.url), "utf8");
+  assert.match(workspaceCoreSource, /export function providerWorkspaceReducer/);
+  assert.match(workspaceCoreSource, /export type ProviderEditIntent/);
+  assert.match(workspaceCoreSource, /export function selectSelectedProvider/);
+  assert.match(workspaceHookSource, /export function useProviderWorkspace/);
+  assert.match(workspaceHookSource, /navigation: \{/);
   assert.match(dateSource, /export function (startOfDay|endOfDay|addDays)/);
   assert.match(labelsSource, /export function (providerLabel|providerFromDisplayName)/);
   assert.match(updateSource, /export function (isUpdateInstallActive|updateInstallToastText)/);
@@ -476,8 +489,8 @@ test("catalog override diagnostics stay bounded and disclose the Codex restart",
       readFile(providerCatalogActionsPath, "utf8"),
       readFile(tauriSourcePath, "utf8"),
       readFile(typesPath, "utf8"),
-      readFile(tauriMainPath, "utf8"),
-      readFile(tauriWebBridgePath, "utf8"),
+      readFile(tauriHandlersPath, "utf8"),
+      readFile(tauriWebAdapterPath, "utf8"),
       readFile(enLocalePath, "utf8"),
       readFile(zhLocalePath, "utf8"),
     ]);
@@ -621,13 +634,13 @@ test("runtime title area double-click toggles maximize without activating contro
 });
 
 test("linux maximize toggle restores a saved size instead of trusting GTK is_maximized", async () => {
-  const mainSource = await readFile(tauriMainPath, "utf8");
+  const handlersSource = await readFile(tauriHandlersPath, "utf8");
 
-  assert.match(mainSource, /fn toggle_linux_window_maximize/);
-  assert.match(mainSource, /static LINUX_WINDOW_RESTORE/);
-  assert.match(mainSource, /if cfg!\(target_os = "linux"\)/);
-  assert.match(mainSource, /\.set_size\(size\)/);
-  assert.match(mainSource, /state\.size = window\.inner_size\(\)\.ok\(\)/);
+  assert.match(handlersSource, /fn toggle_linux_window_maximize/);
+  assert.match(handlersSource, /static LINUX_WINDOW_RESTORE/);
+  assert.match(handlersSource, /if cfg!\(target_os = "linux"\)/);
+  assert.match(handlersSource, /\.set_size\(size\)/);
+  assert.match(handlersSource, /state\.size = window\.inner_size\(\)\.ok\(\)/);
 });
 
 test("linux window stays on the dock, fills the webview, and uses a real tray png", async () => {
@@ -1173,8 +1186,8 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
       readProviderContractSource(),
       readFile(tauriSourcePath, "utf8"),
       readFile(typesPath, "utf8"),
-      readFile(tauriMainPath, "utf8"),
-      readFile(tauriWebBridgePath, "utf8"),
+      readFile(tauriHandlersPath, "utf8"),
+      readFile(tauriWebAdapterPath, "utf8"),
       readFile(tauriOpenAiUsagePath, "utf8"),
       readFile(enLocalePath, "utf8"),
       readFile(zhLocalePath, "utf8"),
@@ -1190,9 +1203,9 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
   assert.match(typesSource, /date: string;/);
   assert.match(tauriSource, /forceRefresh: window\?\.forceRefresh \?\? null/);
   assert.match(mainSource, /fn openai_usage_completions\([\s\S]*force_refresh: Option<bool>/);
-  assert.match(mainSource, /openai_usage_completions,/);
+  assert.match(mainSource, /openai_usage_completions/);
   assert.match(webBridgeSource, /"openai_usage_completions"/);
-  assert.match(webBridgeSource, /optional_bool_arg\(&request\.args, &\["forceRefresh", "force_refresh"\]\)/);
+  assert.match(webBridgeSource, /optional_bool_arg\(args, &\["forceRefresh", "force_refresh"\]\)/);
   assert.match(openAiUsageSource, /account\/usage\/read/);
   assert.match(openAiUsageSource, /codex app-server/);
   assert.match(openAiUsageSource, /const USAGE_AUTO_REFRESH_STALENESS_SECONDS: u64 = 2 \* 3 \* 60;/);
@@ -1332,9 +1345,9 @@ test("official OpenAI usage chart reads cached Codex account usage only on the o
 });
 
 test("slow desktop commands run off the Tauri invoke thread", async () => {
-  const mainSource = await readFile(tauriMainPath, "utf8");
+  const handlersSource = await readFile(tauriHandlersPath, "utf8");
 
-  assert.match(mainSource, /tauri::async_runtime::spawn_blocking/);
+  assert.match(handlersSource, /tauri::async_runtime::spawn_blocking/);
   for (const command of [
     "get_status",
     "refresh_official_models",
@@ -1351,8 +1364,8 @@ test("slow desktop commands run off the Tauri invoke thread", async () => {
     "sync_gateway_clients",
     "generate_catalog",
   ]) {
-    assert.match(mainSource, new RegExp(`async fn ${command}\\(`));
-    assert.match(mainSource, new RegExp(`run_blocking\\("${command}"`));
+    assert.match(handlersSource, new RegExp(`async fn ${command}\\(`));
+    assert.match(handlersSource, new RegExp(`run_blocking\\("${command}"`));
   }
 });
 
@@ -1799,13 +1812,14 @@ test("settings drawer uses switch toggles and exposes history repair as a settin
 });
 
 test("settings drawer separates software and gateway autostart controls", async () => {
-  const [drawerSource, settingsSource, typesSource, tauriSource, appSource, mainSource, zhSource, enSource] = await Promise.all([
+  const [drawerSource, settingsSource, typesSource, tauriSource, appSource, mainSource, handlersSource, zhSource, enSource] = await Promise.all([
     readFile(settingsDrawerPath, "utf8"),
     readFile(settingsLibPath, "utf8"),
     readFile(typesPath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
     readFile(appPath, "utf8"),
     readFile(tauriMainPath, "utf8"),
+    readFile(tauriHandlersPath, "utf8"),
     readFile(zhLocalePath, "utf8"),
     readFile(enLocalePath, "utf8"),
   ]);
@@ -1827,8 +1841,8 @@ test("settings drawer separates software and gateway autostart controls", async 
   assert.match(typesSource, /interface AutostartStatus/);
   assert.match(typesSource, /authoritative: boolean;/);
   assert.match(tauriSource, /getAutostartStatus:\s*\(\)\s*=>\s*call<AutostartStatus>\(COMMANDS.getAutostartStatus\)/);
-  assert.match(mainSource, /autostart::reconcile_settings\(config::get_settings\(\)\?\)/);
-  assert.match(mainSource, /get_autostart_status/);
+  assert.match(handlersSource, /autostart::reconcile_settings\(config::get_settings\(\)\?\)/);
+  assert.match(handlersSource, /get_autostart_status/);
   assert.match(typesSource, /auto_start_gateway: boolean;/);
   assert.doesNotMatch(typesSource, /auto_start_proxy: boolean;/);
   assert.match(settingsSource, /auto_start_software:\s*true/);
@@ -2275,31 +2289,31 @@ test("model test buttons use the selected endpoint connectivity check", async ()
 });
 
 test("add provider only prompts and saves when a name is present", async () => {
-  const [providersSource, navigationSource, catalogActionsSource] = await Promise.all([
+  const [providersSource, workspaceSource, catalogActionsSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
-    readFile(providerNavigationGuardPath, "utf8"),
+    readFile(providerWorkspaceHookPath, "utf8"),
     readFile(providerCatalogActionsPath, "utf8"),
   ]);
-  const selectProvider = navigationSource.match(/const selectProvider = useCallback[\s\S]*?\n  \);/)?.[0] ?? "";
+  const selectProvider = workspaceSource.match(/const selectProvider = useCallback[\s\S]*?\n  \}, \[\]\);/)?.[0] ?? "";
   const savePending =
-    navigationSource.match(/const savePendingProviderNavigation = useCallback[\s\S]*?const discardPendingProviderNavigation/)?.[0] ?? "";
+    workspaceSource.match(/if \(pending\.kind === "existing"\)[\s\S]*return \{ kind: "ok" \};/)?.[0] ?? "";
   const discardPending =
-    navigationSource.match(/const discardPendingProviderNavigation = useCallback[\s\S]*?const cancelPendingProviderNavigation/)?.[0] ?? "";
+    workspaceSource.match(/if \(mode === "discard"\)[\s\S]*return \{ kind: "ok" \};/)?.[0] ?? "";
   const addSave = catalogActionsSource.match(/async function saveAddProviderForm[\s\S]*?async function addProvider/)?.[0] ?? "";
   const dirtyHelper = providersSource.match(/function isAddProviderFormDirty[\s\S]*?function pendingProviderName/)?.[0] ?? "";
 
   assert.doesNotMatch(providersSource, /Discover models before saving the provider\./);
   assert.match(providersSource, /const canAdd = Boolean\(form\.name\.trim\(\)\);/);
   assert.doesNotMatch(providersSource, /const canAdd = form\.name\.trim\(\) && form\.base_url\.trim\(\);/);
-  assert.match(selectProvider, /selectedId === addId/);
-  assert.match(providersSource, /addId: ADD_ID/);
-  assert.match(selectProvider, /isAddFormDirty\(form\)[\s\S]*kind: "add"/);
-  assert.match(selectProvider, /resetAddForm\(\);[\s\S]*setSelectedId\(id\);/);
+  assert.match(selectProvider, /selectedId === ADD_ID/);
+  assert.match(providersSource, /useProviderWorkspace/);
+  assert.match(selectProvider, /form\.name\.trim\(\)[\s\S]*kind: "add"/);
+  assert.match(selectProvider, /resetForm[\s\S]*setSelectedId/);
   assert.match(dirtyHelper, /return Boolean\(form\.name\.trim\(\)\);/);
   assert.doesNotMatch(dirtyHelper, /base_url|api_key|models\.length/);
-  assert.match(savePending, /pending\.kind === "add"/);
-  assert.match(savePending, /const added = await saveAddForm\(pending\.form, pending\.targetId\);/);
-  assert.match(discardPending, /pending\.kind === "add"[\s\S]*resetAddForm\(\)/);
+  assert.match(workspaceSource, /pending\.kind === "add"/);
+  assert.match(workspaceSource, /act\(\{ type: "saveAddForm", form: pending\.form, targetId: pending\.targetId \}\)/);
+  assert.match(discardPending, /pending\.kind === "add"[\s\S]*resetForm/);
   assert.match(addSave, /base_url: nextForm\.base_url\.trim\(\)/);
   assert.match(addSave, /return null;/);
 });
@@ -2359,7 +2373,7 @@ test("Luna Collaboration selector shows only V1/V2 and marks the live catalog de
 test("Luna Collaboration save coordinates Codex before the catalog commit", async () => {
   const [tauriSource, bridgeSource, providersSource] = await Promise.all([
     readFile(tauriSourcePath, "utf8"),
-    readFile(tauriWebBridgePath, "utf8"),
+    readFile(tauriWebAdapterPath, "utf8"),
     readFile(providersPagePath, "utf8"),
   ]);
   const saveApi = tauriSource.match(/saveOfficialMultiAgentVersion[\s\S]*?listOfficialMultiAgentOverrides/)?.[0] ?? "";
@@ -2370,7 +2384,7 @@ test("Luna Collaboration save coordinates Codex before the catalog commit", asyn
   assert.match(tauriSource, /listOfficialMultiAgentBaselines:[\s\S]*COMMANDS.listOfficialMultiAgentBaselines/);
   assert.match(
     bridgeSource,
-    /"save_official_multi_agent_version"[\s\S]*optional_string_arg\(&request\.args, &\["modelId", "model_id"\]\)/,
+    /"save_official_multi_agent_version"[\s\S]*optional_string_arg\(args, &\["modelId", "model_id"\]\)/,
   );
   assert.match(providersSource, /api\.listOfficialMultiAgentOverrides\(\)/);
   assert.match(providersSource, /restartCodex = await onAuthorizeCodexRestart\(\)/);
@@ -2711,9 +2725,9 @@ test("official OpenAI auth prompt guides login before showing usage", async () =
   const [providersSource, tauriSource, mainSource, codexDesktopSource, webBridgeSource, enSource, zhSource] = await Promise.all([
     readFile(providersPagePath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
-    readFile(tauriMainPath, "utf8"),
+    readFile(tauriHandlersPath, "utf8"),
     readFile(tauriCodexDesktopPath, "utf8"),
-    readFile(tauriWebBridgePath, "utf8"),
+    readFile(tauriWebAdapterPath, "utf8"),
     readFile(enLocalePath, "utf8"),
     readFile(zhLocalePath, "utf8"),
   ]);
@@ -2767,9 +2781,9 @@ test("official OpenAI auth prompt guides login before showing usage", async () =
   assert.match(authPrompt, /<Copy size=\{15\} \/>/);
   assert.match(authPrompt, /<RefreshCcw size=\{15\}/);
   assert.match(tauriSource, /openCodexApp: \(\) => call<string>\(COMMANDS.openCodexApp\)/);
-  assert.match(mainSource, /fn open_codex_app\(\) -> Result<String, String> \{[\s\S]*launch_codex_app\(\)/);
-  assert.match(mainSource, /open_codex_app,/);
-  assert.match(mainSource, /fn launch_codex_app\(\) -> Result<String, String> \{[\s\S]*codex_desktop::launch\(\)/);
+  assert.match(mainSource, /fn open_codex_app\(\) -> Result<String, String> \{[\s\S]*codex_desktop::launch\(\)/);
+  assert.match(mainSource, /open_codex_app/);
+  assert.match(mainSource, /codex_desktop::launch\(\)/);
   assert.match(codexDesktopSource, /fn detect_linux_installation\(\) -> Option<LinuxCodexInstallation>/);
   assert.match(codexDesktopSource, /\/usr\/lib\/chatgpt\/codex-launcher/);
   assert.match(codexDesktopSource, /Get-AppxPackageManifest/);
@@ -3229,10 +3243,10 @@ test("catalog and metadata writers share the lifecycle and publication lock", as
     readFile(providerCatalogActionsPath, "utf8"),
     readFile(providersPagePath, "utf8"),
     readFile(tauriSourcePath, "utf8"),
-    readFile(tauriMainPath, "utf8"),
+    readFile(tauriHandlersPath, "utf8"),
     readFile(tauriModelsPath, "utf8"),
     readFile(tauriCodexDesktopPath, "utf8"),
-    readFile(tauriWebBridgePath, "utf8"),
+    readFile(tauriWebAdapterPath, "utf8"),
     readFile(new URL("../../src-tauri/src/cli.rs", import.meta.url), "utf8"),
   ]);
 
@@ -3360,34 +3374,29 @@ test("app update flow separates silent automatic checks from settings checks and
   const automaticCheck = appSource.match(/const runAutomaticUpdateCheck = useCallback[\s\S]*?const updateUsageWindow = useCallback/)?.[0] ?? "";
 
   assert.match(appSource, /const \{ dismissToast, showToast, updateToast \} = useToasts\(\)/);
-  assert.match(appSource, /const updateAvailableToastId = useRef<string \| null>\(null\)/);
-  assert.match(appSource, /APP_UPDATE_CHECK_INTERVAL_MS\s*=\s*24 \* 60 \* 60 \* 1000/);
-  assert.match(appSource, /UPDATE_INSTALL_STATUS_POLL_MS\s*=\s*500/);
-  assert.match(automaticCheck, /updateAvailableToastId\.current = showToast\(\{/);
-  assert.match(automaticCheck, /label: t\("settings\.update"\)/);
-  assert.match(automaticCheck, /timeoutMs: null/);
-  assert.doesNotMatch(automaticCheck, /settings\.checkForUpdates/);
-  assert.doesNotMatch(automaticCheck, /tone: "loading"/);
-  assert.doesNotMatch(settingsCheck, /showToast\(t\("settings\.checkForUpdates"\), "loading"\)/);
-  assert.match(settingsCheck, /t\("settings\.noUpdatesAvailable"\)/);
-  assert.match(settingsCheck, /t\("settings\.updateAvailable", \{ version: status\.latest_version \}\)/);
-  assert.doesNotMatch(settingsCheck, /action:\s*\{/);
-  assert.match(installAction, /const toastId = updateAvailableToastId\.current/);
-  assert.match(installAction, /if \(toastId\) \{[\s\S]*dismissToast\(toastId\);[\s\S]*updateAvailableToastId\.current = null;[\s\S]*\}/);
-  assert.match(installAction, /AppUpdater\.install\(\)/);
-  assert.match(installAction, /settings\.downloadingUpdate/);
+  assert.doesNotMatch(appSource, /updateAvailableToastId/);
+  assert.doesNotMatch(appSource, /APP_UPDATE_CHECK_INTERVAL_MS/);
+  assert.doesNotMatch(appSource, /UPDATE_INSTALL_STATUS_POLL_MS/);
+  assert.doesNotMatch(appSource, /const startAppUpdateInstall = useCallback/);
+  assert.doesNotMatch(appSource, /const checkForUpdates = useCallback/);
+  assert.doesNotMatch(appSource, /const runAutomaticUpdateCheck = useCallback/);
+  assert.doesNotMatch(appSource, /settings\.updateInstallFailed/);
+  // App only delegates to the module seam.
+  assert.match(appSource, /appUpdate\.checkForUpdates/);
+  assert.match(appSource, /appUpdate\.startInstall\("settings"\)/);
+  assert.doesNotMatch(appSource, /updateAvailableToastId/);
+  assert.doesNotMatch(appSource, /AppUpdater/);
+  assert.doesNotMatch(appSource, /app-update-install/);
+  assert.match(appSource, /appUpdate\.startScheduling\(settingsLoaded\)/);
+  assert.match(appSource, /onInstallUpdate=\{async \(\) => \{/);
   assert.match(updateStatusSource, /settings\.installingUpdateRestarting/);
-  assert.ok(
-    installAction.indexOf("dismissToast(toastId)") < installAction.indexOf("AppUpdater.install()"),
-    "the stale update-available toast should be removed before the install loading toast settles",
-  );
 });
 
 test("app update APIs use the web bridge fallback and bridge dispatches updater commands", async () => {
   const [tauriSource, typesSource, bridgeSource, mainSource] = await Promise.all([
     readFile(tauriSourcePath, "utf8"),
     readFile(typesPath, "utf8"),
-    readFile(new URL("../../src-tauri/src/web_bridge.rs", import.meta.url), "utf8"),
+    readFile(tauriWebAdapterPath, "utf8"),
     readFile(tauriMainPath, "utf8"),
   ]);
 
@@ -3656,18 +3665,28 @@ test("gateway takeover is direct and does not add a confirmation surface", async
 });
 
 test("startup update check is delayed and silent on failure", async () => {
-  const appSource = await readFile(appPath, "utf8");
+  const [appSource, lifecycleSource, hookSource] = await Promise.all([
+    readFile(appPath, "utf8"),
+    readFile(new URL("../src/lib/appUpdateLifecycle.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/hooks/useAppUpdateLifecycle.ts", import.meta.url), "utf8"),
+  ]);
 
-  assert.match(appSource, /STARTUP_UPDATE_CHECK_DELAY_MS\s*=\s*2500/);
-  assert.match(appSource, /APP_UPDATE_CHECK_INTERVAL_MS\s*=\s*24 \* 60 \* 60 \* 1000/);
-  assert.match(appSource, /startupUpdateCheckStarted/);
-  assert.match(appSource, /AppUpdater\.check\(\)/);
-  assert.match(appSource, /settings\.updateAvailable/);
-  assert.match(appSource, /settings\.update/);
-  assert.match(appSource, /AppUpdater\.install\(\)/);
-  assert.match(appSource, /window\.setInterval\(\(\) => void runAutomaticUpdateCheck\(\), APP_UPDATE_CHECK_INTERVAL_MS\)/);
-  assert.match(appSource, /Automatic update checks are best-effort/);
-  assert.doesNotMatch(appSource, /setBanner\(messageFromError\(err\)\)[\s\S]*Startup update/);
+  // The scheduling and silent-check policy lives in the lifecycle module,
+  // not in App.tsx orchestration.
+  assert.match(lifecycleSource, /STARTUP_DELAY_MS\s*=\s*2500/);
+  assert.match(lifecycleSource, /AUTO_CHECK_INTERVAL_MS\s*=\s*24 \* 60 \* 60 \* 1000/);
+  assert.match(lifecycleSource, /startScheduling\(settingsLoaded: boolean\)/);
+  assert.match(lifecycleSource, /Automatic update checks are best-effort/);
+  assert.match(lifecycleSource, /runAutomaticCheck/);
+  assert.match(lifecycleSource, /settings\.updateAvailable/);
+  assert.match(lifecycleSource, /settings\.update/);
+  // App only composes the module and no longer owns scheduling.
+  assert.match(appSource, /appUpdate\.startScheduling\(settingsLoaded\)/);
+  assert.doesNotMatch(appSource, /runAutomaticUpdateCheck/);
+  assert.doesNotMatch(appSource, /startupUpdateCheckStarted/);
+  assert.doesNotMatch(appSource, /AppUpdater/);
+  // Hook exposes the module seam; production port delegates to api.
+  assert.match(hookSource, /startScheduling: \(settingsLoaded: boolean\)/);
 });
 
 test("legacy provider hidden capability is removed from model/provider UI state", async () => {
@@ -3769,7 +3788,7 @@ test("xAI SuperGrok login card uses one loading toast and the XAI_API_KEY fallba
       readFile(tauriSourcePath, "utf8"),
       readFile(typesPath, "utf8"),
       readFile(new URL("../src/lib/commands.ts", import.meta.url), "utf8"),
-      readFile(tauriWebBridgePath, "utf8"),
+      readFile(tauriWebAdapterPath, "utf8"),
       readFile(providerCatalogActionsPath, "utf8"),
       readFile(enLocalePath, "utf8"),
       readFile(zhLocalePath, "utf8"),
@@ -3844,8 +3863,8 @@ test("add provider opens a catalog overlay instead of a blank form", async () =>
       readFile(providerCatalogActionsPath, "utf8"),
       readFile(new URL("../src/lib/commands.ts", import.meta.url), "utf8"),
       readFile(tauriSourcePath, "utf8"),
-      readFile(tauriMainPath, "utf8"),
-      readFile(tauriWebBridgePath, "utf8"),
+      readFile(tauriHandlersPath, "utf8"),
+      readFile(tauriWebAdapterPath, "utf8"),
       readFile(enLocalePath, "utf8"),
       readFile(zhLocalePath, "utf8"),
     ]);

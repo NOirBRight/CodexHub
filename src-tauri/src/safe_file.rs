@@ -195,14 +195,18 @@ fn adjacent_lock_path(path: &Path) -> PathBuf {
 
 fn lock_path(path: &Path) -> PathBuf {
     let coordination_target =
-        dsh_private_lock_target(path).unwrap_or_else(|| path.to_path_buf());
+        foreign_client_lock_target(path).unwrap_or_else(|| path.to_path_buf());
     adjacent_lock_path(&coordination_target)
 }
 
-/// DSH treats an adjacent document lock as a live writer based on file
-/// presence alone. Keep CodexHub's persistent flock protocol in its own
-/// namespace for the two DSH documents we mutate. Rust and Python intentionally
-/// use this same deterministic mapping.
+/// Clients that treat an adjacent `*.lock` path as *their* lock protocol
+/// (DSH exclusive-create, Pi/OMP `proper-lockfile` mkdir) cannot share
+/// CodexHub's persistent flock file. Keep our protocol in
+/// `~/.codexhub/locks/<client>/`. Rust and Python use the same mapping.
+fn foreign_client_lock_target(path: &Path) -> Option<PathBuf> {
+    dsh_private_lock_target(path).or_else(|| agent_client_lock_target(path))
+}
+
 fn dsh_private_lock_target(path: &Path) -> Option<PathBuf> {
     let file_name = path.file_name()?.to_str()?;
     if !matches!(file_name, ".credentials.yaml" | "settings.yaml") {
@@ -219,6 +223,57 @@ fn dsh_private_lock_target(path: &Path) -> Option<PathBuf> {
             .join("dsh")
             .join(file_name),
     )
+}
+
+fn agent_client_lock_target(path: &Path) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
+    let agent_dir = path.parent()?;
+    if agent_dir.file_name()?.to_str()? != "agent" {
+        return None;
+    }
+    let client_dir = agent_dir.parent()?;
+    let namespace = match (client_dir.file_name()?.to_str()?, file_name) {
+        (".pi", "settings.json" | "models.json") => "pi",
+        (".omp", "config.yml" | "config.yaml" | "models.yml") => "omp",
+        _ => return None,
+    };
+    let home = client_dir.parent()?;
+    Some(
+        home.join(".codexhub")
+            .join("locks")
+            .join(namespace)
+            .join(file_name),
+    )
+}
+
+/// Drop leftover CodexHub flock files from a foreign client's lock path so
+/// `mkdir`-based reclaim (Pi/OMP) and exclusive-create (DSH) can succeed.
+/// Directories are left alone: those are the foreign protocol's live lock.
+fn clear_displaced_adjacent_protocol_lock(target: &Path) {
+    let adjacent = adjacent_lock_path(target);
+    if adjacent == lock_path(target) {
+        return;
+    }
+    remove_displaced_protocol_file(&adjacent);
+    remove_displaced_protocol_file(&namespace_lock_path(&adjacent));
+}
+
+fn remove_displaced_protocol_file(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if !metadata.is_file() {
+        return;
+    }
+    match fs::read(path) {
+        Ok(bytes) if bytes.is_empty() => {}
+        Ok(bytes) => match std::str::from_utf8(&bytes) {
+            Ok(text) if matches!(lock_state(text), LockState::Protocol) => {}
+            _ => return,
+        },
+        Err(_) => return,
+    }
+    let _ = fs::remove_file(path);
 }
 
 fn timestamp_millis() -> u128 {
@@ -363,6 +418,7 @@ impl FileLock {
     }
 
     fn acquire_inner(target: &Path, hook: Option<&dyn Fn(&'static str)>) -> Result<Self, String> {
+        clear_displaced_adjacent_protocol_lock(target);
         let path = lock_path(target);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -877,6 +933,60 @@ mod tests {
                 .expect("DSH-style exclusive lock creation must succeed");
             fs::remove_file(adjacent_lock).unwrap();
         }
+    }
+
+    #[test]
+    fn pi_and_omp_writes_leave_the_foreign_lock_namespace_available() {
+        let home = test_root("agent-lock-interop");
+        let cases: &[(&str, &str, &str)] = &[
+            (".pi", "models.json", "pi"),
+            (".pi", "settings.json", "pi"),
+            (".omp", "models.yml", "omp"),
+            (".omp", "config.yml", "omp"),
+        ];
+        for (client, file_name, namespace) in cases {
+            let agent = home.join(client).join("agent");
+            fs::create_dir_all(&agent).unwrap();
+            let target = agent.join(file_name);
+            write_text_atomic(&target, "new\n").unwrap();
+
+            let adjacent_lock = agent.join(format!("{file_name}.lock"));
+            assert!(
+                !adjacent_lock.exists(),
+                "CodexHub must not occupy {client} {file_name}.lock"
+            );
+            assert!(
+                !agent.join(format!("{file_name}.lock.guard")).exists(),
+                "CodexHub guards must not remain in the {client} agent directory"
+            );
+            let private_lock = home
+                .join(".codexhub/locks")
+                .join(namespace)
+                .join(format!("{file_name}.lock"));
+            assert_eq!(fs::read_to_string(private_lock).unwrap(), LOCK_PROTOCOL);
+            fs::create_dir(&adjacent_lock)
+                .expect("proper-lockfile mkdir must succeed on the foreign lock path");
+            fs::remove_dir(adjacent_lock).unwrap();
+        }
+    }
+
+    #[test]
+    fn displaced_codexhub_protocol_file_is_cleared_from_pi_lock_namespace() {
+        let home = test_root("pi-lock-heal");
+        let agent = home.join(".pi").join("agent");
+        fs::create_dir_all(&agent).unwrap();
+        let target = agent.join("settings.json");
+        let adjacent_lock = agent.join("settings.json.lock");
+        let adjacent_guard = agent.join("settings.json.lock.guard");
+        fs::write(&adjacent_lock, LOCK_PROTOCOL).unwrap();
+        fs::write(&adjacent_guard, "").unwrap();
+
+        write_text_atomic(&target, "new\n").unwrap();
+
+        assert!(!adjacent_lock.exists());
+        assert!(!adjacent_guard.exists());
+        fs::create_dir(&adjacent_lock).expect("Pi mkdir lock must work after healing");
+        fs::remove_dir(adjacent_lock).unwrap();
     }
 
     #[test]

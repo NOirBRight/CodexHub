@@ -70,6 +70,19 @@ bucket (the existing unified-history machinery,
 `model_providers.*` sections are no longer stripped, but switching to them
 changes the history bucket by design of the client itself.
 
+## DM-4 amendment: managed-client adapter seam
+
+Campaign #491 DM-4 completes #8 with a unified coordinator and per-client
+adapters. Adapters expose three internal capabilities — metadata(), inspect(ctx) -> ClientSnapshot, and plan(intent, ctx) -> ClientMutationPlan (Connect | Disconnect | Republish) — and never publish files directly. The
+coordinator (src-tauri/src/gateway/managed_clients.rs) owns the routing-owner
+gate, global write lock, baseline/legacy backup adoption, file_transaction
+atomic publish/rollback, block-fingerprint readback, pending-sync cleanup, and
+result mapping. InjectionDescriptor plus the JSON/YAML/TOML strategies are
+internal plan machinery. The Codex stable-bucket exception is expressed by a
+dedicated adapter, not by distorting the generic descriptor.
+
+The adapter interface stays internal to the Rust crate: metadata(), inspect(ctx) -> ClientSnapshot, and plan(intent, ctx) -> ClientMutationPlan. Public Tauri/bridge commands only ever see the coordinator, never an adapter.
+
 ## Consequences
 
 - Users can run the Gateway alongside their own providers in the same client;
@@ -85,3 +98,13 @@ changes the history bucket by design of the client itself.
   switch); no separate "active/pointing" indicator is surfaced.
 - Byte-compare readback remains in force for not-yet-migrated clients; the
   two readback semantics coexist during the campaign.
+
+## Campaign status (0.1.9-beta.3.13)
+
+Coordinator `adapter_for` now registers `dsh`, `codex`, `opencode`, `pi`,
+`omp`, and `zcode`. Native apply for opencode/pi/omp/zcode is
+`publish_apply` → `apply_native_at`. Codex live overlay stays in
+`config.rs` / `config_overlay.py` because of the stable-history-bucket
+exception above; `CodexAdapter` is the registry entry and keeps isolated
+gateway apply fail-closed to `apply_codex_config_isolated`. Isolated
+dispatch no longer special-cases `client_id == "codex"`.

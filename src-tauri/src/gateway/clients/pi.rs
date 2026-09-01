@@ -515,6 +515,34 @@ pub(in crate::gateway) fn preview_pi_config_with_paths(
     })
 }
 
+pub(in crate::gateway) struct PiApplyPlan {
+    pub settings_path: PathBuf,
+    pub models_path: PathBuf,
+    pub next_models: String,
+    pub skip_snapshot: bool,
+}
+
+/// Pure next-text plan. Does not create backups or write the target files.
+pub(in crate::gateway) fn plan_pi_apply(
+    settings_path: &Path,
+    models_path: &Path,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<PiApplyPlan, String> {
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    let current_settings = fs::read_to_string(settings_path).unwrap_or_default();
+    let current_models = fs::read_to_string(models_path).unwrap_or_default();
+    let next_models = pi_models_text(models_path, settings, providers, &model)?;
+    Ok(PiApplyPlan {
+        settings_path: settings_path.to_path_buf(),
+        models_path: models_path.to_path_buf(),
+        skip_snapshot: is_pi_codexhub_config(&current_settings, &current_models),
+        next_models,
+    })
+}
+
+#[cfg(test)]
 pub(in crate::gateway) fn apply_pi_config_with_paths(
     settings_path: &Path,
     models_path: &Path,
@@ -523,30 +551,36 @@ pub(in crate::gateway) fn apply_pi_config_with_paths(
     providers: &[Provider],
     model: &str,
 ) -> Result<GatewayClientApplyResult, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    publish_pi_apply(
+        &plan_pi_apply(settings_path, models_path, settings, providers, model)?,
+        backup_roots,
+    )
+}
+
+pub(in crate::gateway) fn publish_pi_apply(
+    plan: &PiApplyPlan,
+    backup_roots: &[(PathBuf, BackupChannel)],
+) -> Result<GatewayClientApplyResult, String> {
     let (backup_root, _) = backup_roots
         .first()
         .ok_or_else(|| "Pi apply requires at least one backup root".to_string())?;
-    let current_settings = fs::read_to_string(settings_path).unwrap_or_default();
-    let current_models = fs::read_to_string(models_path).unwrap_or_default();
     let backup_path = create_snapshot_backup(
         "pi",
         backup_root,
         &[
-            ("settings.json", settings_path),
-            ("models.json", models_path),
+            ("settings.json", &plan.settings_path),
+            ("models.json", &plan.models_path),
         ],
-        is_pi_codexhub_config(&current_settings, &current_models),
+        plan.skip_snapshot,
     )
     .map_err(|_| "failed to create Pi backup snapshot".to_string())?;
-    record_pi_rollback_baseline(settings_path, models_path, backup_roots)?;
-    let next_models = pi_models_text(models_path, settings, providers, &model)?;
-    write_text_replace(models_path, &next_models)
+    record_pi_rollback_baseline(&plan.settings_path, &plan.models_path, backup_roots)?;
+    write_text_replace(&plan.models_path, &plan.next_models)
         .map_err(|_| "failed to write managed Pi models".to_string())?;
     Ok(GatewayClientApplyResult {
         client_id: "pi".to_string(),
         applied: true,
-        config_path: Some(models_path.to_path_buf()),
+        config_path: Some(plan.models_path.clone()),
         backup_path,
         message: "Pi now has the CodexHub provider available. Model selection is unchanged."
             .to_string(),

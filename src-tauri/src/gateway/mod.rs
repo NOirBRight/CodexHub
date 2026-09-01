@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 mod backup;
 mod clients;
 mod inject;
+mod managed_clients;
 mod isolated;
 mod providers;
 mod readback;
@@ -40,39 +41,46 @@ pub use readback::verify_apply_readback;
 
 use clients::codex::read_codex_auth_status;
 use clients::omp::{
-    apply_omp_config_with_paths, detect_omp_config_paths, detect_omp_route_details,
-    preview_omp_config_with_paths, restore_omp_config_with_paths,
+    detect_omp_config_paths, detect_omp_route_details,
 };
 #[cfg(test)]
-use clients::omp::{omp_models_yml_text, omp_route_mode, OmpConfigPaths};
+use clients::omp::{
+    apply_omp_config_with_paths, omp_models_yml_text, omp_route_mode, plan_omp_apply,
+    restore_omp_config_with_paths,
+    OmpConfigPaths,
+};
 use clients::opencode::{
-    apply_opencode_config_with_paths, detect_opencode_config_path, detect_opencode_executable_path,
-    detect_opencode_version, is_opencode_codexhub_config, preview_opencode_config_with_path,
-    restore_opencode_config_with_backup_roots,
+    detect_opencode_config_path, detect_opencode_executable_path,
+    detect_opencode_version, is_opencode_codexhub_config,
 };
 #[cfg(test)]
 use clients::opencode::{
-    detect_opencode_executable_path_in_home, opencode_config_text,
+    apply_opencode_config_with_paths, detect_opencode_executable_path_in_home, opencode_config_text,
+    plan_opencode_apply, OpenCodeApplyDecision,
     opencode_ownership_bounded_cleanup, opencode_reasoning_variants, restore_latest_backup,
+    restore_opencode_config_with_backup_roots,
 };
 #[cfg(all(test, target_os = "linux"))]
 use clients::opencode::opencode_system_executable_candidates;
 use clients::pi::{
-    apply_pi_config_with_paths, detect_pi_config_paths, detect_pi_route_details,
-    preview_pi_config_with_paths, restore_pi_config_with_paths,
+    detect_pi_config_paths, detect_pi_route_details,
 };
 #[cfg(test)]
-use clients::pi::{pi_models_text, pi_ownership_bounded_cleanup, pi_settings_text};
+use clients::pi::{
+    apply_pi_config_with_paths, pi_models_text, pi_ownership_bounded_cleanup, pi_settings_text,
+    plan_pi_apply, restore_pi_config_with_paths,
+};
 use clients::zcode::{
-    apply_zcode_config_with_targets, detect_zcode_config_targets, detect_zcode_executable_path,
-    detect_zcode_route_details, detect_zcode_store_path, preview_zcode_config_with_targets,
-    restore_zcode_config_with_targets, zcode_latest_version, zcode_route_mode_with_expected,
+    detect_zcode_config_targets, detect_zcode_executable_path,
+    detect_zcode_route_details, detect_zcode_store_path, zcode_latest_version,
+    zcode_route_mode_with_expected,
 };
 #[cfg(test)]
 use clients::zcode::{
-    zcode_catalog_text, zcode_route_mode, zcode_targets_from_writable, zcode_v2_cache_text,
-    zcode_v2_config_text, zcode_v2_root_from_catalog_path, zcode_v2_root_from_settings_path,
-    ZcodeConfigTargets,
+    apply_zcode_config_with_targets, plan_zcode_apply, restore_zcode_config_with_targets,
+    zcode_catalog_text,
+    zcode_route_mode, zcode_targets_from_writable, zcode_v2_cache_text, zcode_v2_config_text,
+    zcode_v2_root_from_catalog_path, zcode_v2_root_from_settings_path, ZcodeConfigTargets,
 };
 
 #[cfg(test)]
@@ -811,46 +819,7 @@ pub fn preview_gateway_client_config(
     let providers = config::get_providers()?;
     let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let id = normalize_client_id(&client_id);
-    if id == "opencode" {
-        let path = detect_opencode_config_path()
-            .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
-        return preview_opencode_config_with_path(&path, &settings, &providers, &model);
-    }
-    if id == "pi" {
-        let paths = detect_pi_config_paths();
-        return preview_pi_config_with_paths(
-            &paths.settings_path,
-            &paths.models_path,
-            &settings,
-            &providers,
-            &model,
-        );
-    }
-    if id == "omp" {
-        let paths = detect_omp_config_paths();
-        return preview_omp_config_with_paths(
-            &paths.config_path,
-            &paths.models_path,
-            &settings,
-            &providers,
-            &model,
-        );
-    }
-    if id == "zcode" {
-        let targets = detect_zcode_config_targets();
-        return preview_zcode_config_with_targets(&targets, &settings, &providers, &model);
-    }
-    let config = gateway_copy_client_config(Some(id.clone()), Some(model))?;
-    Ok(GatewayClientConfigPreview {
-        client_id: id,
-        can_apply: false,
-        strategy: "copy_only".to_string(),
-        config_path: None,
-        current_redacted: None,
-        next_redacted: config.json,
-        backup_required: false,
-        message: "Generic and unknown clients are copy-only in this release.".to_string(),
-    })
+    managed_clients::preview_native(&id, &settings, &providers, &model)
 }
 
 pub fn apply_gateway_client_config(
@@ -883,102 +852,7 @@ fn apply_gateway_client_config_locked(
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
     let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    match client_id.as_str() {
-        "opencode" => {
-            let path = detect_opencode_config_path()
-                .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
-            let result = apply_opencode_config_with_paths(
-                &path,
-                &client_backup_roots_for_apply("opencode"),
-                &settings,
-                &providers,
-                &model,
-            )?;
-            if result.applied {
-                verify_apply_readback(
-                    "opencode",
-                    std::slice::from_ref(&path),
-                    &settings,
-                    &providers,
-                    &model,
-                )?;
-            }
-            Ok(result)
-        }
-        "pi" => {
-            let paths = detect_pi_config_paths();
-            let result = apply_pi_config_with_paths(
-                &paths.settings_path,
-                &paths.models_path,
-                &client_backup_roots_for_apply("pi"),
-                &settings,
-                &providers,
-                &model,
-            )?;
-            if result.applied {
-                verify_apply_readback(
-                    "pi",
-                    &[paths.settings_path.clone(), paths.models_path.clone()],
-                    &settings,
-                    &providers,
-                    &model,
-                )?;
-            }
-            Ok(result)
-        }
-        "omp" => {
-            let paths = detect_omp_config_paths();
-            let result = apply_omp_config_with_paths(
-                &paths.config_path,
-                &paths.models_path,
-                &client_backup_root("omp"),
-                &settings,
-                &providers,
-                &model,
-            )?;
-            if result.applied {
-                verify_apply_readback(
-                    "omp",
-                    &[paths.config_path.clone(), paths.models_path.clone()],
-                    &settings,
-                    &providers,
-                    &model,
-                )?;
-            }
-            Ok(result)
-        }
-        "zcode" => {
-            let targets = detect_zcode_config_targets();
-            let result = apply_zcode_config_with_targets(
-                &targets,
-                &client_backup_root("zcode"),
-                &settings,
-                &providers,
-                &model,
-            )?;
-            if result.applied {
-                verify_apply_readback(
-                    "zcode",
-                    &[
-                        targets.catalog_path.clone(),
-                        targets.v2_config_path.clone(),
-                        targets.v2_cache_path.clone(),
-                    ],
-                    &settings,
-                    &providers,
-                    &model,
-                )?;
-            }
-            Ok(result)
-        }
-        _ => Ok(GatewayClientApplyResult {
-            client_id,
-            applied: false,
-            config_path: None,
-            backup_path: None,
-            message: "This client is copy-only; no native adapter is registered.".to_string(),
-        }),
-    }
+    managed_clients::apply_native(client_id, &settings, &providers, &model)
 }
 
 pub fn restore_gateway_client_config(
@@ -1008,36 +882,7 @@ fn restore_gateway_client_config_locked(
         .lock()
         .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
     let backup_roots = client_backup_roots_for_restore(&client_id, backup_owner);
-    match client_id.as_str() {
-        "opencode" => {
-            let path = detect_opencode_config_path()
-                .ok_or_else(|| "OpenCode config path could not be resolved".to_string())?;
-            restore_opencode_config_with_backup_roots(&path, &backup_roots)
-        }
-        "pi" => {
-            let paths = detect_pi_config_paths();
-            restore_pi_config_with_paths(&paths.settings_path, &paths.models_path, &backup_roots)
-        }
-        "omp" => {
-            let paths = detect_omp_config_paths();
-            restore_with_backup_roots(&backup_roots, |backup_root| {
-                restore_omp_config_with_paths(&paths.config_path, &paths.models_path, backup_root)
-            })
-        }
-        "zcode" => {
-            let targets = detect_zcode_config_targets();
-            restore_with_backup_roots(&backup_roots, |backup_root| {
-                restore_zcode_config_with_targets(&targets, backup_root)
-            })
-        }
-        _ => Ok(GatewayClientApplyResult {
-            client_id,
-            applied: false,
-            config_path: None,
-            backup_path: None,
-            message: "Restore is not available for this copy-only client.".to_string(),
-        }),
-    }
+    managed_clients::restore_native(client_id, &backup_roots)
 }
 
 fn gateway_client_config_write_lock() -> &'static Mutex<()> {
@@ -1442,27 +1287,7 @@ where
 }
 
 fn gateway_client_has_existing_config(client_id: &str) -> bool {
-    match client_id {
-        "opencode" => detect_opencode_config_path()
-            .as_ref()
-            .map(|path| path.exists())
-            .unwrap_or(false),
-        "pi" => {
-            let paths = detect_pi_config_paths();
-            paths.settings_path.exists() || paths.models_path.exists()
-        }
-        "omp" => {
-            let paths = detect_omp_config_paths();
-            paths.config_path.exists() || paths.models_path.exists()
-        }
-        "zcode" => {
-            let targets = detect_zcode_config_targets();
-            targets.v2_config_path.exists()
-                || targets.catalog_path.exists()
-                || targets.v2_cache_path.exists()
-        }
-        _ => false,
-    }
+    managed_clients::has_existing_config(client_id)
 }
 
 pub fn subagent_matrix_status() -> Result<SubagentMatrixStatus, String> {

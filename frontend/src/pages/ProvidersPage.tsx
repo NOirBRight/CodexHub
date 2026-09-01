@@ -36,9 +36,13 @@ import {
   modelIdMatches,
   SwitchControl,
 } from "../components/providers/ProviderModelSection";
-import { useProviderNavigationGuard } from "../hooks/useProviderNavigationGuard";
-import type { PendingProviderNavigation } from "../hooks/useProviderNavigationGuard";
 import { useProviderCatalogActions } from "../hooks/useProviderCatalogActions";
+import {
+  ADD_ID,
+  OFFICIAL_ID,
+  useProviderWorkspace,
+  type PendingProviderNavigation,
+} from "../hooks/useProviderWorkspace";
 import { useVerticalOverflow } from "../hooks/useVerticalOverflow";
 import { cx, displayModel, renumberModels } from "../lib/format";
 import { emptyProvider, type AddProviderForm } from "../lib/providerForm";
@@ -65,8 +69,6 @@ import type {
   UpstreamFormatProbeResult,
 } from "../lib/types";
 
-const OFFICIAL_ID = "__official__";
-const ADD_ID = "__add__";
 type ProviderNavItem =
   { id: string; sort_order: number; provider: Provider };
 type CodexAuthState = "authorized" | "missing" | "unknown";
@@ -112,7 +114,9 @@ function ProvidersPageImpl({
   const { t } = useTranslation();
   const { confirm: confirmAction, dialog: confirmDialog } = useConfirmDialog();
   const tr = t as Translate;
-  const { showToast, updateToast } = useToasts();
+  const toast = useToasts();
+  const { showToast, updateToast } = toast;
+  const authorizeCodexRestartRef = useRef<() => Promise<boolean | null>>(async () => null);
   const initialOfficialUsageSnapshot = useMemo(() => readStoredOfficialOpenAIUsageSnapshot(), []);
   const [codexAuthPreviewState, setCodexAuthPreviewState] = useState<CodexAuthState | null>(() => readCodexAuthPreviewState());
   const [providers, setProviders] = useState<Provider[]>(() => providersSnapshot);
@@ -143,13 +147,6 @@ function ProvidersPageImpl({
     useState<AppFlavorInfo["codex_target_owner"] | undefined>(undefined);
   const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(gatewayStatusSnapshot ?? null);
   const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>(() => codexAuthPreviewState ?? "unknown");
-  const [officialModels, setOfficialModels] = useState<Model[]>(() => {
-    const normalizedSettings = settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null;
-    return sortOfficialModels(
-      mergeOfficialModelSources(catalogModels, modelMetadata),
-      normalizedSettings?.official_model_sort_order ?? [],
-    );
-  });
   const [officialCollaborationOverrides, setOfficialCollaborationOverrides] = useState<
     Record<string, "v1" | "v2">
   >({});
@@ -167,38 +164,60 @@ function ProvidersPageImpl({
   const [probeResult, setProbeResult] = useState<UpstreamFormatProbeResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [modelDiscoveryError, setModelDiscoveryError] = useState<string | null>(null);
-  const {
-    cancelPendingProviderNavigation,
-    discardPendingProviderNavigation,
-    pendingProviderNavigation,
-    savePendingProviderNavigation,
-    selectedId,
-    selectProvider,
-    setSelectedId,
-    trackProviderDraft,
-  } = useProviderNavigationGuard<Provider, AddProviderForm>({
-    addId: ADD_ID,
-    form,
-    initialSelectedId: OFFICIAL_ID,
-    isAddFormDirty: isAddProviderFormDirty,
-    resetAddForm: () => setForm(emptyProvider),
-    saveAddForm: async (nextForm, targetId) => Boolean(await saveAddProviderForm(nextForm, targetId)),
-    saveExistingDraft: (draft) => updateProvider(draft, t("providers.providerSaved", { name: draft.name })),
+  const workspace = useProviderWorkspace({
+    getSource: () => ({ catalogModels, modelMetadata, providers, settings }),
+    onProvidersChanged,
+    onSettingsChanged,
+    refreshGatewayState: async () => {
+      await onGatewayChanged?.();
+    },
+    authorizeCodexRestart: () => authorizeCodexRestartRef.current(),
+    toast,
+    t,
+    tr,
   });
+  const selectedId = workspace.state.selectedId;
+  const officialModels = workspace.state.officialModels;
+  const setOfficialModels = (value: Model[] | ((current: Model[]) => Model[])) => {
+    const next = typeof value === "function" ? value(workspace.state.officialModels) : value;
+    workspace.edit({ type: "setOfficialModels", models: next });
+  };
+  const { selectProvider, trackProviderDraft } = workspace;
+  const setSelectedId = (value: string | ((current: string) => string)) => {
+    const next = typeof value === "function" ? value(workspace.state.selectedId) : value;
+    workspace.setSelectedId(next);
+  };
+  const pendingNewProvider = workspace.state.pendingNewProvider;
+  const setPendingNewProvider = (value: Provider | null | ((current: Provider | null) => Provider | null)) => {
+    const next = typeof value === "function" ? value(workspace.state.pendingNewProvider) : value;
+    if (next) {
+      workspace.edit({ type: "setPendingNewProvider", provider: next });
+    } else {
+      workspace.edit({ type: "clearPendingNewProvider" });
+    }
+  };
+  function addCatalogProvider(preset: Provider) {
+    workspace.edit({ type: "setProviders", providers });
+    workspace.edit({ type: "stageCatalogPreset", preset });
+  }
+  const pendingProviderNavigation = workspace.navigation.pending;
+  const cancelPendingProviderNavigation = () => {
+    void workspace.navigation.resolve("cancel");
+  };
+  const discardPendingProviderNavigation = () => {
+    setForm(emptyProvider);
+    void workspace.navigation.resolve("discard");
+  };
+  const savePendingProviderNavigation = () => workspace.navigation.resolve("save");
+  const editWorkspace = workspace.edit;
+  useEffect(() => {
+    editWorkspace({ type: "updateForm", form });
+  }, [editWorkspace, form]);
   const {
-    addCatalogProvider,
-    addProvider,
-    pendingNewProvider,
-    setPendingNewProvider,
     catalogSyncToastMessage,
-    discoverForForm,
     formProbeModel,
-    persistProviderProbeResult,
-    probeUpstreamFormat,
+    probeUpstreamFormat: catalogProbeUpstreamFormat,
     providerProbeModel,
-    refreshOfficialModels,
-    refreshProviderModels,
-    saveAddProviderForm,
     saveProviders,
     updateGatewayAfterCatalog,
   } = useProviderCatalogActions({
@@ -217,6 +236,8 @@ function ProvidersPageImpl({
     setProbeResult,
     setProviders,
     setSelectedId,
+    pendingNewProvider,
+    setPendingNewProvider,
     settings,
     settingsDraft,
     t,
@@ -224,6 +245,87 @@ function ProvidersPageImpl({
     toast: { showToast, updateToast },
     updateToastWithError,
   });
+  async function discoverForForm() {
+    setBusy("discover");
+    try {
+      const result = await workspace.act({ type: "discoverForForm", form });
+      if (result.kind === "ok" && result.form) {
+        setForm(result.form);
+      }
+      setModelDiscoveryError(result.kind === "error" ? result.message : null);
+    } finally {
+      setBusy(null);
+    }
+  }
+  async function probeUpstreamFormat(
+    baseUrl: string,
+    apiKey: string,
+    model?: string | null,
+    providerId?: string,
+  ) {
+    if (providerId && pendingNewProvider?.id === providerId) {
+      return catalogProbeUpstreamFormat(baseUrl, apiKey, model, providerId);
+    }
+    setBusy("probe");
+    setProbeResult(null);
+    try {
+      const result = await workspace.act({
+        type: "probe",
+        baseUrl,
+        apiKey,
+        model,
+        providerId,
+      });
+      if (result.kind === "ok" && result.probeResult) {
+        setProbeResult(result.probeResult);
+        if (result.providers) {
+          setProviders(result.providers);
+        }
+        setError(null);
+        return result.probeResult;
+      }
+      return null;
+    } finally {
+      setBusy(null);
+    }
+  }
+  async function addProvider() {
+    setBusy("save");
+    try {
+      const result = await workspace.act({ type: "saveAddForm", form });
+      if (result.kind === "ok") {
+        if (result.providers) {
+          setProviders(result.providers);
+        }
+        setForm(emptyProvider);
+        setError(null);
+        return;
+      }
+      if (result.kind === "error") {
+        setError(result.message);
+      }
+    } finally {
+      setBusy(null);
+    }
+  }
+  async function refreshProviderModels(provider: Provider) {
+    setBusy(provider.id);
+    try {
+      const result = await workspace.act({ type: "discoverProviderModels", providerId: provider.id });
+      if (result.kind === "ok") {
+        if (result.providers) {
+          setProviders(result.providers);
+        }
+        setModelDiscoveryError(null);
+        return;
+      }
+      if (result.kind === "error") {
+        setModelDiscoveryError(result.message);
+      }
+    } finally {
+      setBusy(null);
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -800,6 +902,7 @@ function ProvidersPageImpl({
     });
     return confirmed ? true : null;
   }
+  authorizeCodexRestartRef.current = authorizeCodexRestart;
 
   async function applyCodexHubConnection(nextMode: ConnectionMode, forceTakeover: boolean) {
     let restartCodex: boolean | null;
@@ -943,7 +1046,11 @@ function ProvidersPageImpl({
   async function refreshOfficialModelsAndCollaborationState(
     options?: { quiet?: boolean; throwOnError?: boolean },
   ) {
-    const refreshed = await refreshOfficialModels(options);
+    const refreshed = await workspace.act({
+      type: "refreshOfficialModels",
+      quiet: options?.quiet,
+      throwOnError: options?.throwOnError,
+    });
     try {
       const [overrides, baselines] = await Promise.all([
         api.listOfficialMultiAgentOverrides(),
@@ -955,7 +1062,7 @@ function ProvidersPageImpl({
       // The catalog refresh remains usable when the optional selector readback
       // is unavailable; the next page refresh will retry it.
     }
-    return refreshed;
+    return refreshed.kind === "ok";
   }
 
   async function deleteProvider(providerId: string) {

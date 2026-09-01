@@ -283,8 +283,10 @@ use super::super::{
     provider_entry_has_codexhub_name, provider_entry_has_gateway_path,
     resolve_gateway_client_model_id, route_mode_from_text_file, sanitize_text, windows_app_path,
     write_text_replace, GatewayClientApplyResult, GatewayClientConfigPreview,
-    GatewayClientProviderGroups, IsolatedClientApplyTargets,
+    GatewayClientProviderGroups,
 };
+#[cfg(test)]
+use super::super::IsolatedClientApplyTargets;
 use crate::app_flavor::RoutingOwner;
 use reqwest::blocking::Client;
 use std::path::PathBuf;
@@ -724,6 +726,35 @@ pub(in crate::gateway) fn preview_zcode_config_with_targets(
     })
 }
 
+pub(in crate::gateway) struct ZcodeApplyPlan {
+    pub targets: ZcodeConfigTargets,
+    pub next_catalog: String,
+    pub next_config: String,
+    pub next_cache: String,
+    pub skip_snapshot: bool,
+}
+
+/// Pure next-text plan. Does not create backups or write the target files.
+pub(in crate::gateway) fn plan_zcode_apply(
+    targets: &ZcodeConfigTargets,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<ZcodeApplyPlan, String> {
+    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    let next_catalog = zcode_catalog_text(settings, providers, &model)?;
+    let next_cache = zcode_v2_cache_text(settings, providers, &model)?;
+    let next_config = zcode_v2_config_text(&targets.v2_config_path, settings, providers, &model)?;
+    Ok(ZcodeApplyPlan {
+        skip_snapshot: zcode_targets_current_is_managed(targets),
+        targets: targets.clone(),
+        next_catalog,
+        next_config,
+        next_cache,
+    })
+}
+
+#[cfg(test)]
 pub(in crate::gateway) fn apply_zcode_config_with_targets(
     targets: &ZcodeConfigTargets,
     backup_root: &Path,
@@ -731,23 +762,29 @@ pub(in crate::gateway) fn apply_zcode_config_with_targets(
     providers: &[Provider],
     model: &str,
 ) -> Result<GatewayClientApplyResult, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    publish_zcode_apply(
+        &plan_zcode_apply(targets, settings, providers, model)?,
+        backup_root,
+    )
+}
+
+pub(in crate::gateway) fn publish_zcode_apply(
+    plan: &ZcodeApplyPlan,
+    backup_root: &Path,
+) -> Result<GatewayClientApplyResult, String> {
     let backup_path = create_snapshot_backup(
         "zcode",
         backup_root,
-        &zcode_target_files(targets),
-        zcode_targets_current_is_managed(targets),
+        &zcode_target_files(&plan.targets),
+        plan.skip_snapshot,
     )?;
-    let next_catalog = zcode_catalog_text(settings, providers, &model)?;
-    let next_cache = zcode_v2_cache_text(settings, providers, &model)?;
-    let next_config = zcode_v2_config_text(&targets.v2_config_path, settings, providers, &model)?;
-    write_text_replace(&targets.catalog_path, &next_catalog)?;
-    write_text_replace(&targets.v2_config_path, &next_config)?;
-    write_text_replace(&targets.v2_cache_path, &next_cache)?;
+    write_text_replace(&plan.targets.catalog_path, &plan.next_catalog)?;
+    write_text_replace(&plan.targets.v2_config_path, &plan.next_config)?;
+    write_text_replace(&plan.targets.v2_cache_path, &plan.next_cache)?;
     Ok(GatewayClientApplyResult {
         client_id: "zcode".to_string(),
         applied: true,
-        config_path: Some(targets.v2_config_path.clone()),
+        config_path: Some(plan.targets.v2_config_path.clone()),
         backup_path,
         message: "ZCode now routes through CodexHub Gateway.".to_string(),
     })
@@ -1128,6 +1165,7 @@ pub(in crate::gateway) fn sanitize_zcode_provider_collection_text(
         .map_err(|error| format!("failed to serialize cleaned ZCode provider collection: {error}"))
 }
 
+#[cfg(test)]
 pub(in crate::gateway) fn zcode_targets_from_writable(
     targets: &IsolatedClientApplyTargets,
 ) -> Result<ZcodeConfigTargets, String> {

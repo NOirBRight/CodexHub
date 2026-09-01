@@ -42,15 +42,15 @@ Keep the current Windows cases. Names stay Codex Desktop / Codex App.
 | Case | Client | Route |
 |---|---|---|
 | `desktop-luna` | Codex Desktop | Official Luna |
-| `desktop-ollama-cloud` | Codex Desktop | Ollama Cloud `glm-5.2` |
-| `zcode-luna` | ZCode | Official Luna |
-| `zcode-ollama-cloud` | ZCode | Ollama Cloud `glm-5.2` |
+| `desktop-opencode-go` | Codex Desktop | retired GUI; not run |
+| `zcode-luna` | ZCode | retired GUI; isolated CLI materializer only |
+| `zcode-opencode-go` | ZCode | retired GUI; not run |
 
 Launch Desktop through the existing AppX `OpenAI.Codex_*` path. Linux using the `chatgpt` package does **not** retire this gate.
 
 ### 4. CLI clients (Windows `-CliOnly` still valid)
 
-Codex CLI, OpenCode, Pi, OMP: Official Luna + Ollama Cloud. OpenCode/OMP/ZCode config semantics are still takeover until #435, except Pi activation which already stopped flipping.
+Windows real-client E2E is permanently CLI-only. Ollama is prohibited. Live CLI cases: Official Luna plus OpenCode Go muse-spark-1.2-contributor for Codex CLI/OpenCode/Pi/OMP. ZCode is isolated managed-client-config preview/apply/readback, not GUI. #497 still needs the Yoga dedicated OPENCODE_API_KEY file.
 
 ## How to sync
 

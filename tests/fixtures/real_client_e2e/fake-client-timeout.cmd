@@ -4,7 +4,7 @@ if defined CODEXHUB_E2E_VERSION_PROBE (
   exit /b 0
 )
 if not defined CODEXHUB_E2E_CASE exit /b 0
-if "%CODEXHUB_E2E_CASE%"=="codex-cli-ollama-cloud" (
+if "%CODEXHUB_E2E_CASE%"=="codex-cli-opencode-go" (
   echo Authorization: Bearer fixture-private-token C:\Users\private-account 1>&2
   exit /b 7
 )

@@ -76,7 +76,9 @@ pub fn verify_apply_readback(
         "opencode" => {
             let written = fs::read_to_string(&target_paths[0])
                 .map_err(|error| format!("readback failed: {error}"))?;
-            let expected = opencode_config_text(settings, providers, model)?;
+            // Provider Injection merge is idempotent: re-merging the written
+            // config must reproduce it exactly (foreign providers preserved).
+            let expected = opencode_config_text(Some(&written), settings, providers, model)?;
             if written != expected {
                 return Err(
                     "readback failed: opencode output does not round-trip production preview"
@@ -113,7 +115,7 @@ pub fn verify_apply_readback(
                 vision,
                 reasoning.as_deref(),
             );
-            let expected_models = omp_models_yml_text(settings, providers, model)?;
+            let expected_models = omp_models_yml_text(None, settings, providers, model)?;
             if written_config != expected_config || written_models != expected_models {
                 return Err(
                     "readback failed: omp output does not round-trip production preview"

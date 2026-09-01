@@ -59,6 +59,8 @@ type ProviderCatalogActionOptions = {
   setProbeResult: SetState<UpstreamFormatProbeResult | null>;
   setProviders: SetState<Provider[]>;
   setSelectedId: SetState<string>;
+  pendingNewProvider?: Provider | null;
+  setPendingNewProvider?: SetState<Provider | null>;
   settings: Settings | null;
   settingsDraft: Settings | null;
   t: Translate;
@@ -83,6 +85,8 @@ export function useProviderCatalogActions({
   setProbeResult,
   setProviders,
   setSelectedId,
+  pendingNewProvider: pendingNewProviderProp,
+  setPendingNewProvider: setPendingNewProviderProp,
   settings,
   settingsDraft,
   t,
@@ -91,7 +95,9 @@ export function useProviderCatalogActions({
   updateToastWithError,
 }: ProviderCatalogActionOptions) {
   const { showToast, updateToast } = toast;
-  const [pendingNewProvider, setPendingNewProvider] = useState<Provider | null>(null);
+  const [pendingNewProviderState, setPendingNewProviderState] = useState<Provider | null>(null);
+  const pendingNewProvider = pendingNewProviderProp !== undefined ? pendingNewProviderProp : pendingNewProviderState;
+  const setPendingNewProvider = setPendingNewProviderProp ?? setPendingNewProviderState;
 
   function updateProbeToast(toastId: string, result: UpstreamFormatProbeResult) {
     if (result.model_required) {

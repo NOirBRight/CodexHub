@@ -1034,7 +1034,7 @@ mod isolated_managed_client_config {
 
         // Correct production output round-trips.
         let expected =
-            super::super::opencode_config_text(&settings, &providers, "volc/glm-5.2").unwrap();
+            super::super::opencode_config_text(None, &settings, &providers, "volc/glm-5.2").unwrap();
         fs::write(&missing, &expected).unwrap();
         verify_apply_readback(
             "opencode",
