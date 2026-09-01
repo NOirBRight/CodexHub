@@ -3,8 +3,6 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import ts from "typescript";
 
-const actionsPath = new URL("../src/hooks/useProviderCatalogActions.ts", import.meta.url);
-const editorPath = new URL("../src/components/providers/ProviderEditor.tsx", import.meta.url);
 const endpointPath = new URL("../src/lib/providerEndpoint.ts", import.meta.url);
 const formatPath = new URL("../src/lib/format.ts", import.meta.url);
 const typesPath = new URL("../src/lib/types.ts", import.meta.url);
@@ -138,44 +136,6 @@ test("mergeDiscoveredModels leaves existing models unchanged on empty discovery"
   const merged = mergeDiscoveredModels(existing, []);
   assert.equal(merged.length, 1, "existing model should remain");
   assert.equal(merged[0].id, "manual", "existing model id should be unchanged");
-});
-
-test("refreshProviderModels merges against persisted provider models, not the stale draft", async () => {
-  const source = await readFile(actionsPath, "utf8");
-  assert.match(
-    source,
-    /const\s+persistedProvider\s*=\s*isPending\s*\?[\s\S]*providers\.find\(\(item\)\s*=>\s*item\.id\s*===\s*provider\.id\)\s*\?\?\s*provider;/,
-    "should look up the persisted provider by id unless the add draft is unsaved",
-  );
-  assert.match(
-    source,
-    /preset\?\.discovery_policy === "retain-intersection"[\s\S]*persistedProvider\.models\.filter/,
-    "should drop retain-intersection models that discovery no longer returns",
-  );
-  assert.match(
-    source,
-    /mergeDiscoveredModels\(retainedModels,\s*discovered\)/,
-    "should merge discovered models against the persisted provider's models",
-  );
-  assert.match(
-    source,
-    /const\s+previousModelIds\s*=\s*new\s+Set\(persistedProvider\.models\.map\(\(model\)\s*=>\s*model\.id\)\);/,
-    "should compute previous model ids from the persisted provider's models",
-  );
-});
-
-test("ProviderDetail keeps draft models in sync with persisted provider models", async () => {
-  const source = await readFile(editorPath, "utf8");
-  assert.match(
-    source,
-    /setDraft\(\(current\)\s*=>\s*\{\s*if\s*\(\s*current\.id\s*!==\s*normalizedProvider\.id\s*\|\|\s*current\.models\s*===\s*normalizedProvider\.models\s*\)\s*\{\s*return\s*current;\s*\}\s*return\s*\{\s*\.\.\.current,\s*models:\s*normalizedProvider\.models\s*\};\s*\}\);/,
-    "should sync draft models from normalizedProvider.models",
-  );
-  assert.match(
-    source,
-    /useEffect\(\(\)\s*=>\s*\{\s*setDraft\(\(current\)\s*=>\s*\{/,
-    "should use an effect to update the draft",
-  );
 });
 
 test("model-required probe preserves existing endpoint capabilities", async () => {

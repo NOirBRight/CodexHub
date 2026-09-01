@@ -56,7 +56,6 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/qualify_beta3_protocol_cli.py",
     "scripts/replay_official_transport.py",
     "scripts/report_quality_gates.py",
-    "scripts/run_claude_messages_spike_smoke.py",
     "scripts/run_issue_106_task_lifecycle.py",
     "scripts/run_issue_283_app_v2_request_shape.py",
     "scripts/run_issue_283_cli_v2_lifecycle.py",

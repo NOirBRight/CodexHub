@@ -107,7 +107,10 @@ class AggregateFailureSink(BlockingSink):
         self.recovery_attempts = 0
 
     def append(self, records: Sequence[bytes]) -> None:
-        if any(json.loads(record).get("event") == "telemetry_writer_recovered" for record in records):
+        if any(
+            json.loads(record).get("event") == "telemetry_writer_recovered"
+            for record in records
+        ):
             self.recovery_attempts += 1
             raise OSError(errno.ENOSPC, "disk full")
         super().append(records)
@@ -162,9 +165,25 @@ class BoundedEventWriterTests(TestCase):
         byte_sink = BlockingSink()
         first = {"event": "first", "payload": "a" * 32}
         second = {"event": "second", "payload": "b" * 32}
-        first_size = len(json.dumps(first, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) + 1
-        second_size = len(json.dumps(second, ensure_ascii=True, separators=(",", ":")).encode("utf-8")) + 1
-        byte_writer = self._writer(byte_sink, max_records=8, max_bytes=first_size + second_size - 1)
+        first_size = (
+            len(
+                json.dumps(first, ensure_ascii=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            )
+            + 1
+        )
+        second_size = (
+            len(
+                json.dumps(second, ensure_ascii=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            )
+            + 1
+        )
+        byte_writer = self._writer(
+            byte_sink, max_records=8, max_bytes=first_size + second_size - 1
+        )
         self.assertTrue(byte_writer.enqueue(first))
         self.assertTrue(byte_sink.entered.wait(1))
         self.assertFalse(byte_writer.enqueue(second))
@@ -173,7 +192,9 @@ class BoundedEventWriterTests(TestCase):
         byte_sink.release.set()
         self.assertTrue(byte_writer.flush(1).completed)
 
-    def test_oversized_single_record_is_rejected_before_full_json_serialization(self) -> None:
+    def test_oversized_single_record_is_rejected_before_full_json_serialization(
+        self,
+    ) -> None:
         sink = RecordingSink()
         writer = self._writer(sink, max_records=8, max_bytes=128)
         oversized = {"event": "oversized", "payload": "x" * 1_000_000}
@@ -194,7 +215,10 @@ class BoundedEventWriterTests(TestCase):
             "value": '"\\\n\x01\u00e9\U0001f600',
             "nested": [None, True, False, -12, float("nan")],
         }
-        expected = json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + b"\n"
+        expected = (
+            json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+            + b"\n"
+        )
         sink = RecordingSink()
         writer = self._writer(sink, max_records=8, max_bytes=len(expected))
 
@@ -213,12 +237,18 @@ class BoundedEventWriterTests(TestCase):
         sink.release.set()
         self.assertTrue(writer.flush(1).completed)
 
-        self.assertEqual([record["event"] for record in sink.records()], ["one", "two", "three"])
+        self.assertEqual(
+            [record["event"] for record in sink.records()], ["one", "two", "three"]
+        )
         self.assertEqual([len(batch) for batch in sink.batches], [1, 2])
 
-    def test_concurrent_producers_use_one_writer_and_complete_jsonl_records(self) -> None:
+    def test_concurrent_producers_use_one_writer_and_complete_jsonl_records(
+        self,
+    ) -> None:
         sink = RecordingSink()
-        writer = self._writer(sink, max_records=512, max_bytes=512 * 1024, batch_max_records=32)
+        writer = self._writer(
+            sink, max_records=512, max_bytes=512 * 1024, batch_max_records=32
+        )
         producer_count = 8
         records_per_producer = 25
         barrier = threading.Barrier(producer_count)
@@ -227,11 +257,19 @@ class BoundedEventWriterTests(TestCase):
 
         def produce(producer: int) -> None:
             barrier.wait()
-            local = [writer.enqueue({"event": "request", "producer": producer, "index": index}) for index in range(records_per_producer)]
+            local = [
+                writer.enqueue(
+                    {"event": "request", "producer": producer, "index": index}
+                )
+                for index in range(records_per_producer)
+            ]
             with accepted_lock:
                 accepted.extend(local)
 
-        threads = [threading.Thread(target=produce, args=(producer,)) for producer in range(producer_count)]
+        threads = [
+            threading.Thread(target=produce, args=(producer,))
+            for producer in range(producer_count)
+        ]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -244,11 +282,17 @@ class BoundedEventWriterTests(TestCase):
         self.assertEqual(len(records), producer_count * records_per_producer)
         self.assertEqual(
             {(record["producer"], record["index"]) for record in records},
-            {(producer, index) for producer in range(producer_count) for index in range(records_per_producer)},
+            {
+                (producer, index)
+                for producer in range(producer_count)
+                for index in range(records_per_producer)
+            },
         )
         self.assertEqual(sink.max_active_writes, 1)
 
-    def test_a_sink_has_one_active_writer_and_can_be_reclaimed_after_shutdown(self) -> None:
+    def test_a_sink_has_one_active_writer_and_can_be_reclaimed_after_shutdown(
+        self,
+    ) -> None:
         sink = RecordingSink()
         writer = self._writer(sink)
         with self.assertRaisesRegex(ValueError, "already owns this sink"):
@@ -263,7 +307,9 @@ class BoundedEventWriterTests(TestCase):
             path = Path(tmpdir) / "shared-events.jsonl"
             file_writer = self._writer(JsonlFileSink(path))
             with self.assertRaisesRegex(ValueError, "already owns this sink"):
-                BoundedEventWriter(JsonlFileSink(path), max_records=64, max_bytes=64 * 1024)
+                BoundedEventWriter(
+                    JsonlFileSink(path), max_records=64, max_bytes=64 * 1024
+                )
             self.assertTrue(file_writer.shutdown(1).completed)
 
     def test_rotation_fence_holds_later_records_while_caller_policy_runs(self) -> None:
@@ -278,11 +324,15 @@ class BoundedEventWriterTests(TestCase):
             rotation_entered.set()
             release_rotation.wait(1)
 
-        rotation_thread = threading.Thread(target=lambda: results.append(writer.rotate(rotate, 1)))
+        rotation_thread = threading.Thread(
+            target=lambda: results.append(writer.rotate(rotate, 1))
+        )
         rotation_thread.start()
         self.assertTrue(rotation_entered.wait(1))
         self.assertTrue(writer.enqueue({"event": "after-rotation"}))
-        self.assertEqual([record["event"] for record in sink.records()], ["before-rotation"])
+        self.assertEqual(
+            [record["event"] for record in sink.records()], ["before-rotation"]
+        )
         self.assertEqual(writer.status().queued_records, 1)
 
         release_rotation.set()
@@ -296,7 +346,9 @@ class BoundedEventWriterTests(TestCase):
             ["before-rotation", "after-rotation"],
         )
 
-    def test_overflow_recovery_is_aggregate_and_never_recursively_enqueued(self) -> None:
+    def test_overflow_recovery_is_aggregate_and_never_recursively_enqueued(
+        self,
+    ) -> None:
         sink = AggregateFailureSink()
         writer = self._writer(sink, max_records=1, max_bytes=4096)
         self.assertTrue(writer.enqueue({"event": "accepted"}))
@@ -317,7 +369,9 @@ class BoundedEventWriterTests(TestCase):
         self.assertEqual(stopped.outcome, "failed")
         self.assertEqual(stopped.status.shutdown_state, "stopped")
 
-    def test_slow_sink_does_not_block_enqueue_and_flush_times_out_boundedly(self) -> None:
+    def test_slow_sink_does_not_block_enqueue_and_flush_times_out_boundedly(
+        self,
+    ) -> None:
         sink = BlockingSink()
         writer = self._writer(sink)
         started = time.monotonic()
@@ -350,10 +404,14 @@ class BoundedEventWriterTests(TestCase):
                 events = [record["event"] for record in sink.records()]
                 self.assertEqual(events, ["recovered", "telemetry_writer_recovered"])
 
-    def test_serialization_rejection_and_repeated_sink_failures_recover_without_new_workers(self) -> None:
+    def test_serialization_rejection_and_repeated_sink_failures_recover_without_new_workers(
+        self,
+    ) -> None:
         serialization_sink = RecordingSink()
         serialization_writer = self._writer(serialization_sink)
-        self.assertFalse(serialization_writer.enqueue({"event": "bad", "value": object()}))
+        self.assertFalse(
+            serialization_writer.enqueue({"event": "bad", "value": object()})
+        )
         self.assertEqual(serialization_writer.flush(0).outcome, "failed")
         self.assertTrue(serialization_writer.enqueue({"event": "after-serialization"}))
         self.assertTrue(serialization_writer.flush(1).completed)
@@ -365,11 +423,15 @@ class BoundedEventWriterTests(TestCase):
         recursive_sink = RecordingSink()
         recursive_writer = self._writer(recursive_sink)
         self.assertFalse(recursive_writer.enqueue(RecursionErrorMapping()))
-        self.assertEqual(recursive_writer.status().last_failure_category, "serialization_rejected")
+        self.assertEqual(
+            recursive_writer.status().last_failure_category, "serialization_rejected"
+        )
 
         nonfinite_sink = RecordingSink()
         nonfinite_writer = self._writer(nonfinite_sink)
-        self.assertTrue(nonfinite_writer.enqueue({"event": "nonfinite", "value": float("nan")}))
+        self.assertTrue(
+            nonfinite_writer.enqueue({"event": "nonfinite", "value": float("nan")})
+        )
         self.assertTrue(nonfinite_writer.flush(1).completed)
         self.assertIn(b'"value":NaN', nonfinite_sink.batches[0][0])
 
@@ -386,7 +448,9 @@ class BoundedEventWriterTests(TestCase):
             ["after-failures", "telemetry_writer_recovered"],
         )
 
-    def test_partial_disk_write_is_repaired_before_future_complete_jsonl_records(self) -> None:
+    def test_partial_disk_write_is_repaired_before_future_complete_jsonl_records(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "events.jsonl"
             state = {"fail_once": True}
@@ -409,10 +473,18 @@ class BoundedEventWriterTests(TestCase):
             self.assertTrue(writer.enqueue({"event": "after-repair"}))
             self.assertTrue(writer.flush(1).completed)
 
-            records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual([record["event"] for record in records], ["after-repair", "telemetry_writer_recovered"])
+            records = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                [record["event"] for record in records],
+                ["after-repair", "telemetry_writer_recovered"],
+            )
 
-    def test_writer_crash_restarts_once_and_drains_retained_backlog_without_followup_calls(self) -> None:
+    def test_writer_contains_sink_crash_and_drains_retained_backlog_without_restart(
+        self,
+    ) -> None:
         sink = CrashWithRetainedBacklogSink()
         writer = self._writer(sink)
         self.assertTrue(writer.enqueue({"event": "crash"}))
@@ -421,7 +493,7 @@ class BoundedEventWriterTests(TestCase):
         sink.release_crash.set()
 
         self.assertTrue(sink.replacement_wrote.wait(1))
-        self.assertEqual(writer.status().writer_generation, 2)
+        self.assertEqual(writer.status().writer_generation, 1)
         self.assertEqual(
             [record["event"] for record in sink.records()],
             ["retained", "telemetry_writer_recovered"],

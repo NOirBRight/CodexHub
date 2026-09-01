@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -16,7 +17,6 @@ from apply_patch_adapter import (
     APPLY_PATCH_ADAPTER_ERROR_CODE,
     APPLY_PATCH_ADAPTER_EVENT,
     APPLY_PATCH_HISTORY_ADAPTER_EVENT,
-    ApplyPatchAdapter,
     ApplyPatchFacts,
 )
 
@@ -31,32 +31,54 @@ FORBIDDEN_SOURCE_MARKERS = (
     "BaseHTTPRequestHandler",
 )
 
-PATCH = "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch"
+PATCH = (
+    "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch"
+)
 SECRET_PATCH = "*** Begin Patch\n*** Update File: secret.txt\n@@\n-SECRET_BODY\n+leaked\n*** End Patch"
 
 
-def _adapter(events: list | None = None) -> tuple[ApplyPatchAdapter, list]:
+class _ModuleAdapter:
+    def __init__(self, write_event):
+        self._write_event = write_event
+
+    def __getattr__(self, name):
+        function = getattr(apply_patch_adapter, name)
+
+        def invoke(*args, **kwargs):
+            with patch.object(apply_patch_adapter, "_write_event", self._write_event):
+                return function(*args, **kwargs)
+
+        return invoke
+
+
+def _adapter(events: list | None = None) -> tuple[_ModuleAdapter, list]:
     captured = events if events is not None else []
 
     def write_event(event_context, event, **fields):
         captured.append((event, fields, event_context))
 
-    adapter = ApplyPatchAdapter(facts=ApplyPatchFacts(), write_event=write_event)
+    adapter = _ModuleAdapter(write_event)
     return adapter, captured
 
 
-def _function_call(*, item_id="item_patch", call_id="call_patch", patch=PATCH, status="completed"):
+def _function_call(
+    *, item_id="item_patch", call_id="call_patch", patch=PATCH, status="completed"
+):
     return {
         "id": item_id,
         "type": "function_call",
         "status": status,
         "call_id": call_id,
         "name": "apply_patch",
-        "arguments": json.dumps({"patch": patch}, ensure_ascii=True, separators=(",", ":")),
+        "arguments": json.dumps(
+            {"patch": patch}, ensure_ascii=True, separators=(",", ":")
+        ),
     }
 
 
-def _custom_call(*, call_id="call_patch", patch=PATCH, status="completed", item_id=None):
+def _custom_call(
+    *, call_id="call_patch", patch=PATCH, status="completed", item_id=None
+):
     item = {
         "type": "custom_tool_call",
         "status": status,
@@ -69,13 +91,12 @@ def _custom_call(*, call_id="call_patch", patch=PATCH, status="completed", item_
     return item
 
 
-def test_apply_patch_adapter_typed_context_is_the_seam():
-    assert {"facts", "write_event"} <= set(ApplyPatchAdapter.__annotations__)
+def test_apply_patch_adapter_uses_module_functions_without_dynamic_lookup():
     source = Path(apply_patch_adapter.__file__).read_text(encoding="utf-8")
     for marker in FORBIDDEN_SOURCE_MARKERS:
         assert marker not in source
     assert inspect.isclass(ApplyPatchFacts)
-    assert inspect.isclass(ApplyPatchAdapter)
+    assert callable(apply_patch_adapter.adapt_response_body)
     assert "getattr(" not in source
 
 
@@ -103,9 +124,17 @@ def test_adapt_custom_tool_history_reconstructs_exact_pair():
     assert rewritten[0] is unrelated
     assert rewritten[1]["type"] == "function_call"
     assert rewritten[1]["name"] == "apply_patch"
-    assert rewritten[1]["arguments"] == json.dumps({"patch": PATCH}, ensure_ascii=True, separators=(",", ":"))
-    assert rewritten[2] == {"type": "function_call_output", "call_id": "call_patch", "output": "Success. Updated target.txt"}
-    outcomes = {(event, fields["outcome"], fields["count"]) for event, fields, _ in events}
+    assert rewritten[1]["arguments"] == json.dumps(
+        {"patch": PATCH}, ensure_ascii=True, separators=(",", ":")
+    )
+    assert rewritten[2] == {
+        "type": "function_call_output",
+        "call_id": "call_patch",
+        "output": "Success. Updated target.txt",
+    }
+    outcomes = {
+        (event, fields["outcome"], fields["count"]) for event, fields, _ in events
+    }
     assert outcomes == {
         (APPLY_PATCH_HISTORY_ADAPTER_EVENT, "adapted", 1),
         (APPLY_PATCH_HISTORY_ADAPTER_EVENT, "untouched", 1),
@@ -120,9 +149,15 @@ def test_apply_patch_lifecycle_status_is_phase_specific():
     with pytest.raises(Exception):
         adapter.adapt_response_body({"output": [_function_call(status="in_progress")]})
     with pytest.raises(Exception):
-        adapter.adapt_stream_events([
-            {"type": "response.output_item.added", "output_index": 0, "item": _function_call(status="completed")},
-        ])
+        adapter.adapt_stream_events(
+            [
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": _function_call(status="completed"),
+                },
+            ]
+        )
 
 
 def test_adapt_response_body_rewrites_function_call_to_custom_tool():
@@ -159,7 +194,7 @@ def test_adapt_stream_events_rewrites_lifecycle_to_custom_tool():
             "arguments": done_item["arguments"],
         },
         {"type": "response.output_item.done", "output_index": 0, "item": done_item},
-        {"type": "response.completed", "response": {"output": [done_item]}}
+        {"type": "response.completed", "response": {"output": [done_item]}},
     ]
     rewritten, changed = adapter.adapt_stream_events(
         stream,
@@ -183,33 +218,48 @@ def test_invalid_shapes_fail_closed_without_payload_leak():
     extra_field = _function_call()
     extra_field["extra"] = SECRET_PATCH
     with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as raised:
-        adapter.adapt_response_body({"output": [extra_field]}, {"request_id": "req-invalid"})
+        adapter.adapt_response_body(
+            {"output": [extra_field]}, {"request_id": "req-invalid"}
+        )
     assert raised.value.cause.code == APPLY_PATCH_ADAPTER_ERROR_CODE
     assert events == [
         (
             APPLY_PATCH_ADAPTER_EVENT,
-            {"surface": "body", "outcome": "rejected", "count": 1, "reason": "function_call_fields_not_exact"},
+            {
+                "surface": "body",
+                "outcome": "rejected",
+                "count": 1,
+                "reason": "function_call_fields_not_exact",
+            },
             {"request_id": "req-invalid"},
         )
     ]
     assert "SECRET_BODY" not in repr(events)
 
     history_adapter, history_events = _adapter()
-    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as history_raised:
+    with pytest.raises(
+        gateway_errors.UpstreamProtocolTranslationError
+    ) as history_raised:
         history_adapter.adapt_custom_tool_history(
             [_custom_call(patch=SECRET_PATCH)],
             event_context={"request_id": "req-unpaired"},
         )
     assert history_raised.value.cause.code == APPLY_PATCH_ADAPTER_ERROR_CODE
     assert history_events == [
-        (APPLY_PATCH_HISTORY_ADAPTER_EVENT, {"outcome": "rejected", "count": 1}, {"request_id": "req-unpaired"})
+        (
+            APPLY_PATCH_HISTORY_ADAPTER_EVENT,
+            {"outcome": "rejected", "count": 1},
+            {"request_id": "req-unpaired"},
+        )
     ]
     assert "SECRET_BODY" not in repr(history_events)
 
     empty_adapter, empty_events = _adapter()
     empty_call = _function_call(patch="   ")
     with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as empty_raised:
-        empty_adapter.adapt_response_body({"output": [empty_call]}, {"request_id": "req-empty"})
+        empty_adapter.adapt_response_body(
+            {"output": [empty_call]}, {"request_id": "req-empty"}
+        )
     assert empty_raised.value.cause.code == APPLY_PATCH_ADAPTER_ERROR_CODE
     assert empty_events[0][1]["reason"] == "patch_empty"
 
@@ -225,10 +275,18 @@ def test_disabled_context_is_passthrough():
     assert adapted_call_ids == set()
     assert changed is False
     payload = {"output": [_function_call()]}
-    body, body_changed = adapter.adapt_response_body(payload, {"_apply_patch_adapter_enabled": False})
+    body, body_changed = adapter.adapt_response_body(
+        payload, {"_apply_patch_adapter_enabled": False}
+    )
     assert body is payload
     assert body_changed is False
-    stream = [{"type": "response.output_item.added", "output_index": 0, "item": _function_call()}]
+    stream = [
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": _function_call(),
+        }
+    ]
     rewritten_events, stream_changed = adapter.adapt_stream_events(
         stream,
         event_context={"_apply_patch_adapter_enabled": False},
@@ -260,16 +318,17 @@ def test_facade_wrappers_use_live_write_event(monkeypatch):
             {"request_id": "live-write"},
         )
     ]
-    live_adapter = apply_patch_adapter.apply_patch_adapter()
-    assert live_adapter.write_event is write_event
-
     monkeypatch.setattr(
         gateway_stream_semantics,
         "RESPONSES_TERMINAL_EVENT_TYPES",
         {"response.custom_terminal"},
     )
-    terminal_adapter = apply_patch_adapter.apply_patch_adapter()
-    assert terminal_adapter.facts.terminal_event_types == frozenset({"response.custom_terminal"})
-    events, changed = terminal_adapter.adapt_stream_events([{"type": "response.custom_terminal"}])
+    gateway_compat.adapt_third_party_apply_patch_response_body({"output": []}, {})
+    assert apply_patch_adapter._facts().terminal_event_types == frozenset(
+        {"response.custom_terminal"}
+    )
+    events, changed = apply_patch_adapter.adapt_stream_events(
+        [{"type": "response.custom_terminal"}]
+    )
     assert events == [{"type": "response.custom_terminal"}]
     assert changed is False

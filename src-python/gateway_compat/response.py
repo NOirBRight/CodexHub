@@ -12,12 +12,10 @@ import re
 import uuid
 
 from apply_patch_adapter import (
-    ApplyPatchAdapter,
     ApplyPatchFacts,
     ThirdPartyApplyPatchStreamAdapter as _ApplyPatchStreamAdapterImpl,
 )
 from collaboration_adapter import (
-    CollaborationAdapter,
     CollaborationFacts,
     PathBindingSigner,
     WORKER_REQUESTED_BINDING_FIELD,
@@ -54,7 +52,6 @@ from tool_surface_adapter import (
     TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL,
     TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION,
     TOOL_SEARCH_UNAVAILABLE_STATUS,
-    ToolSurfaceAdapter,
     ToolSurfaceFacts,
 )
 from route_plan import (
@@ -491,7 +488,7 @@ def _adapt_third_party_apply_patch_response_body(
 
 class _ThirdPartyApplyPatchStreamAdapter(_ApplyPatchStreamAdapterImpl):
     def __init__(self, event_context: Mapping[str, Any] | None, *, surface: str = "stream"):
-        super().__init__(host._apply_patch_adapter(), event_context, surface=surface)
+        super().__init__(event_context, surface=surface)
 
 
 def _adapt_third_party_apply_patch_stream_events(

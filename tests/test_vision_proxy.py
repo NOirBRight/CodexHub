@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from contextlib import ExitStack
+from unittest.mock import patch
 
 import pytest
+import vision_proxy
 
 from gateway_errors import ImageProxyError
 from route_plan import VisionPlan
@@ -16,11 +19,7 @@ from route_primitives import (
     VisionAction,
     VisionNetworkAction,
 )
-from vision_proxy import (
-    VisionFacts,
-    VisionProxyAdapter,
-    VisionProxyHooks,
-)
+from vision_proxy import VisionFacts
 
 
 _IMAGE_URL = "https://example.test/chart.png"
@@ -28,6 +27,30 @@ _VISION_UPSTREAM = {
     "name": "vision-provider",
     "upstream_format": "responses",
 }
+
+
+class _ModuleAdapter:
+    def __init__(self, facts: VisionFacts | None = None, **hooks: Any) -> None:
+        self._facts = facts or VisionFacts()
+        self._hooks = hooks
+
+    def __getattr__(self, name: str):
+        function = getattr(vision_proxy, name)
+
+        def invoke(*args: Any, **kwargs: Any):
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(vision_proxy, "_facts", return_value=self._facts)
+                )
+                for hook, value in self._hooks.items():
+                    stack.enter_context(patch.object(vision_proxy, f"_{hook}", value))
+                return function(*args, **kwargs)
+
+        return invoke
+
+
+def _adapter(*, facts: VisionFacts | None = None, **hooks: Any) -> _ModuleAdapter:
+    return _ModuleAdapter(facts, **hooks)
 
 
 def _reject_plan() -> VisionPlan:
@@ -42,11 +65,9 @@ def _reject_plan() -> VisionPlan:
 
 
 def test_text_only_image_rejection_is_fail_closed_before_hooks() -> None:
-    adapter = VisionProxyAdapter(
-        hooks=VisionProxyHooks(
-            resolve_upstream=lambda _model: pytest.fail(
-                "rejected image reached catalog resolution"
-            )
+    adapter = _adapter(
+        resolve_upstream=lambda _model: pytest.fail(
+            "rejected image reached catalog resolution"
         )
     )
     payload = {
@@ -74,7 +95,7 @@ def test_text_only_image_rejection_is_fail_closed_before_hooks() -> None:
 
 
 def test_pass_through_rejects_contradictory_text_only_plan() -> None:
-    adapter = VisionProxyAdapter()
+    adapter = _adapter()
     plan = VisionPlan(
         policy=VISION_PROXY_CODEX_APP_ADAPTER,
         action=VisionAction.PASS_THROUGH,
@@ -95,10 +116,10 @@ def test_pass_through_rejects_contradictory_text_only_plan() -> None:
 
 def test_boundary_override_remains_live_at_adapter_seam() -> None:
     calls = []
-    adapter = VisionProxyAdapter(
-        hooks=VisionProxyHooks(
-            boundary_override=lambda payload, **kwargs: calls.append((payload, kwargs)) or True,
-        )
+    adapter = _adapter(
+        boundary_override=lambda payload, **kwargs: (
+            calls.append((payload, kwargs)) or True
+        ),
     )
     plan = VisionPlan(
         policy=VISION_PROXY_CODEX_APP_ADAPTER,
@@ -121,15 +142,13 @@ def test_boundary_override_remains_live_at_adapter_seam() -> None:
 
 
 def test_chat_url_image_is_replaced_through_typed_seam(tmp_path: Path) -> None:
-    adapter = VisionProxyAdapter(
+    adapter = _adapter(
         facts=VisionFacts(cache_path=tmp_path / "cache.sqlite"),
-        hooks=VisionProxyHooks(
-            enabled_reader=lambda: True,
-            vision_model_reader=lambda: "vision-model",
-            resolve_upstream=lambda _model: _VISION_UPSTREAM,
-            model_supports_image=lambda model, _upstream: model == "vision-model",
-            describe_image_override=lambda *_args, **_kwargs: "A rising blue chart.",
-        ),
+        enabled_reader=lambda: True,
+        vision_model_reader=lambda: "vision-model",
+        resolve_upstream=lambda _model: _VISION_UPSTREAM,
+        model_supports_image=lambda model, _upstream: model == "vision-model",
+        describe_image_override=lambda *_args, **_kwargs: "A rising blue chart.",
     )
     payload = {
         "messages": [
@@ -176,12 +195,10 @@ def test_description_cache_miss_then_hit_avoids_second_model_call(
         model_calls.append(model)
         return "Cached visual context."
 
-    adapter = VisionProxyAdapter(
+    adapter = _adapter(
         facts=VisionFacts(cache_path=tmp_path / "cache.sqlite"),
-        hooks=VisionProxyHooks(
-            describe_image_override=describe,
-            write_event=lambda _context, event, **_fields: events.append(event),
-        ),
+        describe_image_override=describe,
+        write_event=lambda _context, event, **_fields: events.append(event),
     )
     part = {"type": "input_image", "image_url": _IMAGE_URL}
 
@@ -232,13 +249,13 @@ def test_malformed_description_response_fails_closed() -> None:
             }
         ).encode("utf-8")
     )
-    adapter = VisionProxyAdapter(
-        hooks=VisionProxyHooks(
-            compatible_request_body=lambda body, _upstream, **_kwargs: body,
-            responses_url=lambda _upstream, _path: "https://vision.example.test/v1/responses",
-            upstream_headers=lambda headers, _upstream: dict(headers),
-            open_upstream=lambda _request, **_kwargs: response,
-        )
+    adapter = _adapter(
+        compatible_request_body=lambda body, _upstream, **_kwargs: body,
+        responses_url=lambda _upstream, _path: (
+            "https://vision.example.test/v1/responses"
+        ),
+        upstream_headers=lambda headers, _upstream: dict(headers),
+        open_upstream=lambda _request, **_kwargs: response,
     )
 
     with pytest.raises(ImageProxyError, match="no image description"):

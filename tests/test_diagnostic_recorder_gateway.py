@@ -551,7 +551,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
 
         with (
             patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
-            patch("gateway_transport.GatewayTransport.open_once", return_value=_Response()),
+            patch("gateway_transport.open_once", return_value=_Response()),
         ):
             response = gateway_transport.open_upstream_response(
                 request,
@@ -590,7 +590,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
 
         with (
             patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
-            patch("gateway_transport.GatewayTransport.open_once", side_effect=URLError("private failure")),
+            patch("gateway_transport.open_once", side_effect=URLError("private failure")),
             patch("gateway_transport.transport_failure_phase", return_value="tls"),
         ):
             with self.assertRaises(URLError):
@@ -651,7 +651,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
         response = _MetadataFaultResponse()
 
-        with patch("gateway_transport.GatewayTransport.open_once", return_value=response):
+        with patch("gateway_transport.open_once", return_value=response):
             actual = gateway_transport.open_upstream_response(
                 request,
                 upstream_name="official",

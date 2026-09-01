@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub fn get_providers() -> Result<Vec<Provider>, String> {
     get_providers_with_paths(&ConfigPaths::runtime()?)
@@ -392,7 +391,7 @@ impl CommandRunner for ProcessCommandRunner {
     fn run(&self, program: &Path, args: &[String]) -> Result<CommandOutcome, String> {
         let mut command = runtime_paths::configured_python_command(program);
         command.args(args);
-        configure_no_window(&mut command);
+        crate::runtime_paths::configure_no_window(&mut command);
         let output = command
             .output()
             .map_err(|error| format!("failed to start {}: {error}", program.display()))?;
@@ -402,19 +401,6 @@ impl CommandRunner for ProcessCommandRunner {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
-    }
-}
-
-pub(crate) fn configure_no_window(command: &mut Command) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = command;
     }
 }
 

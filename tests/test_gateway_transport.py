@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import inspect
 import ssl
+from contextlib import ExitStack
 from email.utils import formatdate
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
@@ -15,7 +17,6 @@ import pytest
 import gateway_transport
 from gateway_errors import GatewayPreResponseBudgetExhausted
 from gateway_transport import (
-    GatewayTransport,
     TransportFacts,
     UpstreamSseReaderLifecycle,
     _retry_after_delay_seconds,
@@ -44,7 +45,9 @@ FORBIDDEN_SOURCE_MARKERS = (
 
 
 class _FakeResponse:
-    def __init__(self, body: bytes = b"ok", status: int = 200, headers: dict | None = None):
+    def __init__(
+        self, body: bytes = b"ok", status: int = 200, headers: dict | None = None
+    ):
         self.status = status
         self.code = status
         self.reason = "OK"
@@ -74,11 +77,32 @@ class _FakeHTTPError(HTTPError):
         )
 
 
+class _ModuleTransport:
+    def __init__(self, **overrides):
+        self._overrides = overrides
+
+    def __getattr__(self, name):
+        function = getattr(gateway_transport, name)
+
+        def invoke(*args, **kwargs):
+            with ExitStack() as stack:
+                for dependency, value in self._overrides.items():
+                    stack.enter_context(
+                        patch.object(gateway_transport, f"_{dependency}", value)
+                    )
+                return function(*args, **kwargs)
+
+        return invoke
+
+
+GatewayTransport = _ModuleTransport
+
+
 def test_gateway_transport_source_does_not_import_facade_or_sse() -> None:
     source = Path(gateway_transport.__file__).read_text(encoding="utf-8")
     for marker in FORBIDDEN_SOURCE_MARKERS:
         assert marker not in source
-    assert "class GatewayTransport" in source
+    assert "class GatewayTransport" not in source
     assert "class TransportFacts" in source
 
 
@@ -87,14 +111,9 @@ def test_transport_failure_phase_classifies_ssl_eof() -> None:
     assert gateway_transport.transport_failure_phase(error) == "tls_handshake"
 
 
-def test_typed_transport_seam_is_gateway_transport() -> None:
-    assert inspect.isclass(GatewayTransport)
+def test_transport_uses_module_functions_and_immutable_facts() -> None:
     assert inspect.isclass(TransportFacts)
-    annotations = GatewayTransport.__annotations__
-    assert "facts" in annotations
-    assert "official_open" in annotations
-    assert "standard_open" in annotations
-    assert "open_once_hook" in annotations
+    assert callable(gateway_transport.open_response)
 
 
 def test_open_once_uses_official_policy_not_string_dispatch() -> None:
@@ -108,7 +127,9 @@ def test_open_once_uses_official_policy_not_string_dispatch() -> None:
         seen.append("standard")
         return _FakeResponse()
 
-    transport = GatewayTransport(official_open=official_open, standard_open=standard_open)
+    transport = GatewayTransport(
+        official_open=official_open, standard_open=standard_open
+    )
     request = Request("https://example.test/v1/responses", data=b"{}", method="POST")
     transport.open_once(
         request,
@@ -155,10 +176,18 @@ def test_open_response_retries_scripted_http_error_and_honors_retry_after() -> N
 
 
 def test_open_response_classifies_503_as_overloaded_and_permanent_400() -> None:
-    assert _upstream_failure_class(_FakeHTTPError(503)) == RETRY_FAILURE_PROVIDER_OVERLOADED
+    assert (
+        _upstream_failure_class(_FakeHTTPError(503))
+        == RETRY_FAILURE_PROVIDER_OVERLOADED
+    )
     assert _upstream_failure_class(_FakeHTTPError(400)) == RETRY_FAILURE_PERMANENT
-    assert _upstream_failure_class(_FakeHTTPError(429)) == RETRY_FAILURE_PROVIDER_THROTTLE
-    assert _upstream_failure_class(URLError(TimeoutError("timed out"))) == RETRY_FAILURE_QUICK_TRANSIENT
+    assert (
+        _upstream_failure_class(_FakeHTTPError(429)) == RETRY_FAILURE_PROVIDER_THROTTLE
+    )
+    assert (
+        _upstream_failure_class(URLError(TimeoutError("timed out")))
+        == RETRY_FAILURE_QUICK_TRANSIENT
+    )
 
 
 def test_retry_after_supports_delta_seconds_and_http_date() -> None:
@@ -172,8 +201,12 @@ def test_retry_after_supports_delta_seconds_and_http_date() -> None:
 
 def test_pre_response_budget_raises_before_open() -> None:
     transport = GatewayTransport(
-        official_open=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("opened")),
-        standard_open=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("opened")),
+        official_open=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("opened")
+        ),
+        standard_open=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("opened")
+        ),
     )
     with pytest.raises(GatewayPreResponseBudgetExhausted):
         transport.open_response(
@@ -311,7 +344,9 @@ def test_transport_build_request_materializes_endpoint_url():
 
 def test_transport_build_request_merges_endpoint_query_parameters():
     transport = GatewayTransport(
-        endpoint_url_hook=lambda upstream, path: "https://example.test" + path + "?api-version=1",
+        endpoint_url_hook=lambda upstream, path: (
+            "https://example.test" + path + "?api-version=1"
+        ),
     )
     request = transport.build_request({}, "/responses?trace=1")
     assert request.full_url == "https://example.test/responses?api-version=1&trace=1"
@@ -320,12 +355,16 @@ def test_transport_build_request_merges_endpoint_query_parameters():
 def test_open_once_hook_is_used_by_open_response() -> None:
     seen: list[str] = []
 
-    def fake_once(request: Request, *, upstream_name: str, timeout: float, transport_policy=None):
+    def fake_once(
+        request: Request, *, upstream_name: str, timeout: float, transport_policy=None
+    ):
         seen.append(upstream_name)
         return _FakeResponse()
 
     transport = GatewayTransport(
-        official_open=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("official")),
+        official_open=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("official")
+        ),
         open_once_hook=fake_once,
     )
     transport.open_response(

@@ -14,6 +14,11 @@ pub(crate) fn set_resource_root(path: impl AsRef<Path>) {
     }
 }
 
+/// Candidate names shared by Codex CLI discovery call sites, in precedence order.
+pub(crate) fn codex_executable_candidates() -> &'static [&'static str] {
+    &["codex.cmd", "codex", "codex.exe"]
+}
+
 /// Remove host-environment selectors before starting a Python child.
 ///
 /// An already selected Python executable can still be redirected to another
@@ -37,7 +42,7 @@ pub(crate) fn configure_python_command(command: &mut Command) {
     configure_no_window(command);
 }
 
-fn configure_no_window(command: &mut Command) {
+pub(crate) fn configure_no_window(command: &mut Command) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;

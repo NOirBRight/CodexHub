@@ -237,10 +237,6 @@ def sleep_for_retry_with_gateway_cancellation(*args: Any, **kwargs: Any) -> Any:
     return gateway_admission.sleep_for_retry_with_gateway_cancellation(*args, **kwargs)
 
 
-def _gateway_transport() -> Any:
-    return gateway_transport.default_gateway_transport()
-
-
 def _open_upstream_response(request: Request, **kwargs: Any) -> Any:
     return gateway_transport.open_upstream_response(request, **kwargs)
 
@@ -502,7 +498,7 @@ class GatewayHandlerMixin:
                 request_mutation_policy=MutationPolicy.OFFICIAL_PASSTHROUGH,
                 operational_authentication=operational_authentication,
             )
-            request = _gateway_transport().build_request(
+            request = gateway_transport.build_request(
                 upstream,
                 "/images/generations",
                 data=body,
@@ -1300,7 +1296,7 @@ class GatewayHandlerMixin:
                 **proxy_request_context,
             )
             control_path = self.path[3:] if self.path.startswith("/v1/") else self.path
-            request = _gateway_transport().build_request(
+            request = gateway_transport.build_request(
                 upstream,
                 control_path,
                 headers=headers,

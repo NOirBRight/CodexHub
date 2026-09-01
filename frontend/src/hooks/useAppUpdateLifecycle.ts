@@ -23,7 +23,7 @@ export function useAppUpdateLifecycle(options: {
   setRuntime: (update: (current: RuntimeSnapshot) => RuntimeSnapshot) => void;
   translate: (key: string, options?: Record<string, unknown>) => string;
 }) {
-  const { getRuntime, setRuntime, translate } = options;
+  const { setRuntime, translate } = options;
   const { confirm: confirmAction } = useConfirmDialog();
   const { dismissToast, showToast, updateToast } = useToasts();
   const [view, setView] = useState<AppUpdateView>(() => ({

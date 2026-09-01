@@ -1704,35 +1704,6 @@ RESPONSES_TERMINAL_EVENT_TYPES = {
 }
 
 
-def _responses_events_have_terminal(events: list[Mapping[str, Any]]) -> bool:
-    for event in events:
-        if not isinstance(event, Mapping):
-            continue
-        event_type = event.get("type")
-        if isinstance(event_type, str) and event_type in RESPONSES_TERMINAL_EVENT_TYPES:
-            return True
-    return False
-
-
-def _chat_stream_chunk_has_finish(chunk: Mapping[str, Any]) -> bool:
-    choices = chunk.get("choices")
-    if not isinstance(choices, list):
-        return False
-    for choice in choices:
-        if isinstance(choice, Mapping) and choice.get("finish_reason") is not None:
-            return True
-    return False
-
-
-def _chat_stream_chunks_have_terminal(chunks: list[Mapping[str, Any] | str]) -> bool:
-    for chunk in chunks:
-        if chunk == "[DONE]":
-            return True
-        if isinstance(chunk, Mapping) and _chat_stream_chunk_has_finish(chunk):
-            return True
-    return False
-
-
 def _response_events_to_chat_stream_chunks(
     events: list[Mapping[str, Any]],
     *,

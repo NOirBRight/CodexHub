@@ -84,7 +84,7 @@ pub async fn xai_open_verification_url(url: String) -> Result<String, String> {
 }
 
 pub(crate) fn pin_https_xai_url(url: &str) -> Result<String, String> {
-    let parsed = url::Url::parse(url.trim()).map_err(|error| format!("invalid URL: {error}"))?;
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|error| format!("invalid URL: {error}"))?;
     if parsed.scheme() != "https" {
         return Err("xAI verification URL must be HTTPS".to_string());
     }

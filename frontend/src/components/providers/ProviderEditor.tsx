@@ -38,7 +38,7 @@ import type {
   UpstreamFormat,
   UpstreamFormatProbeResult,
 } from "../../lib/types";
-import type { ProviderDraftState } from "../../hooks/useProviderNavigationGuard";
+import type { ProviderDraftState } from "../../lib/providerWorkspace/core";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 

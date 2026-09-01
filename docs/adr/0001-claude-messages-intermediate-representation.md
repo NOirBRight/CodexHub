@@ -89,6 +89,12 @@ before a route can ship: each new Messages capability needs a representation
 decision and a test, rather than becoming an accidental omission inside an
 existing Gateway conversion helper.
 
+The exploratory spike, its smoke runner, fixtures, and spike-only tests were
+retired before release. The `anthropic_messages` configuration value remains
+reserved and fails closed before sampling. Any future implementation must
+re-establish the formal representation seam described by this ADR rather than
+recovering or promoting the retired prototype.
+
 ## Alternatives considered
 
 ### Extend the current implicit Gateway conversion helpers

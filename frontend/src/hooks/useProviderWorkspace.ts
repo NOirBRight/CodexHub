@@ -1,37 +1,34 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { useToasts } from "../components/PageToast";
-
-
+import { publishCatalog } from "../lib/catalogPublish";
 import { mergeDiscoveredModels } from "../lib/format";
 import { applyProviderProbeResult, probeSucceeded, shortProviderDiscoveryError } from "../lib/providerEndpoint";
-import { messageFromError } from "../lib/tauri";
-import type { Model, Provider, Settings, UpstreamFormatProbeResult } from "../lib/types";
+import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
+import type { GatewayClientSyncSummary, Model, Provider, Settings, UpstreamFormatProbeResult } from "../lib/types";
 import {
   ADD_ID,
   OFFICIAL_ID,
   applyDiscoveredModelsForProvider,
-  applyProbeToProvider,
   buildNextProviderFromForm,
   providerWorkspaceReducer,
   resolveOfficialRefresh,
   selectSelectedProvider,
+  formProbeModelFor,
+  providerProbeModelFor,
   type PendingProviderNavigation,
   type ProviderDraftState,
   type ProviderEditIntent,
   type ProviderWorkspaceOutcome,
   type ProviderWorkspaceState,
 } from "../lib/providerWorkspace/core";
-import {
-  createProductionPorts,
-  isBackendDisconnected,
-  publishAndSync,
-  type ProviderWorkspacePorts,
-} from "../lib/providerWorkspace/ports";
-
 import { catalogOverrideToastMessage } from "../lib/providerWorkspace/feedback";
 import { mergeOfficialModelSources, sortOfficialModels } from "../lib/officialModels";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
+
+function isBackendDisconnected(error: unknown): boolean {
+  return isBackendDisconnectedMessage(messageFromError(error));
+}
 
 export type WorkspaceSource = {
   catalogModels: Model[];
@@ -60,6 +57,8 @@ export type ProviderWorkspaceHandle = {
 };
 
 export type ProviderActionIntent =
+  | { type: "saveProviders"; providers: Provider[]; successMessage?: string; toastId?: string; skipPublish?: boolean }
+  | { type: "saveSettings"; settings: Settings; regenerateCatalog?: boolean; successMessage?: string; toastId?: string }
   | { type: "saveProvider"; provider: Provider; successMessage?: string; skipPublish?: boolean }
   | { type: "saveAddForm"; form: import("../lib/providerForm").AddProviderForm; targetId?: string }
   | { type: "discoverProviderModels"; providerId: string }
@@ -112,26 +111,59 @@ export function useProviderWorkspace(options: {
   tr: Translate;
 }): ProviderWorkspaceHandle {
   const { getSource, onProvidersChanged, onSettingsChanged, refreshGatewayState, toast, t, tr } = options;
-  const { dismissToast, showToast, updateToast } = toast;
-  const [state, dispatch] = useReducer(providerWorkspaceReducer, getSource(), initialState);
+  const { showToast, updateToast } = toast;
+  const externalSource = getSource();
+  const [state, dispatch] = useReducer(providerWorkspaceReducer, externalSource, initialState);
   const dirtyDraftRef = useRef<ProviderDraftState<Provider> | null>(null);
-  const sourceRef = useRef(getSource());
-  sourceRef.current = getSource();
+  const sourceRef = useRef(externalSource);
+  sourceRef.current = externalSource;
 
-  const authorizeCodexRestartRef = useRef(options.authorizeCodexRestart);
-  authorizeCodexRestartRef.current = options.authorizeCodexRestart;
-  const portsRef = useRef<ProviderWorkspacePorts | null>(null);
-  if (!portsRef.current) {
-    portsRef.current = createProductionPorts({
-      authorizeCodexRestart: async () => {
-        if (authorizeCodexRestartRef.current) {
-          return authorizeCodexRestartRef.current();
-        }
-        return window.confirm(tr("providers.authorizeCodexRestart") ?? "Restart Codex App?") ? true : false;
+  const authorizeCodexRestart = useCallback(async () => {
+    if (options.authorizeCodexRestart) {
+      return options.authorizeCodexRestart();
+    }
+    return window.confirm(tr("providers.authorizeCodexRestart") ?? "Restart Codex App?");
+  }, [options.authorizeCodexRestart, tr]);
+
+  const publishAndSync = useCallback(async (
+    restartCodex: boolean,
+    settings: Settings | null,
+    updateText: (text: string, tone: "loading" | "success" | "error") => void,
+    catalogAlreadyPublished = false,
+  ): Promise<GatewayClientSyncSummary | null> => {
+    if (!catalogAlreadyPublished) {
+      updateText("providers.generatingCatalog", "loading");
+    }
+    const published = await publishCatalog(
+      {
+        reason: "provider-catalog",
+        persist: !catalogAlreadyPublished,
+        syncClients: Boolean(settings?.auto_sync_clients),
       },
-      refreshGatewayState,
-    });
-  }
+      {
+        generate: () => api.generateCatalog(restartCodex),
+        sync: async () => {
+          updateText("providers.syncBoundClients", "loading");
+          return api.syncGatewayClients().catch((err) => ({
+            applied: 0,
+            skipped: 0,
+            failed: 1,
+            results: [],
+            message: messageFromError(err),
+          }));
+        },
+      },
+    );
+    let syncResult = published.syncResult;
+    await refreshGatewayState();
+    const diagnostics = await api.catalogOverrideDiagnostics().catch(() => null);
+    if (syncResult) {
+      syncResult = { ...syncResult, catalog_override_diagnostics: diagnostics };
+    } else if (diagnostics) {
+      syncResult = { applied: 0, skipped: 0, failed: 0, results: [], message: "", catalog_override_diagnostics: diagnostics };
+    }
+    return syncResult;
+  }, [refreshGatewayState]);
 
   const edit = useCallback((intent: ProviderEditIntent) => {
     dispatch(intent);
@@ -144,7 +176,7 @@ export function useProviderWorkspace(options: {
 
   useEffect(() => {
     syncExternal();
-  }, [syncExternal]);
+  }, [externalSource.catalogModels, externalSource.modelMetadata, externalSource.providers, externalSource.settings, syncExternal]);
 
   const updateToastWithError = useCallback(
     (toastId: string, err: unknown) => {
@@ -215,24 +247,21 @@ export function useProviderWorkspace(options: {
 
   const saveProvidersCore = useCallback(
     async (next: Provider[], opts: { successMessage?: string; toastId?: string; skipPublish?: boolean }) => {
-      const restartCodex = opts.skipPublish ? false : await portsRef.current!.authorizeCodexRestart();
+      const restartCodex = opts.skipPublish ? false : await authorizeCodexRestart();
       if (restartCodex === null) {
         return { kind: "cancelled" as const };
       }
       dispatch({ type: "setBusy", busy: "save" });
       const toastId = opts.toastId ?? showToast(t("providers.updateProviderCatalog"), "loading");
       try {
-        const saved = await portsRef.current!.saveProviders(next);
+        const saved = await api.saveProviders(next);
         dispatch({ type: "setProviders", providers: saved });
         onProvidersChanged?.(saved);
         if (!opts.skipPublish) {
           const syncResult = await publishAndSync(
-            portsRef.current!,
             restartCodex,
             sourceRef.current.settings,
-            {
-              updateText: (text, tone) => updateToast(toastId, { action: null, text: t(text), tone }),
-            },
+            (text, tone) => updateToast(toastId, { action: null, text: t(text), tone }),
           );
           const toastMessage = catalogSyncToastMessage(opts.successMessage ?? t("providers.providerCatalogUpdated"), syncResult);
           updateToast(toastId, {
@@ -251,13 +280,50 @@ export function useProviderWorkspace(options: {
         dispatch({ type: "setBusy", busy: null });
       }
     },
-    [catalogSyncToastMessage, onProvidersChanged, showToast, t, updateToast, updateToastWithError],
+    [authorizeCodexRestart, catalogSyncToastMessage, onProvidersChanged, publishAndSync, showToast, t, updateToast, updateToastWithError],
   );
 
   const act = useCallback(
     async (intent: ProviderActionIntent): Promise<ProviderWorkspaceOutcome> => {
-      const ports = portsRef.current!;
       switch (intent.type) {
+        case "saveProviders":
+          return saveProvidersCore(intent.providers, {
+            successMessage: intent.successMessage,
+            toastId: intent.toastId,
+            skipPublish: intent.skipPublish,
+          });
+        case "saveSettings": {
+          const restartCodex = intent.regenerateCatalog ? await authorizeCodexRestart() : false;
+          if (restartCodex === null) {
+            return { kind: "cancelled" };
+          }
+          dispatch({ type: "setBusy", busy: "settings" });
+          const toastId = intent.toastId ?? showToast(intent.successMessage ? `${intent.successMessage}...` : t("settings.savingSettings"), "loading");
+          try {
+            const saved = await api.saveSettings(intent.settings);
+            dispatch({ type: "setSettings", settings: saved });
+            onSettingsChanged?.(saved);
+            const syncResult = intent.regenerateCatalog
+              ? await publishAndSync(
+                  restartCodex,
+                  saved,
+                  (text, tone) => updateToast(toastId, { action: null, text: t(text), tone }),
+                )
+              : null;
+            const message = catalogSyncToastMessage(intent.successMessage ?? t("settings.settingsSaved"), syncResult);
+            updateToast(toastId, {
+              action: null,
+              text: message ?? t("settings.settingsSaved"),
+              tone: syncResult?.failed ? "error" : "success",
+            });
+            return { kind: "ok", message: message ?? undefined };
+          } catch (err) {
+            updateToastWithError(toastId, err);
+            return { kind: "error", message: messageFromError(err) };
+          } finally {
+            dispatch({ type: "setBusy", busy: null });
+          }
+        }
         case "saveProvider":
           return saveProvidersCore([...state.providers.map((p) => (p.id === intent.provider.id ? intent.provider : p))], {
             successMessage: intent.successMessage,
@@ -267,13 +333,13 @@ export function useProviderWorkspace(options: {
           dispatch({ type: "setBusy", busy: "save" });
           const toastId = showToast(t("providers.savingProvider"), "loading");
           try {
-            const restartCodex = await ports.authorizeCodexRestart();
+            const restartCodex = await authorizeCodexRestart();
             if (restartCodex === null) {
               updateToast(toastId, { action: null, text: t("providers.saveCancelled"), tone: "info" });
               return { kind: "cancelled" };
             }
             const currentProviders = sourceRef.current.providers;
-            const built = buildNextProviderFromForm(currentProviders, intent.form, intent.targetId);
+            const built = buildNextProviderFromForm(currentProviders, intent.form);
             if (!built.provider) {
               const message = t(built.error ?? "providers.providerNameRequired", {
                 name: intent.form.name.trim(),
@@ -282,15 +348,17 @@ export function useProviderWorkspace(options: {
               return { kind: "error", message };
             }
             const nextProviders = [...currentProviders, built.provider];
-            const saved = await ports.saveProviders(nextProviders);
+            const saved = await api.saveProviders(nextProviders);
             dispatch({ type: "setProviders", providers: saved });
             dispatch({ type: "setSelectedId", selectedId: intent.targetId ?? built.id });
             dispatch({ type: "resetForm" });
             dispatch({ type: "clearPendingNewProvider" });
             onProvidersChanged?.(saved);
-            const syncResult = await publishAndSync(ports, restartCodex, sourceRef.current.settings, {
-              updateText: (text, tone) => updateToast(toastId, { action: null, text: t(text), tone }),
-            });
+            const syncResult = await publishAndSync(
+              restartCodex,
+              sourceRef.current.settings,
+              (text, tone) => updateToast(toastId, { action: null, text: t(text), tone }),
+            );
             const msg = catalogSyncToastMessage(t("providers.providerAdded", { name: built.provider.name }), syncResult);
             updateToast(toastId, { action: null, text: msg ?? t("providers.providerAdded", { name: built.provider.name }), tone: "success" });
             return { kind: "ok", message: msg ?? undefined, providers: saved };
@@ -314,8 +382,8 @@ export function useProviderWorkspace(options: {
           dispatch({ type: "setBusy", busy: intent.providerId });
           const toastId = showToast(t("providers.discoveringProviderModels", { name: provider.name }), "loading");
           try {
-            const models = await ports.discoverProviderModels(provider.base_url, provider.api_key ?? "", provider.id);
-            const bundled = await ports.getBundledProviders().catch(() => [] as Provider[]);
+            const models = await api.discoverProviderModels(provider.base_url, provider.api_key ?? "", provider.id);
+            const bundled = await api.getBundledProviders().catch(() => [] as Provider[]);
             const preset = bundled.find((b) => b.id === provider.id) ?? null;
             const isPending = pending?.id === provider.id;
             const baseProvider = isPending ? state.pendingNewProvider : provider;
@@ -356,7 +424,7 @@ export function useProviderWorkspace(options: {
           const toastId = showToast(t("providers.discoveringModels"), "loading");
           try {
             const form = intent.form ?? state.form;
-            const models = await ports.discoverProviderModels(form.base_url, form.api_key, form.id.trim() || null);
+            const models = await api.discoverProviderModels(form.base_url, form.api_key, form.id.trim() || null);
             const nextForm = {
               ...form,
               models: mergeDiscoveredModels(form.models, models),
@@ -383,10 +451,18 @@ export function useProviderWorkspace(options: {
           dispatch({ type: "setProbeResult", result: null });
           const toastId = intent.toastId ?? showToast(t("providers.endpointSelectionTest"), "loading");
           try {
-            const result = await ports.probeUpstreamFormat(intent.baseUrl, intent.apiKey, intent.model);
+            const result = await api.probeUpstreamFormat(intent.baseUrl, intent.apiKey, intent.model);
             dispatch({ type: "setProbeResult", result });
             let providers: Provider[] | undefined;
             if (intent.providerId && probeSucceeded(result)) {
+              if (state.pendingNewProvider?.id === intent.providerId) {
+                dispatch({
+                  type: "setPendingNewProvider",
+                  provider: applyProviderProbeResult(state.pendingNewProvider, result),
+                });
+                updateProbeToast(toastId, result);
+                return { kind: "ok", probeResult: result };
+              }
               const currentProviders = sourceRef.current.providers;
               const provider = currentProviders.find((p) => p.id === intent.providerId);
               if (provider) {
@@ -394,7 +470,7 @@ export function useProviderWorkspace(options: {
                   p.id === intent.providerId ? applyProviderProbeResult(p, result) : p,
                 );
                 dispatch({ type: "setProviders", providers: nextProviders });
-                const saved = await ports.saveProviders(nextProviders);
+                const saved = await api.saveProviders(nextProviders);
                 dispatch({ type: "setProviders", providers: saved });
                 onProvidersChanged?.(saved);
                 providers = saved;
@@ -413,7 +489,7 @@ export function useProviderWorkspace(options: {
           const quiet = intent.quiet ?? false;
           let toastId: string | null = null;
           try {
-            const restartCodex = quiet ? false : await ports.authorizeCodexRestart();
+            const restartCodex = quiet ? false : await authorizeCodexRestart();
             if (restartCodex === null) {
               return { kind: "cancelled" };
             }
@@ -421,7 +497,7 @@ export function useProviderWorkspace(options: {
               dispatch({ type: "setBusy", busy: "official-refresh" });
               toastId = showToast(t("providers.refreshingOfficialModels"), "loading");
             }
-            const refreshResult = await ports.refreshOfficialModels(restartCodex);
+            const refreshResult = await api.refreshOfficialModels(restartCodex);
             const resolved = resolveOfficialRefresh(state.officialModelOrderDraft, refreshResult.models);
             if (!resolved.followsAutomatic) {
               dispatch({ type: "setOfficialModelOrderDraft", order: resolved.nextOrder });
@@ -432,9 +508,12 @@ export function useProviderWorkspace(options: {
               dispatch({ type: "setDiscoveryError", error: null });
               return { kind: "ok" };
             }
-            const syncResult = await publishAndSync(ports, restartCodex, sourceRef.current.settings, {
-              updateText: (text, tone) => updateToast(toastId!, { action: null, text: t(text), tone }),
-            }, { catalogAlreadyPublished: true });
+            const syncResult = await publishAndSync(
+              restartCodex,
+              sourceRef.current.settings,
+              (text, tone) => updateToast(toastId!, { action: null, text: t(text), tone }),
+              true,
+            );
             const refreshMessage = refreshResult.codex_restart_result === "restarted"
               ? t("providers.officialModelsRefreshedCodexRestarted")
               : refreshResult.codex_restart_result === "switched_relaunch_failed"
@@ -479,7 +558,7 @@ export function useProviderWorkspace(options: {
           const nextProviders = state.providers.filter((p) => p.id !== intent.providerId);
           const toastId = showToast(t("providers.deletingProvider"), "loading");
           try {
-            const saved = await ports.saveProviders(nextProviders);
+            const saved = await api.saveProviders(nextProviders);
             dispatch({ type: "setProviders", providers: saved });
             onProvidersChanged?.(saved);
             updateToast(toastId, { action: null, text: t("providers.providerDeleted"), tone: "success" });
@@ -491,7 +570,7 @@ export function useProviderWorkspace(options: {
         }
       }
     },
-    [catalogSyncToastMessage, onProvidersChanged, saveProvidersCore, showToast, state, t, tr, updateProbeToast, updateToastWithError],
+    [authorizeCodexRestart, catalogSyncToastMessage, onProvidersChanged, onSettingsChanged, publishAndSync, refreshGatewayState, saveProvidersCore, showToast, state, t, tr, updateProbeToast, updateToast, updateToastWithError],
   );
 
   const navigation = useMemo(
@@ -596,4 +675,5 @@ export function useProviderWorkspace(options: {
 
 // Re-export constants used by the page.
 export { ADD_ID, OFFICIAL_ID };
+export { formProbeModelFor, providerProbeModelFor };
 export type { PendingProviderNavigation, ProviderDraftState };

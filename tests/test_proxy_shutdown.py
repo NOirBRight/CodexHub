@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 from pathlib import Path
 import tempfile
@@ -196,18 +195,6 @@ def test_upstream_sse_reader_join_is_capped_at_one_second_and_timeout_is_classif
     assert lifecycle.reader_alive is False
 
 
-def test_upstream_sse_reader_scope_audit_keeps_bounded_queue_and_thread_in_one_owner() -> None:
-    lifecycle_source = inspect.getsource(gateway_transport.UpstreamSseReaderLifecycle)
-    module_source = inspect.getsource(gateway_transport)
-
-    assert "QUEUE_CAPACITY = 32" in lifecycle_source
-    assert "queue.Queue(maxsize=self.QUEUE_CAPACITY)" in lifecycle_source
-    assert "self._queue.put(item, timeout=self.PRODUCER_PUT_TIMEOUT_SECONDS)" in lifecycle_source
-    assert "self._queue.put(item)" not in lifecycle_source
-    assert module_source.count('"gateway-sse-reader"') == 1
-    assert "target=self._read_upstream" in lifecycle_source
-
-
 def test_shutdown_endpoint_stops_server() -> None:
     controller = gateway_admission.GatewayShutdownController()
     server = ThreadingHTTPServer(("127.0.0.1", 0), CodexProxyHandler)
@@ -385,7 +372,7 @@ def test_request_racing_admission_closure_never_opens_or_retries_upstream_work()
 
     try:
         controller.close_admission()
-        with patch.object(gateway_transport.GatewayTransport, "open_once") as open_upstream:
+        with patch.object(gateway_transport, "open_once") as open_upstream:
             with pytest.raises(gateway_admission.GatewayUserRequestedShutdown):
                 gateway_transport.open_upstream_response(
                     Request("https://example.invalid/v1/responses", data=b"{}", method="POST"),

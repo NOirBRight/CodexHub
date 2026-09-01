@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,7 +11,7 @@ import pytest
 
 import gateway_catalog_runtime
 from catalog import CatalogPolicy
-from gateway_catalog_runtime import CatalogFacts, CatalogRuntime
+from gateway_catalog_runtime import CatalogFacts
 from gateway_errors import ModelIdentityResolutionError
 
 
@@ -35,20 +36,43 @@ def _policy() -> CatalogPolicy:
     )
 
 
-def test_catalog_runtime_source_is_independent_of_facade_handler_transport_and_planning() -> None:
+class _ModuleCatalogRuntime:
+    def __init__(self, *, facts=None, **readers):
+        self.facts = facts or CatalogFacts()
+        self._readers = readers
+
+    def __getattr__(self, name):
+        function = getattr(gateway_catalog_runtime, name)
+
+        def invoke(*args, **kwargs):
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch("gateway_catalog_runtime._facts", return_value=self.facts)
+                )
+                for reader, value in self._readers.items():
+                    stack.enter_context(
+                        patch(f"gateway_catalog_runtime._{reader}", value)
+                    )
+                return function(*args, **kwargs)
+
+        return invoke
+
+
+CatalogRuntime = _ModuleCatalogRuntime
+
+
+def test_catalog_runtime_source_is_independent_of_facade_handler_transport_and_planning() -> (
+    None
+):
     source = Path(gateway_catalog_runtime.__file__).read_text(encoding="utf-8")
     for marker in FORBIDDEN_SOURCE_MARKERS:
         assert marker not in source
-    assert "class CatalogRuntime" in source
+    assert "class CatalogRuntime" not in source
     assert "class CatalogFacts" in source
 
 
-def test_catalog_runtime_hooks_are_frozen():
-    runtime = CatalogRuntime()
-    with pytest.raises(FrozenInstanceError):
-        runtime.facts = CatalogFacts()  # type: ignore[misc]
-    with pytest.raises(FrozenInstanceError):
-        runtime.official_base_url_reader = lambda: "https://changed.test"  # type: ignore[misc]
+def test_catalog_runtime_is_exposed_as_module_functions():
+    assert callable(gateway_catalog_runtime.choose_upstream)
 
 
 def test_catalog_facts_are_deeply_immutable() -> None:
@@ -68,7 +92,10 @@ def test_openai_model_list_stays_openai_shaped() -> None:
         {
             "fetched_at": "2026-08-25T00:00:00Z",
             "models": [
-                {"slug": "gpt-5.6-luna", "codex_proxy_metadata": {"provider": "openai"}},
+                {
+                    "slug": "gpt-5.6-luna",
+                    "codex_proxy_metadata": {"provider": "openai"},
+                },
                 {"slug": "xai/grok-4", "codex_proxy_metadata": {"provider": "xai"}},
             ],
         }
@@ -197,16 +224,18 @@ def test_context_guard_uses_only_complete_published_official_budget() -> None:
         "model_auto_compact_token_limit": 700,
     }
     catalog = {
-        "models": [{
-            "slug": "gpt-test",
-            "context_window": 1200,
-            "codex_proxy_metadata": {
-                "provider": "openai",
-                "upstream_name": "official",
-                "upstream_model": "gpt-test",
-                "official_context_budget": budget,
-            },
-        }]
+        "models": [
+            {
+                "slug": "gpt-test",
+                "context_window": 1200,
+                "codex_proxy_metadata": {
+                    "provider": "openai",
+                    "upstream_name": "official",
+                    "upstream_model": "gpt-test",
+                    "official_context_budget": budget,
+                },
+            }
+        ]
     }
 
     guarded = CatalogRuntime().catalog_with_openai_context_guard(
@@ -221,15 +250,20 @@ def test_context_guard_uses_only_complete_published_official_budget() -> None:
 
 def test_catalog_factory_keeps_owning_module_reader_patches_live() -> None:
     row = {"slug": "runtime-model", "max_output_tokens": 321}
-    with patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value={"runtime-model": row}):
+    with patch(
+        "gateway_catalog_runtime.generated_catalog_by_slug",
+        return_value={"runtime-model": row},
+    ):
         assert gateway_catalog_runtime.catalog_max_output_tokens("runtime-model") == 321
 
 
 def test_owning_module_generated_catalog_slug_hook_stays_live():
-    with patch("gateway_catalog_runtime.generated_catalog_by_slug", return_value={"hook-only": {"slug": "hook-only"}}):
+    with patch(
+        "gateway_catalog_runtime.generated_catalog_by_slug",
+        return_value={"hook-only": {"slug": "hook-only"}},
+    ):
         assert gateway_catalog_runtime.generated_catalog_slugs() == {"hook-only"}
 
 
 def test_catalog_types_are_true_facade_aliases() -> None:
     assert gateway_catalog_runtime.CatalogFacts is CatalogFacts
-    assert gateway_catalog_runtime.CatalogRuntime is CatalogRuntime

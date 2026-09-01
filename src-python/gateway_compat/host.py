@@ -48,19 +48,19 @@ STRUCTURED_TOOL_PROTOCOLS = {"responses_structured", "chat_tools"}
 def _apply_patch_adapter() -> Any:
     import apply_patch_adapter as _module
 
-    return _module.apply_patch_adapter()
+    return _module
 
 
 def _collaboration_adapter() -> Any:
     import collaboration_adapter as _module
 
-    return _module.collaboration_adapter()
+    return _module
 
 
 def _tool_surface_adapter() -> Any:
     import tool_surface_adapter as _module
 
-    return _module.tool_surface_adapter()
+    return _module
 
 
 def _catalog_output_limit(model_id: str) -> tuple[int | None, bool]:

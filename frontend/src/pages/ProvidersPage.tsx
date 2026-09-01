@@ -1,17 +1,11 @@
 import {
-  Cable,
-  Check,
   Copy,
-  Eye,
-  EyeOff,
   ExternalLink,
   Link2,
   Link2Off,
   Plus,
   RefreshCcw,
   Save,
-  Trash2,
-  X,
 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -36,23 +30,17 @@ import {
   modelIdMatches,
   SwitchControl,
 } from "../components/providers/ProviderModelSection";
-import { useProviderCatalogActions } from "../hooks/useProviderCatalogActions";
 import {
   ADD_ID,
+  formProbeModelFor,
   OFFICIAL_ID,
+  providerProbeModelFor,
   useProviderWorkspace,
   type PendingProviderNavigation,
 } from "../hooks/useProviderWorkspace";
 import { useVerticalOverflow } from "../hooks/useVerticalOverflow";
 import { cx, displayModel, renumberModels } from "../lib/format";
 import { emptyProvider, type AddProviderForm } from "../lib/providerForm";
-import {
-  filterCodexVisibleOfficialModels,
-  mergeOfficialModelSources,
-  refreshedOfficialModelOrder,
-  shouldFollowOfficialCatalogOrder,
-  sortOfficialModels,
-} from "../lib/officialModels";
 import { upstreamFormatLabel } from "../lib/providerEndpoint";
 import { normalizeOfficialModelId, normalizeSettings } from "../lib/settings";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
@@ -118,28 +106,55 @@ function ProvidersPageImpl({
   const { showToast, updateToast } = toast;
   const authorizeCodexRestartRef = useRef<() => Promise<boolean | null>>(async () => null);
   const initialOfficialUsageSnapshot = useMemo(() => readStoredOfficialOpenAIUsageSnapshot(), []);
+  const normalizedSettingsSnapshot = useMemo(
+    () => settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null,
+    [settingsSnapshot],
+  );
   const [codexAuthPreviewState, setCodexAuthPreviewState] = useState<CodexAuthState | null>(() => readCodexAuthPreviewState());
-  const [providers, setProviders] = useState<Provider[]>(() => providersSnapshot);
-  const [settings, setSettings] = useState<Settings | null>(() => (
-    settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null
-  ));
-  const [settingsDraft, setSettingsDraft] = useState<Settings | null>(() => (
-    settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null
-  ));
-  const [officialDisabledModelsDraft, setOfficialDisabledModelsDraft] = useState<string[]>(() => (
-    settingsSnapshot ? withDefaultFastVariants(settingsSnapshot).official_disabled_models : []
-  ));
-  const [officialModelOrderDraft, setOfficialModelOrderDraft] = useState<string[]>(() => (
-    settingsSnapshot ? withDefaultFastVariants(settingsSnapshot).official_model_sort_order : []
-  ));
-  const persistedOfficialSettingsRef = useRef({
-    disabledModels: settingsSnapshot
-      ? withDefaultFastVariants(settingsSnapshot).official_disabled_models
-      : [],
-    modelOrder: settingsSnapshot
-      ? withDefaultFastVariants(settingsSnapshot).official_model_sort_order
-      : [],
+  const workspace = useProviderWorkspace({
+    getSource: () => ({
+      catalogModels,
+      modelMetadata,
+      providers: providersSnapshot,
+      settings: normalizedSettingsSnapshot,
+    }),
+    onProvidersChanged,
+    onSettingsChanged,
+    refreshGatewayState: async () => {
+      await onGatewayChanged?.();
+    },
+    authorizeCodexRestart: () => authorizeCodexRestartRef.current(),
+    toast,
+    t,
+    tr,
   });
+  const {
+    busy,
+    form,
+    modelDiscoveryError,
+    officialDisabledModelsDraft,
+    officialModelOrderDraft,
+    probeResult,
+    providers,
+    settings,
+    settingsDraft,
+  } = workspace.state;
+  const setProviders = (value: Provider[]) => workspace.edit({ type: "setProviders", providers: value });
+  const setSettings = (value: Settings | null | ((current: Settings | null) => Settings | null)) => {
+    const next = typeof value === "function" ? value(workspace.state.settings) : value;
+    if (next) workspace.edit({ type: "setSettings", settings: next });
+  };
+  const setSettingsDraft = setSettings;
+  const setOfficialDisabledModelsDraft = (disabled: string[]) =>
+    workspace.edit({ type: "setOfficialDisabledModelsDraft", disabled });
+  const setOfficialModelOrderDraft = (order: string[]) =>
+    workspace.edit({ type: "setOfficialModelOrderDraft", order });
+  const setForm = (next: AddProviderForm) => workspace.edit({ type: "updateForm", form: next });
+  const setProbeResult = (result: UpstreamFormatProbeResult | null) =>
+    workspace.edit({ type: "setProbeResult", result });
+  const setBusy = (next: string | null) => workspace.edit({ type: "setBusy", busy: next });
+  const setModelDiscoveryError = (error: string | null) =>
+    workspace.edit({ type: "setDiscoveryError", error });
   const handledCodexSwitchRequestRef = useRef<number | null>(null);
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(appStatusSnapshot);
   const [connectionPendingMode, setConnectionPendingMode] = useState<ConnectionMode | null>(null);
@@ -158,24 +173,8 @@ function ProvidersPageImpl({
   const [officialUsageError, setOfficialUsageError] = useState<string | null>(null);
   const [officialUsageHidden, setOfficialUsageHidden] = useState(false);
   const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot | null>(null);
-  const [form, setForm] = useState(emptyProvider);
   const [catalogPickerOpen, setCatalogPickerOpen] = useState(false);
   const [catalogPresets, setCatalogPresets] = useState<Provider[] | null>(null);
-  const [probeResult, setProbeResult] = useState<UpstreamFormatProbeResult | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [modelDiscoveryError, setModelDiscoveryError] = useState<string | null>(null);
-  const workspace = useProviderWorkspace({
-    getSource: () => ({ catalogModels, modelMetadata, providers, settings }),
-    onProvidersChanged,
-    onSettingsChanged,
-    refreshGatewayState: async () => {
-      await onGatewayChanged?.();
-    },
-    authorizeCodexRestart: () => authorizeCodexRestartRef.current(),
-    toast,
-    t,
-    tr,
-  });
   const selectedId = workspace.state.selectedId;
   const officialModels = workspace.state.officialModels;
   const setOfficialModels = (value: Model[] | ((current: Model[]) => Model[])) => {
@@ -213,38 +212,27 @@ function ProvidersPageImpl({
   useEffect(() => {
     editWorkspace({ type: "updateForm", form });
   }, [editWorkspace, form]);
-  const {
-    catalogSyncToastMessage,
-    formProbeModel,
-    probeUpstreamFormat: catalogProbeUpstreamFormat,
-    providerProbeModel,
-    saveProviders,
-    updateGatewayAfterCatalog,
-  } = useProviderCatalogActions({
-    authorizeCodexRestart,
-    form,
-    officialModelOrderDraft,
-    onProvidersChanged,
-    providers,
-    refreshGatewayState,
-    setBusy,
-    setError,
-    setForm,
-    setModelDiscoveryError,
-    setOfficialModelOrderDraft,
-    setOfficialModels,
-    setProbeResult,
-    setProviders,
-    setSelectedId,
-    pendingNewProvider,
-    setPendingNewProvider,
-    settings,
-    settingsDraft,
-    t,
-    tr,
-    toast: { showToast, updateToast },
-    updateToastWithError,
-  });
+  async function saveProviders(
+    next: Provider[],
+    regenerateCatalog = true,
+    successMessage?: string,
+    toastId?: string,
+  ): Promise<Provider[]> {
+    const result = await workspace.act({
+      type: "saveProviders",
+      providers: next,
+      successMessage,
+      toastId,
+      skipPublish: !regenerateCatalog,
+    });
+    if (result.kind === "ok") {
+      return result.providers ?? next;
+    }
+    if (result.kind === "error") {
+      throw new Error(result.message);
+    }
+    return providers;
+  }
   async function discoverForForm() {
     setBusy("discover");
     try {
@@ -263,9 +251,6 @@ function ProvidersPageImpl({
     model?: string | null,
     providerId?: string,
   ) {
-    if (providerId && pendingNewProvider?.id === providerId) {
-      return catalogProbeUpstreamFormat(baseUrl, apiKey, model, providerId);
-    }
     setBusy("probe");
     setProbeResult(null);
     try {
@@ -346,47 +331,8 @@ function ProvidersPageImpl({
   }, [catalogModels]);
 
   useEffect(() => {
-    const normalizedSettings = settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null;
-    const disabledModels = normalizedSettings?.official_disabled_models ?? [];
-    const modelOrder = normalizedSettings?.official_model_sort_order ?? [];
-    const persistedOfficialSettings = persistedOfficialSettingsRef.current;
-    const officialSettingsChanged =
-      JSON.stringify(disabledModels) !== JSON.stringify(persistedOfficialSettings.disabledModels) ||
-      JSON.stringify(modelOrder) !== JSON.stringify(persistedOfficialSettings.modelOrder);
-    setSettings(normalizedSettings);
-    setSettingsDraft(normalizedSettings);
-    if (officialSettingsChanged) {
-      setOfficialDisabledModelsDraft(disabledModels);
-      setOfficialModelOrderDraft(modelOrder);
-      persistedOfficialSettingsRef.current = { disabledModels, modelOrder };
-    }
-  }, [settingsSnapshot]);
-
-  useEffect(() => {
-    setProviders(providersSnapshot);
-    if (
-      selectedId !== OFFICIAL_ID &&
-      selectedId !== ADD_ID &&
-      pendingNewProvider?.id !== selectedId &&
-      !providersSnapshot.some((provider) => provider.id === selectedId)
-    ) {
-      setSelectedId(providersSnapshot[0]?.id ?? OFFICIAL_ID);
-    }
-  }, [pendingNewProvider?.id, providersSnapshot, selectedId]);
-
-  useEffect(() => {
     setCodexStatus(appStatusSnapshot);
   }, [appStatusSnapshot]);
-
-  useEffect(() => {
-    const normalizedSettings = settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null;
-    setOfficialModels(
-      sortOfficialModels(
-        mergeOfficialModelSources(catalogModels, modelMetadata),
-        normalizedSettings?.official_model_sort_order ?? [],
-      ),
-    );
-  }, [catalogModels, modelMetadata, settingsSnapshot]);
 
   useEffect(() => {
     officialUsageSnapshotRef.current = officialUsageSnapshot;
@@ -416,12 +362,7 @@ function ProvidersPageImpl({
     setModelDiscoveryError(null);
   }, [selectedId]);
 
-  const selectedProvider = useMemo(() => {
-    if (pendingNewProvider && selectedId === pendingNewProvider.id) {
-      return pendingNewProvider;
-    }
-    return providers.find((provider) => provider.id === selectedId) ?? null;
-  }, [pendingNewProvider, providers, selectedId]);
+  const selectedProvider = workspace.selectedProvider;
   const providerModelCount = useMemo(
     () =>
       providers.reduce(
@@ -499,12 +440,6 @@ function ProvidersPageImpl({
   const gatewayContextById = useMemo(() => {
     return new Map((gatewayStatus?.official_models ?? []).map((model) => [model.id, model.context_window]));
   }, [gatewayStatus]);
-
-  function setMessage(value: string | null) {
-    if (value) {
-      showToast(value, "message");
-    }
-  }
 
   function setError(value: string | null) {
     if (value) {
@@ -719,64 +654,17 @@ function ProvidersPageImpl({
   }
 
   async function saveSettings(next: Settings, regenerateCatalog = false, successMessage?: string, toastId?: string) {
-    const restartCodex = regenerateCatalog ? await authorizeCodexRestart() : false;
-    if (restartCodex === null) {
-      return;
-    }
-    setBusy("settings");
-    const activeToastId = toastId ?? showToast(successMessage ? `${successMessage}...` : t("settings.savingSettings"), "loading");
-    try {
-      const saved = await api.saveSettings(next);
-      setSettings(saved);
-      setSettingsDraft(saved);
-      onSettingsChanged?.(saved);
-      let syncResult: GatewayClientSyncSummary | null = null;
-      if (regenerateCatalog) {
-        syncResult = await updateGatewayAfterCatalog(saved, activeToastId, { restartCodex });
-      }
-      const toastMessage = catalogSyncToastMessage(successMessage ?? t("settings.settingsSaved"), syncResult);
-      if (syncResult?.failed) {
-        updateToast(activeToastId, {
-          action: null,
-          text: toastMessage ?? t("providers.settingsSavedSyncFailed"),
-          tone: "error",
-        });
-      } else {
-        updateToast(activeToastId, {
-          action: null,
-          text: toastMessage ?? t("settings.settingsSaved"),
-          tone: "success",
-        });
-        setError(null);
-      }
-    } catch (err) {
-      updateToastWithError(activeToastId, err);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function toggleAutostart(enabled: boolean) {
-    if (!settingsDraft) {
-      return;
-    }
-    setBusy("autostart");
-    const toastId = showToast(enabled ? t("providers.enablingAutoStart") : t("providers.disablingAutoStart"), "loading");
-    try {
-      if (enabled) {
-        await api.setAutostart(true);
-      } else {
-        await api.removeAutostart();
-      }
-      await saveSettings(
-        { ...settingsDraft, auto_start_software: enabled },
-        false,
-        enabled ? t("providers.autoStartEnabled") : t("providers.autoStartDisabled"),
-        toastId,
-      );
-    } catch (err) {
-      updateToastWithError(toastId, err);
-      setBusy(null);
+    const result = await workspace.act({
+      type: "saveSettings",
+      settings: next,
+      regenerateCatalog,
+      successMessage,
+      toastId,
+    });
+    if (result.kind === "ok") {
+      setSettings(next);
+      setSettingsDraft(next);
+      setError(null);
     }
   }
 
@@ -1171,7 +1059,7 @@ function ProvidersPageImpl({
                 onDiscover={() => void discoverForForm()}
                 onFormChange={setForm}
                 onProbe={() =>
-                  probeUpstreamFormat(form.base_url, form.api_key, formProbeModel())
+                  probeUpstreamFormat(form.base_url, form.api_key, formProbeModelFor(form))
                 }
               />
             ) : selectedId === OFFICIAL_ID ? (
@@ -1219,7 +1107,7 @@ function ProvidersPageImpl({
                   probeUpstreamFormat(
                     provider.base_url,
                     provider.api_key ?? "",
-                    providerProbeModel(provider),
+                    providerProbeModelFor(provider),
                     provider.id,
                   )
                 }
@@ -1367,7 +1255,6 @@ function ProviderSourceSidebar({
   onToggleConnection: () => void;
   selectedId: string;
 }) {
-  const { t } = useTranslation();
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2 p-3">
       <OfficialOpenAICard
@@ -2211,10 +2098,6 @@ function withDefaultFastVariants(settings: Settings): Settings {
   return normalizeSettings(settings);
 }
 
-function isAddProviderFormDirty(form: AddProviderForm) {
-  return Boolean(form.name.trim());
-}
-
 function pendingProviderName(
   pending: PendingProviderNavigation<Provider, AddProviderForm>,
   t: Translate,
@@ -2287,21 +2170,4 @@ function codexAuthStateFromGatewayStatus(status: GatewayStatus | null): CodexAut
     return "authorized";
   }
   return "missing";
-}
-
-function Toggle({
-  checked,
-  label,
-  onChange,
-}: {
-  checked: boolean;
-  label: string;
-  onChange: (value: boolean) => void;
-}) {
-  return (
-    <label className="flex h-9 items-center justify-between gap-3 rounded-md border border-line bg-panel px-3 text-sm font-medium">
-      <span className="truncate">{label}</span>
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
-    </label>
-  );
 }

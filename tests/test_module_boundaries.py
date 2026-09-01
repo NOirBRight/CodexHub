@@ -93,27 +93,22 @@ def test_gateway_transport_does_not_import_facade_handler_or_sse() -> None:
     assert "gateway_sse" not in source
     assert "BaseHTTPRequestHandler" not in source
     assert "CodexProxyHandler" not in source
-    assert "class GatewayTransport" in source
+    assert "class GatewayTransport" not in source
     assert "TransportPolicy.OFFICIAL_KEEPALIVE" in source
 
 
-def test_vision_proxy_does_not_import_facade_handler_sse_transport_or_catalog() -> None:
+def test_vision_proxy_does_not_import_facade_or_handler() -> None:
     source = Path(vision_proxy.__file__).read_text(encoding="utf-8")
     for marker in (
         "import codex_proxy",
         "from codex_proxy",
         "BaseHTTPRequestHandler",
         "CodexProxyHandler",
-        "gateway_sse",
-        "gateway_transport",
-        "gateway_catalog_runtime",
-        "protocol_translation",
-        "sse_events",
     ):
         assert marker not in source
-    assert "class VisionProxyAdapter" in source
+    assert "class VisionProxyAdapter" not in source
     assert "class VisionFacts" in source
-    assert "class VisionProxyHooks" in source
+    assert "class VisionProxyHooks" not in source
 
 
 def test_downstream_stream_commit_lives_in_gateway_sse() -> None:

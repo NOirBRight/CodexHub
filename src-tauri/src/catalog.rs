@@ -401,7 +401,7 @@ impl CatalogSyncCommandRunner for ProcessCatalogSyncCommandRunner {
         for (name, value) in env {
             command.env(name, value);
         }
-        config::configure_no_window(&mut command);
+        crate::runtime_paths::configure_no_window(&mut command);
 
         let output = command
             .output()

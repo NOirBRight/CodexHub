@@ -9,7 +9,6 @@ import { SettingsDrawer } from "./components/SettingsDrawer";
 import { useToasts } from "./components/PageToast";
 import { changeAppLocale } from "./i18n";
 import { cx } from "./lib/format";
-import { historyIssueKey } from "./lib/history";
 import { addDays, endOfDay, startOfDay } from "./lib/dateRange";
 import { api, messageFromError } from "./lib/tauri";
 import { useAppUpdateLifecycle } from "./hooks/useAppUpdateLifecycle";
@@ -25,16 +24,10 @@ import {
   type RuntimeSnapshot,
 } from "./lib/runtimeStore";
 import type {
-  AppFlavorInfo,
   AppStatus,
-  AppUpdateInstallStatus,
-  AppUpdateStatus,
-  AppVersionInfo,
   GatewayClientContract,
   GatewayClientInfo,
-  GatewayEvent,
   GatewayStatus,
-  GatewayUsageSnapshot,
   Model,
   Provider,
   Settings,
@@ -236,7 +229,7 @@ function tabPaneClass(active: boolean) {
 export default function App() {
   const { t } = useTranslation();
   const { confirm: confirmAction, dialog: confirmDialog } = useConfirmDialog();
-  const { dismissToast, showToast, updateToast } = useToasts();
+  const { showToast, updateToast } = useToasts();
   const [activeTab, setActiveTab] = useState<TabId>("codexhub");
   const [visibleTab, setVisibleTab] = useState<TabId>("codexhub");
   const [mountedTabs, setMountedTabs] = useState<Record<TabId, boolean>>({
@@ -491,55 +484,6 @@ export default function App() {
 
 
 
-
-
-
-  const repairConversationHistory = useCallback(async () => {
-    setBusy("history");
-    const toastId = showToast({
-      dedupeKey: "unified-history-preflight",
-      text: t("settings.syncingConversationHistory"),
-      timeoutMs: null,
-      tone: "loading",
-    });
-    try {
-      const result = await api.syncConversationHistory();
-      if (result.status === "repaired") {
-        updateToast(toastId, {
-          action: null,
-          text: t("settings.historyStartupRepaired", {
-            rows: result.changed_rows,
-            files: result.changed_files,
-          }),
-          tone: "success",
-        });
-      } else if (result.status === "deferred") {
-        updateToast(toastId, {
-          action: null,
-          text: t("settings.historySyncDeferred"),
-          tone: "info",
-        });
-      } else if (result.status === "restart_required" || result.status === "conflict") {
-        updateToast(toastId, {
-          action: null,
-          text: t(historyIssueKey(result)),
-          timeoutMs: null,
-          tone: "error",
-        });
-      } else {
-        dismissToast(toastId);
-      }
-    } catch (err) {
-      updateToast(toastId, {
-        action: null,
-        text: t("settings.historyUnexpectedFailure"),
-        timeoutMs: null,
-        tone: "error",
-      });
-    } finally {
-      setBusy(null);
-    }
-  }, [dismissToast, showToast, t, updateToast]);
 
 
 

@@ -110,7 +110,6 @@ export function StackedUsageChartShell({
   pendingMessage,
   providers,
   summary,
-  telemetryStatus,
 }: StackedUsageChartShellProps) {
   const { i18n, t } = useTranslation();
   const locale = i18n.language || "en-US";

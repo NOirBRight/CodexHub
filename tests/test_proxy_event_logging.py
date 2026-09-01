@@ -59,7 +59,7 @@ class ProxyEventLoggingTests(TestCase):
                             clear=False,
                         ),
                         patch(
-                            "gateway_transport.GatewayTransport.open_once",
+                            "gateway_transport.open_once",
                             side_effect=[URLError(TimeoutError("upstream timed out")), success],
                         ) as open_once,
                         patch("gateway_transport.time.sleep"),
@@ -107,7 +107,7 @@ class ProxyEventLoggingTests(TestCase):
                             clear=False,
                         ),
                         patch(
-                            "gateway_transport.GatewayTransport.open_once",
+                            "gateway_transport.open_once",
                             side_effect=HTTPError(
                                 "https://example.test/v1/responses",
                                 503,

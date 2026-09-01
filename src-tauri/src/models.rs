@@ -166,7 +166,7 @@ pub fn probe_upstream_format(
     if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
         command.arg("--model").arg(model);
     }
-    configure_no_window(&mut command);
+    crate::runtime_paths::configure_no_window(&mut command);
 
     let output = command
         .output()
@@ -1084,19 +1084,6 @@ fn readable_native_model_cache(cache_path: &Path) -> Option<Vec<u8>> {
     // atomically published; the caller separately requires it to differ from
     // the pre-request snapshot when context metadata was absent.
     Some(bytes)
-}
-
-fn configure_no_window(command: &mut Command) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = command;
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -3321,7 +3308,7 @@ fn find_codex_executable() -> Result<PathBuf, String> {
     if let Some(path) = npm_codex_vendor_exe() {
         return Ok(path);
     }
-    for candidate in codex_executable_candidates() {
+    for candidate in crate::runtime_paths::codex_executable_candidates() {
         if let Ok(path) = which::which(candidate) {
             return Ok(path);
         }
@@ -3370,9 +3357,6 @@ fn npm_codex_vendor_exe() -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-fn codex_executable_candidates() -> Vec<&'static str> {
-    vec!["codex.cmd", "codex", "codex.exe"]
-}
 
 #[cfg(test)]
 mod tests {

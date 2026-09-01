@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 from pathlib import Path
+from unittest.mock import patch
 import pytest
 
 import collaboration_adapter
@@ -14,7 +15,6 @@ from collaboration_adapter import (
     WORKER_BINDING_ERROR_CODE,
     WORKER_REQUESTED_BINDING_FIELD,
     WORKER_SELECTOR_ERROR_CODE,
-    CollaborationAdapter,
     CollaborationFacts,
     PathBindingSigner,
 )
@@ -33,21 +33,47 @@ FORBIDDEN_SOURCE_MARKERS = (
 )
 
 
-def _adapter(tmp_path: Path, events: list | None = None) -> tuple[CollaborationAdapter, list]:
+class _ModuleAdapter:
+    def __init__(self, facts, emit, signer):
+        self.facts = facts
+        self._emit = emit
+        self._signer = signer
+
+    def __getattr__(self, name):
+        function = getattr(collaboration_adapter, name)
+
+        def invoke(*args, **kwargs):
+            with (
+                patch.object(collaboration_adapter, "_facts", return_value=self.facts),
+                patch.object(collaboration_adapter, "_emit", self._emit),
+                patch.object(
+                    collaboration_adapter, "_signer", return_value=self._signer
+                ),
+            ):
+                return function(*args, **kwargs)
+
+        return invoke
+
+
+def _adapter(tmp_path: Path, events: list | None = None) -> tuple[_ModuleAdapter, list]:
     captured = events if events is not None else []
 
     def emit(event: str, **fields):
         captured.append((event, fields))
 
-    adapter = CollaborationAdapter(
-        facts=CollaborationFacts(signing_root=tmp_path),
-        emit=emit,
-        signer=PathBindingSigner(tmp_path),
+    adapter = _ModuleAdapter(
+        CollaborationFacts(signing_root=tmp_path), emit, PathBindingSigner(tmp_path)
     )
     return adapter, captured
 
 
-def _spawn_call(*, arguments, call_id="call_worker", item_id="item_worker", name="multi_agent_v1__spawn_agent"):
+def _spawn_call(
+    *,
+    arguments,
+    call_id="call_worker",
+    item_id="item_worker",
+    name="multi_agent_v1__spawn_agent",
+):
     return {
         "type": "function_call",
         "id": item_id,
@@ -57,12 +83,7 @@ def _spawn_call(*, arguments, call_id="call_worker", item_id="item_worker", name
     }
 
 
-def test_collaboration_adapter_typed_context_is_the_seam():
-    assert {
-        "facts",
-        "emit",
-        "signer",
-    } <= set(CollaborationAdapter.__annotations__)
+def test_collaboration_adapter_uses_module_functions_without_dynamic_lookup():
     source = Path(collaboration_adapter.__file__).read_text(encoding="utf-8")
     for marker in FORBIDDEN_SOURCE_MARKERS:
         assert marker not in source
@@ -112,7 +133,10 @@ def test_mixed_history_fails_closed_without_payload_leak(tmp_path):
         adapter.resolve_boundary(payload, {})
     assert raised.value.cause.code == COLLABORATION_BOUNDARY_ERROR_CODE
     assert events == [
-        ("collaboration_boundary_rejected", {"surface": "request", "outcome": "rejected", "count": 1})
+        (
+            "collaboration_boundary_rejected",
+            {"surface": "request", "outcome": "rejected", "count": 1},
+        )
     ]
     assert "SECRET_PROMPT" not in repr(events)
     assert "SECRET_TASK" not in repr(events)
@@ -120,12 +144,17 @@ def test_mixed_history_fails_closed_without_payload_leak(tmp_path):
 
 def test_chat_caller_rejects_worker_selector_before_sidecar_attach(tmp_path):
     adapter, events = _adapter(tmp_path)
-    value = _spawn_call(arguments={"agent_type": "worker", "message": "do work", "fork_context": True})
-    context = {"inbound_format": "chat_completions", "_worker_requested_binding": {
-        "agent_type": "worker",
-        "model": "glm-5.2",
-        "reasoning": "high",
-    }}
+    value = _spawn_call(
+        arguments={"agent_type": "worker", "message": "do work", "fork_context": True}
+    )
+    context = {
+        "inbound_format": "chat_completions",
+        "_worker_requested_binding": {
+            "agent_type": "worker",
+            "model": "glm-5.2",
+            "reasoning": "high",
+        },
+    }
     with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as raised:
         adapter.apply_external_worker_response_contract(
             value,
@@ -144,7 +173,9 @@ def test_chat_caller_rejects_worker_selector_before_sidecar_attach(tmp_path):
         )
     ]
     assert WORKER_REQUESTED_BINDING_FIELD not in value
-    assert WORKER_REQUESTED_BINDING_FIELD not in json.loads(json.dumps(value.get("arguments")))
+    assert WORKER_REQUESTED_BINDING_FIELD not in json.loads(
+        json.dumps(value.get("arguments"))
+    )
 
 
 def test_v2_context_bypasses_worker_sidecars_and_stream_ledger(tmp_path):
@@ -190,7 +221,9 @@ def test_hmac_fail_closed_rejects_tampered_sidecar(tmp_path):
     requested = {"agent_type": "worker", "model": "glm-5.2", "reasoning": "high"}
     sidecar = adapter.requested_binding_sidecar(requested, "call_worker")
     sidecar["signature"] = "00" * 32
-    verified, classification = adapter.verified_requested_binding(sidecar, "call_worker")
+    verified, classification = adapter.verified_requested_binding(
+        sidecar, "call_worker"
+    )
     assert verified is None
     assert classification == "unknown_requested_binding_sidecar"
 
@@ -307,7 +340,9 @@ def test_facade_wrappers_use_live_emit_and_signing_root(tmp_path, monkeypatch):
             {},
         )
     assert seen == [
-        ("collaboration_boundary_rejected", {"surface": "request", "outcome": "rejected", "count": 1})
+        (
+            "collaboration_boundary_rejected",
+            {"surface": "request", "outcome": "rejected", "count": 1},
+        )
     ]
-    adapter = collaboration_adapter.collaboration_adapter()
-    assert adapter.facts.signing_root == tmp_path
+    assert collaboration_adapter._facts().signing_root == tmp_path

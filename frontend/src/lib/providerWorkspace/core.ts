@@ -1,5 +1,5 @@
 import { emptyProvider, type AddProviderForm } from "../providerForm";
-import { applyPresetReasoningDefaults, bundledPresetFor, instantiateCatalogProvider } from "../providerCatalog";
+import { applyPresetReasoningDefaults, instantiateCatalogProvider } from "../providerCatalog";
 import { normalizeModel } from "../providerModel";
 import {
   applyProviderProbeResult,
@@ -70,6 +70,7 @@ export type ProviderEditIntent =
   | { type: "setOfficialModelOrderDraft"; order: string[] }
   | { type: "setOfficialDisabledModelsDraft"; disabled: string[] }
   | { type: "setProviders"; providers: Provider[] }
+  | { type: "setSettings"; settings: Settings }
   | { type: "syncExternal"; providers: Provider[]; settings: Settings | null; catalogModels: Model[]; modelMetadata: Model[]; selectedId?: string };
 
 export type ProviderWorkspaceOutcome =
@@ -112,6 +113,8 @@ export function providerWorkspaceReducer(
       return { ...state, officialDisabledModelsDraft: intent.disabled };
     case "setProviders":
       return { ...state, providers: intent.providers };
+    case "setSettings":
+      return { ...state, settings: intent.settings, settingsDraft: intent.settings };
     case "toggleOfficialModel": {
       const disabled = new Set(state.officialDisabledModelsDraft);
       if (intent.enabled) {
@@ -205,7 +208,6 @@ export function selectOfficialEnabledCount(state: ProviderWorkspaceState): numbe
 export function buildNextProviderFromForm(
   providers: Provider[],
   form: AddProviderForm,
-  targetId?: string,
 ): { id: string; provider: Provider | null; error: string | null } {
   const id = form.id.trim() || slugify(form.name);
   if (!id) {

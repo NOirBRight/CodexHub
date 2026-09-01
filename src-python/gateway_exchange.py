@@ -527,120 +527,6 @@ def protocol_fallback_fields(
     }
 
 
-def exchange_error_status(exc: BaseException) -> int | None:
-    """Extract an HTTP status code from an exception (fixed policy)."""
-    status_value = getattr(exc, "code", None)
-    return status_value if isinstance(status_value, int) else None
-
-
-def request_observability_for_attempt(
-    request: "ExchangeRequest",
-    attempt: RouteAttemptLike,
-    attempt_body: bytes,
-) -> dict[str, Any]:
-    """Build observability fields for one executed attempt (fixed policy).
-
-    Reads owning-module attributes at call time (ADR-0007) so patches stay
-    live: proxy_telemetry enrichment, gateway_request prefixing.
-    """
-    import proxy_telemetry as _proxy_telemetry
-    import gateway_request as _gateway_request
-    import gateway_events as _gateway_events
-
-    upstream_observability = _proxy_telemetry.enrich_request_observability(
-        body=attempt_body,
-        codex_home=_gateway_events.RUNTIME_CODEX_DIR,
-        upstream=request.upstream,
-        include_body_hmac=(
-            attempt.request_mutation_policy
-            != MutationPolicy.OFFICIAL_PASSTHROUGH
-        ),
-        prompt_cache_key=request.prompt_cache_key,
-        extract_prompt_cache_key=(
-            attempt.request_mutation_policy
-            != MutationPolicy.OFFICIAL_PASSTHROUGH
-        ),
-    )
-    return {
-        **upstream_observability,
-        **_gateway_request.request_observability_with_prefix(
-            request.caller_request_observability, "caller"
-        ),
-        **_gateway_request.request_observability_with_prefix(
-            upstream_observability, "upstream"
-        ),
-        "request_observability_scope": "executed_attempt",
-        "request_observability_attempt_index": attempt.index,
-        "request_observability_upstream_protocol": (
-            attempt.upstream_protocol.value
-        ),
-    }
-
-
-def protocol_fallback_fields(
-    request: "ExchangeRequest",
-    failed_attempt: RouteAttemptLike,
-    next_attempt: RouteAttemptLike,
-    exc: BaseException,
-    attempt_observability: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Build the upstream_protocol_fallback event fields (fixed policy)."""
-    import gateway_errors as _errors
-    import gateway_request as _greq
-
-    failed = failed_attempt.telemetry_snapshot()
-    following = next_attempt.telemetry_snapshot()
-    return {
-        "request_id": request.inbound.request_id,
-        "model": request.inbound.model,
-        "model_requested": request.inbound.model_requested,
-        "model_canonical": request.model_canonical,
-        "upstream": request.upstream_name,
-        "provider_id": request.upstream_name,
-        "provider_hint": request.inbound.provider_hint,
-        "upstream_format": (
-            request.route_plan.configured_upstream_protocol_name
-        ),
-        "behavior_profile": getattr(request, "behavior_profile", None),
-        "failed_upstream_format": (
-            failed_attempt.selected_upstream_format
-        ),
-        "next_upstream_format": (
-            next_attempt.selected_upstream_format
-        ),
-        "failed_route_attempt_index": failed["index"],
-        "failed_route_attempt_request_body_mode": (
-            failed["request_body_mode"]
-        ),
-        "failed_route_attempt_request_conversion_steps": (
-            failed["request_conversion_steps"]
-        ),
-        "failed_route_attempt_mutation_summary": (
-            failed["mutation_summary"]
-        ),
-        "next_route_attempt_index": following["index"],
-        "next_route_attempt_request_body_mode": (
-            following["request_body_mode"]
-        ),
-        "next_route_attempt_request_conversion_steps": (
-            following["request_conversion_steps"]
-        ),
-        "next_route_attempt_mutation_summary": (
-            following["mutation_summary"]
-        ),
-        "status": getattr(exc, "code", 502),
-        "error": "HTTPError",
-        "detail": _errors.safe_upstream_error_detail(
-            exc,
-            redact_identity=_gateway_transport.retry_identity_from_context(
-                request.event_context
-            ),
-        ),
-        **dict(attempt_observability),
-        **request.proxy_request_context,
-    }
-
-
 def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, observer: ExchangeObserver | None = None) -> tuple[PreparedExchange, bytes]:
     """Canonicalize, adapt, then perform exactly one selected wire conversion.
 
@@ -802,7 +688,7 @@ def execute_exchange(request: ExchangeRequest, ports: ExchangePorts, *, progress
                         "upstream_format": "responses",
                         "reason": lifecycle_reason,
                     }))
-                upstream_request = _gateway_transport.default_gateway_transport().build_request_url(
+                upstream_request = _gateway_transport.build_request_url(
                     attempt.endpoint_url,
                     data=attempt_body,
                     headers=attempt.request_headers.to_dict(),

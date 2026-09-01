@@ -34,7 +34,7 @@ impl AppServerSession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        configure_no_window(&mut command);
+        crate::runtime_paths::configure_no_window(&mut command);
         let mut child = command
             .spawn()
             .map_err(|error| format!("failed to start codex app-server for {purpose}: {error}"))?;
@@ -251,19 +251,6 @@ fn spawn_line_reader(
         }
     });
     receiver
-}
-
-fn configure_no_window(command: &mut Command) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = command;
-    }
 }
 
 #[cfg(windows)]

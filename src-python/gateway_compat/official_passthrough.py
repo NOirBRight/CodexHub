@@ -14,12 +14,10 @@ import uuid
 import gateway_stream_semantics as _stream_semantics
 
 from apply_patch_adapter import (
-    ApplyPatchAdapter,
     ApplyPatchFacts,
     ThirdPartyApplyPatchStreamAdapter as _ApplyPatchStreamAdapterImpl,
 )
 from collaboration_adapter import (
-    CollaborationAdapter,
     CollaborationFacts,
     PathBindingSigner,
     WORKER_REQUESTED_BINDING_FIELD,
@@ -56,7 +54,6 @@ from tool_surface_adapter import (
     TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL,
     TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION,
     TOOL_SEARCH_UNAVAILABLE_STATUS,
-    ToolSurfaceAdapter,
     ToolSurfaceFacts,
 )
 from route_plan import (

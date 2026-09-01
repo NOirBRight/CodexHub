@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import inspect
+from contextlib import ExitStack
 from pathlib import Path
+from unittest.mock import patch
 
 import gateway_compat
 import tool_surface_adapter
 from tool_surface_adapter import (
     NODE_REPL_NAMESPACE,
     TOOL_SEARCH_EMPTY_MISS_BOUND,
-    ToolSurfaceAdapter,
     ToolSurfaceFacts,
 )
 
@@ -51,20 +52,40 @@ def _scripted_discovery_tools() -> tuple[dict, ...]:
     )
 
 
-def _adapter(**overrides) -> ToolSurfaceAdapter:
+class _ModuleAdapter:
+    def __init__(self, facts, overrides):
+        self.facts = facts
+        self._overrides = overrides
+
+    def __getattr__(self, name):
+        function = getattr(tool_surface_adapter, name)
+
+        def invoke(*args, **kwargs):
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(
+                        tool_surface_adapter, "_facts", return_value=self.facts
+                    )
+                )
+                for dependency, value in self._overrides.items():
+                    stack.enter_context(
+                        patch.object(tool_surface_adapter, f"_{dependency}", value)
+                    )
+                return function(*args, **kwargs)
+
+        return invoke
+
+
+def _adapter(**overrides) -> _ModuleAdapter:
     facts = overrides.pop("facts", None)
     if facts is None:
-        facts = ToolSurfaceFacts(multi_agent_discovery_tools=_scripted_discovery_tools())
-    return ToolSurfaceAdapter(facts=facts, **overrides)
+        facts = ToolSurfaceFacts(
+            multi_agent_discovery_tools=_scripted_discovery_tools()
+        )
+    return _ModuleAdapter(facts, overrides)
 
 
-def test_tool_surface_adapter_typed_context_is_the_seam():
-    assert {
-        "facts",
-        "adapt_apply_patch_history",
-        "compatible_internal_message",
-        "transcript_message",
-    } <= set(ToolSurfaceAdapter.__annotations__)
+def test_tool_surface_adapter_uses_module_functions_without_dynamic_lookup():
     source = Path(tool_surface_adapter.__file__).read_text(encoding="utf-8")
     for marker in FORBIDDEN_SOURCE_MARKERS:
         assert marker not in source
@@ -86,17 +107,25 @@ def test_inject_explicit_codex_tools_uses_scripted_declarations():
     names = {tool["name"] for tool in payload["tools"]}
     assert "tool_search" in names
     assert "multi_agent_v1__spawn_agent" in names
-    spawn = next(tool for tool in payload["tools"] if tool["name"] == "multi_agent_v1__spawn_agent")
+    spawn = next(
+        tool
+        for tool in payload["tools"]
+        if tool["name"] == "multi_agent_v1__spawn_agent"
+    )
     assert spawn["description"] == "Spawn a scripted child."
 
 
 def test_flattened_namespace_tools_are_projected_from_source_declarations():
     adapter = _adapter()
-    source = [{
-        "type": "namespace",
-        "name": NODE_REPL_NAMESPACE,
-        "tools": [{"type": "function", "name": "js", "parameters": {"type": "object"}}],
-    }]
+    source = [
+        {
+            "type": "namespace",
+            "name": NODE_REPL_NAMESPACE,
+            "tools": [
+                {"type": "function", "name": "js", "parameters": {"type": "object"}}
+            ],
+        }
+    ]
     flattened = adapter.flatten_namespace_function_tools(source)
     assert any(tool.get("name") == f"{NODE_REPL_NAMESPACE}__js" for tool in flattened)
 
@@ -104,7 +133,12 @@ def test_flattened_namespace_tools_are_projected_from_source_declarations():
 def test_hoist_additional_tools_moves_tools_out_of_input_items():
     adapter = _adapter()
     payload = {
-        "input": [{"type": "additional_tools", "tools": [{"type": "function", "name": "shell"}]}],
+        "input": [
+            {
+                "type": "additional_tools",
+                "tools": [{"type": "function", "name": "shell"}],
+            }
+        ],
     }
     assert adapter.hoist_additional_tools_input_items(payload) is True
     assert payload["input"] == []
@@ -114,7 +148,16 @@ def test_hoist_additional_tools_moves_tools_out_of_input_items():
 def test_restore_deferred_node_repl_namespace_is_surgical():
     adapter = _adapter()
     payload = {"tools": []}
-    source = [{"type": "namespace", "name": NODE_REPL_NAMESPACE, "tools": [{"type": "function", "name": "js"}, {"type": "function", "name": "other"}]}]
+    source = [
+        {
+            "type": "namespace",
+            "name": NODE_REPL_NAMESPACE,
+            "tools": [
+                {"type": "function", "name": "js"},
+                {"type": "function", "name": "other"},
+            ],
+        }
+    ]
     assert adapter.restore_deferred_core_node_repl_namespace(payload, source) is True
     assert payload["tools"][0]["name"] == NODE_REPL_NAMESPACE
     assert [tool["name"] for tool in payload["tools"][0]["tools"]] == ["js"]
@@ -122,11 +165,19 @@ def test_restore_deferred_node_repl_namespace_is_surgical():
 
 def test_normalize_preserves_native_plain_functions_and_apply_patch():
     adapter = _adapter()
-    plain = {"type": "function_call", "name": "shell", "arguments": {"command": "echo hi"}}
+    plain = {
+        "type": "function_call",
+        "name": "shell",
+        "arguments": {"command": "echo hi"},
+    }
     unchanged, changed = adapter.normalize_third_party_tool_call(plain)
     assert changed is False
     assert unchanged is plain
-    apply_patch = {"type": "custom_tool_call", "name": adapter.facts.apply_patch_function_name, "input": "*** Begin Patch"}
+    apply_patch = {
+        "type": "custom_tool_call",
+        "name": adapter.facts.apply_patch_function_name,
+        "input": "*** Begin Patch",
+    }
     unchanged, changed = adapter.normalize_third_party_tool_call(apply_patch)
     assert changed is False
     assert unchanged is apply_patch
@@ -153,14 +204,23 @@ def test_bounded_tool_search_terminalizes_and_suppresses_identical_query():
     ]
     terminals = adapter.bounded_empty_tool_search_terminal_calls(history)
     assert terminals["call_2"] == (query, TOOL_SEARCH_EMPTY_MISS_BOUND)
-    payload = {"input": history, "tools": [dict(adapter.facts.tool_search_explicit_function_tool)]}
-    assert adapter.terminalize_bounded_empty_tool_search_misses(payload, terminals) is True
+    payload = {
+        "input": history,
+        "tools": [dict(adapter.facts.tool_search_explicit_function_tool)],
+    }
+    assert (
+        adapter.terminalize_bounded_empty_tool_search_misses(payload, terminals) is True
+    )
     assert payload["input"][3]["terminal"] is True
     assert adapter.restrict_bounded_tool_search_queries(payload, {query}) is True
-    assert payload["tools"][0]["parameters"]["properties"]["query"]["not"]["enum"] == [query]
+    assert payload["tools"][0]["parameters"]["properties"]["query"]["not"]["enum"] == [
+        query
+    ]
 
     context = {
-        "_bounded_tool_search_query_digests": frozenset({adapter.tool_search_query_digest(query)})
+        "_bounded_tool_search_query_digests": frozenset(
+            {adapter.tool_search_query_digest(query)}
+        )
     }
     rewritten, changed = adapter.suppress_bounded_tool_search_calls(
         {
@@ -184,7 +244,11 @@ def test_rewrite_structured_tool_input_uses_scripted_hooks():
         return input_items, {"call_patch"}, False
 
     def internal(item):
-        return {"type": "message", "role": "developer", "content": f"internal:{item.get('name')}"}
+        return {
+            "type": "message",
+            "role": "developer",
+            "content": f"internal:{item.get('name')}",
+        }
 
     adapter = _adapter(
         adapt_apply_patch_history=adapt_history,
@@ -209,7 +273,10 @@ def test_rewrite_structured_tool_input_uses_scripted_hooks():
             {"type": "reasoning", "summary": []},
         ],
     }
-    assert adapter.rewrite_structured_tool_input_items(payload, event_context={"trace": 1}) is True
+    assert (
+        adapter.rewrite_structured_tool_input_items(payload, event_context={"trace": 1})
+        is True
+    )
     assert seen == [{"trace": 1}]
     assert payload["input"][0]["name"] == "multi_agent_v1__spawn_agent"
     assert "namespace" not in payload["input"][0]
@@ -232,7 +299,9 @@ def test_rewrite_preserves_scripted_compatibility_plan_owned_items():
         "arguments": "{}",
     }
     payload = {"input": [owned]}
-    changed = adapter.rewrite_structured_tool_input_items(payload, compatibility_plan=Plan())
+    changed = adapter.rewrite_structured_tool_input_items(
+        payload, compatibility_plan=Plan()
+    )
     assert changed is False
     assert payload["input"][0] is owned
 
@@ -264,7 +333,11 @@ def test_normalize_third_party_tool_call_rewrites_aliases():
 
 def test_v2_context_skips_third_party_normalization():
     adapter = _adapter()
-    item = {"type": "function_call", "name": f"{NODE_REPL_NAMESPACE}.js", "arguments": {"code": "1"}}
+    item = {
+        "type": "function_call",
+        "name": f"{NODE_REPL_NAMESPACE}.js",
+        "arguments": {"code": "1"},
+    }
     rewritten, changed = adapter.normalize_third_party_tool_call(
         item,
         {"collaboration_protocol": adapter.facts.collaboration_v2},
@@ -278,7 +351,9 @@ def test_downgrade_invalid_tool_calls_uses_scripted_transcript():
         return {
             "type": "message",
             "role": "assistant",
-            "content": [{"type": "output_text", "text": f"SCRIPT:{title}:{item.get('name')}"}],
+            "content": [
+                {"type": "output_text", "text": f"SCRIPT:{title}:{item.get('name')}"}
+            ],
         }
 
     adapter = _adapter(transcript_message=transcript)
@@ -286,7 +361,10 @@ def test_downgrade_invalid_tool_calls_uses_scripted_transcript():
         {"type": "function_call", "name": "bad name!", "arguments": "{}"}
     )
     assert changed is True
-    assert rewritten["content"][0]["text"] == "SCRIPT:Invalid third-party function call transcript:bad name!"
+    assert (
+        rewritten["content"][0]["text"]
+        == "SCRIPT:Invalid third-party function call transcript:bad name!"
+    )
 
 
 def test_facade_wrappers_use_live_apply_patch_hook(monkeypatch):
@@ -297,7 +375,10 @@ def test_facade_wrappers_use_live_apply_patch_hook(monkeypatch):
         return input_items, set(), False
 
     monkeypatch.setattr(
-        __import__("gateway_compat.response", fromlist=["_adapt_apply_patch_custom_tool_history"]),
+        __import__(
+            "gateway_compat.response",
+            fromlist=["_adapt_apply_patch_custom_tool_history"],
+        ),
         "_adapt_apply_patch_custom_tool_history",
         adapt,
     )
@@ -311,5 +392,7 @@ def test_facade_wrappers_use_live_apply_patch_hook(monkeypatch):
             }
         ]
     }
-    gateway_compat.rewrite_structured_tool_input_items(payload, event_context={"live": True})
+    gateway_compat.rewrite_structured_tool_input_items(
+        payload, event_context={"live": True}
+    )
     assert seen == [{"live": True}]

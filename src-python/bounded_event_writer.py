@@ -7,15 +7,17 @@ sink. One background writer owns batching, sink failures, and JSONL recovery.
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass, field
 import errno
 import json
+import logging
+from logging.handlers import QueueHandler, QueueListener
 import math
 from pathlib import Path
+import queue
 import threading
 import time
-from typing import Any, BinaryIO, Callable, Deque, Literal, Mapping, Protocol, Sequence
+from typing import Any, BinaryIO, Callable, Literal, Mapping, Protocol, Sequence
 import weakref
 
 
@@ -105,6 +107,92 @@ class _QueuedRecord:
         return len(self.data)
 
 
+class _EventQueueHandler(QueueHandler):
+    """QueueHandler variant that keeps the already-serialized payload intact."""
+
+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        return record
+
+
+class _JsonlHandler(logging.Handler):
+    def __init__(self, writer: "BoundedEventWriter") -> None:
+        super().__init__()
+        self._writer = writer
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._writer._write_batch(record.records)
+
+
+class _EventQueueListener(QueueListener):
+    """QueueListener with bounded JSONL batching and a timed stop."""
+
+    def __init__(
+        self, writer: "BoundedEventWriter", event_queue: queue.Queue[logging.LogRecord]
+    ) -> None:
+        super().__init__(event_queue, _JsonlHandler(writer), respect_handler_level=True)
+        self._writer = writer
+
+    def _monitor(self) -> None:
+        pending: logging.LogRecord | None = None
+        try:
+            while True:
+                record = pending or self.dequeue(True)
+                pending = None
+                if record is self._sentinel:
+                    if hasattr(self.queue, "task_done"):
+                        self.queue.task_done()
+                    break
+
+                first: _QueuedRecord = record.queued_record
+                self._writer._wait_for_rotation_fence(first.sequence)
+                batch = [first]
+                batch_bytes = first.byte_count
+                while len(batch) < self._writer._batch_max_records:
+                    try:
+                        candidate = self.dequeue(False)
+                    except queue.Empty:
+                        break
+                    if candidate is self._sentinel:
+                        pending = candidate
+                        break
+                    item: _QueuedRecord = candidate.queued_record
+                    if self._writer._rotation_blocks(item.sequence) or (
+                        batch_bytes + item.byte_count > self._writer._batch_max_bytes
+                    ):
+                        pending = candidate
+                        break
+                    batch.append(item)
+                    batch_bytes += item.byte_count
+
+                batch_record = logging.LogRecord(
+                    name="bounded_event_writer",
+                    level=logging.INFO,
+                    pathname=__file__,
+                    lineno=0,
+                    msg="",
+                    args=(),
+                    exc_info=None,
+                )
+                batch_record.records = batch
+                self.handle(batch_record)
+                for _item in batch:
+                    if hasattr(self.queue, "task_done"):
+                        self.queue.task_done()
+        finally:
+            self._writer._listener_stopped()
+
+    def stop_bounded(self, timeout: float) -> bool:
+        thread = self._thread
+        if thread is None:
+            return True
+        self.enqueue_sentinel()
+        thread.join(max(0.0, timeout))
+        if thread.is_alive():
+            return False
+        self._thread = None
+        return True
+
+
 @dataclass
 class _PendingRecovery:
     overflow_records: int = 0
@@ -150,7 +238,9 @@ class _PendingRecovery:
         # Failure categories are fixed, short labels chosen by this module.
         # Keep the aggregation itself bounded even if a future category changes.
         if category in self.failure_categories or len(self.failure_categories) < 8:
-            self.failure_categories[category] = self.failure_categories.get(category, 0) + 1
+            self.failure_categories[category] = (
+                self.failure_categories.get(category, 0) + 1
+            )
 
 
 class JsonlFileSink:
@@ -179,7 +269,10 @@ class JsonlFileSink:
         return hash(self._identity_path)
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, JsonlFileSink) and self._identity_path == other._identity_path
+        return (
+            isinstance(other, JsonlFileSink)
+            and self._identity_path == other._identity_path
+        )
 
     @staticmethod
     def _default_open_file(path: Path, mode: str) -> BinaryIO:
@@ -188,7 +281,9 @@ class JsonlFileSink:
     def append(self, records: Sequence[bytes]) -> None:
         if not records:
             return
-        if any(not record.endswith(b"\n") or b"\n" in record[:-1] for record in records):
+        if any(
+            not record.endswith(b"\n") or b"\n" in record[:-1] for record in records
+        ):
             raise ValueError("event sink requires complete one-line JSONL records")
 
         payload = b"".join(records)
@@ -276,12 +371,16 @@ class BoundedEventWriter:
         self._max_bytes = max_bytes
         self._batch_max_records = batch_max_records
         self._batch_max_bytes = batch_max_bytes
-        self._recovery_record_factory = recovery_record_factory or _default_recovery_record
+        self._recovery_record_factory = (
+            recovery_record_factory or _default_recovery_record
+        )
         self._clock = clock
         self._thread_name = thread_name
 
         self._condition = threading.Condition(threading.RLock())
-        self._queue: Deque[_QueuedRecord] = deque()
+        self._queue: queue.Queue[logging.LogRecord] = queue.Queue()
+        self._queue_handler = _EventQueueHandler(self._queue)
+        self._listener = _EventQueueListener(self, self._queue)
         # Pending counts include a batch currently being written. This keeps the
         # configured bounds strict even while storage is slow.
         self._pending_records = 0
@@ -302,14 +401,19 @@ class BoundedEventWriter:
         self._unresolved_failure = False
 
         self._shutdown_state: WriterShutdownState = "running"
-        self._worker: threading.Thread | None = None
-        self._writer_generation = 0
-        # A crash with retained backlog gets exactly one automatic replacement.
-        # A successful write resets this guard for a later, independent crash.
-        self._automatic_restart_used = False
+        self._writer_generation = 1
         self._rotation_target_sequence: int | None = None
         self._sink_ownership: Literal["weak", "strong"]
         self._claim_sink_ownership()
+        try:
+            self._listener.start()
+            if self._listener._thread is not None:
+                self._listener._thread.name = self._thread_name
+        except Exception:
+            self._writer_generation = 0
+            self._record_failure_locked(
+                "writer_start_failed", record_count=0, byte_count=0
+            )
 
     def enqueue(self, record: Mapping[str, Any]) -> bool:
         """Attempt a non-blocking in-memory enqueue of one sanitized record."""
@@ -337,7 +441,9 @@ class BoundedEventWriter:
             return False
         except Exception:
             with self._condition:
-                self._record_failure_locked("serialization_rejected", record_count=1, byte_count=0)
+                self._record_failure_locked(
+                    "serialization_rejected", record_count=1, byte_count=0
+                )
                 self._condition.notify_all()
             return False
 
@@ -348,18 +454,36 @@ class BoundedEventWriter:
                 self._dropped_bytes += byte_count
                 self._condition.notify_all()
                 return False
-            if self._pending_records >= self._max_records or self._pending_bytes + byte_count > self._max_bytes:
+            if (
+                self._pending_records >= self._max_records
+                or self._pending_bytes + byte_count > self._max_bytes
+            ):
                 self._record_overflow_locked(byte_count=byte_count)
                 self._condition.notify_all()
                 return False
 
             queued = _QueuedRecord(sequence=self._next_sequence, data=data)
             self._next_sequence += 1
-            self._queue.append(queued)
+            log_record = logging.LogRecord(
+                name="bounded_event_writer",
+                level=logging.INFO,
+                pathname=__file__,
+                lineno=0,
+                msg="",
+                args=(),
+                exc_info=None,
+            )
+            log_record.queued_record = queued
+            try:
+                self._queue_handler.handle(log_record)
+            except (
+                queue.Full
+            ):  # pragma: no cover - the queue is intentionally unbounded.
+                self._record_overflow_locked(byte_count=byte_count)
+                return False
             self._pending_records += 1
             self._pending_bytes += byte_count
             self._accepted_records += 1
-            self._ensure_worker_locked()
             self._condition.notify_all()
             return True
 
@@ -374,11 +498,12 @@ class BoundedEventWriter:
 
         with self._condition:
             target_sequence = self._next_sequence - 1
-            self._ensure_worker_locked()
             self._condition.notify_all()
         return self._wait_for(target_sequence, timeout)
 
-    def rotate(self, operation: RotationOperation, timeout: float = 5.0) -> BoundedEventWriterResult:
+    def rotate(
+        self, operation: RotationOperation, timeout: float = 5.0
+    ) -> BoundedEventWriterResult:
         """Fence sink writes around a caller-owned, bounded rotation operation.
 
         The caller owns the rotation policy and its file changes. This module
@@ -388,11 +513,13 @@ class BoundedEventWriter:
         """
 
         with self._condition:
-            if self._shutdown_state != "running" or self._rotation_target_sequence is not None:
+            if (
+                self._shutdown_state != "running"
+                or self._rotation_target_sequence is not None
+            ):
                 return BoundedEventWriterResult("failed", self._status_locked())
             target_sequence = self._next_sequence - 1
             self._rotation_target_sequence = target_sequence
-            self._ensure_worker_locked()
             self._condition.notify_all()
 
         fenced = self._wait_for(target_sequence, timeout)
@@ -406,7 +533,9 @@ class BoundedEventWriter:
             operation()
         except BaseException:
             with self._condition:
-                self._record_failure_locked("rotation_failed", record_count=0, byte_count=0)
+                self._record_failure_locked(
+                    "rotation_failed", record_count=0, byte_count=0
+                )
                 self._rotation_target_sequence = None
                 self._condition.notify_all()
                 return self._result_locked()
@@ -423,7 +552,6 @@ class BoundedEventWriter:
             if self._shutdown_state == "running":
                 self._shutdown_state = "stopping"
             target_sequence = self._next_sequence - 1
-            self._ensure_worker_locked()
             self._condition.notify_all()
 
         result = self._wait_for(target_sequence, timeout)
@@ -431,15 +559,11 @@ class BoundedEventWriter:
             return result
 
         deadline = time.monotonic() + max(0.0, timeout)
-        with self._condition:
-            worker = self._worker
-            self._condition.notify_all()
-        if worker is not None and worker is not threading.current_thread():
-            worker.join(max(0.0, deadline - time.monotonic()))
+        stopped = self._listener.stop_bounded(max(0.0, deadline - time.monotonic()))
 
         release_sink_ownership = False
         with self._condition:
-            if worker is not None and worker.is_alive():
+            if not stopped:
                 return BoundedEventWriterResult("timeout", self._status_locked())
             if self._pending_records == 0:
                 self._shutdown_state = "stopped"
@@ -449,7 +573,9 @@ class BoundedEventWriter:
             self._release_sink_ownership()
         return result
 
-    def _wait_for(self, target_sequence: int, timeout: float) -> BoundedEventWriterResult:
+    def _wait_for(
+        self, target_sequence: int, timeout: float
+    ) -> BoundedEventWriterResult:
         deadline = time.monotonic() + max(0.0, timeout)
         with self._condition:
             while self._completed_sequence < target_sequence or self._recovery_inflight:
@@ -462,22 +588,6 @@ class BoundedEventWriter:
     def _result_locked(self) -> BoundedEventWriterResult:
         outcome: WriterOutcome = "failed" if self._unresolved_failure else "drained"
         return BoundedEventWriterResult(outcome, self._status_locked())
-
-    def _ensure_worker_locked(self) -> None:
-        if self._shutdown_state not in {"running", "stopping"}:
-            return
-        if self._worker is not None and self._worker.is_alive():
-            return
-        if not self._queue:
-            return
-        try:
-            worker = threading.Thread(target=self._writer_loop, name=self._thread_name, daemon=True)
-            self._worker = worker
-            self._writer_generation += 1
-            worker.start()
-        except Exception:
-            self._worker = None
-            self._record_failure_locked("writer_start_failed", record_count=0, byte_count=0)
 
     def _claim_sink_ownership(self) -> None:
         with self._sink_owners_lock:
@@ -507,96 +617,61 @@ class BoundedEventWriter:
             elif self._strong_sink_owners.get(id(self._sink)) is self:
                 self._strong_sink_owners.pop(id(self._sink), None)
 
-    def _writer_loop(self) -> None:
-        current_worker = threading.current_thread()
-        inflight: Sequence[_QueuedRecord] = ()
-        writer_crashed = False
-        try:
-            while True:
-                with self._condition:
-                    while not self._queue:
-                        if self._shutdown_state == "stopping":
-                            return
-                        self._condition.wait()
-                    while (
-                        self._rotation_target_sequence is not None
-                        and self._queue[0].sequence > self._rotation_target_sequence
-                    ):
-                        self._condition.wait()
-                        if not self._queue:
-                            break
-                    if not self._queue:
-                        continue
-                    inflight = self._take_batch_locked()
-
-                try:
-                    self._sink.append([record.data for record in inflight])
-                except Exception as exc:
-                    with self._condition:
-                        self._complete_batch_locked(inflight)
-                        self._record_failure_locked(
-                            _failure_category(exc),
-                            record_count=len(inflight),
-                            byte_count=sum(record.byte_count for record in inflight),
-                        )
-                        self._condition.notify_all()
-                    inflight = ()
-                    continue
-
-                with self._condition:
-                    self._complete_batch_locked(inflight)
-                    self._written_records += len(inflight)
-                    self._automatic_restart_used = False
-                    recovery = self._pending_recovery.snapshot() if self._pending_recovery.has_data() else None
-                    self._recovery_inflight = recovery is not None
-                    self._condition.notify_all()
-                inflight = ()
-
-                if recovery is not None:
-                    self._emit_recovery(recovery)
-        except BaseException:
-            writer_crashed = True
-            with self._condition:
-                if inflight:
-                    self._complete_batch_locked(inflight)
-                    self._record_failure_locked(
-                        "writer_crash",
-                        record_count=len(inflight),
-                        byte_count=sum(record.byte_count for record in inflight),
-                    )
-                else:
-                    self._record_failure_locked("writer_crash", record_count=0, byte_count=0)
-                self._condition.notify_all()
-        finally:
-            release_sink_ownership = False
-            with self._condition:
-                if self._worker is current_worker:
-                    self._worker = None
-                if writer_crashed and self._queue and not self._automatic_restart_used:
-                    self._automatic_restart_used = True
-                    self._ensure_worker_locked()
-                if self._shutdown_state == "stopping" and self._pending_records == 0:
-                    self._shutdown_state = "stopped"
-                    release_sink_ownership = True
-                self._condition.notify_all()
-            if release_sink_ownership:
-                self._release_sink_ownership()
-
-    def _take_batch_locked(self) -> list[_QueuedRecord]:
-        batch: list[_QueuedRecord] = []
-        batch_bytes = 0
-        while self._queue and len(batch) < self._batch_max_records:
-            next_record = self._queue[0]
-            if (
+    def _rotation_blocks(self, sequence: int) -> bool:
+        with self._condition:
+            return (
                 self._rotation_target_sequence is not None
-                and next_record.sequence > self._rotation_target_sequence
+                and sequence > self._rotation_target_sequence
+            )
+
+    def _wait_for_rotation_fence(self, sequence: int) -> None:
+        with self._condition:
+            while (
+                self._rotation_target_sequence is not None
+                and sequence > self._rotation_target_sequence
             ):
-                break
-            if batch and batch_bytes + next_record.byte_count > self._batch_max_bytes:
-                break
-            batch.append(self._queue.popleft())
-            batch_bytes += next_record.byte_count
-        return batch
+                self._condition.wait()
+
+    def _write_batch(self, inflight: Sequence[_QueuedRecord]) -> None:
+        try:
+            self._sink.append([record.data for record in inflight])
+        except Exception as exc:
+            with self._condition:
+                self._complete_batch_locked(inflight)
+                self._record_failure_locked(
+                    _failure_category(exc),
+                    record_count=len(inflight),
+                    byte_count=sum(record.byte_count for record in inflight),
+                )
+                self._condition.notify_all()
+            return
+        except BaseException:
+            with self._condition:
+                self._complete_batch_locked(inflight)
+                self._record_failure_locked(
+                    "writer_crash",
+                    record_count=len(inflight),
+                    byte_count=sum(record.byte_count for record in inflight),
+                )
+                self._condition.notify_all()
+            return
+
+        with self._condition:
+            self._complete_batch_locked(inflight)
+            self._written_records += len(inflight)
+            recovery = (
+                self._pending_recovery.snapshot()
+                if self._pending_recovery.has_data()
+                else None
+            )
+            self._recovery_inflight = recovery is not None
+            self._condition.notify_all()
+        if recovery is not None:
+            self._emit_recovery(recovery)
+
+    def _listener_stopped(self) -> None:
+        with self._condition:
+            self._condition.notify_all()
 
     def _complete_batch_locked(self, batch: Sequence[_QueuedRecord]) -> None:
         if not batch:
@@ -667,14 +742,18 @@ class BoundedEventWriter:
             last_failure_category=self._last_failure_category,
             last_failure_time=self._last_failure_time,
             recovery_events_written=self._recovery_events_written,
-            recovery_pending=self._pending_recovery.has_data() or self._recovery_inflight,
+            recovery_pending=self._pending_recovery.has_data()
+            or self._recovery_inflight,
             shutdown_state=self._shutdown_state,
-            writer_alive=self._worker is not None and self._worker.is_alive(),
+            writer_alive=self._listener._thread is not None
+            and self._listener._thread.is_alive(),
             writer_generation=self._writer_generation,
         )
 
 
-def _serialize_record(record: Mapping[str, Any], *, max_bytes: int | None = None) -> bytes:
+def _serialize_record(
+    record: Mapping[str, Any], *, max_bytes: int | None = None
+) -> bytes:
     if not isinstance(record, Mapping):
         raise TypeError("event record must be a mapping")
     if max_bytes is not None:
@@ -713,7 +792,9 @@ class _JsonSizeBudget:
         self.remaining -= byte_count
 
 
-def _measure_json_mapping(value: Mapping[Any, Any], budget: _JsonSizeBudget, active: set[int]) -> None:
+def _measure_json_mapping(
+    value: Mapping[Any, Any], budget: _JsonSizeBudget, active: set[int]
+) -> None:
     identity = id(value)
     if identity in active:
         raise ValueError("circular event mapping")
@@ -733,7 +814,9 @@ def _measure_json_mapping(value: Mapping[Any, Any], budget: _JsonSizeBudget, act
         active.remove(identity)
 
 
-def _measure_json_sequence(value: list[Any] | tuple[Any, ...], budget: _JsonSizeBudget, active: set[int]) -> None:
+def _measure_json_sequence(
+    value: list[Any] | tuple[Any, ...], budget: _JsonSizeBudget, active: set[int]
+) -> None:
     identity = id(value)
     if identity in active:
         raise ValueError("circular event sequence")
@@ -803,9 +886,13 @@ def _measure_json_string(value: str, budget: _JsonSizeBudget) -> None:
             budget.consume(12)
 
 
-def _measure_json_integer(value: int, budget: _JsonSizeBudget, *, quoted: bool = False) -> None:
+def _measure_json_integer(
+    value: int, budget: _JsonSizeBudget, *, quoted: bool = False
+) -> None:
     sign = 1 if value < 0 else 0
-    digit_upper_bound = 1 if value == 0 else (value.bit_length() * 30_103) // 100_000 + 2
+    digit_upper_bound = (
+        1 if value == 0 else (value.bit_length() * 30_103) // 100_000 + 2
+    )
     rendered_upper_bound = sign + digit_upper_bound
     if rendered_upper_bound > budget.remaining + 2:
         raise _RecordTooLarge("integer exceeds bounded admission")
@@ -813,7 +900,9 @@ def _measure_json_integer(value: int, budget: _JsonSizeBudget, *, quoted: bool =
     budget.consume(rendered_size + (2 if quoted else 0))
 
 
-def _measure_json_float(value: float, budget: _JsonSizeBudget, *, quoted: bool = False) -> None:
+def _measure_json_float(
+    value: float, budget: _JsonSizeBudget, *, quoted: bool = False
+) -> None:
     if math.isnan(value):
         rendered_size = 3
     elif math.isinf(value):

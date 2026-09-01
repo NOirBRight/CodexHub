@@ -14,7 +14,6 @@ import io
 import json
 import zlib
 from collections.abc import Mapping
-from pathlib import Path
 import re
 from typing import Any
 
@@ -25,20 +24,10 @@ from catalog import canonical_model_id
 import gateway_catalog_runtime as _catalog
 import maintained_catalog
 import gateway_stream_semantics as _stream_semantics
-from gateway_errors import safe_upstream_error_detail
 import gateway_settings
 from gateway_transport import get_header as _get_header, header_items as _header_items
 from route_primitives import (
-    IMAGE_PROXY_PROMPT,
-    IMAGE_PROXY_PROMPT_VERSION,
     RouteProtocol,
-)
-from sse_events import SseEventAssembler
-from vision_proxy import (
-    IMAGE_PROXY_CACHE_LOCK,
-    VisionFacts,
-    VisionProxyAdapter,
-    VisionProxyHooks,
 )
 
 try:
@@ -814,56 +803,8 @@ def provider_scoped_route_model(model_id: str | None, provider_hint: str | None)
     return f"{provider}/{slug}"
 
 
-def vision_proxy_adapter() -> VisionProxyAdapter:
-    """Build a request-time Vision Proxy seam reading owning-module attributes."""
-
-    import gateway_compat
-    import gateway_transport
-    import route_plan
-    from protocol_translation import prepare_exchange
-
-    return VisionProxyAdapter(
-        facts=VisionFacts(
-            cache_path=Path(vision_proxy.IMAGE_PROXY_CACHE_PATH),
-            prompt_version=IMAGE_PROXY_PROMPT_VERSION,
-            prompt=IMAGE_PROXY_PROMPT,
-            cache_lock=IMAGE_PROXY_CACHE_LOCK,
-            downstream_closed_error=_stream_semantics.DownstreamClosedDuringImageProxyError,
-        ),
-        hooks=VisionProxyHooks(
-            enabled_reader=gateway_settings.gateway_image_proxy_enabled,
-            vision_model_reader=gateway_settings.gateway_image_proxy_model,
-            resolve_upstream=_catalog.choose_upstream,
-            model_supports_image=_catalog.model_supports_image,
-            canonical_model_id=canonical_model_id,
-            compatible_request_body=gateway_compat.compatible_request_body,
-            strip_tools=_stream_semantics._strip_tools_for_text_only_proxy_payload,
-            responses_url=route_plan._responses_url,
-            chat_completions_url=route_plan._chat_completions_url,
-            prepare_exchange=prepare_exchange,
-            upstream_headers=gateway_transport.upstream_headers,
-            open_upstream=gateway_transport.open_upstream_response,
-            upstream_timeout_seconds=gateway_settings.upstream_timeout_seconds,
-            response_is_event_stream=_is_event_stream,
-            events_to_responses_body=_stream_semantics._events_to_responses_body,
-            write_event=gateway_events.write_adapter_event,
-            usage_from_payload=gateway_events._usage_from_payload,
-            normalize_usage=gateway_events.normalize_usage_for_event,
-            safe_upstream_error_detail=safe_upstream_error_detail,
-            cache_lookup_override=vision_proxy.image_proxy_cache_lookup,
-            description_for_part_override=vision_proxy.image_proxy_description_for_part,
-            sse_assembler_factory=SseEventAssembler,
-            response_event_payload=_stream_semantics._converted_sse_payload,
-        ),
-    )
-
-
-# Facade-era private alias kept for in-package callers.
-_vision_proxy_adapter = vision_proxy_adapter
-
-
 def value_contains_image(value: Any) -> bool:
-    return vision_proxy_adapter().value_contains_image(value)
+    return vision_proxy.value_contains_image(value)
 _value_contains_image = value_contains_image
 
 
@@ -883,7 +824,7 @@ def enforce_text_only_image_boundary(
         inbound_protocol = RouteProtocol(inbound_format)
     except ValueError as exc:
         raise ImageProxyError("Vision Proxy received an unsupported inbound protocol") from exc
-    return vision_proxy_adapter().enforce_text_only_boundary(
+    return vision_proxy.enforce_text_only_boundary(
         payload,
         inbound_protocol=inbound_protocol,
         target_model=target_model,

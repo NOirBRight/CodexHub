@@ -4,6 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use std::cmp::Reverse;
 use std::fs;
+#[cfg(test)]
 use std::io::Write;
 #[cfg(test)]
 use std::io::{BufRead, BufReader};
@@ -885,19 +886,6 @@ fn kill_child(child: &mut Child) {
 }
 
 #[cfg(test)]
-fn configure_no_window(command: &mut Command) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = command;
-    }
-}
-
 #[allow(dead_code)]
 fn write_json_line(stdin: &mut impl Write, value: &Value) -> Result<(), String> {
     serde_json::to_writer(&mut *stdin, value)
@@ -917,7 +905,7 @@ fn find_codex_executable() -> Result<PathBuf, String> {
     if let Some(path) = npm_codex_vendor_exe() {
         return Ok(path);
     }
-    for candidate in codex_executable_candidates() {
+    for candidate in crate::runtime_paths::codex_executable_candidates() {
         if let Ok(path) = which::which(candidate) {
             return Ok(path);
         }
@@ -942,9 +930,6 @@ fn npm_codex_vendor_exe() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-fn codex_executable_candidates() -> Vec<&'static str> {
-    vec!["codex.cmd", "codex", "codex.exe"]
-}
 
 fn snapshot_from_codex_account_usage(
     start_time: u64,
@@ -2125,7 +2110,7 @@ mod tests {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        configure_no_window(&mut command);
+        crate::runtime_paths::configure_no_window(&mut command);
         let mut child = command.spawn().expect("slow child process starts");
         let stdout = child.stdout.take().expect("slow child stdout is piped");
 
@@ -2147,7 +2132,7 @@ mod tests {
 
     #[test]
     fn codex_executable_candidates_put_shims_before_windows_app_alias() {
-        let candidates = codex_executable_candidates();
+        let candidates = crate::runtime_paths::codex_executable_candidates();
         let cmd_position = candidates
             .iter()
             .position(|candidate| *candidate == "codex.cmd");

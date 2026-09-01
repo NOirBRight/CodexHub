@@ -2837,18 +2837,6 @@ fn configure_detached(command: &mut Command) {
 fn configure_detached(_command: &mut Command) {}
 
 #[cfg(windows)]
-fn configure_no_window(command: &mut Command) {
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = command;
-    }
-}
-
 #[cfg(windows)]
 #[derive(Clone, Copy)]
 enum WindowsInspectionKind {
@@ -2900,7 +2888,7 @@ fn run_windows_inspection(
 ) -> Result<std::process::Output, String> {
     let mut command = Command::new("powershell");
     command.args(["-NoProfile", "-Command", script]);
-    configure_no_window(&mut command);
+    crate::runtime_paths::configure_no_window(&mut command);
     run_bounded_inspection_command(command, Instant::now() + timeout, kind)
 }
 
@@ -3383,7 +3371,7 @@ fn kill_process(pid: u32) -> Result<(), String> {
     let pid_text = pid.to_string();
     let mut command = Command::new("taskkill");
     command.args(["/PID", &pid_text, "/T", "/F"]);
-    configure_no_window(&mut command);
+    crate::runtime_paths::configure_no_window(&mut command);
     let output = command
         .output()
         .map_err(|error| format!("failed to run taskkill for PID {pid}: {error}"))?;
@@ -3641,7 +3629,7 @@ mod tests {
             "Write-Error 'private-inspection-sentinel'; Start-Sleep -Seconds 60",
         ]);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        super::configure_no_window(&mut command);
+        crate::runtime_paths::configure_no_window(&mut command);
         // Generous deadline: PowerShell cold start under parallel test load can
         // take several seconds and the helper must write its PID first. The
         // timeout path still triggers because the helper sleeps far longer.
@@ -3680,7 +3668,7 @@ mod tests {
             let python = crate::runtime_paths::find_test_python();
             let mut command = crate::runtime_paths::configured_python_command(&python);
             command.args(["-c", &script]);
-            super::configure_no_window(&mut command);
+            crate::runtime_paths::configure_no_window(&mut command);
             let result = run_bounded_inspection_command(
                 command,
                 Instant::now() + Duration::from_secs(20),
@@ -4692,7 +4680,7 @@ time.sleep(10)
             ),
         ]);
         configure_start_stdio(&mut command);
-        super::configure_no_window(&mut command);
+        crate::runtime_paths::configure_no_window(&mut command);
         let mut child = command.spawn().expect("spawn output parent");
         let capture = capture_child_stdio(&mut child);
         child.wait().expect("output parent exits");

@@ -1673,7 +1673,7 @@ fn is_supported_version_probe_path(path: &Path) -> bool {
 }
 
 fn command_output_no_window(mut command: Command) -> Option<std::process::Output> {
-    configure_no_window(&mut command);
+    crate::runtime_paths::configure_no_window(&mut command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1690,19 +1690,6 @@ fn command_output_no_window(mut command: Command) -> Option<std::process::Output
             return None;
         }
         thread::sleep(Duration::from_millis(25));
-    }
-}
-
-fn configure_no_window(command: &mut Command) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = command;
     }
 }
 
