@@ -13,6 +13,7 @@ import {
   shouldFollowOfficialCatalogOrder,
   sortOfficialModels,
   mergeOfficialModelSources,
+  reconcileOfficialModelSnapshot,
 } from "../officialModels";
 import type { Model, Provider, Settings, UpstreamFormatProbeResult } from "../types";
 
@@ -39,6 +40,9 @@ export type ProviderWorkspaceState = {
   officialDisabledModelsDraft: string[];
   officialModelOrderDraft: string[];
   officialModels: Model[];
+  // A refreshed/edited list belongs to this workspace. Generated catalogs can
+  // lag behind live discovery and must not replace it during settings readback.
+  officialModelSnapshot: Model[] | null;
   pendingNavigation: PendingProviderNavigation<Provider, AddProviderForm> | null;
   pendingNewProvider: Provider | null;
   probeResult: UpstreamFormatProbeResult | null;
@@ -120,7 +124,7 @@ export function providerWorkspaceReducer(
     case "setPendingNavigation":
       return { ...state, pendingNavigation: intent.pending };
     case "setOfficialModels":
-      return { ...state, officialModels: intent.models };
+      return { ...state, officialModels: intent.models, officialModelSnapshot: intent.models };
     case "setOfficialModelOrderDraft":
       return { ...state, officialModelOrderDraft: intent.order };
     case "setOfficialDisabledModelsDraft":
@@ -143,6 +147,7 @@ export function providerWorkspaceReducer(
       return {
         ...state,
         officialModels: intent.models,
+        officialModelSnapshot: intent.models,
         officialModelOrderDraft: nextOrder,
       };
     }
@@ -165,6 +170,9 @@ export function providerWorkspaceReducer(
       };
     }
     case "syncExternal": {
+      const snapshot = state.officialModelSnapshot == null ? null : reconcileOfficialModelSnapshot(
+        state.officialModelSnapshot, intent.catalogModels, intent.modelMetadata,
+      );
       const next = {
         ...state,
         providers: intent.providers,
@@ -172,9 +180,12 @@ export function providerWorkspaceReducer(
         settingsDraft: intent.settings,
         catalogModels: intent.catalogModels,
         modelMetadata: intent.modelMetadata,
+        officialModelSnapshot: snapshot,
         officialModels: sortOfficialModels(
-          mergeOfficialModelSources(intent.catalogModels, intent.modelMetadata),
-          intent.settings?.official_model_sort_order ?? [],
+          snapshot ?? mergeOfficialModelSources(intent.catalogModels, intent.modelMetadata),
+          state.officialModelSnapshot != null
+            ? state.officialModelOrderDraft
+            : intent.settings?.official_model_sort_order ?? [],
         ),
       };
       const selectedId = intent.selectedId ?? state.selectedId;

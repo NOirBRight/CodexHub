@@ -11,10 +11,11 @@ const typesPath = new URL("../src/lib/types.ts", import.meta.url);
 // (providerEndpoint/providerCatalog/format import i18n at runtime; none of the
 // functions under test touch i18n, so the combined module is evaluable.)
 async function loadCombinedModule() {
-  const [coreSource, feedbackSource, typesSource] = await Promise.all([
+  const [coreSource, feedbackSource, typesSource, officialModelsSource] = await Promise.all([
     readFile(corePath, "utf8"),
     readFile(feedbackPath, "utf8"),
     readFile(typesPath, "utf8"),
+    readFile(new URL("../src/lib/officialModels.ts", import.meta.url), "utf8"),
   ]);
 
   const stripImports = (src) =>
@@ -26,10 +27,10 @@ async function loadCombinedModule() {
   const combined = [
     stripImports(typesSource),
     stripImports(feedbackSource),
+    "function normalizeOfficialModelId(value) { return value.trim().replace(/^openai\\//, ''); }",
+    stripImports(officialModelsSource),
     // Stub the i18n-adjacent helpers core.ts imports (pure under test).
     "function instantiateCatalogProvider(preset, sortOrder) { return { ...preset, sort_order: sortOrder }; }",
-    "function sortOfficialModels(models, _order) { return models; }",
-    "function mergeOfficialModelSources(a, b) { return [...(a || []), ...(b || [])]; }",
     "function mergeDiscoveredModels(base, discovered) { const seen = new Set(base.map((m) => m.id)); return [...base, ...discovered.filter((m) => !seen.has(m.id))]; }",
     "function slugify(name) { return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''); }",
     "function normalizeModel(m) { return m; }",
@@ -38,9 +39,6 @@ async function loadCombinedModule() {
     "function normalizeEndpointFormats(fmts) { return fmts; }",
     "function applyProviderProbeResult(p, _r) { return p; }",
     "function probeSucceeded(r) { return Boolean(r && !r.model_required && !r.inconclusive_reason); }",
-    "function shouldFollowOfficialCatalogOrder() { return false; }",
-    "function refreshedOfficialModelOrder(order, _models) { return order; }",
-    "function filterCodexVisibleOfficialModels(models) { return models; }",
     "function bundledPresetFor(_id, _bundled) { return null; }",
     "const emptyProvider = { id: '', name: '', base_url: '', api_key: '', upstream_format: 'auto', available_upstream_formats: [], tool_protocol: 'auto', display_prefix: '', models: [] };",
     stripImports(coreSource),
@@ -145,6 +143,72 @@ test("syncExternal repairs external deletion of selected provider", async () => 
     settings: null, catalogModels: [], modelMetadata: [],
   });
   assert.equal(next.selectedId, "p2");
+});
+
+test("save readback preserves live models, selection and custom order over an older catalog", async () => {
+  const { providerWorkspaceReducer: reduce } = await loadCombinedModule();
+  const model = (id) => ({ id, enabled: true, visibility: "list" });
+  const oldCatalog = [model("gpt-5.6-sol"), model("gpt-5.4")];
+  const source = {
+    providers: [], catalogModels: oldCatalog, modelMetadata: oldCatalog,
+    settings: { official_model_sort_order: [], official_disabled_models: [] },
+  };
+  let state = {
+    ...source, selectedId: "__official__", officialModels: oldCatalog,
+    officialModelSnapshot: null, officialModelOrderDraft: [], officialDisabledModelsDraft: [],
+  };
+  state = reduce(state, { type: "setOfficialModels", models: [model("gpt-6-astra"), model("gpt-5.6-sol")] });
+  state = reduce(state, { type: "toggleOfficialModel", modelId: "gpt-5.6-sol", enabled: false });
+  state = reduce(state, { type: "reorderOfficialModels", models: [model("gpt-5.6-sol"), model("gpt-6-astra")] });
+  // A background read before Save must also preserve the unsaved order.
+  state = reduce(state, { type: "syncExternal", ...source });
+  assert.deepEqual(state.officialModels.map((m) => m.id), ["gpt-5.6-sol", "gpt-6-astra"]);
+  const saved = { official_model_sort_order: state.officialModelOrderDraft, official_disabled_models: state.officialDisabledModelsDraft };
+  state = reduce(state, { type: "setSettings", settings: saved });
+  state = reduce(state, { type: "syncExternal", ...source, settings: saved });
+  assert.deepEqual(state.officialModels.map((m) => m.id), saved.official_model_sort_order);
+  assert.deepEqual(state.officialDisabledModelsDraft, ["gpt-5.6-sol"]);
+  // An explicit refresh still replaces the membership, including removals.
+  state = reduce(state, { type: "setOfficialModels", models: [model("gpt-6-astra")] });
+  state = reduce(state, { type: "syncExternal", ...source, settings: saved });
+  assert.deepEqual(state.officialModels.map((m) => m.id), ["gpt-6-astra"]);
+});
+
+test("workspace without a live snapshot still receives catalog updates", async () => {
+  const { providerWorkspaceReducer: reduce } = await loadCombinedModule();
+  const next = reduce({ selectedId: "__official__", officialModelSnapshot: null }, {
+    type: "syncExternal", providers: [], settings: null, modelMetadata: [],
+    catalogModels: [{ id: "gpt-6-astra", visibility: "list", enabled: true }],
+  });
+  assert.deepEqual(next.officialModels.map((m) => m.id), ["gpt-6-astra"]);
+});
+
+test("snapshot receives published metadata without reverting membership, selection or order", async () => {
+  const { providerWorkspaceReducer: reduce } = await loadCombinedModule();
+  const sol = { id: "gpt-5.6-sol", visibility: "list", enabled: false, sort_order: 2, context_window: 400000, max_context_window: 400000 };
+  const astra = { id: "gpt-6-astra", visibility: "list", enabled: true, sort_order: 1 };
+  let state = {
+    selectedId: "__official__", officialModelOrderDraft: [astra.id, sol.id],
+    officialDisabledModelsDraft: [sol.id], officialModelSnapshot: [astra, sol],
+  };
+  const source = {
+    type: "syncExternal", providers: [], settings: {},
+    catalogModels: [
+      { ...sol, id: "openai/gpt-5.6-sol", enabled: true, sort_order: 1, context_window: 272000, max_context_window: 300000, multi_agent_version: "v2" },
+      { id: "gpt-5.4", visibility: "list", enabled: true },
+    ],
+    modelMetadata: [{ ...sol, context_window: 999000, max_context_window: 999000 }],
+  };
+  state = reduce(state, source);
+  assert.deepEqual(state.officialModels.map((m) => m.id), [astra.id, sol.id]);
+  assert.equal(state.officialModels[1].context_window, 272000);
+  assert.equal(state.officialModels[1].max_context_window, 300000);
+  assert.equal(state.officialModels[1].multi_agent_version, "v2");
+  assert.equal(state.officialModels[1].enabled, false);
+  assert.equal(state.officialModels[1].sort_order, 2);
+  assert.deepEqual(state.officialDisabledModelsDraft, [sol.id]);
+  state = reduce(state, { ...source, catalogModels: [], modelMetadata: [] });
+  assert.equal(state.officialModels[1].context_window, 272000);
 });
 
 test("catalogOverrideToastMessage null when all zero", async () => {

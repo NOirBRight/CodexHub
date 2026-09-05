@@ -1,0 +1,196 @@
+[
+  {
+    "type": "namespace",
+    "name": "multi_agent_v1",
+    "description": "sanitized",
+    "tools": [
+      {
+        "type": "function",
+        "name": "close_agent",
+        "description": "sanitized",
+        "strict": false,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string",
+              "description": "sanitized"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "type": "function",
+        "name": "resume_agent",
+        "description": "sanitized",
+        "strict": false,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "sanitized"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "type": "function",
+        "name": "send_input",
+        "description": "sanitized",
+        "strict": false,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "interrupt": {
+              "type": "boolean",
+              "description": "sanitized"
+            },
+            "items": {
+              "type": "array",
+              "description": "sanitized",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "audio_url": {
+                    "type": "string",
+                    "description": "sanitized"
+                  },
+                  "image_url": {
+                    "type": "string",
+                    "description": "sanitized"
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "sanitized"
+                  },
+                  "path": {
+                    "type": "string",
+                    "description": "sanitized"
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "sanitized"
+                  },
+                  "type": {
+                    "type": "string",
+                    "description": "sanitized"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "message": {
+              "type": "string",
+              "description": "sanitized"
+            },
+            "target": {
+              "type": "string",
+              "description": "sanitized"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "type": "function",
+        "name": "spawn_agent",
+        "description": "sanitized",
+        "strict": false,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "fork_context": {
+              "type": "boolean",
+              "description": "sanitized"
+            },
+            "items": {
+              "type": "array",
+              "description": "sanitized",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "audio_url": {
+                    "type": "string",
+                    "description": "sanitized"
+                  },
+                  "image_url": {
+                    "type": "string",
+                    "description": "sanitized"
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "sanitized"
+                  },
+                  "path": {
+                    "type": "string",
+                    "description": "sanitized"
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "sanitized"
+                  },
+                  "type": {
+                    "type": "string",
+                    "description": "sanitized"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "message": {
+              "type": "string",
+              "description": "sanitized"
+            },
+            "model": {
+              "type": "string",
+              "description": "sanitized"
+            },
+            "reasoning_effort": {
+              "type": "string",
+              "description": "sanitized"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "type": "function",
+        "name": "wait_agent",
+        "description": "sanitized",
+        "strict": false,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "targets": {
+              "type": "array",
+              "description": "sanitized",
+              "items": {
+                "type": "string"
+              }
+            },
+            "timeout_ms": {
+              "type": "number",
+              "description": "sanitized"
+            }
+          },
+          "required": [
+            "targets"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+]

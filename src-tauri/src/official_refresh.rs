@@ -259,9 +259,9 @@ fn read_only_refresh_result(
             Ok(models) if !models.is_empty() => Ok(OfficialRefreshResult {
                 models,
                 restart_required: false,
-                warning: Some(
-                    "Live Official model list unavailable; showing cached models.".to_string(),
-                ),
+                warning: Some(format!(
+                    "Live Official model list unavailable; showing cached models. {live_error}"
+                )),
                 codex_restart_result: None,
             }),
             Ok(_) => Err(live_error),
@@ -1282,6 +1282,7 @@ mod tests {
             .warning
             .as_deref()
             .is_some_and(|warning| warning.contains("cached")));
+        assert!(result.warning.as_deref().unwrap().contains("Codex app-server unavailable"));
         assert!(result.codex_restart_result.is_none());
     }
 

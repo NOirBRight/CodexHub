@@ -1,3 +1,4 @@
+import { readCodexRestartNotice } from "../lib/providerWorkspace/restart";
 import {
   Copy,
   ExternalLink,
@@ -103,7 +104,6 @@ function ProvidersPageImpl({
   const tr = t as Translate;
   const toast = useToasts();
   const { showToast, updateToast } = toast;
-  const authorizeCodexRestartRef = useRef<() => Promise<boolean | null>>(async () => null);
   const initialOfficialUsageSnapshot = useMemo(() => readStoredOfficialOpenAIUsageSnapshot(), []);
   const normalizedSettingsSnapshot = useMemo(
     () => settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null,
@@ -122,7 +122,6 @@ function ProvidersPageImpl({
     refreshGatewayState: async () => {
       await onGatewayChanged?.();
     },
-    authorizeCodexRestart: () => authorizeCodexRestartRef.current(),
     toast,
     t,
     tr,
@@ -139,7 +138,6 @@ function ProvidersPageImpl({
     settingsDraft,
   } = workspace.state;
   const {
-    stageProviders,
     stageSettings,
     updateForm,
     setProbeResult,
@@ -600,7 +598,6 @@ function ProvidersPageImpl({
       toastId,
     });
     if (result.kind === "ok") {
-      stageSettings(next);
       setError(null);
     }
   }
@@ -617,16 +614,8 @@ function ProvidersPageImpl({
   }
 
   async function updateProvider(next: Provider, successMessage?: string) {
-    if (pendingNewProvider && next.id === pendingNewProvider.id) {
-      await saveProviders([...providers, next], true, successMessage);
-      stagePendingProvider(null);
-      return;
-    }
-    await saveProviders(
-      providers.map((provider) => (provider.id === next.id ? next : provider)),
-      true,
-      successMessage,
-    );
+    const result = await workspace.saveProvider(next, { successMessage });
+    if (result.kind === "error") throw new Error(result.message);
   }
 
   function toggleProviderEnabled(providerId: string, enabled: boolean) {
@@ -644,7 +633,6 @@ function ProvidersPageImpl({
     const nextProviders = providers.map((provider) =>
       provider.id === providerId ? { ...provider, enabled } : provider,
     );
-    stageProviders(nextProviders);
     void saveProviders(
       nextProviders,
       true,
@@ -675,7 +663,6 @@ function ProvidersPageImpl({
       }
     }
 
-    stageProviders(nextProviders);
     await saveProviders(nextProviders, true, t("providers.providerOrderSaved"));
   }
 
@@ -724,7 +711,6 @@ function ProvidersPageImpl({
     });
     return confirmed ? true : null;
   }
-  authorizeCodexRestartRef.current = authorizeCodexRestart;
 
   async function applyCodexHubConnection(nextMode: ConnectionMode, forceTakeover: boolean) {
     let restartCodex: boolean | null;
@@ -915,24 +901,8 @@ function ProvidersPageImpl({
     }))) {
       return;
     }
-    const previousProviders = providers;
-    const previousSelectedId = selectedId;
-    const next = providers.filter((provider) => provider.id !== providerId);
-    setSelectedProviderId(next[0]?.id ?? OFFICIAL_ID);
-    stageProviders(next);
-    try {
-      const saved = await saveProviders(next, true, t("providers.providerDeleted", { name: target.name }));
-      if (saved.some((provider) => provider.id === providerId)) {
-        stageProviders(saved);
-        setSelectedProviderId(providerId);
-        setError(t("providers.providerDeleteDidNotPersist", { name: target.name }));
-        return;
-      }
-    } catch {
-      stageProviders(previousProviders);
-      setSelectedProviderId(previousSelectedId);
-      return;
-    }
+    const result = await workspace.deleteProvider(providerId);
+    if (result.kind !== "ok") return;
     setProbeResult(null);
     setDiscoveryError(null);
     setError(null);
@@ -949,7 +919,8 @@ function ProvidersPageImpl({
 
   return (
     <>
-    <main className="relative grid h-full min-h-0 min-w-0 grid-cols-[minmax(240px,32%)_minmax(0,1fr)] gap-3 overflow-hidden">
+    <fieldset disabled={busy === "save"} {...(busy === "save" ? { inert: "" } : {})} className="contents">
+    <main aria-busy={busy === "save"} className="relative grid h-full min-h-0 min-w-0 grid-cols-[minmax(240px,32%)_minmax(0,1fr)] gap-3 overflow-hidden">
       <aside className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
         <ProviderSourceSidebar
           codexAuthState={codexAuthState}
@@ -1005,7 +976,6 @@ function ProvidersPageImpl({
                 officialIncluded={settings?.include_official_models ?? false}
                 authIssue={gatewayStatus?.codex_auth?.issue ?? null}
                 onCopyLoginCommand={() => void copyCodexLoginCommand()}
-                onAuthorizeCodexRestart={authorizeCodexRestart}
                 onContextGuardChanged={reflectContextGuardSetting}
                 onOpenCodexApp={() => void openCodexAppForLogin()}
                 onRefresh={(options) => refreshOfficialModelsAndCollaborationState(options)}
@@ -1016,7 +986,7 @@ function ProvidersPageImpl({
                 onSave={() => void saveOfficialModels()}
                 onToggleModel={toggleOfficialModel}
                 dirty={officialModelDraftDirty}
-                saveBusy={busy === "settings"}
+                saveBusy={busy === "save"}
                 syncBoundClients={settings?.auto_sync_clients ?? true}
                 usageBusy={officialUsageBusy}
                 usageError={officialUsageError}
@@ -1051,6 +1021,7 @@ function ProvidersPageImpl({
         </div>
       </section>
     </main>
+    </fieldset>
     {confirmDialog}
     {pendingProviderNavigation && (
       <UnsavedProviderChangesDialog
@@ -1609,7 +1580,6 @@ function OfficialDetail({
   officialDisabledModels,
   officialIncluded,
   onCopyLoginCommand,
-  onAuthorizeCodexRestart,
   onContextGuardChanged,
   onOpenCodexApp,
   onRefresh,
@@ -1638,7 +1608,6 @@ function OfficialDetail({
   officialDisabledModels: string[];
   officialIncluded: boolean;
   onCopyLoginCommand: () => void;
-  onAuthorizeCodexRestart: () => Promise<boolean | null>;
   onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
   onRefresh: (options?: { quiet?: boolean; throwOnError?: boolean }) => Promise<boolean>;
@@ -1688,23 +1657,13 @@ function OfficialDetail({
     if (contextGuardBusy) {
       return;
     }
-    let restartCodex: boolean | null;
-    try {
-      restartCodex = await onAuthorizeCodexRestart();
-    } catch (err) {
-      showToast(t("providers.contextGuardUpdateFailed", { message: messageFromError(err) }), "error");
-      return;
-    }
-    if (restartCodex === null) {
-      return;
-    }
     setContextGuardBusy(true);
     const toastId = showToast(
       enabled ? t("providers.enablingContextGuard") : t("providers.disablingContextGuard"),
       "loading",
     );
     try {
-      const status = await api.setCodexContextGuard(enabled, restartCodex);
+      const status = await api.setCodexContextGuard(enabled, false);
       setContextGuardStatus(status);
       onContextGuardChanged(status.gateway_enabled);
       let syncResult: GatewayClientSyncSummary | null = null;
@@ -1722,13 +1681,9 @@ function OfficialDetail({
         }
         await onRefreshClients?.().catch(() => undefined);
       }
-      const restartMessage = status.codex_restart_result === "restarted"
-        ? t("providers.contextGuardCodexRestarted")
-        : status.codex_restart_result === "switched_relaunch_failed"
-          ? t("providers.contextGuardCodexRelaunchFailed")
-          : enabled
-            ? t("providers.contextGuardEnabledRestartCodex")
-            : t("providers.contextGuardDisabledRestartCodex");
+      const restartNotice = await readCodexRestartNotice(api);
+      const restartMessage = restartNotice === "required" ? t("providers.catalogOverrideRestartCodex")
+        : restartNotice === "unknown" ? t("providers.codexRestartStatusUnknown") : t("common.saved");
       const appliedClientCount = syncResult?.applied ?? 0;
       const failedClientCount = syncResult?.failed ?? 0;
       let clientSyncFeedback: { text: string; tone: "error" | "success" };
@@ -1804,22 +1759,12 @@ function OfficialDetail({
   }
 
   async function changeOfficialCollaborationVersion(modelId: string, version: "v1" | "v2" | null) {
-    let restartCodex: boolean | null;
-    try {
-      restartCodex = await onAuthorizeCodexRestart();
-    } catch (err) {
-      showToast(t("providers.collaborationVersionSaveFailed", { message: messageFromError(err) }), "error");
-      return;
-    }
-    if (restartCodex === null) {
-      return;
-    }
     const toastId = showToast(
       t("providers.savingCollaborationVersion", { version: version ?? t("providers.catalogBaseline") }),
       "loading",
     );
     try {
-      const result = await api.saveOfficialMultiAgentVersion(modelId, version, restartCodex);
+      const result = await api.saveOfficialMultiAgentVersion(modelId, version, false);
       const canonical = normalizeOfficialModelId(modelId) ?? modelId;
       const next = { ...officialCollaborationOverrides };
       if (version === null) {
@@ -1828,11 +1773,10 @@ function OfficialDetail({
         next[canonical] = version;
       }
       onOfficialCollaborationOverridesChanged(next);
-      const savedMessage = result.codex_restart_result === "restarted"
-        ? t("providers.collaborationVersionSavedCodexRestarted")
-        : result.codex_restart_result === "switched_relaunch_failed"
-          ? t("providers.collaborationVersionSavedCodexRelaunchFailed")
-          : t("providers.collaborationVersionSaved");
+      const restartNotice = await readCodexRestartNotice(api);
+      const savedMessage = t("providers.collaborationVersionSaved") +
+        (restartNotice === "required" ? " " + t("providers.catalogOverrideRestartCodex")
+          : restartNotice === "unknown" ? " " + t("providers.codexRestartStatusUnknown") : "");
       updateToast(toastId, {
         action: null,
         text: result.warning?.trim()

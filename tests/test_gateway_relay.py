@@ -240,3 +240,89 @@ def test_sse_line_iterator_uses_injected_lifecycle():
     assert lifecycle.started
     assert lifecycle.closed_calls == 1
     assert lifecycle.joined
+
+
+def test_relay_assembled_output_commits_headers_and_terminal_once():
+    from gateway_relay import RelaySseOutput, iter_upstream_sse_events
+    from gateway_exchange_bindings import bind_downstream_stream_commit
+
+    writer = Writer()
+    commit = bind_downstream_stream_commit(writer, None, "official")
+    output = RelaySseOutput(writer, commit)
+
+    def read_lines(response, *, line_resets_idle_timeout, on_line):
+        for chunk in response:
+            line_resets_idle_timeout(chunk)
+            if on_line:
+                on_line(chunk)
+            yield chunk
+
+    frames = iter_upstream_sse_events(
+        [b'event: response.completed\ndata: {"type":"response.completed"}\n', b'\n'],
+        read_lines=read_lines, event_resets_idle_timeout=lambda event: True,
+    )
+    assert output.headers(200, "official")
+    assert output.headers(200, "official")
+    for frame in frames:
+        assert output.write(frame.raw)
+    assert commit.terminal_committed
+    before = writer.wfile.getvalue()
+    output.data({"late": True})
+    output.done()
+    assert writer.wfile.getvalue() == before
+    assert writer.responses == [200]
+
+
+def test_relay_incomplete_frame_fails_after_delivering_complete_event():
+    import pytest
+    from gateway_relay import iter_upstream_sse_events
+    from protocol_translation import UpstreamStreamIncompleteError
+
+    def read_lines(response, *, line_resets_idle_timeout, on_line):
+        for chunk in response:
+            line_resets_idle_timeout(chunk)
+            yield chunk
+
+    events = iter_upstream_sse_events(
+        [b'data: {"ok":true}\n\ndata: unfinished'],
+        read_lines=read_lines, event_resets_idle_timeout=lambda event: True,
+    )
+    assert next(events).data == b'{"ok":true}'
+    with pytest.raises(UpstreamStreamIncompleteError):
+        next(events)
+
+
+def test_relay_complete_event_precedes_frame_size_failure():
+    import pytest
+    from gateway_relay import iter_upstream_sse_events
+    from sse_events import DEFAULT_MAX_FRAME_BYTES, SseFrameTooLargeError
+
+    def read_lines(response, *, line_resets_idle_timeout, on_line):
+        for chunk in response:
+            line_resets_idle_timeout(chunk)
+            yield chunk
+
+    events = iter_upstream_sse_events(
+        [b'data: ok\n\n' + b'x' * (DEFAULT_MAX_FRAME_BYTES + 1)],
+        read_lines=read_lines, event_resets_idle_timeout=lambda event: True,
+    )
+    assert next(events).data == b'ok'
+    with pytest.raises(SseFrameTooLargeError):
+        next(events)
+
+
+def test_cancelled_relay_output_closes_upstream_and_rejects_more_bytes():
+    from gateway_relay import RelaySseOutput
+    from gateway_exchange_bindings import bind_downstream_stream_commit
+
+    closed = []
+    upstream = SimpleNamespace(close=lambda: closed.append(True))
+    writer = Writer()
+    commit = bind_downstream_stream_commit(writer, upstream, "official")
+    output = RelaySseOutput(writer, commit)
+    assert output.headers(200, "official")
+    commit.cancel()
+    assert not output.write(b'data: late\n\n')
+    assert writer.close_connection
+    assert closed == [True]
+    assert writer.wfile.getvalue() == b''

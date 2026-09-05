@@ -357,6 +357,18 @@ class DownstreamStreamCommit:
         return self._terminal_committed
 
     @property
+    def output_started(self) -> bool:
+        return self._downstream_output_started
+
+    @property
+    def content_exposed(self) -> bool:
+        return self._downstream_content_exposed or self._downstream_output_started
+
+    @property
+    def terminal_seen(self) -> bool:
+        return self._sse_stats.terminal_event_seen
+
+    @property
     def downstream_closed(self) -> bool:
         return self._downstream_closed
 

@@ -26,6 +26,9 @@ import route_primitives
 import runtime_tool_compatibility
 import sse_events
 
+from sse_events import SseEvent, SseEventAssembler, SseAssemblerClosedError, SseFrameTooLargeError
+from protocol_translation import UpstreamStreamIncompleteError
+
 from route_primitives import MutationPolicy, StreamingPolicy, UsagePolicy
 
 
@@ -171,6 +174,33 @@ def write_sse_done(
         commit_sse_bytes=commit_sse_bytes,
     )
 
+
+@dataclass(frozen=True)
+class RelaySseOutput:
+    """Relay output with one request-scoped commitment ledger."""
+
+    writer: RelayWriter
+    commit: gateway_sse.DownstreamStreamCommit
+
+    def headers(self, status: int, upstream_name: str) -> bool:
+        return send_sse_headers(self.writer, status, upstream_name, commit_headers=self.commit.commit_headers)
+
+    def write(self, data: bytes, *, observe: bool = True) -> bool:
+        return self.commit.commit_sse_bytes(data, observe=observe)
+
+    def event(self, event: str, payload: Mapping[str, Any]) -> bool:
+        return write_sse_event(self.writer, event, payload,
+            encode_json_line=gateway_stream_semantics.sse_json_line, commit_sse_bytes=self.write)
+
+    def data(self, payload: Mapping[str, Any]) -> bool:
+        return write_sse_data(self.writer, payload,
+            encode_json_line=gateway_stream_semantics.sse_json_line, commit_sse_bytes=self.write)
+
+    def done(self) -> bool:
+        return write_sse_done(self.writer, commit_sse_bytes=self.write,
+            terminal_committed=self.commit.terminal_committed)
+
+
 class SseLineLifecycle(Protocol):
     closed: bool
 
@@ -308,6 +338,57 @@ class RelayGlue:
     logger: Any
 
 
+def iter_upstream_sse_events(
+    response: Any,
+    *,
+    read_lines: Callable[..., Any],
+    event_resets_idle_timeout: Callable[[SseEvent], bool],
+    on_chunk: Callable[[bytes], None] | None = None,
+) -> Any:
+    assembler = SseEventAssembler()
+    pending_events: list[SseEvent] = []
+    assembler_finished = False
+    deferred_size_error: SseFrameTooLargeError | None = None
+
+    def assemble_chunk(chunk: bytes) -> bool:
+        nonlocal deferred_size_error
+        events: list[SseEvent] = []
+        try:
+            assembler.feed(chunk, on_event=events.append)
+        except SseFrameTooLargeError as exc:
+            deferred_size_error = exc
+        pending_events.extend(events)
+        return any(event_resets_idle_timeout(event) for event in events)
+
+    try:
+        for chunk in read_lines(
+            response,
+            line_resets_idle_timeout=assemble_chunk,
+            on_line=on_chunk,
+        ):
+            if not chunk:
+                break
+            ready_events = tuple(pending_events)
+            pending_events.clear()
+            yield from ready_events
+            if deferred_size_error is not None:
+                raise deferred_size_error
+
+        termination = assembler.finish()
+        assembler_finished = True
+        yield from termination.events
+        if termination.disposition == "incomplete":
+            raise UpstreamStreamIncompleteError(
+                "Upstream SSE stream ended with an incomplete pending frame"
+            )
+    finally:
+        if not assembler_finished:
+            try:
+                assembler.cancel()
+            except SseAssemblerClosedError:
+                pass
+
+
 class RelayHandler(Protocol):
     close_connection: bool
     _active_prepared_exchange: Any
@@ -315,12 +396,7 @@ class RelayHandler(Protocol):
 
     def _relay_transparent_upstream_response(self, *args: Any, **kwargs: Any) -> int: ...
     def _relay_official_passthrough_sse_response(self, *args: Any, **kwargs: Any) -> int: ...
-    def _iter_upstream_sse_events(self, *args: Any, **kwargs: Any) -> Any: ...
-    def _send_sse_headers(self, *args: Any, **kwargs: Any) -> bool: ...
-    def _write_sse_bytes(self, *args: Any, **kwargs: Any) -> bool: ...
-    def _write_sse_data(self, *args: Any, **kwargs: Any) -> bool: ...
-    def _write_sse_done(self, *args: Any, **kwargs: Any) -> bool: ...
-    def _write_sse_event(self, *args: Any, **kwargs: Any) -> bool: ...
+    def _iter_upstream_sse_lines(self, *args: Any, **kwargs: Any) -> Any: ...
     def _write_downstream_sse_error(self, *args: Any, **kwargs: Any) -> bool: ...
     def _write_non_streaming_body_relay(self, body: bytes) -> bool: ...
     def _send_json(self, status: int, payload: dict[str, Any]) -> None: ...
@@ -538,6 +614,7 @@ def relay_upstream_response(
             ),
         )
         self._downstream_stream_commit = seam
+    output = RelaySseOutput(self, seam)
     compatibility_event_context = dict(event_context or {})
     compatibility_event_context["_apply_patch_adapter_enabled"] = not want_chat_output
     # When the caller asked for a non-streaming response but the upstream
@@ -648,12 +725,12 @@ def relay_upstream_response(
             failure_class="downstream_client_closed",
             client_disconnected=True,
             terminal=seam.terminal_committed,
-            terminal_seen=seam._sse_stats.terminal_event_seen,
-            downstream_output_started=seam._downstream_output_started,
+            terminal_seen=seam.terminal_seen,
+            downstream_output_started=seam.output_started,
             retry_forbidden=True,
             retry_safety_class=(
                 RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
-                if seam._downstream_content_exposed or seam._downstream_output_started
+                if seam.content_exposed
                 else RETRY_SAFETY_SUPPRESSED_POST_WRITE
             ),
             **event_fields,
@@ -708,7 +785,7 @@ def relay_upstream_response(
                 response_id=response_id,
                 redact_identity=relay_redact_identity,
             )
-            wrote_error = self._write_sse_bytes(
+            wrote_error = output.write(
                 _sse_json_line(failed_event, b"\n") + b"\n"
             )
         else:
@@ -765,8 +842,9 @@ def relay_upstream_response(
             incomplete_frame = False
 
             try:
-                for frame in self._iter_upstream_sse_events(
+                for frame in iter_upstream_sse_events(
                     response,
+                    read_lines=self._iter_upstream_sse_lines,
                     event_resets_idle_timeout=(
                         _chat_sse_event_resets_idle_timeout
                         if upstream_format == "chat_completions"
@@ -1052,7 +1130,7 @@ def relay_upstream_response(
                 response_events = []
             if response_events:
                 if not headers_sent:
-                    if not self._send_sse_headers(status, upstream_name):
+                    if not output.headers(status, upstream_name):
                         return finish_downstream_stream_closed(
                             seam.last_write_error() or OSError("downstream closed")
                         )
@@ -1075,7 +1153,7 @@ def relay_upstream_response(
                         event, _ = _guard_duplicate_multi_agent_spawn_calls(event, compatibility_event_context)
                     event_type = event.get("type")
                     if isinstance(event_type, str) and event_type:
-                        if not self._write_sse_event(event_type, event):
+                        if not output.event(event_type, event):
                             return finish_downstream_stream_closed(
                                 seam.last_write_error() or OSError("downstream closed")
                             )
@@ -1159,8 +1237,9 @@ def relay_upstream_response(
             converter = _ResponsesToChatStreamConverter()
             incomplete_frame = False
             try:
-                for frame in self._iter_upstream_sse_events(
+                for frame in iter_upstream_sse_events(
                     response,
+                    read_lines=self._iter_upstream_sse_lines,
                     event_resets_idle_timeout=_responses_sse_event_resets_idle_timeout,
                     on_chunk=observe_diagnostic_sse_line,
                 ):
@@ -1208,7 +1287,7 @@ def relay_upstream_response(
                         _capture_usage(usage_capture, None, missing_reason="stream_error_event")
                         return 502
                     for chunk in converter.chunks_for_event(event):
-                        if not self._write_sse_data(chunk):
+                        if not output.data(chunk):
                             return finish_downstream_stream_closed(
                                 seam.last_write_error() or OSError("downstream closed")
                             )
@@ -1311,7 +1390,7 @@ def relay_upstream_response(
                     )
                 _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
-            if not self._write_sse_done():
+            if not output.done():
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
@@ -1341,11 +1420,12 @@ def relay_upstream_response(
                     raise _RuntimeToolInverseStreamError(exc) from exc
                 if not compatible_line:
                     return True
-                return self._write_sse_bytes(compatible_line)
+                return output.write(compatible_line)
 
             try:
-                for frame in self._iter_upstream_sse_events(
+                for frame in iter_upstream_sse_events(
                     response,
+                    read_lines=self._iter_upstream_sse_lines,
                     event_resets_idle_timeout=_chat_sse_event_resets_idle_timeout,
                     on_chunk=observe_diagnostic_sse_line,
                 ):
@@ -1529,8 +1609,9 @@ def relay_upstream_response(
             events: list[Mapping[str, Any]] = []
             incomplete_frame = False
             try:
-                for frame in self._iter_upstream_sse_events(
+                for frame in iter_upstream_sse_events(
                     response,
+                    read_lines=self._iter_upstream_sse_lines,
                     event_resets_idle_timeout=_responses_sse_event_resets_idle_timeout,
                     on_chunk=observe_diagnostic_sse_line,
                 ):
@@ -1680,11 +1761,11 @@ def relay_upstream_response(
                     seam.last_write_error() or OSError("downstream closed")
                 )
             for chunk in converted_chat_chunks:
-                if not self._write_sse_data(chunk):
+                if not output.data(chunk):
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-            if not self._write_sse_done():
+            if not output.done():
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
@@ -1703,8 +1784,9 @@ def relay_upstream_response(
             chunks: list[Mapping[str, Any] | str] = []
             incomplete_frame = False
             try:
-                for frame in self._iter_upstream_sse_events(
+                for frame in iter_upstream_sse_events(
                     response,
+                    read_lines=self._iter_upstream_sse_lines,
                     event_resets_idle_timeout=_chat_sse_event_resets_idle_timeout,
                     on_chunk=observe_diagnostic_sse_line,
                 ):
@@ -1866,7 +1948,7 @@ def relay_upstream_response(
                 for chunk in _chat_completion_body_to_stream_chunks(
                     _response_body_to_chat_completion_body(response_body)
                 ):
-                    if not self._write_sse_data(chunk):
+                    if not output.data(chunk):
                         return finish_downstream_stream_closed(
                             seam.last_write_error() or OSError("downstream closed")
                         )
@@ -1969,13 +2051,13 @@ def relay_upstream_response(
                         seam.last_write_error() or OSError("downstream closed")
                     )
                 for event in events:
-                    if not self._write_sse_bytes(
+                    if not output.write(
                         _sse_json_line(event, line_ending) + line_ending
                     ):
                         return finish_downstream_stream_closed(
                             seam.last_write_error() or OSError("downstream closed")
                         )
-            if not self._write_sse_done():
+            if not output.done():
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
@@ -2196,14 +2278,14 @@ def relay_upstream_response(
                     seam.last_write_error() or OSError("downstream closed")
                 )
             for buffered_line, terminal in buffered_lines:
-                if not self._write_sse_bytes(buffered_line):
+                if not output.write(buffered_line):
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
                 if terminal:
                     separator = _sse_event_separator_after_line(buffered_line)
                     if separator:
-                        if not self._write_sse_bytes(separator):
+                        if not output.write(separator):
                             return finish_downstream_stream_closed(
                                 seam.last_write_error() or OSError("downstream closed")
                             )
@@ -2251,17 +2333,17 @@ def relay_upstream_response(
                 return
             if pending_downstream_lines:
                 for pending_line in pending_downstream_lines:
-                    if not self._write_sse_bytes(pending_line):
+                    if not output.write(pending_line):
                         raise DownstreamWriteFailedError()
                 pending_downstream_lines.clear()
-            if not self._write_sse_bytes(out_line):
+            if not output.write(out_line):
                 raise DownstreamWriteFailedError()
 
         def flush_pending_downstream_lines() -> None:
             if not pending_downstream_lines:
                 return
             for pending_line in pending_downstream_lines:
-                if not self._write_sse_bytes(pending_line):
+                if not output.write(pending_line):
                     raise DownstreamWriteFailedError()
             pending_downstream_lines.clear()
 
@@ -2288,7 +2370,7 @@ def relay_upstream_response(
                 "output": [],
                 "error": sanitized_error,
             }
-            if not self._write_sse_event(
+            if not output.event(
                 "response.failed",
                 {"type": "response.failed", "response": response_payload},
             ):
@@ -2324,7 +2406,7 @@ def relay_upstream_response(
             pending_line_count = len(pending_downstream_lines)
             pending_byte_count = sum(len(pending_line) for pending_line in pending_downstream_lines)
             flush_pending_downstream_lines()
-            if not self._write_sse_event("response.completed", event):
+            if not output.event("response.completed", event):
                 raise DownstreamWriteFailedError()
             write_proxy_event(
                 "upstream_stream_incomplete_synthesized_terminal",

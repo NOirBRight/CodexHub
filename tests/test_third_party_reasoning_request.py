@@ -6,6 +6,9 @@ import os
 import urllib.error
 import urllib.request
 
+import pytest
+from live_gateway_support import configured_live_gateway
+
 import gateway_compat
 import gateway_request
 from collaboration_runtime_contract import COLLABORATION_V2, EXPECTED_PARAMETER_SCHEMAS
@@ -248,13 +251,14 @@ def test_xai_v2_codex_app_history_is_safe_for_strict_responses_deserializers():
 
 def test_live_gateway_accepts_sanitized_xai_codex_app_history():
     if os.environ.get("CODEXHUB_SKIP_LIVE_XAI_E2E") == "1":
-        return
+        pytest.skip("live xAI E2E explicitly disabled")
+    gateway = configured_live_gateway()
     body = json.dumps(_codex_app_xai_history_request()).encode()
     req = urllib.request.Request(
-        "http://127.0.0.1:9099/v1/responses",
+        f"{gateway.base_url}/v1/responses",
         data=body,
         headers={
-            "Authorization": "Bearer codexhub-proxy",
+            "Authorization": f"Bearer {gateway.client_key}",
             "Content-Type": "application/json",
             "User-Agent": "codex-app",
         },
