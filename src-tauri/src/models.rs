@@ -856,10 +856,9 @@ fn visibility_diagnostics_from_payload(payload: &Value) -> Value {
 }
 
 fn read_codex_app_server_model_list() -> Result<AppServerModelListSnapshot, String> {
-    let codex = find_codex_executable()?;
     let target_home = runtime_paths::codex_target_home_dir()?;
     let staging = StagedCodexHome::new(&target_home)?;
-    let mut command = Command::new(&codex);
+    let mut command = crate::codex_cli::command()?;
     command.args(["app-server", "--stdio"]);
     command.env("CODEX_HOME", staging.path());
     let cache_path = staging.path().join("models_cache.json");
@@ -3301,73 +3300,10 @@ fn find_python() -> Result<PathBuf, String> {
     runtime_paths::find_python(resource_root.as_deref())
 }
 
-fn find_codex_executable() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("CODEXHUB_CODEX_PATH")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        return Ok(path);
-    }
-    if let Some(path) = desktop_codex_exe() {
-        return Ok(path);
-    }
-    if let Some(path) = npm_codex_vendor_exe() {
-        return Ok(path);
-    }
-    for candidate in crate::runtime_paths::codex_executable_candidates() {
-        if let Ok(path) = which::which(candidate) {
-            return Ok(path);
-        }
-    }
-    Err(
-        "Codex subscription model refresh requires the Codex CLI to be installed and on PATH."
-            .to_string(),
-    )
-}
-
-fn desktop_codex_exe() -> Option<PathBuf> {
-    let local_appdata = std::env::var_os("LOCALAPPDATA")?;
-    desktop_codex_exe_from_local_appdata(Path::new(&local_appdata))
-}
-
-fn desktop_codex_exe_from_local_appdata(local_appdata: &Path) -> Option<PathBuf> {
-    let bin_dir = local_appdata.join("OpenAI").join("Codex").join("bin");
-    let mut candidates = fs::read_dir(bin_dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path().join("codex.exe"))
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    candidates.sort_by_key(|path| {
-        fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(UNIX_EPOCH)
-    });
-    candidates.pop()
-}
-
-fn npm_codex_vendor_exe() -> Option<PathBuf> {
-    let appdata = std::env::var_os("APPDATA")?;
-    let path = PathBuf::from(appdata)
-        .join("npm")
-        .join("node_modules")
-        .join("@openai")
-        .join("codex")
-        .join("node_modules")
-        .join("@openai")
-        .join("codex-win32-x64")
-        .join("vendor")
-        .join("x86_64-pc-windows-msvc")
-        .join("codex")
-        .join("codex.exe");
-    path.exists().then_some(path)
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::{
-        desktop_codex_exe_from_local_appdata, discover_provider_models_with_timeout,
+        discover_provider_models_with_timeout,
         enrich_models_with_ollama_show, finish_official_multi_agent_save,
         generate_catalog_with_runner, list_model_metadata,
         list_models, list_official_multi_agent_baselines, list_official_multi_agent_overrides,
@@ -3562,25 +3498,6 @@ mod tests {
                 .open(liveness_path)
                 .expect("app-server helper must be terminated and release its liveness file");
         }
-    }
-
-    #[test]
-    fn desktop_codex_exe_finds_the_app_managed_runtime() {
-        let root = temp_root("desktop-codex-runtime");
-        let executable = root
-            .join("OpenAI")
-            .join("Codex")
-            .join("bin")
-            .join("runtime-hash")
-            .join("codex.exe");
-        fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        fs::write(&executable, b"desktop codex").unwrap();
-
-        assert_eq!(
-            desktop_codex_exe_from_local_appdata(&root),
-            Some(executable)
-        );
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

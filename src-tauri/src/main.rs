@@ -7,6 +7,7 @@ mod autostart;
 mod build_info;
 mod catalog;
 mod cli;
+mod codex_cli;
 mod codex_desktop;
 mod config;
 mod desktop_commands;

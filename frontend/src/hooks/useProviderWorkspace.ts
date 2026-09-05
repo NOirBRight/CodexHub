@@ -120,6 +120,7 @@ function initialState(source: WorkspaceSource): ProviderWorkspaceState {
     modelMetadata: source.modelMetadata,
     officialDisabledModelsDraft: source.settings?.official_disabled_models ?? [],
     officialModelOrderDraft: source.settings?.official_model_sort_order ?? [],
+    officialModelSnapshot: null,
     officialModels: sortOfficialModels(
       mergeOfficialModelSources(source.catalogModels, source.modelMetadata),
       source.settings?.official_model_sort_order ?? [],

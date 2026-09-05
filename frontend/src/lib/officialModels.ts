@@ -82,6 +82,23 @@ export function refreshedOfficialModelOrder(currentOrder: string[], refreshedMod
   return nextOrder;
 }
 
+export function reconcileOfficialModelSnapshot(snapshot: Model[], catalog: Model[], metadata: Model[]) {
+  const knownOfficialIds = officialModelIdSet(snapshot, catalog, metadata);
+  const published = new Map(
+    mergeOfficialModelSources(catalog, metadata).map((model) => [normalizeOfficialModelId(model.id, knownOfficialIds), model]),
+  );
+  return snapshot.map((model) => {
+    const update = published.get(normalizeOfficialModelId(model.id, knownOfficialIds));
+    return update ? {
+      ...model,
+      ...update,
+      id: model.id,
+      enabled: model.enabled,
+      sort_order: model.sort_order,
+    } : model;
+  });
+}
+
 export function mergeOfficialModelSources(catalog: Model[], metadata: Model[]) {
   const knownOfficialIds = officialModelIdSet(catalog, metadata);
   const blockedOfficialIds = new Set<string>();

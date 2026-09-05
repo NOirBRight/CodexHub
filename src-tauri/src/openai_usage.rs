@@ -651,8 +651,7 @@ impl Drop for AppServerJob {
 }
 
 fn read_codex_account_usage() -> Result<CodexAccountUsageResponse, String> {
-    let codex = find_codex_executable()?;
-    let mut command = Command::new(&codex);
+    let mut command = crate::codex_cli::command()?;
     command.args(["app-server", "--stdio"]);
     let mut session = AppServerSession::start(command, "Codex account usage")?;
     session.initialize()?;
@@ -894,42 +893,6 @@ fn write_json_line(stdin: &mut impl Write, value: &Value) -> Result<(), String> 
         .write_all(b"\n")
         .map_err(|error| format!("Failed to write codex app-server request: {error}"))
 }
-
-fn find_codex_executable() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("CODEXHUB_CODEX_PATH")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        return Ok(path);
-    }
-    if let Some(path) = npm_codex_vendor_exe() {
-        return Ok(path);
-    }
-    for candidate in crate::runtime_paths::codex_executable_candidates() {
-        if let Ok(path) = which::which(candidate) {
-            return Ok(path);
-        }
-    }
-    Err("Codex account usage requires the Codex CLI to be installed and on PATH.".to_string())
-}
-
-fn npm_codex_vendor_exe() -> Option<PathBuf> {
-    let appdata = std::env::var_os("APPDATA")?;
-    let path = PathBuf::from(appdata)
-        .join("npm")
-        .join("node_modules")
-        .join("@openai")
-        .join("codex")
-        .join("node_modules")
-        .join("@openai")
-        .join("codex-win32-x64")
-        .join("vendor")
-        .join("x86_64-pc-windows-msvc")
-        .join("bin")
-        .join("codex.exe");
-    path.is_file().then_some(path)
-}
-
 
 fn snapshot_from_codex_account_usage(
     start_time: u64,
