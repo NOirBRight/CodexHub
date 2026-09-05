@@ -3421,7 +3421,8 @@ def test_operator_commands_have_explicit_outer_and_manual_deadlines():
 
     assert "run-with-windows-watchdog.py --timeout-seconds 3600 --" in documentation
     assert "-OverallTimeoutSeconds 5400" in documentation
-    assert "-ManualEvidenceTimeoutSeconds 900" in documentation
+    assert "-CliOnly" in documentation
+    assert "manual window is finite (default `900`," in documentation
     assert "manual window is finite" in documentation
 
 
