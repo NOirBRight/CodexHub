@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import copy
 import json
-from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import pytest
+
+from live_gateway_support import configured_live_gateway
 
 from collaboration_runtime_contract import (
     COLLABORATION_V1,
@@ -21,32 +22,25 @@ from collaboration_runtime_contract import (
 )
 from probe_upstream_format import headers as probe_headers
 
-GATEWAY = "http://127.0.0.1:9099"
 MUSE = "opencode-go/muse-spark-1.2-contributor"
 DEEPSEEK = "commandcode/deepseek/deepseek-v4-flash"
 
 
-def _gateway_key() -> str:
-    settings = json.loads(Path.home().joinpath(".codex/proxy/settings.json").read_text())
-    return str(settings.get("gateway_client_key") or "codexhub-proxy")
-
-
 def _gateway_up() -> bool:
+    gateway = configured_live_gateway()
     try:
-        with urlopen(Request(f"{GATEWAY}/health", method="GET"), timeout=2) as resp:
+        with urlopen(Request(f"{gateway.base_url}/health", method="GET"), timeout=2) as resp:
             return resp.status == 200
     except Exception:
         return False
 
 
-pytestmark = pytest.mark.skipif(not _gateway_up(), reason="local Gateway is not healthy")
-
-
 def _post(path: str, payload: dict, timeout: int = 120) -> tuple[int, dict | str]:
     body = json.dumps(payload).encode()
-    headers = probe_headers(_gateway_key(), json_body=True)
+    gateway = configured_live_gateway()
+    headers = probe_headers(gateway.client_key, json_body=True)
     headers["User-Agent"] = "codex-app"
-    req = Request(f"{GATEWAY}{path}", data=body, headers=headers, method="POST")
+    req = Request(f"{gateway.base_url}{path}", data=body, headers=headers, method="POST")
     try:
         with urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")

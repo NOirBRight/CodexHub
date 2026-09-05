@@ -181,6 +181,33 @@ def _build_source_payload(namespace_tool_count: int) -> dict[str, Any]:
     return {"model": "glm-5.2", "input": [], "tools": tools}
 
 
+def _replay_schema(schema: Any) -> Any:
+    """Keep the historical evidence spelling for equivalent property policies.
+
+    The provider adapter now spells true/false as {}/{"not": {}}. Only
+    additionalProperties in schema positions is canonicalized; descriptions,
+    defaults, enums and arbitrary instance data remain byte-significant.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    result = dict(schema)
+    policy = result.get("additionalProperties")
+    if policy == {}:
+        result["additionalProperties"] = True
+    elif policy == {"not": {}}:
+        result["additionalProperties"] = False
+    for key in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas"):
+        if isinstance(result.get(key), dict):
+            result[key] = {name: _replay_schema(value) for name, value in result[key].items()}
+    for key in ("additionalProperties", "items", "contains", "propertyNames", "not", "if", "then", "else"):
+        if key in result:
+            result[key] = _replay_schema(result[key])
+    for key in ("allOf", "anyOf", "oneOf", "prefixItems"):
+        if isinstance(result.get(key), list):
+            result[key] = [_replay_schema(value) for value in result[key]]
+    return result
+
+
 def _prepared_surface(workspace: Path, namespace_tool_count: int, strategy: str) -> dict[str, Any]:
     source_payload = _build_source_payload(namespace_tool_count)
     source_bytes = json.dumps(source_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
@@ -202,6 +229,11 @@ def _prepared_surface(workspace: Path, namespace_tool_count: int, strategy: str)
     prepared_payload = json.loads(prepared_bytes)
     tools = prepared_payload.get("tools")
     _require(isinstance(tools, list), "prepared_surface_invalid")
+    tools = [
+        {**tool, "parameters": _replay_schema(tool["parameters"])}
+        if isinstance(tool, dict) and "parameters" in tool else tool
+        for tool in tools
+    ]
     flattened_count = sum(
         1
         for tool in tools
