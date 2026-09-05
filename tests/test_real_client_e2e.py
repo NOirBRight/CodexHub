@@ -40,7 +40,7 @@ OFFICIAL_GATEWAY_MODEL = OFFICIAL_OPENCODE_CASE["models"]["gateway"]
 THIRD_PARTY_MANAGED_MODEL = THIRD_PARTY_OPENCODE_CASE["models"]["managed"]
 THIRD_PARTY_CANONICAL_MODEL = THIRD_PARTY_OPENCODE_CASE["models"]["canonical"]
 CLI_WINDOWS_CASE_IDS = tuple(case["case_ids"]["windows"] for case in CLI_CASES)
-CLI_CANONICAL_MODELS = frozenset(case["models"]["canonical"] for case in CLI_CASES)
+CLI_GATEWAY_MODELS = frozenset(case["models"]["gateway"] for case in CLI_CASES)
 CLI_CASE_COUNT = len(CLI_CASES)
 GUI_CASE_COUNT = 4
 PI_OFFICIAL_CASE_ID = next(
@@ -1350,10 +1350,9 @@ def test_real_versioned_client_events_are_correlated_with_gateway_diagnostics(tm
     native = [json.loads(line) for line in diagnostics[0].read_text().splitlines()]
     completes = [event for event in native if event["event"] == "request_complete"]
     assert len(completes) == 16
-    assert {event["model_canonical"] for event in completes} == (
-        CLI_CANONICAL_MODELS
-        | {OFFICIAL_GATEWAY_MODEL}
-    )
+    # Gateway diagnostics contain wire routes, not provider-prefixed client
+    # selectors (Pi/OMP intentionally have different canonical client IDs).
+    assert {event["model_canonical"] for event in completes} == CLI_GATEWAY_MODELS
     production_fields = {
         "event",
         "request_id",
