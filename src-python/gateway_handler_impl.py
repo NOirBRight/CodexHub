@@ -135,7 +135,6 @@ from protocol_translation import (
     NonForwardable,
     PreparedExchange,
     UnsupportedProtocolTranslationError,
-    UpstreamStreamIncompleteError,
 )
 from route_plan import (
     RelayExecutionPlan,
@@ -163,10 +162,7 @@ from runtime_tool_compatibility import (
     ToolCompatibilityError as RuntimeToolCompatibilityError,
 )
 from sse_events import (
-    SseAssemblerClosedError,
     SseEvent,
-    SseEventAssembler,
-    SseFrameTooLargeError,
 )
 from gateway_events import RUNTIME_CODEX_DIR
 from gateway_transport import (
@@ -1530,56 +1526,6 @@ class GatewayHandlerMixin:
             line_resets_idle_timeout=line_resets_idle_timeout,
             on_line=on_line,
         )
-
-    def _iter_upstream_sse_events(
-        self,
-        response: Any,
-        *,
-        event_resets_idle_timeout: Callable[[SseEvent], bool],
-        on_chunk: Callable[[bytes], None] | None = None,
-    ) -> Any:
-        assembler = SseEventAssembler()
-        pending_events: list[SseEvent] = []
-        assembler_finished = False
-        deferred_size_error: SseFrameTooLargeError | None = None
-
-        def assemble_chunk(chunk: bytes) -> bool:
-            nonlocal deferred_size_error
-            events: list[SseEvent] = []
-            try:
-                assembler.feed(chunk, on_event=events.append)
-            except SseFrameTooLargeError as exc:
-                deferred_size_error = exc
-            pending_events.extend(events)
-            return any(event_resets_idle_timeout(event) for event in events)
-
-        try:
-            for chunk in self._iter_upstream_sse_lines(
-                response,
-                line_resets_idle_timeout=assemble_chunk,
-                on_line=on_chunk,
-            ):
-                if not chunk:
-                    break
-                ready_events = tuple(pending_events)
-                pending_events.clear()
-                yield from ready_events
-                if deferred_size_error is not None:
-                    raise deferred_size_error
-
-            termination = assembler.finish()
-            assembler_finished = True
-            yield from termination.events
-            if termination.disposition == "incomplete":
-                raise UpstreamStreamIncompleteError(
-                    "Upstream SSE stream ended with an incomplete pending frame"
-                )
-        finally:
-            if not assembler_finished:
-                try:
-                    assembler.cancel()
-                except SseAssemblerClosedError:
-                    pass
 
     def _write_sse_error_event(
         self,

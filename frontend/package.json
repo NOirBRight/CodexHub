@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
-    "test:ui-contract": "node --test scripts/ui-contract.test.mjs scripts/provider-workspace.test.mjs scripts/desktop-commands.contract.test.mjs scripts/official-models-visibility.test.mjs scripts/provider-discovery-draft.test.mjs scripts/provider-model-copy.test.mjs scripts/provider-catalog.test.mjs && node --experimental-strip-types --test scripts/app-update-lifecycle.test.mjs scripts/persistent-action.test.mjs scripts/commands.test.mjs scripts/catalog-publish.test.mjs scripts/runtime-store.test.mjs",
+    "test:ui-contract": "node --test scripts/ui-contract.test.mjs scripts/provider-workspace.test.mjs scripts/desktop-commands.contract.test.mjs scripts/official-models-visibility.test.mjs scripts/provider-discovery-draft.test.mjs scripts/provider-model-copy.test.mjs scripts/provider-catalog.test.mjs && node --experimental-strip-types --test scripts/app-update-lifecycle.test.mjs scripts/persistent-action.test.mjs scripts/provider-save.test.mjs scripts/commands.test.mjs scripts/catalog-publish.test.mjs scripts/runtime-store.test.mjs",
     "test:provider-comparison": "node --test scripts/provider-comparison.test.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },

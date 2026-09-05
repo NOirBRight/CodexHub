@@ -151,10 +151,7 @@ def downstream_has_been_exposed(handler: Any) -> bool:
     seam = _handler_downstream_stream_commit(handler)
     if seam is None:
         return False
-    return bool(
-        getattr(seam, "_downstream_output_started", False)
-        or getattr(seam, "_downstream_content_exposed", False)
-    )
+    return seam.content_exposed
 _downstream_has_been_exposed = downstream_has_been_exposed
 
 

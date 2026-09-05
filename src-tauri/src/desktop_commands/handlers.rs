@@ -488,6 +488,9 @@ pub async fn generate_catalog(restart_codex: Option<bool>) -> Result<Vec<Model>,
 }
 
 pub(crate) fn generate_catalog_coordinated(restart_codex: bool) -> Result<Vec<Model>, String> {
+    if !restart_codex {
+        return codex_desktop::serialize_config_writer(catalog::generate_catalog_with_existing_lock);
+    }
     coordinated_catalog_write(restart_codex, catalog::generate_catalog_with_existing_lock)
 }
 
@@ -521,6 +524,17 @@ pub(crate) fn save_official_multi_agent_version_coordinated(
     version: Option<String>,
     restart_codex: bool,
 ) -> Result<OfficialMultiAgentSaveResult, String> {
+    if !restart_codex {
+        let outcome = codex_desktop::serialize_config_writer(|| {
+            let prepared = models::prepare_official_multi_agent_version(model_id, version)?;
+            models::publish_official_multi_agent_version(prepared).map_err(|error| error.to_string())
+        })?;
+        return Ok(OfficialMultiAgentSaveResult {
+            model: outcome.model,
+            warning: outcome.warning,
+            codex_restart_result: None,
+        });
+    }
     let coordinated = codex_desktop::coordinate_switch(restart_codex, || {
         prepare_then_commit_official_multi_agent(
             || {
@@ -658,6 +672,9 @@ pub fn set_codex_context_guard(
     enabled: bool,
     restart_codex: Option<bool>,
 ) -> Result<config::CodexContextGuardStatus, String> {
+    if !restart_codex.unwrap_or(false) {
+        return codex_desktop::serialize_config_writer(|| config::set_codex_context_guard(enabled));
+    }
     let coordinated = codex_desktop::coordinate_switch(restart_codex.unwrap_or(false), || {
         config::set_codex_context_guard(enabled)
     })?;
