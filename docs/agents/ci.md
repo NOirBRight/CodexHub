@@ -181,3 +181,15 @@ collection completeness without executing `tests/test_real_client_e2e.py`, use:
 ```
 
 Do not commit generated frontend output, local Tauri resource placeholders, or `dist/` artifacts.
+
+### Optional live-provider probes
+
+The ordinary Python suite must not discover or send requests to a developer's
+running Gateway. The OpenCode/Command Code and xAI live probes require an
+explicit `CODEXHUB_LIVE_GATEWAY_CONFIG` pointing to a private JSON file with
+`base_url` (an HTTP loopback URL with an explicit port) and `gateway_client_key`.
+Use a separately started candidate Gateway and dedicated provider inputs. Never
+check this file into Git or include it in uploaded evidence. Without the input,
+these optional probes report skips; an invalid explicit input or a configured
+Gateway's connection/auth/provider failure remains a failure. The mandatory
+Windows and Linux eight-case CLI release gates remain unchanged.
