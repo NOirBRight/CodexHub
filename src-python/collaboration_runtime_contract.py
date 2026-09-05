@@ -218,17 +218,23 @@ def _parameter_schema_matches(version: str, name: str, parameters: Mapping[str, 
     if version not in {COLLABORATION_V1, COLLABORATION_V2} or name != "spawn_agent":
         return False
 
-    # Codex CLI 0.146.1 omits only ``agent_type`` from the spawn declaration
-    # when no agent role is configured. The runtime argument type still accepts
-    # the field, so keep the full frozen schema as the canonical contract while
-    # recognizing this one exact declaration variant for both protocol
-    # namespaces. No other property, annotation, or required-field drift is
-    # accepted.
-    default_role_expected = dict(expected)
-    default_role_properties = dict(expected["properties"])
-    default_role_properties.pop("agent_type")
-    default_role_expected["properties"] = default_role_properties
-    return normalized == default_role_expected
+    # Roles are configuration-dependent in both protocols. CLI 0.153.4 also
+    # omits V1 service_tier when tier selection is unavailable. Match only
+    # these optional-field omissions; retain exact types, required fields,
+    # encryption markers, and all other declaration constraints.
+    optional_fields = {"agent_type"}
+    if version == COLLABORATION_V1:
+        optional_fields.add("service_tier")
+    properties = normalized.get("properties")
+    if not isinstance(properties, dict):
+        return False
+    variant = dict(expected)
+    variant["properties"] = {
+        field: schema
+        for field, schema in expected["properties"].items()
+        if field not in optional_fields or field in properties
+    }
+    return normalized == variant
 
 
 def _namespace_candidates(tools: Sequence[Any]) -> list[Mapping[str, Any]]:
