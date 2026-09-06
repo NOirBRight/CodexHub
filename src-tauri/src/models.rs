@@ -1775,6 +1775,15 @@ fn official_subscription_seed_text(
 
 fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value {
     let mut payload = model.raw.as_object().cloned().unwrap_or_default();
+    // The subscription endpoint sends ModelInfo (shell_type), unlike the
+    // app-server list DTO. Codex 0.153.4 deserializes an omitted percent as 95
+    // (protocol/src/openai_models.rs). Apply that default only to the derived
+    // seed with a supplied numeric window; keep the raw response untouched.
+    if payload.get("shell_type").and_then(Value::as_str).is_some()
+        && payload.get("context_window").and_then(Value::as_u64).is_some_and(|value| value > 0)
+    {
+        payload.entry("effective_context_window_percent".to_string()).or_insert(json!(95));
+    }
     ensure_responses_lite_opt_in(&mut payload);
     payload.insert("visibility".to_string(), json!(CatalogVisibility::List));
     payload.insert("slug".to_string(), json!(model.slug));
@@ -5123,6 +5132,29 @@ for line in sys.stdin:
                 );
             }
         }
+    }
+
+    #[test]
+    fn subscription_model_info_seed_applies_cli_percent_default_without_changing_raw_response() {
+        for percent in [None, Some(json!(80)), Some(Value::Null)] {
+            let mut row = json!({"slug":"gpt-5.6-luna", "visibility":"list",
+                "display_name":"Luna", "shell_type":"shell_command",
+                "context_window":272000, "max_context_window":872000,
+                "auto_compact_token_limit":null});
+            if let Some(value) = percent.clone() {
+                row["effective_context_window_percent"] = value;
+            }
+            let models = subscription_models_from_payload(&json!({"models":[row]})).unwrap();
+            let seed = super::official_subscription_seed_model(&models[0]);
+            assert_eq!(seed["effective_context_window_percent"], percent.clone().unwrap_or(json!(95)));
+            assert_eq!(models[0].raw.get("effective_context_window_percent"), percent.as_ref());
+        }
+        let models = subscription_models_from_payload(&json!({"models":[{
+            "slug":"gpt-5.6-luna", "visibility":"list", "shell_type":"shell_command"
+        }]})).unwrap();
+        let seed = super::official_subscription_seed_model(&models[0]);
+        assert!(seed.get("context_window").is_none());
+        assert!(seed.get("effective_context_window_percent").is_none());
     }
 
     #[test]
