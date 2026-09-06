@@ -18,6 +18,8 @@ root.walkRules((rule) => {
 root.walkDecls((decl) => {
   if (decl.prop === "font-size" && /^\d+px$/.test(decl.value) && parseInt(decl.value) < 10)
     report(decl, "Workspace text must be at least 10px");
+  if (decl.prop === "font-size" && decl.parent.selector === ".ws-heading h1" && parseInt(decl.value) > 20)
+    report(decl, "Workspace headings must not exceed 20px");
   if (
     !decl.prop.startsWith("--") &&
     /^(color|background|background-color|border|border-color)$/.test(decl.prop) &&
