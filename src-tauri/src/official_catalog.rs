@@ -131,7 +131,6 @@ fn timeout() -> Result<Duration, String> {
 
 pub(crate) fn fetch(refresh: &Refresh) -> Result<String, String> {
     let deadline = refresh.deadline;
-    let budget = deadline.saturating_duration_since(Instant::now());
     let mut version_command = crate::codex_cli::command()?;
     version_command.arg("--version");
     let output = run(version_command, refresh, deadline, 4096)?;
@@ -150,13 +149,22 @@ pub(crate) fn fetch(refresh: &Refresh) -> Result<String, String> {
             "--client-version",
             version,
             "--timeout",
-            &budget.as_secs().to_string(),
+            &http_timeout_argument(deadline),
         ])
         .env(
             "CODEXHUB_CODEX_TARGET_HOME",
             crate::runtime_paths::codex_target_home_dir()?,
         );
     run(command, refresh, deadline, 33 * 1024 * 1024)
+}
+
+fn http_timeout_argument(deadline: Instant) -> String {
+    // A one-second total budget already has less than one whole second left
+    // after process setup. Preserve fractions instead of making urllib nonblocking.
+    deadline
+        .saturating_duration_since(Instant::now())
+        .as_secs_f64()
+        .to_string()
 }
 
 fn run(
@@ -376,5 +384,15 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(2));
         std::thread::sleep(Duration::from_millis(1100));
         assert!(!marker.exists(), "catalog descendant survived its deadline");
+    }
+    #[test]
+    fn one_second_budget_does_not_become_a_zero_http_timeout() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        std::thread::sleep(Duration::from_millis(5));
+        let seconds: f64 = http_timeout_argument(deadline).parse().unwrap();
+        assert!(
+            seconds > 0.0 && seconds < 1.0,
+            "remaining timeout: {seconds}"
+        );
     }
 }
