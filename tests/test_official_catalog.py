@@ -92,3 +92,16 @@ def test_remote_errors_do_not_include_response_body():
 def test_identity_only_catalog_is_rejected():
     with pytest.raises(official_catalog.CatalogError, match="incomplete"):
         official_catalog.validate_models([{"slug": "gpt-new", "visibility": "list"}])
+
+
+def test_helper_serializes_unicode_metadata_on_legacy_windows_stdout():
+    document = {"models": [{"slug": "example", "display_name": "模型 ✨"}]}
+    buffer = io.BytesIO()
+    output = io.TextIOWrapper(buffer, encoding="cp1252")
+    with patch.object(official_catalog, "fetch_catalog", return_value=document), \
+         patch.object(official_catalog.sys, "argv", ["official_catalog.py", "--client-version", "0.153.4", "--timeout", "30"]), \
+         patch.object(official_catalog.sys, "stdout", output):
+        status = official_catalog.main()
+    output.flush()
+    assert status == 0
+    assert json.loads(buffer.getvalue().decode("utf-8")) == document

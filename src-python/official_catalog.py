@@ -98,7 +98,9 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, required=True)
     args = parser.parse_args()
     try:
-        print(json.dumps(fetch_catalog(args.client_version, args.timeout), ensure_ascii=False))
+        # Windows pipes may use a legacy code page. ASCII JSON escapes preserve
+        # all metadata while keeping the parent-facing wire valid UTF-8.
+        print(json.dumps(fetch_catalog(args.client_version, args.timeout), ensure_ascii=True))
         return 0
     except SubscriptionAuthError:
         print(json.dumps({"error": "Codex subscription login is unavailable; sign in again with Codex"}))
