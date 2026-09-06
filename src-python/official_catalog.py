@@ -17,7 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-import codex_auth
+from subscription_credential import SubscriptionAuthError, credential_for
 
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 ENDPOINT = "https://chatgpt.com/backend-api/codex/models"
@@ -35,11 +35,12 @@ class NoRedirect(HTTPRedirectHandler):
 def fetch_catalog(client_version: str, timeout: float, *, opener=None) -> dict:
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?", client_version):
         raise CatalogError("Cannot determine the installed Codex CLI version")
-    token = codex_auth.access_token()
-    account = codex_auth.account_id()
+    credential = credential_for("codex_auth")
+    if credential is None:
+        raise CatalogError("Codex subscription authentication is unavailable")
+    token = credential.access_token()
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    if account:
-        headers["ChatGPT-Account-Id"] = account
+    headers.update(credential.account_headers())
     request = Request(ENDPOINT + "?" + urlencode({"client_version": client_version}), headers=headers)
     transport = opener or build_opener(NoRedirect()).open
     try:
@@ -58,9 +59,37 @@ def fetch_catalog(client_version: str, timeout: float, *, opener=None) -> dict:
         raise CatalogError("Official catalog returned invalid JSON") from None
     if not isinstance(result, dict) or not isinstance(result.get("models"), list):
         raise CatalogError("Official catalog response has no model array")
+    validate_models(result["models"])
     result.update(client_version=client_version, etag=etag,
                   fetched_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
     return result
+
+
+def validate_models(models: list) -> None:
+    """Require stable ModelInfo wire fields; optional/dynamic budgets may be absent.
+
+    Unknown fields remain untouched. This is deliberately stricter than the
+    startup cache reader, which also supports historical native cache formats.
+    """
+    required = {"slug": str, "display_name": str, "shell_type": str,
+                "visibility": str, "supported_in_api": bool, "priority": int,
+                "supported_reasoning_levels": list, "support_verbosity": bool,
+                "truncation_policy": dict, "experimental_supported_tools": list}
+    seen = set()
+    for model in models:
+        if not isinstance(model, dict) or any(type(model.get(k)) is not kind for k, kind in required.items()):
+            raise CatalogError("Official catalog contains incomplete model metadata")
+        slug = model["slug"]
+        if not slug.strip() or slug in seen or model["visibility"] not in ("list", "hide"):
+            raise CatalogError("Official catalog contains invalid model identities or visibility")
+        seen.add(slug)
+        for level in model["supported_reasoning_levels"]:
+            if not isinstance(level, dict) or not isinstance(level.get("effort"), str) or not isinstance(level.get("description"), str):
+                raise CatalogError("Official catalog contains invalid reasoning metadata")
+        for key in ("context_window", "max_context_window", "auto_compact_token_limit"):
+            value = model.get(key)
+            if value is not None and (type(value) is not int or value <= 0):
+                raise CatalogError("Official catalog contains an invalid context budget")
 
 
 def main() -> int:
@@ -71,7 +100,7 @@ def main() -> int:
     try:
         print(json.dumps(fetch_catalog(args.client_version, args.timeout), ensure_ascii=False))
         return 0
-    except codex_auth.CodexAuthError:
+    except SubscriptionAuthError:
         print(json.dumps({"error": "Codex subscription login is unavailable; sign in again with Codex"}))
     except CatalogError as exc:
         print(json.dumps({"error": str(exc)}))

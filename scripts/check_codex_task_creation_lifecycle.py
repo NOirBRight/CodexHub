@@ -37,7 +37,7 @@ DEFAULT_EVIDENCE_PATH = (
 # separately: model discovery now uses direct HTTP, while usage still probes
 # app-server. Neither path owns native task creation or global MCP settings.
 METADATA_PROBE_MARKERS = {
-    Path("src-tauri/src/models.rs"): "crate::official_catalog::fetch(refresh)?",
+    Path("src-tauri/src/models.rs"): "crate::official_catalog::fetch(&refresh)?",
     Path("src-tauri/src/official_catalog.rs"): "refresh.check(deadline)?",
     Path("src-tauri/src/openai_usage.rs"): 'args(["app-server", "--stdio"])',
 }

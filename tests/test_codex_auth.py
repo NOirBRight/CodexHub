@@ -157,7 +157,7 @@ class AccessTokenTests(unittest.TestCase):
                 _make_auth_json(Path(tmp), access_token=new, refresh_token="rotated")
                 yield lambda: None
             with patch("codex_auth.file_lock_for", another_owner_publishes), \
-                 patch("codex_auth.refresh") as refresh:
+                 patch("codex_auth.urlopen") as refresh:
                 self.assertEqual(codex_auth.access_token(path), new)
                 refresh.assert_not_called()
 

@@ -502,6 +502,7 @@ dependencies = [
  "gdk-pixbuf",
  "glib",
  "gtk",
+ "libc",
  "log",
  "reqwest 0.12.28",
  "rusqlite",

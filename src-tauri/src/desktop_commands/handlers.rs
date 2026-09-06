@@ -438,16 +438,20 @@ pub async fn diagnose_conversation_history(
 }
 
 #[tauri::command]
-pub fn cancel_official_model_refresh() -> Result<(), String> {
-    crate::official_catalog::cancel()
+pub fn cancel_official_model_refresh(request_id: String) -> Result<(), String> {
+    crate::official_catalog::cancel(&request_id)
 }
 
 #[tauri::command]
 pub async fn refresh_official_models(
     restart_codex: Option<bool>,
+    request_id: Option<String>,
 ) -> Result<official_refresh::OfficialRefreshResult, String> {
     run_blocking("refresh_official_models", move || {
-        refresh_official_models_coordinated(restart_codex.unwrap_or(false))
+        if !restart_codex.unwrap_or(false) {
+            return official_refresh::refresh_current_models_with_request(request_id.as_deref());
+        }
+        refresh_official_models_coordinated(true)
     })
     .await
 }

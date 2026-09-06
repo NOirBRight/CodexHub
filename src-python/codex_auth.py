@@ -121,7 +121,7 @@ def _persist_auth_json(path: Path, data: dict[str, Any]) -> None:
     )
 
 
-def refresh(
+def _refresh_unlocked(
     auth_data: dict[str, Any],
     path: Path | None = None,
     *,
@@ -207,6 +207,29 @@ def refresh(
     return new_access
 
 
+def refresh(auth_data: dict[str, Any], path: Path | None = None, *,
+            token_url: str = OAUTH_TOKEN_URL, _opener: Any = None) -> str:
+    """Serialize every refresh owner, including forced adapter refreshes."""
+    target = path or auth_json_path()
+    previous = auth_data.get("tokens", {}).get("access_token")
+    # Separate from the auth.json atomic-write lock acquired during publication.
+    with file_lock_for(target.with_name("codexhub-oauth-refresh")):
+        current = load_auth_json(target)
+        token = current["tokens"]["access_token"]
+        try:
+            exp = decode_jwt_payload(token).get("exp")
+        except CodexAuthError:
+            exp = None
+        if token != previous and not _is_expired(exp):
+            auth_data.clear()
+            auth_data.update(current)
+            return token
+        token = _refresh_unlocked(current, target, token_url=token_url, _opener=_opener)
+        auth_data.clear()
+        auth_data.update(current)
+        return token
+
+
 def access_token(
     path: Path | None = None,
     *,
@@ -246,18 +269,7 @@ def access_token(
             payload = {}
         exp = payload.get("exp") if isinstance(payload, dict) else None
         if _is_expired(exp, now):
-            target = path or auth_json_path()
-            # Distinct from auth.json's atomic-write lock: refresh() publishes
-            # under that lock, so holding it here would deadlock.
-            with file_lock_for(target.with_name("codexhub-oauth-refresh")):
-                auth_data = load_auth_json(target)
-                token = auth_data["tokens"]["access_token"]
-                try:
-                    payload = decode_jwt_payload(token)
-                except CodexAuthError:
-                    payload = {}
-                if _is_expired(payload.get("exp"), now):
-                    token = refresh(auth_data, target, _opener=_opener)
+            token = refresh(auth_data, path, _opener=_opener)
 
         _cache = auth_data
         return token

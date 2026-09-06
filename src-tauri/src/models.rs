@@ -59,40 +59,72 @@ const KNOWN_PROVIDER_ENDPOINT_SUFFIXES: &[&str] = &[
     "/models",
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct OfficialModelsAcquisition {
+    refresh: Option<crate::official_catalog::Refresh>,
     subscription_models: Vec<OfficialSubscriptionModel>,
     models: Vec<Model>,
     visibility_diagnostics: Value,
     native_cache: Option<String>,
 }
 
-pub(crate) fn acquire_official_models_direct() -> Result<OfficialModelsAcquisition, String> {
-    let refresh = crate::official_catalog::Refresh::begin()?;
-    acquire_official_catalog(&refresh)
+impl OfficialModelsAcquisition {
+    pub(crate) fn publish<T, E: From<String>>(
+        &self,
+        publish: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        match &self.refresh {
+            Some(refresh) => refresh.publish(publish),
+            None => publish(), // Legacy conversion fixtures do not start a live refresh.
+        }
+    }
 }
 
-fn acquire_official_catalog(refresh: &crate::official_catalog::Refresh) -> Result<OfficialModelsAcquisition, String> {
-    let text = crate::official_catalog::fetch(refresh)?;
-    let payload: Value = serde_json::from_str(&text).map_err(|_| "Official catalog returned invalid JSON")?;
+pub(crate) fn acquire_official_models_direct() -> Result<OfficialModelsAcquisition, String> {
+    let refresh = crate::official_catalog::Refresh::begin()?;
+    acquire_official_catalog(refresh)
+}
+
+fn acquire_official_catalog(
+    refresh: crate::official_catalog::Refresh,
+) -> Result<OfficialModelsAcquisition, String> {
+    let text = crate::official_catalog::fetch(&refresh)?;
+    let payload: Value =
+        serde_json::from_str(&text).map_err(|_| "Official catalog returned invalid JSON")?;
     validate_official_snapshot(&payload)?;
     let visibility_diagnostics = visibility_diagnostics_from_payload(&payload);
     let subscription_models = subscription_models_from_payload(&payload)?;
     let models = subscription_models_to_metadata_models(&subscription_models);
-    Ok(OfficialModelsAcquisition { subscription_models, models, visibility_diagnostics, native_cache: Some(text) })
+    refresh.check_current()?;
+    Ok(OfficialModelsAcquisition {
+        refresh: Some(refresh),
+        subscription_models,
+        models,
+        visibility_diagnostics,
+        native_cache: Some(text),
+    })
 }
 
 /// Read the current Codex subscription model list without publishing any
 /// CodexHub catalog or touching the running Codex Desktop configuration.
-pub(crate) fn read_official_models_direct() -> Result<Vec<Model>, String> {
-    let refresh = crate::official_catalog::Refresh::begin()?;
-    let acquisition = acquire_official_catalog(&refresh)?;
+pub(crate) fn read_official_models_direct(request_id: Option<&str>) -> Result<Vec<Model>, String> {
+    let refresh = crate::official_catalog::Refresh::begin_for(request_id)?;
+    let acquisition = acquire_official_catalog(refresh)?;
     let paths = ModelPaths::runtime()?;
     let snapshot = match acquisition.native_cache.as_ref() {
         Some(cache) => cache.clone(),
-        None => official_subscription_seed_text(&acquisition.subscription_models, &acquisition.visibility_diagnostics)?,
+        None => official_subscription_seed_text(
+            &acquisition.subscription_models,
+            &acquisition.visibility_diagnostics,
+        )?,
     };
-    refresh.publish(|| safe_file::write_text_atomic_with_mode(&paths.official_editor_cache_path(), &snapshot, Some(0o600)))?;
+    acquisition.publish(|| {
+        safe_file::write_text_atomic_with_mode(
+            &paths.official_editor_cache_path(),
+            &snapshot,
+            Some(0o600),
+        )
+    })?;
     Ok(acquisition.models)
 }
 
@@ -934,6 +966,7 @@ fn acquire_official_models_direct_with_runner(
     let subscription_models = subscription_models_from_app_server_payload(payload)?;
     let models = subscription_models_to_metadata_models(&subscription_models);
     Ok(OfficialModelsAcquisition {
+        refresh: None,
         subscription_models,
         models,
         visibility_diagnostics,

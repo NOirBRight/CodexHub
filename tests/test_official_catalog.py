@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 import official_catalog
+import codex_auth
 
 
 class Response(io.BytesIO):
@@ -13,15 +14,18 @@ class Response(io.BytesIO):
 
 def test_catalog_preserves_full_metadata_and_uses_subscription_auth():
     row = {"slug": "example", "visibility": "list", "context_window": 272000,
-           "future_metadata": {"nested": True}}
+           "future_metadata": {"nested": True}, "display_name": "Example", "shell_type": "shell_command",
+           "supported_in_api": True, "priority": 1, "supported_reasoning_levels": [],
+           "support_verbosity": False, "truncation_policy": {"mode": "bytes", "limit": 10000},
+           "experimental_supported_tools": []}
     def open_request(request, timeout):
         assert request.full_url.endswith("models?client_version=0.153.4")
         assert request.get_header("Authorization") == "Bearer test-secret"
         assert request.get_header("Chatgpt-account-id") == "account"
         assert timeout == 30
         return Response(json.dumps({"models": [row]}).encode())
-    with patch.object(official_catalog.codex_auth, "access_token", return_value="test-secret"), \
-         patch.object(official_catalog.codex_auth, "account_id", return_value="account"):
+    with patch.object(codex_auth, "access_token", return_value="test-secret"), \
+         patch.object(codex_auth, "account_id", return_value="account"):
         result = official_catalog.fetch_catalog("0.153.4", 30, opener=open_request)
     assert result["models"] == [row]
     assert result["etag"] == '"revision-1"'
@@ -31,8 +35,8 @@ def test_catalog_preserves_full_metadata_and_uses_subscription_auth():
 
 @pytest.mark.parametrize("body", [b'{}', b'{"models":null}', b'invalid'])
 def test_rejects_invalid_document(body):
-    with patch.object(official_catalog.codex_auth, "access_token", return_value="secret"), \
-         patch.object(official_catalog.codex_auth, "account_id", return_value=None):
+    with patch.object(codex_auth, "access_token", return_value="secret"), \
+         patch.object(codex_auth, "account_id", return_value=None):
         with pytest.raises(official_catalog.CatalogError):
             official_catalog.fetch_catalog("0.153.4", 30, opener=lambda *a, **k: Response(body))
 
@@ -65,8 +69,8 @@ def test_response_slower_than_cli_five_second_limit_is_accepted():
     thread.start()
     try:
         with patch.object(official_catalog, "ENDPOINT", f"http://127.0.0.1:{server.server_port}/models"), \
-             patch.object(official_catalog.codex_auth, "access_token", return_value="fake"), \
-             patch.object(official_catalog.codex_auth, "account_id", return_value=None):
+             patch.object(codex_auth, "access_token", return_value="fake"), \
+             patch.object(codex_auth, "account_id", return_value=None):
             result = official_catalog.fetch_catalog("0.153.4", 30, opener=build_opener().open)
         assert result["models"] == []
         assert result["etag"] == "slow-catalog"
@@ -79,7 +83,12 @@ def test_remote_errors_do_not_include_response_body():
     from urllib.error import HTTPError
     def fail(*args, **kwargs):
         raise HTTPError("https://chatgpt.com", 401, "secret", {}, io.BytesIO(b"private response"))
-    with patch.object(official_catalog.codex_auth, "access_token", return_value="secret"), \
-         patch.object(official_catalog.codex_auth, "account_id", return_value=None):
+    with patch.object(codex_auth, "access_token", return_value="secret"), \
+         patch.object(codex_auth, "account_id", return_value=None):
         with pytest.raises(official_catalog.CatalogError, match=r"^Official catalog request failed \(HTTP 401\)$"):
             official_catalog.fetch_catalog("0.153.4", 30, opener=fail)
+
+
+def test_identity_only_catalog_is_rejected():
+    with pytest.raises(official_catalog.CatalogError, match="incomplete"):
+        official_catalog.validate_models([{"slug": "gpt-new", "visibility": "list"}])
