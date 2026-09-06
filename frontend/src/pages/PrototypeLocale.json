@@ -521,5 +521,12 @@
   "请按目标客户端的配置格式填写。这里仅提供参数，不会自动修改配置、检测连接或加入受管客户端列表。": "Enter these values using the target client’s configuration format. This panel only provides parameters; it does not modify configuration, detect connections or add a managed client.",
   "模型 ID 请从 Provider 的模型列表复制；不同客户端的字段名称和文件格式可能不同。": "Copy a model ID from the provider’s model list. Field names and file formats vary by client.",
   "复制 Base URL": "Copy Base URL",
-  "复制 API Key": "Copy API key"
+  "复制 API Key": "Copy API key",
+  "资源详情": "Resources",
+  "5 小时剩余": "5-hour remaining",
+  "每周剩余": "Weekly remaining",
+  "3 天后重置": "Resets in 3 days",
+  "4 天后重置": "Resets in 4 days",
+  "Token 剩余": "Tokens remaining",
+  "Grok 订阅": "Grok subscription"
 }

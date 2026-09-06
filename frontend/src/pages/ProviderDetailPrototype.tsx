@@ -11,7 +11,7 @@ import { providerFixtures } from './PrototypeData';
 export function makePrototypeProvider(id: string): Provider {
     const p = providerFixtures.find(x => x.id === id)!;
     const modelNames = id === 'openai' ? ['gpt-5.4', 'gpt-5.5', 'gpt-5.4-mini', 'gpt-5.3-codex-spark'] : [p.model];
-    return { id, name: p.name, base_url: p.base, api_key: 'demo-not-a-real-key', enabled: true, upstream_format: 'auto', models: modelNames.map((name, i) => ({ id: name, display_name: name, enabled: true, context_window: 128000, input_modalities: id === 'deepseek' ? ['text'] : ['text', 'image'], thinking_mode: 'toggle', supported_reasoning_levels: ['low', 'medium', 'high'], default_reasoning_level: 'medium', multi_agent_version: 'v2', sort_order: i })) };
+    return { id, auth_capabilities: id === 'xai' ? ['subscription:xai_oauth'] : undefined, name: p.name, base_url: p.base, api_key: 'demo-not-a-real-key', enabled: true, upstream_format: 'auto', models: modelNames.map((name, i) => ({ id: name, display_name: name, enabled: true, context_window: 128000, input_modalities: id === 'deepseek' ? ['text'] : ['text', 'image'], thinking_mode: 'toggle', supported_reasoning_levels: ['low', 'medium', 'high'], default_reasoning_level: 'medium', multi_agent_version: 'v2', sort_order: i })) };
 }
 export function ProviderDetailPrototype({ provider, initialTab = '模型', onSave, onDelete, notify, onDirty }: {
     provider: Provider;

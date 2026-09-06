@@ -4,7 +4,8 @@ import { pt } from './PrototypeLocale';
 import { useState } from 'react';
 import { OfficialOpenAIUsageLimitBars } from '../components/providers/OfficialOpenAIUsagePanel';
 export const prototypeLimits = [{ key: 'primary', name: '5 hours', period: '5h', limit: 100, used: 28, remaining: 72, resets_at: new Date(Date.now() + 8280000).toISOString() }, { key: 'week', name: 'Weekly', period: 'week', limit: 100, used: 46, remaining: 54, resets_at: new Date(Date.now() + 259200000).toISOString() }];
-let demoXaiSignedIn=false;
+export const prototypeXaiLimits = [{ key: 'week', name: 'Weekly', period: 'week', limit: 100, used: 32, remaining: 68, resets_at: new Date(Date.now() + 345600000).toISOString() }];
+let demoXaiSignedIn=true;
 export function SubscriptionPrototype({ onSignedIn, notify }: {
     onSignedIn: () => void;
     notify: (s: string) => void;
@@ -17,5 +18,5 @@ export function SubscriptionPrototype({ onSignedIn, notify }: {
         notify('xAI 已授权 · 已发现订阅模型');
     }
     else
-        notify('授权失败 · 可重试或改用 API Key'); }}>{pt("完成演示授权")}</button><button className="v-small-button" onClick={() => { demoXaiSignedIn=false;setState('signedout'); notify('已取消设备授权'); }}>{pt("取消")}</button></> : <button className="v-primary small" onClick={login}>{pt("开始设备授权")}</button>)}<button className="v-small-button" onClick={() => notify('认证状态已刷新 · 演示状态')}>{pt("刷新认证")}</button></div></div>{pt(state === 'signedin' && <div className="v-original-controls v-quota-windows"><OfficialOpenAIUsageLimitBars limits={prototypeLimits} busy={false}/></div>)}</div>;
+        notify('授权失败 · 可重试或改用 API Key'); }}>{pt("完成演示授权")}</button><button className="v-small-button" onClick={() => { demoXaiSignedIn=false;setState('signedout'); notify('已取消设备授权'); }}>{pt("取消")}</button></> : <button className="v-primary small" onClick={login}>{pt("开始设备授权")}</button>)}<button className="v-small-button" onClick={() => notify('认证状态已刷新 · 演示状态')}>{pt("刷新认证")}</button></div></div>{pt(state === 'signedin' && <div className="v-original-controls v-quota-windows"><OfficialOpenAIUsageLimitBars limits={prototypeXaiLimits} busy={false}/></div>)}</div>;
 }

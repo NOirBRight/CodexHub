@@ -73,3 +73,10 @@ No implementation issue was supplied, so the approved design verdict and branch 
 - Provider management now owns upstream endpoints, credential configuration, enabled-model counts/previews, ordering and direct model/account/configuration entry points. Quotas and balances remain on Overview.
 - Client page keeps connection state and filters fixed while client cards scroll independently. Replaced the misleading additional-client tile with a Connection Parameters utility in the fixed footer. It explains compatible custom-endpoint requirements and per-client format differences; no automatic unknown-client adapter or AI integration is implied. Existing Rust adapters under src-tauri/src/gateway/clients remain unchanged.
 - Browser checks at 1125×926, 840×600 and 640×520 cover both themes, resource/client independent scrolling, configuration deep links, parameter copy entry points and narrow layout bounds. No production lifecycle or persistence changes.
+
+## Revision 9 — provider-specific resource details
+
+- User-approved layout: Provider identity / resource details / enable switch. One or two independent resource groups use the available content width; there is no mandatory second metric.
+- OpenAI combines 5-hour and weekly windows; xAI/Grok shows a single weekly quota; balance providers show balance and today's spend; Kimi shows remaining/total tokens. Percent, meter and reset text form one group. Model counts and duplicate healthy-balance status are removed from this overview.
+- Added an explicitly simulated xAI subscription to the default fixtures. Its detail panel also uses only the weekly quota, starting with a signed-in demo account. Login/logout/error flows remain available. Chart fixtures include all five sample providers.
+- Rows are 64px high. Browser checks cover light/dark at 1125×926, 840×600 and 640×520, the single-week detail link, last-row reachability and independent scrolling. Production integrations are unchanged.

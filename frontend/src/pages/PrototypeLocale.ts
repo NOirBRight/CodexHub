@@ -11,6 +11,7 @@ export function pt<T>(value:T):T{
   if(dictionary[trimmed])return value.replace(trimmed,dictionary[trimmed]) as T;
   const patterns:Array<[RegExp,(...parts:string[])=>string]>=[
     [/^(.*) 图标$/,(_,name)=>name+' icon'],
+    [/^(.*) 资源详情$/,(_,name)=>name+' resources'],
     [/^(.*) 详情$/,(_,name)=>name+' details'],
     [/^启用 (.*)$/,(_,name)=>'Enable '+name],
     [/^上移 (.*)$/,(_,name)=>'Move '+name+' up'],
