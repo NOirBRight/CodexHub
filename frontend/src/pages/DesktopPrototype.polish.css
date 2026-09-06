@@ -1,0 +1,305 @@
+/* THROWAWAY revision 7. One component finish, with explicit scroll ownership. */
+.v-stage {
+  --control-height: 32px;
+  --control-radius: 7px;
+  --panel-radius: 11px;
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--accent) 17%, transparent);
+  --control-shadow: inset 0 1px 0 var(--rim), 0 1px 2px #25163108;
+  accent-color: var(--accent);
+}
+.v-stage button { cursor: pointer; }
+.v-stage button:disabled { cursor: default; opacity: .46; }
+.v-stage :is(button, input, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.v-stage :is(input, select) { font-family: inherit; font-variant-numeric: tabular-nums; }
+.v-stage :is(.v-small-button, .v-connect-button, .v-primary.small) {
+  min-height: var(--control-height); padding: 6px 11px; gap: 6px;
+  border-radius: var(--control-radius); font-size: 11px; line-height: 1.35; white-space: nowrap;
+}
+.v-stage .v-small-button {
+  border: 1px solid var(--line); background: linear-gradient(var(--surface), var(--inset));
+  box-shadow: var(--control-shadow); color: var(--ink); font-weight: 500;
+}
+.v-stage .v-small-button:hover:not(:disabled) { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.v-stage .v-small-button svg { width: 13px; height: 13px; stroke-width: 1.7; }
+.v-stage .v-primary { min-height: var(--control-height); margin-top: 0; font-size: 11px; }
+.v-stage .v-icon-button { width: 29px; height: 29px; flex: 0 0 29px; padding: 0; color: var(--muted); }
+.v-stage .v-icon-button:hover { background: var(--accent-soft); color: var(--accent); }
+.v-stage :is(.v-switch, .v-state-badge) { flex-shrink: 0; }
+.v-stage .v-state-badge {
+  display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; font-size: 10px;
+  color: var(--green); background: color-mix(in srgb,var(--green) 9%,transparent); border-radius: 5px;
+}
+.v-state-badge:before { content: ''; width: 4px; height: 4px; background: currentColor; border-radius: 50%; }
+.v-stage .v-state-badge.muted { color: var(--muted); background: var(--inset); }
+
+/* Every dialog has one scrollable body. Headings and the editor's save bar stay visible. */
+.v-stage .v-overlay { position: fixed; inset: 0; padding: 20px; }
+.v-stage .v-dialog {
+  width: min(540px, calc(100vw - 40px)); min-width: 0; max-width: 100%; max-height: calc(100dvh - 40px); padding: 0;
+  display: flex; flex-direction: column; overflow: hidden; border-radius: 13px;
+  background: var(--surface);
+}
+.v-stage .v-dialog-provider { width: min(760px, calc(100vw - 40px)); height: min(640px, calc(100dvh - 40px)); }
+.v-stage .v-dialog-catalog { width: min(680px, calc(100vw - 40px)); height: auto; }
+.v-stage .v-dialog-tools { width: min(620px, calc(100vw - 40px)); height: min(640px, calc(100dvh - 40px)); }
+.v-stage .v-dialog-heading {
+  flex: 0 0 auto; margin: 0; padding: 18px 22px; gap: 11px; min-height: 75px;
+  background: linear-gradient(120deg, var(--surface), var(--title)); border-bottom: 1px solid var(--line);
+}
+.v-stage .v-dialog-heading h2 { font-size: 16px; font-weight: 600; letter-spacing: -.3px; line-height: 1.4; overflow-wrap: anywhere; }
+.v-stage .v-dialog-heading small { font-size: 10px; margin-top: 2px; }
+.v-stage .v-dialog-heading>button { width: 28px; height: 28px; margin-left: auto; padding: 0; align-self: center; flex-shrink: 0; }
+.v-stage .v-dialog-heading .v-app-symbol { width: 32px; height: 32px; object-fit: contain; padding: 4px; border-radius: 8px; background: var(--inset); }
+.v-dialog-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 20px 22px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.v-dialog-body-provider { flex: 1; display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.v-provider-editor { flex: 1; min-height: 0; overflow: hidden; }
+.v-editor-tabs {
+  display: flex; flex: 0 0 auto; align-items: center; flex-wrap: wrap; gap: 5px;
+  margin: 0; padding: 11px 22px; border-bottom: 1px solid var(--line); background: var(--surface);
+}
+.v-stage .v-editor-tabs button { min-height: 29px; padding: 5px 11px; font-size: 11px; border-radius: 6px; color: var(--muted); }
+.v-stage .v-editor-tabs button.active { background: var(--accent-soft); color: var(--accent); font-weight: 550; box-shadow: inset 0 1px 0 var(--rim); }
+.v-stage .v-editor-tabs .v-editor-delete { margin-left: auto; font-size: 10px; padding: 5px 7px; }
+.v-stage .v-editor-tabs .v-editor-delete:hover { color: #b75466; background: #c7657212; }
+.v-editor-content { flex: 1; min-height: 0; overflow: auto; padding: 19px 22px; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.v-editor-footer {
+  flex: 0 0 auto; margin: 0; padding: 12px 22px; min-height: 57px; gap: 12px;
+  border-top: 1px solid var(--line); background: linear-gradient(var(--surface), var(--title));
+}
+.v-editor-footer>span { font-size: 10px; line-height: 1.5; }
+.v-stage .v-close-overlay .v-dialog { width: 390px; padding: 22px; overflow: auto; }
+.v-delete-confirm, .v-inline-confirm {
+  padding: 14px 16px; margin: 0 0 16px; border: 1px solid color-mix(in srgb,var(--accent) 24%,var(--line));
+  border-radius: 9px; background: var(--title); box-shadow: inset 0 1px 0 var(--rim);
+}
+.v-delete-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.v-delete-confirm>span { flex: 1 1 220px; font-size: 11px; line-height: 1.6; }
+.v-stage .v-delete-confirm button { padding: 6px 10px; min-height: 30px; border: 1px solid var(--line); background: var(--surface); font-size: 11px; }
+.v-stage .v-delete-confirm button:last-child { color: #b75466; }
+
+/* Forms: consistent height, labels, inset surface and field grouping. */
+.v-stage .v-dialog :is(input:not([type=checkbox]), select) {
+  min-width: 0; max-width: 100%; height: 35px; padding: 7px 10px; margin-top: 7px;
+  border: 1px solid var(--line); border-radius: var(--control-radius); color: var(--ink);
+  font-family: inherit; font-size: 11px; line-height: 1.5; background-color: var(--inset); box-shadow: inset 0 1px 2px #25152e05, 0 1px 0 var(--rim);
+}
+.v-stage .v-dialog :is(input:not([type=checkbox]),select):focus { border-color: var(--accent); outline: none; box-shadow: var(--focus-ring); }
+.v-stage .v-dialog label:not(.v-original-controls label) { margin: 0; display: block; font-size: 11px; color: var(--muted); font-weight: 500; }
+.v-stage .v-dialog label:not(.v-original-controls label)+label { margin-top: 16px; }
+.v-stage .v-dialog .v-provider-form>label { margin-top: 0!important; }
+.v-provider-form { gap: 17px; align-items: start; }
+.v-provider-form>label:nth-child(3) { grid-column: 1/-1; }
+.v-provider-form>.v-small-button { align-self: end; justify-self: end; }
+.v-provider-form .v-dialog-hint { margin: 0; }
+.v-stage .v-dialog .v-key-editor { display: flex; align-items: center; padding: 0; gap: 4px; margin-top: 7px; }
+.v-stage .v-dialog .v-key-editor input { margin-top: 0; flex: 1; }
+.v-stage .v-key-editor>button { width: 30px; height: 32px; padding: 0; font-size: 10px; color: var(--muted); }
+.v-stage .v-dialog-hint { margin: 15px 0 0; padding: 11px 13px; border: 1px solid var(--line); border-radius: 7px; background: var(--inset); font-size: 10px; line-height: 1.8; font-weight: 400; }
+.v-stage .v-dialog p { margin-bottom: 14px; font-size: 11px; line-height: 1.8; }
+.v-account-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 14px 0; }
+.v-account-actions:last-child { margin-bottom: 0; }
+.v-stage .v-onboarding { display: grid; grid-template-columns: 1fr 1fr; gap: 17px; }
+.v-onboarding>.v-small-button { justify-self: start; grid-column: 1/-1; }
+.v-stage .v-dialog .v-onboarding>label { margin-top: 0!important; }
+.v-onboarding>label:nth-of-type(1), .v-onboarding>label:nth-of-type(2), .v-onboarding>.v-dialog-hint, .v-onboarding>.v-error-text { grid-column: 1/-1; }
+.v-onboarding>.v-primary { grid-column: 1/-1; justify-self: end; width: auto; padding: 8px 17px; margin-top: 0; }
+.v-catalog-search { margin: 0 0 16px!important; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--inset); }
+.v-stage .v-catalog-search input { margin: 0; padding-left: 0; border: 0; background: transparent; box-shadow: none; }
+.v-catalog-grid { gap: 9px; margin: 0 0 10px; }
+.v-stage .v-catalog-card { padding: 13px; min-height: 70px; border-radius: 9px; background: linear-gradient(125deg,var(--surface),var(--title)); border: 1px solid var(--line); box-shadow: var(--control-shadow); }
+.v-stage .v-catalog-card:hover { border-color: color-mix(in srgb,var(--accent) 45%,var(--line)); background: var(--accent-soft); }
+.v-catalog-card>small { padding: 2px 5px; background: var(--inset); border-radius: 4px; font-size: 9px; }
+.v-stage .v-catalog-custom { justify-content: flex-start; padding: 14px; border: 1px dashed color-mix(in srgb,var(--accent) 30%,var(--line)); border-radius: 9px; color: var(--accent); }
+.v-stage .v-catalog-custom>svg { width: 33px; }
+
+/* Reused production controls use the same form, chip and button language. */
+.v-model-controls { min-height: 0; flex: none; overflow: visible; padding: 0; }
+.v-model-controls>div { padding: 0; gap: 16px; grid-template-rows: auto auto; }
+.v-model-controls>div>div:nth-child(2) { overflow: visible; margin-right: 0; padding-right: 0; }
+.v-model-controls>div>div:first-child { align-items: center; }
+.v-model-controls>div>div:first-child>div:first-child p { margin: 3px 0 0; font-size: 10px; white-space: normal; }
+.v-original-controls .rounded-panel, .v-original-controls .rounded-inner { border-radius: 9px; }
+.v-original-controls .rounded-full { border-radius: 5px; }
+.v-original-controls :is(.text-sm,.text-xs) { line-height: 1.55; }
+.v-original-controls .text-sm { font-size: 11px; }
+.v-original-controls .text-xs { font-size: 10px; }
+.v-original-controls button.h-9 {
+  height: var(--control-height); padding: 5px 10px; border-radius: 7px; font-size: 11px;
+  font-weight: 500; background: linear-gradient(var(--surface),var(--inset)); border: 1px solid var(--line); box-shadow: var(--control-shadow);
+}
+.v-original-controls button.h-9 svg { width: 13px; height: 13px; }
+.v-original-controls button.h-9:hover:not(:disabled) { background: var(--accent-soft); }
+.v-original-controls button.h-9.bg-action { background: linear-gradient(145deg,#9b81b8,#7a6096); color: white; border-color: #806591; }
+.v-original-controls button.h-9.text-danger { color: #b75466; background: color-mix(in srgb,#b75466 6%,var(--surface)); }
+.v-original-controls [class*="min-h-[52px]"] { min-height: 64px; padding: 11px 12px; }
+.v-original-controls [class*="min-h-[52px]"]:hover { background: color-mix(in srgb,var(--accent-soft) 55%,var(--surface)); }
+.v-original-controls label>span.relative:has(>.peer) { height: 18px; width: 32px; }
+.v-original-controls .peer~span.inset-0 { background: color-mix(in srgb,var(--muted) 25%,var(--surface)); border-color: var(--line); border-radius: 20px; }
+.v-original-controls .peer:checked~span.inset-0 { background: linear-gradient(145deg,#a98fbf,#82659d); border-color: #9880ad; }
+.v-original-controls .peer~span:last-child { width: 14px; height: 14px; left: 1px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px #25152e30; }
+.v-original-controls .peer:checked~span:last-child { transform: translateX(14px); }
+.v-original-controls input[type=checkbox]:not(.sr-only) { accent-color: #9276ab; border-radius: 4px; }
+.v-original-controls .bg-white { background-color: var(--surface); }
+.v-model-controls .fixed { position: fixed; inset: 0; padding: 20px; background: #17102066; }
+.v-model-controls .fixed>div {
+  width: 620px; max-width: 100%; max-height: calc(100dvh - 40px); display: grid;
+  grid-template-rows: auto minmax(0,1fr) auto; border-radius: 13px; background: var(--surface);
+  border: 1px solid var(--line); box-shadow: 0 24px 80px #170c2840;
+}
+.v-model-controls .fixed>div>div:first-child { padding: 17px 20px; background: var(--title); }
+.v-model-controls .fixed>div>div:nth-child(2) { min-height: 0; overflow: auto; padding: 18px 20px; gap: 14px; }
+.v-model-controls .fixed>div>div:last-child { padding: 12px 20px; background: var(--title); }
+.v-model-controls .fixed section { border: 1px solid var(--line); background: var(--inset); padding: 14px; gap: 12px; }
+.v-model-controls .fixed section:first-child { grid-template-columns: 1fr 1fr; }
+.v-model-controls .fixed section:first-child>div:first-child { grid-column: 1/-1; }
+.v-model-controls .fixed .field { border-radius: 7px; height: 34px; margin-top: 0; font-size: 11px; }
+.v-model-controls .fixed label:not(.field) { border-radius: 6px; }
+.v-model-controls .fixed .text-base { font-size: 14px; font-weight: 600; }
+.v-model-controls .fixed h4 { font-size: 12px; }
+.v-model-controls .fixed p { font-size: 10px; margin-bottom: 0; white-space: normal; }
+.v-model-controls .fixed .lg\:grid-cols-\[minmax\(0\,1fr\)_190px\] { grid-template-columns: minmax(0,1fr) 145px; }
+
+/* Accounts, clients and settings share consistent inset panels and spacing. */
+.v-client-detail>.v-provider-detail { display: none; }
+.v-detail-row { min-height: 47px; padding: 12px 0; font-size: 11px; gap: 12px; }
+.v-detail-row>b { text-align: right; overflow-wrap: anywhere; }
+.v-detail-row>span:first-child { flex-shrink: 0; }
+.v-client-detail>label { padding-top: 16px; padding-bottom: 4px; }
+.v-client-detail>.v-primary { width: 100%; margin-top: 18px; }
+.v-config-preview { margin: 13px 0; max-width: 100%; font-size: 10px; line-height: 1.8; background: var(--inset); }
+.v-setting-row { padding: 0 0 15px; font-size: 12px; }
+.v-setting-row small { margin-top: 5px; font-size: 10px; }
+.v-auth-status { padding: 18px; margin: 0 0 16px; background: linear-gradient(130deg,var(--title),var(--surface)); border-radius: 10px; }
+.v-auth-status .v-account-actions { margin-top: 18px; }
+.v-device-code { padding: 19px; margin: 18px 0; border-radius: 8px; font-size: 25px; font-weight: 550; }
+.v-quota-windows { padding: 16px; margin: 16px 0; border: 1px solid var(--line); border-radius: 9px; }
+.v-official-usage { min-width: 0; overflow: visible; }
+.v-settings-section { gap: 24px; grid-template-columns: 180px minmax(0,1fr); }
+.v-settings-section-heading { padding-top: 14px; }
+.v-settings-section-heading p { font-size: 10px; line-height: 1.8; max-width: 185px; }
+.v-settings-row { gap: 16px; min-height: 67px; padding: 14px 17px; }
+.v-settings-row>div:first-child b { font-size: 11px; line-height: 1.5; }
+.v-settings-row small { font-size: 10px; line-height: 1.6; margin-top: 4px; }
+.v-settings-row>div:last-child { max-width: 48%; }
+.v-settings :is(input,select) { font-size: 11px; height: 33px; border-radius: 7px; }
+.v-settings-row>div:last-child input { max-width: 100%; }
+.v-settings .v-key-editor { padding: 13px; }
+.v-settings-section>div:last-child>.v-account-actions { margin: 0; padding: 0 16px 15px; }
+.v-diagnostic-metrics { margin: 0; padding: 14px 16px; gap: 9px; }
+.v-diagnostic-metrics div { padding: 11px; border-radius: 7px; }
+.v-diagnostic-metrics b { font-size: 19px; font-weight: 550; }
+.v-diagnostic-metrics small { font-size: 10px; }
+.v-settings-section>div:last-child>.v-dialog-hint,
+.v-settings-section>div:last-child>.v-inline-confirm,
+.v-settings-section>div:last-child>.v-config-preview { margin: 13px 16px; }
+.v-settings .v-context-status:empty { display: none; }
+.v-context-status:has(>.v-dialog-hint) { padding: 0 16px 14px; }
+.v-context-status:not(:has(>.v-dialog-hint)) { display: none; }
+.v-release-notes { padding: 16px 17px; font-size: 11px; }
+.v-release-notes p { margin-top: 8px; font-size: 10px; color: var(--muted); line-height: 1.8; }
+.v-settings-section>div:last-child>.v-primary { margin: 0 16px 16px!important; width: calc(100% - 32px); border-radius: 7px!important; min-height: 34px; }
+.v-about-brand { gap: 16px; padding: 6px 0 25px; }
+.v-about-brand>img { width: 60px; height: 60px; }
+.v-icon-study { padding-top: 16px; }
+.v-settings-save { min-height: 56px; }
+.v-settings-save>span { font-size: 10px; }
+
+/* Table and card alignment is preserved at compact desktop widths. */
+.v-provider-table { overflow: hidden; border-radius: var(--panel-radius); }
+.v-table-labels,.v-provider-row,.v-provider-row:has(.v-provider-order>span),
+.v-provider-table .v-table-labels:has(+.v-provider-row .v-provider-order span) {
+  grid-template-columns: minmax(140px,1.25fr) minmax(105px,1fr) minmax(100px,1fr) 76px;
+  gap: 16px; padding-left: 17px; padding-right: 17px;
+}
+.v-table-labels { font-size: 9px; letter-spacing: .15px; }
+.v-table-labels>span:last-child { text-align: right; }
+.v-provider-row>.v-provider-order { justify-self: stretch; }
+.v-provider-row { min-height: 64px; height: auto; padding-top: 11px; padding-bottom: 11px; }
+.v-provider-identity small,.v-balance small,.v-quota small { font-size: 9px; line-height: 1.5; }
+.v-provider-identity b { font-size: 12px; }
+.v-provider-order>span { opacity: .35; transition: opacity .15s; }
+.v-provider-row:hover .v-provider-order>span,.v-provider-row:focus-within .v-provider-order>span { opacity: 1; }
+.v-client-heading h2 { font-size: 12px; }
+.v-client-heading small { font-size: 9px; line-height: 1.5; }
+.v-client-config code { font-size: 9px; }
+.v-client-bottom small { font-size: 9px; line-height: 1.6; }
+.v-client-grid { align-items: stretch; }
+.v-client-section-head { flex-wrap: wrap; gap: 10px; }
+.v-client-section-head h2 { gap: 9px; }
+.v-stage .v-client-section-head .v-small-button { min-height: 27px; font-size: 10px; padding: 4px 8px; }
+.v-service-strip .v-service-actions .v-power-button { min-height: 24px; }
+.v-analytics { min-height: 420px; }
+.v-analytics :is(button,select) { font-family: inherit; }
+.v-analytics .rounded-control { border-radius: 7px; }
+.v-analytics-note { flex-wrap: wrap; gap: 5px; }
+.v-toast { max-width: min(640px,calc(100vw - 32px)); padding: 12px 14px; line-height: 1.6; }
+
+/* The tools panel is explicitly separate from the product's settings. */
+.v-dialog-tools .v-dialog-body { flex: 1; padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.v-tools { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.v-tools-intro { display: flex; align-items: start; gap: 10px; padding: 18px 22px 6px; color: var(--accent); }
+.v-tools-intro svg { flex-shrink: 0; margin-top: 3px; }
+.v-tools-intro b { font-size: 12px; }
+.v-stage .v-tools-intro p { color: var(--muted); font-size: 10px; margin: 5px 0; }
+.v-tools-fields { flex: 1; min-height: 0; padding: 6px 22px; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.v-stage .v-dialog .v-tools .v-tool-field { display: grid; grid-template-columns: minmax(130px,1fr) minmax(190px,1.3fr); gap: 14px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--line); margin: 0; }
+.v-stage .v-dialog .v-tools .v-tool-field select { margin: 0; width: 100%; }
+.v-tools-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 22px; border-top: 1px solid var(--line); background: var(--title); }
+
+@media(max-width:900px) {
+  .v-settings-section { grid-template-columns: 155px minmax(0,1fr); gap: 18px; }
+  .v-table-labels,.v-provider-row,.v-provider-row:has(.v-provider-order>span),.v-provider-table .v-table-labels:has(+.v-provider-row .v-provider-order span) { gap: 12px; grid-template-columns: minmax(126px,1.1fr) minmax(96px,.8fr) minmax(96px,1fr) 70px; }
+  .v-client-grid { grid-template-columns: 1fr 1fr; }
+}
+@media(max-width:640px) {
+  .v-stage .v-overlay { padding: 10px; }
+  .v-stage .v-dialog { max-height: calc(100dvh - 20px); }
+  .v-stage .v-dialog-provider,.v-stage .v-dialog-tools { height: calc(100dvh - 20px); }
+  .v-stage .v-dialog-heading { padding: 14px 16px; min-height: 66px; }
+  .v-dialog-body,.v-editor-content { padding: 16px; }
+  .v-dialog-body-provider,.v-dialog-tools .v-dialog-body { padding: 0; }
+  .v-editor-tabs,.v-editor-footer { padding-left: 16px; padding-right: 16px; }
+  .v-model-controls>div>div:first-child { grid-template-columns: 1fr; gap: 10px; }
+  .v-model-controls>div>div:first-child>div:last-child { justify-content: flex-start; flex-wrap: wrap; }
+  .v-original-controls [class*="min-h-[52px]"] { grid-template-columns: 1fr; gap: 8px; }
+  .v-original-controls [class*="min-h-[52px]"]>div:last-child>div { justify-content: flex-start; }
+  .v-stage .v-onboarding,.v-provider-form { grid-template-columns: 1fr; }
+  .v-provider-form>* { grid-column: 1!important; }
+  .v-provider-form>.v-small-button { justify-self: start; }
+  .v-settings-section { grid-template-columns: 1fr; gap: 10px; }
+  .v-settings-section-heading p { max-width: none; }
+  .v-settings-row { padding: 13px; }
+  .v-settings-row>div:last-child { max-width: 47%; }
+  .v-table-labels,.v-provider-row,.v-provider-row:has(.v-provider-order>span),.v-provider-table .v-table-labels:has(+.v-provider-row .v-provider-order span) { grid-template-columns: minmax(110px,1fr) minmax(88px,.8fr) 70px; gap: 10px; padding-left: 12px; padding-right: 12px; }
+  .v-provider-row>.v-quota { grid-column: 2; grid-row: 2; }
+  .v-table-labels>span:nth-child(3) { display: none; }
+  .v-provider-row>.v-provider-order { grid-column: 3; grid-row: 1/3; }
+  .v-provider-row>.v-provider-identity { grid-row: 1/3; }
+  .v-provider-row>.v-balance { grid-column: 2; }
+  .v-provider-row>.v-quota .v-track { display: none; }
+  .v-model-controls .fixed { padding: 10px; }
+  .v-model-controls .fixed>div { max-height: calc(100dvh - 20px); }
+  .v-model-controls .fixed section:first-child { grid-template-columns: 1fr; }
+  .v-model-controls .fixed .lg\:grid-cols-\[minmax\(0\,1fr\)_190px\] { grid-template-columns: 1fr; }
+  .v-stage .v-dialog .v-tools .v-tool-field { grid-template-columns: 1fr; gap: 6px; }
+}
+@media(max-height:620px) {
+  .v-stage .v-dialog-heading { min-height: 61px; padding-top: 12px; padding-bottom: 12px; }
+  .v-editor-tabs { padding-top: 8px; padding-bottom: 8px; }
+  .v-editor-content { padding-top: 14px; padding-bottom: 14px; }
+  .v-page-heading { margin-bottom: 12px; }
+  .v-page-heading h1 { font-size: 20px; }
+  .v-settings-body { padding-top: 12px; }
+}
+@media(prefers-reduced-motion:reduce) { .v-stage * { transition: none!important; } }
+/* Palette bridge for the unchanged production quota/heatmap component. */
+.v-quota-windows .bg-slate-200 { background: var(--line); }
+.v-quota-windows .bg-emerald-500 { background: var(--green); }
+.v-official-usage [style*="background-color: rgb(239, 242, 245)"] { background-color: var(--line)!important; }
+.v-official-usage [style*="background-color: rgb(216, 235, 255)"] { background-color: color-mix(in srgb,var(--accent) 25%,var(--inset))!important; }
+.v-official-usage [style*="background-color: rgb(172, 215, 255)"] { background-color: color-mix(in srgb,var(--accent) 45%,var(--inset))!important; }
+.v-official-usage [style*="background-color: rgb(124, 193, 255)"] { background-color: color-mix(in srgb,var(--accent) 65%,var(--inset))!important; }
+.v-official-usage [style*="background-color: rgb(72, 167, 251)"] { background-color: color-mix(in srgb,var(--accent) 85%,var(--inset))!important; }
+.v-official-usage [style*="background-color: rgb(22, 135, 232)"] { background-color: var(--accent)!important; }

@@ -58,3 +58,11 @@ Scenario controls live behind the titlebar prototype control or a disclosure in 
 Verification: TypeScript compilation; staged diff hygiene; report-only quality gates (parse_errors: 0, existing non-blocking reports). Browser checks include the full catalog, adding xAI through to authorized quota windows, English settings and return to Chinese, Gateway restart confirmation, failed settings save preserving its draft then successful retry, client version/drift states, and light/dark visual inspection. Existing chart and model-editor behavior are retained by direct component reuse. This is UI coverage evidence, not production runtime acceptance.
 
 No implementation issue was supplied, so the approved design verdict and branch pointer are captured here and in the prototype commit, without posting to an unrelated issue.
+
+## Revision 7 — unified finish and complete viewport access
+
+- Preserve the approved pearl/plum desktop direction in both themes. Shared control height, form fields, focus states, chips, panel spacing and provider/client identities now extend to all parity additions and reused model/usage controls.
+- Remove QA scenario selectors from product forms; retain every scenario in the titlebar's Prototype Tools, grouped by service, account/model and maintenance. These remain in-memory fixtures.
+- Modal heading and provider save bar remain visible. Each detail has a single scroll owner; provider tab changes begin at the top. Dialog widths are explicitly bounded by viewport width, including narrow desktop panes.
+- Browser verification: 1280×720, 840×600 and 640×520; light/dark model forms, catalog onboarding, 46-model list bottom, official usage heatmap, client configuration expansion, all six settings categories, custom statistics calendar, overview and centralized tools. Settings and provider footers remain reachable/visible; no horizontal overflow in the inspected narrow overview or provider detail.
+- This is a fast, isolated prototype change. Backend integration and native-window behavior remain outside this browser verification.
