@@ -27,6 +27,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "src-python/global_state_repair.py",
     "src-python/history_consolidate.py",
     "src-python/history_overlay.py",
+    "src-python/official_catalog.py",
     "src-python/probe_upstream_format.py",
     "scripts/analyze_transport_failures.py",
     "scripts/audit_issue_62_runtime_artifacts.py",

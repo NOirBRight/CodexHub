@@ -115,7 +115,9 @@ def test_task_creation_evidence_reports_unavailable_boundary_sources_without_loc
     assert str(tmp_path) not in rendered
 
 
-def test_task_creation_boundary_guard_covers_bounded_app_server_probe_sites() -> None:
+def test_task_creation_boundary_guard_covers_both_metadata_transports() -> None:
+    assert Path("src-tauri/src/official_catalog.rs") in CHECKER.OWNERSHIP_BOUNDARY_PATHS
+    assert Path("src-python/official_catalog.py") in CHECKER.OWNERSHIP_BOUNDARY_PATHS
     assert Path("src-tauri/src/models.rs") in CHECKER.OWNERSHIP_BOUNDARY_PATHS
     assert Path("src-tauri/src/openai_usage.rs") in CHECKER.OWNERSHIP_BOUNDARY_PATHS
     assert CHECKER.validate_owned_boundary_sources(ROOT) == []

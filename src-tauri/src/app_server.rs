@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+#[cfg(test)]
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -133,6 +134,7 @@ impl AppServerSession {
         }
     }
 
+    #[cfg(test)]
     pub fn request(
         &mut self,
         calls: &[AppServerCall],
@@ -192,6 +194,7 @@ impl AppServerSession {
             .map_err(|error| format!("failed to flush codex app-server {purpose} request: {error}"))
     }
 
+    #[cfg(test)]
     fn read_message(&mut self, deadline: Instant, timeout: Duration, purpose: &str) -> Result<Value, String> {
         if Instant::now() >= deadline {
             self.kill();

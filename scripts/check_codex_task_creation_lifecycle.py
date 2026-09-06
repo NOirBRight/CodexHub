@@ -33,8 +33,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EVIDENCE_PATH = (
     REPO_ROOT / "docs" / "evidence" / "issue-106" / "task-creation-lifecycle.json"
 )
-APP_SERVER_PROBE_MARKERS = {
-    Path("src-tauri/src/models.rs"): 'args(["app-server", "--stdio"])',
+# Historical evidence below remains immutable. Check today's ownership boundary
+# separately: model discovery now uses direct HTTP, while usage still probes
+# app-server. Neither path owns native task creation or global MCP settings.
+METADATA_PROBE_MARKERS = {
+    Path("src-tauri/src/models.rs"): "crate::official_catalog::fetch(refresh)?",
+    Path("src-tauri/src/official_catalog.rs"): "refresh.check(deadline)?",
     Path("src-tauri/src/openai_usage.rs"): 'args(["app-server", "--stdio"])',
 }
 OWNERSHIP_BOUNDARY_PATHS = (
@@ -43,7 +47,8 @@ OWNERSHIP_BOUNDARY_PATHS = (
     Path("src-tauri/src/catalog.rs"),
     Path("src-tauri/src/config.rs"),
     Path("src-tauri/src/proxy.rs"),
-    *APP_SERVER_PROBE_MARKERS,
+    Path("src-python/official_catalog.py"),
+    *METADATA_PROBE_MARKERS,
 )
 GLOBAL_MCP_CONFIGURATION_TOKENS = ("openaideveloperdocs", "mcp_servers")
 FORBIDDEN_KEYS = {
@@ -301,10 +306,10 @@ def validate_owned_boundary_sources(repo_root: Path = REPO_ROOT) -> list[str]:
                     "ownership boundary source configures global MCP token "
                     f"{token!r}: {relative_path.as_posix()}"
                 )
-        marker = APP_SERVER_PROBE_MARKERS.get(relative_path)
+        marker = METADATA_PROBE_MARKERS.get(relative_path)
         if marker is not None and marker.lower() not in source:
             mismatches.append(
-                "ownership boundary source missing bounded app-server probe: "
+                "ownership boundary source missing bounded metadata probe: "
                 f"{relative_path.as_posix()}"
             )
     return mismatches
