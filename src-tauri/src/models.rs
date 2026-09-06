@@ -347,7 +347,7 @@ fn official_editor_payload(native_path: &Path, paths: &ModelPaths) -> Result<Opt
     for path in [native_path, editor_path.as_path()] {
         if !path.exists() { continue; }
         match load_json_file(path).and_then(|payload| {
-            subscription_models_from_payload(&payload)?;
+            validate_official_snapshot(&payload)?;
             Ok(payload)
         }) {
             Ok(payload) => {
@@ -367,6 +367,28 @@ fn official_editor_payload(native_path: &Path, paths: &ModelPaths) -> Result<Opt
     }
     if let Some(error) = errors.into_iter().next() { return Err(error); }
     Ok(None)
+}
+
+fn validate_official_snapshot(payload: &Value) -> Result<(), String> {
+    let items = payload.get("models").and_then(Value::as_array)
+        .ok_or_else(|| "Official snapshot did not contain a model array".to_string())?;
+    // An explicitly empty (or entirely hidden) catalog is valid. Missing
+    // identity/visibility fields are not evidence that models were removed.
+    for item in items {
+        let object = item.as_object()
+            .ok_or_else(|| "Official snapshot contains a non-object model".to_string())?;
+        let identity = object.get("slug").or_else(|| object.get("id"))
+            .or_else(|| object.get("model")).or_else(|| object.get("name"));
+        if !identity.and_then(Value::as_str).is_some_and(|id| !id.trim().is_empty()) {
+            return Err("Official snapshot contains a model without an identity".to_string());
+        }
+        if !item_has_internal_identity(object)
+            && catalog_visibility_from_item(object) == CatalogVisibility::Unknown {
+            return Err("Official snapshot contains a model without known visibility".to_string());
+        }
+    }
+    subscription_models_from_payload(payload)?;
+    Ok(())
 }
 
 /// Feed publication the same complete membership as the editor. Preserve the
@@ -891,8 +913,7 @@ fn acquire_official_models_direct_with_runner(
     let snapshot = runner.read_model_list()?;
     let mut native_cache = snapshot.native_cache;
     let native_payload = native_cache.as_ref().and_then(|text| serde_json::from_str::<Value>(text).ok())
-        .filter(|payload| payload.get("models").and_then(Value::as_array)
-            .is_some_and(|models| !models.is_empty() && models.iter().all(Value::is_object)));
+        .filter(|payload| validate_official_snapshot(payload).is_ok());
     if native_cache.is_some() && native_payload.is_none() {
         if !model_list_contains_context_metadata(&snapshot.payload) {
             return Err("Official refresh returned an invalid native model cache without complete model metadata".to_string());
@@ -3462,13 +3483,13 @@ mod tests {
         let paths = test_paths(&root);
         let native = root.join("models_cache.json");
         fs::write(&native, json!({"models": [{"slug":"gpt-5.4","visibility":"list"}]}).to_string()).unwrap();
-        fs::File::open(&native).unwrap().set_modified(UNIX_EPOCH + Duration::from_secs(100)).unwrap();
+        fs::OpenOptions::new().write(true).open(&native).unwrap().set_modified(UNIX_EPOCH + Duration::from_secs(100)).unwrap();
         let snapshot = paths.official_editor_cache_path();
         crate::safe_file::write_text_atomic(&snapshot, &json!({
             "fetched_at": "2026-01-01T00:00:00Z", "client_version": "0.153.4",
             "models": [{"slug":"gpt-6-astra","visibility":"list"}, {"slug":"gpt-hidden","visibility":"hide"}]
         }).to_string()).unwrap();
-        fs::File::open(&snapshot).unwrap().set_modified(UNIX_EPOCH + Duration::from_secs(200)).unwrap();
+        fs::OpenOptions::new().write(true).open(&snapshot).unwrap().set_modified(UNIX_EPOCH + Duration::from_secs(200)).unwrap();
         let models = super::official_editor_models(&native, &paths).unwrap();
         assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["gpt-6-astra"]);
         let seed = super::prepare_official_editor_seed_at(&native, &paths).unwrap().unwrap();
@@ -3490,6 +3511,14 @@ mod tests {
         ]}).to_string()).unwrap();
         assert_eq!(super::official_editor_models(&native, &paths).unwrap()[0].id, "gpt-6-astra");
         fs::write(&native, "invalid").unwrap();
+        assert_eq!(super::official_editor_models(&native, &paths).unwrap()[0].id, "gpt-6-astra");
+        // A newer cache with missing visibility is incomplete, not an empty
+        // catalog. Keep the last complete snapshot instead of dropping rows.
+        fs::write(&native, include_str!("../../tests/fixtures/codex_0_144_2_direct_models_cache.json")).unwrap();
+        assert_eq!(super::official_editor_models(&native, &paths).unwrap()[0].id, "gpt-6-astra");
+        fs::write(&native, json!({"models":[
+            {"slug":"gpt-5.4", "visibility":"list"}, {"slug":"gpt-6-astra"}
+        ]}).to_string()).unwrap();
         assert_eq!(super::official_editor_models(&native, &paths).unwrap()[0].id, "gpt-6-astra");
         // A later native refresh supersedes the editor snapshot, including
         // a valid empty catalog; removed models must not be resurrected.
@@ -4117,12 +4146,15 @@ for line in sys.stdin:
     #[test]
     fn direct_acquisition_never_publishes_malformed_native_cache() {
         let complete = json!({"models":[{"slug":"gpt-6-astra", "visibility":"list", "context_window":1000000, "effective_context_window_percent":95}]});
-        let runner = StaticAppServerModelListRunner::ok_with_cache(complete, "{partial");
-        let acquired = super::acquire_official_models_direct_with_runner(&runner).unwrap();
-        assert!(acquired.native_cache.is_none());
-        assert_eq!(acquired.models[0].id, "gpt-6-astra");
-        let runner = StaticAppServerModelListRunner::ok_with_cache(json!({"models":[{"slug":"gpt-5.4", "visibility":"list"}]}), "{partial");
-        assert!(super::acquire_official_models_direct_with_runner(&runner).is_err());
+        for invalid in ["{partial", "{\"models\":[{\"visibility\":\"list\"}]}",
+            include_str!("../../tests/fixtures/codex_0_144_2_direct_models_cache.json")] {
+            let runner = StaticAppServerModelListRunner::ok_with_cache(complete.clone(), invalid);
+            let acquired = super::acquire_official_models_direct_with_runner(&runner).unwrap();
+            assert!(acquired.native_cache.is_none());
+            assert_eq!(acquired.models[0].id, "gpt-6-astra");
+            let runner = StaticAppServerModelListRunner::ok_with_cache(json!({"models":[{"slug":"gpt-5.4", "visibility":"list"}]}), invalid);
+            assert!(super::acquire_official_models_direct_with_runner(&runner).is_err());
+        }
     }
 
     #[test]
