@@ -1,5 +1,93 @@
 static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+/// Keep Gateway client export tests independent from the developer's current
+/// Codex subscription cache.  The production exporter intentionally treats
+/// that cache as the Official membership authority, so a host with a newer or
+/// older model list must not change these tests' expected gpt-5.4 assertions.
+struct OfficialModelsTestHome {
+    root: PathBuf,
+    previous_codex_home: Option<std::ffi::OsString>,
+    previous_runtime_home: Option<std::ffi::OsString>,
+}
+
+impl OfficialModelsTestHome {
+    fn new() -> Self {
+        let root = unique_temp_dir("codexhub-gateway-official-home");
+        let catalogs = root.join("model-catalogs");
+        fs::create_dir_all(&catalogs).unwrap();
+
+        let official_models = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
+        let subscription_models = official_models
+            .iter()
+            .map(|slug| {
+                json!({
+                    "slug": slug,
+                    "display_name": slug,
+                    "visibility": "list",
+                })
+            })
+            .collect::<Vec<_>>();
+        let published_models = official_models
+            .iter()
+            .map(|slug| {
+                json!({
+                    "slug": slug,
+                    "codex_proxy_metadata": {
+                        "provider": "openai",
+                        "upstream_name": "official",
+                        "official_context_budget": {
+                            "source": "degraded_last_known_official",
+                            "freshness": "stale",
+                            "model_context_window": 272000,
+                            "effective_context_window_percent": 95,
+                            "effective_context_window": 258400,
+                            "model_auto_compact_token_limit": 244800,
+                        },
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+
+        fs::write(
+            catalogs.join("openai-plus-ollama-cloud.json"),
+            serde_json::to_vec_pretty(&json!({
+                "fetched_at": "2026-01-01T00:00:00Z",
+                "models": subscription_models,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            catalogs.join("codexhub-model-catalog.json"),
+            serde_json::to_vec_pretty(&json!({ "models": published_models })).unwrap(),
+        )
+        .unwrap();
+
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        let previous_runtime_home = std::env::var_os("CODEXHUB_RUNTIME_HOME");
+        std::env::set_var("CODEX_HOME", &root);
+        std::env::set_var("CODEXHUB_RUNTIME_HOME", &root);
+
+        Self {
+            root,
+            previous_codex_home,
+            previous_runtime_home,
+        }
+    }
+}
+
+impl Drop for OfficialModelsTestHome {
+    fn drop(&mut self) {
+        restore_env("CODEX_HOME", self.previous_codex_home.take());
+        restore_env("CODEXHUB_RUNTIME_HOME", self.previous_runtime_home.take());
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn isolated_official_models_home() -> OfficialModelsTestHome {
+    OfficialModelsTestHome::new()
+}
+
 fn published_context_windows(entries: &[(&str, u32)]) -> BTreeMap<String, u32> {
     entries
         .iter()

@@ -131,6 +131,7 @@ macro_rules! desktop_command_registry {
             GenerateCatalog => "generate_catalog" => $crate::desktop_commands::generate_catalog, true, true, true, false, ALIASES_RESTART;
             GetCatalogOverrideDiagnostics => "get_catalog_override_diagnostics" => $crate::desktop_commands::get_catalog_override_diagnostics, true, true, true, false, NO_ALIASES;
             ListModels => "list_models" => $crate::desktop_commands::list_models, true, true, true, false, NO_ALIASES;
+            ListOfficialModels => "list_official_models" => $crate::desktop_commands::list_official_models, true, true, true, false, NO_ALIASES;
             RefreshModelMetadata => "refresh_model_metadata" => $crate::desktop_commands::refresh_model_metadata, true, true, true, false, NO_ALIASES;
             ListModelMetadata => "list_model_metadata" => $crate::desktop_commands::list_model_metadata, true, true, true, false, NO_ALIASES;
             SaveModelMetadataOverride => "save_model_metadata_override" => $crate::desktop_commands::save_model_metadata_override, true, true, true, false, NO_ALIASES;

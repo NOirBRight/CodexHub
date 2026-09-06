@@ -15,7 +15,6 @@ import {
   buildOfficialRefreshIntent,
   buildNextProviderFromForm,
   providerWorkspaceReducer,
-  resolveOfficialRefresh,
   selectSelectedProvider,
   formProbeModelFor,
   providerProbeModelFor,
@@ -27,7 +26,6 @@ import {
   type ProviderWorkspaceState,
 } from "../lib/providerWorkspace/core";
 import { catalogOverrideToastMessage } from "../lib/providerWorkspace/feedback";
-import { mergeOfficialModelSources, sortOfficialModels } from "../lib/officialModels";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
@@ -121,11 +119,9 @@ function initialState(source: WorkspaceSource): ProviderWorkspaceState {
     modelMetadata: source.modelMetadata,
     officialDisabledModelsDraft: source.settings?.official_disabled_models ?? [],
     officialModelOrderDraft: source.settings?.official_model_sort_order ?? [],
-    officialModelSnapshot: null,
-    officialModels: sortOfficialModels(
-      mergeOfficialModelSources(source.catalogModels, source.modelMetadata),
-      source.settings?.official_model_sort_order ?? [],
-    ),
+    officialModelSnapshot: [],
+    officialModels: [],
+    officialCatalogLoaded: false,
     pendingNavigation: null,
     pendingNewProvider: null,
     probeResult: null,
@@ -152,6 +148,20 @@ export function useProviderWorkspace(options: {
   const dirtyDraftRef = useRef<ProviderDraftState<Provider> | null>(null);
   const sourceRef = useRef(externalSource);
   sourceRef.current = externalSource;
+
+  useEffect(() => {
+    let cancelled = false;
+    api.listOfficialModels().then(models => {
+      if (!cancelled) dispatch({ type: "initializeOfficialModels", models });
+    }).catch(error => {
+      if (!cancelled) {
+        const message = messageFromError(error);
+        dispatch({ type: "setDiscoveryError", error: message });
+        showToast(message, "error");
+      }
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const saveCoordinator = useRef(createWorkspaceSaveCoordinator()).current;
 
@@ -522,11 +532,10 @@ export function useProviderWorkspace(options: {
             // Refresh reads the current Official model list. Applying a new
             // Codex overlay is a separate, explicitly authorized mutation.
             const refreshResult = await api.refreshOfficialModels(false);
-            const resolved = resolveOfficialRefresh(state.officialModelOrderDraft, refreshResult.models);
-            if (!resolved.followsAutomatic) {
-              dispatch({ type: "setOfficialModelOrderDraft", order: resolved.nextOrder });
+            if (refreshResult.warning?.trim() && !refreshResult.codex_restart_result) {
+              throw new Error(refreshResult.warning.trim());
             }
-            dispatch({ type: "setOfficialModels", models: resolved.sortedModels });
+            dispatch({ type: "applyOfficialRefresh", models: refreshResult.models });
             if (quiet) {
               await refreshGatewayState();
               dispatch({ type: "setDiscoveryError", error: null });

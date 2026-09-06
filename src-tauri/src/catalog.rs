@@ -40,6 +40,10 @@ pub(crate) fn sync_catalog_with_existing_lock() -> Result<String, String> {
     let python = config::find_python()?;
     let runner = ProcessCatalogSyncCommandRunner;
 
+    if let Some(seed) = models::prepare_official_editor_seed()? {
+        crate::safe_file::write_text_atomic_with_mode(&seed.path, &seed.text, seed.unix_mode)?;
+    }
+
     sync_catalog_with_paths(&paths, &python, &runner)
 }
 
@@ -66,9 +70,16 @@ pub(crate) fn prepare_catalog(
 ) -> Result<PreparedCatalogPublication, String> {
     let actual = CatalogPaths::runtime()?;
     let python = config::find_python()?;
+    let mut inputs = overlays.to_vec();
+    let seed_path = actual.codex_dir.join("model-catalogs/openai-plus-ollama-cloud.json");
+    if !inputs.iter().any(|input| input.path == seed_path) {
+        if let Some(seed) = models::prepare_official_editor_seed()? {
+            inputs.push(seed);
+        }
+    }
     prepare_catalog_with_paths(
         &actual,
-        overlays,
+        &inputs,
         &python,
         &ProcessCatalogSyncCommandRunner,
     )
