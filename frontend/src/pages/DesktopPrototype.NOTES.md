@@ -80,3 +80,7 @@ No implementation issue was supplied, so the approved design verdict and branch 
 - OpenAI combines 5-hour and weekly windows; xAI/Grok shows a single weekly quota; balance providers show balance and today's spend; Kimi shows remaining/total tokens. Percent, meter and reset text form one group. Model counts and duplicate healthy-balance status are removed from this overview.
 - Added an explicitly simulated xAI subscription to the default fixtures. Its detail panel also uses only the weekly quota, starting with a signed-in demo account. Login/logout/error flows remain available. Chart fixtures include all five sample providers.
 - Rows are 64px high. Browser checks cover light/dark at 1125×926, 840×600 and 640×520, the single-week detail link, last-row reachability and independent scrolling. Production integrations are unchanged.
+
+### Revision 9 follow-up — weekly alignment
+
+User correction: a provider with only weekly quota uses the right-hand resource slot, aligned with OpenAI's weekly window; the left slot stays empty. Other single-resource types keep their existing layout. Browser measurement confirmed identical x-position and width for both weekly groups; TypeScript and diff checks pass.

@@ -391,6 +391,8 @@
 .v-stage .v-resource-detail-button { display:block; padding:0; width:100%; min-width:0; text-align:left; color:var(--ink); border-radius:5px; }
 .v-resource-details { width:100%; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:26px; align-items:center; }
 .v-resource-details[data-count="1"] { grid-template-columns:minmax(0,1fr); }
+.v-resource-details[data-week-only="true"] { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.v-resource-details[data-week-only="true"]>.v-resource-metric { grid-column:2; }
 .v-resource-metric { min-width:0; }
 .v-resource-value { display:flex; justify-content:space-between; align-items:baseline; gap:8px; min-width:0; }
 .v-resource-value>span { color:var(--muted); font-size:10px; white-space:nowrap; }
