@@ -66,3 +66,10 @@ No implementation issue was supplied, so the approved design verdict and branch 
 - Modal heading and provider save bar remain visible. Each detail has a single scroll owner; provider tab changes begin at the top. Dialog widths are explicitly bounded by viewport width, including narrow desktop panes.
 - Browser verification: 1280×720, 840×600 and 640×520; light/dark model forms, catalog onboarding, 46-model list bottom, official usage heatmap, client configuration expansion, all six settings categories, custom statistics calendar, overview and centralized tools. Settings and provider footers remain reachable/visible; no horizontal overflow in the inspected narrow overview or provider detail.
 - This is a fast, isolated prototype change. Backend integration and native-window behavior remain outside this browser verification.
+
+## Revision 8 — workspace roles and bounded scrolling
+
+- Overview keeps page context, Codex connection and compact metrics fixed; only remaining-resource rows scroll. Removed the decorative latency sparkline because it had no meaningful scale or data relationship.
+- Provider management now owns upstream endpoints, credential configuration, enabled-model counts/previews, ordering and direct model/account/configuration entry points. Quotas and balances remain on Overview.
+- Client page keeps connection state and filters fixed while client cards scroll independently. Replaced the misleading additional-client tile with a Connection Parameters utility in the fixed footer. It explains compatible custom-endpoint requirements and per-client format differences; no automatic unknown-client adapter or AI integration is implied. Existing Rust adapters under src-tauri/src/gateway/clients remain unchanged.
+- Browser checks at 1125×926, 840×600 and 640×520 cover both themes, resource/client independent scrolling, configuration deep links, parameter copy entry points and narrow layout bounds. No production lifecycle or persistence changes.

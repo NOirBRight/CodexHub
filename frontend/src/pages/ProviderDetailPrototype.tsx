@@ -13,8 +13,9 @@ export function makePrototypeProvider(id: string): Provider {
     const modelNames = id === 'openai' ? ['gpt-5.4', 'gpt-5.5', 'gpt-5.4-mini', 'gpt-5.3-codex-spark'] : [p.model];
     return { id, name: p.name, base_url: p.base, api_key: 'demo-not-a-real-key', enabled: true, upstream_format: 'auto', models: modelNames.map((name, i) => ({ id: name, display_name: name, enabled: true, context_window: 128000, input_modalities: id === 'deepseek' ? ['text'] : ['text', 'image'], thinking_mode: 'toggle', supported_reasoning_levels: ['low', 'medium', 'high'], default_reasoning_level: 'medium', multi_agent_version: 'v2', sort_order: i })) };
 }
-export function ProviderDetailPrototype({ provider, onSave, onDelete, notify, onDirty }: {
+export function ProviderDetailPrototype({ provider, initialTab = '模型', onSave, onDelete, notify, onDirty }: {
     provider: Provider;
+    initialTab?: string;
     onDirty: (dirty: boolean) => void;
     onSave: (p: Provider) => Promise<boolean>;
     onDelete: () => void;
@@ -24,7 +25,7 @@ export function ProviderDetailPrototype({ provider, onSave, onDelete, notify, on
     useEffect(()=>()=>window.clearTimeout(refreshTimer.current),[]);
     const [draft, setDraft] = useState(provider);
     const [showKey, setShowKey] = useState(false);
-    const [tab, setTab] = useState('模型');
+    const [tab, setTab] = useState(initialTab);
     const [officialAuth]=usePrototypeScenario('officialAuth');
     const signedIn=officialAuth==='authorized';
     const [confirmDelete, setConfirmDelete] = useState(false);
