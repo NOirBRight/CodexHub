@@ -2,6 +2,7 @@ import type { FocusEvent as ReactFocusEvent, PointerEvent as ReactPointerEvent }
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { cx } from "../../lib/format";
+import { quotaPercent, quotaResetDate } from "../../lib/workspaceResources";
 import type { OpenAIUsageLimit, OpenAIUsageSnapshot } from "../../lib/types";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
@@ -192,7 +193,7 @@ export function OfficialOpenAIUsageLimitBars({
             ? t("providers.limitRefreshing")
             : t("providers.limitEndUnknown")
           : formatUsageLimitEnd(limit.resets_at, locale, t as Translate);
-        const percent = usingPlaceholders ? null : remainingPercent(limit);
+        const percent = usingPlaceholders ? null : quotaPercent(limit);
         const value =
           percent === null
             ? busy
@@ -568,7 +569,7 @@ function limitHasUsageData(limit: OpenAIUsageLimit) {
     finiteUsageNumber(limit.limit) !== null ||
     finiteUsageNumber(limit.used) !== null ||
     finiteUsageNumber(limit.remaining) !== null ||
-    Boolean(limit.resets_at?.trim())
+    quotaResetDate(limit.resets_at) !== null
   );
 }
 
@@ -605,30 +606,14 @@ function usageLimitPeriodLabel(limit: OpenAIUsageLimit, t: Translate) {
   return limit.name?.trim() || limit.period?.trim() || limit.key;
 }
 
-function remainingPercent(limit: OpenAIUsageLimit) {
-  const total = finiteUsageNumber(limit.limit);
-  const used = finiteUsageNumber(limit.used);
-  const explicitRemaining = finiteUsageNumber(limit.remaining);
-  const remaining =
-    explicitRemaining !== null
-      ? explicitRemaining
-      : total !== null && used !== null
-        ? total - used
-        : null;
-  if (total === null || total <= 0 || remaining === null) {
-    return 0;
-  }
-  return Math.max(0, Math.min(100, (remaining / total) * 100));
-}
-
 function finiteUsageNumber(value?: number | null) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function formatUsageLimitEnd(value: string | null | undefined, locale: string, t: Translate) {
-  const date = parseUsageLimitEnd(value);
+  const date = quotaResetDate(value);
   if (!date) {
-    return value?.trim() || t("providers.limitEndUnknown");
+    return t("providers.limitEndUnknown");
   }
   return new Intl.DateTimeFormat(resolvedUsageLocale(locale), {
     day: "numeric",
@@ -636,19 +621,6 @@ function formatUsageLimitEnd(value: string | null | undefined, locale: string, t
     minute: "2-digit",
     month: "short",
   }).format(date);
-}
-
-function parseUsageLimitEnd(value: string | null | undefined) {
-  const trimmed = value?.trim();
-  if (!trimmed) {
-    return null;
-  }
-  const numeric = Number(trimmed);
-  if (Number.isFinite(numeric) && /^\d+(?:\.\d+)?$/.test(trimmed)) {
-    return new Date(numeric < 10_000_000_000 ? numeric * 1000 : numeric);
-  }
-  const parsed = Date.parse(trimmed);
-  return Number.isNaN(parsed) ? null : new Date(parsed);
 }
 
 export function defaultOfficialOpenAIUsageWindow() {

@@ -24,6 +24,8 @@ test("a weekly-only provider occupies the right slot without a fabricated short 
 });
 test("unknown quota never masquerades as exhausted or full", () => {
   assert.equal(quotaPercent(limit()), null);
+  assert.equal(quotaPercent(limit({ resets_at: "2026-09-12T07:52:00Z" })), null);
+  assert.equal(quotaPercent(limit({ used: 0 })), null);
   assert.equal(quotaPercent(limit({ limit: 0, remaining: 0 })), null);
   assert.equal(quotaPercent(limit({ limit: 100, used: 32 })), 68);
   assert.equal(quotaPercent(limit({ limit: 100, remaining: 0, used: 10 })), 0);
