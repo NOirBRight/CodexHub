@@ -25,7 +25,7 @@ export function isWeeklyLimit(limit: OpenAIUsageLimit) {
 
 /** Quota APIs return ISO timestamps as well as epoch seconds/milliseconds. */
 export function quotaResetDate(value?: string | null): Date | null {
-  const raw = value?.trim();
+  const raw = typeof value === "string" ? value.trim() : "";
   if (!raw) return null;
   const number = Number(raw);
   const date = /^\d+(?:\.\d+)?$/.test(raw)

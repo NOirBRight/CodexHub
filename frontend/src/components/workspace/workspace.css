@@ -6,6 +6,10 @@
   --ws-radius-panel: 12px;
   --ws-radius-pill: 999px;
   --ws-control-height: 32px;
+  --ws-scrim: #21133144;
+  --ws-brand-surface: #fff;
+  --ws-brand-ink: #272332;
+  --ws-switch-thumb: #fff;
   --ws-shadow-control: inset 0 1px var(--ws-rim), 0 1px 3px #25133108;
   --ws-shadow-surface: inset 0 1px var(--ws-rim), 0 2px 6px #24173908;
   --ws-shadow-floating: 0 8px 24px #21133122;
@@ -49,7 +53,7 @@
 }
 .workspace-root :focus-visible {
   outline: 2px solid var(--ws-accent);
-  outline-offset: 3px;
+  outline-offset: 2px;
 }
 .workspace-root :where(button) {
   cursor: pointer;
@@ -92,7 +96,7 @@
   color: inherit;
 }
 .workspace-root .ws-button {
-  height: 31px;
+  height: var(--ws-control-height);
   padding: 0 10px;
   background: linear-gradient(var(--ws-surface), var(--ws-inset));
   border-color: var(--ws-line);
@@ -100,17 +104,17 @@
   font-size: 11px;
 }
 .workspace-root .ws-primary {
-  height: 33px;
+  height: var(--ws-control-height);
   padding: 0 12px;
-  background: linear-gradient(135deg, #a08ab8, #7c6295);
-  color: #fff;
-  border-color: #816898;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--ws-accent) 85%, var(--ws-surface)), var(--ws-accent));
+  color: var(--ws-on-accent);
+  border-color: var(--ws-accent);
   box-shadow: var(--ws-shadow-control);
   font-size: 11px;
 }
 .workspace-root .ws-icon {
-  width: 29px;
-  height: 29px;
+  width: var(--ws-control-height);
+  height: var(--ws-control-height);
   color: var(--ws-muted);
 }
 .workspace-root
@@ -159,9 +163,9 @@
 .ws-theme {
   position: absolute;
   right: 156px;
-  top: 8px;
-  width: 29px;
-  height: 29px;
+  top: 6px;
+  width: var(--ws-control-height);
+  height: var(--ws-control-height);
   color: var(--ws-muted) !important;
 }
 .ws-title > header > div:last-child > div:last-child button {
@@ -188,9 +192,9 @@
   background: var(--ws-soft);
 }
 .ws-nav button.selected {
-  color: #fff !important;
-  background: linear-gradient(135deg, #9e86b6, #7b6490);
-  border-color: #857197;
+  color: var(--ws-on-accent) !important;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--ws-accent) 85%, var(--ws-surface)), var(--ws-accent));
+  border-color: var(--ws-accent);
   box-shadow: var(--ws-shadow-control);
 }
 .ws-service {
@@ -216,7 +220,7 @@
   font-size: 11px;
 }
 .ws-service > code {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--ws-muted);
   margin-left: 6px;
 }
@@ -293,11 +297,11 @@
   border-top: 1px solid var(--ws-line);
   padding: 0 16px;
   background: color-mix(in srgb, var(--ws-surface) 85%, var(--ws-inset));
-  font-size: 9px;
+  font-size: 10px;
   color: var(--ws-muted);
 }
 .ws-status .ws-online {
-  font-size: 9px;
+  font-size: 10px;
 }
 .ws-bridge {
   display: flex;
@@ -330,7 +334,7 @@
   padding: 8px;
   border: 1px solid var(--ws-line);
   border-radius: var(--ws-radius-control);
-  background: #fff;
+  background: var(--ws-brand-surface);
 }
 .ws-bridge b {
   font-size: 12px;
@@ -338,7 +342,7 @@
   display: block;
 }
 .ws-bridge small {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--ws-muted);
   display: block;
   margin-top: 2px;
@@ -441,7 +445,7 @@
   height: 27px;
   background: var(--ws-inset);
   border-bottom: 1px solid var(--ws-line);
-  font-size: 9px;
+  font-size: 10px;
   color: var(--ws-muted);
   flex-shrink: 0;
 }
@@ -491,7 +495,7 @@
 }
 .ws-identity small {
   display: block;
-  font-size: 9px;
+  font-size: 10px;
   color: var(--ws-muted);
   margin-top: 2px;
 }
@@ -499,10 +503,10 @@
   height: 34px;
   width: 34px;
   flex-shrink: 0;
-  border: 1px solid #e4dfec;
+  border: 1px solid var(--ws-line);
   border-radius: var(--ws-radius-control);
-  background: #fff;
-  color: #272332;
+  background: var(--ws-brand-surface);
+  color: var(--ws-brand-ink);
   display: grid;
   place-items: center;
   padding: 6px;
@@ -545,7 +549,7 @@
   gap: 8px;
 }
 .ws-limit span {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--ws-muted);
 }
 .ws-limit strong {
@@ -555,13 +559,13 @@
   letter-spacing: -0.6px;
 }
 .ws-limit strong small {
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 400;
   color: var(--ws-muted);
   margin-left: 2px;
 }
 .ws-limit > small {
-  font-size: 8px;
+  font-size: 10px;
   color: var(--ws-muted);
   display: block;
   margin-top: 3px;
@@ -576,14 +580,14 @@
 .ws-meter i {
   height: 100%;
   display: block;
-  background: linear-gradient(90deg, #ac99c6, #806798);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--ws-accent) 70%, var(--ws-surface)), var(--ws-accent));
   border-radius: var(--ws-radius-micro);
 }
 .ws-page-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 9px;
+  font-size: 10px;
   color: var(--ws-muted);
   flex-shrink: 0;
   min-height: 16px;
@@ -651,7 +655,7 @@
   color: var(--ws-muted);
 }
 .ws-endpoint code {
-  font-size: 9px;
+  font-size: 10px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -668,7 +672,7 @@
   gap: 8px;
   min-height: 36px;
   border-top: 1px solid var(--ws-line);
-  font-size: 9px;
+  font-size: 10px;
   color: var(--ws-muted);
   overflow: hidden;
 }
@@ -816,7 +820,7 @@
   padding: 2px;
 }
 .ws-client-filters button {
-  font-size: 9px;
+  font-size: 10px;
   height: 23px;
   padding: 0 10px;
   color: var(--ws-muted) !important;
@@ -944,7 +948,7 @@
   position: fixed;
   inset: 0;
   z-index: 60;
-  background: #21133144;
+  background: var(--ws-scrim);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -1008,7 +1012,7 @@
   box-shadow: var(--ws-shadow-control);
 }
 .workspace-root [role="switch"][aria-checked="true"] {
-  background: linear-gradient(120deg, #b49dca, #8b71a7);
+  background: var(--ws-accent);
 }
 .workspace-root :where(.overflow-auto, .overflow-y-auto) {
   scrollbar-width: thin;
@@ -1044,10 +1048,10 @@
   }
 }
 .workspace-root input[type="checkbox"]:checked + span {
-  background: linear-gradient(120deg, #b49dca, #8b71a7);
+  background: var(--ws-accent);
 }
 .workspace-root input[type="checkbox"] ~ span:last-child {
-  background: #fff;
+  background: var(--ws-switch-thumb);
 }
 .ws-resource-row > span:last-child {
   justify-self: end;
@@ -1129,7 +1133,7 @@
   display: grid;
   place-items: center;
   padding: 30px;
-  background: #21133144;
+  background: var(--ws-scrim);
   backdrop-filter: blur(3px);
 }
 .ws-dialog {
@@ -1182,7 +1186,7 @@
   height: 38px;
   object-fit: contain;
   padding: 6px;
-  background: #fff;
+  background: var(--ws-brand-surface);
   border: 1px solid var(--ws-line);
   border-radius: var(--ws-radius-control);
 }
@@ -1230,7 +1234,7 @@
 .ws-editor-backdrop {
   position: fixed;
   inset: 0;
-  background: #21133133;
+  background: var(--ws-scrim);
   backdrop-filter: blur(2px);
   z-index: 34;
 }
@@ -1265,7 +1269,7 @@
   font-weight: 600;
 }
 .ws-client-heading small {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--ws-muted);
 }
 .ws-client-logo {
@@ -1276,7 +1280,7 @@
   height: 38px;
   border-radius: var(--ws-radius-control);
   border: 1px solid var(--ws-line);
-  background: #fff;
+  background: var(--ws-brand-surface);
 }
 .ws-client-logo img {
   max-width: 27px;
@@ -1301,7 +1305,7 @@
   flex-shrink: 0;
 }
 .ws-client-config code {
-  font-size: 9px;
+  font-size: 10px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1325,7 +1329,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 8px;
+  font-size: 10px;
   color: var(--ws-muted);
   margin-top: 3px;
 }
@@ -1354,7 +1358,7 @@
   background-color: var(--ws-soft);
 }
 .workspace-root [class~="hover:bg-slate-800"]:hover {
-  background-color: color-mix(in srgb, var(--ws-accent) 80%, #23182e);
+  background-color: color-mix(in srgb, var(--ws-accent) 80%, var(--ws-ink));
 }
 .ws-settings-inline input:not([type="checkbox"]) {
   width: 100%;
@@ -1681,7 +1685,7 @@
   border-color: var(--ws-accent);
 }
 .workspace-root.workspace-root .ws-model-switch > span:last-child {
-  background: #fff;
+  background: var(--ws-switch-thumb);
   box-shadow: var(--ws-shadow-surface);
 }
 .workspace-root.workspace-root .ws-model-switch:has(input:disabled) {
@@ -1716,7 +1720,7 @@
   background: var(--ws-inset);
 }
 .workspace-root.workspace-root .ws-switch-control > span:last-child {
-  background: #fff;
+  background: var(--ws-brand-surface);
   box-shadow: var(--ws-shadow-surface);
 }
 .workspace-root.workspace-root .ws-switch-control > input:focus-visible + span {
@@ -1764,7 +1768,7 @@
   border-radius: var(--ws-radius-small);
 }
 .workspace-root.workspace-root
-  :is(.ws-button, .ws-primary, .ws-icon-button, .select-trigger) {
+  :is(.ws-button, .ws-primary, .ws-icon, .ws-theme, .ws-icon-button, .select-trigger) {
   height: var(--ws-control-height);
   border-radius: var(--ws-radius-control);
 }

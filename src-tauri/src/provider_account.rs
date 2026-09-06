@@ -125,6 +125,18 @@ pub async fn provider_usage(provider_id: String) -> Result<Value, String> {
     .await
 }
 
+fn reset_timestamp(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) if !text.trim().is_empty() && text.trim() != "0" => {
+            Some(text.trim().to_owned())
+        }
+        Value::Number(number) if number.as_f64().is_some_and(|n| n > 0.0) => {
+            Some(number.to_string())
+        }
+        _ => None,
+    }
+}
+
 pub fn normalize_opencode(value: &Value) -> Result<Value, String> {
     let mut limits = Vec::new();
     for (key, period, name) in [
@@ -138,7 +150,7 @@ pub fn normalize_opencode(value: &Value) -> Result<Value, String> {
                 .and_then(Value::as_f64)
                 .filter(|v| v.is_finite() && *v >= 0.0)
             {
-                limits.push(json!({"key": key, "period": period, "name": name, "limit":100.0,"used":used,"resets_at":window.get("resetsAt")}));
+                limits.push(json!({"key": key, "period": period, "name": name, "limit":100.0,"used":used,"resets_at":reset_timestamp(window.get("resetsAt"))}));
             }
         }
     }
@@ -157,16 +169,7 @@ pub fn normalize_commandcode(value: &Value) -> Result<Value, String> {
                 window.get("cap").and_then(Value::as_f64),
             ) {
                 if used >= 0.0 && cap > 0.0 {
-                    let reset = window
-                        .get("resetAt")
-                        .filter(|v| {
-                            !v.is_null() && v.as_f64() != Some(0.0) && v.as_str() != Some("0")
-                        })
-                        .map(|v| {
-                            v.as_str()
-                                .map(str::to_owned)
-                                .unwrap_or_else(|| v.to_string())
-                        });
+                    let reset = reset_timestamp(window.get("resetAt"));
                     limits.push(json!({"key":key,"period":period,"name":name,"used":used,"limit":cap,"resets_at":reset}));
                 }
             }
@@ -223,5 +226,24 @@ mod tests {
         assert_eq!(value["limits"][0]["period"], "week");
         assert_eq!(value["limits"][0]["resets_at"], "1789000000");
         assert!(normalize_commandcode(&json!({"credits":{}})).is_err());
+    }
+    #[test]
+    fn remote_reset_types_are_normalized_at_the_quota_boundary() {
+        for (raw, expected) in [
+            (json!(1789000000), json!("1789000000")),
+            (json!({"unexpected": true}), Value::Null),
+            (json!(true), Value::Null),
+            (json!(0), Value::Null),
+        ] {
+            let quota =
+                normalize_opencode(&json!({"usage":{"weekly":{"percent":25,"resetsAt":raw}}}))
+                    .unwrap();
+            assert_eq!(quota["limits"][0]["resets_at"], expected);
+            let quota = normalize_commandcode(
+                &json!({"windowLimits":{"weekly":{"used":2,"cap":10,"resetAt":raw}}}),
+            )
+            .unwrap();
+            assert_eq!(quota["limits"][0]["resets_at"], expected);
+        }
     }
 }

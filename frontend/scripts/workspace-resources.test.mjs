@@ -36,7 +36,7 @@ test("reset timestamps accept API epoch seconds, milliseconds and ISO strings", 
     ms = Date.parse(iso);
   for (const raw of [iso, String(ms), String(ms / 1000)])
     assert.equal(quotaResetDate(raw)?.toISOString(), iso);
-  for (const raw of [undefined, null, "", "unknown", "9999999999999999999"])
+  for (const raw of [undefined, null, {}, true, 1789000000, "", "unknown", "9999999999999999999"])
     assert.equal(quotaResetDate(raw), null);
 });
 

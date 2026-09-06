@@ -6,93 +6,11 @@ CodexHub is a local proxy + configuration manager for OpenAI Codex desktop app.
 It lets users use official OpenAI models and third-party providers side by side,
 with a native desktop UI for configuration and a CLI for scripting.
 
-## Visual System
+## Design authority
 
-CodexHub should feel like a calm native desktop utility: near-white canvas,
-white working surfaces, warm-neutral inset panels, precise controls, and enough
-shadow depth to separate panels without looking like a web dashboard.
-
-### Visual Principles
-
-- Prefer soft layered surfaces over heavy borders. Borders can separate rows,
-  but cards, drawers, popovers, and buttons should get depth from shadows.
-- White should dominate the interface. Warm beige is a supporting layer for
-  inset rows, empty states, and grouped controls, not the main page color.
-- Outer radius = inner radius + padding when rounded elements sit inside each
-  other. A 16px panel with 4px padding should contain 12px inner rows; a 20px
-  overlay with 8px padding should contain 12px content surfaces.
-- Use layered shadows for element depth:
-  - `hairline`: replacement for a thin outline on flat bars and small surfaces.
-  - `control`: buttons, toggles, and compact controls.
-  - `field`: inputs and select-like controls.
-  - `card`: main panels and repeated cards.
-  - `raised`: selected or hovered cards.
-  - `floating`: dropdowns, tooltips, and temporary controls.
-  - `overlay`: drawers, modals, and large elevated surfaces.
-- Keep motion interruptible. Use explicit transitions for shadow, border color,
-  background color, opacity, and transform. Do not use `transition-all`.
-- Buttons can scale to `0.96` on press. Avoid stronger scale values.
-
-### Token Contract
-
-| Token | Value | Use |
-| --- | --- | --- |
-| `canvas` | `#f8f8f7` | App background and empty space |
-| `surface` | `#ffffff` | Primary card/control fill |
-| `panel` | `#f4f3f0` | Secondary grouped surface |
-| `panel-soft` | `#faf9f7` | Subtle inactive/empty areas |
-| `line` | `#dedbd6` | Hairline dividers and input borders |
-| `line-soft` | `#eceae4` | Low-emphasis dividers |
-| `control radius` | `10px` | Buttons, inputs, icon controls |
-| `inner radius` | `12px` | Rows and nested surfaces |
-| `panel radius` | `16px` | Main cards and panels |
-| `overlay radius` | `20px` | Drawers, dialogs, floating overlays |
-
-### Component Rules
-
-- App shell: use a near-white `canvas` background. Runtime and tab bars use white or
-  `surface` fills with hairline shadow, not dark borders.
-- Main panels: 16px radius, `surface` fill, `card` shadow. Use row dividers
-  only inside dense lists.
-- Nested rows: 12px radius and either `surface` or white fill. Selected rows may
-  use a very light action tint plus `raised` shadow.
-- Inputs: 10px radius, `field` shadow, clear focus ring, no harsh blue outline.
-- Select-like dropdowns: use the shared `select-trigger`, `select-popover`,
-  and `select-option` classes for app-styled controls. The trigger should align
-  to input height, use `field` shadow, show a chevron icon, and open a floating
-  popover where the selected option is highlighted and secondary state is shown
-  with compact option-level chips. Avoid native `<select>` controls on
-  primary configuration surfaces where visual consistency matters.
-- Buttons: 10px radius, `control` shadow, exact property transitions, optional
-  `active:scale-[0.96]`.
-- Segmented controls: outer pill or 16px rounded track with 10-12px active
-  segments. Active segment should be elevated rather than just bordered.
-- Toasts, dropdowns, popovers: floating shadow, 16-20px radius, white/surface
-  fill, compact content.
-- Charts: chart container should read as a soft inset work surface; tooltips
-  use floating shadow and 12px radius.
-- Scrollable regions: keep scrollbars as close to the owning pane edge as
-  possible so the central content area stays wide. For vertical lists inside a
-  padded card, first keep the normal panel padding when the content does not
-  overflow. Only when the list actually needs a scrollbar should the viewport
-  extend toward the card edge with a negative margin and a reduced inner gutter,
-  for example `overflow-auto -mr-3 pr-1` inside a `px-3` panel. The content
-  should gain width when the scrollbar moves outward; do not pair the negative
-  margin with equal padding that leaves the content width unchanged. When a
-  scrollbar is present, preserve standard padding where there is room, and
-  reduce the inset only as much as needed to keep the scrollbar near the owning
-  pane edge. Apply the same edge-scrollbar rule across sidebars, drawers, model
-  lists, client lists, and popovers; use an inset scrollbar only when it is
-  intentionally part of a framed control.
-
-### Avoid
-
-- Repeating `rounded-md border border-line bg-white shadow-subtle` everywhere.
-- Flat grey panels that differ only by border color.
-- Oversized dashboard cards, marketing hero sections, decorative gradients, or
-  visual effects unrelated to the desktop utility workflow.
-- Hard one-hue themes. Keep the interface mostly neutral, with blue for action,
-  green for success, amber for warning, and red for destructive states.
+This document retains the original architecture and feature background. Current
+workspace visual rules are defined only in [design.md](../design.md); the 0.2.0
+implementation and acceptance map is in [020-workspace-implementation.md](ui/020-workspace-implementation.md).
 
 ## Architecture
 
@@ -355,7 +273,7 @@ CodexHub/
     frontend/             (empty, using src/ instead for Tauri)
     .gitignore
     README.md
-    DESIGN.md
+    design.md
 ```
 
 ## Decisions

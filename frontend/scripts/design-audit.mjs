@@ -16,6 +16,14 @@ root.walkRules((rule) => {
     );
 });
 root.walkDecls((decl) => {
+  if (decl.prop === "font-size" && /^\d+px$/.test(decl.value) && parseInt(decl.value) < 10)
+    report(decl, "Workspace text must be at least 10px");
+  if (
+    !decl.prop.startsWith("--") &&
+    /^(color|background|background-color|border|border-color)$/.test(decl.prop) &&
+    /#[\da-f]{3,8}\b|rgba?\(/i.test(decl.value)
+  )
+    report(decl, "Colors must use semantic design tokens, including gradients");
   if (
     decl.prop === "border-radius" &&
     decl.value !== "0" &&
@@ -45,5 +53,5 @@ if (issues.length) {
   process.exitCode = 1;
 } else
   console.log(
-    "Design audit passed: role-scoped geometry, radius/shadow tokens and content spacing. Browser state checks remain required.",
+    "Design audit passed: role-scoped geometry, color/radius/shadow tokens and content spacing. Browser state checks remain required.",
   );
