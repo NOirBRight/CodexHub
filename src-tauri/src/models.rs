@@ -379,7 +379,7 @@ fn validate_official_snapshot(payload: &Value) -> Result<(), String> {
             .ok_or_else(|| "Official snapshot contains a non-object model".to_string())?;
         let identity = object.get("slug").or_else(|| object.get("id"))
             .or_else(|| object.get("model")).or_else(|| object.get("name"));
-        if !identity.and_then(Value::as_str).is_some_and(|id| !id.trim().is_empty()) {
+        if identity.and_then(Value::as_str).is_none_or(|id| id.trim().is_empty()) {
             return Err("Official snapshot contains a model without an identity".to_string());
         }
         if !item_has_internal_identity(object)
@@ -1193,10 +1193,7 @@ fn wait_for_native_model_cache_publication(
 fn readable_native_model_cache(cache_path: &Path) -> Option<Vec<u8>> {
     let bytes = fs::read(cache_path).ok()?;
     let payload: Value = serde_json::from_slice(&bytes).ok()?;
-    let models = payload.get("models")?.as_array()?;
-    if models.is_empty() || models.iter().any(|item| !item.is_object()) {
-        return None;
-    }
+    validate_official_snapshot(&payload).ok()?;
     // Detailed freshness, identity, and comp_hash authority remains in
     // catalog_sync.py.  This seam only proves that a stable JSON cache was
     // atomically published; the caller separately requires it to differ from
@@ -3604,6 +3601,10 @@ mod tests {
             std::io::stdout()
                 .flush()
                 .expect("flush app-server model-list test response");
+            if let Some(path) = std::env::var_os("CODEXHUB_APP_SERVER_TEST_EMPTY_CACHE") {
+                crate::safe_file::write_text_atomic(Path::new(&path), r#"{"models":[]}"#)
+                    .expect("publish empty native cache");
+            }
         }
         loop {
             thread::park();
@@ -3836,10 +3837,12 @@ for line in sys.stdin:
         let cases = [
             ("invalid-json", "{not-json", false),
             ("missing-models", "{}", false),
-            ("empty-models", r#"{"models":[]}"#, false),
+            ("empty-models", r#"{"models":[]}"#, true),
             ("null-model", r#"{"models":[null]}"#, false),
             ("string-model", r#"{"models":["gpt-5.6-terra"]}"#, false),
-            ("object-model", r#"{"models":[{"slug":"gpt-5.6-terra"}]}"#, true),
+            ("missing-visibility", r#"{"models":[{"slug":"gpt-5.6-terra"}]}"#, false),
+            ("object-model", r#"{"models":[{"slug":"gpt-5.6-terra","visibility":"list"}]}"#, true),
+            ("hidden-model", r#"{"models":[{"slug":"gpt-5.6-terra","visibility":"hide"}]}"#, true),
         ];
 
         for (name, payload, expected_readable) in cases {
@@ -3931,6 +3934,27 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn app_server_model_list_accepts_new_empty_native_cache_without_context() {
+        let root = temp_root("app-server-empty-cache");
+        let cache_path = root.join("models_cache.json");
+        let helper_liveness_path = root.join("helper-liveness.lock");
+        let mut command = responding_app_server_test_process_command(&helper_liveness_path);
+        command.env(APP_SERVER_TEST_PROCESS_ENV, "respond-without-context")
+            .env("CODEXHUB_APP_SERVER_TEST_EMPTY_CACHE", &cache_path);
+        let result = super::read_codex_app_server_model_list_with_cache_path(
+            command, Duration::from_secs(5), &cache_path, Duration::from_secs(1),
+        ).expect("new valid empty cache must satisfy a context-less refresh");
+        let runner = StaticAppServerModelListRunner::ok_with_cache(
+            result, &fs::read_to_string(&cache_path).unwrap(),
+        );
+        let acquired = super::acquire_official_models_direct_with_runner(&runner).unwrap();
+        assert!(acquired.models.is_empty());
+        assert!(acquired.native_cache.is_some());
+        assert_app_server_test_process_stopped(&helper_liveness_path);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn app_server_model_list_waits_for_cache_when_context_metadata_is_partial() {
         let root = temp_root("app-server-context-cache-grace");
         let script = root.join("fake-codex-app-server.py");
@@ -3976,6 +4000,7 @@ for line in sys.stdin:
             "client_version": "0.146.0",
             "models": [{
                 "slug": "gpt-5.6-terra",
+                "visibility": "list",
                 "context_window": 272000,
                 "max_context_window": 272000,
                 "effective_context_window_percent": 95,

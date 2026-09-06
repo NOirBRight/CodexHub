@@ -1405,6 +1405,7 @@ fn opencode_first_baseline_creation_is_process_atomic() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-opencode-concurrent-baseline");
     let config_path = root.join("opencode.json");
@@ -1457,6 +1458,7 @@ fn pi_first_baseline_creation_is_process_atomic() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-pi-concurrent-baseline");
     let settings_path = root.join("settings.json");
@@ -1974,6 +1976,11 @@ fn plan_zcode_apply_does_not_write_or_backup() {
 
 #[test]
 fn zcode_apply_writes_user_catalog_with_schema_safe_provider() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let root = unique_temp_dir("codexhub-zcode");
     let catalog_path = root.join("model-providers").join("codexhub.json");
     let v2_config_path = root.join("v2").join("config.json");

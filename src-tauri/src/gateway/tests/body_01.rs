@@ -1393,6 +1393,11 @@ fn legacy_official_client_selection_resolves_to_exported_bare_id() {
 
 #[test]
 fn opencode_config_exports_all_active_gateway_models() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let settings = Settings::default();
     let providers = client_export_test_providers();
 
@@ -1829,6 +1834,11 @@ fn client_config_keeps_official_fast_selection_as_client_pseudo_model() {
 
 #[test]
 fn pi_config_exports_all_active_gateway_models() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let root = unique_temp_dir("codexhub-pi-export");
     let settings_path = root.join("settings.json");
     let models_path = root.join("models.json");
