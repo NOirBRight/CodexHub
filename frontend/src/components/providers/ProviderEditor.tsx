@@ -44,6 +44,7 @@ type Translate = (key: string, options?: Record<string, unknown>) => string;
 
 
 export function ProviderDetail({
+  desktopTab,
   busy,
   discoverError,
   onChange,
@@ -55,6 +56,7 @@ export function ProviderDetail({
   provider,
   unsaved = false,
 }: {
+  desktopTab?: string;
   busy: string | null;
   discoverError?: string | null;
   onChange: (provider: Provider, successMessage?: string) => void;
@@ -336,7 +338,7 @@ export function ProviderDetail({
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
+    <div className="ws-provider-detail grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
       <div className="grid gap-2 border-b border-line p-4">
         <HeaderRow
           title={provider.name}
@@ -394,7 +396,7 @@ export function ProviderDetail({
           </div>
         ) : null}
 
-        {xaiSubscriptionAuth ? null : (
+        {xaiSubscriptionAuth && desktopTab !== "connection" ? null : (
         <div className="grid grid-cols-2 gap-2">
           <Field label={t("common.name")}>
             <input

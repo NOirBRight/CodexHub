@@ -1,3 +1,6 @@
+import deepseekLogo from "../assets/providers/deepseek.svg";
+import anthropicLogo from "../assets/providers/anthropic.svg";
+import openaiLogo from "../assets/providers/openai.svg";
 import type { ReactNode } from "react";
 import { createElement } from "react";
 import ollamaLogo from "../assets/providers/ollama.svg";
@@ -9,6 +12,9 @@ import commandcodeLogo from "../assets/providers/commandcode.svg";
 import opencodeLogo from "../assets/providers/opencode.svg";
 
 const PROVIDER_LOGOS: Record<string, string> = {
+  openai: openaiLogo,
+  anthropic: anthropicLogo,
+  deepseek: deepseekLogo,
   "ollama-cloud": ollamaLogo,
   volc: volcengineLogo,
   "minimax-cn": minimaxLogo,

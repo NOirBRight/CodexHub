@@ -2,12 +2,12 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
-/** Linux uses the compact 1024x768 shell; other platforms retain the beta3 desktop geometry. */
+/** Compact desktop geometry; native Linux retains webview zoom for correct pointer hit-testing. */
 export const FIT_STAGE_WIDTH = 1024;
 export const FIT_STAGE_HEIGHT = 768;
 export const FIT_STAGE_SCALE = 0.93;
-const DEFAULT_FIT_STAGE_WIDTH = 1280;
-const DEFAULT_FIT_STAGE_HEIGHT = 960;
+const DEFAULT_FIT_STAGE_WIDTH = 1024;
+const DEFAULT_FIT_STAGE_HEIGHT = 768;
 
 function usesCssTransformScale() {
   if (typeof navigator === "undefined") {
@@ -15,7 +15,7 @@ function usesCssTransformScale() {
   }
   // WebKitGTK does not keep hit-testing aligned with CSS transforms, so clicks
   // can miss the painted UI and punch through. Linux uses webview zoom instead.
-  return !/Linux/i.test(navigator.userAgent) || /Android/i.test(navigator.userAgent);
+  return !isLinuxViewport() || /Android/i.test(navigator.userAgent);
 }
 
 export function FitStage({ children }: { children: ReactNode }) {
@@ -43,11 +43,8 @@ export function FitStage({ children }: { children: ReactNode }) {
         const viewportWidth = host.clientWidth;
         const viewportHeight = host.clientHeight;
         if (viewportWidth <= 0 || viewportHeight <= 0) return;
-        const scale = Math.min(
-          1,
-          viewportWidth / DEFAULT_FIT_STAGE_WIDTH,
-          viewportHeight / DEFAULT_FIT_STAGE_HEIGHT,
-        );
+        // The workspace now reflows instead of shrinking desktop controls.
+        const scale = 1;
         setMetrics({
           scale,
           width: viewportWidth / scale,
@@ -113,7 +110,7 @@ export function FitStage({ children }: { children: ReactNode }) {
 }
 
 function isLinuxViewport() {
-  return typeof navigator !== "undefined" && /Linux/i.test(navigator.userAgent);
+  return typeof navigator !== "undefined" && Boolean(window.__TAURI_INTERNALS__) && /Linux/i.test(navigator.userAgent);
 }
 
 async function readLogicalViewportSize() {

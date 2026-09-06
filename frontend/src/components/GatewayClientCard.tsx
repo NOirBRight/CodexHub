@@ -1,4 +1,12 @@
-import { AlertTriangle, FileText } from "lucide-react";
+import { useState } from "react";
+import { WorkspaceDialog } from "./workspace/WorkspaceDialog";
+import { api, messageFromError } from "../lib/tauri";
+import {
+  MoreHorizontal,
+  RefreshCcw,
+  AlertTriangle,
+  FileText,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import ompIcon from "../assets/omp-icon.png";
 import opencodeIcon from "../assets/opencode-icon.png";
@@ -10,7 +18,12 @@ import { cx } from "../lib/format";
 import type { GatewayClientContract, GatewayClientInfo } from "../lib/types";
 import { SwitchControl } from "./SettingsDrawer";
 
-export type ClientConnectionState = "connected" | "disconnected" | "busy" | "drift" | "unavailable";
+export type ClientConnectionState =
+  | "connected"
+  | "disconnected"
+  | "busy"
+  | "drift"
+  | "unavailable";
 
 interface GatewayClientCardProps {
   busy?: boolean;
@@ -19,6 +32,7 @@ interface GatewayClientCardProps {
   enabledModelCount?: number;
   info?: GatewayClientInfo;
   onToggle: (connect: boolean) => void;
+  onRefresh?: () => Promise<void>;
 }
 
 export function GatewayClientCard({
@@ -28,8 +42,25 @@ export function GatewayClientCard({
   enabledModelCount,
   info,
   onToggle,
+  onRefresh,
 }: GatewayClientCardProps) {
   const { t } = useTranslation();
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailBusy, setDetailBusy] = useState(false);
+  async function loadPreview() {
+    setDetailBusy(true);
+    setDetailError(null);
+    try {
+      const result = await api.previewGatewayClientConfig(client.id);
+      setPreview(result.next_redacted);
+    } catch (error) {
+      setDetailError(messageFromError(error));
+    } finally {
+      setDetailBusy(false);
+    }
+  }
   const state = connectionStateFromInfo(info, busy);
   const installed = Boolean(info?.installed);
   const configPath = info?.config_path ?? client.config_path;
@@ -54,25 +85,50 @@ export function GatewayClientCard({
         : "text-muted";
 
   return (
-    <section
-      className={cx(
-        "rounded-inner bg-surface px-3 py-2.5 shadow-control transition-[box-shadow,opacity,background-color]",
-        state === "connected" && "shadow-raised",
-        state === "drift" && "bg-amber-50/30 ring-1 ring-amber-300/70",
-        state === "unavailable" && "opacity-55",
-        className,
-      )}
-    >
-      <div className="flex items-center gap-2.5">
-        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-control bg-panel-soft shadow-control">
-          <ClientLogo id={client.id} name={name} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-semibold leading-5 text-ink">{name}</h3>
-          <p className="mt-0.5 truncate text-[11px] text-muted">{kindLabel}</p>
+    <>
+      <section
+        className={cx(
+          "ws-client-card",
+          state === "connected" && "connected",
+          state === "unavailable" && "unavailable",
+          className,
+        )}
+      >
+        <div className="ws-client-heading">
+          <span className="ws-client-logo">
+            <ClientLogo id={client.id} name={name} />
+          </span>
+          <div>
+            <h3>{name}</h3>
+            <small>{kindLabel}</small>
+          </div>
+          <button
+            className="ws-icon"
+            aria-label={t("workspace.clientDetails", { name })}
+            onClick={() => setDetailsOpen(true)}
+          >
+            <MoreHorizontal size={15} />
+          </button>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <span className={cx("text-xs font-medium", labelTone)}>{label}</span>
+        <div className="ws-client-config">
+          <FileText size={12} />
+          <code title={configPath || ""}>
+            {configPath || t("common.copyOnly")}
+          </code>
+        </div>
+        <div className="ws-client-bottom">
+          <div>
+            <span className={labelTone}>{label}</span>
+            <small>
+              <ConnectionNarrative
+                clientId={client.id}
+                enabledModelCount={enabledModelCount}
+                installed={installed}
+                state={state}
+                onRepair={() => onToggle(true)}
+              />
+            </small>
+          </div>
           <SwitchControl
             ariaLabel={t("gateway.routeMode", { name })}
             checked={checked}
@@ -81,23 +137,93 @@ export function GatewayClientCard({
             onChange={onToggle}
           />
         </div>
-      </div>
-      <div className="mt-2 flex items-center gap-2 rounded-inner bg-panel-soft px-2.5 py-1.5">
-        <FileText className="h-3 w-3 shrink-0 text-muted" />
-        <code className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink">
-          {configPath || t("common.copyOnly")}
-        </code>
-      </div>
-      <div className="mt-1.5 flex min-h-3.5 items-center gap-1.5 text-[10px] text-muted">
-        <ConnectionNarrative
-          clientId={client.id}
-          enabledModelCount={enabledModelCount}
-          installed={installed}
-          state={state}
-          onRepair={() => onToggle(true)}
-        />
-      </div>
-    </section>
+      </section>
+      <WorkspaceDialog
+        open={detailsOpen}
+        title={t("workspace.clientDetails", { name })}
+        onClose={() => setDetailsOpen(false)}
+        actions={
+          <button
+            className="ws-primary"
+            disabled={disabled || detailBusy}
+            onClick={() => onToggle(!checked)}
+          >
+            {label} ·{" "}
+            {t(checked ? "workspace.disconnect" : "workspace.connect")}
+          </button>
+        }
+      >
+        <div className="ws-client-detail-heading">
+          <ClientLogo id={client.id} name={name} />
+          <div>
+            <b>{name}</b>
+            <small>{kindLabel}</small>
+          </div>
+        </div>
+        <dl className="ws-detail-list">
+          <div>
+            <dt>{t("workspace.connectionState")}</dt>
+            <dd>{label}</dd>
+          </div>
+          <div>
+            <dt>{t("workspace.configPath")}</dt>
+            <dd>
+              <code>{configPath || "—"}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>{t("workspace.installedVersion")}</dt>
+            <dd>{info?.current_version || t("common.unknown")}</dd>
+          </div>
+          <div>
+            <dt>{t("workspace.latestVersion")}</dt>
+            <dd>{info?.latest_version || t("workspace.notChecked")}</dd>
+          </div>
+          <div>
+            <dt>{t("workspace.ownership")}</dt>
+            <dd>{info?.route_owner || "—"}</dd>
+          </div>
+        </dl>
+        <div className="ws-actions">
+          {onRefresh && (
+            <button
+              className="ws-button"
+              disabled={detailBusy}
+              onClick={async () => {
+                setDetailBusy(true);
+                try {
+                  await onRefresh();
+                } finally {
+                  setDetailBusy(false);
+                }
+              }}
+            >
+              <RefreshCcw size={12} />
+              {t("gateway.refreshClients")}
+            </button>
+          )}
+          <button
+            className="ws-button"
+            disabled={detailBusy}
+            onClick={() =>
+              preview !== null ? setPreview(null) : void loadPreview()
+            }
+          >
+            {t(
+              preview !== null
+                ? "workspace.hidePreview"
+                : "workspace.configPreview",
+            )}
+          </button>
+        </div>
+        {detailError && (
+          <p className="text-danger" role="alert">
+            {detailError}
+          </p>
+        )}
+        {preview !== null && <pre className="ws-config-preview">{preview}</pre>}
+      </WorkspaceDialog>
+    </>
   );
 }
 
@@ -127,7 +253,11 @@ function ConnectionNarrative({
     return (
       <>
         <AlertTriangle className="h-3 w-3 text-amber-600" />
-        <button type="button" className="text-left text-amber-700 underline-offset-2 hover:underline" onClick={onRepair}>
+        <button
+          type="button"
+          className="text-left text-amber-700 underline-offset-2 hover:underline"
+          onClick={onRepair}
+        >
           {t("gateway.configDriftRepair")}
         </button>
       </>
@@ -183,7 +313,11 @@ export function connectionStateFromInfo(
   ) {
     return "connected";
   }
-  if (info.route_mode === "hub" || info.route_mode === "release" || info.route_mode === "beta") {
+  if (
+    info.route_mode === "hub" ||
+    info.route_mode === "release" ||
+    info.route_mode === "beta"
+  ) {
     return "connected";
   }
   return "disconnected";
@@ -193,11 +327,20 @@ function ClientLogo({ id, name }: { id: string; name: string }) {
   const icon = clientIcon(id);
   if (icon) {
     return (
-      <img src={icon} alt="" title={name + " logo"} className={clientIconClass(id)} aria-hidden="true" />
+      <img
+        src={icon}
+        alt=""
+        title={name + " logo"}
+        className={clientIconClass(id)}
+        aria-hidden="true"
+      />
     );
   }
   return (
-    <span className="text-[9px] font-black tracking-normal text-slate-600" aria-hidden="true">
+    <span
+      className="text-[9px] font-black tracking-normal text-slate-600"
+      aria-hidden="true"
+    >
       {id.slice(0, 2).toUpperCase()}
     </span>
   );
