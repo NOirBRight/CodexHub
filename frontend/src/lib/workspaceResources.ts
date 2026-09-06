@@ -36,9 +36,11 @@ export function quotaResetDate(value?: string | null): Date | null {
 
 /** Reserve the right-hand slot for a single weekly quota. */
 export function resourceQuotaLayout(limits: OpenAIUsageLimit[]) {
-  const ordered = [...limits].sort(
-    (a, b) => Number(isWeeklyLimit(a)) - Number(isWeeklyLimit(b)),
-  );
+  const rank = (limit: OpenAIUsageLimit) =>
+    /month/i.test(`${limit.period} ${limit.key}`)
+      ? 2
+      : Number(isWeeklyLimit(limit));
+  const ordered = [...limits].sort((a, b) => rank(a) - rank(b));
   return {
     ordered,
     single: ordered.length === 1,

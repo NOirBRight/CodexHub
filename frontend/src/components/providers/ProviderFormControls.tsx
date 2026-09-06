@@ -95,7 +95,7 @@ export function IconButton({
     <button
       type="button"
       className={cx(
-        "focus-ring grid h-9 w-9 place-items-center rounded-md border bg-panel",
+        "ws-icon-button focus-ring grid h-9 w-9 place-items-center rounded-md border bg-panel",
         danger ? "border-danger/40 bg-red-50 text-danger" : "border-line text-ink hover:bg-slate-100",
       )}
       disabled={disabled}

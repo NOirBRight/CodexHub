@@ -2,6 +2,8 @@
  *  Frontend invoke goes through these constants, not raw strings.
  */
 export const COMMANDS = {
+  codexLogout: "codex_logout",
+  providerUsage: "provider_usage",
   getAppFlavor: "get_app_flavor",
   getAppVersion: "get_app_version",
   checkAppUpdate: "check_app_update",

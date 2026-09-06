@@ -944,7 +944,7 @@ export function SwitchControl({
   tone?: "action" | "warn";
 }) {
   return (
-    <span className="relative inline-flex h-5 w-9 shrink-0 items-center">
+    <span className="ws-switch-control relative inline-flex h-5 w-9 shrink-0 items-center">
       <input
         type="checkbox"
         className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"

@@ -60,6 +60,67 @@ export function ProviderWorkspaceView(props: Props) {
   const [daily, setDaily] = useState<GatewayUsageSnapshot | null>(null);
   const [dailyError, setDailyError] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [providerQuotas, setProviderQuotas] = useState<
+    Record<
+      string,
+      {
+        limits: OpenAIUsageLimit[];
+        balance?: number | null;
+        error?: string;
+        pending?: boolean;
+      }
+    >
+  >({});
+  const quotaProviderIds = props.providers
+    .filter((p) => ["commandcode", "opencode-go"].includes(p.id))
+    .map((p) => p.id)
+    .join(",");
+  useEffect(() => {
+    if (props.page !== "overview") return;
+    let active = true;
+    let loading = false;
+    async function loadQuotas() {
+      if (loading) return;
+      loading = true;
+      await Promise.all(
+        quotaProviderIds
+          .split(",")
+          .filter(Boolean)
+          .map(async (id) => {
+            if (active)
+              setProviderQuotas((previous) => ({
+                ...previous,
+                [id]: {
+                  ...previous[id],
+                  limits: previous[id]?.limits ?? [],
+                  pending: true,
+                },
+              }));
+            try {
+              const result = await api.providerUsage(id);
+              if (active)
+                setProviderQuotas((previous) => ({
+                  ...previous,
+                  [id]: result,
+                }));
+            } catch (error) {
+              if (active)
+                setProviderQuotas((previous) => ({
+                  ...previous,
+                  [id]: { limits: [], error: messageFromError(error) },
+                }));
+            }
+          }),
+      );
+      loading = false;
+    }
+    void loadQuotas();
+    const timer = window.setInterval(() => void loadQuotas(), 180000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [props.page, quotaProviderIds, refreshKey]);
   const hasXai = props.providers.some(
     (p) => subscriptionAuthAdapter(p) === "xai_oauth",
   );
@@ -217,6 +278,16 @@ export function ProviderWorkspaceView(props: Props) {
         pending={xaiPending}
         message={xaiError}
       />
+    ) : ["commandcode", "opencode-go"].includes(p.id) ? (
+      <div className="ws-provider-quota">
+        <ResourceLimits
+          limits={(providerQuotas[p.id]?.limits ?? []).filter(
+            (limit) => p.id !== "opencode-go" || limit.key !== "rolling",
+          )}
+          pending={providerQuotas[p.id]?.pending}
+          message={providerQuotas[p.id]?.error}
+        />
+      </div>
     ) : (
       <span className="ws-muted">{t("workspace.quotaUnsupported")}</span>
     );
@@ -238,21 +309,23 @@ export function ProviderWorkspaceView(props: Props) {
         }).format(n);
   return (
     <main className={"ws-page ws-" + props.page}>
-      <WorkspaceHeading
-        page={props.page}
-        actions={
-          props.page === "providers" ? (
-            <button
-              className="ws-primary"
-              disabled={props.busy}
-              onClick={props.onAdd}
-            >
-              <Plus size={13} />
-              {t("providers.addProvider")}
-            </button>
-          ) : undefined
-        }
-      />
+      {props.page !== "overview" && props.page !== "statistics" && (
+        <WorkspaceHeading
+          page={props.page}
+          actions={
+            props.page === "providers" ? (
+              <button
+                className="ws-primary"
+                disabled={props.busy}
+                onClick={props.onAdd}
+              >
+                <Plus size={13} />
+                {t("providers.addProvider")}
+              </button>
+            ) : undefined
+          }
+        />
+      )}
       {(props.page === "overview" || props.page === "clients") && bridge}
       {props.page === "overview" && (
         <>

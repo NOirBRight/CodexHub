@@ -153,6 +153,8 @@ macro_rules! desktop_command_registry {
             SetAutostart => "set_autostart" => $crate::desktop_commands::set_autostart, true, true, true, false, NO_ALIASES;
             RemoveAutostart => "remove_autostart" => $crate::desktop_commands::remove_autostart, true, true, true, false, NO_ALIASES;
             GetAutostartStatus => "get_autostart_status" => $crate::desktop_commands::get_autostart_status, true, true, true, false, NO_ALIASES;
+            CodexLogout => "codex_logout" => $crate::provider_account::codex_logout, true, true, true, false, NO_ALIASES;
+            ProviderUsage => "provider_usage" => $crate::provider_account::provider_usage, true, true, true, false, ALIASES_PROVIDER_ID;
             OpenCodexApp => "open_codex_app" => $crate::desktop_commands::open_codex_app, true, true, true, false, NO_ALIASES;
             WindowMinimize => "window_minimize" => $crate::desktop_commands::window_minimize, true, false, true, true, NO_ALIASES;
             WindowToggleMaximize => "window_toggle_maximize" => $crate::desktop_commands::window_toggle_maximize, true, false, true, true, NO_ALIASES;

@@ -1,13 +1,12 @@
 import { useDialogFocus } from "../hooks/useDialogFocus";
-import { subscriptionAuthAdapter } from "../lib/providerCatalog";
 import { ProviderWorkspaceView } from "../components/workspace/ProviderWorkspaceView";
 import type { WorkspacePage } from "../components/workspace/WorkspaceShell";
 import type { ReactNode } from "react";
 import { X } from "lucide-react";
 import { readCodexRestartNotice } from "../lib/providerWorkspace/restart";
 import {
-  Copy,
-  ExternalLink,
+  LogOut,
+  LogIn,
   Link2,
   Link2Off,
   Plus,
@@ -123,7 +122,6 @@ function ProvidersPageImpl({
   settings: settingsSnapshot,
 }: ProvidersPageProps) {
   const [editorOpen, setEditorOpen] = useState(false);
-  const [editorTab, setEditorTab] = useState("models");
   const editorRef = useRef<HTMLDivElement>(null);
   useDialogFocus(Boolean(desktopPage && editorOpen), editorRef, () =>
     setEditorOpen(false),
@@ -627,18 +625,6 @@ function ProvidersPageImpl({
     }
   }
 
-  async function copyCodexLoginCommand() {
-    try {
-      await navigator.clipboard.writeText("codex login");
-      showToast(t("providers.codexLoginCommandCopied"), "message");
-    } catch (err) {
-      showToast(
-        t("gateway.copyFailed", { message: messageFromError(err) }),
-        "error",
-      );
-    }
-  }
-
   async function refreshCodexAuthStatus() {
     setOperationBusy("auth-refresh");
     try {
@@ -1037,7 +1023,6 @@ function ProvidersPageImpl({
   useEffect(() => {
     if (!openOfficialRequest) return;
     selectProvider(OFFICIAL_ID);
-    setEditorTab("models");
     setEditorOpen(true);
   }, [openOfficialRequest]);
 
@@ -1066,16 +1051,9 @@ function ProvidersPageImpl({
           connectionBusy={Boolean(connectionPendingMode)}
           busy={Boolean(busy)}
           onToggleConnection={() => void toggleCodexHubConnection()}
-          onSelect={(id, tab = "models") => {
+          onSelect={(id) => {
             selectProvider(id);
-            setEditorTab(
-              tab === "account" &&
-                id !== OFFICIAL_ID &&
-                subscriptionAuthAdapter(providers.find((p) => p.id === id)) !==
-                  "xai_oauth"
-                ? "connection"
-                : tab,
-            );
+
             setEditorOpen(true);
           }}
           onAdd={() => void openCatalogPicker()}
@@ -1112,7 +1090,7 @@ function ProvidersPageImpl({
             ? "OpenAI"
             : (selectedProvider?.name ?? t("providers.addProvider"))
         }
-        data-editor-tab={selectedId === ADD_ID ? "add" : editorTab}
+        data-editor-tab={selectedId === ADD_ID ? "add" : "unified"}
         className={desktopPage ? "ws-editor-overlay" : "contents"}
         hidden={Boolean(desktopPage && !editorOpen)}
       >
@@ -1133,24 +1111,6 @@ function ProvidersPageImpl({
               <X size={16} />
             </button>
           </header>
-        )}
-        {desktopPage && selectedId !== ADD_ID && (
-          <nav className="ws-editor-tabs">
-            {(selectedId === OFFICIAL_ID
-              ? ["models", "account"]
-              : subscriptionAuthAdapter(selectedProvider) === "xai_oauth"
-                ? ["models", "connection", "account"]
-                : ["models", "connection"]
-            ).map((tab) => (
-              <button
-                key={tab}
-                className={editorTab === tab ? "selected" : ""}
-                onClick={() => setEditorTab(tab)}
-              >
-                {t("workspace.editorTabs." + tab)}
-              </button>
-            ))}
-          </nav>
         )}
         <fieldset
           disabled={busy === "save"}
@@ -1227,7 +1187,6 @@ function ProvidersPageImpl({
                         settings?.include_official_models ?? false
                       }
                       authIssue={gatewayStatus?.codex_auth?.issue ?? null}
-                      onCopyLoginCommand={() => void copyCodexLoginCommand()}
                       onContextGuardChanged={reflectContextGuardSetting}
                       onOpenCodexApp={() => void openCodexAppForLogin()}
                       onRefresh={(options) =>
@@ -1252,7 +1211,7 @@ function ProvidersPageImpl({
                     />
                   ) : selectedProvider ? (
                     <ProviderDetail
-                      desktopTab={desktopPage ? editorTab : undefined}
+                      desktopTab={desktopPage ? "unified" : undefined}
                       busy={busy}
                       discoverError={modelDiscoveryError}
                       probeResult={probeResult}
@@ -1310,17 +1269,12 @@ function ProvidersPageImpl({
           onSelectCustom={() => {
             setCatalogPickerOpen(false);
             selectProvider(ADD_ID);
-            setEditorTab("connection");
             setEditorOpen(true);
           }}
           onSelectPreset={(preset) => {
             setCatalogPickerOpen(false);
             addCatalogProvider(preset);
-            setEditorTab(
-              subscriptionAuthAdapter(preset) === "xai_oauth"
-                ? "account"
-                : "connection",
-            );
+
             setEditorOpen(true);
           }}
         />
@@ -1819,7 +1773,7 @@ function SourceStatusChip({
   return (
     <span
       className={cx(
-        "inline-flex h-6 max-w-[112px] items-center rounded-full border px-2 text-[11px] font-semibold leading-none",
+        "ws-status-chip inline-flex h-6 max-w-[112px] items-center rounded-full border px-2 text-[11px] font-semibold leading-none",
         tone === "ok" && "border-emerald-200 bg-emerald-50 text-emerald-700",
         tone === "muted" && "border-slate-200 bg-white text-slate-500",
         tone === "pending" && "border-amber-200 bg-amber-50 text-amber-700",
@@ -1929,7 +1883,6 @@ function OfficialDetail({
   onOfficialCollaborationOverridesChanged,
   officialDisabledModels,
   officialIncluded,
-  onCopyLoginCommand,
   onContextGuardChanged,
   onOpenCodexApp,
   onRefresh,
@@ -1960,7 +1913,6 @@ function OfficialDetail({
   ) => void;
   officialDisabledModels: string[];
   officialIncluded: boolean;
-  onCopyLoginCommand: () => void;
   onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
   onRefresh: (options?: {
@@ -1984,7 +1936,41 @@ function OfficialDetail({
   const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
   const authorized = authState === "authorized";
-  const authRefreshBusy = busy === "auth-refresh";
+  const [signOutBusy, setSignOutBusy] = useState(false);
+  const [loginPending, setLoginPending] = useState(false);
+  const refreshAuthRef = useRef(onRefreshAuth);
+  refreshAuthRef.current = onRefreshAuth;
+  useEffect(() => {
+    if (!loginPending) return;
+    const refresh = () => refreshAuthRef.current();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [loginPending]);
+  useEffect(() => {
+    if (authorized) setLoginPending(false);
+  }, [authorized]);
+  async function signOut() {
+    setSignOutBusy(true);
+    const toast = showToast(t("workspace.signingOut"), "loading");
+    try {
+      await api.codexLogout();
+      onRefreshAuth();
+      updateToast(toast, {
+        text: t("workspace.signedOut"),
+        tone: "success",
+        action: null,
+      });
+    } catch (error) {
+      onRefreshAuth();
+      updateToast(toast, {
+        text: messageFromError(error),
+        tone: "error",
+        action: null,
+      });
+    } finally {
+      setSignOutBusy(false);
+    }
+  }
   const [contextGuardStatus, setContextGuardStatus] =
     useState<CodexContextGuardStatus | null>(null);
   const [contextGuardBusy, setContextGuardBusy] = useState(false);
@@ -2218,47 +2204,46 @@ function OfficialDetail({
             <SourceStatusChip {...codexAuthChip(authState, t as Translate)} />
           }
           actions={
-            authorized && (
-              <>
-                <OfficialOpenAIUsageLimitBars
-                  busy={usageBusy}
-                  limits={usageSnapshot?.limits ?? []}
-                />
-                <button
-                  type="button"
-                  className="focus-ring grid h-7 w-7 place-items-center rounded-control bg-surface text-slate-600 shadow-control hover:bg-white disabled:text-slate-300"
-                  disabled={usageBusy}
-                  aria-label={t("providers.refreshOpenAIUsage")}
-                  title={t("providers.refreshOpenAIUsage")}
-                  onClick={onRefreshUsage}
-                >
-                  <RefreshCcw
-                    size={14}
-                    className={usageBusy ? "animate-spin" : undefined}
+            <>
+              {authorized && (
+                <>
+                  <OfficialOpenAIUsageLimitBars
+                    busy={usageBusy}
+                    limits={usageSnapshot?.limits ?? []}
                   />
-                </button>
-              </>
-            )
+                  <button
+                    type="button"
+                    className="focus-ring grid h-7 w-7 place-items-center rounded-control bg-surface text-slate-600 shadow-control hover:bg-white disabled:text-slate-300"
+                    disabled={usageBusy}
+                    aria-label={t("providers.refreshOpenAIUsage")}
+                    title={t("providers.refreshOpenAIUsage")}
+                    onClick={onRefreshUsage}
+                  >
+                    <RefreshCcw
+                      size={14}
+                      className={usageBusy ? "animate-spin" : undefined}
+                    />
+                  </button>
+                </>
+              )}
+              <button
+                className="ws-button"
+                disabled={signOutBusy || busy !== null}
+                onClick={
+                  authorized
+                    ? () => void signOut()
+                    : () => {
+                        setLoginPending(true);
+                        onOpenCodexApp();
+                      }
+                }
+              >
+                {authorized ? <LogOut size={14} /> : <LogIn size={14} />}
+                {t(authorized ? "providers.xaiSignOut" : "workspace.signIn")}
+              </button>
+            </>
           }
         />
-        <div className="ws-actions">
-          <button className="ws-button" onClick={onOpenCodexApp}>
-            <ExternalLink size={12} />
-            {t("providers.openCodexApp")}
-          </button>
-          <button className="ws-button" onClick={onCopyLoginCommand}>
-            <Copy size={12} />
-            {t("providers.copyCodexLoginCommand")}
-          </button>
-          <button
-            className="ws-button"
-            disabled={authRefreshBusy}
-            onClick={onRefreshAuth}
-          >
-            <RefreshCcw size={12} />
-            {t("providers.refreshCodexAuth")}
-          </button>
-        </div>
         {!officialIncluded && (
           <div className="rounded-inner border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium leading-5 text-amber-800 shadow-hairline">
             {t("providers.openaiSourceExcludedDetail")}
@@ -2272,14 +2257,9 @@ function OfficialDetail({
             usageHidden={usageHidden}
           />
         ) : (
-          <CodexAuthPrompt
-            authIssue={authIssue}
-            authState={authState}
-            busy={authRefreshBusy}
-            onCopyLoginCommand={onCopyLoginCommand}
-            onOpenCodexApp={onOpenCodexApp}
-            onRefreshAuth={onRefreshAuth}
-          />
+          <p className="ws-muted">
+            {authIssue || t("workspace.signInForQuota")}
+          </p>
         )}
       </div>
       <ModelSection
@@ -2340,73 +2320,6 @@ function OfficialDetail({
         </button>
       </div>
     </div>
-  );
-}
-
-function CodexAuthPrompt({
-  authIssue,
-  authState,
-  busy,
-  onCopyLoginCommand,
-  onOpenCodexApp,
-  onRefreshAuth,
-}: {
-  authIssue: string | null;
-  authState: CodexAuthState;
-  busy: boolean;
-  onCopyLoginCommand: () => void;
-  onOpenCodexApp: () => void;
-  onRefreshAuth: () => void;
-}) {
-  const { t } = useTranslation();
-  const title =
-    authState === "unknown"
-      ? t("providers.codexAuthUnknownTitle")
-      : t("providers.codexAuthRequiredTitle");
-
-  return (
-    <section className="grid gap-3 rounded-inner bg-amber-50/70 p-3 text-sm shadow-hairline">
-      <div className="min-w-0">
-        <h3 className="truncate text-sm font-semibold text-ink">{title}</h3>
-        <p className="mt-1 text-xs leading-5 text-slate-700">
-          {t("providers.codexAuthRequiredBody")}
-        </p>
-        {authIssue && (
-          <p className="mt-1 truncate text-xs text-slate-500" title={authIssue}>
-            {authIssue}
-          </p>
-        )}
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control hover:bg-slate-800"
-          onClick={onOpenCodexApp}
-        >
-          <ExternalLink size={15} />
-          <span className="truncate">{t("providers.openCodexApp")}</span>
-        </button>
-        <button
-          type="button"
-          className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-slate-700 shadow-control hover:bg-white"
-          onClick={onCopyLoginCommand}
-        >
-          <Copy size={15} />
-          <span className="truncate">
-            {t("providers.copyCodexLoginCommand")}
-          </span>
-        </button>
-        <button
-          type="button"
-          className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-slate-700 shadow-control hover:bg-white disabled:text-slate-300"
-          disabled={busy}
-          onClick={onRefreshAuth}
-        >
-          <RefreshCcw size={15} className={busy ? "animate-spin" : undefined} />
-          <span className="truncate">{t("providers.refreshCodexAuth")}</span>
-        </button>
-      </div>
-    </section>
   );
 }
 

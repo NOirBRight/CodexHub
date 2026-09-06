@@ -1,5 +1,10 @@
 const enUS = {
   workspace: {
+    monthRemaining: "Monthly remaining",
+    signingOut: "Signing out",
+    signedOut: "Signed out. Restart Codex to refresh its account state.",
+    availableBalance: "Available balance",
+    signIn: "Sign in",
     loading: "Loading…",
     appearanceSaved:"Appearance saved. No restart needed.",
     appearanceSessionOnly:"Appearance changed, but the preference could not be saved.",

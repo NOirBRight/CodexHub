@@ -26,6 +26,7 @@ mod models;
 mod official_refresh;
 mod official_catalog;
 mod openai_usage;
+mod provider_account;
 mod proxy;
 mod routing_owner;
 mod runtime_paths;

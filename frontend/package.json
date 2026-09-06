@@ -1,7 +1,7 @@
 {
   "name": "codexhub-frontend",
   "private": true,
-  "version": "0.1.9-beta.3.20",
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -10,7 +10,8 @@
     "test:ui-contract": "node --test scripts/ui-contract.test.mjs scripts/provider-workspace.test.mjs scripts/desktop-commands.contract.test.mjs scripts/official-models-visibility.test.mjs scripts/provider-discovery-draft.test.mjs scripts/provider-model-copy.test.mjs scripts/provider-catalog.test.mjs && node --experimental-strip-types --test scripts/app-update-lifecycle.test.mjs scripts/persistent-action.test.mjs scripts/provider-save.test.mjs scripts/commands.test.mjs scripts/catalog-publish.test.mjs scripts/runtime-store.test.mjs && node --experimental-strip-types --test scripts/workspace-resources.test.mjs scripts/workspace-settings.test.mjs scripts/app-update-hook.test.mjs",
     "test:provider-comparison": "node --test scripts/provider-comparison.test.mjs",
     "preview": "vite preview --host 127.0.0.1",
-    "prototype:ui": "vite --host 127.0.0.1 --port 1422 --open /?prototype=overview"
+    "prototype:ui": "vite --host 127.0.0.1 --port 1422 --open /?prototype=overview",
+    "check:design": "node scripts/design-audit.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

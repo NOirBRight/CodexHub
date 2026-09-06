@@ -202,7 +202,7 @@ export function OfficialOpenAIUsageLimitBars({
         return (
           <div
             key={limit.key}
-            className="min-w-0 rounded-control bg-surface px-2 py-1.5 shadow-control"
+            className="ws-account-quota min-w-0 rounded-control bg-surface px-2 py-1.5 shadow-control"
             title={`${label} · ${value} · ${endTime}`}
             aria-label={
               percent === null

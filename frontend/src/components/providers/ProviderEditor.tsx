@@ -1,10 +1,29 @@
-import { Check, ChevronDown, FlaskConical, LogOut, Plus, RefreshCcw, Save, Trash2, X } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  FlaskConical,
+  LogOut,
+  Plus,
+  RefreshCcw,
+  Save,
+  Trash2,
+  X,
+} from "lucide-react";
 import { OfficialOpenAIUsageLimitBars } from "./OfficialOpenAIUsagePanel";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useToasts } from "../PageToast";
-import { ModelSection, createDraftModel, uniqueModelId } from "./ProviderModelSection";
-import { ApiKeyInput, Field, HeaderRow, IconButton } from "./ProviderFormControls";
+import {
+  ModelSection,
+  createDraftModel,
+  uniqueModelId,
+} from "./ProviderModelSection";
+import {
+  ApiKeyInput,
+  Field,
+  HeaderRow,
+  IconButton,
+} from "./ProviderFormControls";
 import { XaiLoginCard } from "./XaiLoginCard";
 import {
   applyAddProviderProbeResult,
@@ -25,7 +44,11 @@ import {
   bundledPresetFor,
   subscriptionAuthAdapter,
 } from "../../lib/providerCatalog";
-import { endpointSelectionOptions, type AddProviderForm, type InlineTestState } from "../../lib/providerForm";
+import {
+  endpointSelectionOptions,
+  type AddProviderForm,
+  type InlineTestState,
+} from "../../lib/providerForm";
 import { normalizeModel } from "../../lib/providerModel";
 import { isProviderDirty } from "../../lib/providerComparison";
 import { cx, displayModel, renumberModels, slugify } from "../../lib/format";
@@ -41,7 +64,6 @@ import type {
 import type { ProviderDraftState } from "../../lib/providerWorkspace/core";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
-
 
 export function ProviderDetail({
   desktopTab,
@@ -75,7 +97,8 @@ export function ProviderDetail({
     return { ...normalized, upstream_format: provider.upstream_format };
   }, [provider]);
   const [draft, setDraft] = useState(() => normalizedProvider);
-  const [endpointTestState, setEndpointTestState] = useState<InlineTestState>("idle");
+  const [endpointTestState, setEndpointTestState] =
+    useState<InlineTestState>("idle");
   const [bundledPresets, setBundledPresets] = useState<Provider[]>([]);
   const [usageLimits, setUsageLimits] = useState<OpenAIUsageLimit[]>([]);
   const [usageBusy, setUsageBusy] = useState(false);
@@ -85,12 +108,17 @@ export function ProviderDetail({
   const ensuringXaiCatalog = useRef(false);
   draftRef.current = draft;
   const preset = bundledPresetFor(provider.id, bundledPresets);
-  const subscriptionAuth = subscriptionAuthAdapter(provider) ?? subscriptionAuthAdapter(preset);
+  const subscriptionAuth =
+    subscriptionAuthAdapter(provider) ?? subscriptionAuthAdapter(preset);
   const xaiSubscriptionAuth = subscriptionAuth === "xai_oauth";
 
   useEffect(() => {
     setDraft(normalizedProvider);
-    setEndpointTestState(hasAvailableEndpointFormats(normalizedProvider.available_upstream_formats) ? "success" : "idle");
+    setEndpointTestState(
+      hasAvailableEndpointFormats(normalizedProvider.available_upstream_formats)
+        ? "success"
+        : "idle",
+    );
   }, [provider.id]);
 
   useEffect(() => {
@@ -110,12 +138,16 @@ export function ProviderDetail({
       return;
     }
     setDraft((current) =>
-      applyCatalogPresetDefaults(current, preset, { includeModels: current.models.length === 0 }),
+      applyCatalogPresetDefaults(current, preset, {
+        includeModels: current.models.length === 0,
+      }),
     );
   }, [preset, provider.id]);
 
   useEffect(() => {
-    const availableFormats = normalizeEndpointFormats(provider.available_upstream_formats);
+    const availableFormats = normalizeEndpointFormats(
+      provider.available_upstream_formats,
+    );
     setDraft((current) =>
       current.id === provider.id
         ? {
@@ -132,7 +164,10 @@ export function ProviderDetail({
   // saved back over the discovered models.
   useEffect(() => {
     setDraft((current) => {
-      if (current.id !== normalizedProvider.id || current.models === normalizedProvider.models) {
+      if (
+        current.id !== normalizedProvider.id ||
+        current.models === normalizedProvider.models
+      ) {
         return current;
       }
       return { ...current, models: normalizedProvider.models };
@@ -196,7 +231,11 @@ export function ProviderDetail({
   useEffect(() => {
     onDraftStateChange({ providerId: provider.id, draft, dirty });
     return () => {
-      onDraftStateChange({ providerId: provider.id, draft: normalizedProvider, dirty: false });
+      onDraftStateChange({
+        providerId: provider.id,
+        draft: normalizedProvider,
+        dirty: false,
+      });
     };
   }, [dirty, draft, normalizedProvider, onDraftStateChange, provider.id]);
 
@@ -213,7 +252,10 @@ export function ProviderDetail({
     const id = uniqueModelId(draft.models);
     setDraft((current) => ({
       ...current,
-      models: [...current.models, createDraftModel(id, current.models.length + 1)],
+      models: [
+        ...current.models,
+        createDraftModel(id, current.models.length + 1),
+      ],
     }));
     return id;
   }
@@ -221,7 +263,9 @@ export function ProviderDetail({
   function removeModel(modelId: string) {
     const next = {
       ...draft,
-      models: renumberModels(draft.models.filter((model) => model.id !== modelId)),
+      models: renumberModels(
+        draft.models.filter((model) => model.id !== modelId),
+      ),
     };
     setDraft(next);
     if (!unsaved) {
@@ -238,16 +282,21 @@ export function ProviderDetail({
       let current = draftRef.current;
       if (!current.base_url.trim()) {
         const bundled = await api.getBundledProviders();
-        const next = applyCatalogPresetDefaults(current, bundledPresetFor(current.id, bundled), {
-          includeModels: false,
-        });
+        const next = applyCatalogPresetDefaults(
+          current,
+          bundledPresetFor(current.id, bundled),
+          {
+            includeModels: false,
+          },
+        );
         if (next !== current) {
           current = next;
           setDraft(next);
         }
       }
       const catalogOnly =
-        current.models.length === 0 || current.models.every((model) => model.id === "grok-4");
+        current.models.length === 0 ||
+        current.models.every((model) => model.id === "grok-4");
       if (catalogOnly && current.base_url.trim()) {
         onRefresh(current);
       } else if (current !== draftRef.current) {
@@ -306,14 +355,19 @@ export function ProviderDetail({
     if (result) {
       setDraft((current) => applyProviderProbeResult(current, result));
     }
-    setEndpointTestState(result && probeSucceeded(result) ? "success" : "error");
+    setEndpointTestState(
+      result && probeSucceeded(result) ? "success" : "error",
+    );
   }
 
   async function testModel(model: Model) {
     const label = displayModel(model);
     const upstreamFormat = normalizedEndpointFormat(draft.upstream_format);
     const endpointLabel = upstreamFormatLabel(upstreamFormat, t as Translate);
-    const toastId = showToast(t("providers.testingModel", { label, endpoint: endpointLabel }), "loading");
+    const toastId = showToast(
+      t("providers.testingModel", { label, endpoint: endpointLabel }),
+      "loading",
+    );
     try {
       const result = await api.testModelEndpoint(
         draft.base_url,
@@ -323,14 +377,22 @@ export function ProviderDetail({
       );
       updateToast(toastId, {
         action: null,
-        text: t("gateway.connectedHttp", { label, endpoint: endpointLabel, status: result.status }),
+        text: t("gateway.connectedHttp", {
+          label,
+          endpoint: endpointLabel,
+          status: result.status,
+        }),
         tone: "success",
       });
       return true;
     } catch (err) {
       updateToast(toastId, {
         action: null,
-        text: t("gateway.connectionFailed", { label, endpoint: endpointLabel, message: messageFromError(err) }),
+        text: t("gateway.connectionFailed", {
+          label,
+          endpoint: endpointLabel,
+          message: messageFromError(err),
+        }),
         tone: "error",
       });
       return false;
@@ -343,12 +405,17 @@ export function ProviderDetail({
         <HeaderRow
           title={provider.name}
           titleAccessory={
-            xaiSubscriptionAuth ? <SubscriptionAuthChip signedIn={signedIn} /> : null
+            xaiSubscriptionAuth ? (
+              <SubscriptionAuthChip signedIn={signedIn} />
+            ) : null
           }
           actions={
             <>
               {xaiSubscriptionAuth && signedIn ? (
-                <OfficialOpenAIUsageLimitBars busy={usageBusy} limits={usageLimits} />
+                <OfficialOpenAIUsageLimitBars
+                  busy={usageBusy}
+                  limits={usageLimits}
+                />
               ) : null}
               {xaiSubscriptionAuth && signedIn ? (
                 <IconButton
@@ -356,9 +423,34 @@ export function ProviderDetail({
                   disabled={usageBusy}
                   onClick={() => void refreshXaiUsage()}
                 >
-                  <RefreshCcw size={16} className={usageBusy ? "animate-spin" : undefined} />
+                  <RefreshCcw
+                    size={16}
+                    className={usageBusy ? "animate-spin" : undefined}
+                  />
                 </IconButton>
               ) : null}
+              {xaiSubscriptionAuth && signedIn === false ? (
+                <XaiLoginCard
+                  compact
+                  onAuthChange={setSignedIn}
+                  onSignedIn={() => void ensureXaiCatalogReady()}
+                  onUsage={(limits) => {
+                    setUsageLimits(limits);
+                    setUsageBusy(false);
+                  }}
+                />
+              ) : null}
+              {xaiSubscriptionAuth && signedIn ? (
+                <button
+                  className="ws-button"
+                  disabled={usageBusy}
+                  onClick={() => void signOutXai()}
+                >
+                  <LogOut size={14} />
+                  {t("providers.xaiSignOut")}
+                </button>
+              ) : null}
+
               <IconButton
                 title={t("providers.deleteProvider")}
                 danger
@@ -371,66 +463,49 @@ export function ProviderDetail({
           }
         />
 
-        {xaiSubscriptionAuth && signedIn === false ? (
-          <XaiLoginCard
-            onAuthChange={setSignedIn}
-            onSignedIn={() => void ensureXaiCatalogReady()}
-            onUsage={(limits) => {
-              setUsageLimits(limits);
-              setUsageBusy(false);
-            }}
-          />
-        ) : null}
-        {xaiSubscriptionAuth && signedIn ? (
-          <div className="flex min-w-0 items-center justify-between gap-2 rounded-inner bg-panel px-3 py-2 text-xs leading-5 text-slate-600 shadow-hairline">
-            <p className="min-w-0 truncate">{t("providers.xaiSignedInBody")}</p>
-            <button
-              type="button"
-              className="focus-ring inline-flex h-8 shrink-0 items-center gap-1.5 rounded-control bg-surface px-2.5 text-xs font-semibold text-slate-700 shadow-control hover:bg-white disabled:text-slate-300"
-              disabled={usageBusy}
-              onClick={() => void signOutXai()}
-            >
-              <LogOut size={14} />
-              {t("providers.xaiSignOut")}
-            </button>
+        {xaiSubscriptionAuth && !desktopTab ? null : (
+          <div className="grid grid-cols-2 gap-2">
+            <Field label={t("common.name")}>
+              <input
+                className="field field-compact"
+                value={draft.name}
+                onChange={(event) =>
+                  setDraft({ ...draft, name: event.target.value })
+                }
+              />
+            </Field>
+            <Field label={t("common.apiKey")}>
+              <ApiKeyInput
+                value={draft.api_key ?? ""}
+                onChange={(apiKey) =>
+                  setDraft({ ...draft, api_key: apiKey || null })
+                }
+              />
+            </Field>
+            <Field label={t("common.baseUrl")} className="col-span-2">
+              <input
+                className="field field-compact"
+                value={draft.base_url}
+                onChange={(event) =>
+                  setDraft({ ...draft, base_url: event.target.value })
+                }
+              />
+            </Field>
+            <div className="col-span-2">
+              <EndpointSelectionPanel
+                value={draft.upstream_format ?? "auto"}
+                result={probeResult}
+                availableFormats={draft.available_upstream_formats}
+                toolProtocol={draft.tool_protocol}
+                probeDisabled={busy === "probe" || !draft.base_url.trim()}
+                testState={endpointTestState}
+                onChange={(upstreamFormat) =>
+                  setDraft({ ...draft, upstream_format: upstreamFormat })
+                }
+                onProbe={() => void runProbe()}
+              />
+            </div>
           </div>
-        ) : null}
-
-        {xaiSubscriptionAuth && desktopTab !== "connection" ? null : (
-        <div className="grid grid-cols-2 gap-2">
-          <Field label={t("common.name")}>
-            <input
-              className="field field-compact"
-              value={draft.name}
-              onChange={(event) => setDraft({ ...draft, name: event.target.value })}
-            />
-          </Field>
-          <Field label={t("common.apiKey")}>
-            <ApiKeyInput
-              value={draft.api_key ?? ""}
-              onChange={(apiKey) => setDraft({ ...draft, api_key: apiKey || null })}
-            />
-          </Field>
-          <Field label={t("common.baseUrl")} className="col-span-2">
-            <input
-              className="field field-compact"
-              value={draft.base_url}
-              onChange={(event) => setDraft({ ...draft, base_url: event.target.value })}
-            />
-          </Field>
-          <div className="col-span-2">
-            <EndpointSelectionPanel
-              value={draft.upstream_format ?? "auto"}
-              result={probeResult}
-              availableFormats={draft.available_upstream_formats}
-              toolProtocol={draft.tool_protocol}
-              probeDisabled={busy === "probe" || !draft.base_url.trim()}
-              testState={endpointTestState}
-              onChange={(upstreamFormat) => setDraft({ ...draft, upstream_format: upstreamFormat })}
-              onProbe={() => void runProbe()}
-            />
-          </div>
-        </div>
         )}
       </div>
 
@@ -442,7 +517,9 @@ export function ProviderDetail({
         providerId={draft.id}
         onAdd={addModel}
         onDiscover={() => onRefresh(draft)}
-        onReorder={(models) => setDraft({ ...draft, models: renumberModels(models) })}
+        onReorder={(models) =>
+          setDraft({ ...draft, models: renumberModels(models) })
+        }
         onRemove={removeModel}
         onTestModel={testModel}
         onToggle={(modelId, enabled) => updateModel(modelId, { enabled })}
@@ -450,7 +527,9 @@ export function ProviderDetail({
         onCancelNewModel={(modelId) =>
           setDraft((current) => ({
             ...current,
-            models: renumberModels(current.models.filter((model) => model.id !== modelId)),
+            models: renumberModels(
+              current.models.filter((model) => model.id !== modelId),
+            ),
           }))
         }
         modelTestDisabled={!draft.base_url.trim()}
@@ -477,7 +556,6 @@ export function ProviderDetail({
   );
 }
 
-
 export function AddProviderPanel({
   busy,
   canAdd,
@@ -501,7 +579,8 @@ export function AddProviderPanel({
 }) {
   const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
-  const [endpointTestState, setEndpointTestState] = useState<InlineTestState>("idle");
+  const [endpointTestState, setEndpointTestState] =
+    useState<InlineTestState>("idle");
 
   useEffect(() => {
     if (probeResult) {
@@ -533,14 +612,19 @@ export function AddProviderPanel({
     if (result) {
       onFormChange(applyAddProviderProbeResult(form, result));
     }
-    setEndpointTestState(result && probeSucceeded(result) ? "success" : "error");
+    setEndpointTestState(
+      result && probeSucceeded(result) ? "success" : "error",
+    );
   }
 
   async function testModel(model: Model) {
     const label = displayModel(model);
     const upstreamFormat = normalizedEndpointFormat(form.upstream_format);
     const endpointLabel = upstreamFormatLabel(upstreamFormat, t as Translate);
-    const toastId = showToast(t("providers.testingModel", { label, endpoint: endpointLabel }), "loading");
+    const toastId = showToast(
+      t("providers.testingModel", { label, endpoint: endpointLabel }),
+      "loading",
+    );
     try {
       const result = await api.testModelEndpoint(
         form.base_url,
@@ -550,14 +634,22 @@ export function AddProviderPanel({
       );
       updateToast(toastId, {
         action: null,
-        text: t("gateway.connectedHttp", { label, endpoint: endpointLabel, status: result.status }),
+        text: t("gateway.connectedHttp", {
+          label,
+          endpoint: endpointLabel,
+          status: result.status,
+        }),
         tone: "success",
       });
       return true;
     } catch (err) {
       updateToast(toastId, {
         action: null,
-        text: t("gateway.connectionFailed", { label, endpoint: endpointLabel, message: messageFromError(err) }),
+        text: t("gateway.connectionFailed", {
+          label,
+          endpoint: endpointLabel,
+          message: messageFromError(err),
+        }),
         tone: "error",
       });
       return false;
@@ -573,7 +665,9 @@ export function AddProviderPanel({
             <input
               className="field field-compact"
               value={form.name}
-              onChange={(event) => onFormChange({ ...form, name: event.target.value })}
+              onChange={(event) =>
+                onFormChange({ ...form, name: event.target.value })
+              }
             />
           </Field>
           <Field label={t("common.apiKey")}>
@@ -586,7 +680,9 @@ export function AddProviderPanel({
             <input
               className="field field-compact"
               value={form.base_url}
-              onChange={(event) => onFormChange({ ...form, base_url: event.target.value })}
+              onChange={(event) =>
+                onFormChange({ ...form, base_url: event.target.value })
+              }
             />
           </Field>
           <div className="col-span-2">
@@ -597,7 +693,9 @@ export function AddProviderPanel({
               toolProtocol={form.tool_protocol}
               probeDisabled={busy === "probe" || !form.base_url.trim()}
               testState={endpointTestState}
-              onChange={(upstreamFormat) => onFormChange({ ...form, upstream_format: upstreamFormat })}
+              onChange={(upstreamFormat) =>
+                onFormChange({ ...form, upstream_format: upstreamFormat })
+              }
               onProbe={() => void runProbe()}
             />
           </div>
@@ -612,9 +710,14 @@ export function AddProviderPanel({
         providerId={form.id.trim() || slugify(form.name)}
         onAdd={addModel}
         onDiscover={onDiscover}
-        onReorder={(models) => onFormChange({ ...form, models: renumberModels(models) })}
+        onReorder={(models) =>
+          onFormChange({ ...form, models: renumberModels(models) })
+        }
         onRemove={(modelId) =>
-          onFormChange({ ...form, models: form.models.filter((model) => model.id !== modelId) })
+          onFormChange({
+            ...form,
+            models: form.models.filter((model) => model.id !== modelId),
+          })
         }
         onTestModel={testModel}
         onToggle={(modelId, enabled) => updateModel(modelId, { enabled })}
@@ -622,7 +725,9 @@ export function AddProviderPanel({
         onCancelNewModel={(modelId) =>
           onFormChange({
             ...form,
-            models: renumberModels(form.models.filter((model) => model.id !== modelId)),
+            models: renumberModels(
+              form.models.filter((model) => model.id !== modelId),
+            ),
           })
         }
         modelTestDisabled={!form.base_url.trim()}
@@ -643,10 +748,10 @@ export function AddProviderPanel({
   );
 }
 
-
 function SubscriptionAuthChip({ signedIn }: { signedIn: boolean | null }) {
   const { t } = useTranslation();
-  const tone = signedIn === true ? "ok" : signedIn === false ? "pending" : "muted";
+  const tone =
+    signedIn === true ? "ok" : signedIn === false ? "pending" : "muted";
   const label =
     signedIn === true
       ? t("providers.authorized")
@@ -656,7 +761,7 @@ function SubscriptionAuthChip({ signedIn }: { signedIn: boolean | null }) {
   return (
     <span
       className={cx(
-        "inline-flex h-6 max-w-[112px] items-center rounded-full border px-2 text-[11px] font-semibold leading-none",
+        "ws-status-chip inline-flex h-6 max-w-[112px] items-center rounded-full border px-2 text-[11px] font-semibold leading-none",
         tone === "ok" && "border-emerald-200 bg-emerald-50 text-emerald-700",
         tone === "pending" && "border-amber-200 bg-amber-50 text-amber-700",
         tone === "muted" && "border-slate-200 bg-white text-slate-500",
@@ -688,22 +793,33 @@ function EndpointSelectionPanel({
 }) {
   const { t } = useTranslation();
   const selected = normalizedEndpointFormat(value);
-  const mergedAvailableFormats = mergeEndpointFormats(availableFormats, probeAvailableFormats(result));
+  const mergedAvailableFormats = mergeEndpointFormats(
+    availableFormats,
+    probeAvailableFormats(result),
+  );
 
   return (
     <div className="grid min-w-0 gap-1 text-sm font-medium text-slate-700">
       <div className="flex min-w-0 items-center justify-between gap-2">
         <span>{t("common.endpointSelection")}</span>
-        <span className="truncate text-xs font-medium text-slate-500">{toolProtocolLabel(toolProtocol)}</span>
+        <span className="truncate text-xs font-medium text-slate-500">
+          {toolProtocolLabel(toolProtocol)}
+        </span>
       </div>
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-        <EndpointFormatSelect availableFormats={mergedAvailableFormats} value={selected} onChange={onChange} />
+        <EndpointFormatSelect
+          availableFormats={mergedAvailableFormats}
+          value={selected}
+          onChange={onChange}
+        />
         <button
           type="button"
           className={cx(
             "mini-button inline-flex h-9 shrink-0 items-center justify-center gap-2 px-3 text-sm font-semibold disabled:bg-slate-100",
-            testState === "success" && "status-pop border-emerald-200 bg-emerald-50 text-emerald-700",
-            testState === "error" && "status-pop border-red-200 bg-red-50 text-danger",
+            testState === "success" &&
+              "status-pop border-emerald-200 bg-emerald-50 text-emerald-700",
+            testState === "error" &&
+              "status-pop border-red-200 bg-red-50 text-danger",
           )}
           disabled={probeDisabled || testState === "testing"}
           onClick={onProbe}
@@ -726,7 +842,9 @@ function EndpointFormatSelect({
   value: UpstreamFormat;
 }) {
   const [open, setOpen] = useState(false);
-  const selected = endpointSelectionOptions.find((option) => option.value === value) ?? endpointSelectionOptions[0];
+  const selected =
+    endpointSelectionOptions.find((option) => option.value === value) ??
+    endpointSelectionOptions[0];
   const available = new Set(availableFormats);
   const selectedAvailable = available.has(selected.value);
   const { t } = useTranslation();
@@ -750,13 +868,18 @@ function EndpointFormatSelect({
         onClick={() => setOpen((current) => !current)}
       >
         <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate">{upstreamFormatLabel(selected.value, tr)}</span>
+          <span className="truncate">
+            {upstreamFormatLabel(selected.value, tr)}
+          </span>
           {selectedAvailable && <EndpointAvailableChip />}
         </span>
         <ChevronDown size={15} className="shrink-0 text-slate-500" />
       </button>
       {open && (
-        <div className="select-popover absolute left-0 top-[calc(100%+6px)] z-30 w-full min-w-[240px]" role="listbox">
+        <div
+          className="select-popover absolute left-0 top-[calc(100%+6px)] z-30 w-full min-w-[240px]"
+          role="listbox"
+        >
           {endpointSelectionOptions.map((option) => {
             const selectedOption = option.value === value;
             const optionAvailable = available.has(option.value);
@@ -773,7 +896,9 @@ function EndpointFormatSelect({
                   setOpen(false);
                 }}
               >
-                <span className="truncate">{upstreamFormatLabel(option.value, tr)}</span>
+                <span className="truncate">
+                  {upstreamFormatLabel(option.value, tr)}
+                </span>
                 <span className="flex shrink-0 items-center gap-2">
                   {optionAvailable && <EndpointAvailableChip />}
                 </span>
@@ -795,7 +920,13 @@ function EndpointAvailableChip() {
   );
 }
 
-function TestStateIcon({ size, state }: { size: number; state: InlineTestState }) {
+function TestStateIcon({
+  size,
+  state,
+}: {
+  size: number;
+  state: InlineTestState;
+}) {
   if (state === "testing") {
     return <RefreshCcw size={size} className="shrink-0 animate-spin" />;
   }

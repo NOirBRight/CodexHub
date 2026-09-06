@@ -39,3 +39,15 @@ test("reset timestamps accept API epoch seconds, milliseconds and ISO strings", 
   for (const raw of [undefined, null, "", "unknown", "9999999999999999999"])
     assert.equal(quotaResetDate(raw), null);
 });
+
+test("quota windows keep chronological order with monthly after weekly", () => {
+  const limits = [
+    { key: "monthly", name: "Monthly", period: "month" },
+    { key: "weekly", name: "Weekly", period: "week" },
+    { key: "rolling", name: "5 hours", period: "5h" },
+  ];
+  assert.deepEqual(
+    resourceQuotaLayout(limits).ordered.map((item) => item.key),
+    ["rolling", "weekly", "monthly"],
+  );
+});

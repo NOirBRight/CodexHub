@@ -290,7 +290,7 @@ export function StackedUsageChartShell({
           />
 
           <div ref={customRangeRef} className="relative">
-            <div className="grid grid-cols-[44px_44px_64px] rounded-full bg-panel p-0.5 text-[11px] shadow-control">
+            <div className="ws-chart-range grid grid-cols-[44px_44px_64px] rounded-full bg-panel p-0.5 text-[11px] shadow-control">
               {[
                 { value: "7d", label: t("usage.week") },
                 { value: "1m", label: t("usage.month") },
@@ -375,7 +375,7 @@ function UsageDropdown<T extends string>({
     <div className="relative">
       <button
         type="button"
-        className="focus-ring flex h-8 min-w-0 items-center justify-between gap-1 rounded-full bg-surface px-2 text-[11px] font-semibold text-slate-600 shadow-control transition-[box-shadow,background-color] duration-150 ease-out hover:bg-white hover:shadow-raised"
+        className="ws-chart-select focus-ring flex h-8 min-w-0 items-center justify-between gap-1 rounded-full bg-surface px-2 text-[11px] font-semibold text-slate-600 shadow-control transition-[box-shadow,background-color] duration-150 ease-out hover:bg-white hover:shadow-raised"
         aria-expanded={open}
         onClick={onToggle}
       >

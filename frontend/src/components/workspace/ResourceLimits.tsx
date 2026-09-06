@@ -42,7 +42,9 @@ export function ResourceLimits({
                   ? t("workspace.weekRemaining")
                   : /5h|5.hour/i.test(limit.period + " " + limit.name)
                     ? t("workspace.fiveHourRemaining")
-                    : limit.name || limit.period}
+                    : /month/i.test(limit.period + " " + limit.name)
+                      ? t("workspace.monthRemaining")
+                      : limit.name || limit.period}
               </span>
               <strong>
                 {percent === null ? "—" : Math.round(percent)}

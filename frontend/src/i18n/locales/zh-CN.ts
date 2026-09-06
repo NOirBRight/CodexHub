@@ -1,5 +1,10 @@
 const zhCN = {
   workspace: {
+    monthRemaining: "每月剩余",
+    signingOut: "正在登出",
+    signedOut: "已登出，请重启 Codex 更新账户状态。",
+    availableBalance: "可用余额",
+    signIn: "登录",
     loading: "正在查询…",
     appearanceSaved:"外观已保存，无需重启。",
     appearanceSessionOnly:"已切换外观，但无法保存偏好；重开后可能恢复。",
