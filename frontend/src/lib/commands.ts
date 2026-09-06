@@ -22,6 +22,7 @@ export const COMMANDS = {
   saveSettings: "save_settings",
   getCodexContextGuardStatus: "get_codex_context_guard_status",
   setCodexContextGuard: "set_codex_context_guard",
+  cancelOfficialModelRefresh: "cancel_official_model_refresh",
   refreshOfficialModels: "refresh_official_models",
   openaiUsageCompletions: "openai_usage_completions",
   discoverProviderModels: "discover_provider_models",

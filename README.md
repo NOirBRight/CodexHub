@@ -325,3 +325,20 @@ unpackaged source runs still require the development toolchain.
 ## License
 
 MIT
+
+### Official model refresh
+
+CodexHub reads the account's complete Codex subscription model catalog directly,
+using the existing Codex ChatGPT login and the installed CLI's version. It does
+not use the Platform API model list or modify the CLI binary. The request keeps
+complete model metadata and the server ETag in the private editor cache. Existing
+ordering, enabled states and unsaved edits are retained; only new visible models
+introduce a save requirement on an otherwise unchanged draft.
+
+The default total refresh timeout is 30 seconds. Set
+`CODEXHUB_OFFICIAL_MODELS_TIMEOUT_SECONDS` to an integer from 1 to 300 in the
+CodexHub process environment to change it, then restart **CodexHub** to inherit
+the new environment. Codex Desktop does not need restarting. During refresh,
+the model-list refresh button becomes **Cancel**. Failed, invalid or cancelled
+requests leave the previous editor catalog intact. Startup and offline reads
+continue to use the last validated cache.

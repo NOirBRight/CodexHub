@@ -1,5 +1,4 @@
 use crate::{
-    app_server::{AppServerCall, AppServerSession},
     config, runtime_paths, safe_file, CatalogVisibility, MetadataProvenance, Model, ModelPricing,
     Settings, UpstreamFormat,
 };
@@ -10,20 +9,21 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
+#[cfg(test)]
+use crate::app_server::{AppServerCall, AppServerSession};
 use std::sync::OnceLock;
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::time::Instant;
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
-const CODEX_APP_SERVER_MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
-// Codex CLI 0.146 may answer model/list before it atomically publishes the
-// native context cache.  A response that already carries context is a safe
-// direct snapshot and returns immediately; a context-less response needs this
-// bounded grace before the catalog can resolve a safe Official budget.
-const CODEX_APP_SERVER_NATIVE_CACHE_GRACE: Duration = Duration::from_secs(20);
 const MAX_VISIBILITY_DIAGNOSTIC_COUNT: u64 = 100;
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
@@ -68,19 +68,31 @@ pub(crate) struct OfficialModelsAcquisition {
 }
 
 pub(crate) fn acquire_official_models_direct() -> Result<OfficialModelsAcquisition, String> {
-    acquire_official_models_direct_with_runner(&ProcessAppServerModelListRunner)
+    let refresh = crate::official_catalog::Refresh::begin()?;
+    acquire_official_catalog(&refresh)
+}
+
+fn acquire_official_catalog(refresh: &crate::official_catalog::Refresh) -> Result<OfficialModelsAcquisition, String> {
+    let text = crate::official_catalog::fetch(refresh)?;
+    let payload: Value = serde_json::from_str(&text).map_err(|_| "Official catalog returned invalid JSON")?;
+    validate_official_snapshot(&payload)?;
+    let visibility_diagnostics = visibility_diagnostics_from_payload(&payload);
+    let subscription_models = subscription_models_from_payload(&payload)?;
+    let models = subscription_models_to_metadata_models(&subscription_models);
+    Ok(OfficialModelsAcquisition { subscription_models, models, visibility_diagnostics, native_cache: Some(text) })
 }
 
 /// Read the current Codex subscription model list without publishing any
 /// CodexHub catalog or touching the running Codex Desktop configuration.
 pub(crate) fn read_official_models_direct() -> Result<Vec<Model>, String> {
-    let acquisition = acquire_official_models_direct()?;
+    let refresh = crate::official_catalog::Refresh::begin()?;
+    let acquisition = acquire_official_catalog(&refresh)?;
     let paths = ModelPaths::runtime()?;
     let snapshot = match acquisition.native_cache.as_ref() {
         Some(cache) => cache.clone(),
         None => official_subscription_seed_text(&acquisition.subscription_models, &acquisition.visibility_diagnostics)?,
     };
-    safe_file::write_text_atomic_with_mode(&paths.official_editor_cache_path(), &snapshot, Some(0o600))?;
+    refresh.publish(|| safe_file::write_text_atomic_with_mode(&paths.official_editor_cache_path(), &snapshot, Some(0o600)))?;
     Ok(acquisition.models)
 }
 
@@ -860,22 +872,16 @@ fn refresh_official_models_from_endpoint(
     )
 }
 
+#[cfg(test)]
 trait AppServerModelListRunner {
     fn read_model_list(&self) -> Result<AppServerModelListSnapshot, String>;
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct AppServerModelListSnapshot {
     payload: Value,
     native_cache: Option<String>,
-}
-
-struct ProcessAppServerModelListRunner;
-
-impl AppServerModelListRunner for ProcessAppServerModelListRunner {
-    fn read_model_list(&self) -> Result<AppServerModelListSnapshot, String> {
-        read_codex_app_server_model_list()
-    }
 }
 
 #[cfg(test)]
@@ -907,6 +913,7 @@ fn refresh_official_models_direct_with_runner(
     Ok(acquisition.models)
 }
 
+#[cfg(test)]
 fn acquire_official_models_direct_with_runner(
     runner: &dyn AppServerModelListRunner,
 ) -> Result<OfficialModelsAcquisition, String> {
@@ -968,30 +975,12 @@ fn visibility_diagnostics_from_payload(payload: &Value) -> Value {
     Value::Object(counts)
 }
 
-fn read_codex_app_server_model_list() -> Result<AppServerModelListSnapshot, String> {
-    let target_home = runtime_paths::codex_target_home_dir()?;
-    let staging = StagedCodexHome::new(&target_home)?;
-    let mut command = crate::codex_cli::command()?;
-    command.args(["app-server", "--stdio"]);
-    command.env("CODEX_HOME", staging.path());
-    let cache_path = staging.path().join("models_cache.json");
-    let payload = read_codex_app_server_model_list_with_cache_path(
-        command,
-        CODEX_APP_SERVER_MODEL_LIST_TIMEOUT,
-        &cache_path,
-        CODEX_APP_SERVER_NATIVE_CACHE_GRACE,
-    )?;
-    let native_cache = fs::read_to_string(&cache_path).ok();
-    Ok(AppServerModelListSnapshot {
-        payload,
-        native_cache,
-    })
-}
-
+#[cfg(test)]
 struct StagedCodexHome {
     path: PathBuf,
 }
 
+#[cfg(test)]
 impl StagedCodexHome {
     fn new(source_home: &Path) -> Result<Self, String> {
         static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(1);
@@ -1038,6 +1027,7 @@ impl StagedCodexHome {
     }
 }
 
+#[cfg(test)]
 impl Drop for StagedCodexHome {
     fn drop(&mut self) {
         if let Err(error) = fs::remove_dir_all(&self.path) {
@@ -1054,6 +1044,7 @@ fn read_codex_app_server_model_list_with_command(
     read_codex_app_server_model_list_with_cache_grace(command, timeout, None, Duration::ZERO)
 }
 
+#[cfg(test)]
 fn read_codex_app_server_model_list_with_cache_path(
     command: Command,
     timeout: Duration,
@@ -1068,6 +1059,7 @@ fn read_codex_app_server_model_list_with_cache_path(
     )
 }
 
+#[cfg(test)]
 fn read_codex_app_server_model_list_with_cache_grace(
     command: Command,
     timeout: Duration,
@@ -1131,6 +1123,7 @@ fn read_codex_app_server_model_list_with_cache_grace(
     Ok(result)
 }
 
+#[cfg(test)]
 fn model_list_contains_context_metadata(result: &Value) -> bool {
     let Some(items) = result
         .get("data")
@@ -1164,6 +1157,7 @@ fn model_list_contains_context_metadata(result: &Value) -> bool {
         })
 }
 
+#[cfg(test)]
 fn wait_for_native_model_cache_publication(
     cache_path: &Path,
     grace: Duration,
@@ -1190,6 +1184,7 @@ fn wait_for_native_model_cache_publication(
     }
 }
 
+#[cfg(test)]
 fn readable_native_model_cache(cache_path: &Path) -> Option<Vec<u8>> {
     let bytes = fs::read(cache_path).ok()?;
     let payload: Value = serde_json::from_slice(&bytes).ok()?;
@@ -1226,6 +1221,7 @@ struct ReasoningLevelEntry {
     description: Option<String>,
 }
 
+#[cfg(test)]
 fn subscription_models_from_app_server_payload(
     payload: &Value,
 ) -> Result<Vec<OfficialSubscriptionModel>, String> {
@@ -3445,7 +3441,9 @@ mod tests {
     use std::sync::mpsc::{self, Receiver};
     use std::sync::Mutex;
     use std::thread::{self, JoinHandle};
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::time::Instant;
 
     #[test]
     fn official_editor_uses_full_native_membership_not_gateway_export_or_builtin_models() {

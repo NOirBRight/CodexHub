@@ -229,6 +229,7 @@ export const api = {
       restartCodex,
       restart_codex: restartCodex,
     }),
+  cancelOfficialModelRefresh: () => call<void>(COMMANDS.cancelOfficialModelRefresh),
   refreshOfficialModels: (restartCodex = false) =>
     call<OfficialRefreshResult>(COMMANDS.refreshOfficialModels, {
       restartCodex,

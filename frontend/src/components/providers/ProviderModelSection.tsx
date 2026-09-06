@@ -31,6 +31,7 @@ export function ModelSection({
   onCancelNewModel,
   onDiscover,
   onRefresh,
+  onCancelRefresh,
   onRemove,
   onReorder,
   onTestModel,
@@ -57,6 +58,7 @@ export function ModelSection({
   onAdd?: () => string | undefined;
   onCancelNewModel?: (modelId: string) => void;
   onDiscover?: () => void;
+  onCancelRefresh?: () => void;
   onRefresh?: () => void;
   onRemove?: (modelId: string) => void;
   onReorder: (models: Model[]) => void;
@@ -255,13 +257,13 @@ export function ModelSection({
                 "focus-ring inline-flex shrink-0 items-center justify-center gap-2 border border-line bg-panel px-3 font-semibold hover:bg-slate-100 disabled:bg-slate-100",
                 headerControl ? "h-7 rounded-full text-xs" : "h-9 rounded-md text-sm",
               )}
-              disabled={interactionDisabled || refreshBusy}
-              aria-label={t("common.refresh")}
-              title={t("common.refresh")}
-              onClick={() => onRefresh()}
+              disabled={interactionDisabled || (refreshBusy && !onCancelRefresh)}
+              aria-label={t(refreshBusy && onCancelRefresh ? "common.cancel" : "common.refresh")}
+              title={t(refreshBusy && onCancelRefresh ? "common.cancel" : "common.refresh")}
+              onClick={() => refreshBusy && onCancelRefresh ? onCancelRefresh() : onRefresh()}
             >
-              <RefreshCcw size={16} />
-              {!headerControl && t("common.refresh")}
+              {refreshBusy && onCancelRefresh ? t("common.cancel") : <RefreshCcw size={16} />}
+              {!headerControl && !refreshBusy && t("common.refresh")}
             </button>
           )}
           {onDiscover && (

@@ -17,7 +17,7 @@ from typing import Any
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
-from atomic_io import atomic_write_text
+from atomic_io import atomic_write_text, file_lock_for
 
 CODEX_HOME_ENV = "CODEX_HOME"
 CODEX_TARGET_HOME_ENV = "CODEXHUB_CODEX_TARGET_HOME"
@@ -246,7 +246,18 @@ def access_token(
             payload = {}
         exp = payload.get("exp") if isinstance(payload, dict) else None
         if _is_expired(exp, now):
-            token = refresh(auth_data, path, _opener=_opener)
+            target = path or auth_json_path()
+            # Distinct from auth.json's atomic-write lock: refresh() publishes
+            # under that lock, so holding it here would deadlock.
+            with file_lock_for(target.with_name("codexhub-oauth-refresh")):
+                auth_data = load_auth_json(target)
+                token = auth_data["tokens"]["access_token"]
+                try:
+                    payload = decode_jwt_payload(token)
+                except CodexAuthError:
+                    payload = {}
+                if _is_expired(payload.get("exp"), now):
+                    token = refresh(auth_data, target, _opener=_opener)
 
         _cache = auth_data
         return token

@@ -88,6 +88,7 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
                 registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
             to_value(crate::set_codex_context_guard(enabled, Some(restart_codex)))
         }
+        Command::CancelOfficialModelRefresh => to_value(crate::official_catalog::cancel()),
         Command::RefreshOfficialModels => {
             let restart_codex =
                 registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);

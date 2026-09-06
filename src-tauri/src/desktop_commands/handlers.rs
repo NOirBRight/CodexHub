@@ -438,6 +438,11 @@ pub async fn diagnose_conversation_history(
 }
 
 #[tauri::command]
+pub fn cancel_official_model_refresh() -> Result<(), String> {
+    crate::official_catalog::cancel()
+}
+
+#[tauri::command]
 pub async fn refresh_official_models(
     restart_codex: Option<bool>,
 ) -> Result<official_refresh::OfficialRefreshResult, String> {

@@ -1882,6 +1882,7 @@ function OfficialDetail({
         officialCollaborationOverrides={officialCollaborationOverrides}
         officialDisabledModels={officialDisabledModels}
         onRefresh={onRefresh}
+        onCancelRefresh={() => { void api.cancelOfficialModelRefresh().catch((error) => showToast(String(error), "error")); }}
         onReorder={onReorder}
         onTestModel={testOfficialModel}
         refreshBusy={busy === "official-refresh"}

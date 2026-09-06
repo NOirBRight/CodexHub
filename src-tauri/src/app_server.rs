@@ -254,11 +254,11 @@ fn spawn_line_reader(
 }
 
 #[cfg(windows)]
-struct AppServerJob(windows_sys::Win32::Foundation::HANDLE);
+pub(crate) struct AppServerJob(windows_sys::Win32::Foundation::HANDLE);
 
 #[cfg(windows)]
 impl AppServerJob {
-    fn assign_to(child: &Child) -> Result<Self, String> {
+    pub(crate) fn assign_to(child: &Child) -> Result<Self, String> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
