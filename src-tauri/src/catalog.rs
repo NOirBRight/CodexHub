@@ -41,7 +41,7 @@ pub(crate) fn sync_catalog_with_existing_lock() -> Result<String, String> {
     let runner = ProcessCatalogSyncCommandRunner;
 
     if let Some(seed) = models::prepare_official_editor_seed()? {
-        crate::safe_file::write_text_atomic(&seed.path, &seed.text)?;
+        crate::safe_file::write_text_atomic_with_mode(&seed.path, &seed.text, seed.unix_mode)?;
     }
 
     sync_catalog_with_paths(&paths, &python, &runner)

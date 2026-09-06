@@ -80,7 +80,7 @@ pub(crate) fn read_official_models_direct() -> Result<Vec<Model>, String> {
         Some(cache) => cache.clone(),
         None => official_subscription_seed_text(&acquisition.subscription_models, &acquisition.visibility_diagnostics)?,
     };
-    safe_file::write_text_atomic(&paths.official_editor_cache_path(), &snapshot)?;
+    safe_file::write_text_atomic_with_mode(&paths.official_editor_cache_path(), &snapshot, Some(0o600))?;
     Ok(acquisition.models)
 }
 
@@ -96,14 +96,14 @@ pub(crate) fn prepare_official_models_acquisition(
     )?;
     let editor_text = acquisition.native_cache.clone().unwrap_or_else(|| seed_text.clone());
     let mut files = vec![
-        crate::file_transaction::PreparedTextFile::runtime(
+        crate::file_transaction::PreparedTextFile::runtime_owner_only(
             paths.official_editor_cache_path(), editor_text,
         ),
         crate::file_transaction::PreparedTextFile::runtime(
             paths.metadata_cache_path(),
             format!("{metadata_text}\n"),
         ),
-        crate::file_transaction::PreparedTextFile::runtime(
+        crate::file_transaction::PreparedTextFile::runtime_owner_only(
             paths.official_subscription_cache_path(),
             seed_text,
         ),
@@ -386,7 +386,7 @@ fn prepare_official_editor_seed_at(native: &Path, paths: &ModelPaths) -> Result<
     payload["visibility_diagnostics"] = visibility_diagnostics_from_payload(&payload);
     payload["models"] = json!(models.iter().map(official_subscription_seed_model).collect::<Vec<_>>());
     let text = serde_json::to_string_pretty(&payload).map_err(|error| format!("failed to serialize Official editor catalog: {error}"))?;
-    Ok(Some(crate::file_transaction::PreparedTextFile::runtime(paths.official_subscription_cache_path(), text)))
+    Ok(Some(crate::file_transaction::PreparedTextFile::runtime_owner_only(paths.official_subscription_cache_path(), text)))
 }
 
 pub(crate) fn list_models_with_presence() -> Result<Option<Vec<Model>>, String> {
@@ -3477,6 +3477,12 @@ mod tests {
         assert_eq!(payload["models"].as_array().unwrap().len(), 1);
         assert_eq!(payload["models"][0]["slug"], "gpt-6-astra");
         assert_eq!(seed.path, paths.official_subscription_cache_path());
+        crate::file_transaction::publish_prepared_text_files(std::slice::from_ref(&seed)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&seed.path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         // Rewriting an older native snapshot must not supersede a newer
         // successful refresh merely because its filesystem mtime changed.
         fs::write(&native, json!({"fetched_at":"2025-12-01T00:00:00Z", "models":[

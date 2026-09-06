@@ -83,6 +83,13 @@ impl PreparedTextFile {
         }
     }
 
+    pub(crate) fn runtime_owner_only(path: PathBuf, text: String) -> Self {
+        Self {
+            namespace: PreparedFileNamespace::Runtime,
+            ..Self::owner_only(path, text)
+        }
+    }
+
     pub(crate) fn codex_target_owner_only(path: PathBuf, text: String) -> Self {
         Self {
             path,
