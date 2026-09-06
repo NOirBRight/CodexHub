@@ -9,8 +9,7 @@ import {
 import { mergeDiscoveredModels, renumberModels, slugify } from "../format";
 import {
   filterCodexVisibleOfficialModels,
-  refreshedOfficialModelOrder,
-  shouldFollowOfficialCatalogOrder,
+  officialModelSortKeys,
   sortOfficialModels,
   mergeOfficialModelSources,
   reconcileOfficialModelSnapshot,
@@ -43,6 +42,7 @@ export type ProviderWorkspaceState = {
   // A refreshed/edited list belongs to this workspace. Generated catalogs can
   // lag behind live discovery and must not replace it during settings readback.
   officialModelSnapshot: Model[] | null;
+  officialCatalogLoaded?: boolean;
   pendingNavigation: PendingProviderNavigation<Provider, AddProviderForm> | null;
   pendingNewProvider: Provider | null;
   probeResult: UpstreamFormatProbeResult | null;
@@ -71,6 +71,8 @@ export type ProviderEditIntent =
   | { type: "setPendingNewProvider"; provider: Provider | null }
   | { type: "setPendingNavigation"; pending: PendingProviderNavigation<Provider, AddProviderForm> | null }
   | { type: "setOfficialModels"; models: Model[] }
+  | { type: "applyOfficialRefresh"; models: Model[] }
+  | { type: "initializeOfficialModels"; models: Model[] }
   | { type: "setOfficialModelOrderDraft"; order: string[] }
   | { type: "setOfficialDisabledModelsDraft"; disabled: string[] }
   | { type: "setProviders"; providers: Provider[] }
@@ -125,6 +127,17 @@ export function providerWorkspaceReducer(
       return { ...state, pendingNavigation: intent.pending };
     case "setOfficialModels":
       return { ...state, officialModels: intent.models, officialModelSnapshot: intent.models };
+    case "initializeOfficialModels": {
+      if (state.officialCatalogLoaded) return state;
+      const models = sortOfficialModels(filterCodexVisibleOfficialModels(intent.models), state.officialModelOrderDraft);
+      return { ...state, officialModels: models, officialModelSnapshot: models, officialCatalogLoaded: true };
+    }
+    case "applyOfficialRefresh": {
+      const resolved = resolveOfficialRefresh(state.officialModelOrderDraft, intent.models,
+        state.officialModels, state.officialDisabledModelsDraft);
+      return { ...state, officialModels: resolved.sortedModels, officialCatalogLoaded: true,
+        officialModelSnapshot: resolved.sortedModels, officialModelOrderDraft: resolved.nextOrder };
+    }
     case "setOfficialModelOrderDraft":
       return { ...state, officialModelOrderDraft: intent.order };
     case "setOfficialDisabledModelsDraft":
@@ -170,6 +183,16 @@ export function providerWorkspaceReducer(
       };
     }
     case "syncExternal": {
+      // Settings arrive after the first render. Adopt persisted values only
+      // for fields still equal to their previous baseline; keep local edits.
+      const officialDisabledModelsDraft = JSON.stringify(state.officialDisabledModelsDraft ?? []) ===
+        JSON.stringify(state.settings?.official_disabled_models ?? [])
+        ? intent.settings?.official_disabled_models ?? []
+        : state.officialDisabledModelsDraft;
+      const officialModelOrderDraft = JSON.stringify(state.officialModelOrderDraft ?? []) ===
+        JSON.stringify(state.settings?.official_model_sort_order ?? [])
+        ? intent.settings?.official_model_sort_order ?? []
+        : state.officialModelOrderDraft;
       const snapshot = state.officialModelSnapshot == null ? null : reconcileOfficialModelSnapshot(
         state.officialModelSnapshot, intent.catalogModels, intent.modelMetadata,
       );
@@ -178,14 +201,16 @@ export function providerWorkspaceReducer(
         providers: intent.providers,
         settings: intent.settings,
         settingsDraft: intent.settings,
+        officialDisabledModelsDraft,
+        officialModelOrderDraft,
         catalogModels: intent.catalogModels,
         modelMetadata: intent.modelMetadata,
         officialModelSnapshot: snapshot,
-        officialModels: sortOfficialModels(
+        officialModels: snapshot && JSON.stringify(officialModelOrderDraft) === JSON.stringify(state.officialModelOrderDraft)
+          ? snapshot
+          : sortOfficialModels(
           snapshot ?? mergeOfficialModelSources(intent.catalogModels, intent.modelMetadata),
-          state.officialModelSnapshot != null
-            ? state.officialModelOrderDraft
-            : intent.settings?.official_model_sort_order ?? [],
+          officialModelOrderDraft,
         ),
       };
       const selectedId = intent.selectedId ?? state.selectedId;
@@ -295,13 +320,34 @@ export function applyProbeToProvider(
 export function resolveOfficialRefresh(
   currentOrder: string[],
   refreshedModels: Model[],
-): { followsAutomatic: boolean; nextOrder: string[]; sortedModels: Model[] } {
-  const followsAutomatic = shouldFollowOfficialCatalogOrder(currentOrder);
-  const nextOrder = followsAutomatic
-    ? currentOrder
-    : refreshedOfficialModelOrder(currentOrder, refreshedModels);
+  currentModels: Model[],
+  disabledModels: string[],
+): { nextOrder: string[]; sortedModels: Model[] } {
   const filtered = filterCodexVisibleOfficialModels(refreshedModels);
-  return { followsAutomatic, nextOrder, sortedModels: sortOfficialModels(filtered, nextOrder) };
+  const known = new Set([...currentOrder, ...disabledModels, ...currentModels.map(m => m.id)]
+    .flatMap(officialModelSortKeys));
+  const additions = filtered.filter(model => !officialModelSortKeys(model.id).some(key => known.has(key)));
+  // Missing models must not rewrite user preferences. Keep the currently
+  // rendered order even when the server changes its default ordering.
+  const displayOrder = [...currentModels.map(m => m.id), ...currentOrder, ...disabledModels];
+  const ranks = new Map<string, number>();
+  displayOrder.forEach((id, index) => officialModelSortKeys(id).forEach(key => {
+    if (!ranks.has(key)) ranks.set(key, index);
+  }));
+  const rank = (model: Model) => Math.min(...officialModelSortKeys(model.id).map(key => ranks.get(key) ?? Number.MAX_SAFE_INTEGER));
+  const sortedModels = [...filtered].sort((a, b) => rank(a) - rank(b));
+  let nextOrder = currentOrder;
+  if (additions.length) {
+    nextOrder = [...currentOrder];
+    const ordered = new Set(nextOrder.flatMap(officialModelSortKeys));
+    for (const model of [...currentModels, ...additions]) {
+      const keys = officialModelSortKeys(model.id);
+      if (keys.some(key => ordered.has(key))) continue;
+      nextOrder.push(model.id);
+      keys.forEach(key => ordered.add(key));
+    }
+  }
+  return { nextOrder, sortedModels };
 }
 
 export function providerProbeModelFor(provider: Provider): string | null {

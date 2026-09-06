@@ -1,6 +1,6 @@
 [package]
 name = "codexhub"
-version = "0.1.9-beta.3.18"
+version = "0.1.9-beta.3.19"
 description = "CodexHub desktop backend and CLI"
 authors = ["CodexHub"]
 license = "MIT"
@@ -33,6 +33,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 which = "6"
 log = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 # YAML strategy for the injection descriptor engine (#432): DSH settings and
 # credentials are YAML; the engine parses and re-serializes mappings while
 # preserving every user-owned key.

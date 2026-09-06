@@ -74,7 +74,14 @@ pub(crate) fn acquire_official_models_direct() -> Result<OfficialModelsAcquisiti
 /// Read the current Codex subscription model list without publishing any
 /// CodexHub catalog or touching the running Codex Desktop configuration.
 pub(crate) fn read_official_models_direct() -> Result<Vec<Model>, String> {
-    acquire_official_models_direct().map(|acquisition| acquisition.models)
+    let acquisition = acquire_official_models_direct()?;
+    let paths = ModelPaths::runtime()?;
+    let snapshot = match acquisition.native_cache.as_ref() {
+        Some(cache) => cache.clone(),
+        None => official_subscription_seed_text(&acquisition.subscription_models, &acquisition.visibility_diagnostics)?,
+    };
+    safe_file::write_text_atomic(&paths.official_editor_cache_path(), &snapshot)?;
+    Ok(acquisition.models)
 }
 
 pub(crate) fn prepare_official_models_acquisition(
@@ -87,7 +94,11 @@ pub(crate) fn prepare_official_models_acquisition(
         &acquisition.subscription_models,
         &acquisition.visibility_diagnostics,
     )?;
+    let editor_text = acquisition.native_cache.clone().unwrap_or_else(|| seed_text.clone());
     let mut files = vec![
+        crate::file_transaction::PreparedTextFile::runtime(
+            paths.official_editor_cache_path(), editor_text,
+        ),
         crate::file_transaction::PreparedTextFile::runtime(
             paths.metadata_cache_path(),
             format!("{metadata_text}\n"),
@@ -308,6 +319,74 @@ fn model_test_payload(
 
 pub fn list_models() -> Result<Vec<Model>, String> {
     Ok(list_models_with_presence()?.unwrap_or_default())
+}
+
+/// The Official editor needs the complete subscription catalog, not the
+/// enabled-only Gateway export. Native discovery owns membership; metadata
+/// defaults and user overrides must never resurrect an absent model.
+pub fn list_official_models() -> Result<Vec<Model>, String> {
+    let paths = ModelPaths::runtime()?;
+    let native_path = runtime_paths::codex_target_home_dir()?.join("models_cache.json");
+    let mut models = official_editor_models(&native_path, &paths)?;
+    apply_catalog_multi_agent_overrides(&paths, &mut models);
+    Ok(models)
+}
+
+fn official_editor_models(native_path: &Path, paths: &ModelPaths) -> Result<Vec<Model>, String> {
+    if let Some(payload) = official_editor_payload(native_path, paths)? {
+        let subscription = subscription_models_from_payload(&payload)?;
+        return Ok(subscription_models_to_metadata_models(&subscription));
+    }
+    Ok(read_official_subscription_models_from_cache_with_presence(paths)?.unwrap_or_default())
+}
+
+fn official_editor_payload(native_path: &Path, paths: &ModelPaths) -> Result<Option<Value>, String> {
+    let editor_path = paths.official_editor_cache_path();
+    let mut snapshots = Vec::new();
+    let mut errors = Vec::new();
+    for path in [native_path, editor_path.as_path()] {
+        if !path.exists() { continue; }
+        match load_json_file(path).and_then(|payload| {
+            subscription_models_from_payload(&payload)?;
+            Ok(payload)
+        }) {
+            Ok(payload) => {
+                let fetched = payload.get("fetched_at");
+                let timestamp = fetched.and_then(Value::as_i64).and_then(|s| s.checked_mul(1000))
+                    .or_else(|| fetched.and_then(Value::as_str).and_then(|s|
+                        chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| t.timestamp_millis())))
+                    .unwrap_or_else(|| fs::metadata(path).ok().and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64).unwrap_or(0));
+                snapshots.push((timestamp, payload));
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    if let Some((_, payload)) = snapshots.into_iter().max_by_key(|(timestamp, _)| *timestamp) {
+        return Ok(Some(payload));
+    }
+    if let Some(error) = errors.into_iter().next() { return Err(error); }
+    Ok(None)
+}
+
+/// Feed publication the same complete membership as the editor. Preserve the
+/// acquisition timestamp: reading a cached list does not make it fresh.
+pub(crate) fn prepare_official_editor_seed() -> Result<Option<crate::file_transaction::PreparedTextFile>, String> {
+    if !config::get_settings()?.include_official_models {
+        return Ok(None);
+    }
+    let paths = ModelPaths::runtime()?;
+    let native = runtime_paths::codex_target_home_dir()?.join("models_cache.json");
+    prepare_official_editor_seed_at(&native, &paths)
+}
+
+fn prepare_official_editor_seed_at(native: &Path, paths: &ModelPaths) -> Result<Option<crate::file_transaction::PreparedTextFile>, String> {
+    let Some(mut payload) = official_editor_payload(native, paths)? else { return Ok(None) };
+    let models = subscription_models_from_payload(&payload)?;
+    payload["visibility_diagnostics"] = visibility_diagnostics_from_payload(&payload);
+    payload["models"] = json!(models.iter().map(official_subscription_seed_model).collect::<Vec<_>>());
+    let text = serde_json::to_string_pretty(&payload).map_err(|error| format!("failed to serialize Official editor catalog: {error}"))?;
+    Ok(Some(crate::file_transaction::PreparedTextFile::runtime(paths.official_subscription_cache_path(), text)))
 }
 
 pub(crate) fn list_models_with_presence() -> Result<Option<Vec<Model>>, String> {
@@ -810,14 +889,27 @@ fn acquire_official_models_direct_with_runner(
     runner: &dyn AppServerModelListRunner,
 ) -> Result<OfficialModelsAcquisition, String> {
     let snapshot = runner.read_model_list()?;
-    let visibility_diagnostics = visibility_diagnostics_from_payload(&snapshot.payload);
-    let subscription_models = subscription_models_from_app_server_payload(&snapshot.payload)?;
+    let mut native_cache = snapshot.native_cache;
+    let native_payload = native_cache.as_ref().and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .filter(|payload| payload.get("models").and_then(Value::as_array)
+            .is_some_and(|models| !models.is_empty() && models.iter().all(Value::is_object)));
+    if native_cache.is_some() && native_payload.is_none() {
+        if !model_list_contains_context_metadata(&snapshot.payload) {
+            return Err("Official refresh returned an invalid native model cache without complete model metadata".to_string());
+        }
+        native_cache = None;
+    }
+    // model/list may have returned fallback presets before the native online
+    // fetch completed. Use the validated fresh native snapshot consistently.
+    let payload = native_payload.as_ref().unwrap_or(&snapshot.payload);
+    let visibility_diagnostics = visibility_diagnostics_from_payload(payload);
+    let subscription_models = subscription_models_from_app_server_payload(payload)?;
     let models = subscription_models_to_metadata_models(&subscription_models);
     Ok(OfficialModelsAcquisition {
         subscription_models,
         models,
         visibility_diagnostics,
-        native_cache: snapshot.native_cache,
+        native_cache,
     })
 }
 
@@ -2501,6 +2593,10 @@ impl ModelPaths {
             .join("model-metadata-cache.json")
     }
 
+    fn official_editor_cache_path(&self) -> PathBuf {
+        self.codex_dir.join("proxy").join("official-editor-catalog.json")
+    }
+
     fn metadata_overrides_path(&self) -> PathBuf {
         self.codex_dir
             .join("proxy")
@@ -3333,6 +3429,69 @@ mod tests {
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    #[test]
+    fn official_editor_uses_full_native_membership_not_gateway_export_or_builtin_models() {
+        let root = temp_root("official-editor-membership");
+        let paths = test_paths(&root);
+        fs::create_dir_all(paths.generated_catalog_path().parent().unwrap()).unwrap();
+        fs::write(paths.generated_catalog_path(), json!({"models": [
+            {"slug": "gpt-5.4", "visibility": "list"}
+        ]}).to_string()).unwrap();
+        fs::write(paths.official_subscription_cache_path(), json!({"models": [
+            {"slug": "gpt-5.4", "visibility": "list"}
+        ]}).to_string()).unwrap();
+        let native = root.join("models_cache.json");
+        fs::write(&native, json!({"models": [
+            {"slug": "gpt-6-astra", "visibility": "list", "context_window": 1000000},
+            {"slug": "gpt-5.5", "visibility": "list"},
+            {"slug": "gpt-hidden", "visibility": "hide"}
+        ]}).to_string()).unwrap();
+        let models = super::official_editor_models(&native, &paths).unwrap();
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["gpt-6-astra", "gpt-5.5"]);
+        fs::write(&native, "{\"models\":[]}").unwrap();
+        assert!(super::official_editor_models(&native, &paths).unwrap().is_empty());
+        fs::write(&native, "invalid").unwrap();
+        assert!(super::official_editor_models(&native, &paths).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn official_editor_refresh_snapshot_drives_reopen_and_save_without_renewing_freshness() {
+        let root = temp_root("official-editor-reopen");
+        fs::create_dir_all(&root).unwrap();
+        let paths = test_paths(&root);
+        let native = root.join("models_cache.json");
+        fs::write(&native, json!({"models": [{"slug":"gpt-5.4","visibility":"list"}]}).to_string()).unwrap();
+        fs::File::open(&native).unwrap().set_modified(UNIX_EPOCH + Duration::from_secs(100)).unwrap();
+        let snapshot = paths.official_editor_cache_path();
+        crate::safe_file::write_text_atomic(&snapshot, &json!({
+            "fetched_at": "2026-01-01T00:00:00Z", "client_version": "0.153.4",
+            "models": [{"slug":"gpt-6-astra","visibility":"list"}, {"slug":"gpt-hidden","visibility":"hide"}]
+        }).to_string()).unwrap();
+        fs::File::open(&snapshot).unwrap().set_modified(UNIX_EPOCH + Duration::from_secs(200)).unwrap();
+        let models = super::official_editor_models(&native, &paths).unwrap();
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["gpt-6-astra"]);
+        let seed = super::prepare_official_editor_seed_at(&native, &paths).unwrap().unwrap();
+        let payload: Value = serde_json::from_str(&seed.text).unwrap();
+        assert_eq!(payload["fetched_at"], "2026-01-01T00:00:00Z");
+        assert_eq!(payload["models"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["models"][0]["slug"], "gpt-6-astra");
+        assert_eq!(seed.path, paths.official_subscription_cache_path());
+        // Rewriting an older native snapshot must not supersede a newer
+        // successful refresh merely because its filesystem mtime changed.
+        fs::write(&native, json!({"fetched_at":"2025-12-01T00:00:00Z", "models":[
+            {"slug":"gpt-5.4", "visibility":"list"}
+        ]}).to_string()).unwrap();
+        assert_eq!(super::official_editor_models(&native, &paths).unwrap()[0].id, "gpt-6-astra");
+        fs::write(&native, "invalid").unwrap();
+        assert_eq!(super::official_editor_models(&native, &paths).unwrap()[0].id, "gpt-6-astra");
+        // A later native refresh supersedes the editor snapshot, including
+        // a valid empty catalog; removed models must not be resurrected.
+        fs::write(&native, "{\"models\":[]}").unwrap();
+        assert!(super::official_editor_models(&native, &paths).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     const APP_SERVER_TEST_PROCESS_ENV: &str = "CODEXHUB_APP_SERVER_TEST_PROCESS";
     const APP_SERVER_TEST_PROCESS_LIVENESS_ENV: &str =
@@ -3936,7 +4095,7 @@ for line in sys.stdin:
                     "effective_context_window_percent": 95
                 }]
             }),
-            r#"{"etag":"fresh","models":[]}"#,
+            r#"{"etag":"fresh","models":[{"slug":"gpt-6-astra","visibility":"list","context_window":1000000,"effective_context_window_percent":95}]}"#,
         );
 
         let acquisition = super::acquire_official_models_direct_with_runner(&runner)
@@ -3944,8 +4103,20 @@ for line in sys.stdin:
 
         assert_eq!(
             acquisition.native_cache.as_deref(),
-            Some(r#"{"etag":"fresh","models":[]}"#)
+            Some(r#"{"etag":"fresh","models":[{"slug":"gpt-6-astra","visibility":"list","context_window":1000000,"effective_context_window_percent":95}]}"#)
         );
+        assert_eq!(acquisition.models[0].id, "gpt-6-astra");
+    }
+
+    #[test]
+    fn direct_acquisition_never_publishes_malformed_native_cache() {
+        let complete = json!({"models":[{"slug":"gpt-6-astra", "visibility":"list", "context_window":1000000, "effective_context_window_percent":95}]});
+        let runner = StaticAppServerModelListRunner::ok_with_cache(complete, "{partial");
+        let acquired = super::acquire_official_models_direct_with_runner(&runner).unwrap();
+        assert!(acquired.native_cache.is_none());
+        assert_eq!(acquired.models[0].id, "gpt-6-astra");
+        let runner = StaticAppServerModelListRunner::ok_with_cache(json!({"models":[{"slug":"gpt-5.4", "visibility":"list"}]}), "{partial");
+        assert!(super::acquire_official_models_direct_with_runner(&runner).is_err());
     }
 
     #[test]

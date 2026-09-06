@@ -342,6 +342,7 @@ export const api = {
   catalogOverrideDiagnostics: () =>
     call<CatalogOverrideDiagnostics>(COMMANDS.getCatalogOverrideDiagnostics),
   listModels: () => call<Model[]>(COMMANDS.listModels),
+  listOfficialModels: () => call<Model[]>(COMMANDS.listOfficialModels),
   refreshModelMetadata: () => call<Model[]>(COMMANDS.refreshModelMetadata),
   listModelMetadata: () => call<Model[]>(COMMANDS.listModelMetadata),
   saveModelMetadataOverride: (model: Model) =>

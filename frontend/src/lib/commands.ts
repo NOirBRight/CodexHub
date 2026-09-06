@@ -53,6 +53,7 @@ export const COMMANDS = {
   generateCatalog: "generate_catalog",
   getCatalogOverrideDiagnostics: "get_catalog_override_diagnostics",
   listModels: "list_models",
+  listOfficialModels: "list_official_models",
   refreshModelMetadata: "refresh_model_metadata",
   listModelMetadata: "list_model_metadata",
   saveModelMetadataOverride: "save_model_metadata_override",

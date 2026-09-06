@@ -263,6 +263,7 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         }
         Command::GetCatalogOverrideDiagnostics => to_value(catalog::catalog_override_diagnostics()),
         Command::ListModels => to_value(models::list_models()),
+        Command::ListOfficialModels => to_value(models::list_official_models()),
         Command::RefreshModelMetadata => to_value(models::refresh_model_metadata()),
         Command::ListModelMetadata => to_value(models::list_model_metadata()),
         Command::SaveModelMetadataOverride => {

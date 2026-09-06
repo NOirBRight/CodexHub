@@ -174,6 +174,90 @@ test("save readback preserves live models, selection and custom order over an ol
   assert.deepEqual(state.officialModels.map((m) => m.id), ["gpt-6-astra"]);
 });
 
+test("asynchronous settings load initializes Official drafts before refresh", async () => {
+  const m = await loadCombinedModule();
+  const settings = { official_disabled_models: ["gpt-5.5"], official_model_sort_order: ["gpt-5.6-luna", "gpt-5.5"] };
+  let state = { selectedId: "__official__", settings: null, officialModelSnapshot: null,
+    officialDisabledModelsDraft: [], officialModelOrderDraft: [], officialModels: [] };
+  state = m.providerWorkspaceReducer(state, { type: "syncExternal", providers: [], settings,
+    catalogModels: [], modelMetadata: [] });
+  assert.deepEqual(state.officialDisabledModelsDraft, settings.official_disabled_models);
+  assert.deepEqual(state.officialModelOrderDraft, settings.official_model_sort_order);
+  assert.equal(m.selectOfficialModelDraftDirty(state), false);
+  state = m.providerWorkspaceReducer(state, { type: "setOfficialModels", models: [
+    { id: "gpt-5.6-luna", enabled: true }, { id: "gpt-5.5", enabled: true },
+  ] });
+  assert.equal(m.selectOfficialEnabledCount(state), 1);
+  state = m.providerWorkspaceReducer(state, { type: "reorderOfficialModels", models: [...state.officialModels].reverse() });
+  state = m.providerWorkspaceReducer(state, { type: "syncExternal", providers: [], settings,
+    catalogModels: [], modelMetadata: [] });
+  assert.deepEqual(state.officialModelOrderDraft, ["gpt-5.5", "gpt-5.6-luna"]);
+  state = m.providerWorkspaceReducer(state, { type: "toggleOfficialModel", modelId: "gpt-5.5", enabled: true });
+  assert.equal(m.selectOfficialModelDraftDirty(state), true);
+  state = m.providerWorkspaceReducer(state, { type: "syncExternal", providers: [], settings,
+    catalogModels: [], modelMetadata: [] });
+  assert.deepEqual(state.officialDisabledModelsDraft, []);
+  assert.equal(m.selectOfficialModelDraftDirty(state), true);
+  state = m.providerWorkspaceReducer(state, { type: "setSettings", settings: {
+    official_disabled_models: state.officialDisabledModelsDraft,
+    official_model_sort_order: state.officialModelOrderDraft,
+  } });
+  assert.equal(m.selectOfficialModelDraftDirty(state), false);
+});
+
+test("refresh preserves edits and only new visible identities create a save change", async () => {
+  const m = await loadCombinedModule();
+  const model = (id) => ({ id, visibility: "list", enabled: true });
+  const settings = { official_disabled_models: ["gpt-b"], official_model_sort_order: [] };
+  let state = { settings, officialDisabledModelsDraft: ["gpt-b"], officialModelOrderDraft: [],
+    officialModels: [model("gpt-b"), model("gpt-a")], officialModelSnapshot: null };
+  const refresh = (models) => { state = m.providerWorkspaceReducer(state, { type: "applyOfficialRefresh", models }); };
+  refresh([{ ...model("gpt-a"), name: "Updated" }, model("gpt-b")]);
+  assert.deepEqual(state.officialModels.map(m => m.id), ["gpt-b", "gpt-a"]);
+  assert.equal(state.officialModels[1].name, "Updated");
+  assert.equal(m.selectOfficialModelDraftDirty(state), false);
+  refresh([model("gpt-a")]);
+  assert.equal(m.selectOfficialModelDraftDirty(state), false);
+  refresh([model("gpt-a"), { ...model("gpt-hidden"), visibility: "hide" }]);
+  assert.equal(m.selectOfficialModelDraftDirty(state), false);
+  state = m.providerWorkspaceReducer(state, { type: "toggleOfficialModel", modelId: "gpt-a", enabled: false });
+  refresh([model("gpt-new"), model("gpt-a")]);
+  assert.deepEqual(state.officialModels.map(m => m.id), ["gpt-a", "gpt-new"]);
+  assert.deepEqual(state.officialModelOrderDraft, ["gpt-a", "gpt-new"]);
+  assert.deepEqual(state.officialDisabledModelsDraft, ["gpt-b", "gpt-a"]);
+  assert.equal(m.selectOfficialModelDraftDirty(state), true);
+});
+
+test("refresh never prunes saved order or mistakes known disabled models for new ones", async () => {
+  const m = await loadCombinedModule();
+  const model = (id) => ({ id, visibility: "list", enabled: true });
+  const settings = { official_disabled_models: ["gpt-b"], official_model_sort_order: ["gpt-a", "gpt-b", "gpt-old"] };
+  let state = { settings, officialDisabledModelsDraft: ["gpt-b"], officialModelOrderDraft: settings.official_model_sort_order,
+    officialModels: [model("gpt-a")], officialModelSnapshot: null };
+  state = m.providerWorkspaceReducer(state, { type: "applyOfficialRefresh", models: [model("gpt-b"), model("gpt-a")] });
+  assert.deepEqual(state.officialModels.map(m => m.id), ["gpt-a", "gpt-b"]);
+  assert.equal(m.selectOfficialModelDraftDirty(state), false);
+});
+
+test("new model alone enables Save and refresh keeps an in-flight reorder", async () => {
+  const m = await loadCombinedModule();
+  const model = (id) => ({ id, visibility: "list", enabled: true });
+  const settings = { official_disabled_models: [], official_model_sort_order: [] };
+  let state = { settings, officialDisabledModelsDraft: [], officialModelOrderDraft: [],
+    officialModels: [model("gpt-5.6-luna"), model("gpt-5.6-sol")], officialModelSnapshot: null };
+  state = m.providerWorkspaceReducer(state, { type: "applyOfficialRefresh", models: [model("gpt-5.6-sol"), model("gpt-5.6-luna")] });
+  state = m.providerWorkspaceReducer(state, { type: "syncExternal", providers: [], settings: structuredClone(settings), catalogModels: [], modelMetadata: [] });
+  assert.deepEqual(state.officialModels.map(m => m.id), ["gpt-5.6-luna", "gpt-5.6-sol"]);
+  assert.equal(m.selectOfficialModelDraftDirty(state), false);
+  state = m.providerWorkspaceReducer(state, { type: "applyOfficialRefresh", models: [model("gpt-new"), ...state.officialModels] });
+  assert.equal(m.selectOfficialModelDraftDirty(state), true);
+  assert.deepEqual(state.officialModelOrderDraft, ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-new"]);
+  state = m.providerWorkspaceReducer(state, { type: "reorderOfficialModels", models: [...state.officialModels].reverse() });
+  const order = state.officialModelOrderDraft;
+  state = m.providerWorkspaceReducer(state, { type: "applyOfficialRefresh", models: [model("gpt-5.6-sol"), model("gpt-new"), model("gpt-5.6-luna")] });
+  assert.deepEqual(state.officialModels.map(m => m.id), order);
+});
+
 test("workspace without a live snapshot still receives catalog updates", async () => {
   const { providerWorkspaceReducer: reduce } = await loadCombinedModule();
   const next = reduce({ selectedId: "__official__", officialModelSnapshot: null }, {
@@ -181,6 +265,24 @@ test("workspace without a live snapshot still receives catalog updates", async (
     catalogModels: [{ id: "gpt-6-astra", visibility: "list", enabled: true }],
   });
   assert.deepEqual(next.officialModels.map((m) => m.id), ["gpt-6-astra"]);
+});
+
+test("Official initialization uses its full catalog without changing preferences or overwriting a completed refresh", async () => {
+  const m = await loadCombinedModule();
+  const model = id => ({ id, visibility: "list", enabled: true });
+  const settings = { official_disabled_models: ["gpt-5.5"], official_model_sort_order: ["gpt-6-astra", "gpt-5.5"] };
+  let state = { settings, officialDisabledModelsDraft: settings.official_disabled_models,
+    officialModelOrderDraft: settings.official_model_sort_order, officialModelSnapshot: [], officialModels: [], officialCatalogLoaded: false };
+  state = m.providerWorkspaceReducer(state, { type: "initializeOfficialModels", models: [model("gpt-6-astra"), model("gpt-5.5")] });
+  state = m.providerWorkspaceReducer(state, { type: "syncExternal", providers: [], settings,
+    catalogModels: [model("gpt-5.4")], modelMetadata: [model("gpt-5.4")] });
+  assert.deepEqual(state.officialModels.map(m => m.id), ["gpt-6-astra", "gpt-5.5"]);
+  assert.equal(m.selectOfficialEnabledCount(state), 1);
+  assert.equal(m.selectOfficialModelDraftDirty(state), false);
+  state = m.providerWorkspaceReducer(state, { type: "applyOfficialRefresh", models: [model("gpt-new"), ...state.officialModels] });
+  const current = state;
+  state = m.providerWorkspaceReducer(state, { type: "initializeOfficialModels", models: [model("gpt-5.4")] });
+  assert.equal(state, current);
 });
 
 test("snapshot receives published metadata without reverting membership, selection or order", async () => {

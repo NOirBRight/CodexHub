@@ -83,6 +83,11 @@ pub fn refresh_model_metadata() -> Result<Vec<Model>, String> {
 }
 
 #[tauri::command]
+pub fn list_official_models() -> Result<Vec<Model>, String> {
+    models::list_official_models()
+}
+
+#[tauri::command]
 pub fn list_model_metadata() -> Result<Vec<Model>, String> {
     models::list_model_metadata()
 }
