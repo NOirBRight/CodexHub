@@ -145,6 +145,22 @@ class AccessTokenTests(unittest.TestCase):
             self.assertEqual(written["tokens"]["access_token"], new_token)
             self.assertEqual(written["tokens"]["refresh_token"], "rt.new")
 
+    def test_waiting_refresh_reuses_tokens_published_by_other_process(self):
+        from contextlib import contextmanager
+        old = _make_jwt({"exp": 1, "client_id": "app_x"})
+        new = _make_jwt({"exp": int(time.time()) + 3600, "client_id": "app_x"})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _make_auth_json(Path(tmp), access_token=old)
+            @contextmanager
+            def another_owner_publishes(lock_target):
+                self.assertNotEqual(lock_target, path)
+                _make_auth_json(Path(tmp), access_token=new, refresh_token="rotated")
+                yield lambda: None
+            with patch("codex_auth.file_lock_for", another_owner_publishes), \
+                 patch("codex_auth.urlopen") as refresh:
+                self.assertEqual(codex_auth.access_token(path), new)
+                refresh.assert_not_called()
+
     def test_access_token_no_exp_refreshes_defensively(self):
         token = _make_jwt({"client_id": "app_x"})  # no exp
         new_token = _make_jwt({"exp": int(time.time()) + 3600, "client_id": "app_x"})

@@ -88,10 +88,20 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
                 registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
             to_value(crate::set_codex_context_guard(enabled, Some(restart_codex)))
         }
+        Command::CancelOfficialModelRefresh => {
+            let request_id = registry_optional_string_arg(args, command, "request_id")
+                .ok_or_else(|| "request_id is required".to_string())?;
+            to_value(crate::official_catalog::cancel(&request_id))
+        },
         Command::RefreshOfficialModels => {
             let restart_codex =
                 registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
-            to_value(crate::refresh_official_models_coordinated(restart_codex))
+            if !restart_codex {
+                let request_id = registry_optional_string_arg(args, command, "request_id");
+                to_value(crate::official_refresh::refresh_current_models_with_request(request_id.as_deref()))
+            } else {
+                to_value(crate::refresh_official_models_coordinated(true))
+            }
         }
         Command::OpenaiUsageCompletions => {
             let start_time = registry_optional_u64_arg(args, command, "start_time");

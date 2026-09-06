@@ -196,6 +196,12 @@ export function providerWorkspaceReducer(
       const snapshot = state.officialModelSnapshot == null ? null : reconcileOfficialModelSnapshot(
         state.officialModelSnapshot, intent.catalogModels, intent.modelMetadata,
       );
+      const officialModels = snapshot && JSON.stringify(officialModelOrderDraft) === JSON.stringify(state.officialModelOrderDraft)
+        ? snapshot
+        : sortOfficialModels(
+          snapshot ?? mergeOfficialModelSources(intent.catalogModels, intent.modelMetadata),
+          officialModelOrderDraft,
+        );
       const next = {
         ...state,
         providers: intent.providers,
@@ -205,13 +211,10 @@ export function providerWorkspaceReducer(
         officialModelOrderDraft,
         catalogModels: intent.catalogModels,
         modelMetadata: intent.modelMetadata,
-        officialModelSnapshot: snapshot,
-        officialModels: snapshot && JSON.stringify(officialModelOrderDraft) === JSON.stringify(state.officialModelOrderDraft)
-          ? snapshot
-          : sortOfficialModels(
-          snapshot ?? mergeOfficialModelSources(intent.catalogModels, intent.modelMetadata),
-          officialModelOrderDraft,
-        ),
+        // Keep the snapshot aligned when late settings reorder the list;
+        // the next metadata sync must not restore the previous order.
+        officialModelSnapshot: snapshot === null ? null : officialModels,
+        officialModels,
       };
       const selectedId = intent.selectedId ?? state.selectedId;
       if (

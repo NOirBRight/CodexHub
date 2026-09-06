@@ -313,6 +313,25 @@ test("snapshot receives published metadata without reverting membership, selecti
   assert.equal(state.officialModels[1].context_window, 272000);
 });
 
+test("late saved order survives repeated external synchronization after catalog initialization", async () => {
+  const m = await loadCombinedModule();
+  const models = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+    .map(id => ({ id, visibility: "list", enabled: true }));
+  const settings = { official_model_sort_order: [models[2].id, models[0].id, models[1].id],
+    official_disabled_models: [models[1].id] };
+  let state = { selectedId: "__official__", settings: null, officialModelSnapshot: [],
+    officialModels: [], officialCatalogLoaded: false, officialModelOrderDraft: [], officialDisabledModelsDraft: [] };
+  state = m.providerWorkspaceReducer(state, { type: "initializeOfficialModels", models });
+  for (let i = 0; i < 3; i++) {
+    state = m.providerWorkspaceReducer(state, { type: "syncExternal", providers: [],
+      settings: structuredClone(settings), catalogModels: models, modelMetadata: [] });
+    assert.deepEqual(state.officialModels.map(model => model.id), settings.official_model_sort_order,
+      `saved order after external sync ${i + 1}`);
+    assert.equal(m.selectOfficialModelDraftDirty(state), false);
+    assert.equal(m.selectOfficialEnabledCount(state), 2);
+  }
+});
+
 test("catalogOverrideToastMessage null when all zero", async () => {
   const m = await loadCombinedModule();
   assert.equal(m.catalogOverrideToastMessage({ accepted: 0, rejected: 0, migrated: 0 }, () => "x"), null);

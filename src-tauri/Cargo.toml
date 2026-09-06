@@ -1,6 +1,6 @@
 [package]
 name = "codexhub"
-version = "0.1.9-beta.3.19"
+version = "0.1.9-beta.3.20"
 description = "CodexHub desktop backend and CLI"
 authors = ["CodexHub"]
 license = "MIT"
@@ -38,6 +38,9 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 # credentials are YAML; the engine parses and re-serializes mappings while
 # preserving every user-owned key.
 serde_yaml = "0.9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", features = ["v3_24"] }

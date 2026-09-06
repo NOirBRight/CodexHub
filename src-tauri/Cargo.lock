@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "codexhub"
-version = "0.1.9-beta.3.19"
+version = "0.1.9-beta.3.20"
 dependencies = [
  "cairo-rs",
  "chrono",
@@ -502,6 +502,7 @@ dependencies = [
  "gdk-pixbuf",
  "glib",
  "gtk",
+ "libc",
  "log",
  "reqwest 0.12.28",
  "rusqlite",

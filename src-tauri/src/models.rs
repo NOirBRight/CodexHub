@@ -1,5 +1,4 @@
 use crate::{
-    app_server::{AppServerCall, AppServerSession},
     config, runtime_paths, safe_file, CatalogVisibility, MetadataProvenance, Model, ModelPricing,
     Settings, UpstreamFormat,
 };
@@ -10,20 +9,21 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
+#[cfg(test)]
+use crate::app_server::{AppServerCall, AppServerSession};
 use std::sync::OnceLock;
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::time::Instant;
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
-const CODEX_APP_SERVER_MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
-// Codex CLI 0.146 may answer model/list before it atomically publishes the
-// native context cache.  A response that already carries context is a safe
-// direct snapshot and returns immediately; a context-less response needs this
-// bounded grace before the catalog can resolve a safe Official budget.
-const CODEX_APP_SERVER_NATIVE_CACHE_GRACE: Duration = Duration::from_secs(20);
 const MAX_VISIBILITY_DIAGNOSTIC_COUNT: u64 = 100;
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
@@ -59,28 +59,72 @@ const KNOWN_PROVIDER_ENDPOINT_SUFFIXES: &[&str] = &[
     "/models",
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct OfficialModelsAcquisition {
+    refresh: Option<crate::official_catalog::Refresh>,
     subscription_models: Vec<OfficialSubscriptionModel>,
     models: Vec<Model>,
     visibility_diagnostics: Value,
     native_cache: Option<String>,
 }
 
+impl OfficialModelsAcquisition {
+    pub(crate) fn publish<T, E: From<String>>(
+        &self,
+        publish: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
+        match &self.refresh {
+            Some(refresh) => refresh.publish(publish),
+            None => publish(), // Legacy conversion fixtures do not start a live refresh.
+        }
+    }
+}
+
 pub(crate) fn acquire_official_models_direct() -> Result<OfficialModelsAcquisition, String> {
-    acquire_official_models_direct_with_runner(&ProcessAppServerModelListRunner)
+    let refresh = crate::official_catalog::Refresh::begin()?;
+    acquire_official_catalog(refresh)
+}
+
+fn acquire_official_catalog(
+    refresh: crate::official_catalog::Refresh,
+) -> Result<OfficialModelsAcquisition, String> {
+    let text = crate::official_catalog::fetch(&refresh)?;
+    let payload: Value =
+        serde_json::from_str(&text).map_err(|_| "Official catalog returned invalid JSON")?;
+    validate_official_snapshot(&payload)?;
+    let visibility_diagnostics = visibility_diagnostics_from_payload(&payload);
+    let subscription_models = subscription_models_from_payload(&payload)?;
+    let models = subscription_models_to_metadata_models(&subscription_models);
+    refresh.check_current()?;
+    Ok(OfficialModelsAcquisition {
+        refresh: Some(refresh),
+        subscription_models,
+        models,
+        visibility_diagnostics,
+        native_cache: Some(text),
+    })
 }
 
 /// Read the current Codex subscription model list without publishing any
 /// CodexHub catalog or touching the running Codex Desktop configuration.
-pub(crate) fn read_official_models_direct() -> Result<Vec<Model>, String> {
-    let acquisition = acquire_official_models_direct()?;
+pub(crate) fn read_official_models_direct(request_id: Option<&str>) -> Result<Vec<Model>, String> {
+    let refresh = crate::official_catalog::Refresh::begin_for(request_id)?;
+    let acquisition = acquire_official_catalog(refresh)?;
     let paths = ModelPaths::runtime()?;
     let snapshot = match acquisition.native_cache.as_ref() {
         Some(cache) => cache.clone(),
-        None => official_subscription_seed_text(&acquisition.subscription_models, &acquisition.visibility_diagnostics)?,
+        None => official_subscription_seed_text(
+            &acquisition.subscription_models,
+            &acquisition.visibility_diagnostics,
+        )?,
     };
-    safe_file::write_text_atomic_with_mode(&paths.official_editor_cache_path(), &snapshot, Some(0o600))?;
+    acquisition.publish(|| {
+        safe_file::write_text_atomic_with_mode(
+            &paths.official_editor_cache_path(),
+            &snapshot,
+            Some(0o600),
+        )
+    })?;
     Ok(acquisition.models)
 }
 
@@ -860,22 +904,16 @@ fn refresh_official_models_from_endpoint(
     )
 }
 
+#[cfg(test)]
 trait AppServerModelListRunner {
     fn read_model_list(&self) -> Result<AppServerModelListSnapshot, String>;
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct AppServerModelListSnapshot {
     payload: Value,
     native_cache: Option<String>,
-}
-
-struct ProcessAppServerModelListRunner;
-
-impl AppServerModelListRunner for ProcessAppServerModelListRunner {
-    fn read_model_list(&self) -> Result<AppServerModelListSnapshot, String> {
-        read_codex_app_server_model_list()
-    }
 }
 
 #[cfg(test)]
@@ -907,6 +945,7 @@ fn refresh_official_models_direct_with_runner(
     Ok(acquisition.models)
 }
 
+#[cfg(test)]
 fn acquire_official_models_direct_with_runner(
     runner: &dyn AppServerModelListRunner,
 ) -> Result<OfficialModelsAcquisition, String> {
@@ -927,6 +966,7 @@ fn acquire_official_models_direct_with_runner(
     let subscription_models = subscription_models_from_app_server_payload(payload)?;
     let models = subscription_models_to_metadata_models(&subscription_models);
     Ok(OfficialModelsAcquisition {
+        refresh: None,
         subscription_models,
         models,
         visibility_diagnostics,
@@ -968,30 +1008,12 @@ fn visibility_diagnostics_from_payload(payload: &Value) -> Value {
     Value::Object(counts)
 }
 
-fn read_codex_app_server_model_list() -> Result<AppServerModelListSnapshot, String> {
-    let target_home = runtime_paths::codex_target_home_dir()?;
-    let staging = StagedCodexHome::new(&target_home)?;
-    let mut command = crate::codex_cli::command()?;
-    command.args(["app-server", "--stdio"]);
-    command.env("CODEX_HOME", staging.path());
-    let cache_path = staging.path().join("models_cache.json");
-    let payload = read_codex_app_server_model_list_with_cache_path(
-        command,
-        CODEX_APP_SERVER_MODEL_LIST_TIMEOUT,
-        &cache_path,
-        CODEX_APP_SERVER_NATIVE_CACHE_GRACE,
-    )?;
-    let native_cache = fs::read_to_string(&cache_path).ok();
-    Ok(AppServerModelListSnapshot {
-        payload,
-        native_cache,
-    })
-}
-
+#[cfg(test)]
 struct StagedCodexHome {
     path: PathBuf,
 }
 
+#[cfg(test)]
 impl StagedCodexHome {
     fn new(source_home: &Path) -> Result<Self, String> {
         static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(1);
@@ -1038,6 +1060,7 @@ impl StagedCodexHome {
     }
 }
 
+#[cfg(test)]
 impl Drop for StagedCodexHome {
     fn drop(&mut self) {
         if let Err(error) = fs::remove_dir_all(&self.path) {
@@ -1054,6 +1077,7 @@ fn read_codex_app_server_model_list_with_command(
     read_codex_app_server_model_list_with_cache_grace(command, timeout, None, Duration::ZERO)
 }
 
+#[cfg(test)]
 fn read_codex_app_server_model_list_with_cache_path(
     command: Command,
     timeout: Duration,
@@ -1068,6 +1092,7 @@ fn read_codex_app_server_model_list_with_cache_path(
     )
 }
 
+#[cfg(test)]
 fn read_codex_app_server_model_list_with_cache_grace(
     command: Command,
     timeout: Duration,
@@ -1131,6 +1156,7 @@ fn read_codex_app_server_model_list_with_cache_grace(
     Ok(result)
 }
 
+#[cfg(test)]
 fn model_list_contains_context_metadata(result: &Value) -> bool {
     let Some(items) = result
         .get("data")
@@ -1164,6 +1190,7 @@ fn model_list_contains_context_metadata(result: &Value) -> bool {
         })
 }
 
+#[cfg(test)]
 fn wait_for_native_model_cache_publication(
     cache_path: &Path,
     grace: Duration,
@@ -1190,6 +1217,7 @@ fn wait_for_native_model_cache_publication(
     }
 }
 
+#[cfg(test)]
 fn readable_native_model_cache(cache_path: &Path) -> Option<Vec<u8>> {
     let bytes = fs::read(cache_path).ok()?;
     let payload: Value = serde_json::from_slice(&bytes).ok()?;
@@ -1226,6 +1254,7 @@ struct ReasoningLevelEntry {
     description: Option<String>,
 }
 
+#[cfg(test)]
 fn subscription_models_from_app_server_payload(
     payload: &Value,
 ) -> Result<Vec<OfficialSubscriptionModel>, String> {
@@ -1746,6 +1775,15 @@ fn official_subscription_seed_text(
 
 fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value {
     let mut payload = model.raw.as_object().cloned().unwrap_or_default();
+    // The subscription endpoint sends ModelInfo (shell_type), unlike the
+    // app-server list DTO. Codex 0.153.4 deserializes an omitted percent as 95
+    // (protocol/src/openai_models.rs). Apply that default only to the derived
+    // seed with a supplied numeric window; keep the raw response untouched.
+    if payload.get("shell_type").and_then(Value::as_str).is_some()
+        && payload.get("context_window").and_then(Value::as_u64).is_some_and(|value| value > 0)
+    {
+        payload.entry("effective_context_window_percent".to_string()).or_insert(json!(95));
+    }
     ensure_responses_lite_opt_in(&mut payload);
     payload.insert("visibility".to_string(), json!(CatalogVisibility::List));
     payload.insert("slug".to_string(), json!(model.slug));
@@ -3445,7 +3483,9 @@ mod tests {
     use std::sync::mpsc::{self, Receiver};
     use std::sync::Mutex;
     use std::thread::{self, JoinHandle};
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::time::Instant;
 
     #[test]
     fn official_editor_uses_full_native_membership_not_gateway_export_or_builtin_models() {
@@ -5092,6 +5132,29 @@ for line in sys.stdin:
                 );
             }
         }
+    }
+
+    #[test]
+    fn subscription_model_info_seed_applies_cli_percent_default_without_changing_raw_response() {
+        for percent in [None, Some(json!(80)), Some(Value::Null)] {
+            let mut row = json!({"slug":"gpt-5.6-luna", "visibility":"list",
+                "display_name":"Luna", "shell_type":"shell_command",
+                "context_window":272000, "max_context_window":872000,
+                "auto_compact_token_limit":null});
+            if let Some(value) = percent.clone() {
+                row["effective_context_window_percent"] = value;
+            }
+            let models = subscription_models_from_payload(&json!({"models":[row]})).unwrap();
+            let seed = super::official_subscription_seed_model(&models[0]);
+            assert_eq!(seed["effective_context_window_percent"], percent.clone().unwrap_or(json!(95)));
+            assert_eq!(models[0].raw.get("effective_context_window_percent"), percent.as_ref());
+        }
+        let models = subscription_models_from_payload(&json!({"models":[{
+            "slug":"gpt-5.6-luna", "visibility":"list", "shell_type":"shell_command"
+        }]})).unwrap();
+        let seed = super::official_subscription_seed_model(&models[0]);
+        assert!(seed.get("context_window").is_none());
+        assert!(seed.get("effective_context_window_percent").is_none());
     }
 
     #[test]

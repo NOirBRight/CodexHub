@@ -35,6 +35,8 @@ const ALIASES_SWITCH_MODE: &[(&str, &str)] = &[
     ("forceTakeover", "force_takeover"),
     ("restartCodex", "restart_codex"),
 ];
+const ALIASES_REQUEST_ID: &[(&str, &str)] = &[("requestId", "request_id")];
+const ALIASES_OFFICIAL_REFRESH: &[(&str, &str)] = &[("restartCodex", "restart_codex"), ("requestId", "request_id")];
 const ALIASES_RESTART: &[(&str, &str)] = &[("restartCodex", "restart_codex")];
 const ALIASES_USAGE: &[(&str, &str)] = &[
     ("startTime", "start_time"),
@@ -99,7 +101,8 @@ macro_rules! desktop_command_registry {
             SaveSettings => "save_settings" => $crate::desktop_commands::save_settings, true, true, true, false, NO_ALIASES;
             GetCodexContextGuardStatus => "get_codex_context_guard_status" => $crate::desktop_commands::get_codex_context_guard_status, true, true, true, false, NO_ALIASES;
             SetCodexContextGuard => "set_codex_context_guard" => $crate::desktop_commands::set_codex_context_guard, true, true, true, false, ALIASES_RESTART;
-            RefreshOfficialModels => "refresh_official_models" => $crate::desktop_commands::refresh_official_models, true, true, true, false, ALIASES_RESTART;
+            CancelOfficialModelRefresh => "cancel_official_model_refresh" => $crate::desktop_commands::cancel_official_model_refresh, true, true, true, false, ALIASES_REQUEST_ID;
+            RefreshOfficialModels => "refresh_official_models" => $crate::desktop_commands::refresh_official_models, true, true, true, false, ALIASES_OFFICIAL_REFRESH;
             OpenaiUsageCompletions => "openai_usage_completions" => $crate::desktop_commands::openai_usage_completions, true, true, true, false, ALIASES_USAGE;
             DiscoverProviderModels => "discover_provider_models" => $crate::desktop_commands::discover_provider_models, true, true, true, false, ALIASES_DISCOVER;
             ProbeUpstreamFormat => "probe_upstream_format" => $crate::desktop_commands::probe_upstream_format, true, true, true, false, ALIASES_BASE_URL_API_KEY;

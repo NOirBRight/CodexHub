@@ -17,7 +17,7 @@ from typing import Any
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
-from atomic_io import atomic_write_text
+from atomic_io import atomic_write_text, file_lock_for
 
 CODEX_HOME_ENV = "CODEX_HOME"
 CODEX_TARGET_HOME_ENV = "CODEXHUB_CODEX_TARGET_HOME"
@@ -121,7 +121,7 @@ def _persist_auth_json(path: Path, data: dict[str, Any]) -> None:
     )
 
 
-def refresh(
+def _refresh_unlocked(
     auth_data: dict[str, Any],
     path: Path | None = None,
     *,
@@ -205,6 +205,29 @@ def refresh(
     target = path or auth_json_path()
     _persist_auth_json(target, auth_data)
     return new_access
+
+
+def refresh(auth_data: dict[str, Any], path: Path | None = None, *,
+            token_url: str = OAUTH_TOKEN_URL, _opener: Any = None) -> str:
+    """Serialize every refresh owner, including forced adapter refreshes."""
+    target = path or auth_json_path()
+    previous = auth_data.get("tokens", {}).get("access_token")
+    # Separate from the auth.json atomic-write lock acquired during publication.
+    with file_lock_for(target.with_name("codexhub-oauth-refresh")):
+        current = load_auth_json(target)
+        token = current["tokens"]["access_token"]
+        try:
+            exp = decode_jwt_payload(token).get("exp")
+        except CodexAuthError:
+            exp = None
+        if token != previous and not _is_expired(exp):
+            auth_data.clear()
+            auth_data.update(current)
+            return token
+        token = _refresh_unlocked(current, target, token_url=token_url, _opener=_opener)
+        auth_data.clear()
+        auth_data.update(current)
+        return token
 
 
 def access_token(

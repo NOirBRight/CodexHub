@@ -27,6 +27,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "src-python/global_state_repair.py",
     "src-python/history_consolidate.py",
     "src-python/history_overlay.py",
+    "src-python/official_catalog.py",
     "src-python/probe_upstream_format.py",
     "scripts/analyze_transport_failures.py",
     "scripts/audit_issue_62_runtime_artifacts.py",
@@ -325,7 +326,7 @@ def test_relative_windows_entrypoints_keep_the_repository_runtime_contract() -> 
         "-DryRun",
     )
     assert portable_plan.returncode == 0, portable_plan.stdout + portable_plan.stderr
-    assert '"version":"0.1.9-beta.3.19"' in portable_plan.stdout
+    assert '"version":"0.1.9-beta.3.20"' in portable_plan.stdout
 
     runtime_check = _run_relative_powershell_script(
         r".\scripts\Prepare-PythonRuntime.ps1", "-CheckOnly"

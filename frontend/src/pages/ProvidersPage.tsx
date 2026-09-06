@@ -156,6 +156,7 @@ function ProvidersPageImpl({
     discoverForForm: discoverWorkspaceForForm,
     probeProvider,
     refreshOfficialModels,
+    cancelOfficialModelRefresh,
     selectProvider,
     trackProviderDraft,
   } = workspace;
@@ -979,6 +980,7 @@ function ProvidersPageImpl({
                 onContextGuardChanged={reflectContextGuardSetting}
                 onOpenCodexApp={() => void openCodexAppForLogin()}
                 onRefresh={(options) => refreshOfficialModelsAndCollaborationState(options)}
+                onCancelRefresh={cancelOfficialModelRefresh}
                 onRefreshClients={onRefreshClients}
                 onRefreshAuth={() => void refreshCodexAuthStatus()}
                 onRefreshUsage={() => void loadOfficialOpenAIUsage(true, true)}
@@ -1583,6 +1585,7 @@ function OfficialDetail({
   onContextGuardChanged,
   onOpenCodexApp,
   onRefresh,
+  onCancelRefresh,
   onRefreshClients,
   onRefreshAuth,
   onRefreshUsage,
@@ -1611,6 +1614,7 @@ function OfficialDetail({
   onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
   onRefresh: (options?: { quiet?: boolean; throwOnError?: boolean }) => Promise<boolean>;
+  onCancelRefresh: () => void;
   onRefreshClients?: () => Promise<void>;
   onRefreshAuth: () => void;
   onRefreshUsage: () => void;
@@ -1882,6 +1886,7 @@ function OfficialDetail({
         officialCollaborationOverrides={officialCollaborationOverrides}
         officialDisabledModels={officialDisabledModels}
         onRefresh={onRefresh}
+        onCancelRefresh={onCancelRefresh}
         onReorder={onReorder}
         onTestModel={testOfficialModel}
         refreshBusy={busy === "official-refresh"}

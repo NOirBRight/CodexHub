@@ -230,6 +230,10 @@ pub(crate) fn refresh_manual(
 /// the Codex Desktop process. This is the manual Refresh path while Codex is
 /// running; applying a new managed overlay remains a separate mutating flow.
 pub(crate) fn refresh_current_models() -> Result<OfficialRefreshResult, String> {
+    refresh_current_models_with_request(None)
+}
+
+pub(crate) fn refresh_current_models_with_request(request_id: Option<&str>) -> Result<OfficialRefreshResult, String> {
     if !config::get_settings()?.include_official_models {
         return Ok(OfficialRefreshResult {
             models: Vec::new(),
@@ -239,7 +243,7 @@ pub(crate) fn refresh_current_models() -> Result<OfficialRefreshResult, String> 
         });
     }
     read_only_refresh_result(
-        models::read_official_models_direct(),
+        models::read_official_models_direct(request_id),
         models::list_cached_official_models,
     )
 }
@@ -452,7 +456,7 @@ fn refresh_once(
             let (files, budgets) = prepare_catalog_publication(&overlays).map_err(|error| {
                 persist_failed_publication_if_stopped(&state_path, &mut state, error)
             })?;
-            let committed = commit_refresh_if_codex_stopped(|| {
+            let committed = acquisition.publish(|| commit_refresh_if_codex_stopped(|| {
                 publish_prepared_snapshot(
                     &state_path,
                     &mut state,
@@ -461,7 +465,7 @@ fn refresh_once(
                     &files,
                     budgets,
                 )
-            });
+            }));
             let publication = match committed {
                 Ok(Some(publication)) => publication,
                 Ok(None) => return Err(commit_race_error().into()),
@@ -485,55 +489,9 @@ fn refresh_once(
                 warning: publication.warning,
             })
         }
-        Err(direct_error) => {
-            let models = models::list_cached_official_models().unwrap_or_default();
-            let (files, budgets) = prepare_catalog_publication(&[]).map_err(|error| {
-                persist_failed_publication_if_stopped(
-                    &state_path,
-                    &mut state,
-                    direct_official_refresh_failure_message(&direct_error, Some(&error)),
-                )
-            })?;
-            let committed = commit_refresh_if_codex_stopped(|| {
-                publish_prepared_snapshot(
-                    &state_path,
-                    &mut state,
-                    now,
-                    false,
-                    &files,
-                    budgets,
-                )
-            });
-            let publication = match committed {
-                Ok(Some(publication)) => publication,
-                Ok(None) => return Err(commit_race_error().into()),
-                Err(publication_error) if publication_error.rollback_failed() => {
-                    return Err(publication_error);
-                }
-                Err(publication_error) => {
-                    let error = direct_official_refresh_failure_message(
-                        &direct_error,
-                        Some(&publication_error.to_string()),
-                    );
-                    return Err(persist_failed_publication_if_stopped(
-                        &state_path,
-                        &mut state,
-                        error,
-                    )
-                    .into());
-                }
-            };
-            if !current_published_snapshot_available(&state) {
-                return Err(direct_official_refresh_failure_message(&direct_error, None).into());
-            }
-            Ok(RefreshOutcome {
-                trigger,
-                snapshot_available: true,
-                models,
-                restart_required: publication.restart_required,
-                warning: publication.warning,
-            })
-        }
+        // An unsuccessful discovery must never publish a degraded replacement.
+        // Existing validated caches remain available through the read paths.
+        Err(direct_error) => Err(direct_official_refresh_failure_message(&direct_error, None).into()),
     }
 }
 

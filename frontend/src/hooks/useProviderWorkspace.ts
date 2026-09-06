@@ -76,6 +76,7 @@ export type ProviderWorkspaceHandle = {
     providerId?: string;
     toastId?: string;
   }) => Promise<ProviderWorkspaceOutcome>;
+  cancelOfficialModelRefresh: () => void;
   refreshOfficialModels: (options?: ProviderRefreshOptions) => Promise<ProviderWorkspaceOutcome>;
   deleteProvider: (providerId: string) => Promise<ProviderWorkspaceOutcome>;
   /** The single dirty-navigation entry point. */
@@ -144,6 +145,7 @@ export function useProviderWorkspace(options: {
   const { getSource, onProvidersChanged, onSettingsChanged, refreshGatewayState, toast, t, tr } = options;
   const { showToast, updateToast } = toast;
   const externalSource = getSource();
+  const officialRefreshId = useRef<string | null>(null);
   const [state, dispatch] = useReducer(providerWorkspaceReducer, externalSource, initialState);
   const dirtyDraftRef = useRef<ProviderDraftState<Provider> | null>(null);
   const sourceRef = useRef(externalSource);
@@ -522,6 +524,9 @@ export function useProviderWorkspace(options: {
           }
         }
         case "refreshOfficialModels": {
+          if (officialRefreshId.current) return { kind: "error", message: "Official refresh is already running" };
+          const requestId = crypto.randomUUID();
+          officialRefreshId.current = requestId;
           const quiet = intent.quiet ?? false;
           let toastId: string | null = null;
           try {
@@ -531,7 +536,7 @@ export function useProviderWorkspace(options: {
             }
             // Refresh reads the current Official model list. Applying a new
             // Codex overlay is a separate, explicitly authorized mutation.
-            const refreshResult = await api.refreshOfficialModels(false);
+            const refreshResult = await api.refreshOfficialModels(false, requestId);
             if (refreshResult.warning?.trim() && !refreshResult.codex_restart_result) {
               throw new Error(refreshResult.warning.trim());
             }
@@ -587,6 +592,7 @@ export function useProviderWorkspace(options: {
             }
             return { kind: "error", message: messageFromError(err) };
           } finally {
+            officialRefreshId.current = null;
             if (!quiet) {
               dispatch({ type: "setBusy", busy: null });
             }
@@ -829,6 +835,10 @@ export function useProviderWorkspace(options: {
     discoverForForm,
     probeProvider,
     refreshOfficialModels,
+    cancelOfficialModelRefresh: () => {
+      const id = officialRefreshId.current;
+      if (id) void api.cancelOfficialModelRefresh(id).catch((error) => showToast(messageFromError(error), "error"));
+    },
     deleteProvider,
     navigation,
     selectedProvider,
