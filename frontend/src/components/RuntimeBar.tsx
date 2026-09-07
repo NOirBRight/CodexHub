@@ -2,7 +2,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, Play, Settings as SettingsIcon, Square, X } from "lucide-react";
 import type { MouseEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import codexLogo from "../assets/codex-logo.svg";
+import codexLogo from "../assets/brand/codexhub-icon.svg";
 import { cx } from "../lib/format";
 import { api } from "../lib/tauri";
 import type { AppFlavorInfo, AppStatus, Settings } from "../lib/types";

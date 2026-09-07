@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 96 96" fill="none">
+  <title>CodexHub — connected ports</title>
+  <desc>Two opposing open ports joined by one bridge. A compact symbol for connecting models and clients.</desc>
+  <defs>
+    <linearGradient id="shell" x1="14" y1="2" x2="80" y2="96" gradientUnits="userSpaceOnUse"><stop stop-color="#AFA4EB"/><stop offset=".43" stop-color="#7766BB"/><stop offset="1" stop-color="#423761"/></linearGradient>
+    <linearGradient id="rim" x1="18" y1="1" x2="76" y2="95" gradientUnits="userSpaceOnUse"><stop stop-color="#E6E0FF" stop-opacity=".85"/><stop offset=".48" stop-color="#D0C3FF" stop-opacity=".12"/><stop offset="1" stop-color="#181327" stop-opacity=".6"/></linearGradient>
+    <linearGradient id="mark" x1="25" y1="22" x2="73" y2="77" gradientUnits="userSpaceOnUse"><stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#E0D9FA"/></linearGradient>
+  </defs>
+  <rect x="2" y="2" width="92" height="92" rx="23" fill="url(#shell)"/>
+  <rect x="2.75" y="2.75" width="90.5" height="90.5" rx="22.25" stroke="url(#rim)" stroke-width="1.5"/>
+  <path d="M40 25H33C26.9 25 23 28.9 23 35V61C23 67.1 26.9 71 33 71H40M56 25H63C69.1 25 73 28.9 73 35V61C73 67.1 69.1 71 63 71H56M35 48H61" stroke="#35284F" stroke-opacity=".19" stroke-width="8" stroke-linecap="round" transform="translate(0 2)"/>
+  <path d="M40 25H33C26.9 25 23 28.9 23 35V61C23 67.1 26.9 71 33 71H40M56 25H63C69.1 25 73 28.9 73 35V61C73 67.1 69.1 71 63 71H56M35 48H61" stroke="url(#mark)" stroke-width="8" stroke-linecap="round"/>
+</svg>

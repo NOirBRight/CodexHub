@@ -34,7 +34,9 @@ export function useAppUpdateLifecycle(options: {
   }));
   const lifecycleRef = useRef<AppUpdateLifecycle | null>(null);
 
-  if (!lifecycleRef.current) {
+  useEffect(() => {
+    // StrictMode replays setup after cleanup without another render.
+    // Create a fresh lifecycle for each effect lifetime.
     lifecycleRef.current = createAppUpdateLifecycle({
       clock: {
         clearInterval: (handle) => window.clearInterval(handle as number),
@@ -54,7 +56,10 @@ export function useAppUpdateLifecycle(options: {
         setAppVersion: (version) => {
           setRuntime((current) => ({
             ...current,
-            appVersion: { ...current.appVersion, data: { current_version: version } },
+            appVersion: {
+              ...current.appVersion,
+              data: { current_version: version },
+            },
           }));
         },
         setUpdateStatus: (status) => {
@@ -83,9 +88,6 @@ export function useAppUpdateLifecycle(options: {
       },
       translate,
     });
-  }
-
-  useEffect(() => {
     const lifecycle = lifecycleRef.current!;
     const unsubscribe = lifecycle.subscribe(setView);
     lifecycle.refreshCompletion();
@@ -99,8 +101,10 @@ export function useAppUpdateLifecycle(options: {
   const actions = useMemo(
     () => ({
       checkForUpdates: () => lifecycleRef.current!.checkForUpdates(),
-      startInstall: (source: "settings" | "toast") => lifecycleRef.current!.startInstall(source),
-      startScheduling: (settingsLoaded: boolean) => lifecycleRef.current!.startScheduling(settingsLoaded),
+      startInstall: (source: "settings" | "toast") =>
+        lifecycleRef.current!.startInstall(source),
+      startScheduling: (settingsLoaded: boolean) =>
+        lifecycleRef.current!.startScheduling(settingsLoaded),
     }),
     [],
   );

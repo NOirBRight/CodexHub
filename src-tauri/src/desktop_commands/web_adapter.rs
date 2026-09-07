@@ -356,6 +356,8 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         )?)),
         Command::RemoveAutostart => to_value(autostart::remove_autostart()),
         Command::GetAutostartStatus => to_value(autostart::get_autostart_status()),
+        Command::CodexLogout => to_value(crate::provider_account::codex_logout_blocking()),
+        Command::ProviderUsage => to_value(crate::provider_account::provider_usage_blocking(registry_string_arg(args, command, "provider_id")?)),
         Command::OpenCodexApp => to_value(crate::open_codex_app()),
         Command::XaiAuthStatus => to_value(xai_auth::xai_auth_status_blocking()),
         Command::XaiStartDeviceLogin => to_value(xai_auth::xai_start_device_login_blocking()),

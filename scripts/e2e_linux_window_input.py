@@ -576,8 +576,12 @@ def run_probe(binary: Path) -> int:
 
             # Prove WebKit/DOM receives the event, not merely that the GTK shell
             # prevents it from reaching the background. The settings button is
-            # anchored 142 physical pixels from the right edge at every size;
-            # opening its drawer changes a large, stable region of the UI.
+            # in the fifth fixed-width top navigation slot. Switching between
+            # Settings and Overview changes a large stable region of the DOM.
+            # CSS: left 22, buttons 96, gap 7; native Linux zoom is 0.93.
+            settings_x = round((22 + 4 * (96 + 7) + 48) * 0.93)
+            overview_x = round((22 + 48) * 0.93)
+            navigation_y = round((45 + 23) * 0.93)
             response_width = min(360, app_width)
             response_x = app_x + app_width - response_width
             response_height = min(480, app_height)
@@ -593,8 +597,8 @@ def run_probe(binary: Path) -> int:
             )
             x11.pending_button_presses()
             x11.click(
-                app_x + max(0, app_width - 142),
-                app_y + min(28, app_height - 1),
+                app_x + settings_x,
+                app_y + navigation_y,
             )
             if x11.pending_button_presses():
                 print("FAIL: settings-button click passed through to the background window")
@@ -611,21 +615,20 @@ def run_probe(binary: Path) -> int:
             opened_fraction = changed_pixel_fraction(before_response, after_response)
             if opened_fraction < 0.25:
                 print(
-                    "FAIL: settings drawer did not produce the expected large DOM transition; "
+                    "FAIL: settings page did not produce the expected large DOM transition; "
                     f"changed_fraction={opened_fraction:.3f}"
                 )
                 return 1
 
-            # The open drawer renders a full-height backdrop over the left side
-            # of this 820px test window. A physical click there must produce a
-            # large close transition without reaching the background probe.
+            # Return to Overview via its top navigation button. The change
+            # must reach the rendered DOM without reaching the background probe.
             x11.pending_button_presses()
             x11.click(
-                app_x + min(100, app_width - 1),
-                app_y + min(300, app_height - 1),
+                app_x + overview_x,
+                app_y + navigation_y,
             )
             if x11.pending_button_presses():
-                print("FAIL: settings-drawer backdrop click passed through to the background window")
+                print("FAIL: overview-navigation click passed through to the background window")
                 return 1
             x11.move_pointer(5, 5)
             closed_response = wait_for_stable_pixels(
@@ -638,15 +641,15 @@ def run_probe(binary: Path) -> int:
             )
             close_transition = changed_pixel_fraction(after_response, closed_response)
 
-            # Reopen and close the drawer a second time. The page underneath
+            # Repeat the settings/overview cycle. The page
             # can legitimately finish asynchronous startup work while the
             # first drawer cycle is open, so it need not return pixel-for-pixel
             # to the old baseline. Two complete physical cycles prove the DOM
             # handled both buttons without depending on stale page pixels.
             x11.pending_button_presses()
             x11.click(
-                app_x + max(0, app_width - 142),
-                app_y + min(28, app_height - 1),
+                app_x + settings_x,
+                app_y + navigation_y,
             )
             if x11.pending_button_presses():
                 print("FAIL: second settings-button click passed through to the background window")
@@ -664,11 +667,11 @@ def run_probe(binary: Path) -> int:
 
             x11.pending_button_presses()
             x11.click(
-                app_x + min(100, app_width - 1),
-                app_y + min(300, app_height - 1),
+                app_x + overview_x,
+                app_y + navigation_y,
             )
             if x11.pending_button_presses():
-                print("FAIL: second settings-drawer backdrop click passed through to the background window")
+                print("FAIL: second overview-navigation click passed through to the background window")
                 return 1
             x11.move_pointer(5, 5)
             reclosed_response = wait_for_stable_pixels(
@@ -687,7 +690,7 @@ def run_probe(binary: Path) -> int:
                 reclosed_transition,
             ):
                 print(
-                    "FAIL: settings drawer did not complete two physical DOM cycles; "
+                    "FAIL: settings page did not complete two physical DOM cycles; "
                     f"transitions=({opened_fraction:.3f}, {close_transition:.3f}, "
                     f"{reopened_transition:.3f}, {reclosed_transition:.3f})"
                 )
@@ -708,7 +711,7 @@ def run_probe(binary: Path) -> int:
                     return 1
 
             print(
-                "PASS: CodexHub settings drawer opened and closed through physical input, "
+                "PASS: CodexHub settings page opened and closed through physical input, "
                 "and 13 clicks stayed inside the full input region; "
                 f"window={app_width}x{app_height} rectangles={rectangles} "
                 f'wm_class=("{wm_instance}", "{wm_class}") '

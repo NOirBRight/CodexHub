@@ -1,16 +1,43 @@
-import { Activity, Check, CheckCircle2, Copy, Eye, EyeOff, ListChecks, Network, RefreshCcw, Save, Server, X } from "lucide-react";
+import {
+  Activity,
+  Check,
+  CheckCircle2,
+  Copy,
+  Eye,
+  EyeOff,
+  ListChecks,
+  Network,
+  RefreshCcw,
+  Save,
+  Server,
+  X,
+} from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DebugDiagnosticsOverlay } from "../components/DebugDiagnosticsPanel";
 import { EndpointRow } from "../components/EndpointRow";
-import { GatewayClientCard } from "../components/GatewayClientCard";
-import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToast";
+import {
+  connectionStateFromInfo,
+  GatewayClientCard,
+} from "../components/GatewayClientCard";
+import {
+  BACKEND_DISCONNECTED_TOAST_KEY,
+  useToasts,
+} from "../components/PageToast";
 import { PendingPanel } from "../components/PendingPanel";
 import { SwitchControl } from "../components/SettingsDrawer";
 import { StackedUsageChartShell } from "../components/StackedUsageChartShell";
 import { cx } from "../lib/format";
-import { formatRestartDisclosure, runPersistentAction, type RestartTarget } from "../lib/persistentAction";
-import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
+import {
+  formatRestartDisclosure,
+  runPersistentAction,
+  type RestartTarget,
+} from "../lib/persistentAction";
+import {
+  api,
+  isBackendDisconnectedMessage,
+  messageFromError,
+} from "../lib/tauri";
 import type {
   AppFlavorInfo,
   AppStatus,
@@ -28,6 +55,7 @@ import type {
 } from "../lib/types";
 
 interface GatewayPageProps {
+  desktopView?: "statistics" | "clients" | "service" | "diagnostics" | "hidden";
   appFlavor?: AppFlavorInfo | null;
   busy?: string | null;
   clients: GatewayClientContract[];
@@ -47,17 +75,24 @@ interface GatewayPageProps {
   recentEvents: GatewayEvent[];
   clientInfos: GatewayClientInfo[];
   onApplySettings: (settings: Settings) => Promise<string>;
-  onRefreshClients: (options?: { includeClientVersions?: boolean }) => Promise<void>;
+  onRefreshClients: (options?: {
+    includeClientVersions?: boolean;
+  }) => Promise<void>;
   onStartProxy: () => Promise<AppStatus | null>;
   onStopProxy: () => Promise<AppStatus | null>;
   onUsageWindowChange: (window: UsageQueryWindow) => void;
 }
 
 function isActionableDiagnostic(item: GatewayStatus["diagnostics"][number]) {
-  return item.level !== "ok" && item.level !== "status" && item.category !== "proxy_state";
+  return (
+    item.level !== "ok" &&
+    item.level !== "status" &&
+    item.category !== "proxy_state"
+  );
 }
 
 function GatewayPageImpl({
+  desktopView,
   appFlavor,
   busy,
   clients,
@@ -79,28 +114,42 @@ function GatewayPageImpl({
 }: GatewayPageProps) {
   const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
-  const [draftPort, setDraftPort] = useState(settings?.proxy_port ?? status?.port ?? 9099);
+  const [draftPort, setDraftPort] = useState(
+    settings?.proxy_port ?? status?.port ?? 9099,
+  );
   const [draftKey, setDraftKey] = useState(settings?.gateway_client_key ?? "");
-  const [draftTimeout, setDraftTimeout] = useState(settings?.gateway_request_timeout_seconds ?? 300);
+  const [draftTimeout, setDraftTimeout] = useState(
+    settings?.gateway_request_timeout_seconds ?? 300,
+  );
   const [clientBusy, setClientBusy] = useState<string | null>(null);
   const [clientRefreshBusy, setClientRefreshBusy] = useState(false);
   const [showDraftKey, setShowDraftKey] = useState(false);
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
   const [autoRetryBusy, setAutoRetryBusy] = useState(false);
+  const [clientFilter, setClientFilter] = useState("all");
+  const [connectionInfoOpen, setConnectionInfoOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
   const running = status?.proxy_running ?? false;
-  const diagnosticsEnabled = Boolean(appFlavor?.build.flavor === "debug" && appFlavor.build.diagnostics_enabled);
+  const diagnosticsEnabled = Boolean(
+    appFlavor?.build.flavor === "debug" && appFlavor.build.diagnostics_enabled,
+  );
 
   function persistentActionBase() {
     return {
-      showToast: (input: { text: string; tone: "loading"; timeoutMs: null; dedupeKey?: string }) => showToast(input),
+      showToast: (input: {
+        text: string;
+        tone: "loading";
+        timeoutMs: null;
+        dedupeKey?: string;
+      }) => showToast(input),
       updateToast,
       disconnected: "start-gateway" as const,
       disconnectedText: t("gateway.backendNotConnected"),
       startGatewayLabel: t("gateway.startBackend"),
-      isDisconnected: (error: unknown) => isBackendDisconnectedMessage(messageFromError(error)),
+      isDisconnected: (error: unknown) =>
+        isBackendDisconnectedMessage(messageFromError(error)),
       onStartGateway: (toastId?: string) => startBackendFromToast(toastId),
       formatRestart: (target: RestartTarget) => {
         if (target.kind === "none") {
@@ -155,9 +204,21 @@ function GatewayPageImpl({
     () =>
       status
         ? [
-            { label: t("gateway.modelsEndpoint"), meta: "GET /v1/models", value: status.endpoints.models },
-            { label: t("gateway.completions"), meta: "POST /v1/chat/completions", value: status.endpoints.chat_completions },
-            { label: t("gateway.responses"), meta: "POST /v1/responses", value: status.endpoints.responses },
+            {
+              label: t("gateway.modelsEndpoint"),
+              meta: "GET /v1/models",
+              value: status.endpoints.models,
+            },
+            {
+              label: t("gateway.completions"),
+              meta: "POST /v1/chat/completions",
+              value: status.endpoints.chat_completions,
+            },
+            {
+              label: t("gateway.responses"),
+              meta: "POST /v1/responses",
+              value: status.endpoints.responses,
+            },
           ]
         : [],
     [status, t],
@@ -165,11 +226,14 @@ function GatewayPageImpl({
   const defaultModel = status?.official_models[0]?.id ?? null;
   const runtimeOwner = appFlavor?.routing_owner ?? null;
   const enabledModelCount = useMemo(
-    () => providers.reduce((count, provider) => (
-      provider.enabled
-        ? count + provider.models.filter((model) => model.enabled).length
-        : count
-    ), 0),
+    () =>
+      providers.reduce(
+        (count, provider) =>
+          provider.enabled
+            ? count + provider.models.filter((model) => model.enabled).length
+            : count,
+        0,
+      ),
     [providers],
   );
   const clientInfoById = useMemo(
@@ -239,7 +303,8 @@ function GatewayPageImpl({
 
   async function startBackendFromToast(toastId?: string) {
     setClientRefreshBusy(true);
-    const activeToastId = toastId ?? showToast(t("gateway.startingBackend"), "loading");
+    const activeToastId =
+      toastId ?? showToast(t("gateway.startingBackend"), "loading");
     updateToast(activeToastId, {
       action: null,
       text: t("gateway.startingBackend"),
@@ -276,7 +341,9 @@ function GatewayPageImpl({
       setError(t("common.loadingSettings"));
       return;
     }
-    const cleanPort = Number.isFinite(draftPort) ? draftPort : settings.proxy_port;
+    const cleanPort = Number.isFinite(draftPort)
+      ? draftPort
+      : settings.proxy_port;
     const cleanTimeout = Number.isFinite(draftTimeout)
       ? draftTimeout
       : settings.gateway_request_timeout_seconds;
@@ -293,11 +360,16 @@ function GatewayPageImpl({
         work: () => onApplySettings(next),
         success: (message) => ({
           text: message,
-          tone: message === t("runtime.gatewayRetirementCancelled") ? "info" : "success",
+          tone:
+            message === t("runtime.gatewayRetirementCancelled")
+              ? "info"
+              : "success",
           restart: { kind: "none" },
         }),
         formatRestart: (target) =>
-          target.kind === "none" ? "" : persistentActionBase().formatRestart(target),
+          target.kind === "none"
+            ? ""
+            : persistentActionBase().formatRestart(target),
       });
       setError(null);
     } catch {
@@ -308,19 +380,29 @@ function GatewayPageImpl({
   function regenerateClientKey() {
     const bytes = new Uint8Array(18);
     window.crypto.getRandomValues(bytes);
-    const token = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const token = Array.from(bytes, (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
     setDraftKey(`codexhub-${token}`);
     setShowDraftKey(false);
     setMessage(t("gateway.newApiKeyGenerated"));
     setError(null);
   }
 
-  async function switchClientMode(clientId: string, owner: RoutingOwner, forceTakeover = false) {
+  async function switchClientMode(
+    clientId: string,
+    owner: RoutingOwner,
+    forceTakeover = false,
+  ) {
     setClientBusy(`${clientId}:switch:${owner}`);
     const clientName =
-      clientInfoById.get(clientId)?.name ?? clients.find((client) => client.id === clientId)?.name ?? clientId;
+      clientInfoById.get(clientId)?.name ??
+      clients.find((client) => client.id === clientId)?.name ??
+      clientId;
     const client = clientInfoById.get(clientId);
-    const takeoverRequired = client?.route_owner !== "official" && client?.managed_by_current_app === false;
+    const takeoverRequired =
+      client?.route_owner !== "official" &&
+      client?.managed_by_current_app === false;
     if (takeoverRequired && !runtimeOwner) {
       setClientBusy(null);
       showToast(t("gateway.ownerUnavailable"), "error");
@@ -333,7 +415,12 @@ function GatewayPageImpl({
         ...persistentActionBase(),
         loading: t("gateway.switchClient", { clientName, routeName }),
         work: async () => {
-          await api.switchGatewayClientRoute(clientId, owner, defaultModel, shouldForceTakeover);
+          await api.switchGatewayClientRoute(
+            clientId,
+            owner,
+            defaultModel,
+            shouldForceTakeover,
+          );
           await onRefreshClients();
         },
         success: () => ({
@@ -380,18 +467,25 @@ function GatewayPageImpl({
     try {
       await runPersistentAction({
         ...persistentActionBase(),
-        loading: enabled ? t("gateway.enablingAutoRetry") : t("gateway.disablingAutoRetry"),
-        work: () => onApplySettings({
-          ...settings,
-          gateway_auto_retry_enabled: enabled,
-        }),
+        loading: enabled
+          ? t("gateway.enablingAutoRetry")
+          : t("gateway.disablingAutoRetry"),
+        work: () =>
+          onApplySettings({
+            ...settings,
+            gateway_auto_retry_enabled: enabled,
+          }),
         success: (message) => {
           const cancelled = message === t("runtime.gatewayRetirementCancelled");
-          const restarted = message === t("gateway.gatewaySettingsSavedRestarted");
+          const restarted =
+            message === t("gateway.gatewaySettingsSavedRestarted");
           return {
-            text: cancelled || restarted
-              ? message
-              : enabled ? t("gateway.autoRetryEnabled") : t("gateway.autoRetryDisabled"),
+            text:
+              cancelled || restarted
+                ? message
+                : enabled
+                  ? t("gateway.autoRetryEnabled")
+                  : t("gateway.autoRetryDisabled"),
             tone: cancelled ? "info" : "success",
             restart: { kind: "none" },
           };
@@ -406,8 +500,10 @@ function GatewayPageImpl({
     }
   }
 
-  const actionableDiagnostics = status?.diagnostics.filter(isActionableDiagnostic) ?? [];
-  const runtimeActionBusy = busy === "start" || busy === "stop" || busy === "restart";
+  const actionableDiagnostics =
+    status?.diagnostics.filter(isActionableDiagnostic) ?? [];
+  const runtimeActionBusy =
+    busy === "start" || busy === "stop" || busy === "restart";
   const apiKeyCopied = copiedTarget === "gateway-api-key";
 
   function handleConnectionToggle(clientId: string, connect: boolean) {
@@ -422,30 +518,45 @@ function GatewayPageImpl({
       return void switchClientMode(clientId, "official");
     }
     const info = clientInfoById.get(clientId);
-    const takeoverRequired = info?.route_owner !== "official" && info?.managed_by_current_app === false;
+    const takeoverRequired =
+      info?.route_owner !== "official" &&
+      info?.managed_by_current_app === false;
     return void switchClientMode(clientId, runtimeOwner, takeoverRequired);
   }
 
   async function toggleDshConnection(connect: boolean) {
     const info = clientInfoById.get("dsh");
-    const name = info?.name ?? clients.find((client) => client.id === "dsh")?.name ?? "DeepSeek Harness";
+    const name =
+      info?.name ??
+      clients.find((client) => client.id === "dsh")?.name ??
+      "DeepSeek Harness";
     const repairing = connect && info?.route_mode === "stale";
     setClientBusy(connect ? "dsh:connect" : "dsh:disconnect");
     try {
       await runPersistentAction({
         ...persistentActionBase(),
         loading: t(
-          repairing ? "gateway.repairClient" : connect ? "gateway.connectClient" : "gateway.disconnectClient",
+          repairing
+            ? "gateway.repairClient"
+            : connect
+              ? "gateway.connectClient"
+              : "gateway.disconnectClient",
           { name },
         ),
         work: async () => {
-          const report = connect ? await api.dshClientConnect() : await api.dshClientDisconnect();
+          const report = connect
+            ? await api.dshClientConnect()
+            : await api.dshClientDisconnect();
           await onRefreshClients();
           return report;
         },
         success: (report) => ({
           text: t(
-            repairing ? "gateway.repairClientDone" : connect ? "gateway.connectClientDone" : "gateway.disconnectClientDone",
+            repairing
+              ? "gateway.repairClientDone"
+              : connect
+                ? "gateway.connectClientDone"
+                : "gateway.disconnectClientDone",
             { name },
           ),
           restart:
@@ -466,12 +577,17 @@ function GatewayPageImpl({
     try {
       await runPersistentAction({
         ...persistentActionBase(),
-        loading: running ? t("runtime.stoppingRuntime") : t("runtime.startingRuntime"),
+        loading: running
+          ? t("runtime.stoppingRuntime")
+          : t("runtime.startingRuntime"),
         work: () => (running ? onStopProxy() : onStartProxy()),
         success: (status) => ({
-          text: status === null
-            ? t("runtime.gatewayRetirementCancelled")
-            : running ? t("runtime.runtimeStopped") : t("runtime.runtimeStarted"),
+          text:
+            status === null
+              ? t("runtime.gatewayRetirementCancelled")
+              : running
+                ? t("runtime.runtimeStopped")
+                : t("runtime.runtimeStarted"),
           tone: status === null ? "info" : "success",
           restart: { kind: "none" },
         }),
@@ -483,18 +599,25 @@ function GatewayPageImpl({
   }
 
   return (
-    <main className="relative grid h-full min-h-0 w-full max-w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(220px,30%)] gap-3 overflow-hidden">
-      <section className="grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2.5 overflow-hidden">
-        <section className="grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2.5 shadow-card">
+    <main
+      data-workspace-view={desktopView}
+      className="ws-gateway relative grid h-full min-h-0 w-full max-w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(220px,30%)] gap-3 overflow-hidden"
+    >
+      <section className="ws-gateway-primary grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2.5 overflow-hidden">
+        <section className="ws-gateway-service grid min-w-0 gap-2 overflow-hidden rounded-panel bg-surface p-2.5 shadow-card">
           <div className="flex min-w-0 items-center justify-between gap-3">
             <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-ink">
               <Server size={15} className="shrink-0 text-action" />
               <span className="truncate">{t("gateway.gateway")}</span>
             </h2>
             <label className="flex h-7 items-center gap-2 rounded-control bg-panel px-2 text-[11px] font-semibold text-slate-600 shadow-control">
-              <span>{running ? t("runtime.running") : t("runtime.stopped")}</span>
+              <span>
+                {running ? t("runtime.running") : t("runtime.stopped")}
+              </span>
               <SwitchControl
-                ariaLabel={running ? t("runtime.stopRuntime") : t("runtime.startRuntime")}
+                ariaLabel={
+                  running ? t("runtime.stopRuntime") : t("runtime.startRuntime")
+                }
                 checked={running}
                 disabled={runtimeActionBusy || busy === "load"}
                 onChange={(enabled) => {
@@ -524,18 +647,34 @@ function GatewayPageImpl({
                       <button
                         type="button"
                         className="focus-ring absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
-                        aria-label={showDraftKey ? t("common.hideApiKey") : t("common.showApiKey")}
+                        aria-label={
+                          showDraftKey
+                            ? t("common.hideApiKey")
+                            : t("common.showApiKey")
+                        }
                         onClick={() => setShowDraftKey((show) => !show)}
                       >
-                        {showDraftKey ? <EyeOff size={15} /> : <Eye size={15} />}
+                        {showDraftKey ? (
+                          <EyeOff size={15} />
+                        ) : (
+                          <Eye size={15} />
+                        )}
                       </button>
                     </div>
                     <button
                       type="button"
                       className="focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
                       disabled={!draftKey}
-                      aria-label={apiKeyCopied ? t("gateway.apiKeyCopied") : t("gateway.copyApiKey")}
-                      title={apiKeyCopied ? t("common.copied") : t("gateway.copyApiKey")}
+                      aria-label={
+                        apiKeyCopied
+                          ? t("gateway.apiKeyCopied")
+                          : t("gateway.copyApiKey")
+                      }
+                      title={
+                        apiKeyCopied
+                          ? t("common.copied")
+                          : t("gateway.copyApiKey")
+                      }
                       onClick={() => void copyText("gateway-api-key", draftKey)}
                     >
                       {apiKeyCopied ? <Check size={14} /> : <Copy size={14} />}
@@ -560,7 +699,9 @@ function GatewayPageImpl({
                       min={1024}
                       max={65535}
                       value={draftPort}
-                      onChange={(event) => setDraftPort(Number(event.target.value))}
+                      onChange={(event) =>
+                        setDraftPort(Number(event.target.value))
+                      }
                     />
                   </label>
                   <label className="grid min-w-0 gap-1 text-xs font-semibold text-slate-600">
@@ -571,7 +712,9 @@ function GatewayPageImpl({
                       min={5}
                       max={600}
                       value={draftTimeout}
-                      onChange={(event) => setDraftTimeout(Number(event.target.value))}
+                      onChange={(event) =>
+                        setDraftTimeout(Number(event.target.value))
+                      }
                     />
                   </label>
                   <button
@@ -589,7 +732,9 @@ function GatewayPageImpl({
 
             <div className="grid min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-1.5 rounded-inner bg-panel p-2 pb-2.5">
               <div className="flex items-center justify-between gap-3 whitespace-nowrap">
-                <h3 className="shrink-0 text-xs font-semibold text-ink">{t("gateway.copyConnection")}</h3>
+                <h3 className="shrink-0 text-xs font-semibold text-ink">
+                  {t("gateway.copyConnection")}
+                </h3>
               </div>
               {endpoints.length > 0 ? (
                 <div className="grid min-h-[118px] grid-rows-3 gap-1.5">
@@ -639,32 +784,49 @@ function GatewayPageImpl({
           ) : null}
         </section>
 
-        <RecoveryActivityPanel
-          diagnosticsEnabled={diagnosticsEnabled}
-          enabled={Boolean(settings?.gateway_auto_retry_enabled)}
-          disabled={Boolean(busy) || autoRetryBusy || !settings}
-          events={recentEvents}
-          onOpenDiagnostics={() => setDiagnosticsOpen(true)}
-          onToggle={(enabled) => void toggleGatewayAutoRetry(enabled)}
-        />
+        <div className="ws-gateway-recovery">
+          <RecoveryActivityPanel
+            diagnosticsEnabled={diagnosticsEnabled}
+            enabled={Boolean(settings?.gateway_auto_retry_enabled)}
+            disabled={Boolean(busy) || autoRetryBusy || !settings}
+            events={recentEvents}
+            onOpenDiagnostics={() => setDiagnosticsOpen(true)}
+            onToggle={(enabled) => void toggleGatewayAutoRetry(enabled)}
+          />
+        </div>
 
-        <StackedUsageChartShell
-          events={usageEvents}
-          onWindowChange={onUsageWindowChange}
-          pendingMessage={pending?.usage ?? t("gateway.pendingUsage")}
-          providers={providers}
-          summary={usageSummary}
-          telemetryStatus={usageStatus}
-        />
+        <div className="ws-gateway-chart">
+          <StackedUsageChartShell
+            events={usageEvents}
+            onWindowChange={onUsageWindowChange}
+            pendingMessage={pending?.usage ?? t("gateway.pendingUsage")}
+            providers={providers}
+            summary={usageSummary}
+            telemetryStatus={usageStatus}
+          />
+        </div>
       </section>
 
-      <aside className="grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel bg-surface shadow-card">
+      <aside className="ws-gateway-clients grid h-full min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel bg-surface shadow-card">
         <div className="p-3 shadow-hairline">
           <div className="flex items-center justify-between gap-2">
             <h2 className="flex min-w-0 items-center gap-2 text-sm font-semibold text-ink">
               <Network size={15} className="shrink-0 text-action" />
               <span className="truncate">{t("gateway.clientRouting")}</span>
             </h2>
+            {desktopView && (
+              <div className="ws-client-filters">
+                {["all", "connected", "disconnected"].map((filter) => (
+                  <button
+                    className={clientFilter === filter ? "selected" : ""}
+                    key={filter}
+                    onClick={() => setClientFilter(filter)}
+                  >
+                    {t("workspace.clientFilters." + filter)}
+                  </button>
+                ))}
+              </div>
+            )}
             <button
               type="button"
               className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96] disabled:text-slate-300"
@@ -673,26 +835,90 @@ function GatewayPageImpl({
               title={t("gateway.refreshClientsTitle")}
               onClick={() => void refreshGatewayClients()}
             >
-              <RefreshCcw size={14} className={clientRefreshBusy ? "animate-spin" : undefined} />
+              <RefreshCcw
+                size={14}
+                className={clientRefreshBusy ? "animate-spin" : undefined}
+              />
             </button>
           </div>
         </div>
         <div className="min-h-0 overflow-x-hidden overflow-y-auto bg-panel">
           <div className="flex min-h-full flex-col gap-2.5 py-3 pl-3 pr-1">
-            {clients.map((client) => (
-              <GatewayClientCard
-                key={client.id}
-                className="grow shrink-0"
-                client={client}
-                info={clientInfoById.get(client.id)}
-                busy={Boolean(clientBusy?.startsWith(client.id))}
-                enabledModelCount={enabledModelCount}
-                onToggle={(connect) => handleConnectionToggle(client.id, connect)}
-              />
-            ))}
+            {clients
+              .filter(
+                (client) =>
+                  !desktopView ||
+                  clientFilter === "all" ||
+                  (connectionStateFromInfo(clientInfoById.get(client.id)) ===
+                    "connected") ===
+                    (clientFilter === "connected"),
+              )
+              .map((client) => (
+                <GatewayClientCard
+                  key={client.id}
+                  className="grow shrink-0"
+                  client={client}
+                  info={clientInfoById.get(client.id)}
+                  busy={Boolean(clientBusy?.startsWith(client.id))}
+                  enabledModelCount={enabledModelCount}
+                  onRefresh={refreshGatewayClients}
+                  onToggle={(connect) =>
+                    handleConnectionToggle(client.id, connect)
+                  }
+                />
+              ))}
           </div>
         </div>
       </aside>
+      {desktopView === "clients" && (
+        <footer className="ws-page-footer">
+          <span>{t("workspace.clientConfigHint")}</span>
+          <button onClick={() => setConnectionInfoOpen(true)}>
+            {t("gateway.copyConnection")}
+            <Copy size={12} />
+          </button>
+        </footer>
+      )}
+      {connectionInfoOpen && (
+        <div className="ws-connection-overlay">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("gateway.copyConnection")}
+          >
+            <header>
+              <b>{t("gateway.copyConnection")}</b>
+              <button
+                className="ws-icon"
+                aria-label={t("common.close")}
+                onClick={() => setConnectionInfoOpen(false)}
+              >
+                <X size={16} />
+              </button>
+            </header>
+            <p>{t("workspace.manualConnectionHint")}</p>
+            {endpoints.map((endpoint) => (
+              <EndpointRow
+                key={endpoint.label}
+                label={endpoint.label}
+                value={endpoint.value}
+                meta={endpoint.meta}
+                onCopy={() => void copyText(endpoint.label, endpoint.value)}
+              />
+            ))}
+            <button
+              className="ws-button"
+              disabled={!settings?.gateway_client_key}
+              onClick={() =>
+                void copyText("saved-key", settings?.gateway_client_key ?? "")
+              }
+            >
+              <Copy size={12} />
+              {t("gateway.copyApiKey")}
+            </button>
+          </section>
+        </div>
+      )}
       <DebugDiagnosticsOverlay
         enabled={diagnosticsEnabled}
         gatewayRunning={running}
@@ -743,7 +969,8 @@ function RecoveryActivityPanel({
   const [overviewPage, setOverviewPage] = useState(0);
   const summary = useMemo(() => summarizeRecoveryEvents(events), [events]);
   const active = enabled && summary.activeCount > 0;
-  const latestEvent = summary.activeEvents[0] ?? summary.latestEvents[0] ?? null;
+  const latestEvent =
+    summary.activeEvents[0] ?? summary.latestEvents[0] ?? null;
 
   async function openOverview() {
     setOverviewOpen(true);
@@ -751,7 +978,9 @@ function RecoveryActivityPanel({
     setOverviewError(null);
     setOverviewPage(0);
     try {
-      const sinceTs = new Date(Date.now() - RECOVERY_OVERVIEW_HOURS * 60 * 60 * 1000).toISOString();
+      const sinceTs = new Date(
+        Date.now() - RECOVERY_OVERVIEW_HOURS * 60 * 60 * 1000,
+      ).toISOString();
       const recent = await api.gatewayRecentEvents({
         limit: RECOVERY_OVERVIEW_LIMIT,
         sinceTs,
@@ -774,7 +1003,9 @@ function RecoveryActivityPanel({
             <span className="truncate">{t("gateway.recoveryActivity")}</span>
           </h3>
           <p className="mt-0.5 truncate text-[11px] text-slate-500">
-            {enabled ? t("gateway.recoveryActivitySubtitle") : t("gateway.recoveryDisabled")}
+            {enabled
+              ? t("gateway.recoveryActivitySubtitle")
+              : t("gateway.recoveryDisabled")}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -788,7 +1019,11 @@ function RecoveryActivityPanel({
                   : "bg-slate-100 text-slate-500",
             )}
           >
-            {!enabled ? t("gateway.autoRetryOff") : active ? t("gateway.recoveryActive") : t("gateway.recoveryIdle")}
+            {!enabled
+              ? t("gateway.autoRetryOff")
+              : active
+                ? t("gateway.recoveryActive")
+                : t("gateway.recoveryIdle")}
           </span>
           <label className="flex h-7 items-center gap-2 rounded-control bg-panel px-2 text-[11px] font-semibold text-slate-600 shadow-control">
             <span>{t("settings.autoRetry")}</span>
@@ -808,9 +1043,18 @@ function RecoveryActivityPanel({
           !enabled && "opacity-45 grayscale",
         )}
       >
-        <RecoveryMetric label={t("gateway.recoveryAttempts")} value={summary.retryCount} />
-        <RecoveryMetric label={t("gateway.recoveredRequests")} value={summary.recoveredCount} />
-        <RecoveryMetric label={t("gateway.failedHandoffs")} value={summary.failedCount} />
+        <RecoveryMetric
+          label={t("gateway.recoveryAttempts")}
+          value={summary.retryCount}
+        />
+        <RecoveryMetric
+          label={t("gateway.recoveredRequests")}
+          value={summary.recoveredCount}
+        />
+        <RecoveryMetric
+          label={t("gateway.failedHandoffs")}
+          value={summary.failedCount}
+        />
         <RecoveryEventRow
           active={summary.activeEvents[0] === latestEvent}
           event={latestEvent}
@@ -836,8 +1080,12 @@ function RecoveryActivityPanel({
 function RecoveryMetric({ label, value }: { label: string; value: number }) {
   return (
     <div className="grid min-h-[40px] min-w-0 content-center rounded-inner bg-panel px-2.5 py-1.5 shadow-control">
-      <span className="truncate text-[11px] font-semibold text-slate-500">{label}</span>
-      <span className="tabular-nums text-sm font-semibold text-ink">{value}</span>
+      <span className="truncate text-[11px] font-semibold text-slate-500">
+        {label}
+      </span>
+      <span className="tabular-nums text-sm font-semibold text-ink">
+        {value}
+      </span>
     </div>
   );
 }
@@ -854,26 +1102,41 @@ function RecoveryEventRow({
   onOverview: () => void;
 }) {
   const { t } = useTranslation();
-  const provider = event ? recoveryProviderLabel(event, t("usage.unknownProvider")) : null;
+  const provider = event
+    ? recoveryProviderLabel(event, t("usage.unknownProvider"))
+    : null;
   const client = event ? formatRecoveryClient(event.client_id) : null;
   const attemptText = event ? formatAttemptCell(event) : "-";
   const delay = event ? formatDelay(event.delay_ms) : null;
-  const retryText = [attemptText === "-" ? null : attemptText, delay].filter(Boolean).join(" · ");
-  const routeText = event ? (client ? `${client} → ${provider}` : provider) : t("gateway.recoveryEmpty");
+  const retryText = [attemptText === "-" ? null : attemptText, delay]
+    .filter(Boolean)
+    .join(" · ");
+  const routeText = event
+    ? client
+      ? `${client} → ${provider}`
+      : provider
+    : t("gateway.recoveryEmpty");
 
   return (
     <div
       className="grid min-h-[40px] min-w-0 grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-2 rounded-inner bg-panel px-2.5 py-1.5 text-[11px] shadow-control"
-      title={event ? recoveryEventTitle(event) : t("gateway.recoveryOverviewTitle")}
+      title={
+        event ? recoveryEventTitle(event) : t("gateway.recoveryOverviewTitle")
+      }
     >
-      <CheckCircle2 size={13} className={cx("shrink-0", active ? "text-ok" : "text-slate-400")} />
+      <CheckCircle2
+        size={13}
+        className={cx("shrink-0", active ? "text-ok" : "text-slate-400")}
+      />
       <div className="flex min-w-0 items-center gap-1.5">
         {event ? (
           <span className="shrink-0 rounded-control bg-slate-100 px-1.5 py-0.5 font-semibold tabular-nums text-slate-600">
             {retryText || t("gateway.recoveryAttemptUnknown")}
           </span>
         ) : null}
-        <span className="min-w-0 truncate font-semibold text-ink">{routeText}</span>
+        <span className="min-w-0 truncate font-semibold text-ink">
+          {routeText}
+        </span>
       </div>
       {onOpenDiagnostics ? (
         <button
@@ -915,10 +1178,16 @@ function RecoveryOverviewModal({
   page: number;
 }) {
   const { t } = useTranslation();
-  const pageCount = Math.max(1, Math.ceil(events.length / RECOVERY_OVERVIEW_PAGE_SIZE));
+  const pageCount = Math.max(
+    1,
+    Math.ceil(events.length / RECOVERY_OVERVIEW_PAGE_SIZE),
+  );
   const safePage = Math.min(Math.max(page, 0), pageCount - 1);
   const pageStart = safePage * RECOVERY_OVERVIEW_PAGE_SIZE;
-  const pageEvents = events.slice(pageStart, pageStart + RECOVERY_OVERVIEW_PAGE_SIZE);
+  const pageEvents = events.slice(
+    pageStart,
+    pageStart + RECOVERY_OVERVIEW_PAGE_SIZE,
+  );
   const pageFrom = events.length === 0 ? 0 : pageStart + 1;
   const pageTo = pageStart + pageEvents.length;
   return (
@@ -931,14 +1200,24 @@ function RecoveryOverviewModal({
       >
         <div className="flex min-w-0 items-start justify-between gap-3 px-4 py-3 shadow-hairline">
           <div className="min-w-0">
-            <h2 id="gateway-recovery-overview-title" className="flex min-w-0 items-center gap-2 text-base font-semibold text-ink">
+            <h2
+              id="gateway-recovery-overview-title"
+              className="flex min-w-0 items-center gap-2 text-base font-semibold text-ink"
+            >
               <ListChecks size={16} className="shrink-0 text-action" />
-              <span className="truncate">{t("gateway.recoveryOverviewTitle")}</span>
+              <span className="truncate">
+                {t("gateway.recoveryOverviewTitle")}
+              </span>
             </h2>
             <p className="mt-0.5 truncate text-xs text-slate-500">
-              {t("gateway.recoveryOverviewSubtitle", { count: events.length, hours: RECOVERY_OVERVIEW_HOURS })}
+              {t("gateway.recoveryOverviewSubtitle", {
+                count: events.length,
+                hours: RECOVERY_OVERVIEW_HOURS,
+              })}
             </p>
-            {error ? <p className="mt-1 truncate text-xs text-danger">{error}</p> : null}
+            {error ? (
+              <p className="mt-1 truncate text-xs text-danger">{error}</p>
+            ) : null}
           </div>
           <button
             type="button"
@@ -951,59 +1230,97 @@ function RecoveryOverviewModal({
         </div>
 
         {loading ? (
-          <div className="p-4 text-sm text-slate-500">{t("gateway.recoveryOverviewLoading")}</div>
+          <div className="p-4 text-sm text-slate-500">
+            {t("gateway.recoveryOverviewLoading")}
+          </div>
         ) : events.length === 0 ? (
-          <div className="p-4 text-sm text-slate-500">{t("gateway.recoveryEmpty")}</div>
+          <div className="p-4 text-sm text-slate-500">
+            {t("gateway.recoveryEmpty")}
+          </div>
         ) : (
           <div className="min-h-0 overflow-auto">
             <div className="p-3">
               <div className="min-w-[980px] overflow-hidden rounded-panel border border-line">
-              <div className="sticky top-0 z-10 grid grid-cols-[86px_92px_112px_142px_70px_62px_116px_60px_minmax(0,1fr)] bg-panel px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-500">
-                <span>{t("gateway.recoveryColumnTime")}</span>
-                <span>{t("gateway.recoveryColumnClient")}</span>
-                <span>{t("gateway.recoveryColumnProvider")}</span>
-                <span>{t("gateway.recoveryColumnModel")}</span>
-                <span>{t("gateway.recoveryColumnAttempt")}</span>
-                <span>{t("gateway.recoveryColumnDelay")}</span>
-                <span>{t("gateway.recoveryColumnClass")}</span>
-                <span>{t("gateway.recoveryColumnStatus")}</span>
-                <span>{t("gateway.recoveryColumnRequest")}</span>
-              </div>
-              {pageEvents.map((event, index) => (
-                <div
-                  key={`${event.ts ?? "retry"}-${event.request_id ?? index}-${index}`}
-                  className="grid grid-cols-[86px_92px_112px_142px_70px_62px_116px_60px_minmax(0,1fr)] items-start gap-0 border-t border-line px-3 py-2 text-xs"
-                >
-                  <span className="truncate tabular-nums text-slate-500">{formatEventTime(event.ts)}</span>
-                  <span className="truncate font-medium text-ink" title={event.client_id ?? t("common.unknown")}>
-                    {formatRecoveryClient(event.client_id) ?? t("common.unknown")}
-                  </span>
-                  <span className="truncate font-medium text-ink" title={recoveryProviderRaw(event)}>
-                    {recoveryProviderLabel(event)}
-                  </span>
-                  <span className="truncate font-mono text-[11px] text-slate-600" title={event.model ?? ""}>
-                    {displayRecoveryModel(event.model)}
-                  </span>
-                  <span className="tabular-nums text-slate-700">{formatAttemptCell(event)}</span>
-                  <span className="tabular-nums text-slate-700">{formatDelay(event.delay_ms) ?? "-"}</span>
-                  <span className="truncate text-slate-700" title={event.failure_class ?? ""}>
-                    {event.failure_class ?? "-"}
-                  </span>
-                  <span className="tabular-nums text-slate-600">{event.status ?? "-"}</span>
-                  <div className="grid min-w-0 gap-0.5">
-                    <span className="break-all font-mono text-[10px] leading-4 text-slate-500" title={event.path ?? ""}>
-                      {event.path ?? "-"}
-                    </span>
-                    <span className="break-all font-mono text-[10px] leading-4 text-slate-400" title={event.request_id ?? ""}>
-                      {event.request_id ?? "-"}
-                    </span>
-                    <span className="break-words text-[10px] leading-4 text-danger" title={[event.error, event.detail].filter(Boolean).join(": ")}>
-                      {[event.error, event.detail].filter(Boolean).join(": ") || "-"}
-                    </span>
-                  </div>
+                <div className="sticky top-0 z-10 grid grid-cols-[86px_92px_112px_142px_70px_62px_116px_60px_minmax(0,1fr)] bg-panel px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-500">
+                  <span>{t("gateway.recoveryColumnTime")}</span>
+                  <span>{t("gateway.recoveryColumnClient")}</span>
+                  <span>{t("gateway.recoveryColumnProvider")}</span>
+                  <span>{t("gateway.recoveryColumnModel")}</span>
+                  <span>{t("gateway.recoveryColumnAttempt")}</span>
+                  <span>{t("gateway.recoveryColumnDelay")}</span>
+                  <span>{t("gateway.recoveryColumnClass")}</span>
+                  <span>{t("gateway.recoveryColumnStatus")}</span>
+                  <span>{t("gateway.recoveryColumnRequest")}</span>
                 </div>
-              ))}
-            </div>
+                {pageEvents.map((event, index) => (
+                  <div
+                    key={`${event.ts ?? "retry"}-${event.request_id ?? index}-${index}`}
+                    className="grid grid-cols-[86px_92px_112px_142px_70px_62px_116px_60px_minmax(0,1fr)] items-start gap-0 border-t border-line px-3 py-2 text-xs"
+                  >
+                    <span className="truncate tabular-nums text-slate-500">
+                      {formatEventTime(event.ts)}
+                    </span>
+                    <span
+                      className="truncate font-medium text-ink"
+                      title={event.client_id ?? t("common.unknown")}
+                    >
+                      {formatRecoveryClient(event.client_id) ??
+                        t("common.unknown")}
+                    </span>
+                    <span
+                      className="truncate font-medium text-ink"
+                      title={recoveryProviderRaw(event)}
+                    >
+                      {recoveryProviderLabel(event)}
+                    </span>
+                    <span
+                      className="truncate font-mono text-[11px] text-slate-600"
+                      title={event.model ?? ""}
+                    >
+                      {displayRecoveryModel(event.model)}
+                    </span>
+                    <span className="tabular-nums text-slate-700">
+                      {formatAttemptCell(event)}
+                    </span>
+                    <span className="tabular-nums text-slate-700">
+                      {formatDelay(event.delay_ms) ?? "-"}
+                    </span>
+                    <span
+                      className="truncate text-slate-700"
+                      title={event.failure_class ?? ""}
+                    >
+                      {event.failure_class ?? "-"}
+                    </span>
+                    <span className="tabular-nums text-slate-600">
+                      {event.status ?? "-"}
+                    </span>
+                    <div className="grid min-w-0 gap-0.5">
+                      <span
+                        className="break-all font-mono text-[10px] leading-4 text-slate-500"
+                        title={event.path ?? ""}
+                      >
+                        {event.path ?? "-"}
+                      </span>
+                      <span
+                        className="break-all font-mono text-[10px] leading-4 text-slate-400"
+                        title={event.request_id ?? ""}
+                      >
+                        {event.request_id ?? "-"}
+                      </span>
+                      <span
+                        className="break-words text-[10px] leading-4 text-danger"
+                        title={[event.error, event.detail]
+                          .filter(Boolean)
+                          .join(": ")}
+                      >
+                        {[event.error, event.detail]
+                          .filter(Boolean)
+                          .join(": ") || "-"}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         )}
@@ -1058,20 +1375,22 @@ function summarizeRecoveryEvents(events: GatewayEvent[]): RecoverySummary {
       const key = requestId ?? `retry:${order}`;
       const state = requestStates.get(key) ?? {};
       const item = { event, order };
-      if (!state.latestRetry || compareRecoveryEventOrder(item, state.latestRetry) > 0) {
+      if (
+        !state.latestRetry ||
+        compareRecoveryEventOrder(item, state.latestRetry) > 0
+      ) {
         state.latestRetry = item;
       }
       requestStates.set(key, state);
       return;
     }
-    if (
-      requestId &&
-      event.event &&
-      RECOVERY_TERMINAL_EVENTS.has(event.event)
-    ) {
+    if (requestId && event.event && RECOVERY_TERMINAL_EVENTS.has(event.event)) {
       const state = requestStates.get(requestId) ?? {};
       const item = { event, order };
-      if (!state.latestTerminal || compareRecoveryEventOrder(item, state.latestTerminal) > 0) {
+      if (
+        !state.latestTerminal ||
+        compareRecoveryEventOrder(item, state.latestTerminal) > 0
+      ) {
         state.latestTerminal = item;
       }
       requestStates.set(requestId, state);
@@ -1087,7 +1406,8 @@ function summarizeRecoveryEvents(events: GatewayEvent[]): RecoverySummary {
       return;
     }
     const terminalAfterRetry =
-      state.latestTerminal && compareRecoveryEventOrder(state.latestTerminal, state.latestRetry) >= 0;
+      state.latestTerminal &&
+      compareRecoveryEventOrder(state.latestTerminal, state.latestRetry) >= 0;
     if (terminalAfterRetry && state.latestTerminal) {
       if (isFailedRecoveryTerminal(state.latestTerminal.event)) {
         failedCount += 1;
@@ -1141,7 +1461,9 @@ function isFailedRecoveryTerminal(event: GatewayEvent) {
   if (event.event === "request_error") {
     return true;
   }
-  return event.status !== null && event.status !== undefined && event.status >= 400;
+  return (
+    event.status !== null && event.status !== undefined && event.status >= 400
+  );
 }
 
 function isRecoveryRetryStillActive(event: GatewayEvent) {
@@ -1149,8 +1471,14 @@ function isRecoveryRetryStillActive(event: GatewayEvent) {
   if (!Number.isFinite(timestamp)) {
     return true;
   }
-  const delay = event.delay_ms !== null && event.delay_ms !== undefined ? Math.max(0, event.delay_ms) : 0;
-  return Date.now() - timestamp <= Math.max(ACTIVE_RECOVERY_GRACE_MS, delay + ACTIVE_RECOVERY_GRACE_MS);
+  const delay =
+    event.delay_ms !== null && event.delay_ms !== undefined
+      ? Math.max(0, event.delay_ms)
+      : 0;
+  return (
+    Date.now() - timestamp <=
+    Math.max(ACTIVE_RECOVERY_GRACE_MS, delay + ACTIVE_RECOVERY_GRACE_MS)
+  );
 }
 
 function recoveryEventTime(event: GatewayEvent) {
@@ -1202,7 +1530,7 @@ function providerFromGatewayPath(path?: string | null) {
 
 function providerFromModel(model?: string | null) {
   const slashIndex = model?.indexOf("/") ?? -1;
-  return slashIndex > 0 ? model?.slice(0, slashIndex) ?? "" : "";
+  return slashIndex > 0 ? (model?.slice(0, slashIndex) ?? "") : "";
 }
 
 function recoveryEventTitle(event: GatewayEvent) {
@@ -1259,7 +1587,9 @@ function displayRecoveryModel(model?: string | null) {
     return "-";
   }
   const slashIndex = model.indexOf("/");
-  return slashIndex >= 0 && slashIndex < model.length - 1 ? model.slice(slashIndex + 1) : model;
+  return slashIndex >= 0 && slashIndex < model.length - 1
+    ? model.slice(slashIndex + 1)
+    : model;
 }
 
 function formatDelay(delayMs?: number | null) {

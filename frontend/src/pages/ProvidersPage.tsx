@@ -1,7 +1,12 @@
+import { useDialogFocus } from "../hooks/useDialogFocus";
+import { ProviderWorkspaceView } from "../components/workspace/ProviderWorkspaceView";
+import type { WorkspacePage } from "../components/workspace/WorkspaceShell";
+import type { ReactNode } from "react";
+import { X } from "lucide-react";
 import { readCodexRestartNotice } from "../lib/providerWorkspace/restart";
 import {
-  Copy,
-  ExternalLink,
+  LogOut,
+  LogIn,
   Link2,
   Link2Off,
   Plus,
@@ -11,7 +16,10 @@ import {
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useConfirmDialog } from "../components/ConfirmDialog";
-import { BACKEND_DISCONNECTED_TOAST_KEY, useToasts } from "../components/PageToast";
+import {
+  BACKEND_DISCONNECTED_TOAST_KEY,
+  useToasts,
+} from "../components/PageToast";
 import { SortableList } from "../components/SortableList";
 import {
   OPENAI_USAGE_REFRESH_INTERVAL_MS,
@@ -21,7 +29,10 @@ import {
   readStoredOfficialOpenAIUsageSnapshot,
   storeOfficialOpenAIUsageSnapshot,
 } from "../components/providers/OfficialOpenAIUsagePanel";
-import { AddProviderPanel, ProviderDetail } from "../components/providers/ProviderEditor";
+import {
+  AddProviderPanel,
+  ProviderDetail,
+} from "../components/providers/ProviderEditor";
 import { ProviderCatalogPicker } from "../components/providers/ProviderCatalogPicker";
 import { providerLogoSrc } from "../lib/providerLogos";
 import { HeaderRow } from "../components/providers/ProviderFormControls";
@@ -44,7 +55,11 @@ import { cx, displayModel, renumberModels } from "../lib/format";
 import { emptyProvider, type AddProviderForm } from "../lib/providerForm";
 import { upstreamFormatLabel } from "../lib/providerEndpoint";
 import { normalizeOfficialModelId, normalizeSettings } from "../lib/settings";
-import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
+import {
+  api,
+  isBackendDisconnectedMessage,
+  messageFromError,
+} from "../lib/tauri";
 import type {
   AppFlavorInfo,
   AppStatus,
@@ -57,14 +72,17 @@ import type {
   Settings,
 } from "../lib/types";
 
-type ProviderNavItem =
-  { id: string; sort_order: number; provider: Provider };
+type ProviderNavItem = { id: string; sort_order: number; provider: Provider };
 type CodexAuthState = "authorized" | "missing" | "unknown";
 type ConnectionMode = "official" | "custom";
 export type CodexSwitchRequest = { id: number; mode: ConnectionMode };
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
 type ProvidersPageProps = {
+  openOfficialRequest?: number;
+  desktopPage?: WorkspacePage;
+  onNavigate?: (page: WorkspacePage) => void;
+  children?: ReactNode;
   appFlavor?: AppFlavorInfo | null;
   appStatus: AppStatus | null;
   catalogModels: Model[];
@@ -83,6 +101,10 @@ type ProvidersPageProps = {
 };
 
 function ProvidersPageImpl({
+  desktopPage,
+  onNavigate,
+  children,
+  openOfficialRequest,
   appFlavor,
   appStatus: appStatusSnapshot,
   catalogModels,
@@ -99,17 +121,26 @@ function ProvidersPageImpl({
   providers: providersSnapshot,
   settings: settingsSnapshot,
 }: ProvidersPageProps) {
+  const [editorOpen, setEditorOpen] = useState(false);
+  const editorRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(Boolean(desktopPage && editorOpen), editorRef, () =>
+    setEditorOpen(false),
+  );
   const { t } = useTranslation();
   const { confirm: confirmAction, dialog: confirmDialog } = useConfirmDialog();
   const tr = t as Translate;
   const toast = useToasts();
   const { showToast, updateToast } = toast;
-  const initialOfficialUsageSnapshot = useMemo(() => readStoredOfficialOpenAIUsageSnapshot(), []);
+  const initialOfficialUsageSnapshot = useMemo(
+    () => readStoredOfficialOpenAIUsageSnapshot(),
+    [],
+  );
   const normalizedSettingsSnapshot = useMemo(
-    () => settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null,
+    () => (settingsSnapshot ? withDefaultFastVariants(settingsSnapshot) : null),
     [settingsSnapshot],
   );
-  const [codexAuthPreviewState, setCodexAuthPreviewState] = useState<CodexAuthState | null>(() => readCodexAuthPreviewState());
+  const [codexAuthPreviewState, setCodexAuthPreviewState] =
+    useState<CodexAuthState | null>(() => readCodexAuthPreviewState());
   const workspace = useProviderWorkspace({
     getSource: () => ({
       catalogModels,
@@ -161,21 +192,29 @@ function ProvidersPageImpl({
     trackProviderDraft,
   } = workspace;
   const handledCodexSwitchRequestRef = useRef<number | null>(null);
-  const [codexStatus, setCodexStatus] = useState<AppStatus | null>(appStatusSnapshot);
-  const [connectionPendingMode, setConnectionPendingMode] = useState<ConnectionMode | null>(null);
-  const [codexTargetOwnerOverride, setCodexTargetOwnerOverride] =
-    useState<AppFlavorInfo["codex_target_owner"] | undefined>(undefined);
-  const [loadedGatewayStatus, setLoadedGatewayStatus] = useState<GatewayStatus | null>(gatewayStatusSnapshot ?? null);
-  const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>(() => codexAuthPreviewState ?? "unknown");
-  const [officialCollaborationOverrides, setOfficialCollaborationOverrides] = useState<
-    Record<string, "v1" | "v2">
-  >({});
-  const [officialCollaborationBaselines, setOfficialCollaborationBaselines] = useState<
-    Readonly<Record<string, "v1" | "v2">>
-  >({});
-  const [officialUsageSnapshot, setOfficialUsageSnapshot] = useState<OpenAIUsageSnapshot | null>(initialOfficialUsageSnapshot);
+  const [codexStatus, setCodexStatus] = useState<AppStatus | null>(
+    appStatusSnapshot,
+  );
+  const [connectionPendingMode, setConnectionPendingMode] =
+    useState<ConnectionMode | null>(null);
+  const [codexTargetOwnerOverride, setCodexTargetOwnerOverride] = useState<
+    AppFlavorInfo["codex_target_owner"] | undefined
+  >(undefined);
+  const [loadedGatewayStatus, setLoadedGatewayStatus] =
+    useState<GatewayStatus | null>(gatewayStatusSnapshot ?? null);
+  const [codexAuthState, setCodexAuthState] = useState<CodexAuthState>(
+    () => codexAuthPreviewState ?? "unknown",
+  );
+  const [officialCollaborationOverrides, setOfficialCollaborationOverrides] =
+    useState<Record<string, "v1" | "v2">>({});
+  const [officialCollaborationBaselines, setOfficialCollaborationBaselines] =
+    useState<Readonly<Record<string, "v1" | "v2">>>({});
+  const [officialUsageSnapshot, setOfficialUsageSnapshot] =
+    useState<OpenAIUsageSnapshot | null>(initialOfficialUsageSnapshot);
   const [officialUsageBusy, setOfficialUsageBusy] = useState(false);
-  const [officialUsageError, setOfficialUsageError] = useState<string | null>(null);
+  const [officialUsageError, setOfficialUsageError] = useState<string | null>(
+    null,
+  );
   const [officialUsageHidden, setOfficialUsageHidden] = useState(false);
   const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot | null>(null);
   const [catalogPickerOpen, setCatalogPickerOpen] = useState(false);
@@ -194,7 +233,8 @@ function ProvidersPageImpl({
     updateForm(emptyProvider);
     void workspace.navigation.resolve("discard");
   };
-  const savePendingProviderNavigation = () => workspace.navigation.resolve("save");
+  const savePendingProviderNavigation = () =>
+    workspace.navigation.resolve("save");
   async function saveProviders(
     next: Provider[],
     regenerateCatalog = true,
@@ -283,7 +323,10 @@ function ProvidersPageImpl({
     }
     void primeOfficialOpenAIUsage();
     const usageRefreshTimer = window.setInterval(
-      () => void loadOfficialOpenAIUsage(false, false, undefined, { showBusy: false }),
+      () =>
+        void loadOfficialOpenAIUsage(false, false, undefined, {
+          showBusy: false,
+        }),
       OPENAI_USAGE_REFRESH_INTERVAL_MS,
     );
     return () => window.clearInterval(usageRefreshTimer);
@@ -292,7 +335,10 @@ function ProvidersPageImpl({
   useEffect(() => {
     if (gatewayStatusSnapshot !== undefined) {
       setLoadedGatewayStatus(gatewayStatusSnapshot ?? null);
-      setCodexAuthState(codexAuthPreviewState ?? codexAuthStateFromGatewayStatus(gatewayStatusSnapshot ?? null));
+      setCodexAuthState(
+        codexAuthPreviewState ??
+          codexAuthStateFromGatewayStatus(gatewayStatusSnapshot ?? null),
+      );
     }
   }, [codexAuthPreviewState, gatewayStatusSnapshot]);
 
@@ -304,10 +350,7 @@ function ProvidersPageImpl({
   const selectedProvider = workspace.selectedProvider;
   const providerModelCount = useMemo(
     () =>
-      providers.reduce(
-        (total, provider) => total + provider.models.length,
-        0,
-      ),
+      providers.reduce((total, provider) => total + provider.models.length, 0),
     [providers],
   );
   const enabledProviderModels = useMemo(
@@ -317,9 +360,7 @@ function ProvidersPageImpl({
           total +
           provider.models.filter(
             (model) =>
-              provider.enabled &&
-              model.enabled &&
-              model.gateway_exported,
+              provider.enabled && model.enabled && model.gateway_exported,
           ).length,
         0,
       ),
@@ -328,10 +369,10 @@ function ProvidersPageImpl({
   const officialDisabledModels = officialDisabledModelsDraft;
   const officialModelDraftDirty = Boolean(
     settings &&
-    (
-      JSON.stringify(officialDisabledModelsDraft) !== JSON.stringify(settings.official_disabled_models ?? []) ||
-      JSON.stringify(officialModelOrderDraft) !== JSON.stringify(settings.official_model_sort_order ?? [])
-    ),
+      (JSON.stringify(officialDisabledModelsDraft) !==
+        JSON.stringify(settings.official_disabled_models ?? []) ||
+        JSON.stringify(officialModelOrderDraft) !==
+          JSON.stringify(settings.official_model_sort_order ?? [])),
   );
   const officialEnabledCount = officialModels.filter(
     (model) => !isOfficialModelDisabled(officialDisabledModels, model.id),
@@ -349,7 +390,10 @@ function ProvidersPageImpl({
         }
         return left.id.localeCompare(right.id);
       });
-    if (pendingNewProvider && !items.some((item) => item.id === pendingNewProvider.id)) {
+    if (
+      pendingNewProvider &&
+      !items.some((item) => item.id === pendingNewProvider.id)
+    ) {
       items.push({
         id: pendingNewProvider.id,
         sort_order: pendingNewProvider.sort_order ?? items.length + 1,
@@ -360,10 +404,12 @@ function ProvidersPageImpl({
   }, [pendingNewProvider, providers]);
   const canAdd = Boolean(form.name.trim());
   const gatewayStatus = gatewayStatusSnapshot ?? loadedGatewayStatus;
-  const realCodexConnected = codexStatus?.mode === "custom" && codexStatus.proxy_running === true;
-  const effectiveCodexTargetOwner = codexTargetOwnerOverride === undefined
-    ? appFlavor?.codex_target_owner ?? null
-    : codexTargetOwnerOverride;
+  const realCodexConnected =
+    codexStatus?.mode === "custom" && codexStatus.proxy_running === true;
+  const effectiveCodexTargetOwner =
+    codexTargetOwnerOverride === undefined
+      ? (appFlavor?.codex_target_owner ?? null)
+      : codexTargetOwnerOverride;
   const codexOwnedByOtherApp = Boolean(
     !realCodexConnected &&
       effectiveCodexTargetOwner !== null &&
@@ -377,7 +423,12 @@ function ProvidersPageImpl({
       ? codexTakeoverOwnerLabel(effectiveCodexTargetOwner, tr)
       : null;
   const gatewayContextById = useMemo(() => {
-    return new Map((gatewayStatus?.official_models ?? []).map((model) => [model.id, model.context_window]));
+    return new Map(
+      (gatewayStatus?.official_models ?? []).map((model) => [
+        model.id,
+        model.context_window,
+      ]),
+    );
   }, [gatewayStatus]);
 
   function setError(value: string | null) {
@@ -433,7 +484,8 @@ function ProvidersPageImpl({
 
   async function startBackendFromToast(toastId?: string) {
     setOperationBusy("start");
-    const activeToastId = toastId ?? showToast(t("gateway.startingBackend"), "loading");
+    const activeToastId =
+      toastId ?? showToast(t("gateway.startingBackend"), "loading");
     updateToast(activeToastId, {
       action: null,
       text: t("gateway.startingBackend"),
@@ -468,7 +520,10 @@ function ProvidersPageImpl({
       const gatewayStatus = await onGatewayChanged?.();
       if (gatewayStatus !== undefined) {
         setLoadedGatewayStatus(gatewayStatus ?? null);
-        setCodexAuthState(codexAuthPreviewState ?? codexAuthStateFromGatewayStatus(gatewayStatus ?? null));
+        setCodexAuthState(
+          codexAuthPreviewState ??
+            codexAuthStateFromGatewayStatus(gatewayStatus ?? null),
+        );
       }
     } catch {
       // Refresh failures are surfaced by the owning runtime loader.
@@ -477,7 +532,9 @@ function ProvidersPageImpl({
 
   async function primeOfficialOpenAIUsage() {
     if (!officialUsageSnapshotRef.current) {
-      await loadOfficialOpenAIUsage(false, false, undefined, { showBusy: false });
+      await loadOfficialOpenAIUsage(false, false, undefined, {
+        showBusy: false,
+      });
     }
     void loadOfficialOpenAIUsage(false, false, undefined, { showBusy: false });
   }
@@ -489,7 +546,11 @@ function ProvidersPageImpl({
     options?: { showBusy?: boolean },
   ) {
     const showBusy = options?.showBusy ?? true;
-    const activeToastId = toastId ?? (notify ? showToast(t("providers.refreshingOpenAIUsage"), "loading") : null);
+    const activeToastId =
+      toastId ??
+      (notify
+        ? showToast(t("providers.refreshingOpenAIUsage"), "loading")
+        : null);
     if (showBusy) {
       setOfficialUsageBusy(true);
     }
@@ -564,15 +625,6 @@ function ProvidersPageImpl({
     }
   }
 
-  async function copyCodexLoginCommand() {
-    try {
-      await navigator.clipboard.writeText("codex login");
-      showToast(t("providers.codexLoginCommandCopied"), "message");
-    } catch (err) {
-      showToast(t("gateway.copyFailed", { message: messageFromError(err) }), "error");
-    }
-  }
-
   async function refreshCodexAuthStatus() {
     setOperationBusy("auth-refresh");
     try {
@@ -592,7 +644,12 @@ function ProvidersPageImpl({
     }
   }
 
-  async function saveSettings(next: Settings, regenerateCatalog = false, successMessage?: string, toastId?: string) {
+  async function saveSettings(
+    next: Settings,
+    regenerateCatalog = false,
+    successMessage?: string,
+    toastId?: string,
+  ) {
     const result = await saveWorkspaceSettings(next, {
       regenerateCatalog,
       successMessage,
@@ -624,7 +681,9 @@ function ProvidersPageImpl({
       stagePendingProvider({ ...pendingNewProvider, enabled });
       return;
     }
-    const providerName = providers.find((provider) => provider.id === providerId)?.name ?? providerId;
+    const providerName =
+      providers.find((provider) => provider.id === providerId)?.name ??
+      providerId;
     const toastId = showToast(
       enabled
         ? t("providers.enablingProvider", { name: providerName })
@@ -652,15 +711,25 @@ function ProvidersPageImpl({
 
     persistedItems.forEach((item, index) => {
       const sortOrder = index + 1;
-      const providerIndex = nextProviders.findIndex((provider) => provider.id === item.id);
+      const providerIndex = nextProviders.findIndex(
+        (provider) => provider.id === item.id,
+      );
       if (providerIndex >= 0) {
-        nextProviders[providerIndex] = { ...nextProviders[providerIndex], sort_order: sortOrder };
+        nextProviders[providerIndex] = {
+          ...nextProviders[providerIndex],
+          sort_order: sortOrder,
+        };
       }
     });
     if (pendingNewProvider) {
-      const pendingIndex = items.findIndex((item) => item.id === pendingNewProvider.id);
+      const pendingIndex = items.findIndex(
+        (item) => item.id === pendingNewProvider.id,
+      );
       if (pendingIndex >= 0) {
-        stagePendingProvider({ ...pendingNewProvider, sort_order: pendingIndex + 1 });
+        stagePendingProvider({
+          ...pendingNewProvider,
+          sort_order: pendingIndex + 1,
+        });
       }
     }
 
@@ -671,11 +740,18 @@ function ProvidersPageImpl({
     if (!settingsDraft) {
       return;
     }
-    const toastId = showToast(value ? t("providers.includingOfficialModels") : t("providers.excludingOfficialModels"), "loading");
+    const toastId = showToast(
+      value
+        ? t("providers.includingOfficialModels")
+        : t("providers.excludingOfficialModels"),
+      "loading",
+    );
     void saveSettings(
       { ...settingsDraft, include_official_models: value },
       true,
-      value ? t("providers.officialModelsIncluded") : t("providers.officialModelsExcluded"),
+      value
+        ? t("providers.officialModelsIncluded")
+        : t("providers.officialModelsExcluded"),
       toastId,
     );
   }
@@ -687,13 +763,18 @@ function ProvidersPageImpl({
       : [...new Set([...current, modelId])];
     setOfficialDisabledModels(nextDisabled);
     setOfficialModels((currentModels) =>
-      currentModels.map((model) => (modelIdMatches(model.id, modelId) ? { ...model, enabled } : model)),
+      currentModels.map((model) =>
+        modelIdMatches(model.id, modelId) ? { ...model, enabled } : model,
+      ),
     );
   }
 
   async function toggleCodexHubConnection() {
     const nextMode: ConnectionMode = realCodexConnected ? "official" : "custom";
-    await applyCodexHubConnection(nextMode, Boolean(appFlavor?.codex_takeover_required));
+    await applyCodexHubConnection(
+      nextMode,
+      Boolean(appFlavor?.codex_takeover_required),
+    );
   }
 
   async function authorizeCodexRestart(): Promise<boolean | null> {
@@ -713,7 +794,10 @@ function ProvidersPageImpl({
     return confirmed ? true : null;
   }
 
-  async function applyCodexHubConnection(nextMode: ConnectionMode, forceTakeover: boolean) {
+  async function applyCodexHubConnection(
+    nextMode: ConnectionMode,
+    forceTakeover: boolean,
+  ) {
     let restartCodex: boolean | null;
     try {
       restartCodex = await authorizeCodexRestart();
@@ -724,7 +808,10 @@ function ProvidersPageImpl({
     if (restartCodex === null) {
       return;
     }
-    const actionLabel = nextMode === "custom" ? t("providers.connectingToHub") : t("providers.disconnectingFromHub");
+    const actionLabel =
+      nextMode === "custom"
+        ? t("providers.connectingToHub")
+        : t("providers.disconnectingFromHub");
     setConnectionPendingMode(nextMode);
     setOperationBusy("route");
     const toastId = showToast(`${actionLabel}...`, "loading");
@@ -756,7 +843,9 @@ function ProvidersPageImpl({
           : status;
       }
       setCodexStatus(status);
-      setCodexTargetOwnerOverride(nextMode === "custom" ? appFlavor?.routing_owner ?? null : "official");
+      setCodexTargetOwnerOverride(
+        nextMode === "custom" ? (appFlavor?.routing_owner ?? null) : "official",
+      );
       onStatusChanged?.(status);
       setConnectionPendingMode(null);
       setError(null);
@@ -765,10 +854,15 @@ function ProvidersPageImpl({
         historySyncStatus !== "clean" &&
         historySyncStatus !== "repaired"
       ) {
-        const issueMessage = t("providers.codexRouteChangedHistoryIssueRestart", {
-          status: codexHubConnectionSuccessMessage(nextMode, tr),
-          message: historySyncMessage?.trim() || t("settings.historyUnexpectedFailure"),
-        });
+        const issueMessage = t(
+          "providers.codexRouteChangedHistoryIssueRestart",
+          {
+            status: codexHubConnectionSuccessMessage(nextMode, tr),
+            message:
+              historySyncMessage?.trim() ||
+              t("settings.historyUnexpectedFailure"),
+          },
+        );
         setError(issueMessage);
         updateToast(toastId, {
           action: null,
@@ -779,17 +873,18 @@ function ProvidersPageImpl({
       }
       updateToast(toastId, {
         action: null,
-        text: status.codex_restart_result === "restarted"
-          ? t("providers.codexRouteChangedRestarted", {
-              status: codexHubConnectionSuccessMessage(nextMode, tr),
-            })
-          : status.codex_restart_result === "switched_relaunch_failed"
-            ? t("providers.codexRouteChangedRelaunchFailed", {
+        text:
+          status.codex_restart_result === "restarted"
+            ? t("providers.codexRouteChangedRestarted", {
                 status: codexHubConnectionSuccessMessage(nextMode, tr),
               })
-            : t("providers.codexRouteChangedRestart", {
-                status: codexHubConnectionSuccessMessage(nextMode, tr),
-              }),
+            : status.codex_restart_result === "switched_relaunch_failed"
+              ? t("providers.codexRouteChangedRelaunchFailed", {
+                  status: codexHubConnectionSuccessMessage(nextMode, tr),
+                })
+              : t("providers.codexRouteChangedRestart", {
+                  status: codexHubConnectionSuccessMessage(nextMode, tr),
+                }),
         tone: "success",
       });
     } catch (err) {
@@ -819,8 +914,8 @@ function ProvidersPageImpl({
 
   useEffect(() => {
     if (
-      !codexSwitchRequest
-      || handledCodexSwitchRequestRef.current === codexSwitchRequest.id
+      !codexSwitchRequest ||
+      handledCodexSwitchRequestRef.current === codexSwitchRequest.id
     ) {
       return;
     }
@@ -852,9 +947,10 @@ function ProvidersPageImpl({
     );
   }
 
-  async function refreshOfficialModelsAndCollaborationState(
-    options?: { quiet?: boolean; throwOnError?: boolean },
-  ) {
+  async function refreshOfficialModelsAndCollaborationState(options?: {
+    quiet?: boolean;
+    throwOnError?: boolean;
+  }) {
     const refreshed = await refreshOfficialModels(options);
     try {
       const [overrides, baselines] = await Promise.all([
@@ -872,13 +968,17 @@ function ProvidersPageImpl({
 
   async function deleteProvider(providerId: string) {
     if (pendingNewProvider?.id === providerId) {
-      if (!(await confirmAction({
-        cancelLabel: t("common.cancel"),
-        confirmLabel: t("providers.deleteProvider"),
-        message: t("providers.deleteProviderConfirm", { name: pendingNewProvider.name }),
-        title: t("providers.deleteProvider"),
-        tone: "danger",
-      }))) {
+      if (
+        !(await confirmAction({
+          cancelLabel: t("common.cancel"),
+          confirmLabel: t("providers.deleteProvider"),
+          message: t("providers.deleteProviderConfirm", {
+            name: pendingNewProvider.name,
+          }),
+          title: t("providers.deleteProvider"),
+          tone: "danger",
+        }))
+      ) {
         return;
       }
       stagePendingProvider(null);
@@ -893,13 +993,15 @@ function ProvidersPageImpl({
       setError(t("providers.providerNotFound", { providerId }));
       return;
     }
-    if (!(await confirmAction({
-      cancelLabel: t("common.cancel"),
-      confirmLabel: t("providers.deleteProvider"),
-      message: t("providers.deleteProviderConfirm", { name: target.name }),
-      title: t("providers.deleteProvider"),
-      tone: "danger",
-    }))) {
+    if (
+      !(await confirmAction({
+        cancelLabel: t("common.cancel"),
+        confirmLabel: t("providers.deleteProvider"),
+        message: t("providers.deleteProviderConfirm", { name: target.name }),
+        title: t("providers.deleteProvider"),
+        tone: "danger",
+      }))
+    ) {
       return;
     }
     const result = await workspace.deleteProvider(providerId);
@@ -918,143 +1020,265 @@ function ProvidersPageImpl({
     }
   }
 
+  useEffect(() => {
+    if (!openOfficialRequest) return;
+    selectProvider(OFFICIAL_ID);
+    setEditorOpen(true);
+  }, [openOfficialRequest]);
+
   return (
     <>
-    <fieldset disabled={busy === "save"} {...(busy === "save" ? { inert: "" } : {})} className="contents">
-    <main aria-busy={busy === "save"} className="relative grid h-full min-h-0 min-w-0 grid-cols-[minmax(240px,32%)_minmax(0,1fr)] gap-3 overflow-hidden">
-      <aside className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
-        <ProviderSourceSidebar
-          codexAuthState={codexAuthState}
-          codexConnected={codexConnected}
-          codexForeignOwner={codexOwnedByOtherApp}
-          codexOwnerLabel={codexRouteOwnerLabel}
-          connectionPendingMode={connectionPendingMode}
-          gatewayStatus={gatewayStatus}
-          busy={busy}
-          enabledProviderModels={enabledProviderModels}
-          officialEnabledCount={officialEnabledCount}
-          officialIncluded={settings?.include_official_models ?? false}
+      {desktopPage && (
+        <ProviderWorkspaceView
+          page={desktopPage}
+          onNavigate={onNavigate!}
+          providers={providerNavItems.map((item) => item.provider)}
+          officialId={OFFICIAL_ID}
           officialCount={officialModels.length}
-          providerModelCount={providerModelCount}
-          onAdd={() => void openCatalogPicker()}
-          items={providerNavItems}
-          onReorder={(items) => void reorderHubProviders(items)}
-          onSelect={selectProvider}
-          onToggleOfficialInclude={toggleOfficialInclude}
-          onToggleProvider={toggleProviderEnabled}
-          onToggleConnection={() => void toggleCodexHubConnection()}
-          selectedId={selectedId}
-        />
-      </aside>
-
-      <section className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
-        <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto]">
-          <div className="min-h-0 overflow-hidden">
-            {selectedId === ADD_ID ? (
-              <AddProviderPanel
-                busy={busy}
-                canAdd={Boolean(canAdd)}
-                discoverError={modelDiscoveryError}
-                form={form}
-                probeResult={probeResult}
-                onAdd={() => void addProvider()}
-                onDiscover={() => void discoverForForm()}
-                onFormChange={updateForm}
-                onProbe={() =>
-                  probeUpstreamFormat(form.base_url, form.api_key, formProbeModelFor(form))
-                }
-              />
-            ) : selectedId === OFFICIAL_ID ? (
-              <OfficialDetail
-                authState={codexAuthState}
-                busy={busy}
-                gatewayContextById={gatewayContextById}
-                models={officialModels}
-                officialCollaborationBaselines={officialCollaborationBaselines}
-                officialCollaborationOverrides={officialCollaborationOverrides}
-                onOfficialCollaborationOverridesChanged={setOfficialCollaborationOverrides}
-                officialDisabledModels={officialDisabledModels}
-                officialIncluded={settings?.include_official_models ?? false}
-                authIssue={gatewayStatus?.codex_auth?.issue ?? null}
-                onCopyLoginCommand={() => void copyCodexLoginCommand()}
-                onContextGuardChanged={reflectContextGuardSetting}
-                onOpenCodexApp={() => void openCodexAppForLogin()}
-                onRefresh={(options) => refreshOfficialModelsAndCollaborationState(options)}
-                onCancelRefresh={cancelOfficialModelRefresh}
-                onRefreshClients={onRefreshClients}
-                onRefreshAuth={() => void refreshCodexAuthStatus()}
-                onRefreshUsage={() => void loadOfficialOpenAIUsage(true, true)}
-                onReorder={(models) => void reorderOfficialModels(models)}
-                onSave={() => void saveOfficialModels()}
-                onToggleModel={toggleOfficialModel}
-                dirty={officialModelDraftDirty}
-                saveBusy={busy === "save"}
-                syncBoundClients={settings?.auto_sync_clients ?? true}
-                usageBusy={officialUsageBusy}
-                usageError={officialUsageError}
-                usageHidden={officialUsageHidden}
-                usageSnapshot={officialUsageSnapshot}
-              />
-            ) : selectedProvider ? (
-              <ProviderDetail
-                busy={busy}
-                discoverError={modelDiscoveryError}
-                probeResult={probeResult}
-                provider={selectedProvider}
-                onChange={(provider, successMessage) => void updateProvider(provider, successMessage)}
-                onDelete={() => void deleteProvider(selectedProvider.id)}
-                unsaved={pendingNewProvider?.id === selectedProvider.id}
-                onDraftStateChange={trackProviderDraft}
-                onProbe={(provider) =>
-                  probeUpstreamFormat(
-                    provider.base_url,
-                    provider.api_key ?? "",
-                    providerProbeModelFor(provider),
-                    provider.id,
-                  )
-                }
-                onRefresh={(provider) => void refreshProviderModels(provider)}
-              />
-            ) : (
-              <div className="p-6 text-sm text-slate-500">{t("providers.selectProvider")}</div>
-            )}
-          </div>
-
-        </div>
-      </section>
-    </main>
-    </fieldset>
-    {confirmDialog}
-    {pendingProviderNavigation && (
-      <UnsavedProviderChangesDialog
-        busy={busy === "save"}
-        providerName={pendingProviderName(pendingProviderNavigation, tr)}
-        onCancel={cancelPendingProviderNavigation}
-        onDiscard={() => {
-          if (pendingNewProvider && selectedId === pendingNewProvider.id) {
-            stagePendingProvider(null);
+          officialEnabled={officialEnabledCount}
+          officialIncluded={settings?.include_official_models ?? false}
+          limits={officialUsageSnapshot?.limits ?? []}
+          quotaPending={officialUsageBusy}
+          quotaError={officialUsageError}
+          authorized={codexAuthState === "authorized"}
+          connected={codexConnected}
+          running={Boolean(gatewayStatus?.proxy_running)}
+          ownerLabel={
+            codexOwnedByOtherApp
+              ? (codexRouteOwnerLabel ?? undefined)
+              : undefined
           }
-          discardPendingProviderNavigation();
-        }}
-        onSave={() => void savePendingProviderNavigation()}
-      />
-    )}
-    {catalogPickerOpen && (
-      <ProviderCatalogPicker
-        existingIds={new Set(providers.map((provider) => provider.id))}
-        loading={catalogPresets === null}
-        presets={catalogPresets ?? []}
-        onClose={() => setCatalogPickerOpen(false)}
-        onSelectCustom={() => {
-          setCatalogPickerOpen(false);
-          selectProvider(ADD_ID);
-        }}
-        onSelectPreset={(preset) => {
-          setCatalogPickerOpen(false);
-          addCatalogProvider(preset);
-        }}
-      />
-    )}
+          connectionBusy={Boolean(connectionPendingMode)}
+          busy={Boolean(busy)}
+          onToggleConnection={() => void toggleCodexHubConnection()}
+          onSelect={(id) => {
+            selectProvider(id);
+
+            setEditorOpen(true);
+          }}
+          onAdd={() => void openCatalogPicker()}
+          onToggle={(id, enabled) =>
+            id === OFFICIAL_ID
+              ? toggleOfficialInclude(enabled)
+              : toggleProviderEnabled(id, enabled)
+          }
+          onReorder={(ids) =>
+            void reorderHubProviders(
+              ids.map((id) => providerNavItems.find((item) => item.id === id)!),
+            )
+          }
+          onRefresh={() => loadOfficialOpenAIUsage(true, true)}
+        >
+          {children}
+        </ProviderWorkspaceView>
+      )}
+      {desktopPage && editorOpen && (
+        <button
+          className="ws-editor-backdrop"
+          tabIndex={-1}
+          aria-label={t("common.close")}
+          onClick={() => setEditorOpen(false)}
+        />
+      )}
+      <div
+        ref={editorRef}
+        tabIndex={-1}
+        role={desktopPage && editorOpen ? "dialog" : undefined}
+        aria-modal={desktopPage && editorOpen ? true : undefined}
+        aria-label={
+          selectedId === OFFICIAL_ID
+            ? "OpenAI"
+            : (selectedProvider?.name ?? t("providers.addProvider"))
+        }
+        data-editor-tab={selectedId === ADD_ID ? "add" : "unified"}
+        className={desktopPage ? "ws-editor-overlay" : "contents"}
+        hidden={Boolean(desktopPage && !editorOpen)}
+      >
+        {desktopPage && (
+          <header className="ws-editor-title">
+            <b>
+              {selectedId === ADD_ID
+                ? t("providers.addProvider")
+                : selectedId === OFFICIAL_ID
+                  ? "OpenAI"
+                  : selectedProvider?.name}
+            </b>
+            <button
+              className="ws-icon"
+              aria-label={t("common.close")}
+              onClick={() => setEditorOpen(false)}
+            >
+              <X size={16} />
+            </button>
+          </header>
+        )}
+        <fieldset
+          disabled={busy === "save"}
+          {...(busy === "save" ? { inert: "" } : {})}
+          className="contents"
+        >
+          <main
+            aria-busy={busy === "save"}
+            className="relative grid h-full min-h-0 min-w-0 grid-cols-[minmax(240px,32%)_minmax(0,1fr)] gap-3 overflow-hidden"
+          >
+            <aside className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
+              <ProviderSourceSidebar
+                codexAuthState={codexAuthState}
+                codexConnected={codexConnected}
+                codexForeignOwner={codexOwnedByOtherApp}
+                codexOwnerLabel={codexRouteOwnerLabel}
+                connectionPendingMode={connectionPendingMode}
+                gatewayStatus={gatewayStatus}
+                busy={busy}
+                enabledProviderModels={enabledProviderModels}
+                officialEnabledCount={officialEnabledCount}
+                officialIncluded={settings?.include_official_models ?? false}
+                officialCount={officialModels.length}
+                providerModelCount={providerModelCount}
+                onAdd={() => void openCatalogPicker()}
+                items={providerNavItems}
+                onReorder={(items) => void reorderHubProviders(items)}
+                onSelect={selectProvider}
+                onToggleOfficialInclude={toggleOfficialInclude}
+                onToggleProvider={toggleProviderEnabled}
+                onToggleConnection={() => void toggleCodexHubConnection()}
+                selectedId={selectedId}
+              />
+            </aside>
+
+            <section className="min-h-0 min-w-0 overflow-hidden rounded-panel bg-surface shadow-card">
+              <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto]">
+                <div className="min-h-0 overflow-hidden">
+                  {selectedId === ADD_ID ? (
+                    <AddProviderPanel
+                      busy={busy}
+                      canAdd={Boolean(canAdd)}
+                      discoverError={modelDiscoveryError}
+                      form={form}
+                      probeResult={probeResult}
+                      onAdd={() => void addProvider()}
+                      onDiscover={() => void discoverForForm()}
+                      onFormChange={updateForm}
+                      onProbe={() =>
+                        probeUpstreamFormat(
+                          form.base_url,
+                          form.api_key,
+                          formProbeModelFor(form),
+                        )
+                      }
+                    />
+                  ) : selectedId === OFFICIAL_ID ? (
+                    <OfficialDetail
+                      authState={codexAuthState}
+                      busy={busy}
+                      gatewayContextById={gatewayContextById}
+                      models={officialModels}
+                      officialCollaborationBaselines={
+                        officialCollaborationBaselines
+                      }
+                      officialCollaborationOverrides={
+                        officialCollaborationOverrides
+                      }
+                      onOfficialCollaborationOverridesChanged={
+                        setOfficialCollaborationOverrides
+                      }
+                      officialDisabledModels={officialDisabledModels}
+                      officialIncluded={
+                        settings?.include_official_models ?? false
+                      }
+                      authIssue={gatewayStatus?.codex_auth?.issue ?? null}
+                      onContextGuardChanged={reflectContextGuardSetting}
+                      onOpenCodexApp={() => void openCodexAppForLogin()}
+                      onRefresh={(options) =>
+                        refreshOfficialModelsAndCollaborationState(options)
+                      }
+                      onCancelRefresh={cancelOfficialModelRefresh}
+                      onRefreshClients={onRefreshClients}
+                      onRefreshAuth={() => void refreshCodexAuthStatus()}
+                      onRefreshUsage={() =>
+                        void loadOfficialOpenAIUsage(true, true)
+                      }
+                      onReorder={(models) => void reorderOfficialModels(models)}
+                      onSave={() => void saveOfficialModels()}
+                      onToggleModel={toggleOfficialModel}
+                      dirty={officialModelDraftDirty}
+                      saveBusy={busy === "save"}
+                      syncBoundClients={settings?.auto_sync_clients ?? true}
+                      usageBusy={officialUsageBusy}
+                      usageError={officialUsageError}
+                      usageHidden={officialUsageHidden}
+                      usageSnapshot={officialUsageSnapshot}
+                    />
+                  ) : selectedProvider ? (
+                    <ProviderDetail
+                      desktopTab={desktopPage ? "unified" : undefined}
+                      busy={busy}
+                      discoverError={modelDiscoveryError}
+                      probeResult={probeResult}
+                      provider={selectedProvider}
+                      onChange={(provider, successMessage) =>
+                        void updateProvider(provider, successMessage)
+                      }
+                      onDelete={() => void deleteProvider(selectedProvider.id)}
+                      unsaved={pendingNewProvider?.id === selectedProvider.id}
+                      onDraftStateChange={trackProviderDraft}
+                      onProbe={(provider) =>
+                        probeUpstreamFormat(
+                          provider.base_url,
+                          provider.api_key ?? "",
+                          providerProbeModelFor(provider),
+                          provider.id,
+                        )
+                      }
+                      onRefresh={(provider) =>
+                        void refreshProviderModels(provider)
+                      }
+                    />
+                  ) : (
+                    <div className="p-6 text-sm text-slate-500">
+                      {t("providers.selectProvider")}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+          </main>
+        </fieldset>
+      </div>
+      {confirmDialog}
+      {pendingProviderNavigation && (
+        <UnsavedProviderChangesDialog
+          busy={busy === "save"}
+          providerName={pendingProviderName(pendingProviderNavigation, tr)}
+          onCancel={cancelPendingProviderNavigation}
+          onDiscard={() => {
+            if (pendingNewProvider && selectedId === pendingNewProvider.id) {
+              stagePendingProvider(null);
+            }
+            discardPendingProviderNavigation();
+          }}
+          onSave={() => void savePendingProviderNavigation()}
+        />
+      )}
+      {catalogPickerOpen && (
+        <ProviderCatalogPicker
+          existingIds={new Set(providers.map((provider) => provider.id))}
+          loading={catalogPresets === null}
+          presets={catalogPresets ?? []}
+          onClose={() => setCatalogPickerOpen(false)}
+          onSelectCustom={() => {
+            setCatalogPickerOpen(false);
+            selectProvider(ADD_ID);
+            setEditorOpen(true);
+          }}
+          onSelectPreset={(preset) => {
+            setCatalogPickerOpen(false);
+            addCatalogProvider(preset);
+
+            setEditorOpen(true);
+          }}
+        />
+      )}
     </>
   );
 }
@@ -1079,7 +1303,9 @@ function UnsavedProviderChangesDialog({
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/20 p-6">
       <div className="grid w-full max-w-[420px] gap-4 rounded-overlay border border-line bg-white p-5 shadow-overlay">
         <div className="min-w-0">
-          <h3 className="truncate text-base font-semibold">{t("providers.saveProviderChanges")}</h3>
+          <h3 className="truncate text-base font-semibold">
+            {t("providers.saveProviderChanges")}
+          </h3>
           <p className="mt-1 text-sm leading-5 text-slate-600">
             {t("providers.unsavedChanges", { name: fallbackName })}
           </p>
@@ -1220,7 +1446,12 @@ function ConnectionLink({ connected }: { connected: boolean }) {
             : "border-slate-300 bg-surface",
         )}
       >
-        <span className={cx("h-1.5 w-1.5 rounded-full", connected ? "bg-white" : "bg-slate-300")} />
+        <span
+          className={cx(
+            "h-1.5 w-1.5 rounded-full",
+            connected ? "bg-white" : "bg-slate-300",
+          )}
+        />
       </span>
     </div>
   );
@@ -1228,7 +1459,10 @@ function ConnectionLink({ connected }: { connected: boolean }) {
 
 function ConnectedSurfaceFlow() {
   return (
-    <span className="pointer-events-none absolute inset-0 overflow-hidden rounded-[inherit]" aria-hidden="true">
+    <span
+      className="pointer-events-none absolute inset-0 overflow-hidden rounded-[inherit]"
+      aria-hidden="true"
+    >
       <span className="codexhub-card-flow absolute left-0 top-0 h-px w-1/2" />
       <span className="codexhub-card-flow codexhub-card-flow-delay absolute bottom-0 left-0 h-px w-1/2" />
     </span>
@@ -1262,8 +1496,12 @@ function OfficialOpenAICard({
       <div className="rounded-inner text-left">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-semibold">{t("providers.codexDesktop")}</h2>
-            <p className="mt-1 truncate text-xs text-slate-500">{t("providers.codexAppAuth")}</p>
+            <h2 className="truncate text-sm font-semibold">
+              {t("providers.codexDesktop")}
+            </h2>
+            <p className="mt-1 truncate text-xs text-slate-500">
+              {t("providers.codexAppAuth")}
+            </p>
           </div>
           <SourceStatusChip {...authChip} />
         </div>
@@ -1275,14 +1513,24 @@ function OfficialOpenAICard({
           activeTone="neutral"
           enabled={included}
           label="OpenAI"
-          meta={t("providers.modelCount", { enabled: enabledModelCount, total: modelCount })}
+          meta={t("providers.modelCount", {
+            enabled: enabledModelCount,
+            total: modelCount,
+          })}
           onClick={onSelect}
           onToggle={onToggleInclude}
           toggleDisabled={toggleDisabled}
-          toggleLabel={included ? t("providers.openaiSourceIncluded") : t("providers.openaiSourceExcluded")}
+          toggleLabel={
+            included
+              ? t("providers.openaiSourceIncluded")
+              : t("providers.openaiSourceExcluded")
+          }
         />
       </div>
-      <p className="truncate px-1 text-[11px] leading-4 text-slate-500" title={t("providers.openaiExportHint")}>
+      <p
+        className="truncate px-1 text-[11px] leading-4 text-slate-500"
+        title={t("providers.openaiExportHint")}
+      >
         {t("providers.openaiExportHint")}
       </p>
     </section>
@@ -1305,18 +1553,22 @@ function HubConnectionBridge({
   pendingMode: ConnectionMode | null;
 }) {
   const { t } = useTranslation();
-  const label = pendingMode === "custom"
-    ? t("providers.connecting")
-    : pendingMode === "official"
-      ? t("providers.disconnecting")
-    : connected
-      ? ownerLabel
-        ? t("providers.connectedToHubChannel", { channel: ownerLabel })
-        : t("providers.connectedToHub")
-      : t("providers.connectToHub");
-  const icon = pendingMode === "official" || (!pendingMode && !connected)
-    ? <Link2Off size={15} className={pendingMode ? "opacity-70" : undefined} />
-    : <Link2 size={15} className={pendingMode ? "opacity-70" : undefined} />;
+  const label =
+    pendingMode === "custom"
+      ? t("providers.connecting")
+      : pendingMode === "official"
+        ? t("providers.disconnecting")
+        : connected
+          ? ownerLabel
+            ? t("providers.connectedToHubChannel", { channel: ownerLabel })
+            : t("providers.connectedToHub")
+          : t("providers.connectToHub");
+  const icon =
+    pendingMode === "official" || (!pendingMode && !connected) ? (
+      <Link2Off size={15} className={pendingMode ? "opacity-70" : undefined} />
+    ) : (
+      <Link2 size={15} className={pendingMode ? "opacity-70" : undefined} />
+    );
 
   return (
     <div className="relative grid grid-cols-[44px_minmax(0,1fr)] items-center gap-2.5 px-1 py-1.5">
@@ -1330,7 +1582,8 @@ function HubConnectionBridge({
             ? "border border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200 hover:shadow-raised"
             : !pendingMode && connected
               ? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"
-            : !pendingMode && "bg-ink text-white hover:bg-slate-800 hover:shadow-raised",
+              : !pendingMode &&
+                "bg-ink text-white hover:bg-slate-800 hover:shadow-raised",
         )}
         disabled={disabled}
         onClick={onToggle}
@@ -1339,11 +1592,13 @@ function HubConnectionBridge({
             ? t("providers.connectingToHub")
             : pendingMode === "official"
               ? t("providers.disconnectingFromHub")
-               : foreignOwner
-                 ? t("providers.takeOverFromChannelTitle", { channel: ownerLabel ?? t("common.unknown") })
-               : connected
-                 ? t("providers.disconnectFromHubTitle")
-                : t("providers.connectToHubTitle")
+              : foreignOwner
+                ? t("providers.takeOverFromChannelTitle", {
+                    channel: ownerLabel ?? t("common.unknown"),
+                  })
+                : connected
+                  ? t("providers.disconnectFromHubTitle")
+                  : t("providers.connectToHubTitle")
         }
       >
         <span className="shrink-0">{icon}</span>
@@ -1378,12 +1633,13 @@ function CodexHubProviderCard({
   onToggleProvider: (providerId: string, enabled: boolean) => void;
   selectedId: string;
 }) {
-  const [providerListRef, providerListHasOverflow] = useVerticalOverflow<HTMLDivElement>([
-    activeAdd,
-    connected,
-    items.length,
-    selectedId,
-  ]);
+  const [providerListRef, providerListHasOverflow] =
+    useVerticalOverflow<HTMLDivElement>([
+      activeAdd,
+      connected,
+      items.length,
+      selectedId,
+    ]);
   const { t } = useTranslation();
   return (
     <section
@@ -1398,27 +1654,40 @@ function CodexHubProviderCard({
       {connected && <ConnectedSurfaceFlow />}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h2 className="truncate text-sm font-semibold">{t("common.codexHub")}</h2>
-          <p className="mt-1 truncate text-xs text-slate-500" title={t("providers.externalProviderCatalog")}>
+          <h2 className="truncate text-sm font-semibold">
+            {t("common.codexHub")}
+          </h2>
+          <p
+            className="mt-1 truncate text-xs text-slate-500"
+            title={t("providers.externalProviderCatalog")}
+          >
             {t("providers.externalProviderCatalog")}
           </p>
           <p className="mt-1 truncate whitespace-nowrap text-xs leading-4 text-slate-500">
             {t("providers.appsMaySortModels")}
           </p>
         </div>
-        <SourceStatusChip {...gatewayStatusChip(gatewayStatus, t as Translate)} />
+        <SourceStatusChip
+          {...gatewayStatusChip(gatewayStatus, t as Translate)}
+        />
       </div>
 
       <div className="grid gap-2">
         <div className="grid grid-cols-2 gap-2 px-px text-xs">
           <SourceMetric label={t("common.models")} value={String(modelCount)} />
-          <SourceMetric label={t("common.enabled")} value={String(enabledModelCount)} />
+          <SourceMetric
+            label={t("common.enabled")}
+            value={String(enabledModelCount)}
+          />
         </div>
       </div>
 
       <div
         ref={providerListRef}
-        className={cx("min-h-0 overflow-auto", providerListHasOverflow && "-mr-3 pr-1")}
+        className={cx(
+          "min-h-0 overflow-auto",
+          providerListHasOverflow && "-mr-3 pr-1",
+        )}
       >
         {items.length ? (
           <SortableList
@@ -1433,11 +1702,14 @@ function CodexHubProviderCard({
                 label={item.provider.name}
                 logoSrc={providerLogoSrc(item.provider.id)}
                 meta={t("providers.modelCount", {
-                  enabled: item.provider.models.filter((model) => model.enabled).length,
+                  enabled: item.provider.models.filter((model) => model.enabled)
+                    .length,
                   total: item.provider.models.length,
                 })}
                 onClick={() => onSelect(item.provider.id)}
-                onToggle={(enabled) => onToggleProvider(item.provider.id, enabled)}
+                onToggle={(enabled) =>
+                  onToggleProvider(item.provider.id, enabled)
+                }
                 highlightShape="right"
               />
             )}
@@ -1453,7 +1725,9 @@ function CodexHubProviderCard({
         type="button"
         className={cx(
           "focus-ring flex h-10 w-full items-center justify-center gap-2 rounded-control text-sm font-medium shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out active:scale-[0.96]",
-          activeAdd ? "bg-action/10 text-action" : "bg-panel-soft text-slate-600 hover:bg-white hover:shadow-raised",
+          activeAdd
+            ? "bg-action/10 text-action"
+            : "bg-panel-soft text-slate-600 hover:bg-white hover:shadow-raised",
         )}
         onClick={onAdd}
       >
@@ -1464,7 +1738,10 @@ function CodexHubProviderCard({
   );
 }
 
-function gatewayStatusChip(status: GatewayStatus | null, t: Translate): { label: string; tone: "ok" | "muted" | "pending" } {
+function gatewayStatusChip(
+  status: GatewayStatus | null,
+  t: Translate,
+): { label: string; tone: "ok" | "muted" | "pending" } {
   if (!status) {
     return { label: t("common.unknown"), tone: "pending" };
   }
@@ -1473,7 +1750,10 @@ function gatewayStatusChip(status: GatewayStatus | null, t: Translate): { label:
     : { label: t("runtime.stopped"), tone: "muted" };
 }
 
-function codexAuthChip(authState: CodexAuthState, t: Translate): { label: string; tone: "ok" | "muted" | "pending" } {
+function codexAuthChip(
+  authState: CodexAuthState,
+  t: Translate,
+): { label: string; tone: "ok" | "muted" | "pending" } {
   if (authState === "authorized") {
     return { label: t("providers.authorized"), tone: "ok" };
   }
@@ -1483,11 +1763,17 @@ function codexAuthChip(authState: CodexAuthState, t: Translate): { label: string
   return { label: t("providers.authUnknown"), tone: "muted" };
 }
 
-function SourceStatusChip({ label, tone }: { label: string; tone: "ok" | "muted" | "pending" }) {
+function SourceStatusChip({
+  label,
+  tone,
+}: {
+  label: string;
+  tone: "ok" | "muted" | "pending";
+}) {
   return (
     <span
       className={cx(
-        "inline-flex h-6 max-w-[112px] items-center rounded-full border px-2 text-[11px] font-semibold leading-none",
+        "ws-status-chip inline-flex h-6 max-w-[112px] items-center rounded-full border px-2 text-[11px] font-semibold leading-none",
         tone === "ok" && "border-emerald-200 bg-emerald-50 text-emerald-700",
         tone === "muted" && "border-slate-200 bg-white text-slate-500",
         tone === "pending" && "border-amber-200 bg-amber-50 text-amber-700",
@@ -1501,7 +1787,9 @@ function SourceStatusChip({ label, tone }: { label: string; tone: "ok" | "muted"
 function SourceMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="grid min-w-0 place-items-center rounded-inner bg-surface px-2 py-1.5 text-center shadow-control">
-      <div className="text-[9px] font-semibold uppercase leading-3 text-slate-500">{label}</div>
+      <div className="text-[9px] font-semibold uppercase leading-3 text-slate-500">
+        {label}
+      </div>
       <div className="mt-0.5 font-semibold leading-4 text-ink">{value}</div>
     </div>
   );
@@ -1541,17 +1829,26 @@ function ProviderNavButton({
         toggleDisabled
           ? "bg-slate-50 text-slate-400 shadow-control ring-1 ring-slate-200"
           : active
-          ? activeTone === "neutral"
-            ? "bg-panel-soft text-ink shadow-raised ring-1 ring-line"
-            : "bg-blue-50 text-action shadow-raised"
-          : "hover:bg-panel hover:shadow-control",
+            ? activeTone === "neutral"
+              ? "bg-panel-soft text-ink shadow-raised ring-1 ring-line"
+              : "bg-blue-50 text-action shadow-raised"
+            : "hover:bg-panel hover:shadow-control",
       )}
     >
-      <button type="button" className="focus-ring min-w-0 text-left" onClick={onClick}>
+      <button
+        type="button"
+        className="focus-ring min-w-0 text-left"
+        onClick={onClick}
+      >
         <span className="flex min-w-0 items-center gap-2">
           {logoSrc ? (
             <span className="grid h-6 w-6 shrink-0 place-items-center overflow-hidden">
-              <img src={logoSrc} alt="" className="max-h-5 max-w-5 object-contain" aria-hidden="true" />
+              <img
+                src={logoSrc}
+                alt=""
+                className="max-h-5 max-w-5 object-contain"
+                aria-hidden="true"
+              />
             </span>
           ) : null}
           <span className="block truncate font-semibold">{label}</span>
@@ -1560,7 +1857,12 @@ function ProviderNavButton({
       </button>
       <SwitchControl
         checked={enabled}
-        label={toggleLabel ?? (enabled ? t("providers.providerEnabled") : t("providers.providerDisabled"))}
+        label={
+          toggleLabel ??
+          (enabled
+            ? t("providers.providerEnabled")
+            : t("providers.providerDisabled"))
+        }
         disabled={toggleDisabled}
         showLabel={false}
         onChange={onToggle}
@@ -1581,7 +1883,6 @@ function OfficialDetail({
   onOfficialCollaborationOverridesChanged,
   officialDisabledModels,
   officialIncluded,
-  onCopyLoginCommand,
   onContextGuardChanged,
   onOpenCodexApp,
   onRefresh,
@@ -1607,13 +1908,17 @@ function OfficialDetail({
   models: Model[];
   officialCollaborationBaselines: Readonly<Record<string, "v1" | "v2">>;
   officialCollaborationOverrides: Readonly<Record<string, "v1" | "v2">>;
-  onOfficialCollaborationOverridesChanged: (overrides: Record<string, "v1" | "v2">) => void;
+  onOfficialCollaborationOverridesChanged: (
+    overrides: Record<string, "v1" | "v2">,
+  ) => void;
   officialDisabledModels: string[];
   officialIncluded: boolean;
-  onCopyLoginCommand: () => void;
   onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
-  onRefresh: (options?: { quiet?: boolean; throwOnError?: boolean }) => Promise<boolean>;
+  onRefresh: (options?: {
+    quiet?: boolean;
+    throwOnError?: boolean;
+  }) => Promise<boolean>;
   onCancelRefresh: () => void;
   onRefreshClients?: () => Promise<void>;
   onRefreshAuth: () => void;
@@ -1631,8 +1936,43 @@ function OfficialDetail({
   const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
   const authorized = authState === "authorized";
-  const authRefreshBusy = busy === "auth-refresh";
-  const [contextGuardStatus, setContextGuardStatus] = useState<CodexContextGuardStatus | null>(null);
+  const [signOutBusy, setSignOutBusy] = useState(false);
+  const [loginPending, setLoginPending] = useState(false);
+  const refreshAuthRef = useRef(onRefreshAuth);
+  refreshAuthRef.current = onRefreshAuth;
+  useEffect(() => {
+    if (!loginPending) return;
+    const refresh = () => refreshAuthRef.current();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [loginPending]);
+  useEffect(() => {
+    if (authorized) setLoginPending(false);
+  }, [authorized]);
+  async function signOut() {
+    setSignOutBusy(true);
+    const toast = showToast(t("workspace.signingOut"), "loading");
+    try {
+      await api.codexLogout();
+      onRefreshAuth();
+      updateToast(toast, {
+        text: t("workspace.signedOut"),
+        tone: "success",
+        action: null,
+      });
+    } catch (error) {
+      onRefreshAuth();
+      updateToast(toast, {
+        text: messageFromError(error),
+        tone: "error",
+        action: null,
+      });
+    } finally {
+      setSignOutBusy(false);
+    }
+  }
+  const [contextGuardStatus, setContextGuardStatus] =
+    useState<CodexContextGuardStatus | null>(null);
   const [contextGuardBusy, setContextGuardBusy] = useState(false);
   // Gateway publishes the authoritative per-model window from the Official
   // catalog.  A user-owned Codex top-level override is Desktop-only and must
@@ -1641,7 +1981,8 @@ function OfficialDetail({
 
   useEffect(() => {
     let active = true;
-    void api.getCodexContextGuardStatus()
+    void api
+      .getCodexContextGuardStatus()
       .then((status) => {
         if (active) {
           setContextGuardStatus(status);
@@ -1649,7 +1990,12 @@ function OfficialDetail({
       })
       .catch((err) => {
         if (active) {
-          showToast(t("providers.contextGuardStatusFailed", { message: messageFromError(err) }), "error");
+          showToast(
+            t("providers.contextGuardStatusFailed", {
+              message: messageFromError(err),
+            }),
+            "error",
+          );
         }
       });
     return () => {
@@ -1663,7 +2009,9 @@ function OfficialDetail({
     }
     setContextGuardBusy(true);
     const toastId = showToast(
-      enabled ? t("providers.enablingContextGuard") : t("providers.disablingContextGuard"),
+      enabled
+        ? t("providers.enablingContextGuard")
+        : t("providers.disablingContextGuard"),
       "loading",
     );
     try {
@@ -1686,14 +2034,20 @@ function OfficialDetail({
         await onRefreshClients?.().catch(() => undefined);
       }
       const restartNotice = await readCodexRestartNotice(api);
-      const restartMessage = restartNotice === "required" ? t("providers.catalogOverrideRestartCodex")
-        : restartNotice === "unknown" ? t("providers.codexRestartStatusUnknown") : t("common.saved");
+      const restartMessage =
+        restartNotice === "required"
+          ? t("providers.catalogOverrideRestartCodex")
+          : restartNotice === "unknown"
+            ? t("providers.codexRestartStatusUnknown")
+            : t("common.saved");
       const appliedClientCount = syncResult?.applied ?? 0;
       const failedClientCount = syncResult?.failed ?? 0;
       let clientSyncFeedback: { text: string; tone: "error" | "success" };
       if (!syncBoundClients) {
         clientSyncFeedback = {
-          text: t("providers.contextGuardClientsAutoSyncDisabled", { restartMessage }),
+          text: t("providers.contextGuardClientsAutoSyncDisabled", {
+            restartMessage,
+          }),
           tone: "success",
         };
       } else if (syncResultUncertain) {
@@ -1703,22 +2057,30 @@ function OfficialDetail({
         };
       } else if (failedClientCount > 0 && appliedClientCount > 0) {
         clientSyncFeedback = {
-          text: t("providers.contextGuardClientsPartiallySyncedRestart", { restartMessage }),
+          text: t("providers.contextGuardClientsPartiallySyncedRestart", {
+            restartMessage,
+          }),
           tone: "error",
         };
       } else if (failedClientCount > 0) {
         clientSyncFeedback = {
-          text: t("providers.contextGuardClientsSyncFailed", { restartMessage }),
+          text: t("providers.contextGuardClientsSyncFailed", {
+            restartMessage,
+          }),
           tone: "error",
         };
       } else if (appliedClientCount > 0) {
         clientSyncFeedback = {
-          text: t("providers.contextGuardClientsSyncedRestart", { restartMessage }),
+          text: t("providers.contextGuardClientsSyncedRestart", {
+            restartMessage,
+          }),
           tone: "success",
         };
       } else {
         clientSyncFeedback = {
-          text: t("providers.contextGuardClientsNotUpdated", { restartMessage }),
+          text: t("providers.contextGuardClientsNotUpdated", {
+            restartMessage,
+          }),
           tone: "success",
         };
       }
@@ -1729,7 +2091,9 @@ function OfficialDetail({
     } catch (err) {
       updateToast(toastId, {
         action: null,
-        text: t("providers.contextGuardUpdateFailed", { message: messageFromError(err) }),
+        text: t("providers.contextGuardUpdateFailed", {
+          message: messageFromError(err),
+        }),
         tone: "error",
       });
     } finally {
@@ -1740,35 +2104,59 @@ function OfficialDetail({
   async function testOfficialModel(model: Model) {
     const label = displayModel(model);
     const endpointLabel = upstreamFormatLabel("responses", t as Translate);
-    const toastId = showToast(t("providers.testingModel", { label, endpoint: endpointLabel }), "loading");
+    const toastId = showToast(
+      t("providers.testingModel", { label, endpoint: endpointLabel }),
+      "loading",
+    );
     try {
       const result = await api.gatewayTestRequest("responses_stream", model.id);
       if (!result.ok) {
-        throw new Error(result.error || result.sanitized_body || `HTTP ${result.status ?? "unknown"}`);
+        throw new Error(
+          result.error ||
+            result.sanitized_body ||
+            `HTTP ${result.status ?? "unknown"}`,
+        );
       }
       updateToast(toastId, {
         action: null,
-        text: t("gateway.connectedHttp", { label, endpoint: endpointLabel, status: result.status }),
+        text: t("gateway.connectedHttp", {
+          label,
+          endpoint: endpointLabel,
+          status: result.status,
+        }),
         tone: "success",
       });
       return true;
     } catch (err) {
       updateToast(toastId, {
         action: null,
-        text: t("gateway.connectionFailed", { label, endpoint: endpointLabel, message: messageFromError(err) }),
+        text: t("gateway.connectionFailed", {
+          label,
+          endpoint: endpointLabel,
+          message: messageFromError(err),
+        }),
         tone: "error",
       });
       return false;
     }
   }
 
-  async function changeOfficialCollaborationVersion(modelId: string, version: "v1" | "v2" | null) {
+  async function changeOfficialCollaborationVersion(
+    modelId: string,
+    version: "v1" | "v2" | null,
+  ) {
     const toastId = showToast(
-      t("providers.savingCollaborationVersion", { version: version ?? t("providers.catalogBaseline") }),
+      t("providers.savingCollaborationVersion", {
+        version: version ?? t("providers.catalogBaseline"),
+      }),
       "loading",
     );
     try {
-      const result = await api.saveOfficialMultiAgentVersion(modelId, version, false);
+      const result = await api.saveOfficialMultiAgentVersion(
+        modelId,
+        version,
+        false,
+      );
       const canonical = normalizeOfficialModelId(modelId) ?? modelId;
       const next = { ...officialCollaborationOverrides };
       if (version === null) {
@@ -1778,9 +2166,13 @@ function OfficialDetail({
       }
       onOfficialCollaborationOverridesChanged(next);
       const restartNotice = await readCodexRestartNotice(api);
-      const savedMessage = t("providers.collaborationVersionSaved") +
-        (restartNotice === "required" ? " " + t("providers.catalogOverrideRestartCodex")
-          : restartNotice === "unknown" ? " " + t("providers.codexRestartStatusUnknown") : "");
+      const savedMessage =
+        t("providers.collaborationVersionSaved") +
+        (restartNotice === "required"
+          ? " " + t("providers.catalogOverrideRestartCodex")
+          : restartNotice === "unknown"
+            ? " " + t("providers.codexRestartStatusUnknown")
+            : "");
       updateToast(toastId, {
         action: null,
         text: result.warning?.trim()
@@ -1794,14 +2186,16 @@ function OfficialDetail({
     } catch (err) {
       updateToast(toastId, {
         action: null,
-        text: t("providers.collaborationVersionSaveFailed", { message: messageFromError(err) }),
+        text: t("providers.collaborationVersionSaveFailed", {
+          message: messageFromError(err),
+        }),
         tone: "error",
       });
     }
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
+    <div className="ws-official-detail grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
       <div className="grid gap-3 border-b border-line p-4">
         <HeaderRow
           title={t("common.codex")}
@@ -1810,21 +2204,44 @@ function OfficialDetail({
             <SourceStatusChip {...codexAuthChip(authState, t as Translate)} />
           }
           actions={
-            authorized && (
-              <>
-                <OfficialOpenAIUsageLimitBars busy={usageBusy} limits={usageSnapshot?.limits ?? []} />
-                <button
-                  type="button"
-                  className="focus-ring grid h-7 w-7 place-items-center rounded-control bg-surface text-slate-600 shadow-control hover:bg-white disabled:text-slate-300"
-                  disabled={usageBusy}
-                  aria-label={t("providers.refreshOpenAIUsage")}
-                  title={t("providers.refreshOpenAIUsage")}
-                  onClick={onRefreshUsage}
-                >
-                  <RefreshCcw size={14} className={usageBusy ? "animate-spin" : undefined} />
-                </button>
-              </>
-            )
+            <>
+              {authorized && (
+                <>
+                  <OfficialOpenAIUsageLimitBars
+                    busy={usageBusy}
+                    limits={usageSnapshot?.limits ?? []}
+                  />
+                  <button
+                    type="button"
+                    className="focus-ring grid h-7 w-7 place-items-center rounded-control bg-surface text-slate-600 shadow-control hover:bg-white disabled:text-slate-300"
+                    disabled={usageBusy}
+                    aria-label={t("providers.refreshOpenAIUsage")}
+                    title={t("providers.refreshOpenAIUsage")}
+                    onClick={onRefreshUsage}
+                  >
+                    <RefreshCcw
+                      size={14}
+                      className={usageBusy ? "animate-spin" : undefined}
+                    />
+                  </button>
+                </>
+              )}
+              <button
+                className="ws-button"
+                disabled={signOutBusy || busy !== null}
+                onClick={
+                  authorized
+                    ? () => void signOut()
+                    : () => {
+                        setLoginPending(true);
+                        onOpenCodexApp();
+                      }
+                }
+              >
+                {authorized ? <LogOut size={14} /> : <LogIn size={14} />}
+                {t(authorized ? "providers.xaiSignOut" : "workspace.signIn")}
+              </button>
+            </>
           }
         />
         {!officialIncluded && (
@@ -1840,14 +2257,9 @@ function OfficialDetail({
             usageHidden={usageHidden}
           />
         ) : (
-          <CodexAuthPrompt
-            authIssue={authIssue}
-            authState={authState}
-            busy={authRefreshBusy}
-            onCopyLoginCommand={onCopyLoginCommand}
-            onOpenCodexApp={onOpenCodexApp}
-            onRefreshAuth={onRefreshAuth}
-          />
+          <p className="ws-muted">
+            {authIssue || t("workspace.signInForQuota")}
+          </p>
         )}
       </div>
       <ModelSection
@@ -1911,68 +2323,6 @@ function OfficialDetail({
   );
 }
 
-function CodexAuthPrompt({
-  authIssue,
-  authState,
-  busy,
-  onCopyLoginCommand,
-  onOpenCodexApp,
-  onRefreshAuth,
-}: {
-  authIssue: string | null;
-  authState: CodexAuthState;
-  busy: boolean;
-  onCopyLoginCommand: () => void;
-  onOpenCodexApp: () => void;
-  onRefreshAuth: () => void;
-}) {
-  const { t } = useTranslation();
-  const title = authState === "unknown"
-    ? t("providers.codexAuthUnknownTitle")
-    : t("providers.codexAuthRequiredTitle");
-
-  return (
-    <section className="grid gap-3 rounded-inner bg-amber-50/70 p-3 text-sm shadow-hairline">
-      <div className="min-w-0">
-        <h3 className="truncate text-sm font-semibold text-ink">{title}</h3>
-        <p className="mt-1 text-xs leading-5 text-slate-700">{t("providers.codexAuthRequiredBody")}</p>
-        {authIssue && (
-          <p className="mt-1 truncate text-xs text-slate-500" title={authIssue}>
-            {authIssue}
-          </p>
-        )}
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control hover:bg-slate-800"
-          onClick={onOpenCodexApp}
-        >
-          <ExternalLink size={15} />
-          <span className="truncate">{t("providers.openCodexApp")}</span>
-        </button>
-        <button
-          type="button"
-          className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-slate-700 shadow-control hover:bg-white"
-          onClick={onCopyLoginCommand}
-        >
-          <Copy size={15} />
-          <span className="truncate">{t("providers.copyCodexLoginCommand")}</span>
-        </button>
-        <button
-          type="button"
-          className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-slate-700 shadow-control hover:bg-white disabled:text-slate-300"
-          disabled={busy}
-          onClick={onRefreshAuth}
-        >
-          <RefreshCcw size={15} className={busy ? "animate-spin" : undefined} />
-          <span className="truncate">{t("providers.refreshCodexAuth")}</span>
-        </button>
-      </div>
-    </section>
-  );
-}
-
 function withDefaultFastVariants(settings: Settings): Settings {
   return normalizeSettings(settings);
 }
@@ -2000,7 +2350,10 @@ function codexHubConnectionErrorMessage(err: unknown, t: Translate) {
   return t("providers.codexHubConnectionFailed", { message });
 }
 
-function codexTakeoverOwnerLabel(owner: AppFlavorInfo["codex_target_owner"], t: Translate) {
+function codexTakeoverOwnerLabel(
+  owner: AppFlavorInfo["codex_target_owner"],
+  t: Translate,
+) {
   if (owner === null) return t("providers.betaTakeoverUnowned");
   if (owner === "official") return t("common.official");
   if (owner === "release") return t("gateway.ownerRelease");
@@ -2009,38 +2362,58 @@ function codexTakeoverOwnerLabel(owner: AppFlavorInfo["codex_target_owner"], t: 
 }
 
 function codexHubConnectionSuccessMessage(mode: string, t: Translate) {
-  return mode === "custom" ? t("providers.connectedToHub") : t("providers.disconnectedFromHub");
+  return mode === "custom"
+    ? t("providers.connectedToHub")
+    : t("providers.disconnectedFromHub");
 }
 
 function readCodexAuthPreviewState(): CodexAuthState | null {
-  if (typeof window === "undefined" || (!import.meta.env.DEV && !isLocalHttpPreviewLocation(window.location))) {
+  if (
+    typeof window === "undefined" ||
+    (!import.meta.env.DEV && !isLocalHttpPreviewLocation(window.location))
+  ) {
     return null;
   }
   const value = new URLSearchParams(window.location.search).get("codexAuth");
-  return value === "authorized" || value === "missing" || value === "unknown" ? value : null;
+  return value === "authorized" || value === "missing" || value === "unknown"
+    ? value
+    : null;
 }
 
 function clearCodexAuthPreviewParam() {
-  if (typeof window === "undefined" || !window.location.search.includes("codexAuth=")) {
+  if (
+    typeof window === "undefined" ||
+    !window.location.search.includes("codexAuth=")
+  ) {
     return;
   }
   const url = new URL(window.location.href);
   url.searchParams.delete("codexAuth");
-  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${url.pathname}${url.search}${url.hash}`,
+  );
 }
 
 function isLocalHttpPreviewLocation(location: Location) {
   return (
     location.protocol === "http:" &&
-    (location.hostname === "127.0.0.1" || location.hostname === "localhost" || location.hostname === "::1")
+    (location.hostname === "127.0.0.1" ||
+      location.hostname === "localhost" ||
+      location.hostname === "::1")
   );
 }
 
 function isUnknownCodexHubCommand(message: string, command: string) {
-  return message.toLowerCase().includes(`unknown codexhub command: ${command}`.toLowerCase());
+  return message
+    .toLowerCase()
+    .includes(`unknown codexhub command: ${command}`.toLowerCase());
 }
 
-function codexAuthStateFromGatewayStatus(status: GatewayStatus | null): CodexAuthState {
+function codexAuthStateFromGatewayStatus(
+  status: GatewayStatus | null,
+): CodexAuthState {
   if (!status) {
     return "unknown";
   }

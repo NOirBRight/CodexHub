@@ -254,8 +254,8 @@ export function ModelSection({
             <button
               type="button"
               className={cx(
-                "focus-ring inline-flex shrink-0 items-center justify-center gap-2 border border-line bg-panel px-3 font-semibold hover:bg-slate-100 disabled:bg-slate-100",
-                headerControl ? "h-7 rounded-full text-xs" : "h-9 rounded-md text-sm",
+                "ws-model-refresh focus-ring inline-flex shrink-0 items-center justify-center gap-2 border border-line bg-panel px-3 font-semibold hover:bg-slate-100 disabled:bg-slate-100",
+                headerControl ? "ws-compact h-7 rounded-full text-xs" : "h-9 rounded-md text-sm",
               )}
               disabled={interactionDisabled || (refreshBusy && !onCancelRefresh)}
               aria-label={t(refreshBusy && onCancelRefresh ? "common.cancel" : "common.refresh")}
@@ -645,7 +645,7 @@ function optionalPositiveNumber(value: string) {
 
 function CapabilityChip({ icon, label, title }: { icon?: React.ReactNode; label: string; title?: string }) {
   return (
-    <span title={title} className="inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-line bg-panel px-2 text-xs font-semibold text-slate-600">
+    <span title={title} className="ws-model-tag inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-line bg-panel px-2 text-xs font-semibold text-slate-600">
       {icon}
       {label}
     </span>
@@ -696,7 +696,7 @@ function CollaborationVersionChip({
       <button
         type="button"
         className={cx(
-          "inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[11px] font-semibold leading-none",
+          "ws-model-tag inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[11px] font-semibold leading-none",
           overridden ? "border-action/40 bg-blue-50 text-action" : "border-line bg-panel text-slate-600",
         )}
         disabled={disabled}
@@ -783,7 +783,7 @@ export function SwitchControl({
       aria-describedby={ariaDescribedBy}
     >
       <span className={showLabel ? "truncate" : "sr-only"}>{label}</span>
-      <span className="relative inline-flex h-5 w-9 shrink-0 items-center">
+      <span className="ws-model-switch relative inline-flex h-5 w-9 shrink-0 items-center">
         <input
           type="checkbox"
           className="peer sr-only"

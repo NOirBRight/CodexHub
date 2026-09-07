@@ -65,7 +65,7 @@ function ConfirmDialog({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
-  const portalHost = document.getElementById("root");
+  const portalHost = document.querySelector(".workspace-root") ?? document.getElementById("root");
   if (!portalHost) return null;
 
   return createPortal(

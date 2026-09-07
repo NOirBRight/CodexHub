@@ -34,7 +34,9 @@ export function ProviderCatalogPicker({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
-  const portalHost = document.getElementById("root");
+  const portalHost =
+    document.querySelector(".workspace-root") ??
+    document.getElementById("root");
   if (!portalHost) return null;
 
   return createPortal(
@@ -54,46 +56,67 @@ export function ProviderCatalogPicker({
         role="dialog"
       >
         <div className="grid gap-2 px-5 py-4">
-          <h2 id="provider-catalog-picker-title" className="text-base font-semibold text-ink">
+          <h2
+            id="provider-catalog-picker-title"
+            className="text-base font-semibold text-ink"
+          >
             {t("providers.chooseCatalogProviderTitle")}
           </h2>
-          <p id="provider-catalog-picker-body" className="text-sm leading-6 text-muted">
+          <p
+            id="provider-catalog-picker-body"
+            className="text-sm leading-6 text-muted"
+          >
             {t("providers.chooseCatalogProviderBody")}
           </p>
         </div>
         <div className="min-h-0 overflow-y-auto px-5 pb-2">
           {loading ? (
-            <p className="py-6 text-sm text-slate-500">{t("providers.catalogPickerLoading")}</p>
+            <p className="py-6 text-sm text-slate-500">
+              {t("providers.catalogPickerLoading")}
+            </p>
           ) : (
             <div className="grid gap-2">
-              {presets.map((provider) => {
-                const alreadyAdded = existingIds.has(provider.id);
-                return (
-                  <button
-                    key={provider.id}
-                    type="button"
-                    className="focus-ring grid w-full gap-1 rounded-control bg-panel px-3 py-3 text-left shadow-control hover:bg-white"
-                    onClick={() => onSelectPreset(provider)}
-                  >
-                    <span className="flex items-center justify-between gap-2">
-                      <span className="flex min-w-0 items-center gap-2">
-                        <ProviderLogo providerId={provider.id} />
-                        <span className="truncate text-sm font-semibold text-ink">{provider.name}</span>
-                      </span>
-                      {alreadyAdded ? (
-                        <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                          {t("providers.catalogProviderAlreadyAdded")}
+              {presets
+                .filter(
+                  (provider) =>
+                    !["volc", "minimax-cn", "kimi-cn", "kimi"].includes(
+                      provider.id,
+                    ),
+                )
+                .map((provider) => {
+                  const alreadyAdded = existingIds.has(provider.id);
+                  return (
+                    <button
+                      key={provider.id}
+                      type="button"
+                      className="focus-ring grid w-full gap-1 rounded-control bg-panel px-3 py-3 text-left shadow-control hover:bg-white"
+                      onClick={() => onSelectPreset(provider)}
+                    >
+                      <span className="flex items-center justify-between gap-2">
+                        <span className="flex min-w-0 items-center gap-2">
+                          <ProviderLogo providerId={provider.id} />
+                          <span className="truncate text-sm font-semibold text-ink">
+                            {provider.name}
+                          </span>
                         </span>
-                      ) : null}
-                    </span>
-                    {provider.onboarding_hint ? (
-                      <span className="text-xs text-slate-600">{t(provider.onboarding_hint)}</span>
-                    ) : (
-                      <span className="truncate text-xs text-slate-500">{provider.base_url}</span>
-                    )}
-                  </button>
-                );
-              })}
+                        {alreadyAdded ? (
+                          <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                            {t("providers.catalogProviderAlreadyAdded")}
+                          </span>
+                        ) : null}
+                      </span>
+                      {provider.onboarding_hint ? (
+                        <span className="text-xs text-slate-600">
+                          {t(provider.onboarding_hint)}
+                        </span>
+                      ) : (
+                        <span className="truncate text-xs text-slate-500">
+                          {provider.base_url}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
               <button
                 type="button"
                 className="focus-ring grid w-full gap-1 rounded-control border border-dashed border-line bg-surface px-3 py-3 text-left hover:bg-white"
@@ -102,7 +125,9 @@ export function ProviderCatalogPicker({
                 <span className="truncate text-sm font-semibold text-ink">
                   {t("providers.chooseCatalogProviderCustom")}
                 </span>
-                <span className="text-xs text-slate-500">{t("providers.chooseCatalogProviderCustomHint")}</span>
+                <span className="text-xs text-slate-500">
+                  {t("providers.chooseCatalogProviderCustomHint")}
+                </span>
               </button>
             </div>
           )}

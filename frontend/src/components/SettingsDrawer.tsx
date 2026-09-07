@@ -1,11 +1,30 @@
-import { Check, ChevronDown, Download, RefreshCcw, Save, X } from "lucide-react";
+import { rebaseSettingsDraft } from "../lib/workspaceSettings";
+import {
+  Check,
+  ChevronDown,
+  Copy,
+  Download,
+  Eye,
+  EyeOff,
+  RefreshCcw,
+  Save,
+  X,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { changeAppLocale, type AppLocale } from "../i18n";
-import { providerFromDisplayName, providerLabel, providerLabelMap } from "../lib/providerLabels";
+import {
+  providerFromDisplayName,
+  providerLabel,
+  providerLabelMap,
+} from "../lib/providerLabels";
 import { cx } from "../lib/format";
 import { messageFromError } from "../lib/tauri";
-import { formatUpdateDate, isUpdateInstallActive, updateInstallButtonLabel } from "../lib/updateStatus";
+import {
+  formatUpdateDate,
+  isUpdateInstallActive,
+  updateInstallButtonLabel,
+} from "../lib/updateStatus";
 import type {
   AppUpdateInstallStatus,
   AppUpdateStatus,
@@ -18,6 +37,10 @@ import { useToasts } from "./PageToast";
 import { SegmentedSwitch, type SegmentedOption } from "./SegmentedSwitch";
 
 interface SettingsDrawerProps {
+  inlineCategory?: string;
+  dark?: boolean;
+  onTheme?: () => void;
+  onOpenContextGuard?: () => void;
   appVersion: AppVersionInfo | null;
   busy?: string | null;
   open: boolean;
@@ -35,6 +58,10 @@ interface SettingsDrawerProps {
 }
 
 export function SettingsDrawer({
+  inlineCategory,
+  dark,
+  onTheme,
+  onOpenContextGuard,
   appVersion,
   busy,
   onCheckUpdate,
@@ -53,18 +80,27 @@ export function SettingsDrawer({
   const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
   const [draft, setDraft] = useState<Settings | null>(settings);
+  const settingsBaseline = useRef(settings);
+  const [showGatewayKey, setShowGatewayKey] = useState(false);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [closePromptOpen, setClosePromptOpen] = useState(false);
-  const hasUnsavedChanges = Boolean(settings && draft && settingsSaveComparable(settings) !== settingsSaveComparable(draft));
+  const hasUnsavedChanges = Boolean(
+    settings &&
+      draft &&
+      settingsSaveComparable(settings) !== settingsSaveComparable(draft),
+  );
 
   useEffect(() => {
     if (!open) {
+      settingsBaseline.current = settings;
       setDraft(settings);
       setHistoryBusy(false);
       setClosePromptOpen(false);
       return;
     }
-    setDraft((current) => current ?? settings);
+    const baseline = settingsBaseline.current;
+    setDraft((current) => rebaseSettingsDraft(current, baseline, settings));
+    settingsBaseline.current = settings;
   }, [settings, open]);
 
   useEffect(() => {
@@ -73,12 +109,33 @@ export function SettingsDrawer({
     }
   }, [open]);
 
+  async function copyWorkspaceValue(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      showToast(t("common.copied"), "success");
+    } catch (error) {
+      showToast(messageFromError(error), "error");
+    }
+  }
+
   async function saveDraft(options?: { closeOnSuccess?: boolean }) {
     if (!draft) {
       return;
     }
-    const toastId = showToast(t("settings.savingSettings", { defaultValue: "Saving settings..." }), "loading");
+    const toastId = showToast(
+      t("settings.savingSettings", { defaultValue: "Saving settings..." }),
+      "loading",
+    );
     try {
+      if (
+        !Number.isInteger(draft.proxy_port) ||
+        draft.proxy_port < 1024 ||
+        draft.proxy_port > 65535 ||
+        !Number.isInteger(draft.gateway_request_timeout_seconds) ||
+        draft.gateway_request_timeout_seconds < 5 ||
+        draft.gateway_request_timeout_seconds > 600
+      )
+        throw new Error(t("workspace.invalidGatewaySettings"));
       const savedMessage = await onSave(draft);
       updateToast(toastId, {
         action: null,
@@ -102,7 +159,10 @@ export function SettingsDrawer({
     if (!draft) {
       return;
     }
-    const toastId = showToast(t("settings.syncingConversationHistory"), "loading");
+    const toastId = showToast(
+      t("settings.syncingConversationHistory"),
+      "loading",
+    );
     const targetProvider = draft.unified_codex_history ? "custom" : "openai";
     try {
       const message = await onSyncHistory(targetProvider);
@@ -127,7 +187,9 @@ export function SettingsDrawer({
     const previous = draft;
     const next = { ...draft, unified_codex_history: enabled };
     const toastId = showToast(
-      enabled ? t("settings.enablingUnifiedHistory") : t("settings.restoringOfficialHistory"),
+      enabled
+        ? t("settings.enablingUnifiedHistory")
+        : t("settings.restoringOfficialHistory"),
       "loading",
     );
     setDraft(next);
@@ -136,7 +198,11 @@ export function SettingsDrawer({
       const savedMessage = await onSave(next);
       updateToast(toastId, {
         action: null,
-        text: savedMessage ?? (enabled ? t("settings.unifiedHistoryEnabled") : t("settings.officialHistoryRestored")),
+        text:
+          savedMessage ??
+          (enabled
+            ? t("settings.unifiedHistoryEnabled")
+            : t("settings.officialHistoryRestored")),
         tone: "success",
       });
     } catch (err) {
@@ -199,7 +265,7 @@ export function SettingsDrawer({
 
   return (
     <>
-      {open && (
+      {open && !inlineCategory && (
         <button
           type="button"
           className="fixed inset-0 z-40 cursor-default bg-black/10 backdrop-blur-[1px]"
@@ -207,176 +273,455 @@ export function SettingsDrawer({
           onClick={requestClose}
         />
       )}
-    <aside
-      className={cx(
-        "fixed inset-y-0 right-0 z-50 grid w-full max-w-[420px] grid-rows-[auto_minmax(0,1fr)_auto] rounded-l-overlay bg-surface shadow-overlay transition-transform",
-        open ? "translate-x-0" : "translate-x-full",
-      )}
-      aria-hidden={!open}
-    >
-      <div className="flex items-center justify-between gap-3 px-5 py-4 shadow-hairline">
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-[0.06em] text-slate-500">
-            {t("common.settings")}
-          </div>
-          <h2 className="text-base font-semibold text-ink">{t("settings.codexHubGateway")}</h2>
-        </div>
-        <button
-          type="button"
-          className="focus-ring grid h-8 w-8 place-items-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
-          onClick={requestClose}
-          title={t("common.closeSettings")}
-        >
-          <X size={16} />
-        </button>
-      </div>
-
-      <div className="min-h-0 overflow-auto">
-        <div className="py-5 pl-5 pr-2">
-        {!draft ? (
-          <div className="rounded-panel bg-panel p-4 text-sm text-slate-500 shadow-card">
-            {t("common.loadingSettings")}
-          </div>
-        ) : (
-          <div className="grid gap-5">
-            <section className="grid gap-3">
-              <h3 className="text-sm font-semibold text-ink">CodexHub</h3>
-              <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
-                <div className="grid gap-1 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
-                  <span className="text-xs font-semibold text-slate-500">{t("settings.language")}</span>
-                  <SegmentedSwitch
-                    ariaLabel={t("settings.language")}
-                    className="grid-cols-2"
-                    disabled={Boolean(busy)}
-                    value={draft.locale}
-                    options={languageOptions}
-                    onChange={(value) => void changeLanguage(value)}
-                  />
-                </div>
-                <Toggle
-                  checked={draft.auto_start_software}
-                  label={t("settings.autoStartSoftware")}
-                  onChange={(value) => setDraft({ ...draft, auto_start_software: value })}
-                />
-                <Toggle
-                  checked={draft.auto_start_gateway}
-                  label={t("settings.autoStartGateway")}
-                  onChange={(value) => setDraft({ ...draft, auto_start_gateway: value })}
-                />
-                <Toggle
-                  checked={draft.include_official_models}
-                  label={t("settings.includeOfficialModels")}
-                  onChange={(value) => setDraft({ ...draft, include_official_models: value })}
-                />
-                <Toggle
-                  checked={draft.unified_codex_history}
-                  disabled={historyBusy || Boolean(busy)}
-                  label={t("settings.unifiedCodexHistory")}
-                  onChange={(value) => void toggleUnifiedHistory(value)}
-                />
-                <Toggle
-                  checked={draft.auto_sync_clients}
-                  label={t("settings.autoSyncBoundClients")}
-                  onChange={(value) => setDraft({ ...draft, auto_sync_clients: value })}
-                />
-                <button
-                  type="button"
-                  className="focus-ring inline-flex h-9 items-center justify-start rounded-control bg-surface px-3 text-sm font-medium text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
-                  disabled={Boolean(busy) || historyBusy}
-                  onClick={() => void repairHistory()}
-                >
-                  {t("settings.repairHistoryBucket")}
-                </button>
-              </div>
-            </section>
-
-            <section className="grid gap-3">
-              <h3 className="text-sm font-semibold text-ink">{t("settings.autoRetry")}</h3>
-              <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
-                <Toggle
-                  checked={draft.gateway_auto_retry_enabled}
-                  disabled={Boolean(busy)}
-                  label={t("common.enabled")}
-                  onChange={(value) => setDraft({ ...draft, gateway_auto_retry_enabled: value })}
-                />
-                <label className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_36px] items-center gap-3 rounded-inner bg-surface px-3 py-1.5 text-sm font-medium text-slate-700 shadow-control">
-                  <span className="min-w-0 truncate">{t("settings.maxAttempts")}</span>
-                  <input
-                    className="h-6 w-9 min-w-0 rounded-control border border-transparent bg-transparent px-0 text-center text-sm font-semibold tabular-nums text-ink shadow-none outline-none transition-[box-shadow,border-color,background-color] duration-150 ease-out [appearance:textfield] focus:border-action/40 focus:bg-surface focus:shadow-field disabled:text-slate-400 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                    type="number"
-                    min={1}
-                    max={30}
-                    value={draft.gateway_auto_retry_max_attempts}
-                    disabled={!draft.gateway_auto_retry_enabled}
-                    onChange={(event) =>
-                      setDraft({
-                        ...draft,
-                        gateway_auto_retry_max_attempts: clampRetryAttempts(event.target.value),
-                      })
-                    }
-                  />
-                </label>
-              </div>
-            </section>
-
-            <section className="grid gap-3">
-              <h3 className="text-sm font-semibold text-ink">{t("settings.imageProxy")}</h3>
-              <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
-                <Toggle
-                  checked={draft.gateway_image_proxy_enabled}
-                  disabled={Boolean(busy)}
-                  label={t("common.enabled")}
-                  onChange={(value) => setDraft({ ...draft, gateway_image_proxy_enabled: value })}
-                />
-                <div className="relative grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,190px)] items-center gap-3 rounded-inner bg-surface px-3 py-1 text-sm font-medium text-slate-700 shadow-control">
-                  <span className="min-w-0 truncate">{t("settings.visionModel")}</span>
-                  <VisionModelSelect
-                    models={visionModels}
-                    providers={providers}
-                    value={draft.gateway_image_proxy_model}
-                    disabled={!draft.gateway_image_proxy_enabled || visionModels.length === 0}
-                    onChange={(value) => setDraft({ ...draft, gateway_image_proxy_model: value })}
-                  />
-                </div>
-              </div>
-            </section>
-
-            <section className="grid gap-3">
-              <h3 className="text-sm font-semibold text-ink">{t("settings.updates")}</h3>
-              <VersionUpdateBlock
-                busy={updateBusy}
-                installStatus={updateInstallStatus}
-                status={updateStatus}
-                versionInfo={appVersion}
-                onCheck={() => void onCheckUpdate()}
-                onInstall={() => void onInstallUpdate()}
-              />
-            </section>
-          </div>
+      <aside
+        data-settings-category={inlineCategory}
+        className={cx(
+          inlineCategory
+            ? "ws-settings-inline"
+            : "fixed inset-y-0 right-0 z-50 grid w-full max-w-[420px] grid-rows-[auto_minmax(0,1fr)_auto] rounded-l-overlay bg-surface shadow-overlay transition-transform",
+          open ? "translate-x-0" : "translate-x-full",
         )}
-        </div>
-      </div>
-
-      <div className="px-5 py-4 shadow-[0_-1px_0_rgba(31,41,51,0.06)]">
-        <div className="flex flex-wrap items-center justify-end gap-2">
+        aria-hidden={!open}
+      >
+        <div className="flex items-center justify-between gap-3 px-5 py-4 shadow-hairline">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-[0.06em] text-slate-500">
+              {t("common.settings")}
+            </div>
+            <h2 className="text-base font-semibold text-ink">
+              {t("settings.codexHubGateway")}
+            </h2>
+          </div>
           <button
             type="button"
-            className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
-            disabled={Boolean(busy) || historyBusy || !draft || !hasUnsavedChanges}
-            onClick={() => void saveDraft()}
+            className="focus-ring grid h-8 w-8 place-items-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+            onClick={requestClose}
+            title={t("common.closeSettings")}
           >
-            <Save size={15} />
-            {t("common.save")}
+            <X size={16} />
           </button>
         </div>
-      </div>
-    </aside>
+
+        <div className="min-h-0 overflow-auto">
+          <div className="py-5 pl-5 pr-2">
+            {!draft ? (
+              <div className="rounded-panel bg-panel p-4 text-sm text-slate-500 shadow-card">
+                {t("common.loadingSettings")}
+              </div>
+            ) : (
+              <div className="grid gap-5">
+                <section
+                  hidden={Boolean(
+                    inlineCategory && inlineCategory !== "general",
+                  )}
+                  className="grid gap-3"
+                >
+                  <h3 className="text-sm font-semibold text-ink">
+                    {t("workspace.settingsCategories.general")}
+                  </h3>
+                  <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
+                    {inlineCategory && onTheme && (
+                      <div className="ws-setting-line">
+                        <span>{t("workspace.appearance")}</span>
+                        <div className="ws-client-filters">
+                          <button
+                            className={!dark ? "selected" : ""}
+                            onClick={() => dark && onTheme()}
+                          >
+                            {t("workspace.light")}
+                          </button>
+                          <button
+                            className={dark ? "selected" : ""}
+                            onClick={() => !dark && onTheme()}
+                          >
+                            {t("workspace.dark")}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    <div className="grid gap-1 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
+                      <span className="text-xs font-semibold text-slate-500">
+                        {t("settings.language")}
+                      </span>
+                      <SegmentedSwitch
+                        ariaLabel={t("settings.language")}
+                        className="grid-cols-2"
+                        disabled={Boolean(busy)}
+                        value={draft.locale}
+                        options={languageOptions}
+                        onChange={(value) => void changeLanguage(value)}
+                      />
+                    </div>
+                    <Toggle
+                      checked={draft.auto_start_software}
+                      label={t("settings.autoStartSoftware")}
+                      onChange={(value) =>
+                        setDraft({ ...draft, auto_start_software: value })
+                      }
+                    />
+                    <Toggle
+                      checked={draft.auto_start_gateway}
+                      label={t("settings.autoStartGateway")}
+                      onChange={(value) =>
+                        setDraft({ ...draft, auto_start_gateway: value })
+                      }
+                    />
+                  </div>
+                </section>
+                <section
+                  hidden={Boolean(inlineCategory && inlineCategory !== "codex")}
+                  className="grid gap-3"
+                >
+                  <h3 className="text-sm font-semibold text-ink">
+                    {t("workspace.settingsCategories.codex")}
+                  </h3>
+                  <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
+                    <Toggle
+                      checked={draft.include_official_models}
+                      label={t("settings.includeOfficialModels")}
+                      onChange={(value) =>
+                        setDraft({ ...draft, include_official_models: value })
+                      }
+                    />
+                    {inlineCategory && onOpenContextGuard && (
+                      <div className="ws-setting-line">
+                        <span>
+                          {t("providers.contextGuardShort")}
+                          <small>{t("providers.contextGuardTooltip")}</small>
+                        </span>
+                        <button
+                          className="ws-button"
+                          onClick={onOpenContextGuard}
+                        >
+                          {t("workspace.configure")}
+                        </button>
+                      </div>
+                    )}
+                    <Toggle
+                      checked={draft.unified_codex_history}
+                      disabled={historyBusy || Boolean(busy)}
+                      label={t("settings.unifiedCodexHistory")}
+                      onChange={(value) => void toggleUnifiedHistory(value)}
+                    />
+                    <Toggle
+                      checked={draft.auto_sync_clients}
+                      label={t("settings.autoSyncBoundClients")}
+                      onChange={(value) =>
+                        setDraft({ ...draft, auto_sync_clients: value })
+                      }
+                    />
+                    <button
+                      type="button"
+                      className="focus-ring inline-flex h-9 items-center justify-start rounded-control bg-surface px-3 text-sm font-medium text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+                      disabled={Boolean(busy) || historyBusy}
+                      onClick={() => void repairHistory()}
+                    >
+                      {t("settings.repairHistoryBucket")}
+                    </button>
+                  </div>
+                </section>
+
+                {inlineCategory && (
+                  <section
+                    hidden={inlineCategory !== "gateway"}
+                    className="grid gap-3"
+                  >
+                    <h3>{t("workspace.localService")}</h3>
+                    <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
+                      <label className="ws-setting-line">
+                        <span>
+                          {t("workspace.bindAddress")}
+                          <small>{t("workspace.localOnly")}</small>
+                        </span>
+                        <code>{draft.gateway_bind_address}</code>
+                      </label>
+                      <label className="ws-setting-line">
+                        <span>
+                          {t("common.port")}
+                          <small>1024–65535</small>
+                        </span>
+                        <input
+                          className="field"
+                          aria-label={t("common.port")}
+                          type="number"
+                          min={1024}
+                          max={65535}
+                          value={draft.proxy_port}
+                          onChange={(e) =>
+                            setDraft({
+                              ...draft,
+                              proxy_port: Number(e.target.value),
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="ws-setting-line">
+                        <span>
+                          {t("common.timeout")}
+                          <small>{t("workspace.timeoutRange")}</small>
+                        </span>
+                        <input
+                          className="field"
+                          aria-label={t("common.timeout")}
+                          type="number"
+                          min={5}
+                          max={600}
+                          value={draft.gateway_request_timeout_seconds}
+                          onChange={(e) =>
+                            setDraft({
+                              ...draft,
+                              gateway_request_timeout_seconds: Number(
+                                e.target.value,
+                              ),
+                            })
+                          }
+                        />
+                      </label>
+                      <div className="ws-setting-line">
+                        <span>
+                          {t("common.apiKey")}
+                          <small>{t("workspace.localKeyHint")}</small>
+                        </span>
+                        <div className="ws-settings-key">
+                          <input
+                            aria-label={t("common.apiKey")}
+                            type={showGatewayKey ? "text" : "password"}
+                            autoComplete="off"
+                            value={draft.gateway_client_key}
+                            onChange={(e) =>
+                              setDraft({
+                                ...draft,
+                                gateway_client_key: e.target.value,
+                              })
+                            }
+                          />
+                          <button
+                            className="ws-icon"
+                            aria-label={t(
+                              showGatewayKey
+                                ? "common.hideApiKey"
+                                : "common.showApiKey",
+                            )}
+                            onClick={() => setShowGatewayKey((v) => !v)}
+                          >
+                            {showGatewayKey ? (
+                              <EyeOff size={14} />
+                            ) : (
+                              <Eye size={14} />
+                            )}
+                          </button>
+                          <button
+                            className="ws-icon"
+                            aria-label={t("gateway.copyApiKey")}
+                            onClick={() =>
+                              void copyWorkspaceValue(draft.gateway_client_key)
+                            }
+                          >
+                            <Copy size={14} />
+                          </button>
+                          <button
+                            className="ws-icon"
+                            aria-label={t("gateway.regenerateApiKey")}
+                            onClick={() =>
+                              setDraft({
+                                ...draft,
+                                gateway_client_key:
+                                  "ch-" + crypto.randomUUID().replace(/-/g, ""),
+                              })
+                            }
+                          >
+                            <RefreshCcw size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <h3>{t("gateway.copyConnection")}</h3>
+                    <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
+                      {[
+                        ["Models", "/v1/models"],
+                        ["Responses", "/v1/responses"],
+                        ["Chat Completions", "/v1/chat/completions"],
+                      ].map(([label, path]) => {
+                        const url =
+                          "http://" +
+                          (settings?.gateway_bind_address || "127.0.0.1") +
+                          ":" +
+                          (settings?.proxy_port ?? 9099) +
+                          path;
+                        return (
+                          <div className="ws-setting-line" key={path}>
+                            <span>
+                              {label}
+                              <small>{url}</small>
+                            </span>
+                            <button
+                              className="ws-button"
+                              onClick={() => void copyWorkspaceValue(url)}
+                            >
+                              <Copy size={12} />
+                              {t("common.copy")}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                )}
+
+                <section
+                  hidden={Boolean(
+                    inlineCategory && inlineCategory !== "requests",
+                  )}
+                  className="grid gap-3"
+                >
+                  <h3 className="text-sm font-semibold text-ink">
+                    {t("settings.autoRetry")}
+                  </h3>
+                  <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
+                    <Toggle
+                      checked={draft.gateway_auto_retry_enabled}
+                      disabled={Boolean(busy)}
+                      label={t("common.enabled")}
+                      onChange={(value) =>
+                        setDraft({
+                          ...draft,
+                          gateway_auto_retry_enabled: value,
+                        })
+                      }
+                    />
+                    <label className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_36px] items-center gap-3 rounded-inner bg-surface px-3 py-1.5 text-sm font-medium text-slate-700 shadow-control">
+                      <span className="min-w-0 truncate">
+                        {t("settings.maxAttempts")}
+                      </span>
+                      <input
+                        className="h-6 w-9 min-w-0 rounded-control border border-transparent bg-transparent px-0 text-center text-sm font-semibold tabular-nums text-ink shadow-none outline-none transition-[box-shadow,border-color,background-color] duration-150 ease-out [appearance:textfield] focus:border-action/40 focus:bg-surface focus:shadow-field disabled:text-slate-400 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                        type="number"
+                        min={1}
+                        max={30}
+                        value={draft.gateway_auto_retry_max_attempts}
+                        disabled={!draft.gateway_auto_retry_enabled}
+                        onChange={(event) =>
+                          setDraft({
+                            ...draft,
+                            gateway_auto_retry_max_attempts: clampRetryAttempts(
+                              event.target.value,
+                            ),
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                </section>
+
+                <section
+                  hidden={Boolean(
+                    inlineCategory && inlineCategory !== "requests",
+                  )}
+                  className="grid gap-3"
+                >
+                  <h3 className="text-sm font-semibold text-ink">
+                    {t("settings.imageProxy")}
+                  </h3>
+                  <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
+                    <Toggle
+                      checked={draft.gateway_image_proxy_enabled}
+                      disabled={Boolean(busy)}
+                      label={t("common.enabled")}
+                      onChange={(value) =>
+                        setDraft({
+                          ...draft,
+                          gateway_image_proxy_enabled: value,
+                        })
+                      }
+                    />
+                    <div className="relative grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,190px)] items-center gap-3 rounded-inner bg-surface px-3 py-1 text-sm font-medium text-slate-700 shadow-control">
+                      <span className="min-w-0 truncate">
+                        {t("settings.visionModel")}
+                      </span>
+                      <VisionModelSelect
+                        models={visionModels}
+                        providers={providers}
+                        value={draft.gateway_image_proxy_model}
+                        disabled={
+                          !draft.gateway_image_proxy_enabled ||
+                          visionModels.length === 0
+                        }
+                        onChange={(value) =>
+                          setDraft({
+                            ...draft,
+                            gateway_image_proxy_model: value,
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                </section>
+
+                <section
+                  hidden={Boolean(inlineCategory && inlineCategory !== "about")}
+                  className="grid gap-3"
+                >
+                  <h3 className="text-sm font-semibold text-ink">
+                    {t("settings.updates")}
+                  </h3>
+                  <VersionUpdateBlock
+                    busy={updateBusy}
+                    installStatus={updateInstallStatus}
+                    status={updateStatus}
+                    versionInfo={appVersion}
+                    onCheck={() => void onCheckUpdate()}
+                    onInstall={() => void onInstallUpdate()}
+                  />
+                </section>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="px-5 py-4 shadow-[0_-1px_0_rgba(31,41,51,0.06)]">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {inlineCategory && (
+              <>
+                <span className="ws-save-state">
+                  {t(
+                    hasUnsavedChanges
+                      ? "workspace.unsavedDraft"
+                      : "workspace.saved",
+                  )}
+                </span>
+                <button
+                  className="ws-button"
+                  disabled={!hasUnsavedChanges || Boolean(busy)}
+                  onClick={() => setDraft(settings)}
+                >
+                  {t("common.discard")}
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+              disabled={
+                Boolean(busy) || historyBusy || !draft || !hasUnsavedChanges
+              }
+              onClick={() => void saveDraft()}
+            >
+              <Save size={15} />
+              {t("common.save")}
+            </button>
+          </div>
+        </div>
+      </aside>
       {closePromptOpen && (
         <div className="fixed inset-0 z-[90] grid place-items-center bg-black/20 px-4">
           <div className="grid w-full max-w-[360px] gap-4 rounded-overlay bg-surface p-4 shadow-overlay">
             <div>
-              <h3 className="text-base font-semibold text-ink">{t("settings.unsavedChangesTitle")}</h3>
-              <p className="mt-1 text-sm leading-5 text-slate-500">{t("settings.unsavedChangesBody")}</p>
+              <h3 className="text-base font-semibold text-ink">
+                {t("settings.unsavedChangesTitle")}
+              </h3>
+              <p className="mt-1 text-sm leading-5 text-slate-500">
+                {t("settings.unsavedChangesBody")}
+              </p>
             </div>
             <div className="flex flex-wrap justify-end gap-2">
               <button
@@ -411,7 +756,11 @@ export function SettingsDrawer({
 }
 
 function settingsSaveComparable(settings: Settings) {
-  const { locale: _locale, unified_codex_history: _unifiedHistory, ...saveManagedSettings } = settings;
+  const {
+    locale: _locale,
+    unified_codex_history: _unifiedHistory,
+    ...saveManagedSettings
+  } = settings;
   return JSON.stringify(saveManagedSettings);
 }
 
@@ -431,8 +780,11 @@ function VersionUpdateBlock({
   versionInfo: AppVersionInfo | null;
 }) {
   const { i18n, t } = useTranslation();
-  const rawCurrentVersion = status?.current_version ?? versionInfo?.current_version ?? null;
-  const currentVersion = rawCurrentVersion ? `v${rawCurrentVersion}` : t("common.unknown");
+  const rawCurrentVersion =
+    status?.current_version ?? versionInfo?.current_version ?? null;
+  const currentVersion = rawCurrentVersion
+    ? `v${rawCurrentVersion}`
+    : t("common.unknown");
   const latestVersion = status?.latest_version ?? null;
   const updateAvailable = Boolean(status?.available && latestVersion);
   const releaseNotes = status?.notes?.trim() || t("settings.noReleaseNotes");
@@ -461,7 +813,10 @@ function VersionUpdateBlock({
           disabled={Boolean(busy) || installActive}
           onClick={onCheck}
         >
-          <RefreshCcw size={14} className={busy === "check" ? "animate-spin" : ""} />
+          <RefreshCcw
+            size={14}
+            className={busy === "check" ? "animate-spin" : ""}
+          />
         </button>
       </div>
       {updateAvailable && (
@@ -475,7 +830,9 @@ function VersionUpdateBlock({
             </span>
           </div>
           {releaseDate && (
-            <p className="min-w-0 truncate text-[11px] leading-4 text-slate-400">{releaseDate}</p>
+            <p className="min-w-0 truncate text-[11px] leading-4 text-slate-400">
+              {releaseDate}
+            </p>
           )}
           <div className="grid min-w-0 gap-1">
             <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
@@ -492,7 +849,10 @@ function VersionUpdateBlock({
             onClick={onInstall}
           >
             {installActive ? (
-              <RefreshCcw size={14} className={installActive ? "animate-spin" : ""} />
+              <RefreshCcw
+                size={14}
+                className={installActive ? "animate-spin" : ""}
+              />
             ) : (
               <Download size={14} />
             )}
@@ -518,17 +878,27 @@ interface VisionModelParts {
   title: string;
 }
 
-function visionModelParts(model: Model, providerLabels: Map<string, string>): VisionModelParts {
+function visionModelParts(
+  model: Model,
+  providerLabels: Map<string, string>,
+): VisionModelParts {
   const rawId = model.id.trim();
   const slashIndex = rawId.indexOf("/");
   const modelId = slashIndex > 0 ? rawId.slice(slashIndex + 1) : rawId;
-  const idProvider = slashIndex > 0 ? providerLabel(rawId.slice(0, slashIndex), providerLabels) : "";
-  const displayProvider = providerLabel(providerFromDisplayName(model.display_name, modelId), providerLabels);
+  const idProvider =
+    slashIndex > 0
+      ? providerLabel(rawId.slice(0, slashIndex), providerLabels)
+      : "";
+  const displayProvider = providerLabel(
+    providerFromDisplayName(model.display_name, modelId),
+    providerLabels,
+  );
   const sourceProvider =
     model.source_kind === "official"
       ? "OpenAI"
       : providerLabel(model.source_kind ?? "", providerLabels);
-  const provider = idProvider || displayProvider || sourceProvider || "Provider";
+  const provider =
+    idProvider || displayProvider || sourceProvider || "Provider";
 
   return {
     modelId,
@@ -551,7 +921,11 @@ function Toggle({
   return (
     <label className="flex min-h-9 items-center justify-between gap-4 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
       <span className="min-w-0 truncate">{label}</span>
-      <SwitchControl checked={checked} disabled={disabled} onChange={onChange} />
+      <SwitchControl
+        checked={checked}
+        disabled={disabled}
+        onChange={onChange}
+      />
     </label>
   );
 }
@@ -570,7 +944,7 @@ export function SwitchControl({
   tone?: "action" | "warn";
 }) {
   return (
-    <span className="relative inline-flex h-5 w-9 shrink-0 items-center">
+    <span className="ws-switch-control relative inline-flex h-5 w-9 shrink-0 items-center">
       <input
         type="checkbox"
         className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
@@ -582,7 +956,11 @@ export function SwitchControl({
       <span
         className={cx(
           "pointer-events-none absolute inset-0 rounded-full shadow-control transition-colors peer-disabled:opacity-60",
-          tone === "warn" ? "bg-warn" : checked ? "bg-action" : "bg-slate-200 peer-checked:bg-action",
+          tone === "warn"
+            ? "bg-warn"
+            : checked
+              ? "bg-action"
+              : "bg-slate-200 peer-checked:bg-action",
         )}
       />
       <span className="pointer-events-none absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4 peer-disabled:opacity-80" />
@@ -610,9 +988,14 @@ function VisionModelSelect({
     includeOfficialDashedAlias: true,
   });
   const selectedModel = models.find((model) => model.id === value);
-  const selectedParts = selectedModel ? visionModelParts(selectedModel, providerLabels) : null;
+  const selectedParts = selectedModel
+    ? visionModelParts(selectedModel, providerLabels)
+    : null;
   const { t } = useTranslation();
-  const label = models.length === 0 ? t("common.noVisionModels") : selectedParts?.title ?? t("common.selectModel");
+  const label =
+    models.length === 0
+      ? t("common.noVisionModels")
+      : (selectedParts?.title ?? t("common.selectModel"));
 
   useEffect(() => {
     if (disabled) {
@@ -666,7 +1049,9 @@ function VisionModelSelect({
         {selectedParts ? (
           <VisionModelValue parts={selectedParts} />
         ) : (
-          <span className="min-w-0 flex-1 truncate text-slate-500">{label}</span>
+          <span className="min-w-0 flex-1 truncate text-slate-500">
+            {label}
+          </span>
         )}
         <ChevronDown
           size={16}
@@ -678,10 +1063,11 @@ function VisionModelSelect({
       </button>
 
       {open && (
-        <div
-          className="absolute bottom-[calc(100%+6px)] left-1/2 z-[80] w-[min(340px,calc(100vw-2rem))] -translate-x-1/2 overflow-hidden rounded-overlay bg-surface p-1 shadow-overlay"
-        >
-          <div className="vision-model-listbox max-h-56 overflow-y-auto overscroll-contain pr-1" role="listbox">
+        <div className="absolute bottom-[calc(100%+6px)] left-1/2 z-[80] w-[min(340px,calc(100vw-2rem))] -translate-x-1/2 overflow-hidden rounded-overlay bg-surface p-1 shadow-overlay">
+          <div
+            className="vision-model-listbox max-h-56 overflow-y-auto overscroll-contain pr-1"
+            role="listbox"
+          >
             {models.map((model) => (
               <VisionModelOption
                 key={model.id}
@@ -703,7 +1089,9 @@ function VisionModelValue({ parts }: { parts: VisionModelParts }) {
       <span className="min-w-0 truncate font-mono text-sm font-semibold leading-5 text-ink">
         {parts.modelId}
       </span>
-      <span className="shrink-0 truncate text-sm font-medium leading-5 text-slate-500">{parts.provider}</span>
+      <span className="shrink-0 truncate text-sm font-medium leading-5 text-slate-500">
+        {parts.provider}
+      </span>
     </span>
   );
 }
@@ -722,7 +1110,9 @@ function VisionModelOption({
       type="button"
       className={cx(
         "focus-ring flex min-h-8 w-full min-w-0 items-center justify-between gap-2 rounded-control px-2.5 py-1 text-left text-sm font-medium transition-[background-color,color] duration-150 ease-out",
-        selected ? "bg-panel text-ink" : "text-slate-600 hover:bg-panel hover:text-ink",
+        selected
+          ? "bg-panel text-ink"
+          : "text-slate-600 hover:bg-panel hover:text-ink",
       )}
       role="option"
       aria-selected={selected}

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import { useConfirmDialog } from "./components/ConfirmDialog";
@@ -8,7 +15,11 @@ import { RuntimeBar } from "./components/RuntimeBar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { useToasts } from "./components/PageToast";
 import { changeAppLocale } from "./i18n";
-import { cx } from "./lib/format";
+import {
+  WorkspaceFrame,
+  useWorkspaceTheme,
+  type WorkspacePage,
+} from "./components/workspace/WorkspaceShell";
 import { addDays, endOfDay, startOfDay } from "./lib/dateRange";
 import { api, messageFromError } from "./lib/tauri";
 import { useAppUpdateLifecycle } from "./hooks/useAppUpdateLifecycle";
@@ -75,8 +86,10 @@ function defaultUsageWindow(): UsageQueryWindow {
   };
 }
 
-
-function readGatewayClientVersionCache(): Map<string, GatewayClientVersionCacheEntry> {
+function readGatewayClientVersionCache(): Map<
+  string,
+  GatewayClientVersionCacheEntry
+> {
   if (typeof window === "undefined") {
     return new Map();
   }
@@ -88,16 +101,26 @@ function readGatewayClientVersionCache(): Map<string, GatewayClientVersionCacheE
     }
     return new Map(
       parsed
-        .filter((entry): entry is GatewayClientVersionCacheEntry => (
-          Boolean(entry) && typeof entry === "object" && typeof entry.id === "string"
-        ))
+        .filter(
+          (entry): entry is GatewayClientVersionCacheEntry =>
+            Boolean(entry) &&
+            typeof entry === "object" &&
+            typeof entry.id === "string",
+        )
         .map((entry) => [
           entry.id,
           {
-            checked_at: typeof entry.checked_at === "string" ? entry.checked_at : null,
-            current_version: typeof entry.current_version === "string" ? entry.current_version : null,
+            checked_at:
+              typeof entry.checked_at === "string" ? entry.checked_at : null,
+            current_version:
+              typeof entry.current_version === "string"
+                ? entry.current_version
+                : null,
             id: entry.id,
-            latest_version: typeof entry.latest_version === "string" ? entry.latest_version : null,
+            latest_version:
+              typeof entry.latest_version === "string"
+                ? entry.latest_version
+                : null,
             versions_checked: Boolean(entry.versions_checked),
           },
         ]),
@@ -107,7 +130,9 @@ function readGatewayClientVersionCache(): Map<string, GatewayClientVersionCacheE
   }
 }
 
-function applyGatewayClientVersionCache(clients: GatewayClientInfo[]): GatewayClientInfo[] {
+function applyGatewayClientVersionCache(
+  clients: GatewayClientInfo[],
+): GatewayClientInfo[] {
   const cache = readGatewayClientVersionCache();
   if (!cache.size) {
     return clients;
@@ -119,7 +144,9 @@ function applyGatewayClientVersionCache(clients: GatewayClientInfo[]): GatewayCl
     }
     return {
       ...client,
-      versions_checked: Boolean(client.versions_checked ?? cached.versions_checked),
+      versions_checked: Boolean(
+        client.versions_checked ?? cached.versions_checked,
+      ),
       current_version: client.current_version ?? cached.current_version ?? null,
       latest_version: client.latest_version ?? cached.latest_version ?? null,
     };
@@ -141,16 +168,24 @@ function writeGatewayClientVersionCache(clients: GatewayClientInfo[]) {
       cache.delete(client.id);
       return;
     }
-    if (!client.versions_checked && !client.current_version && !client.latest_version) {
+    if (
+      !client.versions_checked &&
+      !client.current_version &&
+      !client.latest_version
+    ) {
       return;
     }
     const previous = cache.get(client.id);
     cache.set(client.id, {
-      checked_at: client.versions_checked ? checkedAt : previous?.checked_at ?? null,
+      checked_at: client.versions_checked
+        ? checkedAt
+        : (previous?.checked_at ?? null),
       current_version: client.current_version ?? null,
       id: client.id,
       latest_version: client.latest_version ?? null,
-      versions_checked: Boolean(client.versions_checked ?? previous?.versions_checked),
+      versions_checked: Boolean(
+        client.versions_checked ?? previous?.versions_checked,
+      ),
     });
   });
   try {
@@ -171,31 +206,46 @@ function mergeGatewayClients(
   return next.map((client) => {
     const previousClient = previousById.get(client.id);
     if (!client.installed) {
-      return { ...client, versions_checked: false, current_version: null, latest_version: null };
+      return {
+        ...client,
+        versions_checked: false,
+        current_version: null,
+        latest_version: null,
+      };
     }
-    const versionsChecked = Boolean(client.versions_checked ?? previousClient?.versions_checked);
+    const versionsChecked = Boolean(
+      client.versions_checked ?? previousClient?.versions_checked,
+    );
     return {
       ...client,
       versions_checked: versionsChecked,
-      current_version: client.current_version ?? previousClient?.current_version ?? null,
-      latest_version: client.latest_version ?? previousClient?.latest_version ?? null,
+      current_version:
+        client.current_version ?? previousClient?.current_version ?? null,
+      latest_version:
+        client.latest_version ?? previousClient?.latest_version ?? null,
     };
   });
 }
 
-function gatewayRuntimeSettingsChanged(previous: Settings | null, next: Settings) {
+function gatewayRuntimeSettingsChanged(
+  previous: Settings | null,
+  next: Settings,
+) {
   if (!previous) {
     return false;
   }
   return (
     previous.gateway_client_key !== next.gateway_client_key ||
     previous.gateway_auto_retry_enabled !== next.gateway_auto_retry_enabled ||
-    previous.gateway_auto_retry_max_attempts !== next.gateway_auto_retry_max_attempts ||
+    previous.gateway_auto_retry_max_attempts !==
+      next.gateway_auto_retry_max_attempts ||
     previous.gateway_image_proxy_enabled !== next.gateway_image_proxy_enabled ||
     previous.gateway_image_proxy_model !== next.gateway_image_proxy_model ||
-    previous.openai_context_guard_enabled !== next.openai_context_guard_enabled ||
+    previous.openai_context_guard_enabled !==
+      next.openai_context_guard_enabled ||
     previous.proxy_port !== next.proxy_port ||
-    previous.gateway_request_timeout_seconds !== next.gateway_request_timeout_seconds
+    previous.gateway_request_timeout_seconds !==
+      next.gateway_request_timeout_seconds
   );
 }
 
@@ -204,12 +254,17 @@ function shouldRestartGateway(
   next: Settings,
   status: Pick<GatewayStatus, "proxy_running"> | null,
 ) {
-  return Boolean(status?.proxy_running && gatewayRuntimeSettingsChanged(previous, next));
+  return Boolean(
+    status?.proxy_running && gatewayRuntimeSettingsChanged(previous, next),
+  );
 }
 
 function visionModelOptions(models: Model[]) {
   return models
-    .filter((model) => model.enabled !== false && model.input_modalities?.includes("image"))
+    .filter(
+      (model) =>
+        model.enabled !== false && model.input_modalities?.includes("image"),
+    )
     .sort((left, right) => {
       const leftName = left.display_name?.trim() || left.id;
       const rightName = right.display_name?.trim() || right.id;
@@ -217,34 +272,31 @@ function visionModelOptions(models: Model[]) {
     });
 }
 
-function tabPaneClass(active: boolean) {
-  return cx(
-    "absolute inset-0 min-h-0 min-w-0 p-4 [contain:layout_paint_style]",
-    active
-      ? "visible z-10 opacity-100 [content-visibility:visible]"
-      : "invisible z-0 opacity-0 pointer-events-none [content-visibility:hidden]",
-  );
-}
-
 export default function App() {
   const { t } = useTranslation();
   const { confirm: confirmAction, dialog: confirmDialog } = useConfirmDialog();
   const { showToast, updateToast } = useToasts();
-  const [activeTab, setActiveTab] = useState<TabId>("codexhub");
+  const [workspacePage, setWorkspacePage] = useState<WorkspacePage>("overview");
+  const [openOfficialRequest, setOpenOfficialRequest] = useState(0);
+  const [settingsCategory, setSettingsCategory] = useState("general");
+  const theme = useWorkspaceTheme();
   const [visibleTab, setVisibleTab] = useState<TabId>("codexhub");
-  const [mountedTabs, setMountedTabs] = useState<Record<TabId, boolean>>({
-    codexhub: true,
-    gateway: false,
-  });
   const [gatewayVisited, setGatewayVisited] = useState(false);
   const [, startUiTransition] = useTransition();
-  const [runtime, setRuntime] = useState<RuntimeSnapshot>(createEmptyRuntimeSnapshot);
+  const [runtime, setRuntime] = useState<RuntimeSnapshot>(
+    createEmptyRuntimeSnapshot,
+  );
   const [busy, setBusy] = useState<string | null>("load");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
-  const [codexSwitchRequest, setCodexSwitchRequest] = useState<CodexSwitchRequest | null>(null);
-  const [usageWindow, setUsageWindow] = useState<UsageQueryWindow>(() => defaultUsageWindow());
-  const runtimeInflight = useRef<Partial<Record<RuntimeCacheKey, Promise<unknown>>>>({});
+  const [codexSwitchRequest, setCodexSwitchRequest] =
+    useState<CodexSwitchRequest | null>(null);
+  const [usageWindow, setUsageWindow] = useState<UsageQueryWindow>(() =>
+    defaultUsageWindow(),
+  );
+  const runtimeInflight = useRef<
+    Partial<Record<RuntimeCacheKey, Promise<unknown>>>
+  >({});
   const runtimeRef = useRef<RuntimeSnapshot | null>(null);
   const trayToastIds = useRef<Map<string, string>>(new Map());
   const nextCodexSwitchRequestId = useRef(1);
@@ -261,69 +313,81 @@ export default function App() {
   const updateBusy = updateView.busy;
   const updateInstallStatus = updateView.installStatus;
 
-  const runCachedRequest = useCallback(async <K extends RuntimeCacheKey>(
-    key: K,
-    loader: () => Promise<RuntimeData<K>>,
-    options?: RuntimeCacheOptions<RuntimeData<K>>,
-  ): Promise<RuntimeData<K>> => {
-    const existing = runtimeInflight.current[key] as Promise<RuntimeData<K>> | undefined;
-    if (existing && !options?.force) {
-      return existing;
-    }
-    const cached = runtimeRef.current?.[key] as RuntimeCache<RuntimeData<K>> | undefined;
-    const staleMs = options?.staleMs ?? 0;
-    if (
-      !options?.force &&
-      staleMs > 0 &&
-      cached?.data !== null &&
-      cached?.data !== undefined &&
-      cached.updatedAt !== null &&
-      Date.now() - cached.updatedAt < staleMs
-    ) {
-      return cached.data;
-    }
+  const runCachedRequest = useCallback(
+    async <K extends RuntimeCacheKey>(
+      key: K,
+      loader: () => Promise<RuntimeData<K>>,
+      options?: RuntimeCacheOptions<RuntimeData<K>>,
+    ): Promise<RuntimeData<K>> => {
+      const existing = runtimeInflight.current[key] as
+        | Promise<RuntimeData<K>>
+        | undefined;
+      if (existing && !options?.force) {
+        return existing;
+      }
+      const cached = runtimeRef.current?.[key] as
+        | RuntimeCache<RuntimeData<K>>
+        | undefined;
+      const staleMs = options?.staleMs ?? 0;
+      if (
+        !options?.force &&
+        staleMs > 0 &&
+        cached?.data !== null &&
+        cached?.data !== undefined &&
+        cached.updatedAt !== null &&
+        Date.now() - cached.updatedAt < staleMs
+      ) {
+        return cached.data;
+      }
 
-    if (!options?.quiet) {
+      if (!options?.quiet) {
+        startUiTransition(() => {
+          setRuntime((current) => setCacheLoading(current, key));
+        });
+      }
+
+      let request: Promise<RuntimeData<K>>;
+      request = loader()
+        .then((data) => {
+          startUiTransition(() => {
+            setRuntime((current) =>
+              options?.apply
+                ? options.apply(current, data)
+                : setCacheData(current, key, data),
+            );
+          });
+          return data;
+        })
+        .catch((err) => {
+          const message = messageFromError(err);
+          startUiTransition(() => {
+            setRuntime((current) => setCacheError(current, key, message));
+          });
+          if (!options?.quiet) {
+            setBanner(message);
+          }
+          throw err;
+        })
+        .finally(() => {
+          if (runtimeInflight.current[key] === request) {
+            delete runtimeInflight.current[key];
+          }
+        });
+
+      runtimeInflight.current[key] = request;
+      return request;
+    },
+    [startUiTransition],
+  );
+
+  const setRuntimeCacheData = useCallback(
+    <K extends RuntimeCacheKey>(key: K, data: RuntimeData<K>) => {
       startUiTransition(() => {
-        setRuntime((current) => setCacheLoading(current, key));
+        setRuntime((current) => setCacheData(current, key, data));
       });
-    }
-
-    let request: Promise<RuntimeData<K>>;
-    request = loader()
-      .then((data) => {
-        startUiTransition(() => {
-          setRuntime((current) =>
-            options?.apply ? options.apply(current, data) : setCacheData(current, key, data),
-          );
-        });
-        return data;
-      })
-      .catch((err) => {
-        const message = messageFromError(err);
-        startUiTransition(() => {
-          setRuntime((current) => setCacheError(current, key, message));
-        });
-        if (!options?.quiet) {
-          setBanner(message);
-        }
-        throw err;
-      })
-      .finally(() => {
-        if (runtimeInflight.current[key] === request) {
-          delete runtimeInflight.current[key];
-        }
-      });
-
-    runtimeInflight.current[key] = request;
-    return request;
-  }, [startUiTransition]);
-
-  const setRuntimeCacheData = useCallback(<K extends RuntimeCacheKey>(key: K, data: RuntimeData<K>) => {
-    startUiTransition(() => {
-      setRuntime((current) => setCacheData(current, key, data));
-    });
-  }, [startUiTransition]);
+    },
+    [startUiTransition],
+  );
 
   const refreshStatus = useCallback(
     (options?: { force?: boolean; quiet?: boolean }) =>
@@ -364,93 +428,107 @@ export default function App() {
     [runCachedRequest],
   );
 
-  const loadAppFlavor = useCallback(async (options?: LoadRuntimeOptions) => {
-    await runCachedRequest(
-      "appFlavor",
-      () => api.getAppFlavor(),
-      {
+  const loadAppFlavor = useCallback(
+    async (options?: LoadRuntimeOptions) => {
+      await runCachedRequest("appFlavor", () => api.getAppFlavor(), {
         force: options?.force,
         staleMs: options?.staleMs,
-      },
-    );
-  }, [runCachedRequest]);
+      });
+    },
+    [runCachedRequest],
+  );
 
-  const loadGatewayClients = useCallback(async (options?: LoadRuntimeOptions) => {
-    const includeClientVersions = Boolean(options?.includeClientVersions);
-    await runCachedRequest(
-      "gatewayClients",
-      async () => {
-        const clients = await api.listGatewayClients(includeClientVersions);
-        const cachedClients = applyGatewayClientVersionCache(clients);
-        return includeClientVersions
-          ? cachedClients.map((client) => ({
-              ...client,
-              versions_checked: Boolean(client.versions_checked ?? (client.installed && client.id !== "generic")),
-            }))
-          : cachedClients;
-      },
-      {
-        force: options?.force,
-        staleMs: options?.staleMs,
-        quiet: true,
-        apply: (current, clients) =>
-          setCacheData(
-            current,
-            "gatewayClients",
-            mergeGatewayClients(current.gatewayClients.data ?? [], clients),
-          ),
-      },
-    );
-  }, [runCachedRequest]);
+  const loadGatewayClients = useCallback(
+    async (options?: LoadRuntimeOptions) => {
+      const includeClientVersions = Boolean(options?.includeClientVersions);
+      await runCachedRequest(
+        "gatewayClients",
+        async () => {
+          const clients = await api.listGatewayClients(includeClientVersions);
+          const cachedClients = applyGatewayClientVersionCache(clients);
+          return includeClientVersions
+            ? cachedClients.map((client) => ({
+                ...client,
+                versions_checked: Boolean(
+                  client.versions_checked ??
+                    (client.installed && client.id !== "generic"),
+                ),
+              }))
+            : cachedClients;
+        },
+        {
+          force: options?.force,
+          staleMs: options?.staleMs,
+          quiet: true,
+          apply: (current, clients) =>
+            setCacheData(
+              current,
+              "gatewayClients",
+              mergeGatewayClients(current.gatewayClients.data ?? [], clients),
+            ),
+        },
+      );
+    },
+    [runCachedRequest],
+  );
 
-  const refreshGatewayTelemetry = useCallback(async (options?: { force?: boolean }) => {
-    if (!gatewayVisited || visibleTab !== "gateway") {
-      return;
-    }
-    await Promise.allSettled([
-      runCachedRequest(
-        "gatewayUsageSnapshot",
-        () => api.gatewayUsageSnapshot(usageWindow),
-        { force: options?.force, quiet: true, staleMs: 4000 },
-      ),
-      runCachedRequest(
-        "gatewayEvents",
-        () => api.gatewayRecentEvents(80),
-        { force: options?.force, quiet: true, staleMs: 4000 },
-      ),
-    ]);
-  }, [gatewayVisited, runCachedRequest, usageWindow, visibleTab]);
-
-  const refreshCoreRuntime = useCallback(async (options?: { force?: boolean }) => {
-    try {
+  const refreshGatewayTelemetry = useCallback(
+    async (options?: { force?: boolean }) => {
+      if (!gatewayVisited || visibleTab !== "gateway") {
+        return;
+      }
       await Promise.allSettled([
-        refreshStatus({ force: options?.force }),
-        refreshSettings({ force: options?.force }),
-        refreshProviders({ force: options?.force }),
-        refreshGatewayStatus({ force: options?.force }),
-        refreshCatalogModels({ force: options?.force }),
-        refreshModelMetadata({ force: options?.force, quiet: true }),
-        loadAppFlavor({ force: options?.force }),
+        runCachedRequest(
+          "gatewayUsageSnapshot",
+          () => api.gatewayUsageSnapshot(usageWindow),
+          { force: options?.force, quiet: true, staleMs: 4000 },
+        ),
+        runCachedRequest("gatewayEvents", () => api.gatewayRecentEvents(80), {
+          force: options?.force,
+          quiet: true,
+          staleMs: 4000,
+        }),
       ]);
-    } finally {
-      setBusy((current) => (current === "load" ? null : current));
-    }
-  }, [
-    refreshCatalogModels,
-    refreshGatewayStatus,
-    refreshModelMetadata,
-    refreshProviders,
-    refreshSettings,
-    refreshStatus,
-    loadAppFlavor,
-  ]);
+    },
+    [gatewayVisited, runCachedRequest, usageWindow, visibleTab],
+  );
 
-  const refreshRuntimeStatus = useCallback(async (options?: { force?: boolean }) => {
-    await Promise.allSettled([
-      refreshStatus({ force: options?.force, quiet: true }),
-      refreshGatewayStatus({ force: options?.force, quiet: true }),
-    ]);
-  }, [refreshGatewayStatus, refreshStatus]);
+  const refreshCoreRuntime = useCallback(
+    async (options?: { force?: boolean }) => {
+      try {
+        await Promise.allSettled([
+          refreshStatus({ force: options?.force }),
+          refreshSettings({ force: options?.force }),
+          refreshProviders({ force: options?.force }),
+          refreshGatewayStatus({ force: options?.force }),
+          refreshCatalogModels({ force: options?.force }),
+          refreshModelMetadata({ force: options?.force, quiet: true }),
+          loadAppFlavor({ force: options?.force }),
+        ]);
+      } finally {
+        setBusy((current) => (current === "load" ? null : current));
+      }
+    },
+    [
+      refreshCatalogModels,
+      refreshGatewayStatus,
+      refreshModelMetadata,
+      refreshProviders,
+      refreshSettings,
+      refreshStatus,
+      loadAppFlavor,
+    ],
+  );
+
+  const refreshRuntimeStatus = useCallback(
+    async (options?: { force?: boolean }) => {
+      await Promise.allSettled([
+        refreshStatus({ force: options?.force, quiet: true }),
+        refreshGatewayStatus({ force: options?.force, quiet: true }),
+      ]);
+    },
+    [refreshGatewayStatus, refreshStatus],
+  );
 
   const refreshProviderRuntime = useCallback(async () => {
     const [gatewayResult] = await Promise.allSettled([
@@ -460,7 +538,12 @@ export default function App() {
       loadGatewayClients({ force: true }),
     ]);
     return gatewayResult.status === "fulfilled" ? gatewayResult.value : null;
-  }, [loadGatewayClients, refreshCatalogModels, refreshGatewayStatus, refreshModelMetadata]);
+  }, [
+    loadGatewayClients,
+    refreshCatalogModels,
+    refreshGatewayStatus,
+    refreshModelMetadata,
+  ]);
 
   const loadAppVersion = useCallback(async () => {
     try {
@@ -480,17 +563,12 @@ export default function App() {
     }
   }, [runCachedRequest, t]);
 
-
-
-
-
-
-
-
-
   const updateUsageWindow = useCallback((nextWindow: UsageQueryWindow) => {
     setUsageWindow((current) => {
-      if (current.startTs === nextWindow.startTs && current.endTs === nextWindow.endTs) {
+      if (
+        current.startTs === nextWindow.startTs &&
+        current.endTs === nextWindow.endTs
+      ) {
         return current;
       }
       return nextWindow;
@@ -498,9 +576,8 @@ export default function App() {
   }, []);
 
   const selectTab = useCallback((tabId: TabId) => {
-    setActiveTab(tabId);
+    setWorkspacePage(tabId === "codexhub" ? "overview" : "statistics");
     setVisibleTab(tabId);
-    setMountedTabs((current) => (current[tabId] ? current : { ...current, [tabId]: true }));
     if (tabId === "gateway") {
       setGatewayVisited(true);
     }
@@ -512,7 +589,10 @@ export default function App() {
     // keep them behind the explicit Gateway refresh action instead of startup.
     void loadGatewayClients();
     const timer = window.setInterval(() => void refreshRuntimeStatus(), 5000);
-    const clientTimer = window.setInterval(() => void loadGatewayClients(), 12 * 60 * 60 * 1000);
+    const clientTimer = window.setInterval(
+      () => void loadGatewayClients(),
+      12 * 60 * 60 * 1000,
+    );
     return () => {
       window.clearInterval(timer);
       window.clearInterval(clientTimer);
@@ -538,7 +618,10 @@ export default function App() {
         }
         return;
       }
-      const toastId = showToast({ text: event.payload.text, tone: event.payload.tone });
+      const toastId = showToast({
+        text: event.payload.text,
+        tone: event.payload.tone,
+      });
       if (event.payload.tone === "loading") {
         trayToastIds.current.set(event.payload.id, toastId);
       }
@@ -565,16 +648,19 @@ export default function App() {
     }
     let disposed = false;
     let unlisten: (() => void) | null = null;
-    void listen<"official" | "custom">("codexhub:request-codex-switch", (event) => {
-      if (event.payload !== "official" && event.payload !== "custom") {
-        return;
-      }
-      selectTab("codexhub");
-      setCodexSwitchRequest({
-        id: nextCodexSwitchRequestId.current++,
-        mode: event.payload,
-      });
-    })
+    void listen<"official" | "custom">(
+      "codexhub:request-codex-switch",
+      (event) => {
+        if (event.payload !== "official" && event.payload !== "custom") {
+          return;
+        }
+        selectTab("codexhub");
+        setCodexSwitchRequest({
+          id: nextCodexSwitchRequestId.current++,
+          mode: event.payload,
+        });
+      },
+    )
       .then((nextUnlisten) => {
         if (disposed) {
           nextUnlisten();
@@ -595,17 +681,22 @@ export default function App() {
     appUpdate.startScheduling(settingsLoaded);
   }, [appUpdate, settingsLoaded]);
 
-
-
-
-
   useEffect(() => {
-    if (!settingsOpen || runtime.appVersion.data || runtime.appVersion.loading) {
+    if (
+      !settingsOpen ||
+      runtime.appVersion.data ||
+      runtime.appVersion.loading
+    ) {
       return;
     }
     const timer = window.setTimeout(() => void loadAppVersion(), 0);
     return () => window.clearTimeout(timer);
-  }, [loadAppVersion, runtime.appVersion.data, runtime.appVersion.loading, settingsOpen]);
+  }, [
+    loadAppVersion,
+    runtime.appVersion.data,
+    runtime.appVersion.loading,
+    settingsOpen,
+  ]);
 
   useEffect(() => {
     if (!gatewayVisited || visibleTab !== "gateway") {
@@ -615,7 +706,10 @@ export default function App() {
       void refreshGatewayTelemetry();
       void loadGatewayClients({ staleMs: 30_000 });
     }, 150);
-    const timer = window.setInterval(() => void refreshGatewayTelemetry(), 5000);
+    const timer = window.setInterval(
+      () => void refreshGatewayTelemetry(),
+      5000,
+    );
     return () => {
       window.clearTimeout(refreshTimer);
       window.clearInterval(timer);
@@ -636,7 +730,10 @@ export default function App() {
   const catalogModels = runtime.catalogModels.data ?? [];
   const modelMetadata = runtime.modelMetadata.data ?? [];
   const appFlavor = runtime.appFlavor.data;
-  const visionModels = useMemo(() => visionModelOptions(catalogModels), [catalogModels]);
+  const visionModels = useMemo(
+    () => visionModelOptions(catalogModels),
+    [catalogModels],
+  );
 
   useEffect(() => {
     if (settings?.locale) {
@@ -644,131 +741,182 @@ export default function App() {
     }
   }, [settings?.locale]);
 
-  const runRuntimeAction = useCallback(async (
-    label: string,
-    action: () => Promise<AppStatus>,
-    options?: { toast?: boolean; warnBeforeGatewayRetirement?: boolean },
-  ): Promise<AppStatus | null> => {
-    if (options?.warnBeforeGatewayRetirement && !(await confirmAction({
-      cancelLabel: t("common.cancel"),
-      confirmLabel: t("common.confirm"),
-      message: t("runtime.gatewayRetirementWarning"),
-      title: t("common.confirm"),
-    }))) {
-      return null;
-    }
-    setBusy(label);
-    const toastId =
-      options?.toast === false
-        ? null
-        : showToast(runtimeActionLoadingMessage(label, t), "loading");
-    try {
-      const status = await action();
-      setRuntimeCacheData("status", status);
-      setBanner(status.message);
-      if (toastId) {
-        updateToast(toastId, {
-          action: null,
-          text: runtimeActionSuccessMessage(label, t),
-          tone: "success",
-        });
+  const runRuntimeAction = useCallback(
+    async (
+      label: string,
+      action: () => Promise<AppStatus>,
+      options?: { toast?: boolean; warnBeforeGatewayRetirement?: boolean },
+    ): Promise<AppStatus | null> => {
+      if (
+        options?.warnBeforeGatewayRetirement &&
+        !(await confirmAction({
+          cancelLabel: t("common.cancel"),
+          confirmLabel: t("common.confirm"),
+          message: t("runtime.gatewayRetirementWarning"),
+          title: t("common.confirm"),
+        }))
+      ) {
+        return null;
       }
-      await refreshRuntimeStatus({ force: true });
-      return status;
-    } catch (err) {
-      const message = messageFromError(err);
-      setBanner(message);
-      await refreshRuntimeStatus({ force: true });
-      if (toastId) {
-        updateToast(toastId, {
-          action: null,
-          text: message,
-          tone: "error",
-        });
-      }
-      if (options?.toast === false) {
-        throw err;
-      }
-      return null;
-    } finally {
-      setBusy(null);
-    }
-  }, [confirmAction, refreshRuntimeStatus, setRuntimeCacheData, showToast, t, updateToast]);
-
-  const saveSettings = useCallback(async (next: Settings) => {
-    setBusy("settings");
-    try {
-      const restartGateway = shouldRestartGateway(settings, next, gatewayStatus);
-      if (restartGateway && !(await confirmAction({
-        cancelLabel: t("common.cancel"),
-        confirmLabel: t("common.confirm"),
-        message: t("runtime.gatewayRetirementWarning"),
-        title: t("common.confirm"),
-      }))) {
-        return t("runtime.gatewayRetirementCancelled");
-      }
-      if (settings && next.auto_start_software !== settings.auto_start_software) {
-        if (next.auto_start_software) {
-          await api.setAutostart(true);
-        } else {
-          await api.removeAutostart();
-        }
-      }
-      const savedSettings = await api.saveSettings(next);
-      setRuntimeCacheData("settings", savedSettings);
-      let saveMessage = t("settings.settingsSaved");
-      if (restartGateway) {
-        const status = await api.restartProxy();
+      setBusy(label);
+      const toastId =
+        options?.toast === false
+          ? null
+          : showToast(runtimeActionLoadingMessage(label, t), "loading");
+      try {
+        const status = await action();
         setRuntimeCacheData("status", status);
-        saveMessage = t("gateway.gatewaySettingsSavedRestarted");
+        setBanner(status.message);
+        if (toastId) {
+          updateToast(toastId, {
+            action: null,
+            text: runtimeActionSuccessMessage(label, t),
+            tone: "success",
+          });
+        }
+        await refreshRuntimeStatus({ force: true });
+        return status;
+      } catch (err) {
+        const message = messageFromError(err);
+        setBanner(message);
+        await refreshRuntimeStatus({ force: true });
+        if (toastId) {
+          updateToast(toastId, {
+            action: null,
+            text: message,
+            tone: "error",
+          });
+        }
+        if (options?.toast === false) {
+          throw err;
+        }
+        return null;
+      } finally {
+        setBusy(null);
       }
-      setBanner(null);
-      await refreshRuntimeStatus({ force: true });
-      return saveMessage;
-    } catch (err) {
-      const message = messageFromError(err);
-      setBanner(message);
-      await refreshRuntimeStatus({ force: true });
-      throw err;
-    } finally {
-      setBusy(null);
-    }
-  }, [confirmAction, gatewayStatus, refreshRuntimeStatus, setRuntimeCacheData, settings, t]);
+    },
+    [
+      confirmAction,
+      refreshRuntimeStatus,
+      setRuntimeCacheData,
+      showToast,
+      t,
+      updateToast,
+    ],
+  );
 
-  const syncHistory = useCallback(async (targetProvider: string) => {
-    setBusy("history");
-    try {
-      const result = await api.syncConversationHistory(targetProvider);
-      if (result.status === "deferred" || result.status === "restart_required") {
-        const message = t("settings.historySyncDeferred");
+  const saveSettings = useCallback(
+    async (next: Settings) => {
+      setBusy("settings");
+      try {
+        const restartGateway = shouldRestartGateway(
+          settings,
+          next,
+          gatewayStatus,
+        );
+        if (
+          restartGateway &&
+          !(await confirmAction({
+            cancelLabel: t("common.cancel"),
+            confirmLabel: t("common.confirm"),
+            message: t("runtime.gatewayRetirementWarning"),
+            title: t("common.confirm"),
+          }))
+        ) {
+          return t("runtime.gatewayRetirementCancelled");
+        }
+        if (
+          settings &&
+          next.auto_start_software !== settings.auto_start_software
+        ) {
+          if (next.auto_start_software) {
+            await api.setAutostart(true);
+          } else {
+            await api.removeAutostart();
+          }
+        }
+        const savedSettings = await api.saveSettings(next);
+        setRuntimeCacheData("settings", savedSettings);
+        let saveMessage = t("settings.settingsSaved");
+        if (restartGateway) {
+          const status = await api.restartProxy();
+          setRuntimeCacheData("status", status);
+          saveMessage = t("gateway.gatewaySettingsSavedRestarted");
+        }
         setBanner(null);
-        return message;
+        await refreshRuntimeStatus({ force: true });
+        return saveMessage;
+      } catch (err) {
+        const message = messageFromError(err);
+        setBanner(message);
+        await refreshRuntimeStatus({ force: true });
+        throw err;
+      } finally {
+        setBusy(null);
       }
-      if (result.status === "conflict") {
-        throw new Error(result.error ?? t("settings.historyProviderConflict"));
-      }
-      const message = result.status === "repaired"
-        ? t("settings.historyStartupRepaired", {
-            rows: result.changed_rows,
-            files: result.changed_files,
-          })
-        : t("settings.conversationHistoryAlreadySynced");
-      setBanner(message);
-      return message;
-    } catch (err) {
-      const message = messageFromError(err);
-      setBanner(message);
-      throw err;
-    } finally {
-      setBusy(null);
-    }
-  }, [t]);
+    },
+    [
+      confirmAction,
+      gatewayStatus,
+      refreshRuntimeStatus,
+      setRuntimeCacheData,
+      settings,
+      t,
+    ],
+  );
 
-  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const syncHistory = useCallback(
+    async (targetProvider: string) => {
+      setBusy("history");
+      try {
+        const result = await api.syncConversationHistory(targetProvider);
+        if (
+          result.status === "deferred" ||
+          result.status === "restart_required"
+        ) {
+          const message = t("settings.historySyncDeferred");
+          setBanner(null);
+          return message;
+        }
+        if (result.status === "conflict") {
+          throw new Error(
+            result.error ?? t("settings.historyProviderConflict"),
+          );
+        }
+        const message =
+          result.status === "repaired"
+            ? t("settings.historyStartupRepaired", {
+                rows: result.changed_rows,
+                files: result.changed_files,
+              })
+            : t("settings.conversationHistoryAlreadySynced");
+        setBanner(message);
+        return message;
+      } catch (err) {
+        const message = messageFromError(err);
+        setBanner(message);
+        throw err;
+      } finally {
+        setBusy(null);
+      }
+    },
+    [t],
+  );
+
+  const openSettings = useCallback(() => {
+    setWorkspacePage("settings");
+    setSettingsOpen(true);
+  }, []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
-  const startProxy = useCallback(() => runRuntimeAction("start", api.startProxy), [runRuntimeAction]);
+  const startProxy = useCallback(
+    () => runRuntimeAction("start", api.startProxy),
+    [runRuntimeAction],
+  );
   const stopProxy = useCallback(
-    () => runRuntimeAction("stop", api.stopProxy, { warnBeforeGatewayRetirement: true }),
+    () =>
+      runRuntimeAction("stop", api.stopProxy, {
+        warnBeforeGatewayRetirement: true,
+      }),
     [runRuntimeAction],
   );
   const startProxyQuiet = useCallback(
@@ -776,11 +924,16 @@ export default function App() {
     [runRuntimeAction],
   );
   const stopProxyQuiet = useCallback(
-    () => runRuntimeAction("stop", api.stopProxy, { toast: false, warnBeforeGatewayRetirement: true }),
+    () =>
+      runRuntimeAction("stop", api.stopProxy, {
+        toast: false,
+        warnBeforeGatewayRetirement: true,
+      }),
     [runRuntimeAction],
   );
   const updateProvidersCache = useCallback(
-    (nextProviders: Provider[]) => setRuntimeCacheData("providers", nextProviders),
+    (nextProviders: Provider[]) =>
+      setRuntimeCacheData("providers", nextProviders),
     [setRuntimeCacheData],
   );
   const updateSettingsCache = useCallback(
@@ -791,133 +944,170 @@ export default function App() {
     (status: AppStatus) => setRuntimeCacheData("status", status),
     [setRuntimeCacheData],
   );
-  const applyGatewaySettings = useCallback(async (nextSettings: Settings) => {
-    return await saveSettings(nextSettings);
-  }, [saveSettings]);
+  const applyGatewaySettings = useCallback(
+    async (nextSettings: Settings) => {
+      return await saveSettings(nextSettings);
+    },
+    [saveSettings],
+  );
 
+  function navigateWorkspace(page: WorkspacePage) {
+    setWorkspacePage(page);
+    setSettingsOpen(page === "settings");
+    setVisibleTab(
+      page === "statistics" || page === "clients" || page === "settings"
+        ? "gateway"
+        : "codexhub",
+    );
+    if (page === "statistics" || page === "clients" || page === "settings")
+      setGatewayVisited(true);
+  }
   return (
     <FitStage>
-    <div className="relative grid h-full min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] bg-canvas text-ink">
-      <WindowResizeHandles />
-      <RuntimeBar
-        appFlavor={appFlavor}
-        busy={busy}
-        message={banner}
-        settings={settings}
+      <WorkspaceFrame
+        page={workspacePage}
+        onNavigate={navigateWorkspace}
         status={appStatus}
-        onOpenSettings={openSettings}
+        settings={settings}
+        busy={Boolean(busy)}
+        dark={theme.dark}
+        onTheme={theme.toggle}
         onStart={startProxy}
         onStop={stopProxy}
-      />
-
-      <nav className="flex min-h-[45px] items-center gap-1 bg-surface px-4 shadow-hairline">
-        {contract.tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            className={cx(
-              "focus-ring relative h-11 px-3 text-sm font-semibold",
-              activeTab === tab.id ? "text-ink" : "text-slate-500 hover:text-ink",
-            )}
-            onClick={() => selectTab(tab.id as TabId)}
+        onRestart={() =>
+          void runRuntimeAction("restart", api.restartProxy, {
+            warnBeforeGatewayRetirement: true,
+          })
+        }
+        titlebar={
+          <RuntimeBar
+            appFlavor={appFlavor}
+            busy={busy}
+            message={banner}
+            settings={settings}
+            status={appStatus}
+            onOpenSettings={openSettings}
+            onStart={startProxy}
+            onStop={stopProxy}
+          />
+        }
+      >
+        <WindowResizeHandles />
+        <ProvidersPage
+          openOfficialRequest={openOfficialRequest}
+          desktopPage={workspacePage}
+          onNavigate={navigateWorkspace}
+          appFlavor={appFlavor}
+          appStatus={appStatus}
+          catalogModels={catalogModels}
+          gatewayStatus={gatewayStatus}
+          modelMetadata={modelMetadata}
+          providers={providers}
+          settings={settings}
+          onGatewayChanged={refreshProviderRuntime}
+          onRefreshClients={loadGatewayClients}
+          onProvidersChanged={updateProvidersCache}
+          onSettingsChanged={updateSettingsCache}
+          onStatusChanged={updateStatusCache}
+          onStartProxy={startProxyQuiet}
+          codexSwitchRequest={codexSwitchRequest}
+          onCodexSwitchRequestHandled={(id) => {
+            setCodexSwitchRequest((current) =>
+              current?.id === id ? null : current,
+            );
+          }}
+        >
+          {workspacePage === "settings" && (
+            <nav className="ws-settings-tabs" aria-label={t("common.settings")}>
+              {[
+                "general",
+                "codex",
+                "gateway",
+                "requests",
+                "diagnostics",
+                "about",
+              ].map((category) => (
+                <button
+                  key={category}
+                  className={settingsCategory === category ? "selected" : ""}
+                  onClick={() => setSettingsCategory(category)}
+                >
+                  {t("workspace.settingsCategories." + category)}
+                </button>
+              ))}
+            </nav>
+          )}
+          <GatewayPage
+            desktopView={
+              workspacePage === "statistics"
+                ? "statistics"
+                : workspacePage === "clients"
+                  ? "clients"
+                  : workspacePage === "settings" &&
+                      settingsCategory === "diagnostics"
+                    ? "diagnostics"
+                    : "hidden"
+            }
+            appFlavor={appFlavor}
+            settings={settings}
+            providers={providers}
+            status={gatewayStatus}
+            usageSummary={gatewayUsageSnapshot?.summary ?? null}
+            usageEvents={gatewayUsageSnapshot?.events ?? []}
+            usageStatus={gatewayUsageSnapshot?.telemetry_status ?? null}
+            usageError={runtime.gatewayUsageSnapshot.error}
+            recentEvents={gatewayEvents}
+            clientInfos={gatewayClients}
+            busy={busy}
+            clients={contract.gatewayClients as GatewayClientContract[]}
+            onApplySettings={applyGatewaySettings}
+            onRefreshClients={loadGatewayClients}
+            onStartProxy={startProxyQuiet}
+            onStopProxy={stopProxyQuiet}
+            onUsageWindowChange={updateUsageWindow}
+          />
+          <div
+            className="ws-settings-holder"
+            hidden={
+              workspacePage !== "settings" || settingsCategory === "diagnostics"
+            }
           >
-            {t(`common.${tab.id === "codexhub" ? "codexHub" : "gateway"}`)}
-            {activeTab === tab.id && (
-              <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-ink" />
-            )}
-          </button>
-        ))}
-        <span className="ml-auto hidden truncate text-xs text-slate-400 xl:block">
-          {t("runtime.gatewayHint")}
-        </span>
-      </nav>
-
-      <div className="relative min-h-0 min-w-0 max-w-full overflow-hidden">
-        {mountedTabs.codexhub && (
-          <section
-            aria-hidden={visibleTab !== "codexhub"}
-            className={tabPaneClass(visibleTab === "codexhub")}
-            data-tab-pane="codexhub"
-          >
-            <div className="h-full min-h-0 min-w-0 overflow-x-auto overflow-y-auto">
-              <ProvidersPage
-                appFlavor={appFlavor}
-                appStatus={appStatus}
-                catalogModels={catalogModels}
-                gatewayStatus={gatewayStatus}
-                modelMetadata={modelMetadata}
-                providers={providers}
-                settings={settings}
-                onGatewayChanged={refreshProviderRuntime}
-                onRefreshClients={loadGatewayClients}
-                onProvidersChanged={updateProvidersCache}
-                onSettingsChanged={updateSettingsCache}
-                onStatusChanged={updateStatusCache}
-                onStartProxy={startProxyQuiet}
-                codexSwitchRequest={codexSwitchRequest}
-                onCodexSwitchRequestHandled={(id) => {
-                  setCodexSwitchRequest((current) => current?.id === id ? null : current);
-                }}
-              />
-            </div>
-          </section>
-        )}
-        {mountedTabs.gateway && (
-          <section
-            aria-hidden={visibleTab !== "gateway"}
-            className={tabPaneClass(visibleTab === "gateway")}
-            data-tab-pane="gateway"
-          >
-            <div className="h-full min-h-0 min-w-0 overflow-hidden">
-              <GatewayPage
-                appFlavor={appFlavor}
-                settings={settings}
-                providers={providers}
-                status={gatewayStatus}
-                usageSummary={gatewayUsageSnapshot?.summary ?? null}
-                usageEvents={gatewayUsageSnapshot?.events ?? []}
-                usageStatus={gatewayUsageSnapshot?.telemetry_status ?? null}
-                usageError={runtime.gatewayUsageSnapshot.error}
-                recentEvents={gatewayEvents}
-                clientInfos={gatewayClients}
-                busy={busy}
-                clients={contract.gatewayClients as GatewayClientContract[]}
-                onApplySettings={applyGatewaySettings}
-                onRefreshClients={loadGatewayClients}
-                onStartProxy={startProxyQuiet}
-                onStopProxy={stopProxyQuiet}
-                onUsageWindowChange={updateUsageWindow}
-              />
-            </div>
-          </section>
-        )}
-      </div>
-
-      {confirmDialog}
-      <SettingsDrawer
-        busy={busy}
-        appVersion={runtime.appVersion.data}
-        open={settingsOpen}
-        providers={providers}
-        settings={settings}
-        updateInstallStatus={updateInstallStatus}
-        updateBusy={updateBusy}
-        updateStatus={updateView.updateStatus ?? runtime.updateStatus.data}
-        visionModels={visionModels}
-        onCheckUpdate={appUpdate.checkForUpdates}
-        onClose={closeSettings}
-        onInstallUpdate={async () => {
-          await appUpdate.startInstall("settings");
-        }}
-        onSave={saveSettings}
-        onSyncHistory={syncHistory}
-      />
-    </div>
+            <SettingsDrawer
+              onOpenContextGuard={() => setOpenOfficialRequest((n) => n + 1)}
+              inlineCategory={settingsCategory}
+              dark={theme.dark}
+              onTheme={theme.toggle}
+              busy={busy}
+              appVersion={runtime.appVersion.data}
+              open={true}
+              providers={providers}
+              settings={settings}
+              updateInstallStatus={updateInstallStatus}
+              updateBusy={updateBusy}
+              updateStatus={
+                updateView.updateStatus ?? runtime.updateStatus.data
+              }
+              visionModels={visionModels}
+              onCheckUpdate={appUpdate.checkForUpdates}
+              onClose={closeSettings}
+              onInstallUpdate={async () => {
+                await appUpdate.startInstall("settings");
+              }}
+              onSave={saveSettings}
+              onSyncHistory={syncHistory}
+            />
+          </div>
+        </ProvidersPage>
+        {confirmDialog}
+      </WorkspaceFrame>
     </FitStage>
   );
 }
 
-function runtimeActionLoadingMessage(label: string, t: (key: string) => string) {
+function runtimeActionLoadingMessage(
+  label: string,
+  t: (key: string) => string,
+) {
   if (label === "start") {
     return t("runtime.startingRuntime");
   }
@@ -930,7 +1120,10 @@ function runtimeActionLoadingMessage(label: string, t: (key: string) => string) 
   return t("runtime.updatingRuntime");
 }
 
-function runtimeActionSuccessMessage(label: string, t: (key: string) => string) {
+function runtimeActionSuccessMessage(
+  label: string,
+  t: (key: string) => string,
+) {
   if (label === "start") {
     return t("runtime.runtimeStarted");
   }

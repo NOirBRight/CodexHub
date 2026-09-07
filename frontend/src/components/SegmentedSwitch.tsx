@@ -31,7 +31,7 @@ export function SegmentedSwitch<T extends string>({
   return (
     <div
       className={cx(
-        "grid rounded-panel bg-panel p-1 shadow-control",
+        "ws-segmented grid rounded-panel bg-panel p-1 shadow-control",
         className,
       )}
       role="group"

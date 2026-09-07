@@ -3,7 +3,11 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useToasts } from "../PageToast";
 import { api, messageFromError } from "../../lib/tauri";
-import type { OpenAIUsageLimit, XaiAuthStatus, XaiDeviceLogin } from "../../lib/types";
+import type {
+  OpenAIUsageLimit,
+  XaiAuthStatus,
+  XaiDeviceLogin,
+} from "../../lib/types";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
@@ -11,7 +15,9 @@ export function XaiLoginCard({
   onAuthChange,
   onSignedIn,
   onUsage,
+  compact = false,
 }: {
+  compact?: boolean;
   onAuthChange?: (signedIn: boolean) => void;
   onSignedIn?: () => void;
   onUsage?: (limits: OpenAIUsageLimit[]) => void;
@@ -77,7 +83,10 @@ export function XaiLoginCard({
     try {
       await api.xaiOpenVerificationUrl(url);
     } catch (err) {
-      const toastId = showToast(translate("providers.xaiOpenVerificationUrl"), "loading");
+      const toastId = showToast(
+        translate("providers.xaiOpenVerificationUrl"),
+        "loading",
+      );
       updateToast(toastId, {
         action: null,
         text: messageFromError(err),
@@ -87,7 +96,10 @@ export function XaiLoginCard({
   }
 
   async function startLogin() {
-    const toastId = showToast(translate("providers.xaiStartingDeviceLogin"), "loading");
+    const toastId = showToast(
+      translate("providers.xaiStartingDeviceLogin"),
+      "loading",
+    );
     setBusy(true);
     pollCancel.current = false;
     try {
@@ -95,7 +107,9 @@ export function XaiLoginCard({
       setDevice(started);
       updateToast(toastId, {
         action: null,
-        text: translate("providers.xaiDeviceCodeReady", { code: started.user_code }),
+        text: translate("providers.xaiDeviceCodeReady", {
+          code: started.user_code,
+        }),
         tone: "loading",
       });
       if (started.verification_url) {
@@ -153,14 +167,41 @@ export function XaiLoginCard({
   const signedIn = status?.signed_in === true;
   const verificationUrl = device?.verification_url;
 
+  if (compact)
+    return (
+      <div className="ws-actions">
+        <button
+          className="ws-button"
+          disabled={busy}
+          onClick={() => void (signedIn ? logout() : startLogin())}
+        >
+          {signedIn ? <LogOut size={14} /> : <KeyRound size={14} />}
+          {translate(signedIn ? "providers.xaiSignOut" : "workspace.signIn")}
+        </button>
+        {device && (
+          <button
+            className="ws-button"
+            onClick={() => void openVerificationUrl(device.verification_url)}
+          >
+            {device.user_code}
+            <ExternalLink size={12} />
+          </button>
+        )}
+      </div>
+    );
+
   return (
     <section className="grid gap-3 rounded-inner bg-amber-50/70 p-3 text-sm shadow-hairline">
       <div className="min-w-0">
         <h3 className="truncate text-sm font-semibold text-ink">
-          {signedIn ? translate("providers.xaiSignedInTitle") : translate("providers.xaiSignInTitle")}
+          {signedIn
+            ? translate("providers.xaiSignedInTitle")
+            : translate("providers.xaiSignInTitle")}
         </h3>
         <p className="mt-1 text-xs leading-5 text-slate-700">
-          {translate(signedIn ? "providers.xaiSignedInBody" : "providers.xaiSignInBody")}
+          {translate(
+            signedIn ? "providers.xaiSignedInBody" : "providers.xaiSignInBody",
+          )}
         </p>
         {device && (
           <p className="mt-2 font-mono text-sm tracking-wide text-ink">
@@ -177,7 +218,9 @@ export function XaiLoginCard({
             onClick={() => void startLogin()}
           >
             <KeyRound size={15} />
-            <span className="truncate">{translate("providers.xaiStartDeviceLogin")}</span>
+            <span className="truncate">
+              {translate("providers.xaiStartDeviceLogin")}
+            </span>
           </button>
         )}
         {verificationUrl ? (
@@ -187,7 +230,9 @@ export function XaiLoginCard({
             onClick={() => void openVerificationUrl(verificationUrl)}
           >
             <ExternalLink size={15} />
-            <span className="truncate">{translate("providers.xaiOpenVerificationUrl")}</span>
+            <span className="truncate">
+              {translate("providers.xaiOpenVerificationUrl")}
+            </span>
           </button>
         ) : null}
         <button
@@ -197,7 +242,9 @@ export function XaiLoginCard({
           onClick={() => void refreshStatus()}
         >
           <RefreshCcw size={15} className={busy ? "animate-spin" : undefined} />
-          <span className="truncate">{translate("providers.xaiRefreshAuth")}</span>
+          <span className="truncate">
+            {translate("providers.xaiRefreshAuth")}
+          </span>
         </button>
         {signedIn && (
           <button
@@ -207,7 +254,9 @@ export function XaiLoginCard({
             onClick={() => void logout()}
           >
             <LogOut size={15} />
-            <span className="truncate">{translate("providers.xaiSignOut")}</span>
+            <span className="truncate">
+              {translate("providers.xaiSignOut")}
+            </span>
           </button>
         )}
       </div>
@@ -216,7 +265,10 @@ export function XaiLoginCard({
 }
 
 function fallbackApiKeyHint(message: string, t: Translate): string {
-  if (message.toLowerCase().includes("403") || message.toLowerCase().includes("not-eligible")) {
+  if (
+    message.toLowerCase().includes("403") ||
+    message.toLowerCase().includes("not-eligible")
+  ) {
     return t("providers.xaiAllowlistFallback");
   }
   return message;
