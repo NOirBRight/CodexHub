@@ -497,6 +497,8 @@ def test_linux_release_builder_recovers_only_a_prepared_appdir_linuxdeploy_failu
     assert "has_prepared_appimage_dir" in script
     assert '"$app_dir/usr/bin/codexhub"' in script
     assert '"$app_dir/usr/share/applications/CodexHub.desktop"' in script
+    assert "linuxdeploy-x86_64.AppImage" in script
+    assert "plugins/linuxdeploy-plugin-appimage/appimagetool-prefix/usr/bin/appimagetool" in script
     assert "appimage_runtime_sha256=" in script
     assert "curl --fail --location --retry 3" in script
     assert "sha256sum --check --status" in script

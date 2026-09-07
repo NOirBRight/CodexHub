@@ -19,6 +19,7 @@ build_appimage_with_pinned_runtime() {
   local appimage_path="$2"
   local cache_root="${XDG_CACHE_HOME:-$HOME/.cache}"
   local plugin_path="$cache_root/tauri/linuxdeploy-plugin-appimage.AppImage"
+  local linuxdeploy_path="$cache_root/tauri/linuxdeploy-x86_64.AppImage"
   local fallback_dir
   local runtime_path
   local appimagetool_path
@@ -27,8 +28,8 @@ build_appimage_with_pinned_runtime() {
     echo "AppImage fallback cannot find the prepared AppDir: $app_dir" >&2
     return 1
   fi
-  if [[ ! -x "$plugin_path" ]]; then
-    echo "AppImage fallback cannot find Tauri's appimage plugin: $plugin_path" >&2
+  if [[ ! -x "$plugin_path" && ! -x "$linuxdeploy_path" ]]; then
+    echo "AppImage fallback cannot find Tauri's linuxdeploy toolchain" >&2
     return 1
   fi
   if ! command -v curl >/dev/null; then
@@ -44,8 +45,13 @@ build_appimage_with_pinned_runtime() {
 
   (
     cd "$fallback_dir"
-    "$plugin_path" --appimage-extract >/dev/null 2>&1
-    appimagetool_path="$fallback_dir/squashfs-root/usr/bin/appimagetool"
+    if [[ -x "$plugin_path" ]]; then
+      "$plugin_path" --appimage-extract >/dev/null 2>&1
+      appimagetool_path="$fallback_dir/squashfs-root/usr/bin/appimagetool"
+    else
+      "$linuxdeploy_path" --appimage-extract >/dev/null 2>&1
+      appimagetool_path="$fallback_dir/squashfs-root/plugins/linuxdeploy-plugin-appimage/appimagetool-prefix/usr/bin/appimagetool"
+    fi
     if [[ ! -x "$appimagetool_path" ]]; then
       echo "AppImage fallback could not extract appimagetool" >&2
       exit 1
