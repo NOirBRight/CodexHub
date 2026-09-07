@@ -5,7 +5,7 @@ from typing import Any, Mapping, NoReturn
 
 
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
-UPSTREAM_USER_AGENT = "CodexHub/0.1.9 (+https://github.com/noirbright/CodexHub)"
+UPSTREAM_USER_AGENT = "CodexHub/0.2.1 (+https://github.com/noirbright/CodexHub)"
 DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS = 600.0
 DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS = 300.0
 DEFAULT_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
@@ -613,4 +613,3 @@ IMAGE_PROXY_PROMPT = (
     "do not include reasoning, caveats about being a proxy, or meta commentary."
 )
 IMAGE_PROXY_PROGRESS_TEXT = "Analyzing image...\n\n"
-

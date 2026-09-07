@@ -55,7 +55,8 @@ test("Linux window override remains an undecorated visible taskbar window", asyn
   const [window] = config.app.windows;
   assert.equal(window.decorations, false);
   assert.equal(window.skipTaskbar, false);
-  assert.equal(window.transparent, false);
+  assert.equal(window.transparent, true);
+  assert.equal(window.backgroundColor, "#00000000");
   assert.ok(window.minWidth > 0 && window.minHeight > 0);
 });
 
@@ -69,4 +70,16 @@ test("main window capability keeps required native window permissions", async ()
   ]) {
     assert.ok(capability.permissions.includes(permission));
   }
+});
+
+test("scrollable workspace surfaces reserve rails before the final controls", async () => {
+  const [globalCss, workspaceCss] = await Promise.all([
+    readFile(new URL("../src/index.css", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/workspace/workspace.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(globalCss, /\.overflow-auto, \.overflow-x-auto, \.overflow-y-auto[\s\S]*scrollbar-gutter: stable/);
+  assert.match(globalCss, /\.overflow-auto, \.overflow-x-auto, \.overflow-y-auto[\s\S]*padding-inline-end: 8px/);
+  assert.match(workspaceCss, /\.ws-scroll \{[\s\S]*scrollbar-gutter: stable;[\s\S]*padding-inline-end: 8px;/);
+  assert.match(workspaceCss, /\.ws-connection-model-list \{[\s\S]*scrollbar-gutter: stable;[\s\S]*padding-inline-end: 8px;/);
+  assert.match(workspaceCss, /\.ws-management\.ws-scroll \{[\s\S]*scrollbar-gutter: auto;/);
 });

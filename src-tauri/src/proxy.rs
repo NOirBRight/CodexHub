@@ -3416,9 +3416,9 @@ fn format_process_failure(label: &str, pid: u32, output: std::process::Output) -
 #[cfg(test)]
 mod tests {
     use super::{
-        build_start_command, capture_child_stdio,
-        clean_up_failed_start_with_controls, comparable_path, configure_start_stdio, detect_mode,
-        find_python, force_kill_after_graceful_timeout, kill_process, read_pid, read_pid_record,
+        build_start_command, capture_child_stdio, clean_up_failed_start_with_controls,
+        comparable_path, configure_start_stdio, detect_mode, find_python,
+        force_kill_after_graceful_timeout, kill_process, read_pid, read_pid_record,
         reconciled_snapshot_with_controls, start_with_paths_and_controls,
         start_with_paths_and_waiter, status_with_paths,
         stop_current_session_owned_with_paths_and_controls,
@@ -3432,15 +3432,15 @@ mod tests {
     #[cfg(windows)]
     use super::{
         build_start_command_without_diagnostics,
-        replace_managed_proxy_from_previous_bundle_with_controls, ProxyLifecycleBackend,
-        run_bounded_inspection_command, run_bounded_inspection_command_with_hook,
-        run_windows_inspection, WindowsInspectionKind,
+        replace_managed_proxy_from_previous_bundle_with_controls, run_bounded_inspection_command,
+        run_bounded_inspection_command_with_hook, run_windows_inspection, ProxyLifecycleBackend,
+        WindowsInspectionKind,
     };
     #[cfg(not(windows))]
     use super::{start_with_paths, stop_with_paths};
-    use crate::Settings;
     #[cfg(windows)]
     use crate::AppStatus;
+    use crate::Settings;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;
@@ -3451,12 +3451,12 @@ mod tests {
     use std::process::Command;
     #[cfg(windows)]
     use std::process::Stdio;
+    #[cfg(windows)]
+    use std::sync::Mutex;
     use std::sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
     };
-    #[cfg(windows)]
-    use std::sync::Mutex;
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -3781,7 +3781,10 @@ mod tests {
         .expect("exact Gateway listener should be recoverable without a PID file");
 
         assert!(snapshot.status.proxy_running);
-        assert_eq!(snapshot.identity.as_ref().map(|identity| identity.pid), Some(pid));
+        assert_eq!(
+            snapshot.identity.as_ref().map(|identity| identity.pid),
+            Some(pid)
+        );
         assert_eq!(read_pid(&paths).expect("recovered PID"), Some(pid));
     }
 

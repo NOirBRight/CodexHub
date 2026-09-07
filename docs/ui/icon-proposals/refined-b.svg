@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <title>CodexHub — connected model core</title>
+  <rect x="4" y="4" width="248" height="248" rx="52" fill="#F1EEF6"/>
+  <!-- Soft enclosure: a consistent gap separates the four connection modules. -->
+  <path d="M119 41Q128 35 137 41L185 69Q193 74 185 79L166 91Q161 94 156 91L137 80Q128 75 119 80L100 91Q95 94 90 91L71 79Q63 74 71 69Z" fill="#8971A7"/>
+  <path d="M119 215Q128 221 137 215L185 187Q193 182 185 177L166 165Q161 162 156 165L137 176Q128 181 119 176L100 165Q95 162 90 165L71 177Q63 182 71 187Z" fill="#8971A7"/>
+  <path d="M59 82Q63 79 67 82L83 92Q88 95 83 100Q76 107 76 117V139Q76 149 83 156Q88 161 83 164L67 174Q63 177 59 174L49 168Q42 164 42 155V101Q42 92 49 88Z" fill="#51435F"/>
+  <path d="M197 82Q193 79 189 82L173 92Q168 95 173 100Q180 107 180 117V139Q180 149 173 156Q168 161 173 164L189 174Q193 177 197 174L207 168Q214 164 214 155V101Q214 92 207 88Z" fill="#51435F"/>
+  <path d="M120 88Q128 83 136 88L165 105Q172 109 172 118V138Q172 147 165 151L136 168Q128 173 120 168L91 151Q84 147 84 138V118Q84 109 91 105Z" fill="#BCA2D8"/>
+  <defs>
+    <clipPath id="core">
+      <path d="M123 102Q128 99 133 102L151 112Q155 115 155 120V139Q155 144 151 147L133 157Q128 160 123 157L105 147Q101 144 101 139V120Q101 115 105 112Z"/>
+    </clipPath>
+  </defs>
+  <!-- Color planes carry the cube; fine, rounded joins only clarify its structure. -->
+  <g clip-path="url(#core)">
+    <path d="M128 96L160 114L128 133L96 114Z" fill="#FAF8FC"/>
+    <path d="M96 114L128 133V164L96 145Z" fill="#E4DAEE"/>
+    <path d="M160 114L128 133V164L160 145Z" fill="#CDBBDD"/>
+    <path d="M99 115L124 130Q128 133 132 130L157 115M128 133V160" stroke="#9D86B4" stroke-width="1.25" stroke-opacity=".65" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

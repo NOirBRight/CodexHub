@@ -1,12 +1,11 @@
 use super::{
     apply_history_sync_result, codex_overlay_owner, get_bundled_providers_with_paths,
     get_codex_context_guard_status_with_paths, get_providers_with_paths, get_settings_with_paths,
-    merge_post_switch_gateway_status, migrate_legacy_context_guard_with_paths,
-    managed_codex_projection_transaction_paths_with_paths,
-    republish_managed_codex_context_budget_with_paths, save_providers_with_paths,
-    save_settings_with_paths, set_codex_context_guard_with_paths, switch_mode_with_paths,
-    switch_mode_with_paths_takeover_as_owner, takeover_metadata_path, top_level_model_is_official,
-    CommandOutcome, CommandRunner, ConfigPaths, ProcessCommandRunner,
+    managed_codex_projection_transaction_paths_with_paths, merge_post_switch_gateway_status,
+    migrate_legacy_context_guard_with_paths, republish_managed_codex_context_budget_with_paths,
+    save_providers_with_paths, save_settings_with_paths, set_codex_context_guard_with_paths,
+    switch_mode_with_paths, switch_mode_with_paths_takeover_as_owner, takeover_metadata_path,
+    top_level_model_is_official, CommandOutcome, CommandRunner, ConfigPaths, ProcessCommandRunner,
 };
 use crate::{Model, Provider, Settings, ToolProtocol, ToolSurfaceStrategy, UpstreamFormat};
 use std::cell::RefCell;
@@ -52,7 +51,10 @@ fn projection_transaction_restores_both_channel_backups_and_takeover_metadata() 
     });
 
     assert!(result.is_err());
-    assert_eq!(fs::read_to_string(release_backup).unwrap(), "old-release-backup");
+    assert_eq!(
+        fs::read_to_string(release_backup).unwrap(),
+        "old-release-backup"
+    );
     assert_eq!(fs::read_to_string(beta_backup).unwrap(), "old-beta-backup");
     assert_eq!(
         fs::read_to_string(release_takeover).unwrap(),
@@ -286,9 +288,11 @@ fn bundled_catalog_toml_includes_kimi_presets() {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../config/providers.toml");
     fs::create_dir_all(paths.bundled_providers_path().parent().unwrap()).unwrap();
     fs::copy(&source, paths.bundled_providers_path()).expect("copy bundled catalog");
-    let bundled =
-        get_bundled_providers_with_paths(&paths).expect("parse repo providers.toml");
-    let ids: Vec<&str> = bundled.iter().map(|provider| provider.id.as_str()).collect();
+    let bundled = get_bundled_providers_with_paths(&paths).expect("parse repo providers.toml");
+    let ids: Vec<&str> = bundled
+        .iter()
+        .map(|provider| provider.id.as_str())
+        .collect();
     assert!(ids.contains(&"kimi"), "{ids:?}");
     assert!(ids.contains(&"kimi-cn"), "{ids:?}");
     assert!(ids.contains(&"ollama-cloud"), "{ids:?}");
@@ -1249,8 +1253,7 @@ fn committed_restore_cleanup_warning_is_exposed_in_switch_status() {
     let runner = RecordingRunner::sequence(vec![CommandOutcome {
         code: Some(0),
         stdout: "restored".to_string(),
-        stderr: "warning: route committed; backup cleanup deferred (PermissionError)\n"
-            .to_string(),
+        stderr: "warning: route committed; backup cleanup deferred (PermissionError)\n".to_string(),
     }]);
 
     let status =

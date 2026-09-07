@@ -44,6 +44,7 @@ is_codexhub_generated_launcher() {
       if ($0 == "Comment=CodexHub desktop backend and CLI") { comment = 1; next }
       if ($0 ~ /^Exec=.+$/) { exec += 1; exec_line = $0; next }
       if ($0 == "Icon=codexhub") { icon = 1; next }
+      if ($0 ~ /^Icon=\/.*\/icons\/hicolor\/128x128\/apps\/codexhub-[[:xdigit:]]{12}\.png$/) { icon = 1; next }
       if ($0 == "Terminal=false") { terminal = 1; next }
       if ($0 == "Categories=Development;") { categories = 1; next }
       if ($0 == "StartupNotify=true") { startup = 1; next }

@@ -1,16 +1,15 @@
+import { GatewayConnectionPanel } from "./workspace/GatewayConnectionPanel";
 import { rebaseSettingsDraft } from "../lib/workspaceSettings";
 import {
   Check,
   ChevronDown,
-  Copy,
   Download,
-  Eye,
-  EyeOff,
   RefreshCcw,
   Save,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { changeAppLocale, type AppLocale } from "../i18n";
 import {
@@ -27,6 +26,7 @@ import {
 } from "../lib/updateStatus";
 import type {
   AppUpdateInstallStatus,
+  GatewayStatus,
   AppUpdateStatus,
   AppVersionInfo,
   Model,
@@ -37,7 +37,9 @@ import { useToasts } from "./PageToast";
 import { SegmentedSwitch, type SegmentedOption } from "./SegmentedSwitch";
 
 interface SettingsDrawerProps {
+  showInlineActions?: boolean;
   inlineCategory?: string;
+  gatewayStatus?: GatewayStatus | null;
   dark?: boolean;
   onTheme?: () => void;
   onOpenContextGuard?: () => void;
@@ -58,7 +60,9 @@ interface SettingsDrawerProps {
 }
 
 export function SettingsDrawer({
+  showInlineActions = false,
   inlineCategory,
+  gatewayStatus,
   dark,
   onTheme,
   onOpenContextGuard,
@@ -81,7 +85,6 @@ export function SettingsDrawer({
   const { showToast, updateToast } = useToasts();
   const [draft, setDraft] = useState<Settings | null>(settings);
   const settingsBaseline = useRef(settings);
-  const [showGatewayKey, setShowGatewayKey] = useState(false);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [closePromptOpen, setClosePromptOpen] = useState(false);
   const hasUnsavedChanges = Boolean(
@@ -422,150 +425,15 @@ export function SettingsDrawer({
                 </section>
 
                 {inlineCategory && (
-                  <section
-                    hidden={inlineCategory !== "gateway"}
-                    className="grid gap-3"
-                  >
-                    <h3>{t("workspace.localService")}</h3>
-                    <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
-                      <label className="ws-setting-line">
-                        <span>
-                          {t("workspace.bindAddress")}
-                          <small>{t("workspace.localOnly")}</small>
-                        </span>
-                        <code>{draft.gateway_bind_address}</code>
-                      </label>
-                      <label className="ws-setting-line">
-                        <span>
-                          {t("common.port")}
-                          <small>1024–65535</small>
-                        </span>
-                        <input
-                          className="field"
-                          aria-label={t("common.port")}
-                          type="number"
-                          min={1024}
-                          max={65535}
-                          value={draft.proxy_port}
-                          onChange={(e) =>
-                            setDraft({
-                              ...draft,
-                              proxy_port: Number(e.target.value),
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="ws-setting-line">
-                        <span>
-                          {t("common.timeout")}
-                          <small>{t("workspace.timeoutRange")}</small>
-                        </span>
-                        <input
-                          className="field"
-                          aria-label={t("common.timeout")}
-                          type="number"
-                          min={5}
-                          max={600}
-                          value={draft.gateway_request_timeout_seconds}
-                          onChange={(e) =>
-                            setDraft({
-                              ...draft,
-                              gateway_request_timeout_seconds: Number(
-                                e.target.value,
-                              ),
-                            })
-                          }
-                        />
-                      </label>
-                      <div className="ws-setting-line">
-                        <span>
-                          {t("common.apiKey")}
-                          <small>{t("workspace.localKeyHint")}</small>
-                        </span>
-                        <div className="ws-settings-key">
-                          <input
-                            aria-label={t("common.apiKey")}
-                            type={showGatewayKey ? "text" : "password"}
-                            autoComplete="off"
-                            value={draft.gateway_client_key}
-                            onChange={(e) =>
-                              setDraft({
-                                ...draft,
-                                gateway_client_key: e.target.value,
-                              })
-                            }
-                          />
-                          <button
-                            className="ws-icon"
-                            aria-label={t(
-                              showGatewayKey
-                                ? "common.hideApiKey"
-                                : "common.showApiKey",
-                            )}
-                            onClick={() => setShowGatewayKey((v) => !v)}
-                          >
-                            {showGatewayKey ? (
-                              <EyeOff size={14} />
-                            ) : (
-                              <Eye size={14} />
-                            )}
-                          </button>
-                          <button
-                            className="ws-icon"
-                            aria-label={t("gateway.copyApiKey")}
-                            onClick={() =>
-                              void copyWorkspaceValue(draft.gateway_client_key)
-                            }
-                          >
-                            <Copy size={14} />
-                          </button>
-                          <button
-                            className="ws-icon"
-                            aria-label={t("gateway.regenerateApiKey")}
-                            onClick={() =>
-                              setDraft({
-                                ...draft,
-                                gateway_client_key:
-                                  "ch-" + crypto.randomUUID().replace(/-/g, ""),
-                              })
-                            }
-                          >
-                            <RefreshCcw size={14} />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                    <h3>{t("gateway.copyConnection")}</h3>
-                    <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
-                      {[
-                        ["Models", "/v1/models"],
-                        ["Responses", "/v1/responses"],
-                        ["Chat Completions", "/v1/chat/completions"],
-                      ].map(([label, path]) => {
-                        const url =
-                          "http://" +
-                          (settings?.gateway_bind_address || "127.0.0.1") +
-                          ":" +
-                          (settings?.proxy_port ?? 9099) +
-                          path;
-                        return (
-                          <div className="ws-setting-line" key={path}>
-                            <span>
-                              {label}
-                              <small>{url}</small>
-                            </span>
-                            <button
-                              className="ws-button"
-                              onClick={() => void copyWorkspaceValue(url)}
-                            >
-                              <Copy size={12} />
-                              {t("common.copy")}
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </section>
+                  <div hidden={inlineCategory !== "gateway"}>
+                    <GatewayConnectionPanel
+                      draft={draft}
+                      settings={settings}
+                      status={gatewayStatus}
+                      onDraft={setDraft}
+                      onCopy={copyWorkspaceValue}
+                    />
+                  </div>
                 )}
 
                 <section
@@ -678,29 +546,28 @@ export function SettingsDrawer({
           </div>
         </div>
 
-        <div className="px-5 py-4 shadow-[0_-1px_0_rgba(31,41,51,0.06)]">
+        <SettingsActions
+          inline={Boolean(inlineCategory)}
+          visible={
+            !inlineCategory ||
+            (showInlineActions &&
+              (inlineCategory !== "about" || hasUnsavedChanges))
+          }
+        >
           <div className="flex flex-wrap items-center justify-end gap-2">
             {inlineCategory && (
-              <>
-                <span className="ws-save-state">
-                  {t(
-                    hasUnsavedChanges
-                      ? "workspace.unsavedDraft"
-                      : "workspace.saved",
-                  )}
-                </span>
-                <button
-                  className="ws-button"
-                  disabled={!hasUnsavedChanges || Boolean(busy)}
-                  onClick={() => setDraft(settings)}
-                >
-                  {t("common.discard")}
-                </button>
-              </>
+              <button
+                type="button"
+                className="ws-button"
+                disabled={!hasUnsavedChanges || Boolean(busy)}
+                onClick={() => setDraft(settings)}
+              >
+                {t("common.discard")}
+              </button>
             )}
             <button
               type="button"
-              className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+              className="ws-primary"
               disabled={
                 Boolean(busy) || historyBusy || !draft || !hasUnsavedChanges
               }
@@ -710,7 +577,7 @@ export function SettingsDrawer({
               {t("common.save")}
             </button>
           </div>
-        </div>
+        </SettingsActions>
       </aside>
       {closePromptOpen && (
         <div className="fixed inset-0 z-[90] grid place-items-center bg-black/20 px-4">
@@ -1123,4 +990,22 @@ function VisionModelOption({
       {selected && <Check size={15} className="shrink-0 text-action" />}
     </button>
   );
+}
+
+function SettingsActions({
+  inline,
+  visible,
+  children,
+}: {
+  inline: boolean;
+  visible: boolean;
+  children: ReactNode;
+}) {
+  const [target, setTarget] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setTarget(document.getElementById("workspace-tab-actions"));
+  }, []);
+  if (!visible) return null;
+  if (inline) return target ? createPortal(children, target) : null;
+  return <div className="px-5 py-4">{children}</div>;
 }

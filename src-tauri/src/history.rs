@@ -64,9 +64,11 @@ fn acquire_history_repair(
     if !mutating {
         return Ok(None);
     }
-    HistoryRepairGuard::try_acquire(gate).map(Some).ok_or_else(|| {
-        UnifiedHistoryResult::pending(UnifiedHistoryStatus::Conflict, "repair_in_progress")
-    })
+    HistoryRepairGuard::try_acquire(gate)
+        .map(Some)
+        .ok_or_else(|| {
+            UnifiedHistoryResult::pending(UnifiedHistoryStatus::Conflict, "repair_in_progress")
+        })
 }
 
 struct DeadlineCommandRunner;
@@ -79,7 +81,10 @@ impl DeadlineCommandRunner {
         deadline: Instant,
     ) -> Result<config::CommandOutcome, String> {
         let mut command = runtime_paths::configured_python_command(program);
-        command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         configure_history_helper_no_window(&mut command);
         let mut child = command
             .spawn()
@@ -108,7 +113,9 @@ impl DeadlineCommandRunner {
                 let _ = child.wait();
                 let _ = stdout_reader.join();
                 let _ = stderr_reader.join();
-                return Err("history_operation_timeout: helper command exceeded deadline".to_string());
+                return Err(
+                    "history_operation_timeout: helper command exceeded deadline".to_string(),
+                );
             }
             thread::sleep(Duration::from_millis(20));
         };
@@ -128,9 +135,7 @@ struct HistoryDeadlineRunner {
 
 impl HistoryDeadlineRunner {
     fn with_deadline(operation_deadline: Instant) -> Self {
-        Self {
-            operation_deadline,
-        }
+        Self { operation_deadline }
     }
 
     fn command_deadline(&self, args: &[String]) -> Instant {
@@ -251,7 +256,6 @@ impl UnifiedHistoryResult {
         result.error = Some(error);
         result
     }
-
 }
 
 #[derive(Debug, Deserialize)]
@@ -375,10 +379,7 @@ pub fn preflight_unified_history(
             "route_takeover_required",
         ));
     }
-    let _repair_guard = match acquire_history_repair(
-        apply_repairs,
-        &HISTORY_REPAIR_IN_PROGRESS,
-    ) {
+    let _repair_guard = match acquire_history_repair(apply_repairs, &HISTORY_REPAIR_IN_PROGRESS) {
         Ok(guard) => guard,
         Err(result) => return Ok(result),
     };
@@ -993,24 +994,23 @@ fn history_backup_root(paths: &ConfigPaths, prefix: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        acquire_history_repair, preflight_target,
-        migrate_official_history_to_unified_with_paths, preflight_unified_history_with_paths,
-        reconcile_after_route_switch_with_paths, restore_official_history_from_unified_with_paths,
-        sync_history_with_paths, HistoryBucketTarget, PreflightRequest, PreflightTarget,
-        UnifiedHistoryStatus,
-    };
     #[cfg(windows)]
     use super::DeadlineCommandRunner;
+    use super::{
+        acquire_history_repair, migrate_official_history_to_unified_with_paths, preflight_target,
+        preflight_unified_history_with_paths, reconcile_after_route_switch_with_paths,
+        restore_official_history_from_unified_with_paths, sync_history_with_paths,
+        HistoryBucketTarget, PreflightRequest, PreflightTarget, UnifiedHistoryStatus,
+    };
     use crate::config::{CommandOutcome, CommandRunner, ConfigPaths};
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicBool;
-    use std::time::{SystemTime, UNIX_EPOCH};
     #[cfg(windows)]
     use std::time::{Duration, Instant};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn history_repair_gate_allows_only_one_mutation_at_a_time() {
@@ -1455,7 +1455,9 @@ mod tests {
         );
         let commands = runner.commands.borrow();
         assert_eq!(commands.len(), 4);
-        assert!(!commands.iter().any(|command| command.args.iter().any(|arg| arg == "rollback-repair")));
+        assert!(!commands
+            .iter()
+            .any(|command| command.args.iter().any(|arg| arg == "rollback-repair")));
     }
 
     #[test]
@@ -1492,14 +1494,19 @@ mod tests {
 
         assert_eq!(result.status, UnifiedHistoryStatus::Conflict);
         assert_eq!(result.reason.as_deref(), Some("helper_timeout"));
-        assert!(result.error.as_deref().is_some_and(|error| error.contains("history_operation_timeout")));
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("history_operation_timeout")));
         assert_eq!(
             fs::read_to_string(paths.codex_config_path()).unwrap(),
             "model_provider = \"openai\"\n"
         );
         let commands = runner.commands.borrow();
         assert_eq!(commands.len(), 4);
-        assert!(!commands.iter().any(|command| command.args.iter().any(|arg| arg == "rollback-repair")));
+        assert!(!commands
+            .iter()
+            .any(|command| command.args.iter().any(|arg| arg == "rollback-repair")));
     }
 
     #[test]
@@ -1571,7 +1578,9 @@ mod tests {
         );
         let commands = runner.commands.borrow();
         assert_eq!(commands.len(), 4);
-        assert!(!commands.iter().any(|command| command.args.iter().any(|arg| arg == "rollback-repair")));
+        assert!(!commands
+            .iter()
+            .any(|command| command.args.iter().any(|arg| arg == "rollback-repair")));
     }
 
     #[test]

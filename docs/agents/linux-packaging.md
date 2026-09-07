@@ -1,6 +1,6 @@
 # Linux packaging
 
-Linux is a first-class CodexHub surface on the same 0.1.9 train as Windows.
+Linux is a first-class CodexHub surface on the same release train as Windows.
 Do not fork a `linux-main`. Rebase campaign work onto `main` and ship Linux
 artifacts from the same tag.
 
@@ -31,6 +31,29 @@ enumerates eligible accounts; it drops to each target UID/GID with cleared
 groups and capabilities before touching that user's launcher directory.
 AppImage upgrades likewise rewrite one stable managed user launcher rather
 than adding per-version entries.
+
+Portable builds register the same managed user launcher, pointing at the
+running executable (including paths containing spaces). Detection requires
+the archive's `CodexHub` executable name and adjacent
+`src-python/codex_proxy.py` and `config/providers.toml` resources;
+development and system binaries do not create portable launchers. GTK uses
+the configured application identifier so GNOME can associate Wayland windows
+with this launcher. Customized user launchers remain untouched.
+Development binaries also leave existing managed launchers untouched; runtime
+cleanup is restricted to the installed `/usr/bin/codexhub` target.
+
+Linux runtime icons refresh all supported hicolor sizes and use a content-hashed
+icon name in the managed launcher, preventing GNOME from reusing a cached
+older image. Normal windows use an RGBA surface, a rounded panel and a
+12-pixel transparent shadow inset; maximized/fullscreen windows omit the
+inset. Debian post-install migration recognizes this managed absolute icon
+format and archives the portable launcher before installing the package entry.
+Verify the packaged build on Wayland as well as X11.
+
+For the GNOME 50 menu-label initialization race and its separately applied,
+reversible desktop compatibility patch, see
+[GNOME support](../../support/gnome/README.md). Do not count reloading the
+indicator as a restart regression test.
 
 Updater platform key: `linux-x86_64`. Add that platform to the existing
 `latest.json` / `latest-debug.json` payload; do not invent a second product
@@ -97,6 +120,22 @@ report must contain eight successful apply/readback/live sentinel cases.
 This host's accepted floors are the same numeric floors as Windows: Codex
 Desktop `26.715.8383.0` (Debian package `chatgpt`) and ZCode `3.3.6`.
 `open_codex_app` on Linux launches `/usr/bin/chatgpt` / `codex-launcher`.
+
+GNOME dock identity regression includes first launch followed by an upgrade
+between two distinct portable directories. The `linux_window` Rust tests load the
+resulting desktop entry through GIO and assert both the current executable and
+fingerprinted icon file. Run `cargo test --locked --manifest-path
+src-tauri/Cargo.toml linux_window`. A portable candidate must also pass
+`./scripts/codexhub-python.sh scripts/e2e_linux_dock_icon.py --bin <portable>/CodexHub`.
+This starts an isolated headless GNOME session with a populated stale icon cache,
+resolves the running window through Shell.WindowTracker, and verifies that its
+actual GIcon can load. The release builder runs this check before archiving, so
+both first launch and portable-directory upgrade must pass. It requires
+GNOME Shell, gdbus, gsettings, and gtk-update-icon-cache; missing dependencies
+must not be reported as a pass. Desktop acceptance additionally checks that
+the running window resolves to the CodexHub icon rather than the generic gear.
+Use isolated test directories; do not include real user paths, configuration,
+credentials, or unrelated desktop contents in shared evidence.
 
 Windows CLI real-client E2E remains required for the Windows candidate. It is
 not a substitute for the Linux CLI gate, and the Linux gate is not a substitute

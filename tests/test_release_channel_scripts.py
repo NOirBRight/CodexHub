@@ -44,12 +44,13 @@ def test_official_transport_wheel_is_pinned_and_packaged():
 
 
 def test_release_version_is_consistent_across_manifests():
-    expected = "0.2.0"
+    expected = "0.2.1"
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     cargo = tomllib.loads((ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
     cargo_lock = tomllib.loads((ROOT / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8"))
     package = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
     package_lock = json.loads((ROOT / "frontend" / "package-lock.json").read_text(encoding="utf-8"))
+    route_primitives = (ROOT / "src-python" / "route_primitives.py").read_text(encoding="utf-8")
     codexhub_lock = next(item for item in cargo_lock["package"] if item["name"] == "codexhub")
 
     assert tauri["version"] == expected
@@ -58,6 +59,7 @@ def test_release_version_is_consistent_across_manifests():
     assert package["version"] == expected
     assert package_lock["version"] == expected
     assert package_lock["packages"][""]["version"] == expected
+    assert f'UPSTREAM_USER_AGENT = "CodexHub/{expected} ' in route_primitives
 
 
 def test_v014_audit_records_reconciliation_and_display_contract():
@@ -489,12 +491,33 @@ def test_linux_release_builder_rejects_stale_or_ambiguous_bundle_artifacts():
     assert "deb package version mismatch" in script
 
 
+def test_linux_release_builder_recovers_only_a_prepared_appdir_linuxdeploy_failure():
+    script = (ROOT / "scripts" / "build-linux-release.sh").read_text(encoding="utf-8")
+
+    assert "tauri build --verbose" in script
+    assert 'grep -Fq "Failed to download runtime file" "$bundle_log"' in script
+    assert "has_prepared_appimage_dir" in script
+    assert '"$app_dir/usr/bin/codexhub"' in script
+    assert '"$app_dir/usr/share/applications/CodexHub.desktop"' in script
+    assert "linuxdeploy-x86_64.AppImage" in script
+    assert "plugins/linuxdeploy-plugin-appimage/appimagetool-prefix/usr/bin/appimagetool" in script
+    assert "appimage_runtime_sha256=" in script
+    assert "curl --fail --location --retry 3" in script
+    assert "sha256sum --check --status" in script
+    assert '"$appimagetool_path" --runtime-file "$runtime_path"' in script
+    assert 'cargo "${tauri_deb_args[@]}"' in script
+    assert 'cargo tauri signer sign --private-key-path "$private_key_path"' in script
+    assert "releases/download/continuous" not in script
+
+
 def test_linux_portable_packages_the_xai_device_login_helper():
     script = (ROOT / "scripts" / "build-linux-portable.sh").read_text(encoding="utf-8")
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
 
     assert 'for resource in config src-python python scripts' in script
     assert '"$portable_dir/scripts/xai_device_login.py"' in script
+    assert 'scripts/e2e_linux_dock_icon.py' in script
+    assert '--bin "$portable_dir/$executableBaseName"' in script
     assert (
         tauri["bundle"]["resources"]["../scripts/xai_device_login.py"]
         == "scripts/xai_device_login.py"

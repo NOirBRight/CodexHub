@@ -1,3 +1,4 @@
+import { readQuotaCache } from "../../lib/quotaCache";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   ArrowRight,
@@ -14,6 +15,7 @@ import { providerLogoSrc } from "../../lib/providerLogos";
 import { subscriptionAuthAdapter } from "../../lib/providerCatalog";
 import { api, messageFromError } from "../../lib/tauri";
 import type {
+  Model,
   GatewayUsageSnapshot,
   OpenAIUsageLimit,
   Provider,
@@ -30,6 +32,7 @@ type Props = {
   children?: ReactNode;
   providers: Provider[];
   officialCount: number;
+  officialModels: Model[];
   officialEnabled: number;
   officialIncluded: boolean;
   limits: OpenAIUsageLimit[];
@@ -50,14 +53,16 @@ type Props = {
   onNavigate: (page: WorkspacePage) => void;
   officialId: string;
 };
+let dailyCache: { day: string; snapshot: GatewayUsageSnapshot } | null = null;
+
 export function ProviderWorkspaceView(props: Props) {
   const { t } = useTranslation();
   const toast = useToasts();
   const [query, setQuery] = useState("");
-  const [xaiLimits, setXaiLimits] = useState<OpenAIUsageLimit[]>([]);
+  const [xaiLimits, setXaiLimits] = useState<OpenAIUsageLimit[]>(() => readQuotaCache("xai")?.limits ?? []);
   const [xaiError, setXaiError] = useState<string | null>(null);
   const [xaiPending, setXaiPending] = useState(false);
-  const [daily, setDaily] = useState<GatewayUsageSnapshot | null>(null);
+  const [daily, setDaily] = useState<GatewayUsageSnapshot | null>(() => dailyCache?.day === new Date().toDateString() ? dailyCache.snapshot : null);
   const [dailyError, setDailyError] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [providerQuotas, setProviderQuotas] = useState<
@@ -70,7 +75,10 @@ export function ProviderWorkspaceView(props: Props) {
         pending?: boolean;
       }
     >
-  >({});
+  >(() => Object.fromEntries(props.providers.flatMap((provider) => {
+    const cached = readQuotaCache(provider.id);
+    return cached ? [[provider.id, cached]] : [];
+  })));
   const quotaProviderIds = props.providers
     .filter((p) => ["commandcode", "opencode-go"].includes(p.id))
     .map((p) => p.id)
@@ -107,7 +115,7 @@ export function ProviderWorkspaceView(props: Props) {
               if (active)
                 setProviderQuotas((previous) => ({
                   ...previous,
-                  [id]: { limits: [], error: messageFromError(error) },
+                  [id]: { ...previous[id], limits: previous[id]?.limits ?? [], pending: false, error: messageFromError(error) },
                 }));
             }
           }),
@@ -135,12 +143,13 @@ export function ProviderWorkspaceView(props: Props) {
           startTs: start.toISOString(),
           endTs: new Date().toISOString(),
         });
+        dailyCache = { day: start.toDateString(), snapshot };
         if (active) {
           setDaily(snapshot);
           setDailyError(false);
         }
       } catch {
-        if (active) setDailyError(true);
+        if (active) setDailyError(dailyCache?.day !== start.toDateString());
       }
       if (hasXai) {
         if (active) setXaiPending(true);
@@ -309,23 +318,25 @@ export function ProviderWorkspaceView(props: Props) {
         }).format(n);
   return (
     <main className={"ws-page ws-" + props.page}>
-      {props.page !== "overview" && props.page !== "statistics" && (
-        <WorkspaceHeading
-          page={props.page}
-          actions={
-            props.page === "providers" ? (
-              <button
-                className="ws-primary"
-                disabled={props.busy}
-                onClick={props.onAdd}
-              >
-                <Plus size={13} />
-                {t("providers.addProvider")}
-              </button>
-            ) : undefined
-          }
-        />
-      )}
+      {props.page !== "overview" &&
+        props.page !== "statistics" &&
+        props.page !== "gateway" && (
+          <WorkspaceHeading
+            page={props.page}
+            actions={
+              props.page === "providers" ? (
+                <button
+                  className="ws-primary"
+                  disabled={props.busy}
+                  onClick={props.onAdd}
+                >
+                  <Plus size={13} />
+                  {t("providers.addProvider")}
+                </button>
+              ) : undefined
+            }
+          />
+        )}
       {(props.page === "overview" || props.page === "clients") && bridge}
       {props.page === "overview" && (
         <>
@@ -433,16 +444,6 @@ export function ProviderWorkspaceView(props: Props) {
                 ))}
             </div>
           </section>
-          <footer className="ws-page-footer">
-            <button onClick={() => props.onNavigate("clients")}>
-              {t("workspace.clients")}
-              <ArrowRight size={12} />
-            </button>
-            <button onClick={() => props.onNavigate("statistics")}>
-              {t("workspace.fullStatistics")}
-              <ArrowRight size={12} />
-            </button>
-          </footer>
         </>
       )}
       {props.page === "providers" && (
@@ -525,9 +526,11 @@ export function ProviderWorkspaceView(props: Props) {
                         {t("workspace.modelsEnabled")}
                         <ArrowRight size={12} />
                       </button>
-                      {p.models.slice(0, 2).map((m) => (
-                        <code key={m.id}>{m.display_name || m.id}</code>
+                      <span className="ws-model-names">
+                      {(official ? props.officialModels : p.models).map((m) => (
+                        <code key={m.id} title={m.id}>{previewModelName(m, p)}</code>
                       ))}
+                      </span>
                       {!official && (
                         <span className="ws-order">
                           {[-1, 1].map((direction) => (
@@ -568,16 +571,21 @@ export function ProviderWorkspaceView(props: Props) {
               p.name.toLowerCase().includes(query.toLowerCase()),
             ) && <p className="ws-empty">{t("workspace.noProviders")}</p>}
           </section>
-          <footer className="ws-page-footer">
-            <span>{t("workspace.quotasInOverview")}</span>
-            <button onClick={() => props.onNavigate("overview")}>
-              {t("workspace.resources")}
-              <ArrowRight size={12} />
-            </button>
-          </footer>
         </>
       )}
       {props.children}
     </main>
   );
+}
+
+function previewModelName(model: Model, provider: Provider): string {
+  let name = model.display_name || model.id;
+  const prefixes = [provider.name, provider.id, ...(provider.id === "opencode-go" ? ["OpenCode"] : [])];
+  for (const prefix of prefixes.sort((a, b) => b.length - a.length)) {
+    if (name.toLowerCase().startsWith(prefix.toLowerCase()) && /^[\s/:_-]/.test(name.slice(prefix.length))) {
+      name = name.slice(prefix.length).replace(/^[\s/:_-]+/, "");
+      break;
+    }
+  }
+  return name || model.id;
 }

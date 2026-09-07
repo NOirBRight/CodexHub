@@ -16,7 +16,7 @@ export function ResourceLimits({
   message?: string | null;
 }) {
   const { t, i18n } = useTranslation();
-  if (message)
+  if (message && !limits.length)
     return (
       <span className="ws-muted" title={message}>
         {t("workspace.quotaUnavailable")}
@@ -30,7 +30,7 @@ export function ResourceLimits({
     );
   const { ordered, single, weekOnly } = resourceQuotaLayout(limits);
   return (
-    <div className="ws-limits" data-single={single} data-week-only={weekOnly}>
+    <div className="ws-limits" data-single={single} data-week-only={weekOnly} aria-busy={pending} title={message || undefined}>
       {ordered.map((limit) => {
         const percent = quotaPercent(limit);
         const date = quotaResetDate(limit.resets_at);

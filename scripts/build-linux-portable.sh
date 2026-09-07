@@ -132,6 +132,11 @@ if [[ ! -f "$portable_dir/scripts/xai_device_login.py" ]]; then
   exit 1
 fi
 
+echo "==> GNOME dock icon E2E"
+"$repo_root/scripts/codexhub-python.sh" \
+  "$repo_root/scripts/e2e_linux_dock_icon.py" \
+  --bin "$portable_dir/$executableBaseName"
+
 if [[ ! -e "$portable_dir/python" ]]; then
   cat > "$portable_dir/LINUX_RUNTIME.txt" <<NOTE
 This Linux portable build uses a host Python 3.13+ interpreter for the Gateway

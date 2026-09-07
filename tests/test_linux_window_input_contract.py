@@ -106,6 +106,41 @@ X-GNOME-UsesNotifications=true
         assert (apps / f"{name}.codexhub-legacy-backup").read_text(encoding="utf-8") == legacy
 
 
+def test_deb_package_archives_the_current_hashed_portable_launcher(tmp_path: Path) -> None:
+    hook = ROOT / "src-tauri" / "linux" / "deb-postinstall.sh"
+    apps = tmp_path / ".local" / "share" / "applications"
+    apps.mkdir(parents=True)
+    portable = """[Desktop Entry]
+Type=Application
+Name=CodexHub
+Comment=CodexHub desktop backend and CLI
+Exec=/opt/CodexHub-new/CodexHub
+Icon=/tmp/icons/hicolor/128x128/apps/codexhub-a1b2c3d4e5f6.png
+Terminal=false
+Categories=Development;
+StartupNotify=true
+StartupWMClass=com.codexhub.app
+X-GNOME-UsesNotifications=true
+X-CodexHub-Managed=true
+"""
+    launcher = apps / "com.codexhub.app.desktop"
+    launcher.write_text(portable, encoding="utf-8")
+
+    result = subprocess.run(
+        ["sh", str(hook), "--test-home", str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not launcher.exists()
+    assert launcher.with_name(f"{launcher.name}.codexhub-legacy-backup").read_text(
+        encoding="utf-8"
+    ) == portable
+
+
 def test_deb_postinstall_pins_the_package_launcher_to_usr_bin(tmp_path: Path) -> None:
     hook = ROOT / "src-tauri" / "linux" / "deb-postinstall.sh"
     launcher = tmp_path / "CodexHub.desktop"

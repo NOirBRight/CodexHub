@@ -71,18 +71,15 @@ pub(crate) fn prepare_catalog(
     let actual = CatalogPaths::runtime()?;
     let python = config::find_python()?;
     let mut inputs = overlays.to_vec();
-    let seed_path = actual.codex_dir.join("model-catalogs/openai-plus-ollama-cloud.json");
+    let seed_path = actual
+        .codex_dir
+        .join("model-catalogs/openai-plus-ollama-cloud.json");
     if !inputs.iter().any(|input| input.path == seed_path) {
         if let Some(seed) = models::prepare_official_editor_seed()? {
             inputs.push(seed);
         }
     }
-    prepare_catalog_with_paths(
-        &actual,
-        &inputs,
-        &python,
-        &ProcessCatalogSyncCommandRunner,
-    )
+    prepare_catalog_with_paths(&actual, &inputs, &python, &ProcessCatalogSyncCommandRunner)
 }
 
 fn prepare_catalog_with_paths(
@@ -152,9 +149,8 @@ impl CatalogStaging {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(|error| {
-                format!("failed to secure catalog staging directory: {error}")
-            })?;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("failed to secure catalog staging directory: {error}"))?;
         }
         Ok(Self { root })
     }
@@ -210,8 +206,9 @@ fn copy_regular_file_if_present(source: &Path, target: &Path) -> Result<(), Stri
         return Err("catalog staging input is not a regular file".to_string());
     }
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create catalog staging input directory: {error}"))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            format!("failed to create catalog staging input directory: {error}")
+        })?;
     }
     fs::copy(source, target)
         .map(|_| ())
@@ -225,9 +222,7 @@ fn staged_path_for_overlay(
 ) -> Result<PathBuf, String> {
     let (actual_root, staged_root) = match overlay.namespace {
         PreparedFileNamespace::Runtime => (&actual.codex_dir, &staged.codex_dir),
-        PreparedFileNamespace::CodexTarget => {
-            (&actual.codex_target_dir, &staged.codex_target_dir)
-        }
+        PreparedFileNamespace::CodexTarget => (&actual.codex_target_dir, &staged.codex_target_dir),
         PreparedFileNamespace::Absolute => {
             return Err(
                 "prepared catalog overlay is missing an explicit runtime or Codex target namespace"
@@ -235,9 +230,10 @@ fn staged_path_for_overlay(
             )
         }
     };
-    let relative = overlay.path.strip_prefix(actual_root).map_err(|_| {
-        "prepared catalog overlay is outside its declared managed root".to_string()
-    })?;
+    let relative = overlay
+        .path
+        .strip_prefix(actual_root)
+        .map_err(|_| "prepared catalog overlay is outside its declared managed root".to_string())?;
     Ok(staged_root.join(relative))
 }
 
@@ -430,8 +426,8 @@ impl CatalogSyncCommandRunner for ProcessCatalogSyncCommandRunner {
 mod tests {
     use super::{
         prepare_catalog_with_paths, read_catalog_override_diagnostics, sync_catalog_with_paths,
-        CatalogCommandOutcome, CatalogOverrideDiagnostics, CatalogPaths,
-        CatalogSyncCommandRunner, CODEX_TARGET_HOME_ENV, GENERATED_CATALOG_FILE,
+        CatalogCommandOutcome, CatalogOverrideDiagnostics, CatalogPaths, CatalogSyncCommandRunner,
+        CODEX_TARGET_HOME_ENV, GENERATED_CATALOG_FILE,
     };
     use crate::file_transaction::PreparedTextFile;
     use std::cell::RefCell;
@@ -527,15 +523,14 @@ mod tests {
         )];
         let runner = PreparingCatalogRunner;
 
-        let prepared = prepare_catalog_with_paths(
-            &actual,
-            &overlays,
-            Path::new("python-test"),
-            &runner,
-        )
-        .expect("isolated catalog preparation");
+        let prepared =
+            prepare_catalog_with_paths(&actual, &overlays, Path::new("python-test"), &runner)
+                .expect("isolated catalog preparation");
 
-        assert_eq!(fs::read_to_string(&actual_catalog).unwrap(), "old-catalog\n");
+        assert_eq!(
+            fs::read_to_string(&actual_catalog).unwrap(),
+            "old-catalog\n"
+        );
         assert_eq!(fs::read_to_string(&actual_seed).unwrap(), "old-seed\n");
         assert_eq!(
             prepared.catalog_payload()["models"][0]["slug"],
@@ -713,7 +708,10 @@ mod tests {
                     r#"{"models":[{"slug":"gpt-5.6-luna"}]}"#,
                 ),
                 ("codexhub-model-catalog-baseline.json", r#"{"models":[]}"#),
-                ("codexhub-model-catalog-overrides.json", r#"{"overrides":[]}"#),
+                (
+                    "codexhub-model-catalog-overrides.json",
+                    r#"{"overrides":[]}"#,
+                ),
                 ("codex-proxy-state.json", r#"{"visible_models":[]}"#),
                 (
                     ".codexhub-catalog-owner-key",
@@ -741,15 +739,11 @@ mod tests {
         ) -> Result<CatalogCommandOutcome, String> {
             let env = env.iter().cloned().collect::<BTreeMap<_, _>>();
             let runtime = env.get("CODEX_HOME").expect("staged runtime");
-            let target = env
-                .get(CODEX_TARGET_HOME_ENV)
-                .expect("staged Codex target");
+            let target = env.get(CODEX_TARGET_HOME_ENV).expect("staged Codex target");
             assert_ne!(runtime, target);
             assert_eq!(
-                fs::read_to_string(
-                    runtime.join("model-catalogs/openai-plus-ollama-cloud.json")
-                )
-                .unwrap(),
+                fs::read_to_string(runtime.join("model-catalogs/openai-plus-ollama-cloud.json"))
+                    .unwrap(),
                 "prepared-seed\n"
             );
             assert_eq!(
@@ -763,7 +757,10 @@ mod tests {
                     r#"{"models":[{"slug":"gpt-5.6-luna"}]}"#,
                 ),
                 ("codexhub-model-catalog-baseline.json", r#"{"models":[]}"#),
-                ("codexhub-model-catalog-overrides.json", r#"{"overrides":[]}"#),
+                (
+                    "codexhub-model-catalog-overrides.json",
+                    r#"{"overrides":[]}"#,
+                ),
                 ("codex-proxy-state.json", r#"{"visible_models":[]}"#),
                 (
                     ".codexhub-catalog-owner-key",

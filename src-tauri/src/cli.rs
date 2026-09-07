@@ -1,6 +1,6 @@
 use crate::{
-    autostart, config, gateway, history, models, proxy, AppStatus, Model, Provider,
-    Settings, UpstreamFormat,
+    autostart, config, gateway, history, models, proxy, AppStatus, Model, Provider, Settings,
+    UpstreamFormat,
 };
 use serde::Serialize;
 use std::io::{Read, Write};
@@ -22,9 +22,9 @@ pub fn run(args: &[String]) -> i32 {
         Some("stop") => print_result(proxy::stop()),
         Some("restart") => print_result(crate::restart_proxy()),
         Some("refresh-models") => match parse_restart_codex_flag(&args[1..]) {
-            Ok(restart_codex) => {
-                print_result(crate::refresh_official_models_published_coordinated(restart_codex))
-            }
+            Ok(restart_codex) => print_result(
+                crate::refresh_official_models_published_coordinated(restart_codex),
+            ),
             Err(()) => {
                 print_refresh_models_usage();
                 2

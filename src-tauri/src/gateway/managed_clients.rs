@@ -1215,7 +1215,9 @@ mod tests {
     #[test]
     fn perform_plan_honors_no_execution_plans_without_touching_dsh() {
         let (_settings, ctx) = test_ctx();
-        let plan = CodexAdapter.plan(ClientIntent::Connect, &ctx).expect("plan");
+        let plan = CodexAdapter
+            .plan(ClientIntent::Connect, &ctx)
+            .expect("plan");
         let error = perform_plan(&plan, &ctx).expect_err("overlay plans are fail-closed");
         assert!(error.contains("config_overlay.py"));
     }

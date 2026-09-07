@@ -1,3 +1,4 @@
+import { writeQuotaCache, clearQuotaCache } from "./quotaCache";
 import { invoke } from "@tauri-apps/api/core";
 import { COMMANDS, type CommandName } from "./commands";
 import type {
@@ -386,12 +387,20 @@ export const api = {
   removeAutostart: () => call<string>(COMMANDS.removeAutostart),
   getAutostartStatus: () => call<AutostartStatus>(COMMANDS.getAutostartStatus),
   codexLogout: () => call<void>(COMMANDS.codexLogout),
-  providerUsage: (providerId: string) => call<{limits: import("./types").OpenAIUsageLimit[]; balance?: number | null; currency?: string}>(COMMANDS.providerUsage, {providerId}),
+  providerUsage: async (providerId: string) => {
+    const snapshot = await call<{limits: import("./types").OpenAIUsageLimit[]; balance?: number | null; currency?: string}>(COMMANDS.providerUsage, {providerId});
+    writeQuotaCache(providerId, snapshot);
+    return snapshot;
+  },
   openCodexApp: () => call<string>(COMMANDS.openCodexApp),
   windowMinimize: () => desktopCall<void>(COMMANDS.windowMinimize),
   windowToggleMaximize: () => desktopCall<void>(COMMANDS.windowToggleMaximize),
   windowCloseToTray: () => desktopCall<void>(COMMANDS.windowCloseToTray),
-  xaiAuthStatus: () => call<XaiAuthStatus>(COMMANDS.xaiAuthStatus),
+  xaiAuthStatus: async () => {
+    const status = await call<XaiAuthStatus>(COMMANDS.xaiAuthStatus);
+    if (!status.signed_in) clearQuotaCache("xai");
+    return status;
+  },
   xaiStartDeviceLogin: () => call<XaiDeviceLogin>(COMMANDS.xaiStartDeviceLogin),
   xaiOpenVerificationUrl: (url: string) => call<string>(COMMANDS.xaiOpenVerificationUrl, { url }),
   xaiPollDeviceLogin: (device: XaiDeviceLogin) => {
@@ -401,8 +410,16 @@ export const api = {
       device_json: deviceJson,
     });
   },
-  xaiLogout: () => call<{ ok: boolean }>(COMMANDS.xaiLogout),
-  xaiUsageSnapshot: () => call<XaiUsageSnapshot>(COMMANDS.xaiUsageSnapshot),
+  xaiLogout: async () => {
+    const result = await call<{ ok: boolean }>(COMMANDS.xaiLogout);
+    if (result.ok) clearQuotaCache("xai");
+    return result;
+  },
+  xaiUsageSnapshot: async () => {
+    const snapshot = await call<XaiUsageSnapshot>(COMMANDS.xaiUsageSnapshot);
+    writeQuotaCache("xai", snapshot);
+    return snapshot;
+  },
 };
 
 export function messageFromError(error: unknown): string {

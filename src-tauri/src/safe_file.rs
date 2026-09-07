@@ -95,7 +95,10 @@ pub(crate) fn write_text_atomic_with_mode(
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
-            format!("failed to create file directory {}: {error}", parent.display())
+            format!(
+                "failed to create file directory {}: {error}",
+                parent.display()
+            )
         })?;
     }
 
@@ -106,11 +109,7 @@ pub(crate) fn write_text_atomic_with_mode(
 /// Write `text` to `path` using a temp file and atomic rename while already
 /// holding an exclusive lock on `path`. Used for multi-step check-then-write
 /// operations that must remain atomic across processes.
-pub(crate) fn write_text_locked(
-    path: &Path,
-    text: &str,
-    lock: &FileLock,
-) -> Result<(), String> {
+pub(crate) fn write_text_locked(path: &Path, text: &str, lock: &FileLock) -> Result<(), String> {
     write_text_locked_with_mode(path, text, lock, None)
 }
 
@@ -125,7 +124,10 @@ fn write_text_locked_with_mode(
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
-            format!("failed to create file directory {}: {error}", parent.display())
+            format!(
+                "failed to create file directory {}: {error}",
+                parent.display()
+            )
         })?;
     }
 
@@ -146,27 +148,36 @@ fn write_text_locked_with_mode(
         })?;
     drop(temp_file);
 
-    lock.verify_namespace_identity()
-        .inspect_err(|_| {
-            let _ = fs::remove_file(&temp_path);
-        })?;
+    lock.verify_namespace_identity().inspect_err(|_| {
+        let _ = fs::remove_file(&temp_path);
+    })?;
     fs::rename(&temp_path, path).map_err(|error| {
         let _ = fs::remove_file(&temp_path);
-        format!("failed to move temp file {} to {}: {error}", temp_path.display(), path.display())
+        format!(
+            "failed to move temp file {} to {}: {error}",
+            temp_path.display(),
+            path.display()
+        )
     })
 }
 
 fn unique_temp_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(
         ".{}.{}.{}.tmp-codexhub",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("file"),
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file"),
         std::process::id(),
         timestamp_millis()
     ))
 }
 
 #[cfg(unix)]
-fn apply_atomic_write_mode(path: &Path, temp_file: &File, requested: Option<u32>) -> Result<(), String> {
+fn apply_atomic_write_mode(
+    path: &Path,
+    temp_file: &File,
+    requested: Option<u32>,
+) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
 
     let mode = match requested {
@@ -182,14 +193,20 @@ fn apply_atomic_write_mode(path: &Path, temp_file: &File, requested: Option<u32>
 }
 
 #[cfg(not(unix))]
-fn apply_atomic_write_mode(_path: &Path, _temp_file: &File, _requested: Option<u32>) -> Result<(), String> {
+fn apply_atomic_write_mode(
+    _path: &Path,
+    _temp_file: &File,
+    _requested: Option<u32>,
+) -> Result<(), String> {
     Ok(())
 }
 
 fn adjacent_lock_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(
         "{}.lock",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("file")
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file")
     ))
 }
 
@@ -277,14 +294,34 @@ fn remove_displaced_protocol_file(path: &Path) {
 }
 
 fn timestamp_millis() -> u128 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_millis()).unwrap_or_default()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "linux")]
 const LOCK_NOFOLLOW: i32 = 0x20000;
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
 const LOCK_NOFOLLOW: i32 = 0x100;
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))))]
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))
+))]
 const LOCK_NOFOLLOW: i32 = 0x100;
 
 fn open_lock_file(path: &Path, create_new: bool) -> std::io::Result<File> {
@@ -310,10 +347,20 @@ fn open_lock_file(path: &Path, create_new: bool) -> std::io::Result<File> {
 }
 
 fn namespace_lock_path(primary: &Path) -> PathBuf {
-    primary.with_file_name(format!("{}.guard", primary.file_name().and_then(|name| name.to_str()).unwrap_or("file")))
+    primary.with_file_name(format!(
+        "{}.guard",
+        primary
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file")
+    ))
 }
 
-fn acquire_namespace_guard(path: &Path, started: &Instant, hook: Option<&dyn Fn(&'static str)>) -> Result<File, String> {
+fn acquire_namespace_guard(
+    path: &Path,
+    started: &Instant,
+    hook: Option<&dyn Fn(&'static str)>,
+) -> Result<File, String> {
     loop {
         let file = match open_lock_file(path, true) {
             Ok(file) => file,
@@ -605,7 +652,8 @@ fn lock_path_identity(_path: &Path, metadata: &fs::Metadata) -> Result<(u64, u64
 
 #[cfg(windows)]
 fn lock_path_identity(path: &Path, _metadata: &fs::Metadata) -> Result<(u32, u64), String> {
-    let file = open_lock_file(path, false).map_err(|_| "atomic write lock path changed".to_owned())?;
+    let file =
+        open_lock_file(path, false).map_err(|_| "atomic write lock path changed".to_owned())?;
     lock_file_identity(&file)
 }
 
@@ -614,10 +662,14 @@ fn lock_file_identity(file: &File) -> Result<(u32, u64), String> {
     use std::os::windows::io::AsRawHandle;
     let mut information = ByHandleFileInformation::default();
     let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
-    if result == 0 || information.number_of_links != 1 || information.file_attributes & win32::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    if result == 0
+        || information.number_of_links != 1
+        || information.file_attributes & win32::FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
         return Err("atomic write lock is not a regular single-link file".to_owned());
     }
-    let index = (u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low);
+    let index =
+        (u64::from(information.file_index_high) << 32) | u64::from(information.file_index_low);
     Ok((information.volume_serial_number, index))
 }
 
@@ -629,8 +681,8 @@ fn validate_lock_handle(file: &File) -> Result<(), String> {
 #[cfg(unix)]
 fn verify_lock_identity(path: &Path, file: &File) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
-    let path_metadata = fs::symlink_metadata(path)
-        .map_err(|_| "atomic write lock path changed".to_owned())?;
+    let path_metadata =
+        fs::symlink_metadata(path).map_err(|_| "atomic write lock path changed".to_owned())?;
     validate_lock_metadata(&path_metadata)?;
     let file_metadata = file
         .metadata()
@@ -644,15 +696,15 @@ fn verify_lock_identity(path: &Path, file: &File) -> Result<(), String> {
 
 #[cfg(windows)]
 fn verify_lock_identity(path: &Path, file: &File) -> Result<(), String> {
-    let path_metadata = fs::symlink_metadata(path)
-        .map_err(|_| "atomic write lock path changed".to_owned())?;
+    let path_metadata =
+        fs::symlink_metadata(path).map_err(|_| "atomic write lock path changed".to_owned())?;
     validate_lock_metadata(&path_metadata)?;
-    let path_file = open_lock_file(path, false)
-        .map_err(|_| "atomic write lock path changed".to_owned())?;
-    let path_identity = lock_file_identity(&path_file)
-        .map_err(|_| "atomic write lock path changed".to_owned())?;
-    let file_identity = lock_file_identity(file)
-        .map_err(|_| "atomic write lock path changed".to_owned())?;
+    let path_file =
+        open_lock_file(path, false).map_err(|_| "atomic write lock path changed".to_owned())?;
+    let path_identity =
+        lock_file_identity(&path_file).map_err(|_| "atomic write lock path changed".to_owned())?;
+    let file_identity =
+        lock_file_identity(file).map_err(|_| "atomic write lock path changed".to_owned())?;
     if path_identity != file_identity {
         return Err("atomic write lock path changed".to_owned());
     }
@@ -661,7 +713,8 @@ fn verify_lock_identity(path: &Path, file: &File) -> Result<(), String> {
 
 fn prepare_lock_metadata(file: &mut File, created: bool) -> Result<(), LockMetadataError> {
     let mut text = String::new();
-    file.seek(SeekFrom::Start(0)).map_err(|_| LockMetadataError::Io)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| LockMetadataError::Io)?;
     match file.read_to_string(&mut text) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
@@ -679,8 +732,10 @@ fn prepare_lock_metadata(file: &mut File, created: bool) -> Result<(), LockMetad
         return Err(LockMetadataError::Unrecoverable);
     }
     file.set_len(0).map_err(|_| LockMetadataError::Io)?;
-    file.seek(SeekFrom::Start(0)).map_err(|_| LockMetadataError::Io)?;
-    file.write_all(LOCK_PROTOCOL.as_bytes()).map_err(|_| LockMetadataError::Io)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| LockMetadataError::Io)?;
+    file.write_all(LOCK_PROTOCOL.as_bytes())
+        .map_err(|_| LockMetadataError::Io)?;
     file.sync_all().map_err(|_| LockMetadataError::Io)
 }
 
@@ -696,7 +751,10 @@ fn lock_state(text: &str) -> LockState {
     if text.is_empty() {
         return LockState::Empty;
     }
-    if matches!(text, "codexhub-atomic-lock=1\n" | "codexhub-atomic-lock=1\r\n") {
+    if matches!(
+        text,
+        "codexhub-atomic-lock=1\n" | "codexhub-atomic-lock=1\r\n"
+    ) {
         return LockState::Protocol;
     }
     match parse_legacy_pid(text) {
@@ -725,9 +783,7 @@ fn parse_legacy_pid(text: &str) -> Option<i64> {
         let (key, value) = line.split_once('=')?;
         match key {
             "pid" if pid.is_none() => pid = parse_legacy_pid_value(value),
-            "acquired_at_millis" if timestamp.is_none() => {
-                timestamp = parse_decimal_u128(value)
-            }
+            "acquired_at_millis" if timestamp.is_none() => timestamp = parse_decimal_u128(value),
             _ => return None,
         }
     }
@@ -736,7 +792,9 @@ fn parse_legacy_pid(text: &str) -> Option<i64> {
 
 fn parse_legacy_pid_value(value: &str) -> Option<i64> {
     let parsed = parse_decimal_u128(value)?;
-    (1..=i32::MAX as u128).contains(&parsed).then_some(parsed as i64)
+    (1..=i32::MAX as u128)
+        .contains(&parsed)
+        .then_some(parsed as i64)
 }
 
 fn parse_decimal_u128(value: &str) -> Option<u128> {
@@ -780,7 +838,10 @@ fn try_lock_exclusive(file: &File) -> Result<bool, ()> {
     let result = unsafe { flock(file.as_raw_fd(), flock_op::LOCK_EX | flock_op::LOCK_NB) };
     if result == 0 {
         Ok(true)
-    } else if matches!(std::io::Error::last_os_error().kind(), std::io::ErrorKind::WouldBlock) {
+    } else if matches!(
+        std::io::Error::last_os_error().kind(),
+        std::io::ErrorKind::WouldBlock
+    ) {
         Ok(false)
     } else {
         Err(())
@@ -790,7 +851,11 @@ fn try_lock_exclusive(file: &File) -> Result<bool, ()> {
 #[cfg(unix)]
 fn unlock(file: &File) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
-    if unsafe { flock(file.as_raw_fd(), flock_op::LOCK_UN) } == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    if unsafe { flock(file.as_raw_fd(), flock_op::LOCK_UN) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(windows)]
@@ -807,17 +872,25 @@ fn try_lock_exclusive(file: &File) -> Result<bool, ()> {
             &mut overlapped,
         )
     };
-    if result != 0 { Ok(true) }
-    else if matches!(std::io::Error::last_os_error().raw_os_error(), Some(code) if code == win32::ERROR_SHARING_VIOLATION || code == win32::ERROR_LOCK_VIOLATION) { Ok(false) }
-    else { Err(()) }
+    if result != 0 {
+        Ok(true)
+    } else if matches!(std::io::Error::last_os_error().raw_os_error(), Some(code) if code == win32::ERROR_SHARING_VIOLATION || code == win32::ERROR_LOCK_VIOLATION)
+    {
+        Ok(false)
+    } else {
+        Err(())
+    }
 }
 
 #[cfg(windows)]
 fn unlock(file: &File) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     let mut overlapped = Overlapped::default();
-    if unsafe { UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut overlapped) } != 0 { Ok(()) }
-    else { Err(std::io::Error::last_os_error()) }
+    if unsafe { UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut overlapped) } != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(unix)]
@@ -858,9 +931,25 @@ struct Overlapped {
 #[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn GetFileInformationByHandle(handle: *mut std::ffi::c_void, information: *mut ByHandleFileInformation) -> i32;
-    fn LockFileEx(handle: *mut std::ffi::c_void, flags: u32, reserved: u32, low: u32, high: u32, overlapped: *mut Overlapped) -> i32;
-    fn UnlockFileEx(handle: *mut std::ffi::c_void, reserved: u32, low: u32, high: u32, overlapped: *mut Overlapped) -> i32;
+    fn GetFileInformationByHandle(
+        handle: *mut std::ffi::c_void,
+        information: *mut ByHandleFileInformation,
+    ) -> i32;
+    fn LockFileEx(
+        handle: *mut std::ffi::c_void,
+        flags: u32,
+        reserved: u32,
+        low: u32,
+        high: u32,
+        overlapped: *mut Overlapped,
+    ) -> i32;
+    fn UnlockFileEx(
+        handle: *mut std::ffi::c_void,
+        reserved: u32,
+        low: u32,
+        high: u32,
+        overlapped: *mut Overlapped,
+    ) -> i32;
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
     fn GetExitCodeProcess(handle: *mut std::ffi::c_void, code: *mut u32) -> i32;
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
@@ -868,12 +957,12 @@ unsafe extern "system" {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::write_text_atomic_with_mode;
     use super::{
         install_test_pre_open_hook, lock_state, parse_legacy_pid, write_text_atomic,
         write_text_locked, FileLock, LockState, LOCK_PROTOCOL,
     };
-    #[cfg(unix)]
-    use super::write_text_atomic_with_mode;
     use std::{
         fs,
         io::{BufRead, Read, Write},
@@ -885,7 +974,13 @@ mod tests {
     };
 
     fn test_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("codexhub-safe-file-{name}-{}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()))
+        std::env::temp_dir().join(format!(
+            "codexhub-safe-file-{name}-{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
     }
 
     fn configured_test_python() -> Command {
@@ -893,14 +988,16 @@ mod tests {
         crate::runtime_paths::configured_python_command(&python)
     }
 
-
     #[test]
     fn write_text_atomic_keeps_persistent_versioned_lock() {
         let root = test_root("lock-protocol");
         fs::create_dir_all(&root).unwrap();
         let target = root.join("providers.toml");
         write_text_atomic(&target, "new").unwrap();
-        assert_eq!(fs::read_to_string(root.join("providers.toml.lock")).unwrap(), "codexhub-atomic-lock=1\n");
+        assert_eq!(
+            fs::read_to_string(root.join("providers.toml.lock")).unwrap(),
+            "codexhub-atomic-lock=1\n"
+        );
     }
 
     #[test]
@@ -1047,23 +1144,59 @@ mod tests {
 
     #[test]
     fn legacy_recovery_is_never_based_on_age() {
-        assert!(matches!(lock_state("pid=0\nacquired_at_millis=0\n"), LockState::Unknown));
-        assert!(matches!(lock_state("acquired_at_millis=0\n"), LockState::Unknown));
+        assert!(matches!(
+            lock_state("pid=0\nacquired_at_millis=0\n"),
+            LockState::Unknown
+        ));
+        assert!(matches!(
+            lock_state("acquired_at_millis=0\n"),
+            LockState::Unknown
+        ));
         assert!(matches!(lock_state("not-a-lock\n"), LockState::Unknown));
     }
 
     #[test]
     fn parser_accepts_only_the_shared_protocol_and_legacy_shape() {
-        assert!(matches!(lock_state("codexhub-atomic-lock=1\n"), LockState::Protocol));
-        assert!(matches!(lock_state("codexhub-atomic-lock=1\r\n"), LockState::Protocol));
-        assert_eq!(parse_legacy_pid("pid=1\r\nacquired_at_millis=0\r\n"), Some(1));
-        assert_eq!(parse_legacy_pid("pid=1\nacquired_at_millis=340282366920938463463374607431768211456\n"), None);
-        assert!(matches!(lock_state("codexhub-atomic-lock=1"), LockState::Unknown));
-        assert!(matches!(lock_state("codexhub-atomic-lock=2\n"), LockState::Unknown));
-        assert!(matches!(lock_state("codexhub-atomic-lock=1\nextra=value\n"), LockState::Unknown));
-        assert!(matches!(lock_state("pid=1\npid=2\nacquired_at_millis=0\n"), LockState::Unknown));
-        assert!(matches!(lock_state("pid=-1\nacquired_at_millis=0\n"), LockState::Unknown));
-        assert!(matches!(lock_state("pid=999999999999999999999999\nacquired_at_millis=0\n"), LockState::Unknown));
+        assert!(matches!(
+            lock_state("codexhub-atomic-lock=1\n"),
+            LockState::Protocol
+        ));
+        assert!(matches!(
+            lock_state("codexhub-atomic-lock=1\r\n"),
+            LockState::Protocol
+        ));
+        assert_eq!(
+            parse_legacy_pid("pid=1\r\nacquired_at_millis=0\r\n"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_legacy_pid("pid=1\nacquired_at_millis=340282366920938463463374607431768211456\n"),
+            None
+        );
+        assert!(matches!(
+            lock_state("codexhub-atomic-lock=1"),
+            LockState::Unknown
+        ));
+        assert!(matches!(
+            lock_state("codexhub-atomic-lock=2\n"),
+            LockState::Unknown
+        ));
+        assert!(matches!(
+            lock_state("codexhub-atomic-lock=1\nextra=value\n"),
+            LockState::Unknown
+        ));
+        assert!(matches!(
+            lock_state("pid=1\npid=2\nacquired_at_millis=0\n"),
+            LockState::Unknown
+        ));
+        assert!(matches!(
+            lock_state("pid=-1\nacquired_at_millis=0\n"),
+            LockState::Unknown
+        ));
+        assert!(matches!(
+            lock_state("pid=999999999999999999999999\nacquired_at_millis=0\n"),
+            LockState::Unknown
+        ));
     }
 
     #[test]
@@ -1174,7 +1307,9 @@ mod tests {
         let lock_for_hook = lock.clone();
         let replacement_for_hook = replacement.clone();
         install_test_pre_open_hook(move |path| {
-            if path == lock_for_hook.as_path() && !replaced_for_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            if path == lock_for_hook.as_path()
+                && !replaced_for_hook.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
                 fs::remove_file(&lock_for_hook).unwrap();
                 fs::rename(&replacement_for_hook, &lock_for_hook).unwrap();
             }
@@ -1208,7 +1343,9 @@ mod tests {
         let guard_for_hook = guard.clone();
         let replacement_for_hook = replacement.clone();
         install_test_pre_open_hook(move |path| {
-            if path == guard_for_hook.as_path() && !replaced_for_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            if path == guard_for_hook.as_path()
+                && !replaced_for_hook.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
                 fs::remove_file(&guard_for_hook).unwrap();
                 fs::rename(&replacement_for_hook, &guard_for_hook).unwrap();
             }
@@ -1242,10 +1379,19 @@ mod tests {
         fs::write(&victim_file, "do not modify").unwrap();
         fs::write(&target, "old").unwrap();
         let status = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J", &lock.to_string_lossy(), &victim.to_string_lossy()])
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &lock.to_string_lossy(),
+                &victim.to_string_lossy(),
+            ])
             .status()
             .unwrap();
-        assert!(status.success(), "CI must provide a directory junction fixture");
+        assert!(
+            status.success(),
+            "CI must provide a directory junction fixture"
+        );
         let before = fs::symlink_metadata(&lock).unwrap();
 
         let error = write_text_atomic(&target, "new").unwrap_err();
@@ -1327,11 +1473,18 @@ mod tests {
                 }
             }
         });
-        PythonHolder { child, stdin, events: events_rx }
+        PythonHolder {
+            child,
+            stdin,
+            events: events_rx,
+        }
     }
 
     fn expect_handshake(events: &mpsc::Receiver<String>, expected: &str) {
-        assert_eq!(events.recv_timeout(Duration::from_secs(10)).unwrap(), expected);
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(10)).unwrap(),
+            expected
+        );
     }
 
     #[test]
@@ -1352,7 +1505,9 @@ mod tests {
             let hook = |event: &'static str| {
                 events_tx.send(event.to_owned()).unwrap();
                 if event == "blocked" {
-                    replacement_verified_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    replacement_verified_rx
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
                     events_tx.send("replacement-verified".to_owned()).unwrap();
                 }
             };
@@ -1465,7 +1620,10 @@ mod tests {
         let mut lock = FileLock::acquire(&target).unwrap();
         lock.release().unwrap();
         lock.release().unwrap();
-        assert_eq!(fs::read_to_string(root.join("settings.json.lock")).unwrap(), LOCK_PROTOCOL);
+        assert_eq!(
+            fs::read_to_string(root.join("settings.json.lock")).unwrap(),
+            LOCK_PROTOCOL
+        );
     }
 
     #[test]
@@ -1491,7 +1649,10 @@ mod tests {
         // The persisted record carries no timestamp: age alone can never
         // authorize a second writer, however long the first one holds.
         write_text_atomic(&target, "seed").unwrap();
-        assert_eq!(fs::read_to_string(root.join("settings.json.lock")).unwrap(), LOCK_PROTOCOL);
+        assert_eq!(
+            fs::read_to_string(root.join("settings.json.lock")).unwrap(),
+            LOCK_PROTOCOL
+        );
         fs::remove_file(&target).unwrap();
 
         let lock = FileLock::acquire(&target).unwrap();

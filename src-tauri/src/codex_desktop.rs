@@ -12,8 +12,7 @@ pub(crate) const RESTART_REQUIRED_ERROR: &str = "codex_desktop_restart_required"
 pub(crate) const CLOSE_TIMEOUT_ERROR: &str = "codex_desktop_close_timeout";
 pub(crate) const RESTART_UNSUPPORTED_ERROR: &str = "codex_desktop_restart_unsupported";
 pub(crate) const SWITCH_REOPEN_FAILED_ERROR: &str = "codex_desktop_switch_failed_reopen_failed";
-pub(crate) const SWITCH_RELAUNCH_FAILED_ERROR: &str =
-    "codex_desktop_switched_relaunch_failed";
+pub(crate) const SWITCH_RELAUNCH_FAILED_ERROR: &str = "codex_desktop_switched_relaunch_failed";
 pub(crate) const SWITCH_STATE_UNCERTAIN_ERROR: &str = "codex_desktop_switch_state_uncertain";
 pub(crate) const BECAME_RUNNING_ERROR: &str = "codex_desktop_became_running_before_commit";
 const CODEX_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -124,7 +123,9 @@ where
 /// Serialize a non-lifecycle writer with every Codex configuration and
 /// Official publication transaction. This prevents a rollback snapshot from
 /// overwriting a user setting saved during the transaction.
-pub(crate) fn serialize_config_writer<T>(writer: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+pub(crate) fn serialize_config_writer<T>(
+    writer: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     let lock_path = switch_lock_path()?;
     serialize_config_writer_with_path(&lock_path, writer)
 }
@@ -194,7 +195,13 @@ where
     F: FnOnce() -> Result<T, E>,
     E: Into<SwitchMutationError>,
 {
-    coordinate_switch_with_timeout(backend, lock_path, restart_codex, CODEX_CLOSE_TIMEOUT, switch)
+    coordinate_switch_with_timeout(
+        backend,
+        lock_path,
+        restart_codex,
+        CODEX_CLOSE_TIMEOUT,
+        switch,
+    )
 }
 
 fn coordinate_switch_with_timeout<T, B, F, E>(
@@ -1080,10 +1087,12 @@ mod tests {
             true,
             || {
                 backend.events.borrow_mut().push("switch");
-                Err(crate::file_transaction::FileTransactionError::RollbackFailed {
-                    operation: "publish failed".to_string(),
-                    rollback: vec!["injected restore failure".to_string()],
-                })
+                Err(
+                    crate::file_transaction::FileTransactionError::RollbackFailed {
+                        operation: "publish failed".to_string(),
+                        rollback: vec!["injected restore failure".to_string()],
+                    },
+                )
             },
         )
         .expect_err("uncertain transaction state");
@@ -1108,10 +1117,12 @@ mod tests {
             || {
                 backend.events.borrow_mut().push("switch");
                 backend.running.set(true);
-                Err(crate::file_transaction::FileTransactionError::RollbackFailed {
-                    operation: "publish failed".to_string(),
-                    rollback: vec!["injected restore failure".to_string()],
-                })
+                Err(
+                    crate::file_transaction::FileTransactionError::RollbackFailed {
+                        operation: "publish failed".to_string(),
+                        rollback: vec!["injected restore failure".to_string()],
+                    },
+                )
             },
         )
         .expect_err("uncertain transaction state");
@@ -1147,10 +1158,12 @@ mod tests {
             || {
                 backend.events.borrow_mut().push("switch");
                 backend.running.set(true);
-                Err(crate::file_transaction::FileTransactionError::RollbackFailed {
-                    operation: "publish failed".to_string(),
-                    rollback: vec!["injected restore failure".to_string()],
-                })
+                Err(
+                    crate::file_transaction::FileTransactionError::RollbackFailed {
+                        operation: "publish failed".to_string(),
+                        rollback: vec!["injected restore failure".to_string()],
+                    },
+                )
             },
         )
         .expect_err("uncertain transaction state");
@@ -1158,10 +1171,7 @@ mod tests {
         assert!(error.contains(SWITCH_STATE_UNCERTAIN_ERROR));
         assert!(error.contains("may still be running"));
         assert!(backend.running.get());
-        assert_eq!(
-            &*backend.events.borrow(),
-            &["status", "switch", "status"]
-        );
+        assert_eq!(&*backend.events.borrow(), &["status", "switch", "status"]);
     }
 
     #[test]
@@ -1178,10 +1188,12 @@ mod tests {
             || {
                 backend.events.borrow_mut().push("switch");
                 backend.running.set(true);
-                Err(crate::file_transaction::FileTransactionError::RollbackFailed {
-                    operation: "publish failed".to_string(),
-                    rollback: vec!["injected restore failure".to_string()],
-                })
+                Err(
+                    crate::file_transaction::FileTransactionError::RollbackFailed {
+                        operation: "publish failed".to_string(),
+                        rollback: vec!["injected restore failure".to_string()],
+                    },
+                )
             },
         )
         .expect_err("uncertain transaction state");
@@ -1211,7 +1223,10 @@ mod tests {
         )
         .expect("safe rollback should reopen the original desktop");
 
-        assert_eq!(result.restart_result, CodexRestartResult::SwitchFailedReopened);
+        assert_eq!(
+            result.restart_result,
+            CodexRestartResult::SwitchFailedReopened
+        );
         assert!(backend.running.get());
     }
 
@@ -1443,9 +1458,7 @@ mod tests {
     #[test]
     fn windows_restart_manager_helper_compiles_and_rejects_a_reused_process_identity() {
         let wrong_executable = std::env::temp_dir().join("not-the-powershell-host.exe");
-        let escaped = wrong_executable
-            .to_string_lossy()
-            .replace('\'', "''");
+        let escaped = wrong_executable.to_string_lossy().replace('\'', "''");
         let script = format!(
             "{WINDOWS_RESTART_MANAGER_TYPE}\ntry {{ [CodexHubRestartManager]::GracefulShutdown([uint32]$PID, '{escaped}', 100) | Out-Null; Write-Output 'unexpected-accept' }} catch {{ Write-Output $_.Exception.ToString() }}"
         );
@@ -1546,11 +1559,9 @@ finally {{
     #[test]
     fn windows_watchdog_terminates_a_hung_helper_within_its_bound() {
         let started = Instant::now();
-        let error = run_windows_lifecycle_script(
-            "Start-Sleep -Seconds 30",
-            Duration::from_millis(500),
-        )
-        .expect_err("hung PowerShell helper must time out");
+        let error =
+            run_windows_lifecycle_script("Start-Sleep -Seconds 30", Duration::from_millis(500))
+                .expect_err("hung PowerShell helper must time out");
 
         assert!(error.contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(5));

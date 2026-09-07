@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn artifact_and_manifest_identity_is_flavor_specific_without_changing_semver() {
-        let version = "0.2.0";
+        let version = "0.2.1";
 
         assert_eq!(BuildFlavor::Normal.updater_manifest_name(), "latest.json");
         assert_eq!(
@@ -132,25 +132,25 @@ mod tests {
             BuildFlavor::Normal
                 .artifact_name(version, UPDATER_PLATFORM_WINDOWS)
                 .expect("windows artifact"),
-            "CodexHub_0.2.0_x64-setup.exe"
+            "CodexHub_0.2.1_x64-setup.exe"
         );
         assert_eq!(
             BuildFlavor::Debug
                 .artifact_name(version, UPDATER_PLATFORM_WINDOWS)
                 .expect("windows artifact"),
-            "CodexHub_0.2.0_debug_x64-setup.exe"
+            "CodexHub_0.2.1_debug_x64-setup.exe"
         );
         assert_eq!(
             BuildFlavor::Normal
                 .artifact_name(version, UPDATER_PLATFORM_LINUX)
                 .expect("linux artifact"),
-            "CodexHub_0.2.0_amd64.AppImage"
+            "CodexHub_0.2.1_amd64.AppImage"
         );
         assert_eq!(
             BuildFlavor::Debug
                 .artifact_name(version, UPDATER_PLATFORM_LINUX)
                 .expect("linux artifact"),
-            "CodexHub_0.2.0_debug_amd64.AppImage"
+            "CodexHub_0.2.1_debug_amd64.AppImage"
         );
         let expected_platform = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
             UPDATER_PLATFORM_LINUX

@@ -870,15 +870,6 @@ function GatewayPageImpl({
           </div>
         </div>
       </aside>
-      {desktopView === "clients" && (
-        <footer className="ws-page-footer">
-          <span>{t("workspace.clientConfigHint")}</span>
-          <button onClick={() => setConnectionInfoOpen(true)}>
-            {t("gateway.copyConnection")}
-            <Copy size={12} />
-          </button>
-        </footer>
-      )}
       {connectionInfoOpen && (
         <div className="ws-connection-overlay">
           <section

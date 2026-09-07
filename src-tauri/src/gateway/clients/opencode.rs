@@ -79,7 +79,9 @@ pub(in crate::gateway) fn opencode_config_text(
     if !base.is_object() {
         base = Value::Object(Map::new());
     }
-    let object = base.as_object_mut().ok_or_else(|| "OpenCode config root must be a JSON object".to_string())?;
+    let object = base
+        .as_object_mut()
+        .ok_or_else(|| "OpenCode config root must be a JSON object".to_string())?;
     // Preserve user-owned providers; drop stale codexhub entries.
     if let Some(providers_object) = object.get_mut("provider").and_then(Value::as_object_mut) {
         remove_codexhub_client_provider_entries(providers_object);
@@ -90,8 +92,12 @@ pub(in crate::gateway) fn opencode_config_text(
         object.insert("provider".to_string(), Value::Object(provider_map));
     }
     serde_json::to_string_pretty(&base)
-        .map(|text| format!("{text}
-"))
+        .map(|text| {
+            format!(
+                "{text}
+"
+            )
+        })
         .map_err(|error| format!("failed to serialize OpenCode config: {error}"))
 }
 

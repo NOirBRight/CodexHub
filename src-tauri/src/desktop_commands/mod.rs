@@ -11,8 +11,8 @@ pub mod web_adapter;
 pub use handlers::*;
 pub(crate) use handlers::{
     generate_catalog_coordinated, refresh_official_models_coordinated,
-    refresh_official_models_published_coordinated,
-    save_official_multi_agent_version_coordinated, sync_catalog_coordinated,
+    refresh_official_models_published_coordinated, save_official_multi_agent_version_coordinated,
+    sync_catalog_coordinated,
 };
 pub use web_adapter::dispatch_web;
 
@@ -36,7 +36,10 @@ const ALIASES_SWITCH_MODE: &[(&str, &str)] = &[
     ("restartCodex", "restart_codex"),
 ];
 const ALIASES_REQUEST_ID: &[(&str, &str)] = &[("requestId", "request_id")];
-const ALIASES_OFFICIAL_REFRESH: &[(&str, &str)] = &[("restartCodex", "restart_codex"), ("requestId", "request_id")];
+const ALIASES_OFFICIAL_REFRESH: &[(&str, &str)] = &[
+    ("restartCodex", "restart_codex"),
+    ("requestId", "request_id"),
+];
 const ALIASES_RESTART: &[(&str, &str)] = &[("restartCodex", "restart_codex")];
 const ALIASES_USAGE: &[(&str, &str)] = &[
     ("startTime", "start_time"),

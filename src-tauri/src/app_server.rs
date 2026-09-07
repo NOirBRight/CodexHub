@@ -48,14 +48,11 @@ impl AppServerSession {
                 return Err(error);
             }
         };
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| {
-                let _ = child.kill();
-                let _ = child.wait();
-                "failed to open codex app-server stdin".to_string()
-            })?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            let _ = child.kill();
+            let _ = child.wait();
+            "failed to open codex app-server stdin".to_string()
+        })?;
         let stdout = child.stdout.take().ok_or_else(|| {
             let _ = child.kill();
             let _ = child.wait();
@@ -195,7 +192,12 @@ impl AppServerSession {
     }
 
     #[cfg(test)]
-    fn read_message(&mut self, deadline: Instant, timeout: Duration, purpose: &str) -> Result<Value, String> {
+    fn read_message(
+        &mut self,
+        deadline: Instant,
+        timeout: Duration,
+        purpose: &str,
+    ) -> Result<Value, String> {
         if Instant::now() >= deadline {
             self.kill();
             return Err(format!(
@@ -214,11 +216,12 @@ impl AppServerSession {
             }
             AppServerPoll::Closed => {
                 let _ = self.child.wait();
-                Err(format!("codex app-server {purpose} did not return a response"))
+                Err(format!(
+                    "codex app-server {purpose} did not return a response"
+                ))
             }
         }
     }
-
 }
 
 impl Drop for AppServerSession {
@@ -227,9 +230,7 @@ impl Drop for AppServerSession {
     }
 }
 
-fn spawn_line_reader(
-    stdout: ChildStdout,
-) -> mpsc::Receiver<Result<Option<String>, String>> {
+fn spawn_line_reader(stdout: ChildStdout) -> mpsc::Receiver<Result<Option<String>, String>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut reader = BufReader::new(stdout);

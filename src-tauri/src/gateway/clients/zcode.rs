@@ -275,6 +275,8 @@ fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGro
     })
 }
 
+#[cfg(test)]
+use super::super::IsolatedClientApplyTargets;
 use super::super::{
     combined_current_preview, combined_named_text, create_snapshot_backup,
     detect_route_details_from_json_provider_array, detect_route_details_from_json_provider_object,
@@ -285,8 +287,6 @@ use super::super::{
     write_text_replace, GatewayClientApplyResult, GatewayClientConfigPreview,
     GatewayClientProviderGroups,
 };
-#[cfg(test)]
-use super::super::IsolatedClientApplyTargets;
 use crate::app_flavor::RoutingOwner;
 use reqwest::blocking::Client;
 use std::path::PathBuf;

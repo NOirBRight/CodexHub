@@ -336,14 +336,14 @@ pub fn subagent_matrix_status() -> Result<gateway::SubagentMatrixStatus, String>
 }
 
 #[tauri::command]
-pub fn list_official_multi_agent_overrides() -> Result<std::collections::HashMap<String, String>, String>
-{
+pub fn list_official_multi_agent_overrides(
+) -> Result<std::collections::HashMap<String, String>, String> {
     models::list_official_multi_agent_overrides()
 }
 
 #[tauri::command]
-pub fn list_official_multi_agent_baselines() -> Result<std::collections::HashMap<String, String>, String>
-{
+pub fn list_official_multi_agent_baselines(
+) -> Result<std::collections::HashMap<String, String>, String> {
     models::list_official_multi_agent_baselines()
 }
 
@@ -503,7 +503,9 @@ pub async fn generate_catalog(restart_codex: Option<bool>) -> Result<Vec<Model>,
 
 pub(crate) fn generate_catalog_coordinated(restart_codex: bool) -> Result<Vec<Model>, String> {
     if !restart_codex {
-        return codex_desktop::serialize_config_writer(catalog::generate_catalog_with_existing_lock);
+        return codex_desktop::serialize_config_writer(
+            catalog::generate_catalog_with_existing_lock,
+        );
     }
     coordinated_catalog_write(restart_codex, catalog::generate_catalog_with_existing_lock)
 }
@@ -541,7 +543,8 @@ pub(crate) fn save_official_multi_agent_version_coordinated(
     if !restart_codex {
         let outcome = codex_desktop::serialize_config_writer(|| {
             let prepared = models::prepare_official_multi_agent_version(model_id, version)?;
-            models::publish_official_multi_agent_version(prepared).map_err(|error| error.to_string())
+            models::publish_official_multi_agent_version(prepared)
+                .map_err(|error| error.to_string())
         })?;
         return Ok(OfficialMultiAgentSaveResult {
             model: outcome.model,
@@ -580,7 +583,14 @@ pub(crate) fn save_official_multi_agent_version_coordinated(
     })
 }
 
-pub(crate) fn prepare_then_commit_official_multi_agent<Prepared, Output, Prepare, Publish, Gate, Error>(
+pub(crate) fn prepare_then_commit_official_multi_agent<
+    Prepared,
+    Output,
+    Prepare,
+    Publish,
+    Gate,
+    Error,
+>(
     prepare: Prepare,
     publish: Publish,
     gate: Gate,

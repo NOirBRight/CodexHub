@@ -553,6 +553,14 @@ def run_probe(binary: Path) -> int:
                 )
                 return 1
 
+            gtk_identity = subprocess.run(
+                ["xprop", "-id", f"0x{app_xid:x}", "_GTK_APPLICATION_ID"],
+                check=True, capture_output=True, text=True, timeout=3,
+            ).stdout
+            if '"com.codexhub.app"' not in gtk_identity:
+                print("FAIL: GTK application identity is missing; GNOME cannot match the launcher")
+                return 1
+
             rectangles = x11.input_rectangles(app_xid)
             points = [
                 (app_width * x_percent // 100, app_height * y_percent // 100)
@@ -576,12 +584,19 @@ def run_probe(binary: Path) -> int:
 
             # Prove WebKit/DOM receives the event, not merely that the GTK shell
             # prevents it from reaching the background. The settings button is
-            # in the fifth fixed-width top navigation slot. Switching between
+            # in the sixth fixed-width top navigation slot. Switching between
             # Settings and Overview changes a large stable region of the DOM.
-            # CSS: left 22, buttons 96, gap 7; native Linux zoom is 0.93.
-            settings_x = round((22 + 4 * (96 + 7) + 48) * 0.93)
-            overview_x = round((22 + 48) * 0.93)
-            navigation_y = round((45 + 23) * 0.93)
+            # Keep the physical coordinates aligned with the application scale.
+            stage_source = (Path(__file__).resolve().parents[1] / "frontend/src/components/FitStage.tsx").read_text()
+            scale_match = re.search(r"FIT_STAGE_SCALE\s*=\s*([0-9.]+)", stage_source)
+            if not scale_match:
+                raise RuntimeError("Cannot determine the candidate UI scale")
+            ui_scale = float(scale_match.group(1))
+            shadow_match = re.search(r"NATIVE_SHADOW_INSET\s*=\s*([\d.]+)", stage_source)
+            shadow_inset = float(shadow_match.group(1)) if shadow_match else 0
+            settings_x = round((shadow_inset + 22 + 5 * (96 + 8) + 48) * ui_scale)
+            overview_x = round((shadow_inset + 22 + 48) * ui_scale)
+            navigation_y = round((shadow_inset + 45 + 23) * ui_scale)
             response_width = min(360, app_width)
             response_x = app_x + app_width - response_width
             response_height = min(480, app_height)

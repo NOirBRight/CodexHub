@@ -1106,16 +1106,18 @@ mod tests {
             "</Triggers>",
             "<BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>",
         );
-        let unknown_action = owned.replace("<Exec>", "<UnknownAction>").replace(
-            "</Exec>",
-            "</UnknownAction>",
-        );
+        let unknown_action = owned
+            .replace("<Exec>", "<UnknownAction>")
+            .replace("</Exec>", "</UnknownAction>");
         let unknown_trigger = owned
             .replace("<LogonTrigger>", "<UnknownTrigger>")
             .replace("</LogonTrigger>", "</UnknownTrigger>");
         let malformed = "<Task><Actions /></Task>";
 
-        assert_eq!(run_uninstall_script_fixture(exe, &[&owned, &owned]), (0, true));
+        assert_eq!(
+            run_uninstall_script_fixture(exe, &[&owned, &owned]),
+            (0, true)
+        );
         assert_eq!(
             run_uninstall_script_fixture(exe, &[&owned, &replacement]),
             (super::WINDOWS_UNINSTALL_PRESERVED_EXIT_CODE, false)
@@ -1376,8 +1378,8 @@ mod tests {
 
     #[cfg(windows)]
     fn run_uninstall_script_fixture(exe: &Path, task_xml: &[&str]) -> (i32, bool) {
-        let mut prelude = "$ErrorActionPreference='Stop';$global:tasks=New-Object Collections.Queue;"
-            .to_string();
+        let mut prelude =
+            "$ErrorActionPreference='Stop';$global:tasks=New-Object Collections.Queue;".to_string();
         for xml in task_xml {
             prelude.push_str(&format!(
                 "$global:tasks.Enqueue([pscustomobject]@{{Path={};Xml={}}});",
@@ -1392,7 +1394,10 @@ mod tests {
             .output()
             .expect("PowerShell fixture should start");
         (
-            outcome.status.code().expect("PowerShell should return a code"),
+            outcome
+                .status
+                .code()
+                .expect("PowerShell should return a code"),
             String::from_utf8_lossy(&outcome.stdout).contains("CODEXHUB_DELETE_CALLED"),
         )
     }
@@ -1428,10 +1433,7 @@ mod tests {
             .contains(&home.join("Library").join("LaunchAgents")));
         let writes = filesystem.writes.borrow();
         let plist = writes.get(&plist_path).unwrap();
-        assert!(plist.contains(&format!(
-            "<string>{}</string>",
-            super::macos_label()
-        )));
+        assert!(plist.contains(&format!("<string>{}</string>", super::macos_label())));
         assert!(plist.contains("CodexHub &amp; Tools"));
         assert!(plist.contains("<string>start</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>\n  <true/>"));

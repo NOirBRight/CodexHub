@@ -127,10 +127,7 @@ fn managed_codex_projection_transaction_paths_with_paths(
 }
 
 fn takeover_metadata_path(backup_path: &Path) -> PathBuf {
-    let mut name = backup_path
-        .file_name()
-        .unwrap_or_default()
-        .to_os_string();
+    let mut name = backup_path.file_name().unwrap_or_default().to_os_string();
     name.push(".takeover.json");
     backup_path.with_file_name(name)
 }

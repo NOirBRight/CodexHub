@@ -955,11 +955,19 @@ export default function App() {
     setWorkspacePage(page);
     setSettingsOpen(page === "settings");
     setVisibleTab(
-      page === "statistics" || page === "clients" || page === "settings"
+      page === "statistics" ||
+        page === "clients" ||
+        page === "gateway" ||
+        page === "settings"
         ? "gateway"
         : "codexhub",
     );
-    if (page === "statistics" || page === "clients" || page === "settings")
+    if (
+      page === "statistics" ||
+      page === "clients" ||
+      page === "gateway" ||
+      page === "settings"
+    )
       setGatewayVisited(true);
   }
   return (
@@ -1019,22 +1027,17 @@ export default function App() {
         >
           {workspacePage === "settings" && (
             <nav className="ws-settings-tabs" aria-label={t("common.settings")}>
-              {[
-                "general",
-                "codex",
-                "gateway",
-                "requests",
-                "diagnostics",
-                "about",
-              ].map((category) => (
-                <button
-                  key={category}
-                  className={settingsCategory === category ? "selected" : ""}
-                  onClick={() => setSettingsCategory(category)}
-                >
-                  {t("workspace.settingsCategories." + category)}
-                </button>
-              ))}
+              {["general", "codex", "requests", "diagnostics", "about"].map(
+                (category) => (
+                  <button
+                    key={category}
+                    className={settingsCategory === category ? "selected" : ""}
+                    onClick={() => setSettingsCategory(category)}
+                  >
+                    {t("workspace.settingsCategories." + category)}
+                  </button>
+                ),
+              )}
             </nav>
           )}
           <GatewayPage
@@ -1069,12 +1072,21 @@ export default function App() {
           <div
             className="ws-settings-holder"
             hidden={
-              workspacePage !== "settings" || settingsCategory === "diagnostics"
+              (workspacePage !== "settings" && workspacePage !== "gateway") ||
+              (workspacePage === "settings" &&
+                settingsCategory === "diagnostics")
             }
           >
             <SettingsDrawer
+              showInlineActions={
+                workspacePage === "gateway" ||
+                (workspacePage === "settings" && settingsCategory !== "diagnostics")
+              }
               onOpenContextGuard={() => setOpenOfficialRequest((n) => n + 1)}
-              inlineCategory={settingsCategory}
+              inlineCategory={
+                workspacePage === "gateway" ? "gateway" : settingsCategory
+              }
+              gatewayStatus={gatewayStatus}
               dark={theme.dark}
               onTheme={theme.toggle}
               busy={busy}

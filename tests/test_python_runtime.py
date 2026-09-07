@@ -49,6 +49,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/e2e_gateway_client_matrix.py",
     "scripts/e2e_history_online_sync.py",
     "scripts/e2e_linux_cli_clients.py",
+    "scripts/e2e_linux_dock_icon.py",
     "scripts/e2e_linux_gui_clients.py",
     "scripts/e2e_linux_window_input.py",
     "scripts/generate_wayfinder_final_audit.py",
@@ -62,6 +63,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/run_issue_283_cli_v2_lifecycle.py",
     "scripts/run_issue_395_cli_chat_v2_lifecycle.py",
     "scripts/run_issue_62_live_control.py",
+    "scripts/update_pricing_snapshot.py",
     "scripts/validate_issue_278_evidence.py",
     "scripts/validate_issue_369_matrix.py",
     "scripts/validate_issue_63_evidence.py",
@@ -326,7 +328,7 @@ def test_relative_windows_entrypoints_keep_the_repository_runtime_contract() -> 
         "-DryRun",
     )
     assert portable_plan.returncode == 0, portable_plan.stdout + portable_plan.stderr
-    assert '"version":"0.2.0"' in portable_plan.stdout
+    assert '"version":"0.2.1"' in portable_plan.stdout
 
     runtime_check = _run_relative_powershell_script(
         r".\scripts\Prepare-PythonRuntime.ps1", "-CheckOnly"
