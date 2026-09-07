@@ -1,6 +1,6 @@
 # Linux packaging
 
-Linux is a first-class CodexHub surface on the same 0.1.9 train as Windows.
+Linux is a first-class CodexHub surface on the same release train as Windows.
 Do not fork a `linux-main`. Rebase campaign work onto `main` and ship Linux
 artifacts from the same tag.
 

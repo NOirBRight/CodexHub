@@ -44,12 +44,13 @@ def test_official_transport_wheel_is_pinned_and_packaged():
 
 
 def test_release_version_is_consistent_across_manifests():
-    expected = "0.2.0"
+    expected = "0.2.1"
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     cargo = tomllib.loads((ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
     cargo_lock = tomllib.loads((ROOT / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8"))
     package = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
     package_lock = json.loads((ROOT / "frontend" / "package-lock.json").read_text(encoding="utf-8"))
+    route_primitives = (ROOT / "src-python" / "route_primitives.py").read_text(encoding="utf-8")
     codexhub_lock = next(item for item in cargo_lock["package"] if item["name"] == "codexhub")
 
     assert tauri["version"] == expected
@@ -58,6 +59,7 @@ def test_release_version_is_consistent_across_manifests():
     assert package["version"] == expected
     assert package_lock["version"] == expected
     assert package_lock["packages"][""]["version"] == expected
+    assert f'UPSTREAM_USER_AGENT = "CodexHub/{expected} ' in route_primitives
 
 
 def test_v014_audit_records_reconciliation_and_display_contract():
