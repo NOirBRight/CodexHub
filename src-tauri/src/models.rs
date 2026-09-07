@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::app_server::{AppServerCall, AppServerSession};
 use crate::{
     config, runtime_paths, safe_file, CatalogVisibility, MetadataProvenance, Model, ModelPricing,
     Settings, UpstreamFormat,
@@ -12,15 +14,13 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
 #[cfg(test)]
-use crate::app_server::{AppServerCall, AppServerSession};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use std::time::Instant;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
@@ -138,10 +138,14 @@ pub(crate) fn prepare_official_models_acquisition(
         &acquisition.subscription_models,
         &acquisition.visibility_diagnostics,
     )?;
-    let editor_text = acquisition.native_cache.clone().unwrap_or_else(|| seed_text.clone());
+    let editor_text = acquisition
+        .native_cache
+        .clone()
+        .unwrap_or_else(|| seed_text.clone());
     let mut files = vec![
         crate::file_transaction::PreparedTextFile::runtime_owner_only(
-            paths.official_editor_cache_path(), editor_text,
+            paths.official_editor_cache_path(),
+            editor_text,
         ),
         crate::file_transaction::PreparedTextFile::runtime(
             paths.metadata_cache_path(),
@@ -153,10 +157,12 @@ pub(crate) fn prepare_official_models_acquisition(
         ),
     ];
     if let Some(native_cache) = acquisition.native_cache.clone() {
-        files.push(crate::file_transaction::PreparedTextFile::codex_target_owner_only(
-            runtime_paths::codex_target_home_dir()?.join("models_cache.json"),
-            native_cache,
-        ));
+        files.push(
+            crate::file_transaction::PreparedTextFile::codex_target_owner_only(
+                runtime_paths::codex_target_home_dir()?.join("models_cache.json"),
+                native_cache,
+            ),
+        );
     }
     Ok((acquisition.models.clone(), files))
 }
@@ -384,50 +390,83 @@ fn official_editor_models(native_path: &Path, paths: &ModelPaths) -> Result<Vec<
     Ok(read_official_subscription_models_from_cache_with_presence(paths)?.unwrap_or_default())
 }
 
-fn official_editor_payload(native_path: &Path, paths: &ModelPaths) -> Result<Option<Value>, String> {
+fn official_editor_payload(
+    native_path: &Path,
+    paths: &ModelPaths,
+) -> Result<Option<Value>, String> {
     let editor_path = paths.official_editor_cache_path();
     let mut snapshots = Vec::new();
     let mut errors = Vec::new();
     for path in [native_path, editor_path.as_path()] {
-        if !path.exists() { continue; }
+        if !path.exists() {
+            continue;
+        }
         match load_json_file(path).and_then(|payload| {
             validate_official_snapshot(&payload)?;
             Ok(payload)
         }) {
             Ok(payload) => {
                 let fetched = payload.get("fetched_at");
-                let timestamp = fetched.and_then(Value::as_i64).and_then(|s| s.checked_mul(1000))
-                    .or_else(|| fetched.and_then(Value::as_str).and_then(|s|
-                        chrono::DateTime::parse_from_rfc3339(s).ok().map(|t| t.timestamp_millis())))
-                    .unwrap_or_else(|| fs::metadata(path).ok().and_then(|m| m.modified().ok())
-                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64).unwrap_or(0));
+                let timestamp = fetched
+                    .and_then(Value::as_i64)
+                    .and_then(|s| s.checked_mul(1000))
+                    .or_else(|| {
+                        fetched.and_then(Value::as_str).and_then(|s| {
+                            chrono::DateTime::parse_from_rfc3339(s)
+                                .ok()
+                                .map(|t| t.timestamp_millis())
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        fs::metadata(path)
+                            .ok()
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0)
+                    });
                 snapshots.push((timestamp, payload));
             }
             Err(error) => errors.push(error),
         }
     }
-    if let Some((_, payload)) = snapshots.into_iter().max_by_key(|(timestamp, _)| *timestamp) {
+    if let Some((_, payload)) = snapshots
+        .into_iter()
+        .max_by_key(|(timestamp, _)| *timestamp)
+    {
         return Ok(Some(payload));
     }
-    if let Some(error) = errors.into_iter().next() { return Err(error); }
+    if let Some(error) = errors.into_iter().next() {
+        return Err(error);
+    }
     Ok(None)
 }
 
 fn validate_official_snapshot(payload: &Value) -> Result<(), String> {
-    let items = payload.get("models").and_then(Value::as_array)
+    let items = payload
+        .get("models")
+        .and_then(Value::as_array)
         .ok_or_else(|| "Official snapshot did not contain a model array".to_string())?;
     // An explicitly empty (or entirely hidden) catalog is valid. Missing
     // identity/visibility fields are not evidence that models were removed.
     for item in items {
-        let object = item.as_object()
+        let object = item
+            .as_object()
             .ok_or_else(|| "Official snapshot contains a non-object model".to_string())?;
-        let identity = object.get("slug").or_else(|| object.get("id"))
-            .or_else(|| object.get("model")).or_else(|| object.get("name"));
-        if identity.and_then(Value::as_str).is_none_or(|id| id.trim().is_empty()) {
+        let identity = object
+            .get("slug")
+            .or_else(|| object.get("id"))
+            .or_else(|| object.get("model"))
+            .or_else(|| object.get("name"));
+        if identity
+            .and_then(Value::as_str)
+            .is_none_or(|id| id.trim().is_empty())
+        {
             return Err("Official snapshot contains a model without an identity".to_string());
         }
         if !item_has_internal_identity(object)
-            && catalog_visibility_from_item(object) == CatalogVisibility::Unknown {
+            && catalog_visibility_from_item(object) == CatalogVisibility::Unknown
+        {
             return Err("Official snapshot contains a model without known visibility".to_string());
         }
     }
@@ -437,7 +476,8 @@ fn validate_official_snapshot(payload: &Value) -> Result<(), String> {
 
 /// Feed publication the same complete membership as the editor. Preserve the
 /// acquisition timestamp: reading a cached list does not make it fresh.
-pub(crate) fn prepare_official_editor_seed() -> Result<Option<crate::file_transaction::PreparedTextFile>, String> {
+pub(crate) fn prepare_official_editor_seed(
+) -> Result<Option<crate::file_transaction::PreparedTextFile>, String> {
     if !config::get_settings()?.include_official_models {
         return Ok(None);
     }
@@ -446,13 +486,27 @@ pub(crate) fn prepare_official_editor_seed() -> Result<Option<crate::file_transa
     prepare_official_editor_seed_at(&native, &paths)
 }
 
-fn prepare_official_editor_seed_at(native: &Path, paths: &ModelPaths) -> Result<Option<crate::file_transaction::PreparedTextFile>, String> {
-    let Some(mut payload) = official_editor_payload(native, paths)? else { return Ok(None) };
+fn prepare_official_editor_seed_at(
+    native: &Path,
+    paths: &ModelPaths,
+) -> Result<Option<crate::file_transaction::PreparedTextFile>, String> {
+    let Some(mut payload) = official_editor_payload(native, paths)? else {
+        return Ok(None);
+    };
     let models = subscription_models_from_payload(&payload)?;
     payload["visibility_diagnostics"] = visibility_diagnostics_from_payload(&payload);
-    payload["models"] = json!(models.iter().map(official_subscription_seed_model).collect::<Vec<_>>());
-    let text = serde_json::to_string_pretty(&payload).map_err(|error| format!("failed to serialize Official editor catalog: {error}"))?;
-    Ok(Some(crate::file_transaction::PreparedTextFile::runtime_owner_only(paths.official_subscription_cache_path(), text)))
+    payload["models"] = json!(models
+        .iter()
+        .map(official_subscription_seed_model)
+        .collect::<Vec<_>>());
+    let text = serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("failed to serialize Official editor catalog: {error}"))?;
+    Ok(Some(
+        crate::file_transaction::PreparedTextFile::runtime_owner_only(
+            paths.official_subscription_cache_path(),
+            text,
+        ),
+    ))
 }
 
 pub(crate) fn list_models_with_presence() -> Result<Option<Vec<Model>>, String> {
@@ -472,20 +526,16 @@ pub fn list_model_metadata() -> Result<Vec<Model>, String> {
     let config_paths = config::ConfigPaths::runtime()?;
     let known_official_models = config::known_official_model_ids(&config_paths);
     let cached = read_metadata_cache(&paths).unwrap_or_default();
-    let cached = merge_metadata_with_overrides(
-        builtin_model_metadata(),
-        cached,
-        &known_official_models,
-    );
+    let cached =
+        merge_metadata_with_overrides(builtin_model_metadata(), cached, &known_official_models);
     let overrides = read_metadata_overrides(&paths).unwrap_or_default();
-    let merged = merge_metadata_with_overrides(
-        cached,
-        overrides,
-        &known_official_models,
-    );
+    let merged = merge_metadata_with_overrides(cached, overrides, &known_official_models);
     let mut merged = merged;
     apply_catalog_multi_agent_overrides(&paths, &mut merged);
-    Ok(merged.into_iter().filter(model_is_catalog_visible).collect())
+    Ok(merged
+        .into_iter()
+        .filter(model_is_catalog_visible)
+        .collect())
 }
 
 pub(crate) fn list_cached_official_subscription_models_with_presence(
@@ -550,7 +600,9 @@ pub(crate) fn prepare_official_multi_agent_version(
     let canonical = config::normalize_official_model_id(&model_id, &known_official_models)
         .ok_or_else(|| "official model identity is invalid".to_string())?;
     if qualified_official_code_mode_multi_agent_version(&canonical).is_none() {
-        return Err("this Official model has no qualified Collaboration V1/V2 selector".to_string());
+        return Err(
+            "this Official model has no qualified Collaboration V1/V2 selector".to_string(),
+        );
     }
     let version = version.map(|value| value.trim().to_ascii_lowercase());
     if let Some(value) = version.as_deref() {
@@ -560,18 +612,22 @@ pub(crate) fn prepare_official_multi_agent_version(
     }
 
     let current_models = list_models_with_presence()?.unwrap_or_default();
-    let visible_official_row = current_models.iter().find(|model| {
-        let model_id = model
-            .id
-            .strip_prefix("openai/")
-            .unwrap_or(model.id.as_str());
-        model.source_kind.as_deref() == Some("official")
-            && model_id == canonical
-            && model_has_exact_official_upstream(model, &canonical)
-            && model_is_catalog_visible(model)
-    }).cloned().ok_or_else(|| {
-        "selected Official model is not a visible qualified catalog row".to_string()
-    })?;
+    let visible_official_row = current_models
+        .iter()
+        .find(|model| {
+            let model_id = model
+                .id
+                .strip_prefix("openai/")
+                .unwrap_or(model.id.as_str());
+            model.source_kind.as_deref() == Some("official")
+                && model_id == canonical
+                && model_has_exact_official_upstream(model, &canonical)
+                && model_is_catalog_visible(model)
+        })
+        .cloned()
+        .ok_or_else(|| {
+            "selected Official model is not a visible qualified catalog row".to_string()
+        })?;
     let baseline_version = read_managed_catalog_multi_agent_version(&paths, &canonical)
         .or_else(|| {
             builtin_model_metadata()
@@ -605,7 +661,8 @@ pub(crate) fn prepare_official_multi_agent_version(
         .to_string();
 
     let catalog_path = paths.generated_catalog_path();
-    let catalog_text = catalog_multi_agent_version_text(&catalog_path, &canonical, &desired_version)?;
+    let catalog_text =
+        catalog_multi_agent_version_text(&catalog_path, &canonical, &desired_version)?;
     Ok(PreparedOfficialMultiAgentSave {
         fallback_model: visible_official_row,
         canonical,
@@ -711,8 +768,7 @@ fn update_catalog_override_payload(
     for entry in entries.iter_mut() {
         let is_exact_identity = entry.get("provider").and_then(Value::as_str) == Some("openai")
             && entry.get("upstream_name").and_then(Value::as_str) == Some("official")
-            && entry.get("upstream_model").and_then(Value::as_str)
-                == Some(canonical_model_id);
+            && entry.get("upstream_model").and_then(Value::as_str) == Some(canonical_model_id);
         if !is_exact_identity {
             continue;
         }
@@ -747,8 +803,7 @@ fn update_catalog_override_payload(
     entries.retain(|entry| {
         let is_exact_identity = entry.get("provider").and_then(Value::as_str) == Some("openai")
             && entry.get("upstream_name").and_then(Value::as_str) == Some("official")
-            && entry.get("upstream_model").and_then(Value::as_str)
-                == Some(canonical_model_id);
+            && entry.get("upstream_model").and_then(Value::as_str) == Some(canonical_model_id);
         !(is_exact_identity
             && entry
                 .get("fields")
@@ -778,8 +833,7 @@ pub fn list_official_multi_agent_overrides() -> Result<HashMap<String, String>, 
     let visible_qualified_ids: HashSet<String> = visible_models
         .iter()
         .filter_map(|model| {
-            if model.source_kind.as_deref() != Some("official")
-                || !model_is_catalog_visible(model)
+            if model.source_kind.as_deref() != Some("official") || !model_is_catalog_visible(model)
             {
                 return None;
             }
@@ -788,8 +842,7 @@ pub fn list_official_multi_agent_overrides() -> Result<HashMap<String, String>, 
                 .strip_prefix("openai/")
                 .unwrap_or(model.id.as_str())
                 .to_string();
-            (qualified_official_code_mode_multi_agent_version(&canonical)
-                .is_some()
+            (qualified_official_code_mode_multi_agent_version(&canonical).is_some()
                 && model_has_exact_official_upstream(model, &canonical))
             .then_some(canonical)
         })
@@ -881,7 +934,9 @@ pub fn list_official_multi_agent_baselines() -> Result<HashMap<String, String>, 
                         .filter(|value| *value == "v1" || *value == "v2")
                 }
             })
-            .or_else(|| pinned_official_code_mode_multi_agent_version(canonical).map(str::to_string));
+            .or_else(|| {
+                pinned_official_code_mode_multi_agent_version(canonical).map(str::to_string)
+            });
         if let Some(baseline) = baseline {
             result.insert(canonical.to_string(), baseline);
         }
@@ -951,7 +1006,9 @@ fn acquire_official_models_direct_with_runner(
 ) -> Result<OfficialModelsAcquisition, String> {
     let snapshot = runner.read_model_list()?;
     let mut native_cache = snapshot.native_cache;
-    let native_payload = native_cache.as_ref().and_then(|text| serde_json::from_str::<Value>(text).ok())
+    let native_payload = native_cache
+        .as_ref()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
         .filter(|payload| validate_official_snapshot(payload).is_ok());
     if native_cache.is_some() && native_payload.is_none() {
         if !model_list_contains_context_metadata(&snapshot.payload) {
@@ -1039,17 +1096,19 @@ impl StagedCodexHome {
             let metadata = fs::symlink_metadata(&source_auth)
                 .map_err(|error| format!("failed to inspect Codex auth for refresh: {error}"))?;
             if !metadata.file_type().is_file() {
-                return Err("Codex auth path is not a regular file; refusing staged refresh".to_string());
+                return Err(
+                    "Codex auth path is not a regular file; refusing staged refresh".to_string(),
+                );
             }
             let staged_auth = staging.path.join("auth.json");
-            fs::copy(&source_auth, &staged_auth)
-                .map_err(|error| format!("failed to stage Codex auth for Official refresh: {error}"))?;
+            fs::copy(&source_auth, &staged_auth).map_err(|error| {
+                format!("failed to stage Codex auth for Official refresh: {error}")
+            })?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&staged_auth, fs::Permissions::from_mode(0o600)).map_err(
-                    |error| format!("failed to secure staged Codex auth: {error}"),
-                )?;
+                fs::set_permissions(&staged_auth, fs::Permissions::from_mode(0o600))
+                    .map_err(|error| format!("failed to secure staged Codex auth: {error}"))?;
             }
         }
         Ok(staging)
@@ -1380,7 +1439,9 @@ fn validate_pinned_official_catalog_metadata(
         PINNED_OFFICIAL_LITE_ONLY_FIELDS
     };
     if metadata.len() != required_fields.len()
-        || required_fields.iter().any(|field| !metadata.contains_key(*field))
+        || required_fields
+            .iter()
+            .any(|field| !metadata.contains_key(*field))
     {
         return Err(format!(
             "official catalog metadata for {slug} has an invalid field set"
@@ -1388,11 +1449,7 @@ fn validate_pinned_official_catalog_metadata(
     }
     if let Some(expected_multi_agent_version) = pinned_official_code_mode_multi_agent_version(slug)
     {
-        if metadata
-            .get("prefer_websockets")
-            .and_then(Value::as_bool)
-            != Some(true)
-        {
+        if metadata.get("prefer_websockets").and_then(Value::as_bool) != Some(true) {
             return Err(format!(
                 "official catalog metadata for {slug} has an invalid websocket flag"
             ));
@@ -1402,30 +1459,20 @@ fn validate_pinned_official_catalog_metadata(
                 "official catalog metadata for {slug} has an invalid tool mode"
             ));
         }
-        if metadata
-            .get("multi_agent_version")
-            .and_then(Value::as_str)
+        if metadata.get("multi_agent_version").and_then(Value::as_str)
             != Some(expected_multi_agent_version)
         {
             return Err(format!(
                 "official catalog metadata for {slug} has an invalid multi-agent version"
             ));
         }
-        if metadata
-            .get("use_responses_lite")
-            .and_then(Value::as_bool)
-            != Some(true)
-        {
+        if metadata.get("use_responses_lite").and_then(Value::as_bool) != Some(true) {
             return Err(format!(
                 "official catalog metadata for {slug} has an invalid Responses Lite flag"
             ));
         }
     } else if is_pinned_official_legacy_model(slug) {
-        if metadata
-            .get("prefer_websockets")
-            .and_then(Value::as_bool)
-            != Some(true)
-        {
+        if metadata.get("prefer_websockets").and_then(Value::as_bool) != Some(true) {
             return Err(format!(
                 "official catalog metadata for {slug} has an invalid websocket flag"
             ));
@@ -1443,20 +1490,12 @@ fn validate_pinned_official_catalog_metadata(
                 "official catalog metadata for {slug} has an invalid multi-agent version"
             ));
         }
-        if metadata
-            .get("use_responses_lite")
-            .and_then(Value::as_bool)
-            != Some(false)
-        {
+        if metadata.get("use_responses_lite").and_then(Value::as_bool) != Some(false) {
             return Err(format!(
                 "official catalog metadata for {slug} has an invalid Responses Lite flag"
             ));
         }
-    } else if metadata
-        .get("use_responses_lite")
-        .and_then(Value::as_bool)
-        != Some(false)
-    {
+    } else if metadata.get("use_responses_lite").and_then(Value::as_bool) != Some(false) {
         return Err(format!(
             "official catalog metadata for {slug} has an invalid Responses Lite flag"
         ));
@@ -1722,7 +1761,9 @@ fn read_official_subscription_models_from_cache_with_presence(
     }
     let payload = load_json_file(&paths.official_subscription_cache_path())?;
     let subscription_models = subscription_models_from_payload(&payload)?;
-    Ok(Some(subscription_models_to_metadata_models(&subscription_models)))
+    Ok(Some(subscription_models_to_metadata_models(
+        &subscription_models,
+    )))
 }
 
 fn read_official_subscription_models_from_cache(paths: &ModelPaths) -> Result<Vec<Model>, String> {
@@ -1780,9 +1821,14 @@ fn official_subscription_seed_model(model: &OfficialSubscriptionModel) -> Value 
     // (protocol/src/openai_models.rs). Apply that default only to the derived
     // seed with a supplied numeric window; keep the raw response untouched.
     if payload.get("shell_type").and_then(Value::as_str).is_some()
-        && payload.get("context_window").and_then(Value::as_u64).is_some_and(|value| value > 0)
+        && payload
+            .get("context_window")
+            .and_then(Value::as_u64)
+            .is_some_and(|value| value > 0)
     {
-        payload.entry("effective_context_window_percent".to_string()).or_insert(json!(95));
+        payload
+            .entry("effective_context_window_percent".to_string())
+            .or_insert(json!(95));
     }
     ensure_responses_lite_opt_in(&mut payload);
     payload.insert("visibility".to_string(), json!(CatalogVisibility::List));
@@ -2455,8 +2501,10 @@ fn discovered_reasoning_levels(item: &Value) -> Option<Vec<String>> {
             .and_then(Value::as_array)
             .is_some_and(|items| {
                 items.iter().any(|item| {
-                    item.as_str()
-                        .is_some_and(|value| value.eq_ignore_ascii_case("reasoning") || value.eq_ignore_ascii_case("thinking"))
+                    item.as_str().is_some_and(|value| {
+                        value.eq_ignore_ascii_case("reasoning")
+                            || value.eq_ignore_ascii_case("thinking")
+                    })
                 })
             })
     {
@@ -2472,7 +2520,11 @@ fn discovered_reasoning_levels(item: &Value) -> Option<Vec<String>> {
 
 fn discovered_default_reasoning(item: &Value, levels: Option<&[String]>) -> Option<String> {
     let object = item.as_object()?;
-    for key in ["default_reasoning_level", "default_reasoning_effort", "reasoning_effort"] {
+    for key in [
+        "default_reasoning_level",
+        "default_reasoning_effort",
+        "reasoning_effort",
+    ] {
         if let Some(value) = object.get(key).and_then(Value::as_str).and_then(nonblank) {
             let normalized = value.to_ascii_lowercase();
             if levels.is_none_or(|items| items.iter().any(|item| item == &normalized)) {
@@ -2491,17 +2543,23 @@ fn discovered_default_reasoning(item: &Value, levels: Option<&[String]>) -> Opti
 
 fn discovered_input_modalities(item: &Value) -> Option<Vec<String>> {
     let object = item.as_object()?;
-    if let Some(modalities) = object.get("input_modalities").and_then(string_list_from_json) {
+    if let Some(modalities) = object
+        .get("input_modalities")
+        .and_then(string_list_from_json)
+    {
         if !modalities.is_empty() {
             return Some(modalities);
         }
     }
-    let vision = object.get("capabilities").and_then(Value::as_array).is_some_and(|items| {
-        items.iter().any(|item| {
-            item.as_str()
-                .is_some_and(|value| value.eq_ignore_ascii_case("vision"))
-        })
-    });
+    let vision = object
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.as_str()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("vision"))
+            })
+        });
     if vision {
         return Some(vec!["text".to_string(), "image".to_string()]);
     }
@@ -2650,7 +2708,9 @@ impl ModelPaths {
     }
 
     fn official_editor_cache_path(&self) -> PathBuf {
-        self.codex_dir.join("proxy").join("official-editor-catalog.json")
+        self.codex_dir
+            .join("proxy")
+            .join("official-editor-catalog.json")
     }
 
     fn metadata_overrides_path(&self) -> PathBuf {
@@ -2717,8 +2777,7 @@ fn catalog_multi_agent_version_text(
         let is_exact_official_identity = metadata.get("provider").and_then(Value::as_str)
             == Some("openai")
             && metadata.get("upstream_name").and_then(Value::as_str) == Some("official")
-            && metadata.get("upstream_model").and_then(Value::as_str)
-                == Some(canonical_model_id);
+            && metadata.get("upstream_model").and_then(Value::as_str) == Some(canonical_model_id);
         if !is_exact_official_identity {
             continue;
         }
@@ -2762,11 +2821,12 @@ fn read_managed_catalog_multi_agent_version(
     let models = payload.get("models").and_then(Value::as_array)?;
     models.iter().find_map(|item| {
         let object = item.as_object()?;
-        let metadata = object.get("codex_proxy_metadata").and_then(Value::as_object)?;
+        let metadata = object
+            .get("codex_proxy_metadata")
+            .and_then(Value::as_object)?;
         let exact_identity = metadata.get("provider").and_then(Value::as_str) == Some("openai")
             && metadata.get("upstream_name").and_then(Value::as_str) == Some("official")
-            && metadata.get("upstream_model").and_then(Value::as_str)
-                == Some(canonical_model_id);
+            && metadata.get("upstream_model").and_then(Value::as_str) == Some(canonical_model_id);
         if !exact_identity {
             return None;
         }
@@ -3037,8 +3097,12 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
         gateway_exported: override_model.gateway_exported && original_gateway_exported,
         visibility,
         context_window: override_model.context_window.or(base.context_window),
-        max_context_window: override_model.max_context_window.or(base.max_context_window),
-        effective_source: override_model.effective_source.or(base.effective_source.take()),
+        max_context_window: override_model
+            .max_context_window
+            .or(base.max_context_window),
+        effective_source: override_model
+            .effective_source
+            .or(base.effective_source.take()),
         max_source: override_model.max_source.or(base.max_source.take()),
         confidence: override_model.confidence.or(base.confidence.take()),
         verified_at: override_model.verified_at.or(base.verified_at.take()),
@@ -3150,6 +3214,21 @@ fn builtin_model_metadata() -> Vec<Model> {
             ..Model::default()
         },
     ]
+}
+
+/// Prices authored in the compiled model catalog are a safe fallback when a
+/// newly added model has not yet reached the reviewed pricing snapshot.  This
+/// deliberately excludes metadata cache and user overrides, which can carry
+/// reseller tariffs rather than the lab's ordinary API rate.
+pub(crate) fn builtin_usage_pricing() -> Vec<(String, ModelPricing)> {
+    builtin_model_metadata()
+        .into_iter()
+        .filter_map(|model| {
+            let pricing = model.pricing?;
+            (pricing.source == "official" && pricing.currency == "USD")
+                .then_some((model.id, pricing))
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -3351,10 +3430,22 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
             "context",
         ),
         max_context_window: object.get("max_context_window").and_then(optional_u32),
-        effective_source: object.get("effective_source").and_then(Value::as_str).and_then(nonblank),
-        max_source: object.get("max_source").and_then(Value::as_str).and_then(nonblank),
-        confidence: object.get("confidence").and_then(Value::as_str).and_then(nonblank),
-        verified_at: object.get("verified_at").and_then(Value::as_str).and_then(nonblank),
+        effective_source: object
+            .get("effective_source")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
+        max_source: object
+            .get("max_source")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
+        confidence: object
+            .get("confidence")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
+        verified_at: object
+            .get("verified_at")
+            .and_then(Value::as_str)
+            .and_then(nonblank),
         max_output_tokens: numeric_limit(item, &["max_output_tokens", "output_tokens"], "output"),
         input_modalities: object.get("input_modalities").and_then(string_array),
         supported_reasoning_levels: object
@@ -3402,11 +3493,13 @@ fn catalog_source_kind(object: &Map<String, Value>) -> Option<String> {
     {
         let provider = metadata.get("provider").and_then(Value::as_str);
         let upstream_name = metadata.get("upstream_name").and_then(Value::as_str);
-        return Some(if provider == Some("openai") && upstream_name == Some("official") {
-            "official".to_string()
-        } else {
-            "external".to_string()
-        });
+        return Some(
+            if provider == Some("openai") && upstream_name == Some("official") {
+                "official".to_string()
+            } else {
+                "external".to_string()
+            },
+        );
     }
     None
 }
@@ -3455,17 +3548,13 @@ fn find_python() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_provider_models_with_timeout,
-        enrich_models_with_ollama_show, finish_official_multi_agent_save,
-        generate_catalog_with_runner, list_model_metadata,
+        discover_provider_models_with_timeout, enrich_models_with_ollama_show,
+        finish_official_multi_agent_save, generate_catalog_with_runner, list_model_metadata,
         list_models, list_official_multi_agent_baselines, list_official_multi_agent_overrides,
-        load_json_file,
-        merge_metadata_with_overrides, ollama_show_endpoint,
-        publish_collaboration_files_with,
-        provider_api_endpoint,
-        provider_models_endpoint, read_models_json, refresh_official_models_from_endpoint,
-        refresh_official_models_with_runner, resolve_gateway_api_key_for_settings,
-        resolve_provider_discovery_api_key,
+        load_json_file, merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
+        provider_models_endpoint, publish_collaboration_files_with, read_models_json,
+        refresh_official_models_from_endpoint, refresh_official_models_with_runner,
+        resolve_gateway_api_key_for_settings, resolve_provider_discovery_api_key,
         subscription_models_from_payload, subscription_models_to_metadata_models,
         test_model_endpoint_with_timeout, visibility_diagnostics_from_payload,
         AppServerModelListRunner, AppServerModelListSnapshot, CatalogCommandOutcome,
@@ -3483,31 +3572,51 @@ mod tests {
     use std::sync::mpsc::{self, Receiver};
     use std::sync::Mutex;
     use std::thread::{self, JoinHandle};
+    #[cfg(test)]
+    use std::time::Instant;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
-#[cfg(test)]
-use std::time::Instant;
 
     #[test]
     fn official_editor_uses_full_native_membership_not_gateway_export_or_builtin_models() {
         let root = temp_root("official-editor-membership");
         let paths = test_paths(&root);
         fs::create_dir_all(paths.generated_catalog_path().parent().unwrap()).unwrap();
-        fs::write(paths.generated_catalog_path(), json!({"models": [
-            {"slug": "gpt-5.4", "visibility": "list"}
-        ]}).to_string()).unwrap();
-        fs::write(paths.official_subscription_cache_path(), json!({"models": [
-            {"slug": "gpt-5.4", "visibility": "list"}
-        ]}).to_string()).unwrap();
+        fs::write(
+            paths.generated_catalog_path(),
+            json!({"models": [
+                {"slug": "gpt-5.4", "visibility": "list"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            paths.official_subscription_cache_path(),
+            json!({"models": [
+                {"slug": "gpt-5.4", "visibility": "list"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
         let native = root.join("models_cache.json");
-        fs::write(&native, json!({"models": [
-            {"slug": "gpt-6-astra", "visibility": "list", "context_window": 1000000},
-            {"slug": "gpt-5.5", "visibility": "list"},
-            {"slug": "gpt-hidden", "visibility": "hide"}
-        ]}).to_string()).unwrap();
+        fs::write(
+            &native,
+            json!({"models": [
+                {"slug": "gpt-6-astra", "visibility": "list", "context_window": 1000000},
+                {"slug": "gpt-5.5", "visibility": "list"},
+                {"slug": "gpt-hidden", "visibility": "hide"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
         let models = super::official_editor_models(&native, &paths).unwrap();
-        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["gpt-6-astra", "gpt-5.5"]);
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["gpt-6-astra", "gpt-5.5"]
+        );
         fs::write(&native, "{\"models\":[]}").unwrap();
-        assert!(super::official_editor_models(&native, &paths).unwrap().is_empty());
+        assert!(super::official_editor_models(&native, &paths)
+            .unwrap()
+            .is_empty());
         fs::write(&native, "invalid").unwrap();
         assert!(super::official_editor_models(&native, &paths).is_err());
         fs::remove_dir_all(root).unwrap();
@@ -3519,17 +3628,36 @@ use std::time::Instant;
         fs::create_dir_all(&root).unwrap();
         let paths = test_paths(&root);
         let native = root.join("models_cache.json");
-        fs::write(&native, json!({"models": [{"slug":"gpt-5.4","visibility":"list"}]}).to_string()).unwrap();
-        fs::OpenOptions::new().write(true).open(&native).unwrap().set_modified(UNIX_EPOCH + Duration::from_secs(100)).unwrap();
+        fs::write(
+            &native,
+            json!({"models": [{"slug":"gpt-5.4","visibility":"list"}]}).to_string(),
+        )
+        .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&native)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(100))
+            .unwrap();
         let snapshot = paths.official_editor_cache_path();
         crate::safe_file::write_text_atomic(&snapshot, &json!({
             "fetched_at": "2026-01-01T00:00:00Z", "client_version": "0.153.4",
             "models": [{"slug":"gpt-6-astra","visibility":"list"}, {"slug":"gpt-hidden","visibility":"hide"}]
         }).to_string()).unwrap();
-        fs::OpenOptions::new().write(true).open(&snapshot).unwrap().set_modified(UNIX_EPOCH + Duration::from_secs(200)).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&snapshot)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(200))
+            .unwrap();
         let models = super::official_editor_models(&native, &paths).unwrap();
-        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["gpt-6-astra"]);
-        let seed = super::prepare_official_editor_seed_at(&native, &paths).unwrap().unwrap();
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["gpt-6-astra"]
+        );
+        let seed = super::prepare_official_editor_seed_at(&native, &paths)
+            .unwrap()
+            .unwrap();
         let payload: Value = serde_json::from_str(&seed.text).unwrap();
         assert_eq!(payload["fetched_at"], "2026-01-01T00:00:00Z");
         assert_eq!(payload["models"].as_array().unwrap().len(), 1);
@@ -3539,35 +3667,65 @@ use std::time::Instant;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&seed.path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&seed.path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         // Rewriting an older native snapshot must not supersede a newer
         // successful refresh merely because its filesystem mtime changed.
-        fs::write(&native, json!({"fetched_at":"2025-12-01T00:00:00Z", "models":[
-            {"slug":"gpt-5.4", "visibility":"list"}
-        ]}).to_string()).unwrap();
-        assert_eq!(super::official_editor_models(&native, &paths).unwrap()[0].id, "gpt-6-astra");
+        fs::write(
+            &native,
+            json!({"fetched_at":"2025-12-01T00:00:00Z", "models":[
+                {"slug":"gpt-5.4", "visibility":"list"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::official_editor_models(&native, &paths).unwrap()[0].id,
+            "gpt-6-astra"
+        );
         fs::write(&native, "invalid").unwrap();
-        assert_eq!(super::official_editor_models(&native, &paths).unwrap()[0].id, "gpt-6-astra");
+        assert_eq!(
+            super::official_editor_models(&native, &paths).unwrap()[0].id,
+            "gpt-6-astra"
+        );
         // A newer cache with missing visibility is incomplete, not an empty
         // catalog. Keep the last complete snapshot instead of dropping rows.
-        fs::write(&native, include_str!("../../tests/fixtures/codex_0_144_2_direct_models_cache.json")).unwrap();
-        assert_eq!(super::official_editor_models(&native, &paths).unwrap()[0].id, "gpt-6-astra");
-        fs::write(&native, json!({"models":[
-            {"slug":"gpt-5.4", "visibility":"list"}, {"slug":"gpt-6-astra"}
-        ]}).to_string()).unwrap();
-        assert_eq!(super::official_editor_models(&native, &paths).unwrap()[0].id, "gpt-6-astra");
+        fs::write(
+            &native,
+            include_str!("../../tests/fixtures/codex_0_144_2_direct_models_cache.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            super::official_editor_models(&native, &paths).unwrap()[0].id,
+            "gpt-6-astra"
+        );
+        fs::write(
+            &native,
+            json!({"models":[
+                {"slug":"gpt-5.4", "visibility":"list"}, {"slug":"gpt-6-astra"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::official_editor_models(&native, &paths).unwrap()[0].id,
+            "gpt-6-astra"
+        );
         // A later native refresh supersedes the editor snapshot, including
         // a valid empty catalog; removed models must not be resurrected.
         fs::write(&native, "{\"models\":[]}").unwrap();
-        assert!(super::official_editor_models(&native, &paths).unwrap().is_empty());
+        assert!(super::official_editor_models(&native, &paths)
+            .unwrap()
+            .is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     const APP_SERVER_TEST_PROCESS_ENV: &str = "CODEXHUB_APP_SERVER_TEST_PROCESS";
-    const APP_SERVER_TEST_PROCESS_LIVENESS_ENV: &str =
-        "CODEXHUB_APP_SERVER_TEST_PROCESS_LIVENESS";
+    const APP_SERVER_TEST_PROCESS_LIVENESS_ENV: &str = "CODEXHUB_APP_SERVER_TEST_PROCESS_LIVENESS";
     const APP_SERVER_TEST_PROCESS_HELPER: &str =
         "models::tests::app_server_model_list_test_process_helper";
 
@@ -3621,10 +3779,7 @@ use std::time::Instant;
                 ("model".to_string(), json!("gpt-5.6-terra")),
                 ("visibility".to_string(), json!("list")),
                 ("hidden".to_string(), json!(false)),
-                (
-                    "effective_context_window_percent".to_string(),
-                    json!(95),
-                ),
+                ("effective_context_window_percent".to_string(), json!(95)),
             ]);
             if let Some(context) = context {
                 model.insert("context_window".to_string(), json!(context));
@@ -3768,15 +3923,11 @@ for line in sys.stdin:
         .unwrap();
         let python = super::find_python().expect("repository Python interpreter");
         let mut command = crate::runtime_paths::configured_python_command(&python);
-        command
-            .arg(&script)
-            .env("FAKE_MODELS_CACHE", &cache_path);
+        command.arg(&script).env("FAKE_MODELS_CACHE", &cache_path);
 
-        let result = super::read_codex_app_server_model_list_with_command(
-            command,
-            Duration::from_secs(5),
-        )
-        .expect("model list response");
+        let result =
+            super::read_codex_app_server_model_list_with_command(command, Duration::from_secs(5))
+                .expect("model list response");
 
         assert_eq!(
             result,
@@ -3839,9 +3990,7 @@ for line in sys.stdin:
             fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
             let python = super::find_python().expect("repository Python interpreter");
             let mut command = crate::runtime_paths::configured_python_command(&python);
-            command
-                .arg(&script)
-                .env("MODEL_LIST_SHAPE", shape);
+            command.arg(&script).env("MODEL_LIST_SHAPE", shape);
 
             let result = super::read_codex_app_server_model_list_with_cache_path(
                 command,
@@ -3880,9 +4029,21 @@ for line in sys.stdin:
             ("empty-models", r#"{"models":[]}"#, true),
             ("null-model", r#"{"models":[null]}"#, false),
             ("string-model", r#"{"models":["gpt-5.6-terra"]}"#, false),
-            ("missing-visibility", r#"{"models":[{"slug":"gpt-5.6-terra"}]}"#, false),
-            ("object-model", r#"{"models":[{"slug":"gpt-5.6-terra","visibility":"list"}]}"#, true),
-            ("hidden-model", r#"{"models":[{"slug":"gpt-5.6-terra","visibility":"hide"}]}"#, true),
+            (
+                "missing-visibility",
+                r#"{"models":[{"slug":"gpt-5.6-terra"}]}"#,
+                false,
+            ),
+            (
+                "object-model",
+                r#"{"models":[{"slug":"gpt-5.6-terra","visibility":"list"}]}"#,
+                true,
+            ),
+            (
+                "hidden-model",
+                r#"{"models":[{"slug":"gpt-5.6-terra","visibility":"hide"}]}"#,
+                true,
+            ),
         ];
 
         for (name, payload, expected_readable) in cases {
@@ -3979,13 +4140,19 @@ for line in sys.stdin:
         let cache_path = root.join("models_cache.json");
         let helper_liveness_path = root.join("helper-liveness.lock");
         let mut command = responding_app_server_test_process_command(&helper_liveness_path);
-        command.env(APP_SERVER_TEST_PROCESS_ENV, "respond-without-context")
+        command
+            .env(APP_SERVER_TEST_PROCESS_ENV, "respond-without-context")
             .env("CODEXHUB_APP_SERVER_TEST_EMPTY_CACHE", &cache_path);
         let result = super::read_codex_app_server_model_list_with_cache_path(
-            command, Duration::from_secs(5), &cache_path, Duration::from_secs(1),
-        ).expect("new valid empty cache must satisfy a context-less refresh");
+            command,
+            Duration::from_secs(5),
+            &cache_path,
+            Duration::from_secs(1),
+        )
+        .expect("new valid empty cache must satisfy a context-less refresh");
         let runner = StaticAppServerModelListRunner::ok_with_cache(
-            result, &fs::read_to_string(&cache_path).unwrap(),
+            result,
+            &fs::read_to_string(&cache_path).unwrap(),
         );
         let acquired = super::acquire_official_models_direct_with_runner(&runner).unwrap();
         assert!(acquired.models.is_empty());
@@ -4056,9 +4223,7 @@ for line in sys.stdin:
         .unwrap();
         let python = super::find_python().expect("repository Python interpreter");
         let mut command = crate::runtime_paths::configured_python_command(&python);
-        command
-            .arg(&script)
-            .env("FAKE_MODELS_CACHE", &cache_path);
+        command.arg(&script).env("FAKE_MODELS_CACHE", &cache_path);
         let started = Instant::now();
 
         let result = super::read_codex_app_server_model_list_with_cache_path(
@@ -4070,8 +4235,7 @@ for line in sys.stdin:
         .expect("partial response context should use the bounded native-cache grace");
 
         assert_eq!(result["data"][0]["model"], "gpt-5.6-terra");
-        let cache: Value =
-            serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+        let cache: Value = serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
         assert_eq!(cache["models"][0]["context_window"], 272000);
         assert!(started.elapsed() >= Duration::from_millis(100));
         assert!(started.elapsed() < Duration::from_secs(8));
@@ -4129,11 +4293,9 @@ for line in sys.stdin:
         let command = silent_app_server_test_process_command(&helper_liveness_path);
         let started = Instant::now();
 
-        let error = super::read_codex_app_server_model_list_with_command(
-            command,
-            Duration::from_secs(1),
-        )
-        .expect_err("silent app-server must hit the response timeout");
+        let error =
+            super::read_codex_app_server_model_list_with_command(command, Duration::from_secs(1))
+                .expect_err("silent app-server must hit the response timeout");
 
         assert_eq!(
             error,
@@ -4203,7 +4365,9 @@ for line in sys.stdin:
 
         assert_eq!(
             acquisition.native_cache.as_deref(),
-            Some(r#"{"etag":"fresh","models":[{"slug":"gpt-6-astra","visibility":"list","context_window":1000000,"effective_context_window_percent":95}]}"#)
+            Some(
+                r#"{"etag":"fresh","models":[{"slug":"gpt-6-astra","visibility":"list","context_window":1000000,"effective_context_window_percent":95}]}"#
+            )
         );
         assert_eq!(acquisition.models[0].id, "gpt-6-astra");
     }
@@ -4211,13 +4375,19 @@ for line in sys.stdin:
     #[test]
     fn direct_acquisition_never_publishes_malformed_native_cache() {
         let complete = json!({"models":[{"slug":"gpt-6-astra", "visibility":"list", "context_window":1000000, "effective_context_window_percent":95}]});
-        for invalid in ["{partial", "{\"models\":[{\"visibility\":\"list\"}]}",
-            include_str!("../../tests/fixtures/codex_0_144_2_direct_models_cache.json")] {
+        for invalid in [
+            "{partial",
+            "{\"models\":[{\"visibility\":\"list\"}]}",
+            include_str!("../../tests/fixtures/codex_0_144_2_direct_models_cache.json"),
+        ] {
             let runner = StaticAppServerModelListRunner::ok_with_cache(complete.clone(), invalid);
             let acquired = super::acquire_official_models_direct_with_runner(&runner).unwrap();
             assert!(acquired.native_cache.is_none());
             assert_eq!(acquired.models[0].id, "gpt-6-astra");
-            let runner = StaticAppServerModelListRunner::ok_with_cache(json!({"models":[{"slug":"gpt-5.4", "visibility":"list"}]}), invalid);
+            let runner = StaticAppServerModelListRunner::ok_with_cache(
+                json!({"models":[{"slug":"gpt-5.4", "visibility":"list"}]}),
+                invalid,
+            );
             assert!(super::acquire_official_models_direct_with_runner(&runner).is_err());
         }
     }
@@ -4757,8 +4927,12 @@ for line in sys.stdin:
         let valid = list_official_multi_agent_overrides();
 
         restore_env("CODEX_HOME", previous);
-        assert!(missing.expect("missing upstream model should be ignored").is_empty());
-        assert!(wrong.expect("wrong upstream model should be ignored").is_empty());
+        assert!(missing
+            .expect("missing upstream model should be ignored")
+            .is_empty());
+        assert!(wrong
+            .expect("wrong upstream model should be ignored")
+            .is_empty());
         assert_eq!(
             valid
                 .expect("exact upstream model should be listed")
@@ -4827,7 +5001,8 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn list_official_multi_agent_baselines_does_not_treat_effective_override_as_default_when_managed_baseline_is_missing() {
+    fn list_official_multi_agent_baselines_does_not_treat_effective_override_as_default_when_managed_baseline_is_missing(
+    ) {
         let _guard = ENV_LOCK.lock().unwrap();
         let previous = std::env::var_os("CODEX_HOME");
         let root = temp_root("list-catalog-multi-agent-baseline-missing");
@@ -4882,7 +5057,8 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn list_official_multi_agent_baselines_uses_catalog_value_when_no_managed_baseline_or_override_exists() {
+    fn list_official_multi_agent_baselines_uses_catalog_value_when_no_managed_baseline_or_override_exists(
+    ) {
         let _guard = ENV_LOCK.lock().unwrap();
         let previous = std::env::var_os("CODEX_HOME");
         let root = temp_root("list-catalog-multi-agent-baseline-no-override");
@@ -4959,10 +5135,9 @@ for line in sys.stdin:
         super::set_catalog_multi_agent_version(&paths, "gpt-5.6-luna", "v2")
             .expect("exact Official row should be writable");
 
-        let payload: Value = serde_json::from_str(
-            &fs::read_to_string(&catalog_path).expect("published catalog"),
-        )
-        .unwrap();
+        let payload: Value =
+            serde_json::from_str(&fs::read_to_string(&catalog_path).expect("published catalog"))
+                .unwrap();
         assert_eq!(payload["models"][0]["multi_agent_version"], "v2");
         assert_eq!(payload["models"][1]["multi_agent_version"], "v1");
         let _ = fs::remove_dir_all(root);
@@ -5049,25 +5224,41 @@ for line in sys.stdin:
 
         super::update_catalog_override_payload(&mut payload, "gpt-5.6-luna", Some("v2"))
             .expect("exact Official override should update");
-        assert_eq!(payload["overrides"][0]["fields"]["multi_agent_version"], "v2");
-        assert_eq!(payload["overrides"][0]["fields"]["tool_mode"], "code_mode_only");
-        assert_eq!(payload["overrides"][1]["fields"]["multi_agent_version"], "v1");
+        assert_eq!(
+            payload["overrides"][0]["fields"]["multi_agent_version"],
+            "v2"
+        );
+        assert_eq!(
+            payload["overrides"][0]["fields"]["tool_mode"],
+            "code_mode_only"
+        );
+        assert_eq!(
+            payload["overrides"][1]["fields"]["multi_agent_version"],
+            "v1"
+        );
 
         super::update_catalog_override_payload(&mut payload, "gpt-5.6-luna", None)
             .expect("clearing should remove only the model-level field");
         assert!(payload["overrides"][0]["fields"]
             .get("multi_agent_version")
             .is_none());
-        assert_eq!(payload["overrides"][0]["fields"]["tool_mode"], "code_mode_only");
-        assert_eq!(payload["overrides"][1]["fields"]["multi_agent_version"], "v1");
+        assert_eq!(
+            payload["overrides"][0]["fields"]["tool_mode"],
+            "code_mode_only"
+        );
+        assert_eq!(
+            payload["overrides"][1]["fields"]["multi_agent_version"],
+            "v1"
+        );
     }
 
     #[test]
     fn catalog_override_update_rejects_invalid_payload_before_mutation() {
         let mut payload = json!({"schema_version": 1, "overrides": {}});
         let before = payload.clone();
-        let error = super::update_catalog_override_payload(&mut payload, "gpt-5.6-luna", Some("v2"))
-            .expect_err("non-array overrides must fail closed");
+        let error =
+            super::update_catalog_override_payload(&mut payload, "gpt-5.6-luna", Some("v2"))
+                .expect_err("non-array overrides must fail closed");
         assert_eq!(error, "catalog overrides are invalid");
         assert_eq!(payload, before);
     }
@@ -5146,12 +5337,19 @@ for line in sys.stdin:
             }
             let models = subscription_models_from_payload(&json!({"models":[row]})).unwrap();
             let seed = super::official_subscription_seed_model(&models[0]);
-            assert_eq!(seed["effective_context_window_percent"], percent.clone().unwrap_or(json!(95)));
-            assert_eq!(models[0].raw.get("effective_context_window_percent"), percent.as_ref());
+            assert_eq!(
+                seed["effective_context_window_percent"],
+                percent.clone().unwrap_or(json!(95))
+            );
+            assert_eq!(
+                models[0].raw.get("effective_context_window_percent"),
+                percent.as_ref()
+            );
         }
         let models = subscription_models_from_payload(&json!({"models":[{
             "slug":"gpt-5.6-luna", "visibility":"list", "shell_type":"shell_command"
-        }]})).unwrap();
+        }]}))
+        .unwrap();
         let seed = super::official_subscription_seed_model(&models[0]);
         assert!(seed.get("context_window").is_none());
         assert!(seed.get("effective_context_window_percent").is_none());
@@ -5615,8 +5813,7 @@ for line in sys.stdin:
             },
         ];
 
-        let merged =
-            merge_metadata_with_overrides(base, overrides, &known_official_models);
+        let merged = merge_metadata_with_overrides(base, overrides, &known_official_models);
         let ids = merged
             .iter()
             .map(|model| model.id.as_str())
@@ -5891,8 +6088,8 @@ for line in sys.stdin:
             "source_kind": "official",
             "upstream_model": "gpt-5.6-luna"
         });
-        let model = super::catalog_model_from_item(&same_slug_without_identity)
-            .expect("catalog row");
+        let model =
+            super::catalog_model_from_item(&same_slug_without_identity).expect("catalog row");
         assert_eq!(model.source_kind, None);
     }
 

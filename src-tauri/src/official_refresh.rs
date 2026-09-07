@@ -186,8 +186,8 @@ pub(crate) fn refresh_before_official_activation() -> Result<(), String> {
     if !config::get_settings()?.include_official_models {
         return Ok(());
     }
-    let Some(outcome) = refresh_unattended(RefreshTrigger::Activation)
-        .map_err(|error| error.to_string())?
+    let Some(outcome) =
+        refresh_unattended(RefreshTrigger::Activation).map_err(|error| error.to_string())?
     else {
         log::info!("deferred Official activation refresh while Codex Desktop is running");
         return Ok(());
@@ -233,7 +233,9 @@ pub(crate) fn refresh_current_models() -> Result<OfficialRefreshResult, String> 
     refresh_current_models_with_request(None)
 }
 
-pub(crate) fn refresh_current_models_with_request(request_id: Option<&str>) -> Result<OfficialRefreshResult, String> {
+pub(crate) fn refresh_current_models_with_request(
+    request_id: Option<&str>,
+) -> Result<OfficialRefreshResult, String> {
     if !config::get_settings()?.include_official_models {
         return Ok(OfficialRefreshResult {
             models: Vec::new(),
@@ -398,9 +400,7 @@ fn refresh_with_flight<F>(
     mut work: F,
 ) -> Result<RefreshOutcome, crate::codex_desktop::SwitchMutationError>
 where
-    F: FnMut(
-        RefreshTrigger,
-    ) -> Result<RefreshOutcome, crate::codex_desktop::SwitchMutationError>,
+    F: FnMut(RefreshTrigger) -> Result<RefreshOutcome, crate::codex_desktop::SwitchMutationError>,
 {
     loop {
         let flight_run = flight.run(|| work(trigger));
@@ -456,16 +456,11 @@ fn refresh_once(
             let (files, budgets) = prepare_catalog_publication(&overlays).map_err(|error| {
                 persist_failed_publication_if_stopped(&state_path, &mut state, error)
             })?;
-            let committed = acquisition.publish(|| commit_refresh_if_codex_stopped(|| {
-                publish_prepared_snapshot(
-                    &state_path,
-                    &mut state,
-                    now,
-                    true,
-                    &files,
-                    budgets,
-                )
-            }));
+            let committed = acquisition.publish(|| {
+                commit_refresh_if_codex_stopped(|| {
+                    publish_prepared_snapshot(&state_path, &mut state, now, true, &files, budgets)
+                })
+            });
             let publication = match committed {
                 Ok(Some(publication)) => publication,
                 Ok(None) => return Err(commit_race_error().into()),
@@ -491,7 +486,9 @@ fn refresh_once(
         }
         // An unsuccessful discovery must never publish a degraded replacement.
         // Existing validated caches remain available through the read paths.
-        Err(direct_error) => Err(direct_official_refresh_failure_message(&direct_error, None).into()),
+        Err(direct_error) => {
+            Err(direct_official_refresh_failure_message(&direct_error, None).into())
+        }
     }
 }
 
@@ -584,12 +581,10 @@ fn commit_publication_transaction<T>(
 }
 
 fn project_runtime_with_process_fence() -> Result<bool, String> {
-    let changed = crate::codex_desktop::run_if_stopped(
-        config::republish_managed_codex_context_budget,
-    )?
-    .ok_or_else(commit_race_error)?;
-    crate::codex_desktop::run_if_stopped(|| Ok::<(), String>(()))?
-        .ok_or_else(commit_race_error)?;
+    let changed =
+        crate::codex_desktop::run_if_stopped(config::republish_managed_codex_context_budget)?
+            .ok_or_else(commit_race_error)?;
+    crate::codex_desktop::run_if_stopped(|| Ok::<(), String>(()))?.ok_or_else(commit_race_error)?;
     Ok(changed)
 }
 
@@ -972,9 +967,9 @@ mod tests {
         allow_activation_without_official_snapshot, automatic_refresh_due,
         commit_publication_transaction, commit_refresh_with_gate,
         direct_official_refresh_failure_message, finalize_published_snapshot,
-        finish_publication_state_write, manual_refresh_models, read_only_refresh_result,
-        published_context_budgets_from_catalog_payload,
-        published_official_models_from_catalog, read_state, record_attempt, refresh_with_flight,
+        finish_publication_state_write, manual_refresh_models,
+        published_context_budgets_from_catalog_payload, published_official_models_from_catalog,
+        read_only_refresh_result, read_state, record_attempt, refresh_with_flight,
         scheduled_refresh_backoff, should_attempt, update_published_context_budgets, write_state,
         OfficialRefreshState, PublicationOutcome, PublishedOfficialBudget, RefreshOutcome,
         RefreshTrigger, SingleFlight, DEFERRED_REFRESH_RETRY_SECONDS,
@@ -1033,10 +1028,7 @@ mod tests {
             Duration::from_secs(DEFERRED_REFRESH_RETRY_SECONDS)
         );
         assert_eq!(
-            scheduled_refresh_backoff(&Ok(Some(outcome(
-                RefreshTrigger::Scheduled,
-                true,
-            )))),
+            scheduled_refresh_backoff(&Ok(Some(outcome(RefreshTrigger::Scheduled, true,)))),
             Duration::ZERO
         );
     }
@@ -1153,9 +1145,10 @@ mod tests {
             },
         ];
 
-        let (models, warning) = manual_refresh_models(true, vec![prepublication_model.clone()], || {
-            published_official_models_from_catalog(catalog_models)
-        });
+        let (models, warning) =
+            manual_refresh_models(true, vec![prepublication_model.clone()], || {
+                published_official_models_from_catalog(catalog_models)
+            });
 
         assert!(warning.is_none());
         assert_eq!(models.len(), 1);
@@ -1223,16 +1216,14 @@ mod tests {
 
     #[test]
     fn read_only_refresh_uses_cached_models_without_requesting_a_restart() {
-        let result = read_only_refresh_result(
-            Err("Codex app-server unavailable".to_string()),
-            || {
+        let result =
+            read_only_refresh_result(Err("Codex app-server unavailable".to_string()), || {
                 Ok(vec![Model {
                     id: "gpt-5.5".to_string(),
                     ..Model::default()
                 }])
-            },
-        )
-        .expect("cached model read");
+            })
+            .expect("cached model read");
 
         assert_eq!(result.models.len(), 1);
         assert_eq!(result.models[0].id, "gpt-5.5");
@@ -1240,7 +1231,11 @@ mod tests {
             .warning
             .as_deref()
             .is_some_and(|warning| warning.contains("cached")));
-        assert!(result.warning.as_deref().unwrap().contains("Codex app-server unavailable"));
+        assert!(result
+            .warning
+            .as_deref()
+            .unwrap()
+            .contains("Codex app-server unavailable"));
         assert!(result.codex_restart_result.is_none());
     }
 

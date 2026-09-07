@@ -22,15 +22,17 @@ export type WorkspacePage =
   | "statistics"
   | "providers"
   | "clients"
+  | "gateway"
   | "settings";
 export const workspacePages = [
   "overview",
   "statistics",
   "providers",
   "clients",
+  "gateway",
   "settings",
 ] as const;
-const icons = [LayoutGrid, BarChart3, Layers, Link2, Settings2];
+const icons = [LayoutGrid, BarChart3, Layers, Link2, Radio, Settings2];
 export function useWorkspaceTheme() {
   const { t } = useTranslation();
   const toast = useToasts();
@@ -106,20 +108,23 @@ export function WorkspaceFrame({
         </button>
       </div>
       <nav className="ws-nav">
-        {workspacePages.map((id, i) => {
-          const Icon = icons[i];
-          return (
-            <button
-              key={id}
-              aria-current={page === id ? "page" : undefined}
-              className={page === id ? "selected" : ""}
-              onClick={() => onNavigate(id)}
-            >
-              <Icon size={14} />
-              {t("workspace." + id)}
-            </button>
-          );
-        })}
+        <div className="ws-tab-list">
+          {workspacePages.map((id, i) => {
+            const Icon = icons[i];
+            return (
+              <button
+                key={id}
+                aria-current={page === id ? "page" : undefined}
+                className={page === id ? "selected" : ""}
+                onClick={() => onNavigate(id)}
+              >
+                <Icon size={14} />
+                {t("workspace." + id)}
+              </button>
+            );
+          })}
+        </div>
+        <div id="workspace-tab-actions" className="ws-tab-actions" />
       </nav>
       <div className="ws-service">
         <Radio size={16} />

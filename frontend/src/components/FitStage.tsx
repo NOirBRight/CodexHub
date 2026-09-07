@@ -5,7 +5,8 @@ import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 /** Compact desktop geometry; native Linux retains webview zoom for correct pointer hit-testing. */
 export const FIT_STAGE_WIDTH = 1024;
 export const FIT_STAGE_HEIGHT = 768;
-export const FIT_STAGE_SCALE = 0.93;
+export const FIT_STAGE_SCALE = 1.1;
+export const NATIVE_SHADOW_INSET = 12;
 const DEFAULT_FIT_STAGE_WIDTH = 1024;
 const DEFAULT_FIT_STAGE_HEIGHT = 768;
 
@@ -25,13 +26,13 @@ export function FitStage({ children }: { children: ReactNode }) {
   const [metrics, setMetrics] = useState(() => linuxViewport
     ? {
       scale: FIT_STAGE_SCALE,
-      width: FIT_STAGE_WIDTH / FIT_STAGE_SCALE,
-      height: FIT_STAGE_HEIGHT / FIT_STAGE_SCALE,
+      width: FIT_STAGE_WIDTH / FIT_STAGE_SCALE - 2 * NATIVE_SHADOW_INSET,
+      height: FIT_STAGE_HEIGHT / FIT_STAGE_SCALE - 2 * NATIVE_SHADOW_INSET,
     }
     : {
-      scale: 1,
-      width: DEFAULT_FIT_STAGE_WIDTH,
-      height: DEFAULT_FIT_STAGE_HEIGHT,
+      scale: FIT_STAGE_SCALE,
+      width: DEFAULT_FIT_STAGE_WIDTH / FIT_STAGE_SCALE,
+      height: DEFAULT_FIT_STAGE_HEIGHT / FIT_STAGE_SCALE,
     });
 
   useLayoutEffect(() => {
@@ -44,7 +45,7 @@ export function FitStage({ children }: { children: ReactNode }) {
         const viewportHeight = host.clientHeight;
         if (viewportWidth <= 0 || viewportHeight <= 0) return;
         // The workspace now reflows instead of shrinking desktop controls.
-        const scale = 1;
+        const scale = FIT_STAGE_SCALE;
         setMetrics({
           scale,
           width: viewportWidth / scale,
@@ -66,10 +67,12 @@ export function FitStage({ children }: { children: ReactNode }) {
         return;
       }
       const scale = FIT_STAGE_SCALE;
+      const inset = viewport.expanded ? 0 : NATIVE_SHADOW_INSET;
+      document.documentElement.dataset.windowExpanded = String(viewport.expanded);
       setMetrics({
         scale,
-        width: viewport.width / scale,
-        height: viewport.height / scale,
+        width: viewport.width / scale - 2 * inset,
+        height: viewport.height / scale - 2 * inset,
       });
       await setWebviewZoom(scale);
     };
@@ -93,8 +96,7 @@ export function FitStage({ children }: { children: ReactNode }) {
   }, [linuxViewport]);
 
   return (
-    <div ref={hostRef} className="relative h-full w-full overflow-hidden bg-canvas">
-      <div className="pointer-events-none absolute inset-0 bg-canvas" aria-hidden="true" />
+    <div ref={hostRef} className="fit-stage-host relative h-full w-full overflow-hidden">
       <div
         className={cssTransform ? "relative origin-top-left" : "relative"}
         style={{
@@ -116,15 +118,20 @@ function isLinuxViewport() {
 async function readLogicalViewportSize() {
   try {
     const currentWindow = getCurrentWindow();
-    const [inner, factor] = await Promise.all([currentWindow.innerSize(), currentWindow.scaleFactor()]);
+    const [inner, factor, maximized, fullscreen] = await Promise.all([
+      currentWindow.innerSize(), currentWindow.scaleFactor(),
+      currentWindow.isMaximized(), currentWindow.isFullscreen(),
+    ]);
     return {
       width: inner.width / factor,
       height: inner.height / factor,
+      expanded: maximized || fullscreen,
     };
   } catch {
     return {
       width: document.documentElement.clientWidth,
       height: document.documentElement.clientHeight,
+      expanded: false,
     };
   }
 }

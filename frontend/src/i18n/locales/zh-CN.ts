@@ -1,5 +1,17 @@
 const zhCN = {
   workspace: {
+    gateway: "Gateway",
+    gatewayDescription: "连接参数与可用模型，直接复制到你的客户端。",
+    costMissing: "缺少价格数据",
+    costMissingHint: "费用估算需要请求 Token 用量与模型的美元输入、输出、缓存单价。订阅余额和额度不能换算成逐次请求成本。",
+    copyValue: "复制 {{value}}",
+    availableModels: "可用模型",
+    searchGatewayModels: "搜索模型名称或 ID",
+    filterProvider: "筛选 Provider",
+    allProviders: "全部 Provider",
+    noMatchingModels: "没有匹配的模型",
+    noGatewayModels: "暂无可用模型，请先启用 Provider 和模型。",
+    gatewayModelsUnavailable: "模型列表暂不可用，等待服务状态更新。",
     monthRemaining: "每月剩余",
     signingOut: "正在登出",
     signedOut: "已登出，请重启 Codex 更新账户状态。",

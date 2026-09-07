@@ -495,6 +495,8 @@ def test_linux_portable_packages_the_xai_device_login_helper():
 
     assert 'for resource in config src-python python scripts' in script
     assert '"$portable_dir/scripts/xai_device_login.py"' in script
+    assert 'scripts/e2e_linux_dock_icon.py' in script
+    assert '--bin "$portable_dir/$executableBaseName"' in script
     assert (
         tauri["bundle"]["resources"]["../scripts/xai_device_login.py"]
         == "scripts/xai_device_login.py"

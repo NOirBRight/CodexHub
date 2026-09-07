@@ -1,3 +1,4 @@
+import { readQuotaCache } from "../../lib/quotaCache";
 import {
   Check,
   ChevronDown,
@@ -100,7 +101,7 @@ export function ProviderDetail({
   const [endpointTestState, setEndpointTestState] =
     useState<InlineTestState>("idle");
   const [bundledPresets, setBundledPresets] = useState<Provider[]>([]);
-  const [usageLimits, setUsageLimits] = useState<OpenAIUsageLimit[]>([]);
+  const [usageLimits, setUsageLimits] = useState<OpenAIUsageLimit[]>(() => readQuotaCache("xai")?.limits ?? []);
   const [usageBusy, setUsageBusy] = useState(false);
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
   const dirty = unsaved || isProviderDirty(normalizedProvider, draft);
@@ -207,16 +208,11 @@ export function ProviderDetail({
             setUsageLimits(snapshot.limits ?? []);
           }
         } catch {
-          if (!cancelled) {
-            setUsageLimits([]);
-          }
+          // Keep the last successful quota while the provider is unavailable.
         }
         void ensureXaiCatalogReady();
       } catch {
-        if (!cancelled) {
-          setSignedIn(false);
-          setUsageLimits([]);
-        }
+        if (!cancelled) setSignedIn(null);
       } finally {
         if (!cancelled) {
           setUsageBusy(false);
@@ -320,7 +316,7 @@ export function ProviderDetail({
       setUsageLimits(snapshot.limits ?? []);
       setSignedIn(true);
     } catch {
-      setUsageLimits([]);
+      // A failed refresh must not erase the last successful quota.
     } finally {
       setUsageBusy(false);
     }
@@ -411,7 +407,7 @@ export function ProviderDetail({
           }
           actions={
             <>
-              {xaiSubscriptionAuth && signedIn ? (
+              {xaiSubscriptionAuth && signedIn !== false && (signedIn || usageLimits.length > 0) ? (
                 <OfficialOpenAIUsageLimitBars
                   busy={usageBusy}
                   limits={usageLimits}

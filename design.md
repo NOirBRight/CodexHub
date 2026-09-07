@@ -45,7 +45,7 @@
 
 ## 字体、边框与阴影
 
-- 正文与控件默认 12 px；辅助说明 11 px；日期等紧凑元数据最低 10 px。标题按层级 14–20 px，关键概览数字 24–26 px。
+- 正文与控件默认 13 px；辅助说明 12 px；日期等紧凑元数据最低 11 px。标题按层级 14–20 px，关键概览数字 24–26 px。整体默认缩放 110%；Linux 使用原生 WebView zoom，其余环境沿用 FitStage 缩放，布局按缩放后的可用宽高重排。
 - 普通文字 400–500，控件与标签 500–600，指标 600–700。避免同层级文字同时出现过多字号。
 - 边框统一 1 px `--ws-line`。焦点使用 2 px `--ws-accent`，偏移 2 px；键盘操作不能仅依赖悬停。
 - 控件、面板、浮层和模态框分别使用 `--ws-shadow-control`、`--ws-shadow-surface`、`--ws-shadow-floating`、`--ws-shadow-overlay`。不为每个按钮发明阴影。
@@ -73,3 +73,49 @@
 - 统计时间筛选容器为 8 px，内部按钮为 6 px，未覆盖日历单元和图例圆点。
 - 深色 840 × 600 下，模型开／关状态分别使用强调色／边框色，滑块为白色；OpenAI 顶部实际高度与滚动高度同为 276 px。
 - 此记录覆盖代码静态规则和上述浏览器状态；未声称穷举所有错误弹窗、平台或系统缩放组合。
+
+## 0.2.0 发布后反馈
+
+- Gateway 独立为顶层页面：连接参数与已保存的三个接口地址固定在上方，真实 Gateway 模型目录在下方独立滚动，按 Provider 分组并可折叠，可按来源和模型名称／ID 筛选并复制。
+- 概览移除底部重复导航；统计图例不加顶部分割线。
+- Provider 与 Clients 页移除底部说明／跳转栏。Gateway 三个接口地址并排展示，标题在上、URL 在下，保留完整地址 tooltip 和复制按钮，移除可见复制说明。设置与 Gateway 的 Save／Discard 放在顶层 Tab 右侧，不占用底部高度；只读 About 无草稿时隐藏操作。
+- 全局 Toast 与页面使用同一组文档级主题变量，包含正文、状态图标、操作和关闭按钮；不能假设浮层在 `.workspace-root` 内。
+- Linux 窗口采用 RGBA 透明宿主：正常窗口预留 12 px 透明阴影区，内容面板圆角 14 px，以两层低透明度黑色阴影形成柔和渐变；圆角外不得出现白底或不透明矩形。最大化／全屏取消阴影区并铺满窗口。GTK 样式只作用于主窗口，输入区域保留完整矩形以支持拖动与缩放；验证必须同时覆盖真实 Wayland 合成与 X11 点击。
+- Usage 图表只保留一层背景容器，不再叠加带内边距的内层背景框。110% 缩放、1076×820 窗口下，Workspace 与 Provider 列表必须完整显示至少四项；缩减行内留白，保留字体大小和操作控件。
+- 品牌图标采用用户确认的 `reference-aligned-b.svg` 描摹版。界面源文件为 `frontend/src/assets/brand/codexhub-icon.svg`，所有打包 PNG／ICO 由该 SVG 通过 `cargo tauri icon` 生成；保留原图比例、灰紫配色与透明外边距，禁止单独重画平台版本。后续更改造型仍需用户确认。
+
+### Scroll regions
+
+- Reserve a stable scrollbar gutter for scrollable lists, settings, dialogs,
+  menus and previews. Keep an additional 8 px content clearance on unpadded
+  list regions so overlay scrollbars cannot cover switches or copy buttons.
+- Scroll rails stay at the scroll container edge, outside the cards. Provider
+  is the sole stable exception: its dedicated list may reserve and compensate
+  for its known right rail width in the page gutter, so cards retain symmetric
+  margins and no control sits beneath the rail. Do not use conditional negative
+  margins for other model or provider content.
+- Verify both fitting and overflowing content at 110% on native Linux;
+  scrollbar appearance must not change card widths or hide the final controls.
+
+### Refresh and compact client cards
+
+- Quota panels paint their last successful cached values immediately, then
+  replace them after a successful refresh. A transient refresh failure keeps
+  those values; confirmed sign-out clears account quota caches.
+- Provider card model previews omit the containing provider's redundant name
+  prefix. Official models use the same preview treatment.
+- At 110% scale, client cards must fit two complete rows at 820 px viewport
+  height, including configuration path, connection status and switch.
+- Search fields with an icon share one background across the wrapper; the
+  nested input remains transparent.
+
+### Default-window density
+
+- Validate overview density at the default 1024×768 native window, accounting
+  for 110% zoom and transparent shadow insets: all four resource rows fit.
+- Provider cards retain symmetric page margins. Position the scroll rail in
+  the right page gutter, compensating for the platform's actual rail width.
+- Model previews use available width and a single-line ellipsis, never a fixed
+  two-model limit. Keep enable counts and reorder controls visible.
+- The Usage page places its content directly at normal page margins without
+  an extra outer card, background, border or shadow.

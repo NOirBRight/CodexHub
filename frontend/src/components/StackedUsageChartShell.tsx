@@ -328,11 +328,11 @@ export function StackedUsageChartShell({
       <div className="grid grid-cols-4 gap-2">
         <Metric label={t("gateway.tokens")} value={visibleSummary?.total_tokens !== null && visibleSummary?.total_tokens !== undefined ? formatNumber(visibleSummary.total_tokens, locale) : t("common.unknown")} />
         <Metric label={t("usage.requests")} value={visibleSummary ? formatNumber(visibleSummary.requests, locale) : t("common.unknown")} />
-        <Metric label={t("gateway.estCost")} value={costLabel(visibleSummary, t("common.unknown"))} title={visibleSummary?.cost_label ?? undefined} />
+        <Metric label={t("gateway.estCost")} value={costLabel(visibleSummary, t("workspace.costMissing"))} title={visibleSummary?.estimated_cost_usd == null ? t("workspace.costMissingHint") : visibleSummary.cost_label ?? undefined} />
         <Metric label={t("gateway.cachedInput")} value={cachedInputLabel(visibleSummary, t("common.unknown"))} title={cachedInputTitle(visibleSummary, tr)} />
       </div>
 
-      <div className="relative min-h-0 overflow-hidden rounded-inner bg-panel shadow-inner">
+      <div className="ws-chart-plot relative min-h-0 overflow-hidden rounded-inner border border-line bg-panel">
         {metric === "token" && !stacked.hasData ? (
           <NoTokenChart axis={axis} pendingMessage={pendingMessage} summary={summary} locale={locale} t={tr} />
         ) : (
@@ -639,8 +639,8 @@ function StackedUsageChart({
   }
 
   return (
-    <div className="grid h-full min-h-0 p-3">
-      <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto] overflow-hidden rounded-inner bg-surface/70 shadow-hairline">
+    <div className="grid h-full min-h-0">
+      <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto] overflow-hidden">
         <div className="relative min-h-0">
           <div className="absolute bottom-8 left-3 top-6 grid w-9 grid-rows-[auto_1fr_auto] text-[10px] font-semibold text-slate-400">
             <span title={formatNumber(maxTotal, locale)}>{formatAxisNumber(maxTotal, locale)}</span>
@@ -782,7 +782,7 @@ function StackedUsageChart({
           )}
         </div>
         {series.length > 0 && (
-          <div className="flex min-h-7 flex-wrap items-start justify-center gap-x-2.5 gap-y-1 overflow-visible border-t border-slate-100 px-6 py-1.5 text-[10px] font-semibold text-slate-500">
+          <div className="flex min-h-7 flex-wrap items-start justify-center gap-x-2.5 gap-y-1 overflow-visible px-6 py-1.5 text-[10px] font-semibold text-slate-500">
             {series.map((item) => {
               const hidden = hiddenSeriesKeys.has(item.key);
               return (
@@ -836,8 +836,8 @@ function NoTokenChart({
 }) {
   const columns = chartColumns(axis.length);
   return (
-    <div className="grid h-full min-h-0 p-3">
-      <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_22px] overflow-hidden rounded-inner bg-surface/70 shadow-hairline">
+    <div className="grid h-full min-h-0">
+      <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_22px] overflow-hidden">
         <div className="relative overflow-hidden">
           <div className="absolute inset-x-8 bottom-0 top-4 grid grid-rows-4">
             {Array.from({ length: 4 }).map((_, index) => (

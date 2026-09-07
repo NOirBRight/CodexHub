@@ -1,0 +1,16 @@
+--- a/dbusMenu.js
++++ b/dbusMenu.js
+@@ -288,3 +288,7 @@
+     async _requestProperties(propertyId, cancellable) {
++        // CodexHub: layout readiness can cancel the layout request before
++        // the deferred label fetch runs. Keep it tied to the live menu proxy.
++        if (this.gObjectPath.includes('/tray_icon_tray_app_codexhub/'))
++            cancellable = this._cancellable;
+         this._propertiesRequestedFor.add(propertyId);
+@@ -745,5 +749,2 @@
+         if (this.label) { // especially on GS3.8, separators might not have a hidden label
+             this.label.set_text(label);
+-            // Scope the contrast repair to CodexHub's unique Ayatana menu path.
+-            if (this._dbusClient._busPath.includes('/tray_icon_tray_app_codexhub/'))
+-                this.label.set_style('color: #1f1f1f;');
+         }

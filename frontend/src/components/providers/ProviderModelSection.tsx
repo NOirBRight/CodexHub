@@ -3,7 +3,6 @@ import type * as React from "react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SortableList } from "../SortableList";
-import { useVerticalOverflow } from "../../hooks/useVerticalOverflow";
 import i18n from "../../i18n";
 import { cx, displayModel } from "../../lib/format";
 import {
@@ -81,14 +80,7 @@ export function ModelSection({
   const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const editingModel = editingModelId ? models.find((model) => model.id === editingModelId) ?? null : null;
   const editingModelIsNew = pendingNewModelId !== null && pendingNewModelId === editingModelId;
-  const [modelListRef, modelListHasOverflow] = useVerticalOverflow<HTMLDivElement>([
-    disabled,
-    editingModelId,
-    models.length,
-    providerId,
-    reorderable,
-    interactionDisabled,
-  ]);
+
 
   function addAndEdit() {
     const modelId = onAdd?.();
@@ -290,11 +282,9 @@ export function ModelSection({
         </div>
       </div>
       <div
-        ref={modelListRef}
         className={cx(
           "min-h-0 overflow-auto",
           interactionDisabled && "opacity-60 grayscale",
-          modelListHasOverflow && "-mr-5 pr-3",
         )}
       >
         {models.length === 0 ? (

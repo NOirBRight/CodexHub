@@ -183,28 +183,24 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
   return (
     <div
       className={cx(
-        "grid min-h-10 w-full items-center gap-2 rounded-panel px-3 py-2 text-sm shadow-floating transition-[opacity,transform] duration-150 ease-out",
+        "ws-toast grid min-h-10 w-full items-center gap-2 rounded-panel px-3 py-2 text-sm shadow-floating transition-[opacity,transform] duration-150 ease-out",
         hasAction && dismissible
           ? "grid-cols-[auto_minmax(0,1fr)_auto_auto]"
           : hasAction || dismissible
             ? "grid-cols-[auto_minmax(0,1fr)_auto]"
             : "grid-cols-[auto_minmax(0,1fr)]",
-        toast.tone === "error"
-          ? "bg-red-50 text-danger"
-          : toast.tone === "success"
-            ? "bg-emerald-50 text-emerald-700"
-            : "bg-surface text-slate-700",
+        `ws-toast-${toast.tone}`,
       )}
       role={toast.tone === "error" ? "alert" : "status"}
     >
       {toast.tone === "loading" ? (
-        <RefreshCcw size={14} className="animate-spin text-action" />
+        <RefreshCcw size={14} className="animate-spin ws-toast-icon" />
       ) : toast.tone === "success" ? (
-        <CheckCircle2 size={14} className="text-emerald-600" />
+        <CheckCircle2 size={14} className="ws-toast-icon" />
       ) : toast.tone === "error" ? (
-        <AlertCircle size={14} className="text-danger" />
+        <AlertCircle size={14} className="ws-toast-icon" />
       ) : (
-        <Info size={14} className="text-action" />
+        <Info size={14} className="ws-toast-icon" />
       )}
       <span
         className={cx(
@@ -219,7 +215,7 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
       {toast.action && (
         <button
           type="button"
-          className="focus-ring inline-flex h-7 shrink-0 items-center justify-center whitespace-nowrap rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96]"
+          className="ws-toast-action focus-ring inline-flex h-7 shrink-0 items-center justify-center whitespace-nowrap rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96]"
           onClick={toast.action.onClick}
         >
           {toast.action.label}
@@ -228,7 +224,7 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
       {dismissible && (
         <button
           type="button"
-          className="focus-ring grid h-6 w-6 shrink-0 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
+          className="ws-toast-dismiss focus-ring grid h-6 w-6 shrink-0 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
           aria-label={t("common.dismissNotification")}
           onClick={onDismiss}
         >

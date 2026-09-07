@@ -23,8 +23,8 @@ mod linux_window;
 #[cfg(test)]
 mod lock_test_fixtures;
 mod models;
-mod official_refresh;
 mod official_catalog;
+mod official_refresh;
 mod openai_usage;
 mod provider_account;
 mod proxy;
@@ -34,13 +34,13 @@ mod safe_file;
 mod web_bridge;
 mod xai_auth;
 
-use desktop_commands::{
-    open_codex_app, restart_proxy, set_codex_context_guard, start_proxy, stop_proxy, switch_mode,
-};
 pub(crate) use desktop_commands::{
     generate_catalog_coordinated, refresh_official_models_coordinated,
-    refresh_official_models_published_coordinated,
-    save_official_multi_agent_version_coordinated, sync_catalog_coordinated,
+    refresh_official_models_published_coordinated, save_official_multi_agent_version_coordinated,
+    sync_catalog_coordinated,
+};
+use desktop_commands::{
+    open_codex_app, restart_proxy, set_codex_context_guard, start_proxy, stop_proxy, switch_mode,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -764,7 +764,9 @@ mod tests {
             status.codex_restart_result,
             Some(crate::codex_desktop::CodexRestartResult::SwitchFailedReopened)
         );
-        assert!(status.message.contains("original Codex Desktop was reopened"));
+        assert!(status
+            .message
+            .contains("original Codex Desktop was reopened"));
         assert!(status.message.contains("atomic write rejected"));
     }
 

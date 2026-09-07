@@ -85,7 +85,8 @@ pub(crate) fn manual_mark() -> Result<DiagnosticsActionResult, String> {
         .as_ref()
         .and_then(Value::as_object)
         .ok_or_else(|| "Debug diagnostics returned an invalid mark response.".to_string())?;
-    if result.len() != 2 || !result.contains_key("accepted") || !result.contains_key("incident_id") {
+    if result.len() != 2 || !result.contains_key("accepted") || !result.contains_key("incident_id")
+    {
         return Err("Debug diagnostics returned an invalid mark response.".to_string());
     }
     let accepted = result
@@ -96,7 +97,9 @@ pub(crate) fn manual_mark() -> Result<DiagnosticsActionResult, String> {
         .get("incident_id")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    if incident_id.as_deref().is_some_and(|value| !is_safe_incident_id(value))
+    if incident_id
+        .as_deref()
+        .is_some_and(|value| !is_safe_incident_id(value))
         || (accepted && incident_id.is_none())
     {
         return Err("Debug diagnostics returned an invalid mark response.".to_string());
@@ -157,7 +160,9 @@ fn request(operation: &str, incident_id: Option<&str>) -> Result<ControlResponse
     if !build_info::current().diagnostics_enabled {
         return Err(DIAGNOSTICS_UNAVAILABLE.to_string());
     }
-    let control_dir = runtime_paths::runtime_home_dir()?.join("diagnostics").join("control");
+    let control_dir = runtime_paths::runtime_home_dir()?
+        .join("diagnostics")
+        .join("control");
     request_with_control_dir(&control_dir, operation, incident_id, CONTROL_TIMEOUT)
 }
 
@@ -204,14 +209,18 @@ fn request_with_control_dir(
                     return Ok(response);
                 }
                 return Err(match response.code.as_deref() {
-                    Some("invalid_request") => "Debug diagnostics rejected the control request.".to_string(),
+                    Some("invalid_request") => {
+                        "Debug diagnostics rejected the control request.".to_string()
+                    }
                     _ => DIAGNOSTICS_NOT_READY.to_string(),
                 });
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 let _ = fs::remove_file(&request_path);
-                return Err(format!("failed to read diagnostic control response: {error}"));
+                return Err(format!(
+                    "failed to read diagnostic control response: {error}"
+                ));
             }
         }
         if started.elapsed() >= timeout {
@@ -349,7 +358,10 @@ mod tests {
             assert!(object.contains_key("request_id"));
             assert!(object.contains_key("operation"));
             assert!(object.contains_key("expires_at_ms"));
-            assert_eq!(object.get("operation").and_then(|value| value.as_str()), Some("status"));
+            assert_eq!(
+                object.get("operation").and_then(|value| value.as_str()),
+                Some("status")
+            );
             let request_id = object
                 .get("request_id")
                 .and_then(|value| value.as_str())
@@ -401,15 +413,21 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             if let Ok(mut paths) = fs::read_dir(request_dir) {
-                if let Some(path) = paths
-                    .find_map(Result::ok)
-                    .map(|entry| entry.path())
-                    .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+                if let Some(path) =
+                    paths
+                        .find_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .filter(|path| {
+                            path.extension().and_then(|value| value.to_str()) == Some("json")
+                        })
                 {
                     return path;
                 }
             }
-            assert!(std::time::Instant::now() < deadline, "control request should arrive");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "control request should arrive"
+            );
             thread::sleep(Duration::from_millis(10));
         }
     }

@@ -113,7 +113,9 @@ impl ConfigFileSpec {
     pub(crate) fn resolve(&self, client_root: &Path) -> PathBuf {
         self.relative_path
             .split('/')
-            .fold(client_root.to_path_buf(), |path, segment| path.join(segment))
+            .fold(client_root.to_path_buf(), |path, segment| {
+                path.join(segment)
+            })
     }
 }
 
@@ -192,7 +194,10 @@ impl InjectionDescriptor {
     pub(crate) fn removal_key_set(&self) -> Vec<String> {
         vec![
             self.injection_point().join("."),
-            format!("{}:{}", self.credential.file.relative_path, self.credential.key),
+            format!(
+                "{}:{}",
+                self.credential.file.relative_path, self.credential.key
+            ),
         ]
     }
 
@@ -343,24 +348,22 @@ pub(crate) fn inject(
 
     let route_key = Value::String(descriptor.route_key.to_owned());
     let adopted = match providers.get(&route_key) {
-        Some(existing) => {
-            match descriptor.adoption {
-                AdoptionRule::AdoptLocalGatewayElseConflict => {
-                    let base_url = existing
-                        .get(descriptor.entry_template.base_url_key)
-                        .and_then(Value::as_str);
-                    match base_url {
-                        Some(url) if is_local_gateway_url(url) => true,
-                        _ => {
-                            return Err(format!(
+        Some(existing) => match descriptor.adoption {
+            AdoptionRule::AdoptLocalGatewayElseConflict => {
+                let base_url = existing
+                    .get(descriptor.entry_template.base_url_key)
+                    .and_then(Value::as_str);
+                match base_url {
+                    Some(url) if is_local_gateway_url(url) => true,
+                    _ => {
+                        return Err(format!(
                                 "{} config already has a '{}' provider entry not pointing at the local Gateway; refusing to overwrite user-owned configuration",
                                 descriptor.client_id, descriptor.route_key
                             ));
-                        }
                     }
                 }
             }
-        }
+        },
         None => false,
     };
 
@@ -383,7 +386,11 @@ pub(crate) fn inject(
     let activation_before = read_path(&config, descriptor.activation_path).cloned();
     let config_backup = backup_file(&config_path)?;
     let credential_backup = backup_file(&credential_path)?;
-    write_yaml_atomic(&config_path, &config, existing_unix_mode(&config_path).or(Some(0o600)))?;
+    write_yaml_atomic(
+        &config_path,
+        &config,
+        existing_unix_mode(&config_path).or(Some(0o600)),
+    )?;
     if let Err(error) = write_yaml_atomic(&credential_path, &credentials, Some(0o600)) {
         if let Some(backup) = config_backup.as_ref() {
             let _ = fs::copy(backup, &config_path);
@@ -619,11 +626,8 @@ pub(crate) fn verify_readback(
 ) -> Result<ReadbackReport, String> {
     require_yaml(descriptor)?;
 
-    let expected = expected_block_fingerprint(
-        descriptor,
-        &expectation.base_url,
-        &expectation.models,
-    );
+    let expected =
+        expected_block_fingerprint(descriptor, &expectation.base_url, &expectation.models);
     let actual = block_fingerprint(client_root, descriptor)?;
     let activation = activation_state(client_root, descriptor)?;
 
@@ -698,7 +702,10 @@ fn field_drift_details(
         return details;
     };
 
-    let compare_str = |label: &str, found: Option<&str>, expected: &str, details: &mut Vec<String>| {
+    let compare_str = |label: &str,
+                       found: Option<&str>,
+                       expected: &str,
+                       details: &mut Vec<String>| {
         let found = found.unwrap_or("");
         if found != expected {
             details.push(format!(
@@ -721,7 +728,9 @@ fn field_drift_details(
     );
     compare_str(
         template.credential_ref_key,
-        entry.get(template.credential_ref_key).and_then(Value::as_str),
+        entry
+            .get(template.credential_ref_key)
+            .and_then(Value::as_str),
         descriptor.credential.env_var,
         &mut details,
     );
@@ -865,10 +874,7 @@ fn is_local_gateway_url(url: &str) -> bool {
     if scheme != "http" {
         return false;
     }
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     // Reject userinfo tricks like http://localhost@evil.example.
     if authority.contains('@') {
         return false;
@@ -934,11 +940,16 @@ fn read_path<'a>(root: &'a Mapping, path: &[&str]) -> Option<&'a Value> {
     Some(node)
 }
 
-fn navigate_mapping_mut<'a>(root: &'a mut Mapping, path: &[&str]) -> Result<&'a mut Mapping, String> {
+fn navigate_mapping_mut<'a>(
+    root: &'a mut Mapping,
+    path: &[&str],
+) -> Result<&'a mut Mapping, String> {
     let mut current = root;
     for segment in path {
         let key = Value::String((*segment).to_owned());
-        let entry = current.entry(key).or_insert_with(|| Value::Mapping(Mapping::new()));
+        let entry = current
+            .entry(key)
+            .or_insert_with(|| Value::Mapping(Mapping::new()));
         match entry {
             Value::Mapping(mapping) => current = mapping,
             _ => {
@@ -951,10 +962,7 @@ fn navigate_mapping_mut<'a>(root: &'a mut Mapping, path: &[&str]) -> Result<&'a 
     Ok(current)
 }
 
-fn navigate_mapping_opt_mut<'a>(
-    root: &'a mut Mapping,
-    path: &[&str],
-) -> Option<&'a mut Mapping> {
+fn navigate_mapping_opt_mut<'a>(root: &'a mut Mapping, path: &[&str]) -> Option<&'a mut Mapping> {
     let mut current = root;
     for segment in path {
         current = current
@@ -1010,7 +1018,10 @@ pub(crate) struct DshLifecycleReport {
     pub restart_required: String,
 }
 
-fn dsh_report(root: &Path, expectation: &ReadbackExpectation) -> Result<DshLifecycleReport, String> {
+fn dsh_report(
+    root: &Path,
+    expectation: &ReadbackExpectation,
+) -> Result<DshLifecycleReport, String> {
     let descriptor = dsh_descriptor();
     let readback = verify_readback(root, &descriptor, expectation)?;
     Ok(DshLifecycleReport {
@@ -1026,18 +1037,40 @@ fn dsh_report(root: &Path, expectation: &ReadbackExpectation) -> Result<DshLifec
     })
 }
 
-pub(crate) fn dsh_connect(root: &Path, base_url: String, api_key: MaskedSecret, models: Vec<String>) -> Result<DshLifecycleReport, String> {
+pub(crate) fn dsh_connect(
+    root: &Path,
+    base_url: String,
+    api_key: MaskedSecret,
+    models: Vec<String>,
+) -> Result<DshLifecycleReport, String> {
     let descriptor = dsh_descriptor();
-    let expectation = ReadbackExpectation { base_url: base_url.clone(), models: models.clone() };
-    inject(root, &descriptor, &InjectionRequest { base_url, api_key, models })?;
+    let expectation = ReadbackExpectation {
+        base_url: base_url.clone(),
+        models: models.clone(),
+    };
+    inject(
+        root,
+        &descriptor,
+        &InjectionRequest {
+            base_url,
+            api_key,
+            models,
+        },
+    )?;
     dsh_report(root, &expectation)
 }
 
-pub(crate) fn dsh_disconnect(root: &Path, expectation: &ReadbackExpectation) -> Result<DshLifecycleReport, String> {
+pub(crate) fn dsh_disconnect(
+    root: &Path,
+    expectation: &ReadbackExpectation,
+) -> Result<DshLifecycleReport, String> {
     let descriptor = dsh_descriptor();
     let before = verify_readback(root, &descriptor, expectation)?;
     if matches!(before.status, ReadbackStatus::Drift) {
-        return Err("DSH Injected Block drifted; refusing destructive detach. Repair or reconnect first.".to_string());
+        return Err(
+            "DSH Injected Block drifted; refusing destructive detach. Repair or reconnect first."
+                .to_string(),
+        );
     }
     detach(root, &descriptor)?;
     let mut report = dsh_report(root, expectation)?;
@@ -1045,7 +1078,10 @@ pub(crate) fn dsh_disconnect(root: &Path, expectation: &ReadbackExpectation) -> 
     Ok(report)
 }
 
-pub(crate) fn dsh_readback(root: &Path, expectation: &ReadbackExpectation) -> Result<DshLifecycleReport, String> {
+pub(crate) fn dsh_readback(
+    root: &Path,
+    expectation: &ReadbackExpectation,
+) -> Result<DshLifecycleReport, String> {
     dsh_report(root, expectation)
 }
 
@@ -1185,7 +1221,10 @@ mod tests {
         assert!(descriptor_for("dsh").is_some());
         // Takeover-era clients stay on legacy predicates until migration.
         for legacy in ["codex", "opencode", "pi", "omp", "zcode"] {
-            assert!(descriptor_for(legacy).is_none(), "{legacy} must not migrate implicitly");
+            assert!(
+                descriptor_for(legacy).is_none(),
+                "{legacy} must not migrate implicitly"
+            );
         }
         assert!(descriptor_for("unknown").is_none());
     }
@@ -1224,7 +1263,10 @@ mod tests {
         assert_eq!(format!("{secret:?}"), "***");
         let request = request();
         let debug = format!("{request:?}");
-        assert!(!debug.contains("cx-test-key-0000-SECRET"), "debug leaked: {debug}");
+        assert!(
+            !debug.contains("cx-test-key-0000-SECRET"),
+            "debug leaked: {debug}"
+        );
     }
 
     #[test]
@@ -1319,11 +1361,12 @@ mod tests {
         fs::write(root.join("settings.yaml"), original).unwrap();
 
         let outcome = inject(&root, &descriptor, &request()).unwrap();
-        let backup = outcome.config_backup.expect("pre-existing file must be backed up");
+        let backup = outcome
+            .config_backup
+            .expect("pre-existing file must be backed up");
         assert_eq!(read_file(&backup), original);
 
-        let parsed: Value =
-            serde_yaml::from_str(&read_file(&outcome.config_path)).unwrap();
+        let parsed: Value = serde_yaml::from_str(&read_file(&outcome.config_path)).unwrap();
         assert_eq!(
             at(&parsed, "/agent-default-model").unwrap(),
             "anthropic/claude-opus",
@@ -1333,7 +1376,10 @@ mod tests {
             at(&parsed, "/llm-pi-ai/providers/anthropic/baseURL").unwrap(),
             "https://api.anthropic.example"
         );
-        assert_eq!(at(&parsed, "/llm-pi-ai/stream").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            at(&parsed, "/llm-pi-ai/stream").and_then(Value::as_bool),
+            Some(true)
+        );
         assert!(at(&parsed, "/presets/standard").is_some());
         assert!(at(&parsed, "/llm-pi-ai/providers/codexhub").is_some());
         assert_eq!(
@@ -1359,9 +1405,11 @@ mod tests {
         .unwrap();
 
         let outcome = inject(&root, &descriptor, &request()).unwrap();
-        assert!(outcome.adopted, "local-Gateway entry must be adopted, not a conflict");
-        let parsed: Value =
-            serde_yaml::from_str(&read_file(&outcome.config_path)).unwrap();
+        assert!(
+            outcome.adopted,
+            "local-Gateway entry must be adopted, not a conflict"
+        );
+        let parsed: Value = serde_yaml::from_str(&read_file(&outcome.config_path)).unwrap();
         assert_eq!(
             at(&parsed, "/llm-pi-ai/providers/codexhub/baseURL").unwrap(),
             "http://127.0.0.1:9109/v1",
@@ -1416,7 +1464,9 @@ mod tests {
         assert!(is_local_gateway_url("http://127.0.0.1:9109"));
         assert!(is_local_gateway_url("http://localhost:9109/v1"));
         assert!(is_local_gateway_url("http://[::1]:9109"));
-        assert!(!is_local_gateway_url("http://localhost:9109@evil.example/v1"));
+        assert!(!is_local_gateway_url(
+            "http://localhost:9109@evil.example/v1"
+        ));
         assert!(!is_local_gateway_url("https://localhost:9109"));
         assert!(!is_local_gateway_url("http://localhost:evil"));
         assert!(!is_local_gateway_url("http://localhost.evil.test:9109"));
@@ -1445,11 +1495,12 @@ mod tests {
         .unwrap();
 
         let outcome = inject(&root, &descriptor, &request()).unwrap();
-        let backup = outcome.credential_backup.expect("credential backup missing");
+        let backup = outcome
+            .credential_backup
+            .expect("credential backup missing");
         assert_eq!(read_file(&backup), "OPENAI_API_KEY: sk-user-owned-123\n");
 
-        let parsed: Value =
-            serde_yaml::from_str(&read_file(&outcome.credential_path)).unwrap();
+        let parsed: Value = serde_yaml::from_str(&read_file(&outcome.credential_path)).unwrap();
         assert_eq!(
             parsed.get("OPENAI_API_KEY").unwrap(),
             "sk-user-owned-123",
@@ -1492,8 +1543,7 @@ mod tests {
         assert!(outcome.config_backup.is_some());
         assert!(outcome.credential_backup.is_some());
 
-        let parsed: Value =
-            serde_yaml::from_str(&read_file(&root.join("settings.yaml"))).unwrap();
+        let parsed: Value = serde_yaml::from_str(&read_file(&root.join("settings.yaml"))).unwrap();
         assert!(at(&parsed, "/llm-pi-ai/providers/codexhub").is_none());
         assert!(at(&parsed, "/llm-pi-ai/providers/anthropic").is_some());
         assert_eq!(
@@ -1505,7 +1555,10 @@ mod tests {
         let credentials: Value =
             serde_yaml::from_str(&read_file(&root.join(".credentials.yaml"))).unwrap();
         assert!(credentials.get("CODEXHUB_API_KEY").is_none());
-        assert_eq!(credentials.get("OPENAI_API_KEY").unwrap(), "sk-user-owned-123");
+        assert_eq!(
+            credentials.get("OPENAI_API_KEY").unwrap(),
+            "sk-user-owned-123"
+        );
 
         assert_eq!(block_fingerprint(&root, &descriptor).unwrap(), None);
     }
@@ -1702,13 +1755,26 @@ mod tests {
         assert_eq!(report.status, ReadbackStatus::Clean);
         assert!(report.block_present);
         assert!(report.credential_key_present);
-        assert_eq!(report.actual_fingerprint.as_deref(), Some(outcome.fingerprint.as_str()));
+        assert_eq!(
+            report.actual_fingerprint.as_deref(),
+            Some(outcome.fingerprint.as_str())
+        );
         assert_eq!(
             report.expected_fingerprint,
-            expected_block_fingerprint(&descriptor, "http://127.0.0.1:9109/v1", &expectation().models)
+            expected_block_fingerprint(
+                &descriptor,
+                "http://127.0.0.1:9109/v1",
+                &expectation().models
+            )
         );
-        assert_eq!(report.actual_fingerprint, Some(report.expected_fingerprint.clone()));
-        assert!(report.drift_details.is_empty(), "clean report must have no drift details");
+        assert_eq!(
+            report.actual_fingerprint,
+            Some(report.expected_fingerprint.clone())
+        );
+        assert!(
+            report.drift_details.is_empty(),
+            "clean report must have no drift details"
+        );
         assert_eq!(report.activation, None);
     }
 
@@ -1784,11 +1850,20 @@ mod tests {
         let report = verify_readback(&root, &descriptor, &expectation()).unwrap();
         assert_eq!(report.status, ReadbackStatus::Drift);
         assert!(!report.block_present);
-        assert!(report.credential_key_present, "credential survives; only the entry was deleted");
+        assert!(
+            report.credential_key_present,
+            "credential survives; only the entry was deleted"
+        );
         assert_eq!(report.actual_fingerprint, None);
         let detail = report.drift_details.join("\n");
-        assert!(detail.contains("llm-pi-ai.providers.codexhub"), "detail must name the injection point: {detail}");
-        assert!(detail.contains("re-inject"), "detail must be actionable: {detail}");
+        assert!(
+            detail.contains("llm-pi-ai.providers.codexhub"),
+            "detail must name the injection point: {detail}"
+        );
+        assert!(
+            detail.contains("re-inject"),
+            "detail must be actionable: {detail}"
+        );
     }
 
     #[test]
@@ -1799,7 +1874,10 @@ mod tests {
         assert_eq!(report.status, ReadbackStatus::Drift);
         assert!(!report.block_present);
         assert!(!report.credential_key_present);
-        assert!(report.drift_details.iter().any(|detail| detail.contains("credential key 'CODEXHUB_API_KEY' missing")));
+        assert!(report
+            .drift_details
+            .iter()
+            .any(|detail| detail.contains("credential key 'CODEXHUB_API_KEY' missing")));
     }
 
     #[test]
@@ -1825,12 +1903,29 @@ mod tests {
         let report = verify_readback(&root, &descriptor, &expectation()).unwrap();
         assert_eq!(report.status, ReadbackStatus::Drift);
         assert!(report.block_present);
-        assert_ne!(report.actual_fingerprint, Some(report.expected_fingerprint.clone()));
+        assert_ne!(
+            report.actual_fingerprint,
+            Some(report.expected_fingerprint.clone())
+        );
         let detail = report.drift_details.join("\n");
-        assert!(detail.contains("api: found 'openai-completions', expected 'openai-responses'"), "{detail}");
-        assert!(detail.contains("baseURL: found 'http://127.0.0.1:9999/v1', expected 'http://127.0.0.1:9109/v1'"), "{detail}");
-        assert!(detail.contains("apiKeyEnv: found 'TAMPERED_VAR', expected 'CODEXHUB_API_KEY'"), "{detail}");
-        assert!(detail.contains("found [gpt-5.5], expected [gpt-5.5, gpt-5.5-codex]"), "{detail}");
+        assert!(
+            detail.contains("api: found 'openai-completions', expected 'openai-responses'"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains(
+                "baseURL: found 'http://127.0.0.1:9999/v1', expected 'http://127.0.0.1:9109/v1'"
+            ),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("apiKeyEnv: found 'TAMPERED_VAR', expected 'CODEXHUB_API_KEY'"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("found [gpt-5.5], expected [gpt-5.5, gpt-5.5-codex]"),
+            "{detail}"
+        );
     }
 
     #[test]
@@ -1839,15 +1934,25 @@ mod tests {
         let descriptor = dsh_descriptor();
         inject(&root, &descriptor, &request()).unwrap();
         // User deletes only our credential key, keeps their own.
-        fs::write(root.join(".credentials.yaml"), "OPENAI_API_KEY: sk-user-owned-123\n").unwrap();
+        fs::write(
+            root.join(".credentials.yaml"),
+            "OPENAI_API_KEY: sk-user-owned-123\n",
+        )
+        .unwrap();
 
         let report = verify_readback(&root, &descriptor, &expectation()).unwrap();
         assert_eq!(report.status, ReadbackStatus::Drift);
         assert!(report.block_present);
         assert!(!report.credential_key_present);
         let detail = report.drift_details.join("\n");
-        assert!(detail.contains("credential key 'CODEXHUB_API_KEY' missing"), "{detail}");
-        assert!(!detail.contains("sk-user-owned-123"), "foreign credential value leaked: {detail}");
+        assert!(
+            detail.contains("credential key 'CODEXHUB_API_KEY' missing"),
+            "{detail}"
+        );
+        assert!(
+            !detail.contains("sk-user-owned-123"),
+            "foreign credential value leaked: {detail}"
+        );
     }
 
     #[test]
@@ -1912,6 +2017,9 @@ mod tests {
         fs::write(root.join("settings.yaml"), "llm-pi-ai: [unclosed\n").unwrap();
 
         let error = verify_readback(&root, &descriptor, &expectation()).unwrap_err();
-        assert!(error.contains("failed to parse"), "unexpected error: {error}");
+        assert!(
+            error.contains("failed to parse"),
+            "unexpected error: {error}"
+        );
     }
 }

@@ -184,7 +184,9 @@ fn remove_created_file(path: &Path) -> Result<(), String> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("failed to remove transaction-created file: {error}")),
+        Err(error) => Err(format!(
+            "failed to remove transaction-created file: {error}"
+        )),
     }
 }
 
@@ -256,10 +258,7 @@ mod tests {
         )
         .expect_err("rollback failure");
 
-        assert!(matches!(
-            error,
-            FileTransactionError::RollbackFailed { .. }
-        ));
+        assert!(matches!(error, FileTransactionError::RollbackFailed { .. }));
         assert!(error.rollback_failed());
         let _ = fs::remove_dir_all(root);
     }

@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 mod backup;
 mod clients;
 mod inject;
-mod managed_clients;
 mod isolated;
+mod managed_clients;
 mod providers;
 mod readback;
 
@@ -40,47 +40,41 @@ pub use providers::provider_probe_upstream_format;
 pub use readback::verify_apply_readback;
 
 use clients::codex::read_codex_auth_status;
-use clients::omp::{
-    detect_omp_config_paths, detect_omp_route_details,
-};
 #[cfg(test)]
 use clients::omp::{
     apply_omp_config_with_paths, omp_config_text, omp_models_yml_text, omp_route_mode,
-    plan_omp_apply, publish_omp_apply, restore_omp_config_with_paths,
-    OmpConfigPaths,
+    plan_omp_apply, publish_omp_apply, restore_omp_config_with_paths, OmpConfigPaths,
 };
-use clients::opencode::{
-    detect_opencode_config_path, detect_opencode_executable_path,
-    detect_opencode_version, is_opencode_codexhub_config,
-};
-#[cfg(test)]
-use clients::opencode::{
-    apply_opencode_config_with_paths, detect_opencode_executable_path_in_home, opencode_config_text,
-    plan_opencode_apply, OpenCodeApplyDecision,
-    opencode_ownership_bounded_cleanup, opencode_reasoning_variants, restore_latest_backup,
-    restore_opencode_config_with_backup_roots,
-};
+use clients::omp::{detect_omp_config_paths, detect_omp_route_details};
 #[cfg(all(test, target_os = "linux"))]
 use clients::opencode::opencode_system_executable_candidates;
-use clients::pi::{
-    detect_pi_config_paths, detect_pi_route_details,
+#[cfg(test)]
+use clients::opencode::{
+    apply_opencode_config_with_paths, detect_opencode_executable_path_in_home,
+    opencode_config_text, opencode_ownership_bounded_cleanup, opencode_reasoning_variants,
+    plan_opencode_apply, restore_latest_backup, restore_opencode_config_with_backup_roots,
+    OpenCodeApplyDecision,
+};
+use clients::opencode::{
+    detect_opencode_config_path, detect_opencode_executable_path, detect_opencode_version,
+    is_opencode_codexhub_config,
 };
 #[cfg(test)]
 use clients::pi::{
     apply_pi_config_with_paths, pi_models_text, pi_ownership_bounded_cleanup, pi_settings_text,
     plan_pi_apply, restore_pi_config_with_paths,
 };
-use clients::zcode::{
-    detect_zcode_config_targets, detect_zcode_executable_path,
-    detect_zcode_route_details, detect_zcode_store_path, zcode_latest_version,
-    zcode_route_mode_with_expected,
-};
+use clients::pi::{detect_pi_config_paths, detect_pi_route_details};
 #[cfg(test)]
 use clients::zcode::{
     apply_zcode_config_with_targets, plan_zcode_apply, restore_zcode_config_with_targets,
-    zcode_catalog_text,
-    zcode_route_mode, zcode_targets_from_writable, zcode_v2_cache_text, zcode_v2_config_text,
-    zcode_v2_root_from_catalog_path, zcode_v2_root_from_settings_path, ZcodeConfigTargets,
+    zcode_catalog_text, zcode_route_mode, zcode_targets_from_writable, zcode_v2_cache_text,
+    zcode_v2_config_text, zcode_v2_root_from_catalog_path, zcode_v2_root_from_settings_path,
+    ZcodeConfigTargets,
+};
+use clients::zcode::{
+    detect_zcode_config_targets, detect_zcode_executable_path, detect_zcode_route_details,
+    detect_zcode_store_path, zcode_latest_version, zcode_route_mode_with_expected,
 };
 
 #[cfg(test)]
@@ -90,9 +84,8 @@ pub(crate) use telemetry::{
     read_usage_events_from_sqlite_path, read_usage_events_from_sqlite_path_with_window,
     read_usage_events_from_text, read_usage_summary_from_sqlite_path_with_pricing,
     read_usage_summary_from_sqlite_path_with_pricing_and_window, read_usage_summary_from_text,
-    read_usage_summary_from_text_with_pricing, reset_telemetry_sqlite_ready_calls,
-    sanitize_event, telemetry_sqlite_ready_calls, usage_pricing_by_model, UsagePricing,
-    UsageTimeWindow,
+    read_usage_summary_from_text_with_pricing, reset_telemetry_sqlite_ready_calls, sanitize_event,
+    telemetry_sqlite_ready_calls, usage_pricing_by_model, UsagePricing, UsageTimeWindow,
 };
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(900);

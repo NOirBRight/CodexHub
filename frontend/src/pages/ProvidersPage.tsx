@@ -50,7 +50,6 @@ import {
   useProviderWorkspace,
   type PendingProviderNavigation,
 } from "../hooks/useProviderWorkspace";
-import { useVerticalOverflow } from "../hooks/useVerticalOverflow";
 import { cx, displayModel, renumberModels } from "../lib/format";
 import { emptyProvider, type AddProviderForm } from "../lib/providerForm";
 import { upstreamFormatLabel } from "../lib/providerEndpoint";
@@ -216,7 +215,7 @@ function ProvidersPageImpl({
     null,
   );
   const [officialUsageHidden, setOfficialUsageHidden] = useState(false);
-  const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot | null>(null);
+  const officialUsageSnapshotRef = useRef<OpenAIUsageSnapshot | null>(initialOfficialUsageSnapshot);
   const [catalogPickerOpen, setCatalogPickerOpen] = useState(false);
   const [catalogPresets, setCatalogPresets] = useState<Provider[] | null>(null);
   const selectedId = workspace.state.selectedId;
@@ -1035,6 +1034,7 @@ function ProvidersPageImpl({
           providers={providerNavItems.map((item) => item.provider)}
           officialId={OFFICIAL_ID}
           officialCount={officialModels.length}
+          officialModels={officialModels}
           officialEnabled={officialEnabledCount}
           officialIncluded={settings?.include_official_models ?? false}
           limits={officialUsageSnapshot?.limits ?? []}
@@ -1633,13 +1633,7 @@ function CodexHubProviderCard({
   onToggleProvider: (providerId: string, enabled: boolean) => void;
   selectedId: string;
 }) {
-  const [providerListRef, providerListHasOverflow] =
-    useVerticalOverflow<HTMLDivElement>([
-      activeAdd,
-      connected,
-      items.length,
-      selectedId,
-    ]);
+
   const { t } = useTranslation();
   return (
     <section
@@ -1683,10 +1677,8 @@ function CodexHubProviderCard({
       </div>
 
       <div
-        ref={providerListRef}
         className={cx(
           "min-h-0 overflow-auto",
-          providerListHasOverflow && "-mr-3 pr-1",
         )}
       >
         {items.length ? (

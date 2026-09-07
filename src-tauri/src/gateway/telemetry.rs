@@ -2,7 +2,7 @@ use super::{
     non_empty_str, sanitize_text, GatewayEvent, GatewayUsageEvent, GatewayUsageSnapshot,
     GatewayUsageSummary, TelemetryStatus,
 };
-use crate::{config, models};
+use crate::config;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -40,8 +40,9 @@ struct TelemetryIngestCursor {
     status: TelemetryStatus,
 }
 
-static TELEMETRY_INGEST_CURSOR: OnceLock<Mutex<HashMap<TelemetryIngestKey, TelemetryIngestCursor>>> =
-    OnceLock::new();
+static TELEMETRY_INGEST_CURSOR: OnceLock<
+    Mutex<HashMap<TelemetryIngestKey, TelemetryIngestCursor>>,
+> = OnceLock::new();
 static TELEMETRY_SQLITE_READY_CALLS: AtomicU64 = AtomicU64::new(0);
 
 const OFFICIAL_FAST_PRICING: &[(&str, f64, f64, f64)] = &[
@@ -1009,7 +1010,9 @@ pub(crate) fn gateway_usage_snapshot_for_paths(
     ensure_telemetry_sqlite_ready(db_path)?;
     let window = UsageTimeWindow::new(start_ts, end_ts);
     let pricing = usage_pricing_by_model();
-    let event_limit = limit.unwrap_or(USAGE_SNAPSHOT_EVENT_CAP).clamp(1, USAGE_SNAPSHOT_EVENT_CAP);
+    let event_limit = limit
+        .unwrap_or(USAGE_SNAPSHOT_EVENT_CAP)
+        .clamp(1, USAGE_SNAPSHOT_EVENT_CAP);
     let events = read_usage_events_from_sqlite_path_with_window(db_path, event_limit, &window)?;
     let summary =
         read_usage_summary_from_sqlite_path_with_pricing_and_window(db_path, &pricing, &window)?;
@@ -1470,7 +1473,7 @@ fn estimate_usage_cost(
         };
     }
 
-    let mut label_parts = vec!["Estimated from configured USD pricing metadata".to_string()];
+    let mut label_parts = vec!["Estimated API value in USD at snapshot base rates; not subscription charges or historical invoices".to_string()];
     if cached_priced_as_input_requests > 0 {
         label_parts.push(format!(
             "{cached_priced_as_input_requests} requests used input pricing for cached tokens"
@@ -1521,35 +1524,70 @@ fn average_cache_hit_ratio(
 
 pub(crate) fn usage_pricing_by_model() -> HashMap<String, UsagePricing> {
     let mut pricing_by_model = HashMap::new();
-    let Ok(models) = models::list_model_metadata() else {
-        return pricing_by_model;
-    };
+    // Official estimates never inherit provider caches or user price overrides.
+    // Compiled catalog tariffs cover a just-added model until the next reviewed
+    // Models.dev snapshot reaches the release branch.
+    apply_builtin_official_pricing(&mut pricing_by_model);
+    insert_fast_usage_pricing_aliases(&mut pricing_by_model);
+    apply_bundled_pricing_snapshot(&mut pricing_by_model);
+    pricing_by_model
+}
 
-    for model in models {
-        let Some(pricing) = model.pricing else {
-            continue;
-        };
-        if !pricing.currency.eq_ignore_ascii_case("usd") {
-            continue;
-        }
-        let (Some(input_per_million), Some(output_per_million)) =
-            (pricing.input_per_million, pricing.output_per_million)
+fn apply_builtin_official_pricing(prices: &mut HashMap<String, UsagePricing>) {
+    for (id, pricing) in crate::models::builtin_usage_pricing() {
+        let (Some(input), Some(output)) = (pricing.input_per_million, pricing.output_per_million)
         else {
             continue;
         };
-        let usage_pricing = UsagePricing {
-            input_per_million,
-            cached_input_per_million: pricing.cached_input_per_million,
-            output_per_million,
-        };
-        insert_usage_pricing_aliases(&mut pricing_by_model, &model.id, usage_pricing);
-        if let Some(upstream_model) = model.upstream_model {
-            insert_usage_pricing_aliases(&mut pricing_by_model, &upstream_model, usage_pricing);
+        if !input.is_finite() || input <= 0.0 || !output.is_finite() || output <= 0.0 {
+            continue;
+        }
+        let cached = pricing
+            .cached_input_per_million
+            .filter(|value| value.is_finite() && *value >= 0.0);
+        insert_usage_pricing_aliases(
+            prices,
+            &id,
+            UsagePricing {
+                input_per_million: input,
+                cached_input_per_million: cached,
+                output_per_million: output,
+            },
+        );
+    }
+}
+
+fn apply_bundled_pricing_snapshot(prices: &mut HashMap<String, UsagePricing>) {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        id: String,
+        input_per_million: f64,
+        cached_input_per_million: Option<f64>,
+        output_per_million: f64,
+    }
+    #[derive(serde::Deserialize)]
+    struct Snapshot {
+        entries: Vec<Entry>,
+        unresolved: Vec<String>,
+    }
+    let snapshot: Snapshot =
+        serde_json::from_str(include_str!("../../../config/model_pricing_snapshot.json"))
+            .expect("bundled pricing snapshot must be valid");
+    // New reviewed tariffs supersede stale metadata caches. Unresolved prices
+    // must not accidentally inherit a historical or reseller tariff.
+    for id in snapshot.unresolved {
+        for alias in usage_pricing_aliases(&id) {
+            prices.remove(&alias);
         }
     }
-
-    insert_fast_usage_pricing_aliases(&mut pricing_by_model);
-    pricing_by_model
+    for entry in snapshot.entries {
+        let price = UsagePricing {
+            input_per_million: entry.input_per_million,
+            cached_input_per_million: entry.cached_input_per_million,
+            output_per_million: entry.output_per_million,
+        };
+        replace_usage_pricing_aliases(prices, &entry.id, price);
+    }
 }
 
 fn insert_fast_usage_pricing_aliases(pricing_by_model: &mut HashMap<String, UsagePricing>) {
@@ -1567,7 +1605,14 @@ pub(crate) fn lookup_usage_pricing(
     pricing_by_model: &HashMap<String, UsagePricing>,
     model: &str,
 ) -> Option<UsagePricing> {
-    usage_pricing_aliases(model).find_map(|alias| pricing_by_model.get(&alias).copied())
+    let mut id = model.trim();
+    loop {
+        if let Some(price) = pricing_by_model.get(id) {
+            return Some(*price);
+        }
+        // Strip arbitrary Gateway/lab prefixes, matching only whole model IDs.
+        id = id.split_once('/')?.1;
+    }
 }
 
 fn insert_usage_pricing_aliases(
@@ -1577,6 +1622,16 @@ fn insert_usage_pricing_aliases(
 ) {
     for alias in usage_pricing_aliases(model) {
         pricing_by_model.entry(alias).or_insert(pricing);
+    }
+}
+
+fn replace_usage_pricing_aliases(
+    pricing_by_model: &mut HashMap<String, UsagePricing>,
+    model: &str,
+    pricing: UsagePricing,
+) {
+    for alias in usage_pricing_aliases(model) {
+        pricing_by_model.insert(alias, pricing);
     }
 }
 

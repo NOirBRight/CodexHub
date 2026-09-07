@@ -32,7 +32,10 @@ pub fn xai_usage_snapshot_blocking() -> Result<Value, String> {
 }
 
 pub fn xai_access_token_blocking() -> Result<String, String> {
-    access_token_from_cli_payload(&run_xai_cli(&["access-token"], Some(Duration::from_secs(30)))?)
+    access_token_from_cli_payload(&run_xai_cli(
+        &["access-token"],
+        Some(Duration::from_secs(30)),
+    )?)
 }
 
 pub(crate) fn access_token_from_cli_payload(value: &Value) -> Result<String, String> {
@@ -84,7 +87,8 @@ pub async fn xai_open_verification_url(url: String) -> Result<String, String> {
 }
 
 pub(crate) fn pin_https_xai_url(url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url.trim()).map_err(|error| format!("invalid URL: {error}"))?;
+    let parsed =
+        reqwest::Url::parse(url.trim()).map_err(|error| format!("invalid URL: {error}"))?;
     if parsed.scheme() != "https" {
         return Err("xAI verification URL must be HTTPS".to_string());
     }
@@ -165,7 +169,10 @@ fn run_xai_cli(args: &[&str], timeout: Option<Duration>) -> Result<Value, String
         command.env("CODEX_HOME", home);
     }
     if let Some(limit) = timeout {
-        command.env("CODEXHUB_XAI_CLI_TIMEOUT_SECONDS", limit.as_secs().to_string());
+        command.env(
+            "CODEXHUB_XAI_CLI_TIMEOUT_SECONDS",
+            limit.as_secs().to_string(),
+        );
     }
     let output = command
         .output()

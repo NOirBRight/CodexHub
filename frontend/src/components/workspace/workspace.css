@@ -1,5 +1,5 @@
 /* Desktop workspace: shared production surfaces, independent scroll regions. */
-.workspace-root {
+:root {
   --ws-radius-micro: 4px;
   --ws-radius-small: 6px;
   --ws-radius-control: 8px;
@@ -24,6 +24,8 @@
   --ws-soft: #eee7f5;
   --ws-green: #388775;
   --ws-rim: #ffffffb8;
+}
+.workspace-root {
   position: relative;
   display: flex;
   flex-direction: column;
@@ -32,10 +34,10 @@
   overflow: hidden;
   background: var(--ws-bg);
   color: var(--ws-ink);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
 }
-[data-appearance="dark"] .workspace-root {
+[data-appearance="dark"] {
   --ws-bg: #211e29;
   --ws-surface: #2c2835;
   --ws-inset: #25212f;
@@ -101,16 +103,20 @@
   background: linear-gradient(var(--ws-surface), var(--ws-inset));
   border-color: var(--ws-line);
   box-shadow: var(--ws-shadow-control);
-  font-size: 11px;
+  font-size: 12px;
 }
 .workspace-root .ws-primary {
   height: var(--ws-control-height);
   padding: 0 12px;
-  background: linear-gradient(135deg, color-mix(in srgb, var(--ws-accent) 85%, var(--ws-surface)), var(--ws-accent));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--ws-accent) 85%, var(--ws-surface)),
+    var(--ws-accent)
+  );
   color: var(--ws-on-accent);
   border-color: var(--ws-accent);
   box-shadow: var(--ws-shadow-control);
-  font-size: 11px;
+  font-size: 12px;
 }
 .workspace-root .ws-icon {
   width: var(--ws-control-height);
@@ -173,6 +179,7 @@
   color: var(--ws-muted);
 }
 .ws-nav {
+  overflow: hidden;
   height: 46px;
   display: flex;
   align-items: center;
@@ -182,18 +189,39 @@
   background: color-mix(in srgb, var(--ws-surface) 72%, var(--ws-inset));
   flex-shrink: 0;
 }
-.ws-nav button {
+.ws-tab-list {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.ws-tab-actions {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.ws-tab-actions:empty {
+  display: none;
+}
+.ws-tab-actions button {
+  flex: none;
+}
+.ws-tab-list > button {
+  flex: 0 1 96px;
   height: 30px;
-  padding: 0 14px;
-  font-size: 11px;
+  padding: 0 6px;
+  font-size: 12px;
   color: var(--ws-muted) !important;
 }
-.ws-nav button:hover {
+.ws-tab-list > button:hover {
   background: var(--ws-soft);
 }
-.ws-nav button.selected {
+.ws-tab-list > button.selected {
   color: var(--ws-on-accent) !important;
-  background: linear-gradient(135deg, color-mix(in srgb, var(--ws-accent) 85%, var(--ws-surface)), var(--ws-accent));
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--ws-accent) 85%, var(--ws-surface)),
+    var(--ws-accent)
+  );
   border-color: var(--ws-accent);
   box-shadow: var(--ws-shadow-control);
 }
@@ -206,7 +234,7 @@
   background: color-mix(in srgb, var(--ws-surface) 85%, var(--ws-bg));
   border-bottom: 1px solid var(--ws-line);
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 11px;
 }
 .ws-service > svg {
   color: var(--ws-accent);
@@ -217,20 +245,20 @@
   border-radius: var(--ws-radius-small);
 }
 .ws-service > b {
-  font-size: 11px;
+  font-size: 12px;
 }
 .ws-service > code {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
   margin-left: 6px;
 }
 .ws-online {
   color: var(--ws-green);
-  font-size: 10px;
+  font-size: 11px;
 }
 .ws-muted {
   color: var(--ws-muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 .ws-service-actions {
   display: flex;
@@ -242,7 +270,7 @@
 .ws-service button {
   height: 25px;
   padding: 0 8px;
-  font-size: 10px;
+  font-size: 11px;
 }
 .ws-service button:nth-child(2) {
   border-color: var(--ws-line);
@@ -284,7 +312,7 @@
   line-height: 1.3;
 }
 .ws-heading p {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
   margin-top: 6px;
 }
@@ -297,11 +325,11 @@
   border-top: 1px solid var(--ws-line);
   padding: 0 16px;
   background: color-mix(in srgb, var(--ws-surface) 85%, var(--ws-inset));
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
 }
 .ws-status .ws-online {
-  font-size: 10px;
+  font-size: 11px;
 }
 .ws-bridge {
   display: flex;
@@ -337,12 +365,12 @@
   background: var(--ws-brand-surface);
 }
 .ws-bridge b {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   display: block;
 }
 .ws-bridge small {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
   display: block;
   margin-top: 2px;
@@ -393,7 +421,7 @@
   border: 0;
 }
 .ws-metrics span {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
 }
 .ws-metrics strong {
@@ -428,7 +456,7 @@
   );
 }
 .ws-resource-table > header > b {
-  font-size: 12px;
+  font-size: 13px;
 }
 .ws-resource-table > header > .ws-icon {
   margin-left: auto;
@@ -445,7 +473,7 @@
   height: 27px;
   background: var(--ws-inset);
   border-bottom: 1px solid var(--ws-line);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
   flex-shrink: 0;
 }
@@ -455,12 +483,14 @@
 .ws-scroll {
   overflow: auto;
   min-height: 0;
+  scrollbar-gutter: stable;
+  padding-inline-end: 8px;
   scrollbar-width: thin;
   scrollbar-color: var(--ws-line) transparent;
   overscroll-behavior: contain;
 }
 .ws-resource-row {
-  min-height: 64px;
+  min-height: 58px;
   border-bottom: 1px solid var(--ws-line);
 }
 .ws-resource-row:last-child {
@@ -488,14 +518,14 @@
 }
 .ws-identity b {
   display: block;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .ws-identity small {
   display: block;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
   margin-top: 2px;
 }
@@ -549,7 +579,7 @@
   gap: 8px;
 }
 .ws-limit span {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
 }
 .ws-limit strong {
@@ -559,13 +589,13 @@
   letter-spacing: -0.6px;
 }
 .ws-limit strong small {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 400;
   color: var(--ws-muted);
   margin-left: 2px;
 }
 .ws-limit > small {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
   display: block;
   margin-top: 3px;
@@ -580,14 +610,18 @@
 .ws-meter i {
   height: 100%;
   display: block;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--ws-accent) 70%, var(--ws-surface)), var(--ws-accent));
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--ws-accent) 70%, var(--ws-surface)),
+    var(--ws-accent)
+  );
   border-radius: var(--ws-radius-micro);
 }
 .ws-page-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
   flex-shrink: 0;
   min-height: 16px;
@@ -607,7 +641,7 @@
   align-items: center;
   justify-content: space-between;
   color: var(--ws-muted);
-  font-size: 10px;
+  font-size: 11px;
   flex-shrink: 0;
 }
 .ws-provider-tools label {
@@ -625,19 +659,28 @@
   color: var(--ws-ink);
   width: 185px;
   outline: none;
-  font-size: 10px;
+  font-size: 11px;
 }
 .ws-management {
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+}
+/* Keep the Provider rail in the page's right margin so it never overlays a
+ * card while the cards retain the same visual margin on both sides. */
+.ws-management.ws-scroll {
+  --ws-provider-scroll-rail: 8px;
+  margin-inline-end: calc(-1 * (8px + var(--ws-provider-scroll-rail)));
+  padding-inline-end: calc(8px + var(--ws-provider-scroll-rail));
+  /* Provider intentionally puts its known rail in the page gutter. */
+  scrollbar-gutter: auto;
 }
 .ws-management-row {
   display: grid;
   grid-template-columns: minmax(150px, 1fr) minmax(0, 1.4fr) auto;
-  gap: 14px 22px;
-  padding: 16px 18px 0;
+  gap: 8px 22px;
+  padding: 10px 16px 0;
   border: 1px solid var(--ws-line);
   border-radius: var(--ws-radius-panel);
   background: var(--ws-surface);
@@ -651,11 +694,11 @@
   gap: 4px;
 }
 .ws-endpoint span {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
 }
 .ws-endpoint code {
-  font-size: 10px;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -670,9 +713,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 36px;
+  min-height: 28px;
   border-top: 1px solid var(--ws-line);
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
   overflow: hidden;
 }
@@ -820,7 +863,7 @@
   padding: 2px;
 }
 .ws-client-filters button {
-  font-size: 10px;
+  font-size: 11px;
   height: 23px;
   padding: 0 10px;
   color: var(--ws-muted) !important;
@@ -840,7 +883,7 @@
 .ws-settings-tabs button {
   height: 29px;
   padding: 0 14px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ws-muted) !important;
 }
 .ws-settings-tabs button.selected {
@@ -856,7 +899,7 @@
 .ws-settings-inline {
   display: grid;
   height: 100%;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
 }
@@ -866,13 +909,8 @@
 .ws-settings-inline > div:nth-child(2) > div {
   padding: 0 3px 10px 0;
 }
-.ws-settings-inline > div:last-child {
-  border-top: 1px solid var(--ws-line);
-  padding: 12px 0 0;
-  box-shadow: none;
-}
 .ws-settings-inline section > h3 {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   padding: 3px 0;
 }
@@ -969,7 +1007,7 @@
   align-items: center;
 }
 .ws-connection-overlay p {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ws-muted);
   line-height: 1.8;
 }
@@ -1070,7 +1108,7 @@
   height: 28px;
   padding: 0 14px;
   border-radius: var(--ws-radius-small);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ws-muted);
 }
 .ws-editor-tabs .selected {
@@ -1089,18 +1127,18 @@
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .ws-setting-line small {
   display: block;
   color: var(--ws-muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 400;
   margin-top: 4px;
   max-width: 520px;
 }
 .ws-setting-line > code {
-  font-size: 11px;
+  font-size: 12px;
 }
 .ws-setting-line > .ws-client-filters {
   margin-left: 0;
@@ -1118,12 +1156,12 @@
   width: 170px;
   border: 0;
   min-width: 0;
-  font-size: 11px;
+  font-size: 12px;
   flex: 1;
 }
 .ws-save-state {
   margin-right: auto;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
 }
 .ws-dialog-backdrop {
@@ -1195,7 +1233,7 @@
 }
 .ws-client-detail-heading small {
   color: var(--ws-muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 .ws-detail-list > div {
   display: flex;
@@ -1204,7 +1242,7 @@
   gap: 20px;
   padding: 12px 0;
   border-bottom: 1px solid var(--ws-line);
-  font-size: 11px;
+  font-size: 12px;
 }
 .ws-detail-list dt {
   color: var(--ws-muted);
@@ -1216,7 +1254,7 @@
   overflow-wrap: anywhere;
 }
 .ws-config-preview {
-  font-size: 10px;
+  font-size: 11px;
   padding: 16px;
   border-radius: var(--ws-radius-control);
   border: 1px solid var(--ws-line);
@@ -1241,7 +1279,7 @@
 .ws-gateway-clients > div:nth-child(2) > div > .ws-client-card {
   padding: 0;
   overflow: hidden;
-  min-height: 160px;
+  min-height: 138px;
 }
 .ws-gateway-clients > div:nth-child(2) > div > .ws-client-card.connected {
   border-color: color-mix(in srgb, var(--ws-accent) 40%, var(--ws-line));
@@ -1258,18 +1296,18 @@
   flex-wrap: nowrap;
   align-items: center;
   gap: 10px;
-  padding: 16px 14px 0;
+  padding: 10px 12px 0;
 }
 .ws-client-heading > div {
   flex: 1;
   min-width: 0;
 }
 .ws-client-heading h3 {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
 }
 .ws-client-heading small {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
 }
 .ws-client-logo {
@@ -1294,7 +1332,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 12px 14px;
+  margin: 8px 12px;
   border: 1px solid var(--ws-line);
   border-radius: var(--ws-radius-small);
   background: var(--ws-inset);
@@ -1305,7 +1343,7 @@
   flex-shrink: 0;
 }
 .ws-client-config code {
-  font-size: 10px;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1316,20 +1354,20 @@
   align-items: center;
   gap: 10px;
   border-top: 1px solid var(--ws-line);
-  padding: 10px 14px;
+  padding: 8px 12px;
   background: linear-gradient(
     var(--ws-surface),
     color-mix(in srgb, var(--ws-inset) 30%, var(--ws-surface))
   );
 }
 .ws-client-bottom > div > span {
-  font-size: 10px;
+  font-size: 11px;
 }
 .ws-client-bottom small {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--ws-muted);
   margin-top: 3px;
 }
@@ -1338,12 +1376,6 @@
 }
 .ws-client-card.connected .ws-client-bottom > div > span {
   color: var(--ws-green);
-}
-/* Fixed navigation targets are also exercised by the native pointer harness. */
-.ws-nav button {
-  width: 96px;
-  flex: 0 0 96px;
-  padding: 0 8px;
 }
 .workspace-root [class~="bg-surface/70"] {
   background: color-mix(in srgb, var(--ws-surface) 75%, var(--ws-inset));
@@ -1393,7 +1425,7 @@
   }
   .ws-bridge {
     min-height: 64px;
-    padding: 10px 14px;
+    padding: 8px 12px;
   }
   .ws-metrics {
     height: 56px;
@@ -1404,8 +1436,8 @@
 }
 /* Feedback refinement: compact, unified working surfaces. */
 .ws-overview .ws-metrics {
-  height: 84px;
-  padding: 12px 0;
+  height: 74px;
+  padding: 8px 0;
   align-items: center;
   border: 1px solid var(--ws-line);
   border-radius: var(--ws-radius-panel);
@@ -1461,6 +1493,8 @@
 }
 .ws-gateway-chart .ws-chart-range {
   border-radius: var(--ws-radius-control);
+  border: 1px solid var(--ws-line);
+  box-shadow: none;
 }
 .ws-gateway-chart button {
   border-radius: var(--ws-radius-small);
@@ -1503,7 +1537,7 @@
 }
 .ws-editor-overlay[data-editor-tab="unified"] .ws-provider-detail .field {
   height: 32px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .ws-editor-overlay[data-editor-tab="unified"]
   .ws-provider-detail
@@ -1580,12 +1614,12 @@
   color: var(--ws-green);
 }
 /* Shared legacy-control adapters: retain semantics with workspace theme tokens. */
-.workspace-root {
+:root {
   --ws-danger: #ba555f;
   --ws-warning: #987326;
   --ws-on-accent: #fff;
 }
-[data-appearance="dark"] .workspace-root {
+[data-appearance="dark"] {
   --ws-danger: #ed9da4;
   --ws-warning: #ddbd78;
   --ws-on-accent: #261d30;
@@ -1663,11 +1697,11 @@
   > div:first-child
   > span:last-child {
   color: var(--ws-accent);
-  font-size: 12px;
+  font-size: 13px;
 }
 .workspace-root.workspace-root .ws-account-quota > div:nth-child(2) {
   color: var(--ws-muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 .workspace-root.workspace-root .ws-account-quota > div:last-child {
   height: 3px;
@@ -1737,13 +1771,13 @@
 .workspace-root.workspace-root .ws-segmented > button {
   min-height: 28px;
   border-radius: var(--ws-radius-small);
-  font-size: 12px;
+  font-size: 13px;
   padding: 4px 12px;
 }
 .workspace-root.workspace-root button.focus-ring.h-9:not(.select-option) {
   height: 32px;
   border-radius: var(--ws-radius-control);
-  font-size: 12px;
+  font-size: 13px;
 }
 
 /* Geometry belongs to the component role, never to a utility-class coincidence. */
@@ -1768,7 +1802,14 @@
   border-radius: var(--ws-radius-small);
 }
 .workspace-root.workspace-root
-  :is(.ws-button, .ws-primary, .ws-icon, .ws-theme, .ws-icon-button, .select-trigger) {
+  :is(
+    .ws-button,
+    .ws-primary,
+    .ws-icon,
+    .ws-theme,
+    .ws-icon-button,
+    .select-trigger
+  ) {
   height: var(--ws-control-height);
   border-radius: var(--ws-radius-control);
 }
@@ -1780,7 +1821,372 @@
   > span:last-child {
   box-shadow: 0 1px 3px #0003;
 }
-.workspace-root.workspace-root input.field { height:var(--ws-control-height); }
-.workspace-root.workspace-root .ws-status-chip { border-radius:var(--ws-radius-small); }
-.workspace-root.workspace-root .ws-model-refresh { height:var(--ws-control-height);border-radius:var(--ws-radius-control); }
-.workspace-root.workspace-root .ws-model-refresh.ws-compact { min-width:28px;height:28px;padding:0 6px;border-radius:var(--ws-radius-small); }
+.workspace-root.workspace-root input.field {
+  height: var(--ws-control-height);
+}
+.workspace-root.workspace-root .ws-status-chip {
+  border-radius: var(--ws-radius-small);
+}
+.workspace-root.workspace-root .ws-model-refresh {
+  height: var(--ws-control-height);
+  border-radius: var(--ws-radius-control);
+}
+.workspace-root.workspace-root .ws-model-refresh.ws-compact {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: var(--ws-radius-small);
+}
+
+/* Toasts are siblings of the workspace; tokens therefore live on the document. */
+.ws-toast {
+  background: var(--ws-surface);
+  color: var(--ws-ink);
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius-panel);
+  box-shadow: var(--ws-shadow-floating);
+  font-size: 13px;
+}
+.ws-toast-success {
+  --toast-tone: var(--ws-green);
+}
+.ws-toast-error {
+  --toast-tone: var(--ws-danger);
+}
+.ws-toast-message,
+.ws-toast-info,
+.ws-toast-loading {
+  --toast-tone: var(--ws-accent);
+}
+.ws-toast-icon {
+  color: var(--toast-tone);
+}
+.ws-toast-action {
+  color: var(--ws-on-accent);
+  background: var(--ws-accent);
+  border-radius: var(--ws-radius-small);
+  box-shadow: var(--ws-shadow-control);
+}
+.ws-toast-action:hover {
+  background: color-mix(in srgb, var(--ws-accent) 85%, var(--ws-ink));
+}
+.ws-toast-dismiss {
+  color: var(--ws-muted);
+  border-radius: var(--ws-radius-small);
+}
+.ws-toast-dismiss:hover {
+  background: var(--ws-soft);
+  color: var(--ws-ink);
+}
+.ws-toast :focus-visible {
+  outline: 2px solid var(--ws-accent);
+  outline-offset: 2px;
+}
+.ws-settings-inline[data-settings-category="gateway"] > div:nth-child(2) {
+  overflow: hidden;
+}
+.ws-settings-inline[data-settings-category="gateway"] > div:nth-child(2) > div,
+.ws-settings-inline[data-settings-category="gateway"]
+  > div:nth-child(2)
+  > div
+  > div,
+.ws-settings-inline[data-settings-category="gateway"]
+  > div:nth-child(2)
+  > div
+  > div
+  > div:not([hidden]) {
+  height: 100%;
+  min-height: 0;
+}
+.ws-settings-inline[data-settings-category="gateway"]
+  > div:nth-child(2)
+  > div
+  > div {
+  display: block;
+}
+.ws-connection-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  height: 100%;
+  min-height: 0;
+}
+.ws-connection-settings {
+  flex-shrink: 0;
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius-panel);
+  background: var(--ws-surface);
+  padding: 12px 16px;
+}
+.ws-connection-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 170px 170px;
+  gap: 10px 24px;
+}
+.ws-connection-fields label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--ws-muted);
+}
+.ws-connection-fields label > code {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  color: var(--ws-ink);
+}
+.ws-connection-key .ws-settings-key {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+.ws-connection-endpoints {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--ws-line);
+}
+.ws-connection-endpoints > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+}
+.ws-connection-endpoints > div > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.ws-connection-endpoints span {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ws-muted);
+}
+.ws-connection-endpoints code {
+  display: block;
+  font-size: 12px;
+  color: var(--ws-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-connection-settings p {
+  font-size: 11px;
+}
+.ws-connection-models {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius-panel);
+  background: var(--ws-surface);
+  overflow: hidden;
+}
+.ws-connection-models header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ws-line);
+}
+.ws-connection-filter {
+  background: var(--ws-inset);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius-control);
+  padding: 0 8px;
+  height: 32px;
+  color: var(--ws-muted);
+}
+.ws-connection-filter input {
+  width: 160px;
+  background: transparent;
+  outline: none;
+  color: var(--ws-ink);
+}
+.ws-connection-models select {
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius-control);
+  height: 32px;
+  background: var(--ws-inset);
+  color: var(--ws-ink);
+  max-width: 150px;
+  padding: 0 8px;
+}
+.ws-connection-model-list {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  padding-inline-end: 8px;
+}
+.ws-connection-model {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 130px 32px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--ws-line);
+}
+.ws-connection-model:last-child {
+  border-bottom: 0;
+}
+.ws-connection-model code {
+  display: block;
+  color: var(--ws-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.ws-connection-formats {
+  display: flex;
+  gap: 4px;
+}
+.ws-connection-formats span {
+  font-size: 11px;
+  background: var(--ws-inset);
+  border-radius: var(--ws-radius-small);
+  padding: 2px 4px;
+}
+.ws-connection-empty {
+  padding: 16px;
+}
+.workspace-root .ws-connection-filter input {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+  height: 28px;
+}
+.workspace-root .ws-connection-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  background: var(--ws-inset);
+  border-bottom: 1px solid var(--ws-line);
+}
+.ws-connection-group-toggle > span {
+  color: var(--ws-muted);
+  margin-left: auto;
+}
+.ws-connection-group-toggle svg {
+  color: var(--ws-muted);
+  transition: transform 0.15s;
+}
+.ws-connection-group-toggle svg.collapsed {
+  transform: rotate(-90deg);
+}
+.ws-connection-group .ws-connection-model {
+  padding-left: 34px;
+}
+.ws-connection-key {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+.ws-connection-fields > label > input {
+  width: 80px;
+  flex-shrink: 0;
+}
+.workspace-root .ws-connection-fields .field {
+  width: 80px;
+  min-width: 0;
+  max-width: 80px;
+}
+.ws-connection-fields > label {
+  min-width: 0;
+}
+.ws-connection-fields > label:first-child {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+}
+
+.ws-model-preview > button, .ws-model-preview .ws-order { flex-shrink: 0; }
+.ws-model-names {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-model-names code {
+  display: inline;
+  max-width: none;
+  margin-inline-end: 8px;
+}
+.ws-overview { gap: 10px; padding-top: 14px; }
+.ws-overview .ws-bridge { min-height: 60px; padding-block: 8px; }
+.ws-overview .ws-metrics { height: 58px; padding-block: 4px; }
+.ws-overview .ws-resource-table > header { height: 36px; }
+.ws-overview .ws-resource-table > header > .ws-button { height: 26px; }
+.ws-overview .ws-resource-action { padding-block: 4px; }
+.ws-overview .ws-resource-row { min-height: 56px; }
+.workspace-root .ws-gateway-chart > section {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  padding: 0;
+}
+
+/* Legacy utility hover states must use the same palette as their resting state. */
+.workspace-root [class~="hover:text-ink"]:hover { color: var(--ws-ink); }
+.workspace-root [class~="hover:text-slate-500"]:hover,
+.workspace-root .group:hover [class~="group-hover:text-slate-400"] { color: var(--ws-muted); }
+.workspace-root [class~="hover:text-danger"]:hover { color: var(--ws-danger); }
+.workspace-root [class~="hover:bg-panel"]:hover,
+.workspace-root [class~="hover:bg-slate-100"]:hover { background-color: var(--ws-soft); }
+.workspace-root [class~="hover:bg-surface"]:hover { background-color: var(--ws-surface); }
+.workspace-root [class~="hover:bg-red-50"]:hover {
+  background-color: color-mix(in srgb, var(--ws-danger) 12%, var(--ws-surface));
+}
+.workspace-root [class~="hover:bg-emerald-200"]:hover {
+  background-color: color-mix(in srgb, var(--ws-green) 20%, var(--ws-surface));
+  color: var(--ws-green);
+}
+.workspace-root .ws-chart-plot { border: 1px solid var(--ws-line); }
+
+/* Preserve two complete client rows at the default desktop window size. */
+.ws-clients { gap: 8px; padding-top: 12px; }
+.ws-clients .ws-heading { min-height: 44px; }
+.ws-clients .ws-heading p { margin-top: 3px; }
+.ws-clients .ws-bridge { min-height: 60px; padding-block: 8px; }
+.ws-clients .ws-gateway[data-workspace-view="clients"] > .ws-gateway-clients > div:first-child {
+  padding: 0 0 8px;
+}
+.ws-clients .ws-gateway-clients > div:nth-child(2) > div { gap: 10px; }
+.ws-clients .ws-gateway-clients > div:nth-child(2) > div > .ws-client-card > .ws-client-config {
+  margin-block: 6px;
+  padding-block: 4px;
+}
+.ws-clients .ws-client-bottom { padding-block: 6px; }
+
+.ws-overview .ws-resource-table > .ws-scroll {
+  flex: 1;
+  display: grid;
+  grid-auto-rows: minmax(62px, 25%);
+  align-content: start;
+}
+.ws-clients .ws-gateway-clients > div:nth-child(2) > div {
+  height: 100%;
+  grid-auto-rows: minmax(142px, calc((100% - 10px) / 2));
+  padding-block: 0;
+}
+.ws-clients .ws-gateway-clients > div:nth-child(2) > div > .ws-client-card {
+  display: flex;
+  flex-direction: column;
+}
+.ws-clients .ws-client-bottom { margin-top: auto; }

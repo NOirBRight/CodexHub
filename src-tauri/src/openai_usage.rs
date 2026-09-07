@@ -247,7 +247,9 @@ struct UsageRefreshState {
 impl UsageRefreshCoordinator<fn() -> u64> {
     const fn new(now: fn() -> u64) -> Self {
         Self {
-            state: Mutex::new(UsageRefreshState { last_completed_at: None }),
+            state: Mutex::new(UsageRefreshState {
+                last_completed_at: None,
+            }),
             now,
         }
     }
@@ -257,7 +259,9 @@ impl<C: Fn() -> u64> UsageRefreshCoordinator<C> {
     #[cfg(test)]
     fn with_clock(now: C) -> Self {
         Self {
-            state: Mutex::new(UsageRefreshState { last_completed_at: None }),
+            state: Mutex::new(UsageRefreshState {
+                last_completed_at: None,
+            }),
             now,
         }
     }
@@ -290,7 +294,10 @@ impl<C: Fn() -> u64> UsageRefreshCoordinator<C> {
             }
         }
 
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(completed) = state.last_completed_at {
             if completed >= call_started {
                 log::info!("openai usage refresh: coalesced onto a completed in-flight probe");
@@ -335,7 +342,8 @@ impl<C: Fn() -> u64> UsageRefreshCoordinator<C> {
     }
 }
 
-static USAGE_REFRESH_COORDINATOR: UsageRefreshCoordinator = UsageRefreshCoordinator::new(current_unix_time);
+static USAGE_REFRESH_COORDINATOR: UsageRefreshCoordinator =
+    UsageRefreshCoordinator::new(current_unix_time);
 
 #[cfg(test)]
 fn openai_usage_completions_with_cache<F>(
@@ -575,9 +583,9 @@ struct AppServerChild {
 #[allow(dead_code)]
 impl AppServerChild {
     fn spawn(command: &mut Command) -> Result<Self, String> {
-        let child = command
-            .spawn()
-            .map_err(|error| format!("Failed to start codex app-server for Codex account usage: {error}"))?;
+        let child = command.spawn().map_err(|error| {
+            format!("Failed to start codex app-server for Codex account usage: {error}")
+        })?;
         #[cfg(windows)]
         {
             let job = AppServerJob::new()?;
@@ -2022,7 +2030,10 @@ mod tests {
 
         write_usage_cache(&cache_path, &cache).expect("write usage cache");
 
-        assert_eq!(fs::read_to_string(&lock).expect("lock text"), "codexhub-atomic-lock=1\n");
+        assert_eq!(
+            fs::read_to_string(&lock).expect("lock text"),
+            "codexhub-atomic-lock=1\n"
+        );
         let written = fs::read_to_string(&cache_path).expect("cache text");
         assert!(written.contains(r#""fetched_at":10300"#));
         assert!(written.contains("2026-07-07"));

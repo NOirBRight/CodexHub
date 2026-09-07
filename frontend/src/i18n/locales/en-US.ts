@@ -1,5 +1,17 @@
 const enUS = {
   workspace: {
+    gateway: "Gateway",
+    gatewayDescription: "Connection details and models, ready to copy into your client.",
+    costMissing: "No pricing data",
+    costMissingHint: "Estimates require request token usage and model USD input, output and cached-token rates. Subscription balances and quotas do not represent per-request costs.",
+    copyValue: "Copy {{value}}",
+    availableModels: "Available models",
+    searchGatewayModels: "Search model name or ID",
+    filterProvider: "Filter provider",
+    allProviders: "All providers",
+    noMatchingModels: "No matching models",
+    noGatewayModels: "No available models. Enable a provider and its models first.",
+    gatewayModelsUnavailable: "Model list unavailable. Waiting for service status.",
     monthRemaining: "Monthly remaining",
     signingOut: "Signing out",
     signedOut: "Signed out. Restart Codex to refresh its account state.",

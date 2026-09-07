@@ -811,8 +811,35 @@ fn usage_pricing_includes_official_cached_input_rates() {
     assert_eq!(
         super::lookup_usage_pricing(&pricing, "gpt-5.4-mini")
             .and_then(|pricing| pricing.cached_input_per_million),
-        Some(0.0375)
+        Some(0.075)
     );
+}
+
+#[test]
+fn usage_pricing_snapshot_uses_official_rates_and_preserves_unknowns() {
+    let prices = usage_pricing_by_model();
+    for id in ["deepseek/deepseek-v4-flash", "commandcode/deepseek/deepseek-v4-flash", "opencode-go/deepseek-v4-flash", "custom-provider/deepseek/deepseek-v4-flash"] {
+        let price = super::lookup_usage_pricing(&prices, id).expect("official DeepSeek tariff");
+        assert_eq!(price.input_per_million, 0.14);
+        assert_eq!(price.output_per_million, 0.28);
+        assert_eq!(price.cached_input_per_million, Some(0.0028));
+    }
+    assert_eq!(super::lookup_usage_pricing(&prices, "gpt-5.6-sol").unwrap().input_per_million, 4.0);
+    assert_eq!(super::lookup_usage_pricing(&prices, "opencode-go/muse-spark-1.2-contributor").unwrap().input_per_million, 0.1);
+    // A catalog price is still usable before its next snapshot import; this
+    // must never fall through to a reseller or user-provided override.
+    assert_eq!(
+        super::lookup_usage_pricing(&prices, "custom-provider/deepseek/deepseek-chat")
+            .unwrap()
+            .input_per_million,
+        0.27,
+    );
+    for id in ["gemma4:31b", "hy3", "tencent/hy3-paid", "grok-4", "unknown-model", "xai/grok-4", "custom-provider/gemma4:31b"] {
+        assert!(super::lookup_usage_pricing(&prices, id).is_none(), "{id}");
+    }
+    let text = r#"{"event":"request_complete","model":"commandcode/deepseek/deepseek-v4-flash","status":200,"duration_ms":120,"usage_source":"upstream","usage_input_tokens":1000000,"usage_output_tokens":1000000,"usage_cached_input_tokens":0}"#;
+    let summary = read_usage_summary_from_text_with_pricing(text, &prices);
+    assert!((summary.estimated_cost_usd.unwrap() - 0.42).abs() < 1e-9);
 }
 
 #[test]
