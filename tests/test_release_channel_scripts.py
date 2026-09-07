@@ -489,6 +489,23 @@ def test_linux_release_builder_rejects_stale_or_ambiguous_bundle_artifacts():
     assert "deb package version mismatch" in script
 
 
+def test_linux_release_builder_recovers_only_a_prepared_appdir_linuxdeploy_failure():
+    script = (ROOT / "scripts" / "build-linux-release.sh").read_text(encoding="utf-8")
+
+    assert "tauri build --verbose" in script
+    assert 'grep -Fq "Failed to download runtime file" "$bundle_log"' in script
+    assert "has_prepared_appimage_dir" in script
+    assert '"$app_dir/usr/bin/codexhub"' in script
+    assert '"$app_dir/usr/share/applications/CodexHub.desktop"' in script
+    assert "appimage_runtime_sha256=" in script
+    assert "curl --fail --location --retry 3" in script
+    assert "sha256sum --check --status" in script
+    assert '"$appimagetool_path" --runtime-file "$runtime_path"' in script
+    assert 'cargo "${tauri_deb_args[@]}"' in script
+    assert 'cargo tauri signer sign --private-key-path "$private_key_path"' in script
+    assert "releases/download/continuous" not in script
+
+
 def test_linux_portable_packages_the_xai_device_login_helper():
     script = (ROOT / "scripts" / "build-linux-portable.sh").read_text(encoding="utf-8")
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))

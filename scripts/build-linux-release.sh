@@ -8,6 +8,59 @@ skip_frontend=0
 notes=""
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 private_key_path="${TAURI_SIGNING_PRIVATE_KEY:-$HOME/.codexhub/codexhub-updater.key}"
+# linuxdeploy's bundled appimagetool occasionally fails to bootstrap this
+# runtime even when the release asset itself is reachable. Keep the fallback
+# byte-for-byte pinned so it fails closed if upstream replaces the asset.
+appimage_runtime_url="https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64"
+appimage_runtime_sha256="2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
+
+build_appimage_with_pinned_runtime() {
+  local app_dir="$1"
+  local appimage_path="$2"
+  local cache_root="${XDG_CACHE_HOME:-$HOME/.cache}"
+  local plugin_path="$cache_root/tauri/linuxdeploy-plugin-appimage.AppImage"
+  local fallback_dir
+  local runtime_path
+  local appimagetool_path
+
+  if [[ ! -d "$app_dir" ]]; then
+    echo "AppImage fallback cannot find the prepared AppDir: $app_dir" >&2
+    return 1
+  fi
+  if [[ ! -x "$plugin_path" ]]; then
+    echo "AppImage fallback cannot find Tauri's appimage plugin: $plugin_path" >&2
+    return 1
+  fi
+  if ! command -v curl >/dev/null; then
+    echo "AppImage fallback requires curl to download the pinned runtime" >&2
+    return 1
+  fi
+
+  fallback_dir="$(mktemp -d)"
+  runtime_path="$fallback_dir/runtime-x86_64"
+  curl --fail --location --retry 3 --retry-delay 2 --proto '=https' --tlsv1.2 \
+    --output "$runtime_path" "$appimage_runtime_url"
+  printf '%s  %s\n' "$appimage_runtime_sha256" "$runtime_path" | sha256sum --check --status
+
+  (
+    cd "$fallback_dir"
+    "$plugin_path" --appimage-extract >/dev/null 2>&1
+    appimagetool_path="$fallback_dir/squashfs-root/usr/bin/appimagetool"
+    if [[ ! -x "$appimagetool_path" ]]; then
+      echo "AppImage fallback could not extract appimagetool" >&2
+      exit 1
+    fi
+    "$appimagetool_path" --runtime-file "$runtime_path" "$app_dir" "$appimage_path"
+  )
+  rm -rf "$fallback_dir"
+}
+
+has_prepared_appimage_dir() {
+  local app_dir="$1"
+  [[ -x "$app_dir/usr/bin/codexhub" ]] && \
+    [[ -f "$app_dir/AppRun" ]] && \
+    [[ -f "$app_dir/usr/share/applications/CodexHub.desktop" ]]
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -86,14 +139,43 @@ export CARGO_TARGET_DIR="$targetRoot"
 bundle_root="$targetRoot/release/bundle"
 rm -rf "$bundle_root/appimage" "$bundle_root/deb"
 
-tauri_args=(tauri build --config "$generated_config" --bundles appimage --bundles deb --ci)
+tauri_args=(tauri build --verbose --config "$generated_config" --bundles appimage --bundles deb --ci)
 if [[ "$flavor" == "debug" ]]; then
   tauri_args+=(--features debug-diagnostics)
 fi
-(
+bundle_log="$(mktemp)"
+if ! (
   cd "$repo_root/src-tauri"
   cargo "${tauri_args[@]}"
-)
+) >"$bundle_log" 2>&1; then
+  # Verbose Tauri output preserves the appimagetool marker. Only recover that
+  # exact failure after linuxdeploy has completed the AppDir.
+  if ! grep -Fq "Failed to download runtime file" "$bundle_log" || \
+    ! has_prepared_appimage_dir "$bundle_root/CodexHub.AppDir"; then
+    cat "$bundle_log" >&2
+    rm -f "$bundle_log"
+    exit 1
+  fi
+
+  echo "==> recovering AppImage after appimagetool runtime bootstrap failure"
+  tauri_deb_args=(tauri build --config "$generated_config" --bundles deb --ci)
+  if [[ "$flavor" == "debug" ]]; then
+    tauri_deb_args+=(--features debug-diagnostics)
+  fi
+  (
+    cd "$repo_root/src-tauri"
+    cargo "${tauri_deb_args[@]}"
+  )
+  build_appimage_with_pinned_runtime \
+    "$bundle_root/CodexHub.AppDir" \
+    "$bundle_root/appimage/$appimageName"
+  (
+    cd "$repo_root/src-tauri"
+    cargo tauri signer sign --private-key-path "$private_key_path" \
+      "$bundle_root/appimage/$appimageName"
+  )
+fi
+rm -f "$bundle_log"
 
 mapfile -t appimage_candidates < <(find "$bundle_root/appimage" -maxdepth 1 -name '*.AppImage' -type f -print)
 mapfile -t deb_candidates < <(find "$bundle_root/deb" -maxdepth 1 -name '*.deb' -type f -print)
