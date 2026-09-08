@@ -11,6 +11,76 @@ from typing import Any
 from protocol_translation import UnsupportedProtocolTranslationError
 
 
+_MISSING = object()
+_SCHEMA_ANNOTATION_KEYS = frozenset(
+    {
+        "$anchor", "$comment", "$id", "$schema", "default", "deprecated",
+        "description", "examples", "readOnly", "title", "writeOnly",
+    }
+)
+
+
+def _schema_accepts_object(node: Any) -> bool:
+    """Return whether ``node`` can describe at least one object."""
+
+    if node is True:
+        return True
+    if node is False or not isinstance(node, dict):
+        return False
+
+    type_value = node.get("type", _MISSING)
+    if type_value is not _MISSING and not (
+        type_value == "object"
+        or isinstance(type_value, list) and "object" in type_value
+    ):
+        return False
+    if "const" in node and not isinstance(node["const"], dict):
+        return False
+    if "enum" in node and isinstance(node["enum"], list) and not any(
+        isinstance(value, dict) for value in node["enum"]
+    ):
+        return False
+
+    all_of = node.get("allOf")
+    if isinstance(all_of, list) and any(not _schema_accepts_object(branch) for branch in all_of):
+        return False
+
+    for key in ("anyOf", "oneOf"):
+        branches = node.get(key)
+        if isinstance(branches, list) and (
+            not branches or all(not _schema_accepts_object(branch) for branch in branches)
+        ):
+            return False
+
+    not_schema = node.get("not", _MISSING)
+    if not_schema is not _MISSING and _schema_accepts_all_objects(not_schema):
+        return False
+    return True
+
+
+def _schema_accepts_all_objects(node: Any) -> bool:
+    """Prove a ``not`` child accepts every object, without guessing."""
+
+    if node is True:
+        return True
+    if node is False or not isinstance(node, dict):
+        return False
+    if not node:
+        return True
+
+    type_value = node.get("type", _MISSING)
+    if type_value is _MISSING or not (
+        type_value == "object"
+        or isinstance(type_value, list) and "object" in type_value
+    ):
+        return False
+    if "const" in node or "enum" in node:
+        return False
+    # Only an explicit object type plus annotation keywords is a proof. Any
+    # unknown/applicator keyword may restrict an object and is retained.
+    return set(node) <= {"type", *(_SCHEMA_ANNOTATION_KEYS)}
+
+
 def schema_is_object_typed(node: Any) -> bool:
     """Return whether a union branch can be an object variant.
 
@@ -23,16 +93,7 @@ def schema_is_object_typed(node: Any) -> bool:
         return True
     if not isinstance(node, dict):
         return False
-    type_value = node.get("type")
-    if type_value == "object":
-        return True
-    if isinstance(type_value, list):
-        return "object" in type_value
-    # A schema without an explicit type can still accept objects through
-    # $ref, allOf, not, or object constraints such as minProperties. Retain
-    # those constraints and intersect with type=object when projecting the
-    # branch; absence of a recognized keyword is not evidence of a scalar.
-    return type_value is None
+    return _schema_accepts_object(node)
 
 
 
@@ -63,8 +124,17 @@ def coerce_tool_parameter_root(schema: Any) -> tuple[Any, bool]:
     scalar roots are rejected rather than broadening or wrapping arguments.
     """
 
-    if schema is False or (isinstance(schema, dict) and "not" in schema
-                           and (schema["not"] == {} or schema["not"] is True)):
+    root_type = schema.get("type", _MISSING) if isinstance(schema, dict) else _MISSING
+    object_possible_type = (
+        root_type is _MISSING
+        or root_type == "object"
+        or isinstance(root_type, list) and "object" in root_type
+    )
+    if schema is False or (
+        isinstance(schema, dict)
+        and object_possible_type
+        and not _schema_accepts_object(schema)
+    ):
         raise UnsupportedProtocolTranslationError(
             "unsupported_tool_parameter_root", "Tool parameters cannot satisfy an impossible root schema."
         )

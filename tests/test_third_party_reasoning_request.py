@@ -527,12 +527,53 @@ def test_scalar_tool_root_rejected_without_argument_wrapping(root):
     with pytest.raises(UnsupportedProtocolTranslationError, match="object|Scalar"):
         gateway_compat.compatible_request_body(body, _xai_upstream(), inject_codex_tools=False)
 
-@pytest.mark.parametrize("root", [False, {"not": {}}, {"type": "string", "anyOf": [{"type": "object"}]}])
+@pytest.mark.parametrize("root", [
+    False,
+    {"not": {}},
+    {"type": "object", "not": {}},
+    {"type": "object", "not": True},
+    {"type": "string", "anyOf": [{"type": "object"}]},
+])
 def test_impossible_tool_roots_are_not_broadened(root):
     from gateway_compat.tool_parameter_root import coerce_tool_parameter_root
     from protocol_translation import UnsupportedProtocolTranslationError
     with pytest.raises(UnsupportedProtocolTranslationError):
         coerce_tool_parameter_root(root)
+
+
+@pytest.mark.parametrize("root", [
+    {"allOf": [{"type": "string"}]},
+    {"allOf": [{"type": "object"}, {"type": "string"}]},
+    {"anyOf": [{"type": "string"}, {"type": "number"}]},
+    {"oneOf": [{"type": "string"}, {"type": "null"}]},
+    {"not": {"type": "object", "description": "all objects"}},
+    {"enum": ["scalar"]},
+    {"const": "scalar"},
+])
+def test_indirect_scalar_tool_roots_are_not_broadened(root):
+    from gateway_compat.tool_parameter_root import coerce_tool_parameter_root
+    from protocol_translation import UnsupportedProtocolTranslationError
+
+    with pytest.raises(UnsupportedProtocolTranslationError):
+        coerce_tool_parameter_root(root)
+
+
+def test_mixed_root_union_drops_provably_scalar_branch():
+    body = json.dumps({"input": [], "tools": [
+        {"type": "function", "name": "inspect", "parameters": {
+            "anyOf": [
+                {"allOf": [{"type": "string"}]},
+                {"type": "object", "required": ["path"]},
+                {"type": "null"},
+            ],
+        }},
+    ]}).encode()
+    transformed = json.loads(gateway_compat.compatible_request_body(
+        body, _xai_upstream(), inject_codex_tools=False,
+    ))
+    assert transformed["tools"][0]["parameters"] == {
+        "type": "object", "required": ["path"],
+    }
 
 
 @pytest.mark.parametrize("union", ["anyOf", "oneOf"])
