@@ -104,7 +104,7 @@ selector, route, protocol, evidence, and CLI-version contract lives at
 the current Rust candidate locally, starts its Gateway in an isolated runtime,
 materializes fresh client configuration, and runs Codex CLI, OpenCode, Pi, and
 OMP once against Official `gpt-5.6-luna` and once against OpenCode Go
-`muse-spark-1.2-contributor`:
+`muse-spark-1.3-contributor`:
 
 ```bash
 ./scripts/codexhub-python.sh scripts/e2e_linux_cli_clients.py \

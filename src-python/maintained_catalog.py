@@ -394,7 +394,7 @@ def _opencode_rows() -> tuple[MaintainedModel, ...]:
         ("grok-4.5", "OpenCode Grok 4.5", 500_000, 500_000, True, "high"),
         ("gpt-5.6-luna", "OpenCode GPT 5.6 Luna", 1_050_000, 128_000, True, "max"),
         ("muse-spark-1.2-contributor", "OpenCode Muse Spark 1.2 Contributor", 1_048_576, 131_072, True, "xhigh"),
-        ("muse-spark-1.3-contributor", "OpenCode Muse Spark 1.3 Contributor", 1_048_576, 131_072, True, "max"),
+        ("muse-spark-1.3-contributor", "OpenCode Muse Spark 1.3 Contributor", 1_048_576, 131_072, True, "xhigh"),
         ("glm-5.3-flash", "OpenCode GLM-5.3 Flash", 1_000_000, 131_072, True, None),
         ("glm-5.3", "OpenCode GLM-5.3", 1_000_000, 131_072, False, None),
         ("glm-5.2", "OpenCode GLM-5.2", 1_000_000, 131_072, False, None),
@@ -427,7 +427,7 @@ def _opencode_rows() -> tuple[MaintainedModel, ...]:
         ("omen-alpha", "OpenCode Omen Alpha", 500_000, 128_000, True, "high"),
     )
     extra_levels = {
-        "muse-spark-1.3-contributor": _ALL,
+        "muse-spark-1.3-contributor": _FOUR,
         "deepseek-v4-pro": _LOW_HIGH_MAX,
         "deepseek-v4-flash": _LOW_HIGH_MAX,
         "omen-alpha": _LOW_HIGH,

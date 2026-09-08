@@ -14,9 +14,9 @@ the other. See `docs/agents/linux-packaging.md` for the Linux command and input
 contract.
 
 Ollama remains prohibited. The live third-party CLI leg is OpenCode Go
-`muse-spark-1.2-contributor` (client selector
-`codexhub-opencode-go/muse-spark-1.2-contributor`, Gateway route
-`opencode-go/muse-spark-1.2-contributor`). Dedicated input is
+`muse-spark-1.3-contributor` (client selector
+`codexhub-opencode-go/muse-spark-1.3-contributor`, Gateway route
+`opencode-go/muse-spark-1.3-contributor`). Dedicated input is
 `isolated/credentials/opencode-go.json` with schema
 `codexhub.real-client-opencode-go.v1`. Issue #497 tracks the Yoga credential.
 
@@ -302,7 +302,7 @@ prohibited.
 
 ### CLI-only verification
 
-Always pass `-CliOnly` with `-ThirdPartyModel codexhub-opencode-go/muse-spark-1.2-contributor`.
+Always pass `-CliOnly` with `-ThirdPartyModel codexhub-opencode-go/muse-spark-1.3-contributor`.
 This runs eight automated cases for Codex CLI, OpenCode, Pi, and OMP (Official
 Luna and OpenCode Go Muse Spark 1.2 Contributor). The runner does not resolve
 or start Codex Desktop or ZCode GUI, does not inspect GUI seeds, does not
@@ -505,7 +505,7 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
   -ManagedClientConfigBuild <candidate-portable-path> `
   -ManagedClientConfigSha <candidate-materializer-sha> `
   -LunaModel codexhub-openai/gpt-5.6-luna `
-  -ThirdPartyModel codexhub-opencode-go/muse-spark-1.2-contributor `
+  -ThirdPartyModel codexhub-opencode-go/muse-spark-1.3-contributor `
   -OutputDirectory <path> `
   -HostEnvironmentManifest <path-to-host-environment.json> `
   -CliOnly `

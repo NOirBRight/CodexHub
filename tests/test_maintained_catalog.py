@@ -524,3 +524,10 @@ class BundledMaintainedProvidersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_opencode_muse_13_matches_live_reasoning_contract():
+    from maintained_catalog import resolve_model
+    model = resolve_model("opencode-go", "muse-spark-1.3-contributor")
+    assert model.default_reasoning_level == "xhigh"
+    assert model.reasoning_levels == ("low", "medium", "high", "xhigh")
