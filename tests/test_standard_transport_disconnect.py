@@ -21,6 +21,7 @@ from urllib.error import URLError
 from urllib.request import Request
 
 import gateway_events
+import gateway_http_pool
 import gateway_transport
 from route_primitives import TransportPolicy
 
@@ -193,7 +194,7 @@ def _start_close_after_headers() -> tuple[socket.socket, int, threading.Event, t
     return listener, port, accepted, thread
 
 
-def test_close_mid_body_is_request_write_and_not_retried() -> None:
+def test_close_after_headers_is_post_write_and_not_retried() -> None:
     listener, port, accepted, thread = _start_close_after_headers()
     body = b"x" * (8 * 1024 * 1024)
     try:
@@ -231,8 +232,11 @@ def test_close_mid_body_is_request_write_and_not_retried() -> None:
         gateway_events.refresh_runtime_paths()
 
     assert accepted.is_set()
-    assert gateway_transport.transport_failure_phase(raised) == "request_write"
-    assert gateway_transport.retry_safety_failure_phase(raised) == "request_write"
+    # A Windows loopback socket may accept the complete body into the kernel
+    # before observing closure. Both observed phases forbid retrying the POST.
+    phase = gateway_transport.transport_failure_phase(raised)
+    assert phase in {"request_write", "response_headers"}
+    assert gateway_transport.retry_safety_failure_phase(raised) == phase
     suppressed = [item for item in payloads if item.get("event") == "upstream_retry_suppressed"]
     retries = [item for item in payloads if item.get("event") == "upstream_retry"]
     assert len(suppressed) == 1
@@ -299,3 +303,47 @@ def test_standard_http_connection_enables_tcp_keepalive() -> None:
     finally:
         _stop_stub(server)
     assert keepalive == 1
+
+
+def test_response_header_abort_keeps_post_write_phase(monkeypatch) -> None:
+    # Windows can report WSAECONNABORTED after an upload has completed. The
+    # operation boundary, rather than the OS-specific error text, owns its phase.
+    def abort_headers(self):
+        raise ConnectionAbortedError(10053, "synthetic header read abort")
+
+    monkeypatch.setattr(gateway_http_pool.urllib3.connection.HTTPConnection, "getresponse", abort_headers)
+    server = _start_stub(_SuccessHandler)
+    server.captures = []
+    try:
+        try:
+            _open_xai(f"http://127.0.0.1:{server.server_address[1]}/v1/responses", b"{}")
+        except ConnectionAbortedError as exc:
+            assert gateway_transport.transport_failure_phase(exc) == "response_headers"
+            assert gateway_transport.retry_safety_failure_phase(exc) == "response_headers"
+        else:
+            raise AssertionError("expected header read abort")
+    finally:
+        _stop_stub(server)
+
+
+def test_write_abort_keeps_request_write_phase(monkeypatch) -> None:
+    original = gateway_http_pool.urllib3.connection.HTTPConnection.send
+
+    def abort_body(self, data):
+        if data == b"body-to-abort":
+            raise ConnectionAbortedError(10053, "synthetic request write abort")
+        return original(self, data)
+
+    monkeypatch.setattr(gateway_http_pool.urllib3.connection.HTTPConnection, "send", abort_body)
+    server = _start_stub(_CloseAfterBodyHandler)
+    server.captures = []
+    try:
+        try:
+            _open_xai(f"http://127.0.0.1:{server.server_address[1]}/v1/responses", b"body-to-abort")
+        except ConnectionAbortedError as exc:
+            assert gateway_transport.transport_failure_phase(exc) == "request_write"
+            assert gateway_transport.retry_safety_failure_phase(exc) == "request_write"
+        else:
+            raise AssertionError("expected request write abort")
+    finally:
+        _stop_stub(server)

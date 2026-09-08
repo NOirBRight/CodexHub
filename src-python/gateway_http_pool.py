@@ -224,6 +224,18 @@ def standard_pool_key(url: str, proxy_url: str | None) -> str:
 
 
 class _PooledConnectionMixin:
+    def getresponse(self) -> Any:
+        try:
+            return super().getresponse()  # type: ignore[misc]
+        except BaseException as exc:
+            phase = (
+                "request_write"
+                if getattr(self, _REQUEST_WRITE_ERROR_ATTRIBUTE, None) is not None
+                else "response_headers"
+            )
+            tag_transport_phase(exc, phase)
+            raise
+
     def connect(self) -> None:
         super().connect()  # type: ignore[misc]
         sock = getattr(self, "sock", None)
