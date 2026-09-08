@@ -630,10 +630,7 @@ pub(crate) fn prepare_official_multi_agent_version(
         })?;
     let baseline_version = read_managed_catalog_multi_agent_version(&paths, &canonical)
         .or_else(|| {
-            builtin_model_metadata()
-                .into_iter()
-                .find(|model| model.id == canonical)
-                .and_then(|model| model.multi_agent_version)
+            qualified_official_code_mode_multi_agent_version(&canonical).map(str::to_string)
         })
         .ok_or_else(|| "Official catalog baseline has no Collaboration version".to_string())?;
 
@@ -926,7 +923,7 @@ pub fn list_official_multi_agent_baselines() -> Result<HashMap<String, String>, 
         let baseline = read_managed_catalog_multi_agent_version(&paths, canonical)
             .or_else(|| {
                 if managed_baseline_exists || explicit_overrides.contains_key(canonical) {
-                    pinned_official_code_mode_multi_agent_version(canonical).map(str::to_string)
+                    qualified_official_code_mode_multi_agent_version(canonical).map(str::to_string)
                 } else {
                     model
                         .multi_agent_version
@@ -935,7 +932,7 @@ pub fn list_official_multi_agent_baselines() -> Result<HashMap<String, String>, 
                 }
             })
             .or_else(|| {
-                pinned_official_code_mode_multi_agent_version(canonical).map(str::to_string)
+                qualified_official_code_mode_multi_agent_version(canonical).map(str::to_string)
             });
         if let Some(baseline) = baseline {
             result.insert(canonical.to_string(), baseline);
@@ -2736,7 +2733,7 @@ fn qualified_official_code_mode_multi_agent_version(slug: &str) -> Option<&'stat
     // Sol/Terra retain catalog baselines, but only an accepted GO matrix row
     // may be exposed as a user-selectable model override.
     match slug {
-        "gpt-5.6-luna" => Some("v1"),
+        "gpt-5.6-luna" | "gpt-5.5" => Some("v2"),
         _ => None,
     }
 }
@@ -5051,7 +5048,7 @@ for line in sys.stdin:
                 .expect("catalog baseline should be readable")
                 .get("gpt-5.6-luna")
                 .map(String::as_str),
-            Some("v1")
+            Some("v2")
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -5095,6 +5092,30 @@ for line in sys.stdin:
             Some("v2")
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn qualified_official_collaboration_supports_luna_and_55_only() {
+        for id in ["gpt-5.6-luna", "gpt-5.5"] {
+            assert_eq!(
+                super::qualified_official_code_mode_multi_agent_version(id),
+                Some("v2")
+            );
+            let mut payload = json!({"schema_version": 1, "overrides": []});
+            super::update_catalog_override_payload(&mut payload, id, Some("v1")).unwrap();
+            assert_eq!(
+                payload["overrides"][0]["fields"]["multi_agent_version"],
+                "v1"
+            );
+            super::update_catalog_override_payload(&mut payload, id, None).unwrap();
+            assert_eq!(payload["overrides"].as_array().unwrap().len(), 0);
+        }
+        for id in ["gpt-5.4", "gpt-5.6-sol", "xai/grok-4.6"] {
+            assert_eq!(
+                super::qualified_official_code_mode_multi_agent_version(id),
+                None
+            );
+        }
     }
 
     #[test]

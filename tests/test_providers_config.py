@@ -23,6 +23,25 @@ from providers_config import (
 
 
 class ProvidersConfigTests(unittest.TestCase):
+    def test_external_models_default_to_v2_for_existing_runtime_configs(self):
+        selected = {
+            "xai": ["grok-4.6"],
+            "commandcode": ["deepseek/deepseek-v4-flash", "z-ai/glm-5.3-flash"],
+            "opencode-go": ["muse-spark-1.2-contributor"],
+            "custom-provider": ["unlisted-model"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "providers.toml"
+            providers = [ProviderConfig(
+                id=provider_id, name=provider_id, base_url="https://example.test/v1",
+                api_key="fixture", models=[ModelConfig(id=model_id) for model_id in models],
+            ) for provider_id, models in selected.items()]
+            save_providers(providers, path)
+            index = build_external_model_index(load_providers(path), require_api_key=False)
+            for provider_id, models in selected.items():
+                for model_id in models:
+                    self.assertEqual(index[f"{provider_id}/{model_id}"]["multi_agent_version"], "v2")
+
     def test_bundled_volc_declares_responses_as_its_only_upstream_format(self):
         providers = load_providers(DEFAULT_PROVIDERS_PATH)
         volc = next(provider for provider in providers if provider.id == "volc")

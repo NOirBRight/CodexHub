@@ -1,6 +1,6 @@
-import { Brain, Cable, Check, ChevronDown, Copy, Eye, Plus, RefreshCcw, Trash2, X } from "lucide-react";
+import { Brain, Cable, Check, Copy, Eye, Plus, RefreshCcw, Trash2, X } from "lucide-react";
 import type * as React from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SortableList } from "../SortableList";
 import i18n from "../../i18n";
@@ -125,7 +125,7 @@ export function ModelSection({
     const modelEnabled = disabled
       ? !isOfficialModelDisabled(officialDisabledModels ?? [], model.id)
       : model.enabled;
-    const rowInteractable = !interactionDisabled && !disabled;
+    const rowInteractable = !interactionDisabled;
     function activateModelRow() {
       if (interactionDisabled) {
         return;
@@ -141,23 +141,11 @@ export function ModelSection({
           label={formatContextWindow(contextWindow)}
           title={modelLimitDetails(model, contextWindow)}
         />
-        {disabled && onOfficialCollaborationVersionChange && (() => {
-          const collaboration = officialCollaborationVersionOptions(
-            model,
-            officialCollaborationOverrides,
-            officialCollaborationBaselines,
-          );
-          if (!collaboration) {
-            return null;
-          }
-          return (
-            <CollaborationVersionChip
-              collaboration={collaboration}
-              disabled={interactionDisabled}
-              modelId={model.id}
-              onChange={onOfficialCollaborationVersionChange}
-            />
-          );
+        {(() => {
+          const version = disabled
+            ? officialCollaborationVersionOptions(model, officialCollaborationOverrides, officialCollaborationBaselines)?.effective ?? model.multi_agent_version
+            : model.multi_agent_version ?? "v2";
+          return version ? <CapabilityChip label={`${t("providers.collaborationVersion")} ${version.toUpperCase()}`} /> : null;
         })()}
         {disabled && onToggleOfficialModel && (
           <SwitchControl
@@ -309,12 +297,16 @@ export function ModelSection({
           </div>
         )}
       </div>
-      {!disabled && editingModel && (
+      {editingModel && (
         <ModelEditorOverlay
+          key={editingModel.id}
           model={editingModel}
+          readOnly={disabled}
+          collaboration={disabled ? officialCollaborationVersionOptions(editingModel, officialCollaborationOverrides, officialCollaborationBaselines) : undefined}
+          onCollaborationChange={onOfficialCollaborationVersionChange}
           onApply={(nextModel) => applyModelUpdate(editingModel.id, nextModel)}
           onClose={closeModelEditor}
-          onRemove={onRemove ? () => {
+          onRemove={!disabled && onRemove ? () => {
             if (pendingNewModelId === editingModel.id) {
               setPendingNewModelId(null);
             }
@@ -403,17 +395,24 @@ function ModelIdentity({
 
 function ModelEditorOverlay({
   model,
+  readOnly = false,
+  collaboration,
+  onCollaborationChange,
   onApply,
   onClose,
   onRemove,
 }: {
   model: Model;
+  readOnly?: boolean;
+  collaboration?: ReturnType<typeof officialCollaborationVersionOptions>;
+  onCollaborationChange?: (modelId: string, version: "v1" | "v2" | null) => void;
   onApply: (model: Model) => void;
   onClose: () => void;
   onRemove?: () => void;
 }) {
   const { t } = useTranslation();
   const [draft, setDraft] = useState<Model>(() => normalizeModel(model));
+  const [collaborationSelection, setCollaborationSelection] = useState<"v1" | "v2" | "default">(collaboration?.explicit ?? "default");
   const officialThinking = draft.thinking_mode === "none" || draft.thinking_mode === "always_on" || draft.thinking_mode === "toggle";
   const reasoningEnabled = officialThinking
     ? draft.thinking_mode !== "none" || (draft.supported_reasoning_levels ?? []).length > 0
@@ -474,8 +473,8 @@ function ModelEditorOverlay({
           </button>
         </div>
 
-        <div className="grid gap-4 p-5">
-          <section className="grid gap-3 rounded-inner border border-line bg-panel p-3">
+        <div className="grid max-h-[70vh] gap-4 overflow-y-auto p-5">
+          <fieldset disabled={readOnly} className="grid min-w-0 gap-3 rounded-inner border border-line bg-panel p-3">
             <div>
               <h4 className="text-sm font-semibold">{t("providers.identity")}</h4>
               <p className="mt-0.5 text-xs text-slate-500">{t("providers.gatewayFacingModelName")}</p>
@@ -505,86 +504,109 @@ function ModelEditorOverlay({
                 }
               />
             </Field>
-          </section>
+          </fieldset>
 
           <section className="grid gap-3 rounded-inner border border-line bg-panel p-3">
             <div>
               <div className="text-sm font-semibold">{t("providers.capabilities")}</div>
               <div className="mt-0.5 text-xs text-slate-500">{t("providers.gatewayFacingMetadata")}</div>
             </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <label className="flex h-9 items-center justify-between rounded-control border border-line bg-white px-3 text-sm font-medium">
-                <span className="inline-flex items-center gap-2">
-                  <Eye size={15} />
-                  {t("providers.vision")}
-                </span>
-                <input
-                  type="checkbox"
-                  checked={hasVision(draft)}
-                  onChange={(event) =>
-                    setDraft({
-                      ...draft,
-                      input_modalities: event.target.checked ? ["text", "image"] : ["text"],
-                    })
-                  }
-                />
-              </label>
-              <label className="flex h-9 items-center justify-between rounded-control border border-line bg-white px-3 text-sm font-medium">
-                <span className="inline-flex items-center gap-2">
-                  <Brain size={15} />
-                  {t("providers.thinking")}
-                </span>
-                <input
-                  type="checkbox"
-                  checked={reasoningEnabled}
-                  onChange={(event) => setReasoningEnabled(event.target.checked)}
-                />
-              </label>
-            </div>
-            {officialThinking && (
-              <p className="text-xs text-slate-500">
-                {draft.thinking_mode === "toggle"
-                  ? t("providers.thinkingToggle")
-                  : draft.thinking_mode === "none"
-                    ? t("providers.thinkingNone")
-                    : t("providers.thinkingAlwaysOn")}
-              </p>
-            )}
-            {reasoningEnabled && (draft.supported_reasoning_levels ?? []).length > 0 && (
-              <div className="grid gap-3 rounded-control border border-line bg-white p-3 lg:grid-cols-[minmax(0,1fr)_190px]">
-                <div className="grid gap-2">
-                  <span className="text-xs font-semibold uppercase text-slate-500">{t("providers.reasoningLevels")}</span>
-                  <div className="flex flex-wrap gap-2">
-                    {reasoningLevelOptions.map((level) => (
-                      <label
-                        key={level}
-                        className="flex h-8 items-center gap-2 rounded-control border border-line bg-white px-2 text-xs font-medium"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={(draft.supported_reasoning_levels ?? []).includes(level)}
-                          onChange={(event) => setReasoningLevel(level, event.target.checked)}
-                        />
-                        {level}
-                      </label>
-                    ))}
+            <fieldset disabled={readOnly} className="grid min-w-0 gap-3">
+              <div className="grid gap-2 sm:grid-cols-2">
+                <label className="flex h-9 items-center justify-between rounded-control border border-line bg-white px-3 text-sm font-medium">
+                  <span className="inline-flex items-center gap-2">
+                    <Eye size={15} />
+                    {t("providers.vision")}
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={hasVision(draft)}
+                    onChange={(event) =>
+                      setDraft({
+                        ...draft,
+                        input_modalities: event.target.checked ? ["text", "image"] : ["text"],
+                      })
+                    }
+                  />
+                </label>
+                <label className="flex h-9 items-center justify-between rounded-control border border-line bg-white px-3 text-sm font-medium">
+                  <span className="inline-flex items-center gap-2">
+                    <Brain size={15} />
+                    {t("providers.thinking")}
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={reasoningEnabled}
+                    onChange={(event) => setReasoningEnabled(event.target.checked)}
+                  />
+                </label>
+              </div>
+              {officialThinking && (
+                <p className="text-xs text-slate-500">
+                  {draft.thinking_mode === "toggle"
+                    ? t("providers.thinkingToggle")
+                    : draft.thinking_mode === "none"
+                      ? t("providers.thinkingNone")
+                      : t("providers.thinkingAlwaysOn")}
+                </p>
+              )}
+              {reasoningEnabled && (draft.supported_reasoning_levels ?? []).length > 0 && (
+                <div className="ws-model-capability-group lg:grid-cols-[minmax(0,1fr)_190px]">
+                  <div className="grid gap-2">
+                    <span className="ws-model-capability-label">{t("providers.reasoningLevels")}</span>
+                    <div className="flex flex-wrap gap-2">
+                      {reasoningLevelOptions.map((level) => (
+                        <label
+                          key={level}
+                          className="flex h-8 items-center gap-2 rounded-control border border-line bg-white px-2 text-xs font-medium"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={(draft.supported_reasoning_levels ?? []).includes(level)}
+                            onChange={(event) => setReasoningLevel(level, event.target.checked)}
+                          />
+                          {level}
+                        </label>
+                      ))}
+                    </div>
                   </div>
+                  <Field label={t("common.defaultReasoning")}>
+                    <select
+                      className="field h-9"
+                      value={draft.default_reasoning_level ?? ""}
+                      onChange={(event) =>
+                        setDraft({ ...draft, default_reasoning_level: event.target.value || null })
+                      }
+                    >
+                      {(draft.supported_reasoning_levels ?? []).map((level) => (
+                        <option key={level} value={level}>
+                          {level}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
                 </div>
-                <Field label={t("common.defaultReasoning")}>
+              )}
+            </fieldset>
+            {(!readOnly || collaboration) && (
+              <div role="group" aria-label={t("providers.collaborationVersion")} className="ws-model-capability-group">
+                <label className="ws-model-capability-field">
+                  <span className="ws-model-capability-label">{t("providers.collaborationVersion")}</span>
                   <select
                     className="field h-9"
-                    value={draft.default_reasoning_level ?? ""}
-                    onChange={(event) =>
-                      setDraft({ ...draft, default_reasoning_level: event.target.value || null })
-                    }
+                    aria-label={t("providers.collaborationVersionForModel", { model: model.id })}
+                    value={readOnly ? collaborationSelection : draft.multi_agent_version ?? "default"}
+                    onChange={(event) => {
+                      const value = event.target.value as "v1" | "v2" | "default";
+                      if (readOnly) setCollaborationSelection(value);
+                      else setDraft({ ...draft, multi_agent_version: value === "default" ? null : value });
+                    }}
                   >
-                    {(draft.supported_reasoning_levels ?? []).map((level) => (
-                      <option key={level} value={level}>
-                        {level}
-                      </option>
-                    ))}
+                    <option value="default">{t("providers.collaborationVersionDefault")} ({(collaboration?.baseline ?? "v2").toUpperCase()})</option>
+                    <option value="v1">V1</option>
+                    <option value="v2">V2</option>
                   </select>
-                </Field>
+                </label>
               </div>
             )}
           </section>
@@ -614,7 +636,13 @@ function ModelEditorOverlay({
             <button
               type="button"
               className="focus-ring inline-flex h-9 items-center justify-center rounded-control bg-action px-3 text-sm font-semibold text-white"
-              onClick={() => onApply(normalizeModel(draft))}
+              disabled={readOnly && (!collaboration || !onCollaborationChange)}
+              onClick={() => {
+                if (readOnly) {
+                  onCollaborationChange?.(model.id, collaborationSelection === "default" ? null : collaborationSelection);
+                  onClose();
+                } else onApply(normalizeModel(draft));
+              }}
             >
               {t("common.apply")}
             </button>
@@ -639,102 +667,6 @@ function CapabilityChip({ icon, label, title }: { icon?: React.ReactNode; label:
       {icon}
       {label}
     </span>
-  );
-}
-
-function CollaborationVersionChip({
-  collaboration,
-  disabled,
-  modelId,
-  onChange,
-}: {
-  collaboration: { baseline: "v1" | "v2"; effective: "v1" | "v2"; explicit: "v1" | "v2" | null };
-  disabled: boolean;
-  modelId: string;
-  onChange: (modelId: string, version: "v1" | "v2" | null) => void;
-}) {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const overridden = collaboration.explicit !== null;
-  const options = [
-    { value: "v1" as const, label: `V1${collaboration.baseline === "v1" ? ` ${t("providers.collaborationVersionDefault")}` : ""}` },
-    { value: "v2" as const, label: `V2${collaboration.baseline === "v2" ? ` ${t("providers.collaborationVersionDefault")}` : ""}` },
-  ];
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    function onPointerDown(event: PointerEvent) {
-      if (!rootRef.current?.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    }
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
-  }, [open]);
-
-  return (
-    <div
-      ref={rootRef}
-      className="relative"
-      data-value={collaboration.effective}
-      onClick={(event) => event.stopPropagation()}
-      onKeyDown={(event) => event.stopPropagation()}
-    >
-      <button
-        type="button"
-        className={cx(
-          "ws-model-tag inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[11px] font-semibold leading-none",
-          overridden ? "border-action/40 bg-blue-50 text-action" : "border-line bg-panel text-slate-600",
-        )}
-        disabled={disabled}
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        aria-label={t("providers.collaborationVersionForModel", { model: modelId })}
-        title={t("providers.collaborationVersionDetails", {
-          baseline: collaboration.baseline,
-          effective: collaboration.effective,
-        })}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <span className="leading-none">{t("providers.collaborationVersion")}</span>
-        <span className="leading-none text-ink">{collaboration.effective.toUpperCase()}</span>
-        <ChevronDown size={12} className={cx("text-slate-500 transition-transform", open && "rotate-180")} />
-      </button>
-      {open && (
-        <div
-          className="absolute right-0 top-7 z-20 min-w-[136px] space-y-1 rounded-panel bg-surface p-1 shadow-floating"
-          role="listbox"
-        >
-          {options.map((option) => {
-            const selected = collaboration.effective === option.value;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                role="option"
-                aria-selected={selected}
-                className={
-                  selected
-                    ? "flex h-7 w-full items-center justify-between rounded-control bg-panel px-2.5 text-left text-[11px] font-semibold text-ink"
-                    : "flex h-7 w-full items-center justify-between rounded-control px-2.5 text-left text-[11px] font-semibold text-ink hover:bg-panel"
-                }
-                onClick={() => {
-                  setOpen(false);
-                  const selectedVersion = option.value;
-                  onChange(modelId, selectedVersion === collaboration.baseline ? null : selectedVersion);
-                }}
-              >
-                {option.label}
-                {selected ? <Check size={14} /> : null}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
   );
 }
 

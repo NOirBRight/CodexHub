@@ -1,0 +1,290 @@
+{
+  "date": "2026-09-08",
+  "client": "codex-cli 0.153.4",
+  "matrix": [
+    {
+      "parent_model": "gpt-6-astra",
+      "child_model": "xai/grok-4.6",
+      "passed": true,
+      "child_models": [
+        "xai/grok-4.6"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    },
+    {
+      "parent_model": "gpt-6-astra",
+      "child_model": "commandcode/deepseek/deepseek-v4-flash",
+      "passed": true,
+      "child_models": [
+        "commandcode/deepseek/deepseek-v4-flash"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    },
+    {
+      "parent_model": "gpt-6-astra",
+      "child_model": "commandcode/z-ai/glm-5.3-flash",
+      "passed": true,
+      "child_models": [
+        "commandcode/z-ai/glm-5.3-flash"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    },
+    {
+      "parent_model": "gpt-6-astra",
+      "child_model": "opencode-go/muse-spark-1.2-contributor",
+      "passed": true,
+      "child_models": [
+        "opencode-go/muse-spark-1.2-contributor"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    },
+    {
+      "parent_model": "gpt-6-astra",
+      "child_model": "gpt-5.6-luna",
+      "passed": true,
+      "child_models": [
+        "gpt-5.6-luna"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    },
+    {
+      "parent_model": "xai/grok-4.6",
+      "child_model": "commandcode/deepseek/deepseek-v4-flash",
+      "passed": true,
+      "child_models": [
+        "commandcode/deepseek/deepseek-v4-flash"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    },
+    {
+      "parent_model": "commandcode/deepseek/deepseek-v4-flash",
+      "child_model": "xai/grok-4.6",
+      "passed": true,
+      "child_models": [
+        "xai/grok-4.6"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    },
+    {
+      "parent_model": "commandcode/z-ai/glm-5.3-flash",
+      "child_model": "xai/grok-4.6",
+      "passed": true,
+      "child_models": [
+        "xai/grok-4.6"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    },
+    {
+      "parent_model": "opencode-go/muse-spark-1.2-contributor",
+      "child_model": "xai/grok-4.6",
+      "passed": true,
+      "child_models": [
+        "xai/grok-4.6"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    }
+  ],
+  "final_default_reruns": [
+    {
+      "parent_model": "xai/grok-4.6",
+      "child_model": "commandcode/deepseek/deepseek-v4-flash",
+      "passed": true,
+      "child_models": [
+        "commandcode/deepseek/deepseek-v4-flash"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    },
+    {
+      "parent_model": "gpt-6-astra",
+      "child_model": "xai/grok-4.6",
+      "passed": true,
+      "child_models": [
+        "xai/grok-4.6"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    }
+  ],
+  "final_source_sha256": {
+    "src-python/gateway_compat/collaboration_delivery.py": "3f1e6dad274e432ac6fa756c2cc9125d07f2ce452aab82f365c0b459e88aecc7",
+    "src-python/gateway_compat/official_passthrough.py": "70ce6c222fa19cf444990d9b86dcdabd832e9234268903b91bac1d4e3b2b1876",
+    "src-python/gateway_compat/request.py": "aec79a3678db68a5809302026ee68608232e3e8cab943636d217ba9a6906c2b3",
+    "src-python/gateway_compat/response.py": "c6c7d8f26229b01ae0ed6dcb8ca6adb645181503e4ae7fb534c380b769167aca",
+    "src-python/gateway_exchange.py": "69a441ebde6d36057ed0e3d4f4462629a1e0ca778505067d2adc7c9bd3fefa8e",
+    "src-python/gateway_relay_passthrough.py": "0ce179df25a6d8d2b3d3b3e8c6a329a90450caf3ab4982a49f70ce776dceb443",
+    "src-python/providers_config.py": "6b05043fda9ffc41334748d0cc4957478c1aac0d68986c02c674579546f75c87",
+    "src-python/catalog_sync.py": "dcc83596b0c382a0e2175b17299724bffba9d40cc2336a920d3b31a61d4a28ef",
+    "scripts/e2e_third_party_collaboration.py": "4523eb9117f4b95ca68fc8083b3d072289eb5f2439f520744ff0239155949d68"
+  },
+  "verification": {
+    "python_core": "2199 passed, 170 skipped, 263 subtests passed",
+    "rust": "709 passed, 4 ignored",
+    "clippy": "passed",
+    "linux_physical_pointer_e2e": "passed"
+  },
+  "live_runtime_deployed": false
+}

@@ -1,0 +1,104 @@
+{
+  "date": "2026-09-08",
+  "client": "codex-cli 0.153.4",
+  "purpose": "qualify explicit V2 parent override; official defaults unchanged",
+  "reports": [
+    {
+      "parent_model": "gpt-5.6-luna",
+      "child_model": "xai/grok-4.6",
+      "passed": true,
+      "parent_collaboration_version_override": "v2",
+      "child_models": [
+        "xai/grok-4.6"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    },
+    {
+      "parent_model": "gpt-5.5",
+      "child_model": "xai/grok-4.6",
+      "passed": true,
+      "parent_collaboration_version_override": "v2",
+      "refreshed_official_models": 9,
+      "child_models": [
+        "xai/grok-4.6"
+      ],
+      "child_completed_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "parent_received_results": [
+        "E2E_CHILD_OK 323",
+        "E2E_FOLLOWUP_OK 667"
+      ],
+      "plaintext_child_handoffs": 2,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [
+        "followup_task",
+        "spawn_agent",
+        "wait_agent"
+      ],
+      "client_exit_code": 0
+    },
+    {
+      "parent_model": "gpt-5.4",
+      "child_model": "xai/grok-4.6",
+      "passed": false,
+      "parent_collaboration_version_override": "v2",
+      "child_models": [],
+      "child_completed_results": [],
+      "parent_received_results": [],
+      "plaintext_child_handoffs": 0,
+      "encrypted_child_handoffs": 0,
+      "portable_calls": [],
+      "client_exit_code": 1,
+      "failure_signals": [
+        {
+          "code": "gateway.model_resolution",
+          "source": "gateway",
+          "status": 400,
+          "reason": "missing_catalog_model",
+          "classification": "local_resolution_failure",
+          "failure_class": "permanent",
+          "type": "model_identity_error",
+          "categories": [
+            "missing_catalog_model"
+          ]
+        }
+      ]
+    }
+  ],
+  "fresh_official_catalog": {
+    "model_count": 9,
+    "gpt-5.6-luna": {
+      "present": true,
+      "native_multi_agent_version": "v1"
+    },
+    "gpt-5.5": {
+      "present": true,
+      "native_multi_agent_version": null
+    },
+    "gpt-5.4": {
+      "present": false
+    }
+  },
+  "interpretation": {
+    "gpt-5.6-luna": "qualified_via_gateway_plaintext_adapter",
+    "gpt-5.5": "qualified_via_gateway_plaintext_adapter",
+    "gpt-5.4": "unverified_missing_catalog_entry"
+  }
+}

@@ -81,7 +81,7 @@ test("Luna collaboration options expose the catalog baseline and effective selec
       baseline: "v1",
       effective: "v1",
       explicit: null,
-      candidate: "7006542a773fc20c10e4bbcadd593393a259ceb2",
+      candidate: "portable-collaboration-v2/official-parent-qualification",
     },
   );
   assert.equal(
@@ -91,10 +91,10 @@ test("Luna collaboration options expose the catalog baseline and effective selec
   assert.deepEqual(
     officialCollaborationVersionOptions(luna, { "gpt-5.6-luna": "v2" }),
     {
-      baseline: "v1",
+      baseline: "v2",
       effective: "v2",
       explicit: "v2",
-      candidate: "7006542a773fc20c10e4bbcadd593393a259ceb2",
+      candidate: "portable-collaboration-v2/official-parent-qualification",
     },
   );
   assert.equal(
@@ -105,4 +105,18 @@ test("Luna collaboration options expose the catalog baseline and effective selec
     ).baseline,
     "v2",
   );
+});
+
+
+test("qualified Luna and 5.5 retain explicit V1 while defaulting to V2", () => {
+  for (const id of ["gpt-5.6-luna", "gpt-5.5"]) {
+    const row = model(id, { upstream_model: id, source_kind: "official", visibility: "list", multi_agent_version: "v2" });
+    assert.equal(officialCollaborationVersionOptions(row).effective, "v2");
+    assert.equal(officialCollaborationVersionOptions(row, { [id]: "v1" }).effective, "v1");
+    assert.equal(officialCollaborationVersionOptions(row, { [id]: "v1" }).baseline, "v2");
+    assert.equal(officialCollaborationVersionOptions({ ...row, source_kind: "external" }), null);
+    assert.equal(officialCollaborationVersionOptions({ ...row, upstream_model: "gpt-5.4" }), null);
+    assert.equal(officialCollaborationVersionOptions({ ...row, visibility: "hide" }), null);
+  }
+  assert.equal(officialCollaborationVersionOptions(model("gpt-5.4", { upstream_model: "gpt-5.4", source_kind: "official", visibility: "list" })), null);
 });

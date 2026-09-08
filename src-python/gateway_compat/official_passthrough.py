@@ -75,6 +75,7 @@ from route_primitives import (
 from . import multi_agent as _multi_agent
 from . import response as _response
 from . import host
+from . import collaboration_delivery as _collaboration_delivery
 
 def _compatible_compaction_message(item: Mapping[str, Any]) -> dict[str, str] | None:
     seen: set[str] = set()
@@ -1590,6 +1591,7 @@ def official_passthrough_request_body(
     payload: Mapping[str, Any] | None,
     upstream: Mapping[str, Any],
     model_id: str | None = None,
+    event_context: dict[str, Any] | None = None,
 ) -> bytes:
     if not isinstance(payload, Mapping):
         # Strict official passthrough has no parsed shape to safely rewrite.
@@ -1598,6 +1600,10 @@ def official_passthrough_request_body(
     next_payload = dict(payload)
     upstream_model = upstream.get("upstream_model")
     changed = False
+    if _collaboration_delivery.make_messages_portable(next_payload):
+        changed = True
+        if event_context is not None:
+            event_context[_collaboration_delivery.CONTEXT_KEY] = True
     if isinstance(upstream_model, str) and upstream_model and next_payload.get("model") != upstream_model:
         next_payload["model"] = upstream_model
         changed = True

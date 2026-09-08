@@ -296,7 +296,8 @@ PINNED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS = {
 # Collaboration V1/V2 override. Other pinned rows retain their managed
 # baseline but remain selector-ineligible until separately qualified.
 QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS = {
-    "gpt-5.6-luna": "v1",
+    "gpt-5.6-luna": "v2",
+    "gpt-5.5": "v2",
 }
 PINNED_OFFICIAL_LEGACY_MODEL_IDS = (
     "gpt-5.5",
@@ -567,8 +568,8 @@ def _planner_override_is_valid(
     for key, value in fields.items():
         if key == "multi_agent_version":
             # v1/v2 are the only native planner versions.  The selected model
-            # must itself be one of the pinned Code Mode rows; legacy Official
-            # rows intentionally have a null version and reject this field.
+            # must have real Gateway collaboration qualification; native
+            # metadata alone does not qualify a model.
             if (
                 slug not in QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS
                 or not isinstance(value, str)
@@ -828,14 +829,15 @@ def _managed_baseline_shape_is_valid(payload: Any) -> bool:
             for field in supported_fields:
                 value = model.get(field)
                 if field == "multi_agent_version":
-                    expected_version = expected.get(field)
-                    if expected_version is None:
-                        # Legacy Official rows deliberately carry a null
-                        # multi-agent version.  Keep accepting that pinned
-                        # shape while still rejecting arbitrary values.
-                        if value is not None:
-                            return False
-                    elif not isinstance(value, str) or value != expected_version:
+                    # Accept both historical native baselines and the qualified
+                    # Gateway baseline so upgrades retain explicit user choices.
+                    allowed_versions = {expected.get(field)}
+                    qualified = QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS.get(identity[2])
+                    if qualified is not None:
+                        allowed_versions.add(qualified)
+                    if value is not None and not isinstance(value, str):
+                        return False
+                    if value not in allowed_versions:
                         return False
                 else:
                     expected_value = expected.get(field)
@@ -2218,6 +2220,9 @@ def build_official_proxy_model(
     model["visibility"] = CatalogVisibility.LIST.value
     normalize_official_responses_lite_opt_in(model)
     apply_pinned_official_catalog_metadata(model, slug)
+    # Gateway-qualified collaboration defaults are separate from native metadata.
+    if slug in QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS:
+        model["multi_agent_version"] = QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS[slug]
     normalize_official_upgrade_for_codex(model)
     limits = RESOLVED_MODEL_LIMITS.get(("openai", slug))
     if limits is not None and limits.max_output_tokens is not None:
@@ -2321,8 +2326,8 @@ def build_ollama_model(
         model = deepcopy(DEFAULT_OLLAMA_MODEL)
 
     # Never inherit planner metadata from the shared Official fallback.
-    # Provider configuration may add its own explicit multi-agent capability
-    # after this reset.
+    # Third-party clients default to V2 via the Gateway adapter. Explicit
+    # provider V1 selections remain supported; this is not native capability.
     for key in PINNED_OFFICIAL_PLANNER_FIELD_SET:
         model.pop(key, None)
     model["use_responses_lite"] = False
@@ -2347,6 +2352,8 @@ def build_ollama_model(
     multi_agent_version = (model_metadata or {}).get(slug, {}).get("multi_agent_version")
     if multi_agent_version in {"v1", "v2"}:
         model["multi_agent_version"] = multi_agent_version
+    else:
+        model["multi_agent_version"] = "v2"
     inherited_metadata = model.get("codex_proxy_metadata")
     safe_metadata = {
         key: inherited_metadata[key]
@@ -2444,13 +2451,15 @@ def build_external_provider_model(
         model = deepcopy(DEFAULT_OLLAMA_MODEL)
 
     # Never inherit Official planner fields from the fallback template.  A
-    # third-party row may retain its own provider-declared multi-agent version.
+    # third-party row selects V2 by default, with explicit V1 still respected.
     for key in PINNED_OFFICIAL_PLANNER_FIELD_SET:
         model.pop(key, None)
     model["use_responses_lite"] = False
     multi_agent_version = external_model.get("multi_agent_version")
     if multi_agent_version in {"v1", "v2"}:
         model["multi_agent_version"] = multi_agent_version
+    else:
+        model["multi_agent_version"] = "v2"
 
     alias = str(external_model["alias"])
     display_prefix = str(external_model.get("display_prefix") or external_model.get("provider_alias") or "provider")

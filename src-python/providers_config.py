@@ -1028,11 +1028,11 @@ def _multi_agent_version_field(value: Any) -> str | None:
     return version
 
 
-def _resolved_multi_agent_version(model: ModelConfig) -> str | None:
+def _resolved_multi_agent_version(model: ModelConfig) -> str:
     explicit = _multi_agent_version_field(model.multi_agent_version)
     if explicit is not None:
         return explicit
-    return _multi_agent_version_field(model._bundled_multi_agent_version)
+    return _multi_agent_version_field(model._bundled_multi_agent_version) or "v2"
 
 
 def _resolved_native_responses_tool_codec(provider: ProviderConfig, model: ModelConfig) -> str:

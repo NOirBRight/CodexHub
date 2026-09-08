@@ -176,11 +176,12 @@ type OfficialCollaborationCapability = {
   candidate: string;
 };
 
-// This is the checked-in decision table produced by the exact CLI 0.146.1
-// capability matrix.  A selector is exposed only for an accepted GO row;
+// Gateway qualification evidence lives in docs/evidence/portable-collaboration-v2.
+// A selector is exposed only for an accepted GO row;
 // model/provider names alone never qualify a row.
 const OFFICIAL_COLLABORATION_CAPABILITIES: Record<string, OfficialCollaborationCapability> = {
-  "gpt-5.6-luna": { baseline: "v1", verdict: "GO", candidate: "7006542a773fc20c10e4bbcadd593393a259ceb2" },
+  "gpt-5.6-luna": { baseline: "v2", verdict: "GO", candidate: "portable-collaboration-v2/official-parent-qualification" },
+  "gpt-5.5": { baseline: "v2", verdict: "GO", candidate: "portable-collaboration-v2/official-parent-qualification" },
 };
 
 export function officialCollaborationVersionOptions(

@@ -126,6 +126,7 @@ fn providers_toml_roundtrip_preserves_all_provider_and_model_fields() {
             },
             Model {
                 id: "minimax-m3".to_string(),
+                multi_agent_version: Some("v1".to_string()),
                 display_name: None,
                 upstream_model: None,
                 context_window: None,
