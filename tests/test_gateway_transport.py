@@ -6,6 +6,7 @@ import inspect
 import ssl
 from contextlib import ExitStack
 from email.utils import formatdate
+from http.client import RemoteDisconnected
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -109,6 +110,38 @@ def test_gateway_transport_source_does_not_import_facade_or_sse() -> None:
 def test_transport_failure_phase_classifies_ssl_eof() -> None:
     error = ssl.SSLEOFError("EOF occurred in violation of protocol")
     assert gateway_transport.transport_failure_phase(error) == "tls_handshake"
+
+
+def test_transport_failure_phase_does_not_call_broken_pipe_tcp_connect() -> None:
+    error = BrokenPipeError(32, "Broken pipe")
+    assert gateway_transport.transport_failure_phase(error) == "request_write"
+    assert gateway_transport.retry_safety_failure_phase(error) == "request_write"
+
+
+def test_transport_failure_phase_does_not_call_remote_disconnect_tcp_connect() -> None:
+    nested = RemoteDisconnected("Remote end closed connection without response")
+    error = URLError(nested)
+    assert gateway_transport.transport_failure_phase(error) == "response_headers"
+    assert gateway_transport.retry_safety_failure_phase(error) == "response_headers"
+
+
+def test_retry_safety_suppresses_xai_post_write_disconnects() -> None:
+    request = Request("https://api.x.ai/v1/responses", data=b"{}", method="POST")
+    path = ("xai", "grok-4.6", "", "responses", "")
+    for exc in (
+        BrokenPipeError(32, "Broken pipe"),
+        URLError(RemoteDisconnected("Remote end closed connection without response")),
+    ):
+        safety = gateway_transport._retry_safety_class(
+            exc,
+            request=request,
+            upstream_name="xai",
+            request_kind="main_generation",
+            downstream_exposed=False,
+            model_access_path=path,
+        )
+        assert safety == gateway_transport.RETRY_SAFETY_SUPPRESSED_POST_WRITE
+        assert safety != gateway_transport.RETRY_SAFETY_SAFE_PREWRITE
 
 
 def test_transport_uses_module_functions_and_immutable_facts() -> None:

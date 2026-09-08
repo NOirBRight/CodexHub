@@ -221,7 +221,10 @@ class DiagnosticRecorderGatewayTests(TestCase):
         connection = _VirtualOfficialConnection(sock, clock, connect_duration=0.04)
         pool = gateway_transport.OfficialHTTPSConnectionPool("example.test")
 
-        with patch("gateway_transport.time.monotonic", side_effect=clock.monotonic):
+        with (
+            patch("gateway_transport.time.monotonic", side_effect=clock.monotonic),
+            patch("gateway_http_pool.time.monotonic", side_effect=clock.monotonic),
+        ):
             for _ in range(2):
                 response = pool._make_request(
                     connection,
@@ -258,6 +261,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
 
         with (
             patch("gateway_transport.time.monotonic", side_effect=clock.monotonic),
+            patch("gateway_http_pool.time.monotonic", side_effect=clock.monotonic),
             patch("urllib3.connectionpool.is_connection_dropped", return_value=False),
         ):
             first = pool._get_conn()
@@ -315,6 +319,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         )
         with (
             patch("gateway_transport.time.monotonic", side_effect=clock.monotonic),
+            patch("gateway_http_pool.time.monotonic", side_effect=clock.monotonic),
             patch("gateway_transport.official_pool_manager", return_value=manager),
             patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
             self.assertRaises(TimeoutError) as raised,
@@ -355,6 +360,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
 
         with (
             patch("gateway_transport.time.monotonic", side_effect=clock.monotonic),
+            patch("gateway_http_pool.time.monotonic", side_effect=clock.monotonic),
             self.assertRaises(gateway_transport.urllib3.exceptions.ConnectTimeoutError) as raised,
         ):
             pool._make_request(
@@ -535,6 +541,7 @@ class DiagnosticRecorderGatewayTests(TestCase):
         with (
             patch.object(gateway_transport.urllib3.connectionpool.HTTPSConnectionPool, "_get_conn", return_value=connection),
             patch("gateway_transport.time.monotonic", return_value=100.0),
+            patch("gateway_http_pool.time.monotonic", return_value=100.0),
         ):
             pool._get_conn()
             self.assertEqual(gateway_transport.connection_disposition(connection), "new")
