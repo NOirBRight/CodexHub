@@ -119,7 +119,9 @@ class RequestScopedToolAliasRegistry:
              record_without_alias.original_name, record_without_alias.version],
             ensure_ascii=True, separators=(",", ":"),
         ).encode("utf-8")
-        token = hashlib.sha256(identity).hexdigest()[:20]
+        # Retain the existing digest width so endpoints accepting 32-character
+        # names do not lose namespace/custom/search tools after this upgrade.
+        token = hashlib.sha256(identity).hexdigest()[:10]
         # Collision probing is local to this identity. Adding unrelated tools
         # must not change an earlier alias or exhaust a shared ordinal budget.
         for ordinal in range(1, self._max_attempts + 1):

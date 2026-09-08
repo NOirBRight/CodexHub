@@ -918,6 +918,43 @@ def test_v2_void_result_empty_string_is_normalized_to_null() -> None:
 
 
 @pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
+def test_v2_wait_argument_parse_error_history_round_trips(native: bool) -> None:
+    history = _v2_history_without_encrypted_agent_message()
+    history[10]["arguments"] = '{"timeout_ms":180000.0}'
+    history[11]["output"] = (
+        "failed to parse function arguments: invalid type: floating point "
+        "`180000.0`, expected i64 at line 1 column 22"
+    )
+    history = history[10:12]
+    plan = _v2_plan(native=native)
+    encoded = plan.encode_payload({
+        "tool_choice": "auto",
+        "tools": [_declaration(COLLABORATION_V2)],
+        "input": history,
+    })
+    decoded = plan.decode_payload({"input": encoded["input"]})
+    assert decoded["input"][0]["arguments"] == history[0]["arguments"]
+    assert decoded["input"][1] == history[1]
+
+
+@pytest.mark.parametrize("output", [
+    "unrecognized result text",
+    "failed to parse function arguments: ",
+    '{"message":"failed to parse function arguments: bad","timed_out":"false"}',
+    '{"message":"a","message":"b","timed_out":false}',
+])
+def test_v2_wait_error_replay_keeps_invalid_results_closed(output: str) -> None:
+    history = _v2_history()[10:12]
+    history[1]["output"] = output
+    with pytest.raises(ToolCompatibilityError):
+        _v2_plan().encode_payload({
+            "tool_choice": "auto",
+            "tools": [_declaration(COLLABORATION_V2)],
+            "input": history,
+        })
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
 def test_v2_void_result_empty_string_round_trips(native: bool) -> None:
     history = _v2_history() if native else _v2_history_without_encrypted_agent_message()
     # followup_task result is at index 1, send_message result at index 7.

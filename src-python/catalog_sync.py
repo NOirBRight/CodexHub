@@ -2488,7 +2488,7 @@ def build_external_provider_model(
     )
     if has_explicit_reasoning_levels:
         reasoning_levels_source = explicit_reasoning_levels
-        fill_missing = maintained is None
+        fill_missing = False
     elif maintained is not None:
         reasoning_levels_source = maintained.reasoning_levels
         fill_missing = False

@@ -32,6 +32,7 @@ SENSITIVE_FIELD_NAMES = {
     "credentials",
     "openai-api-key",
     "prompt",
+    "prompt_cache_key",
     "proxy-authorization",
     "reasoning_text",
     "response_id",

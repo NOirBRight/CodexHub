@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
+import os
 import re
 import json
 import subprocess
@@ -583,6 +584,110 @@ class ConfigOverlayTests(unittest.TestCase):
 
             restore_overlay(config_path, backup_path)
             self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+
+    def test_apply_overlay_migrates_signed_old_catalog_reference(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            old = root / "luna-v2-native-catalog.json"
+            new = root / "codexhub-model-catalog.json"
+            config = root / "config.toml"
+            backup = root / "config.backup.toml"
+            config.write_text(config_overlay.build_overlay(str(old), owner="release"), encoding="utf-8")
+            backup.write_text('model = "gpt-5.5"\n', encoding="utf-8")
+            apply_overlay(config, backup, new, "http://127.0.0.1:9099")
+            self.assertEqual(top_level_value(config.read_text(), "model_catalog_json"), str(new))
+            restore_overlay(config, backup)
+            self.assertEqual(config.read_text(), 'model = "gpt-5.5"\n')
+
+    def test_apply_overlay_preserves_unowned_native_catalog_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            codex_home = tmp / "codex-home"
+            catalogs = codex_home / "model-catalogs"
+            catalogs.mkdir(parents=True)
+            native = catalogs / "luna-v2-native-catalog.json"
+            native.write_text('{"models": []}\n', encoding="utf-8")
+            managed_catalog = catalogs / "codexhub-model-catalog.json"
+            managed_catalog.write_text('{"models": []}\n', encoding="utf-8")
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        'model = "gpt-6-astra"',
+                        f'model_catalog_json = "{native}"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                apply_overlay(
+                    config_path, backup_path, managed_catalog, "http://127.0.0.1:9099"
+                )
+                active = config_path.read_text(encoding="utf-8")
+                self.assertNotIn(str(managed_catalog.resolve()), active)
+                self.assertIn("luna-v2-native-catalog.json", active)
+
+                restore_overlay(config_path, backup_path)
+
+            restored = config_path.read_text(encoding="utf-8")
+            self.assertIn("luna-v2-native-catalog.json", restored)
+            self.assertNotIn(str(managed_catalog.resolve()), restored)
+
+    def test_apply_overlay_preserves_unowned_relative_native_catalog_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            codex_home = tmp / "codex-home"
+            catalogs = codex_home / "model-catalogs"
+            catalogs.mkdir(parents=True)
+            (catalogs / "luna-v2-native-catalog.json").write_text(
+                '{"models": []}\n', encoding="utf-8"
+            )
+            managed_catalog = catalogs / "codexhub-model-catalog.json"
+            managed_catalog.write_text('{"models": []}\n', encoding="utf-8")
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text(
+                'model_catalog_json = "model-catalogs/luna-v2-native-catalog.json"\n',
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                apply_overlay(
+                    config_path, backup_path, managed_catalog, "http://127.0.0.1:9099"
+                )
+
+            active = config_path.read_text(encoding="utf-8")
+            self.assertNotIn(str(managed_catalog.resolve()), active)
+            self.assertIn("luna-v2-native-catalog.json", active)
+
+    def test_apply_overlay_keeps_user_catalog_inside_codex_home_model_catalogs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            codex_home = tmp / "codex-home"
+            catalogs = codex_home / "model-catalogs"
+            catalogs.mkdir(parents=True)
+            user_catalog = catalogs / "team-models.json"
+            user_catalog.write_text('{"models": []}\n', encoding="utf-8")
+            managed_catalog = catalogs / "codexhub-model-catalog.json"
+            managed_catalog.write_text('{"models": []}\n', encoding="utf-8")
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text(
+                f'model_catalog_json = "{user_catalog}"\n',
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                apply_overlay(
+                    config_path, backup_path, managed_catalog, "http://127.0.0.1:9099"
+                )
+
+            active = config_path.read_text(encoding="utf-8")
+            self.assertIn("team-models.json", active)
+            self.assertNotIn("codexhub-model-catalog.json", active)
 
     def test_unified_history_injection_preserves_user_owned_catalog_path(self):
         original = (

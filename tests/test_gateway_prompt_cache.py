@@ -88,6 +88,26 @@ def test_native_collision_changes_only_its_conflicting_alias():
     assert [entry.aliases[0] for entry in collided.entries[1:3]] == aliases[1:]
 
 
+def test_short_name_endpoint_retains_all_adapted_tool_families():
+    baseline = _plan(_tools())
+    constrained = build_tool_compatibility_plan(
+        _tools(), selected_protocol="chat_tools",
+        protocol_capabilities=ProtocolCapabilities.chat_tools(max_tool_name_length=32),
+    )
+    assert [e.aliases for e in baseline.entries] == [e.aliases for e in constrained.entries]
+    assert all(len(alias) <= 32 for entry in constrained.entries for alias in entry.aliases)
+
+
+def test_raw_cache_keys_are_redacted_recursively_but_hashes_and_states_survive():
+    clean = proxy_telemetry.sanitize_mapping({
+        "prompt_cache_key": "private-cache-value", "nested": [{"prompt_cache_key": "also-private"}],
+        "prompt_cache_key_hash": "safe-hash", "upstream_prompt_cache_key_state": "present",
+    })
+    assert "private" not in json.dumps(clean)
+    assert clean["prompt_cache_key_hash"] == "safe-hash"
+    assert clean["upstream_prompt_cache_key_state"] == "present"
+
+
 @pytest.mark.parametrize("protocol", ["responses", "chat_completions"])
 @pytest.mark.parametrize("base_url,expected", [
     ("https://api.openai.com/v1", PromptCacheKeyPolicy.PRESERVE),

@@ -171,11 +171,32 @@ def _looks_like_managed_catalog_path(value: str | None) -> bool:
     if len(parts) == 2 and parts[0] == "model-catalogs":
         return True
     try:
-        codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
         candidate = Path(value).expanduser().resolve()
-        return candidate == (codex_home / "model-catalogs" / parts[-1]).resolve()
+        return candidate == (_codex_home() / "model-catalogs" / parts[-1]).resolve()
     except (OSError, RuntimeError, ValueError):
         return False
+
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+
+
+def _overlay_catalog_value(
+    existing_catalog_value: str | None,
+    config_path: Path,
+    catalog_path: Path | None,
+    original: str,
+) -> str | None:
+    if catalog_path is None:
+        return existing_catalog_value
+    keep_existing = (
+        existing_catalog_value is not None
+        and not is_managed_catalog_path(existing_catalog_value, catalog_path)
+        and not _overlay_marks_managed_catalog(original)
+    )
+    if keep_existing:
+        return existing_catalog_value
+    return catalog_config_value(config_path, catalog_path)
 
 
 def _catalog_owner_secret_path(catalog_value: str) -> Path:
@@ -883,16 +904,7 @@ def apply_overlay(
     for section in STALE_PROXY_PROVIDER_SECTIONS:
         cleaned = strip_section(cleaned, section)
     existing_catalog_value = top_level_value(original, "model_catalog_json")
-    catalog_value = (
-        existing_catalog_value
-        if existing_catalog_value is not None
-        and not is_managed_catalog_path(existing_catalog_value, catalog_path)
-        else (
-            catalog_config_value(config_path, catalog_path)
-            if catalog_path is not None
-            else existing_catalog_value
-        )
-    )
+    catalog_value = _overlay_catalog_value(existing_catalog_value, config_path, catalog_path, original)
     catalog_owned = catalog_value is not None and is_managed_catalog_path(catalog_value, catalog_path)
     cleaned = strip_top_level_keys(cleaned)
     cleaned = set_feature_flags(cleaned, PROXY_FEATURE_FLAGS)
