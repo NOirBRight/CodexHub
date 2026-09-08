@@ -544,3 +544,30 @@ def test_nullable_outer_type_on_object_union_is_normalized(union):
     assert result["type"] == "object"
     assert result[union] == root[union]
     assert root["type"] == ["object", "null"]
+
+
+@pytest.mark.parametrize("union", ["anyOf", "oneOf"])
+@pytest.mark.parametrize("branch", [
+    {"allOf": [{"type": "object", "required": ["path"]}]},
+    {"$ref": "#/$defs/path_args"},
+    {"not": {"required": ["forbidden"]}},
+    {"minProperties": 1},
+])
+def test_tool_union_retains_indirect_object_constraints(union, branch):
+    root = {
+        "$defs": {"path_args": {"type": "object", "required": ["path"]}},
+        union: [branch, {"type": "object", "required": ["other"]}, {"type": "null"}],
+    }
+    body = json.dumps({"input": [], "tools": [
+        {"type": "function", "name": "inspect", "parameters": root},
+    ]}).encode()
+    transformed = json.loads(gateway_compat.compatible_request_body(
+        body, _xai_upstream(), inject_codex_tools=False,
+    ))
+    parameters = transformed["tools"][0]["parameters"]
+    assert parameters["$defs"] == root["$defs"]
+    # The public adapter resolves local references before normalizing roots.
+    expected_branch = root["$defs"]["path_args"] if "$ref" in branch else branch
+    assert parameters[union] == [
+        {**expected_branch, "type": "object"}, {"type": "object", "required": ["other"]},
+    ]

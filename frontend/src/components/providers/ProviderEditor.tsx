@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { OfficialOpenAIUsageLimitBars } from "./OfficialOpenAIUsagePanel";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useToasts } from "../PageToast";
 import {
@@ -110,6 +110,15 @@ export function ProviderDetail({
   const draftRef = useRef(draft);
   const ensuringXaiCatalog = useRef(false);
   const catalogRetryKey = useRef<string | null>(null);
+  const bundledRequest = useRef<Promise<Provider[]> | null>(null);
+  const loadBundledPresets = useCallback(() => {
+    if (!bundledRequest.current) {
+      bundledRequest.current = api.getBundledProviders().finally(() => {
+        bundledRequest.current = null;
+      });
+    }
+    return bundledRequest.current;
+  }, []);
   draftRef.current = draft;
   const preset = bundledPresetFor(provider.id, bundledPresets);
   const listedModels = useMemo(
@@ -132,7 +141,7 @@ export function ProviderDetail({
   useEffect(() => {
     catalogRetryKey.current = null;
     let cancelled = false;
-    void api.getBundledProviders().then((presets) => {
+    void loadBundledPresets().then((presets) => {
       if (!cancelled) {
         setBundledPresets(presets);
       }
@@ -140,7 +149,7 @@ export function ProviderDetail({
     return () => {
       cancelled = true;
     };
-  }, [provider.id]);
+  }, [loadBundledPresets, provider.id]);
 
   useEffect(() => {
     if (!modelsMissingFromPreset(draft.models, preset)) {
@@ -155,7 +164,7 @@ export function ProviderDetail({
     }
     catalogRetryKey.current = retryKey;
     let cancelled = false;
-    void api.getBundledProviders().then((presets) => {
+    void loadBundledPresets().then((presets) => {
       if (!cancelled) {
         setBundledPresets(presets);
       }
@@ -163,7 +172,7 @@ export function ProviderDetail({
     return () => {
       cancelled = true;
     };
-  }, [draft.models, preset, provider.id]);
+  }, [draft.models, loadBundledPresets, preset, provider.id]);
 
   useEffect(() => {
     if (!preset) {

@@ -28,15 +28,12 @@ def schema_is_object_typed(node: Any) -> bool:
         return True
     if isinstance(type_value, list):
         return "object" in type_value
-    if type_value in {"string", "number", "integer", "boolean", "array", "null"}:
-        return False
-    return (
-        "properties" in node
-        or "additionalProperties" in node
-        or "patternProperties" in node
-        or "required" in node
-        or not node
-    )
+    # A schema without an explicit type can still accept objects through
+    # $ref, allOf, not, or object constraints such as minProperties. Retain
+    # those constraints and intersect with type=object when projecting the
+    # branch; absence of a recognized keyword is not evidence of a scalar.
+    return type_value is None
+
 
 
 def object_schema_from_branch(node: Any) -> dict[str, Any]:
