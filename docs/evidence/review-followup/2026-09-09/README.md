@@ -13,7 +13,7 @@
 
 ## 验证
 
-[Linux 结构化结果](linux-local.json)记录运行命令、二进制 SHA256 和 8 组真实客户端结果；[Windows 结构化结果](windows-local.json)记录完整套件、增量复验与真实 CLI 阻塞。
+[Linux 结构化结果](linux-local.json)记录运行命令、二进制 SHA256 和 8 组真实客户端结果；[Windows 结构化结果](windows-local.json)记录完整套件、增量复验与真实 CLI 结果。
 
 | 检查 | 结果 |
 |---|---|
@@ -26,16 +26,18 @@
 | Windows Python core | 2357 passed，36 skipped，265 subtests passed |
 | Windows 文档编码增量 | 7 passed，145 deselected |
 | Windows 模拟客户端 | 全量运行 145 passed / 7 failed（编码问题）；修复后 7/7 增量复验通过，合计覆盖全部 152 项 |
-| Windows 真实 CLI | 暂被运行中的 Codex Desktop 重启保护阻止，尚未完成 |
+| Windows 真实 CLI | Codex CLI / OpenCode / Pi / OMP × Luna / Muse Spark 1.3，8/8 通过；测试后已恢复 Codex Desktop |
 
 以上为各相关检查的最新结果，不是同一次 `verify-linux.sh` 全绿：该脚本上一轮只有旧超时断言失败；修复后完整 Python core 已重跑通过，其余 Rust、clippy、窗口检查仍沿用未受影响的通过结果。
 
 Windows 使用 Yoga 上的独立 checkout、portable 和专用 E2E 输入目录。portable 来自 `ef591f5`；归档 SHA256 为 `840be98cb5fc4e63fddba29491c9dd8dea3281083acaa540c305d25a0b2277b3`。核心测试仅额外应用 `dcc3c36` 的测试断言修正。构建结束后 MSVC `vctip.exe` 遥测辅助进程未自行退出；确认产物完成后只清理本次构建产生的 helper，才完成 watchdog 收尾，因此不声明本次构建完全无需人工干预。
 
+Windows 真实矩阵使用 Codex CLI `0.153.4`、OpenCode `1.18.21`、Pi `0.80.6`、OMP `17.0.3`。八组均返回 HTTP 200，各完成一次只读工具调用与一次 sentinel 回传，终态 `completed`；fallback、错误事件和重复终态均为 0。
+
 ## 失败记录与范围限制
 
 - Windows 第一次真实 E2E 在 sidecar 检查前停止；核对 portable 来源并写入精确候选 SHA 后再次运行。
-- 第二次在 `refresh-models` 阶段被 `codex_desktop_restart_required` 拦截：Yoga 有运行中的 Codex Desktop。未绕过保护，也未擅自关闭它。
+- 第二次在 `refresh-models` 阶段被 `codex_desktop_restart_required` 拦截：Yoga 有运行中的 Codex Desktop。用户随后明确授权关闭并继续。Restart Manager 返回 350，关闭窗口后后台进程仍在，故只结束精确 AppX 路径对应的应用进程树。第三次正式运行 8/8 通过，随后重新打开同一已注册应用，观察到 8 个应用进程。
 - Windows 模拟套件的 UTF-8 文档读取在默认 GBK 环境失败；修复后七项相关测试已通过。完整套件耗时 1338.57 秒，145 项通过；7 项编码失败均已增量复验通过，不将两次运行合并声称为单次全绿。
 - Linux 原始 CLI E2E 入口实际通过；没有把替代启动器的诊断结果当作正式通过。
 - 真实 CLI 只覆盖两种模型、四个客户端，不代表所有第三方模型或 Desktop 子代理都已通过。先前 xAI 会话问题的调查结论仍保留独立历史语境。
