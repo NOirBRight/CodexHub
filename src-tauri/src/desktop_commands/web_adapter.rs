@@ -119,7 +119,8 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         }
         Command::DiscoverProviderModels => {
             let base_url = registry_string_arg(args, command, "base_url")?;
-            let api_key = registry_string_arg(args, command, "api_key")?;
+            // Blank is valid: xAI uses SuperGrok OAuth; some local endpoints need no key.
+            let api_key = registry_optional_string_arg(args, command, "api_key").unwrap_or_default();
             let provider_id = registry_optional_string_arg(args, command, "provider_id");
             to_value(models::discover_provider_models(
                 &base_url,
@@ -129,7 +130,7 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         }
         Command::ProbeUpstreamFormat => {
             let base_url = registry_string_arg(args, command, "base_url")?;
-            let api_key = registry_string_arg(args, command, "api_key")?;
+            let api_key = registry_optional_string_arg(args, command, "api_key").unwrap_or_default();
             let model = args
                 .get("model")
                 .and_then(Value::as_str)
@@ -150,7 +151,7 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         }
         Command::TestModelEndpoint => {
             let base_url = registry_string_arg(args, command, "base_url")?;
-            let api_key = registry_string_arg(args, command, "api_key")?;
+            let api_key = registry_optional_string_arg(args, command, "api_key").unwrap_or_default();
             let model = registry_string_arg(args, command, "model")?;
             let upstream_format = serde_json::from_value(
                 registry_value(args, command, "upstream_format")
@@ -485,4 +486,28 @@ pub(crate) fn optional_bool_arg(args: &Value, names: &[&str]) -> Option<bool> {
     names
         .iter()
         .find_map(|name| args.get(*name).and_then(Value::as_bool))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch_web;
+    use serde_json::json;
+
+    #[test]
+    fn discover_provider_models_accepts_blank_api_key() {
+        let err = dispatch_web(
+            "discover_provider_models",
+            &json!({
+                "baseUrl": "http://127.0.0.1:1",
+                "apiKey": "",
+                "providerId": "xai",
+            }),
+            None,
+        )
+        .expect_err("blank api key should reach discovery, not fail argument decoding");
+        assert!(
+            !err.contains("apiKey argument is required"),
+            "blank api key was rejected before discovery: {err}"
+        );
+    }
 }
