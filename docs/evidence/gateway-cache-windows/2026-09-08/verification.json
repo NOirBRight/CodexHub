@@ -1,0 +1,130 @@
+{
+  "schema": "codexhub.gateway-cache-windows-verification.v1",
+  "candidate_sha": "9445702e7bca52d457d9ceac6eea1dc6f95e94f4",
+  "source_head": "fb664ed727bdf454c972528423e476bc7a268f95",
+  "source_includes_working_tree_changes": true,
+  "source_manifest_sha256": "143ead294a392ffdfbfd7b6ff36e4d161a8e84b2081e76b270b082751ea40cc0",
+  "verified_snapshot_files": 706,
+  "environment": {
+    "os": "windows",
+    "os_build": "10.0.26200.0",
+    "development_python": "3.13.11",
+    "pytest": "9.1.1",
+    "node": "25.7.0",
+    "npm": "11.10.1",
+    "cargo": "1.97.1",
+    "tauri_cli": "2.11.4"
+  },
+  "focused_regressions": {
+    "outcome": "passed",
+    "passed": 438,
+    "skipped": 2,
+    "subtests_passed": 13,
+    "duration_seconds": 18.24
+  },
+  "synthetic_e2e": {
+    "outcome": "failed",
+    "passed": 151,
+    "failed": 1,
+    "duration_seconds": 1951.59,
+    "failed_cases": [
+      "test_candidate_bootstrap_does_not_discover_or_reuse_ambient_host_state"
+    ]
+  },
+  "portable_build": {
+    "outcome": "passed",
+    "version": "0.2.1",
+    "flavor": "debug",
+    "powershell_major_version": 7,
+    "archive_sha256": "2667fa3920d9e9614387b11d78d8ae857dff8f12826682df44a49b0cccd57ec5",
+    "verified_packaged_python_sources": 75
+  },
+  "live_cli_e2e": {
+    "outcome": "passed",
+    "candidate_sha": "b27449e051812342ea53a918ceb99c715112dac3",
+    "case_count": 8,
+    "passed_count": 8,
+    "failed_count": 0,
+    "summary_artifact": "omp-fix/summary.json"
+  },
+  "live_cli_e2e_initial_attempt": {
+    "outcome": "failed",
+    "failure_classification": "candidate_gateway_bootstrap_failed",
+    "case_count": 0,
+    "startup_duration_ms": 5541,
+    "root_cause": "undetermined",
+    "summary_artifact": "summary.json",
+    "startup_artifact": "candidate-startup.json",
+    "independent_refresh_probe": {
+      "exit_code": 0,
+      "duration_seconds": 18.43,
+      "qualifying_e2e_run": false,
+      "artifact": "bootstrap-probe.sanitized.json"
+    },
+    "diagnosed_stage": "official_model_refresh_before_gateway_start",
+    "followup_bootstrap_probes": [
+      {
+        "artifact": "runner-bootstrap-probe.sanitized.json",
+        "exit_code": 0,
+        "qualifying_e2e_run": false
+      },
+      {
+        "artifact": "runner-bootstrap-cold-probe.sanitized.json",
+        "exit_code": 0,
+        "qualifying_e2e_run": false
+      },
+      {
+        "artifact": "runner-bootstrap-cold-ps5.sanitized.json",
+        "exit_code": 0,
+        "qualifying_e2e_run": false
+      },
+      {
+        "artifact": "bootstrap-attempt-1.sanitized.json",
+        "exit_code": 0,
+        "qualifying_e2e_run": false
+      }
+    ]
+  },
+  "live_cli_e2e_before_omp_fix": {
+    "outcome": "failed",
+    "failure_classification": "case_failure",
+    "case_count": 8,
+    "passed_count": 7,
+    "failed_count": 1,
+    "bootstrap_outcome": "passed",
+    "summary_artifact": "live-r2/summary.json",
+    "failed_case": "omp-opencode-go",
+    "upstream_error_code": "MissingSessionID",
+    "required_header": "x-opencode-session",
+    "business_code_modified": false
+  },
+  "omp_fix": {
+    "candidate_sha": "b27449e051812342ea53a918ceb99c715112dac3",
+    "base_candidate_sha": "9445702e7bca52d457d9ceac6eea1dc6f95e94f4",
+    "source_files": [
+      "src-python/gateway_transport.py",
+      "src-python/gateway_handler_impl.py"
+    ],
+    "regression_file": "tests/test_opencode_session_headers.py",
+    "regression_cases": 14,
+    "linux_core": {
+      "passed": 2182,
+      "skipped": 169,
+      "subtests_passed": 263,
+      "duration_seconds": 66.03
+    },
+    "windows_core": {
+      "passed": 2315,
+      "skipped": 36,
+      "subtests_passed": 263,
+      "duration_seconds": 238.03
+    },
+    "portable": {
+      "archive_sha256": "7351bdcccc801a55f5d01a337c7e487084d862b801160aca717f28d9e957a44b",
+      "exe_sha256": "c037dcd01ad74e15fd507a35b0236eaf6d88db0b9a85db58250c84671602f89d",
+      "patched_source_hashes_verified": true
+    },
+    "review": "Direct standards/spec review of three-file delta completed; preserves explicit headers, scopes derivation to HTTPS OpenCode Go endpoints, does not change request bodies or retry assertions.",
+    "published_or_deployed": false
+  }
+}

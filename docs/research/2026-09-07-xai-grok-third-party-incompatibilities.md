@@ -1,6 +1,6 @@
 # CodexHub × xAI Grok: third-party request/tool/schema incompatibilities
 
-Date: 2026-09-07  
+Date: 2026-09-07
 Scope: What Codex App / Codex CLI emit through CodexHub Gateway to xAI Grok (Chat Completions and Responses), which shapes xAI documents as rejected, which shapes CodexHub rewrites, and which other third-party providers share the same constraints. The incompatibility table is the evidence snapshot; **Implementation status** records what Gateway now does.
 
 Live observation used as a pin, not as the whole catalog:

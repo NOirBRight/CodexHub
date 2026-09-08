@@ -169,8 +169,8 @@ telemetry_has_key_hash = True
 
 | 范围 | 实现 |
 | --- | --- |
-| 稳定别名 | `registry.py` 使用版本化的 family/namespace/original name/declared version 身份生成 80-bit 摘要，后缀仅用于该身份的有界碰撞处理；移除全工具表 seed 与共享递增序号。请求/重试的映射和独立 call ledger 继续保留。 |
-| 实际上游遥测 | `enrich_request_observability` 从传入的最终 body 读取 key，移除 caller override。caller/upstream 分别记录 `prompt_cache_key_state` 与 HMAC；区分 present/empty/null/absent/invalid/unavailable，落库时清除失效的旧 hash。实现选择解析实际 body，暂未采用官方解析值复用优化。 |
+| 稳定别名 | `registry.py` 使用版本化的 family/namespace/original name/declared version 身份生成摘要，保留原有 10 位 hex 长度以兼容 32 字符工具名端点；后缀仅用于该身份的有界碰撞处理。移除全工具表 seed 与共享递增序号，请求/重试的映射和独立 call ledger 继续保留。 |
+| 实际上游遥测 | `enrich_request_observability` 从传入的最终 body 读取 key，移除 caller override。caller/upstream 分别记录 `prompt_cache_key_state` 与 HMAC；区分 present/empty/null/absent/invalid/unavailable，落库时清除失效的旧 hash。原始 `prompt_cache_key` 加入通用递归脱敏名单，保留 hash/state。实现选择解析实际 body，暂未采用官方解析值复用优化。 |
 | 端点能力 | 新增 [prompt_cache_policy.py](../../src-python/prompt_cache_policy.py)，按 HTTPS origin、默认端口、准确 endpoint path 和目标协议核定能力；由不可变 `RouteAttemptPlan` 固化。不是根据供应商名称、模型名称或 cached usage 推断，也未增加需跨 Rust/UI 同步的配置字段。 |
 | 跨协议 key | 已验证端点的有效 string/null/empty key 在 Responses ↔ Chat 两向转换中保留。未知目标保持兼容性丢弃，由 `PreparedExchange.dropped_cache_controls` 驱动一次脱敏 `cache_control_dropped` 事件（含 attempt index 与原因）。未增加探测重试。 |
 | 显式缓存 | 同协议保持原始缓存控制；跨协议的 options/retention/content breakpoint 在未实现等价映射时明确拒绝，测试覆盖 breakpoint 不被悄悄剥离。 |
@@ -179,7 +179,9 @@ telemetry_has_key_hash = True
 
 当前已验证能力表包含 `https://api.openai.com/v1/responses`、`https://api.openai.com/v1/chat/completions` 和已保留原生 key 的 `https://chatgpt.com/backend-api/codex/responses`。公开 API 依据是实际抓取的 [OpenAI Chat create reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) 与前述 Prompt caching 文档；订阅端点依据是已有原生透传契约。未知第三方端点的同协议请求保持原样，其跨协议 key 仍按未知能力记录丢弃。进一步开放端点需要该端点的字段支持证据。
 
-验证结果：新增 [缓存边界测试](../../tests/test_gateway_prompt_cache.py) 46 项，以及 exchange 丢弃事件回归；已有测试同步新的接口参数与有界别名分配行为。最终完整 Python core 为 **2,166 passed、169 skipped、263 subtests passed（57.96s）**。运行使用临时 `CODEX_HOME`；回环服务器和临时 Git 签名测试获得沙箱所需权限后通过，没有关闭 hook 或签名。旧环境失败中的矩阵变化通过更新真实能力说明解决，并非仅替换源码 hash。
+验证结果：新增 [缓存边界测试](../../tests/test_gateway_prompt_cache.py) 48 项，以及 exchange 丢弃事件回归；已有测试同步新的接口参数与有界别名分配行为。最终完整 Python core 为 **2,168 passed、169 skipped、263 subtests passed（55.01s）**。运行使用临时 `CODEX_HOME`；回环服务器和临时 Git 签名测试获得沙箱所需权限后通过，没有关闭 hook 或签名。旧环境失败中的矩阵变化通过更新真实能力说明解决，并非仅替换源码 hash。
+
+需求审查无阻塞项。规范审查发现新别名摘要过长会导致 32 字符工具名端点失败，已恢复原有 10 位 hex 长度，并补上 namespace/custom/search 三类工具的短名称端点回归；同时补齐原始缓存 key 的递归脱敏及其回归。两项修正经增量复审确认关闭，无新增阻塞项。上述完整测试覆盖最终修正；测试结束后逐项核对 18 个源码、测试和协议证据文件的 SHA-256，与已审查候选一致。
 
 Report-only quality gates 已执行，0 个 parse errors；该启发式仍报告既有噪音，并将实际由 `route_plan` 调用的 `cache_key_policy_for_endpoint` 列为可能死函数，人工核对为误报，未添加忽略规则。`git diff --check` 通过。未执行 Windows synthetic 分区、Rust/UI 或真实供应商 A/B；本次没有修改这些实现边界，节省金额仍未实测。
 

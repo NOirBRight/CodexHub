@@ -1,0 +1,884 @@
+{
+  "cutoff_utc": "2026-09-08T13:26:42Z",
+  "model": "xai/grok-4.6",
+  "reasoning_effort": "xhigh",
+  "last_completed_input_tokens": 212889,
+  "last_completed_output_tokens": 321,
+  "last_request_bytes": 6392034,
+  "observed_errors": [
+    "HTTP 500",
+    "BrokenPipeError: [Errno 32] Broken pipe",
+    "RemoteDisconnected: Remote end closed connection without response",
+    "gateway_pre_response_budget_exhausted"
+  ],
+  "requests": [
+    {
+      "request_id": "0496cfcea148",
+      "end": "2026-09-08T11:33:46Z",
+      "status": 200,
+      "duration_ms": 142123
+    },
+    {
+      "request_id": "e2e1ff76bcce",
+      "start": "2026-09-08T11:33:47Z",
+      "body_bytes": 427961,
+      "end": "2026-09-08T11:34:07Z",
+      "status": 200,
+      "duration_ms": 20997
+    },
+    {
+      "request_id": "7404131e7efe",
+      "start": "2026-09-08T11:34:08Z",
+      "body_bytes": 444796,
+      "end": "2026-09-08T11:34:22Z",
+      "status": 200,
+      "duration_ms": 14514
+    },
+    {
+      "request_id": "a256c61b0160",
+      "start": "2026-09-08T11:34:23Z",
+      "body_bytes": 455259,
+      "end": "2026-09-08T11:34:41Z",
+      "status": 200,
+      "duration_ms": 18976
+    },
+    {
+      "request_id": "7ebe924e907e",
+      "start": "2026-09-08T11:34:42Z",
+      "body_bytes": 469360,
+      "end": "2026-09-08T11:34:52Z",
+      "status": 200,
+      "duration_ms": 10792
+    },
+    {
+      "request_id": "fbe4d707999e",
+      "start": "2026-09-08T11:34:53Z",
+      "body_bytes": 863896,
+      "end": "2026-09-08T11:35:29Z",
+      "status": 200,
+      "duration_ms": 36575
+    },
+    {
+      "request_id": "b7cb4cec8d85",
+      "start": "2026-09-08T11:35:29Z",
+      "body_bytes": 895745,
+      "end": "2026-09-08T11:36:13Z",
+      "status": 200,
+      "duration_ms": 44520
+    },
+    {
+      "request_id": "6aab5ba9f065",
+      "start": "2026-09-08T11:36:14Z",
+      "body_bytes": 911871,
+      "end": "2026-09-08T11:36:33Z",
+      "status": 200,
+      "duration_ms": 19997
+    },
+    {
+      "request_id": "e65778e99a5c",
+      "start": "2026-09-08T11:36:34Z",
+      "body_bytes": 948323,
+      "end": "2026-09-08T11:37:00Z",
+      "status": 200,
+      "duration_ms": 26520
+    },
+    {
+      "request_id": "511ec512c7ed",
+      "start": "2026-09-08T11:37:01Z",
+      "body_bytes": 1474215,
+      "end": "2026-09-08T11:37:29Z",
+      "status": 200,
+      "duration_ms": 28957
+    },
+    {
+      "request_id": "142cd07f3331",
+      "start": "2026-09-08T11:37:30Z",
+      "body_bytes": 1489069,
+      "end": "2026-09-08T11:37:57Z",
+      "status": 200,
+      "duration_ms": 28198
+    },
+    {
+      "request_id": "cffe86cb9cd4",
+      "start": "2026-09-08T11:37:58Z",
+      "body_bytes": 1509711,
+      "end": "2026-09-08T11:38:32Z",
+      "status": 200,
+      "duration_ms": 34392
+    },
+    {
+      "request_id": "144ffd08ebc1",
+      "start": "2026-09-08T11:38:33Z",
+      "body_bytes": 1517974,
+      "end": "2026-09-08T11:38:48Z",
+      "status": 200,
+      "duration_ms": 16038
+    },
+    {
+      "request_id": "ca2baf21b935",
+      "start": "2026-09-08T11:38:49Z",
+      "body_bytes": 1527543,
+      "end": "2026-09-08T11:38:56Z",
+      "status": 200,
+      "duration_ms": 7726
+    },
+    {
+      "request_id": "e3bca2723907",
+      "start": "2026-09-08T11:38:57Z",
+      "body_bytes": 1531518,
+      "end": "2026-09-08T11:39:07Z",
+      "status": 200,
+      "duration_ms": 11222
+    },
+    {
+      "request_id": "72f2c2b50ff3",
+      "start": "2026-09-08T11:39:08Z",
+      "body_bytes": 1542193,
+      "end": "2026-09-08T11:39:14Z",
+      "status": 200,
+      "duration_ms": 6208
+    },
+    {
+      "request_id": "0537d2b13658",
+      "start": "2026-09-08T11:39:14Z",
+      "body_bytes": 1544278,
+      "end": "2026-09-08T11:39:24Z",
+      "status": 200,
+      "duration_ms": 10525
+    },
+    {
+      "request_id": "8d0c059e7062",
+      "start": "2026-09-08T11:39:25Z",
+      "body_bytes": 1545965,
+      "end": "2026-09-08T11:39:43Z",
+      "status": 200,
+      "duration_ms": 18957
+    },
+    {
+      "request_id": "ad50ad7fbbe6",
+      "start": "2026-09-08T11:39:44Z",
+      "body_bytes": 1553000,
+      "end": "2026-09-08T11:40:07Z",
+      "status": 200,
+      "duration_ms": 24060
+    },
+    {
+      "request_id": "741d23242ce1",
+      "start": "2026-09-08T11:40:08Z",
+      "body_bytes": 1555396,
+      "end": "2026-09-08T11:40:38Z",
+      "status": 200,
+      "duration_ms": 30126
+    },
+    {
+      "request_id": "5f7ffceb93c0",
+      "start": "2026-09-08T11:40:38Z",
+      "body_bytes": 1567334,
+      "end": "2026-09-08T11:40:58Z",
+      "status": 200,
+      "duration_ms": 20192
+    },
+    {
+      "request_id": "efaeac06c6cd",
+      "start": "2026-09-08T11:40:59Z",
+      "body_bytes": 1571674,
+      "end": "2026-09-08T11:41:06Z",
+      "status": 200,
+      "duration_ms": 7756
+    },
+    {
+      "request_id": "4a929f6b5f9c",
+      "start": "2026-09-08T11:41:07Z",
+      "body_bytes": 1760329,
+      "end": "2026-09-08T11:41:38Z",
+      "status": 200,
+      "duration_ms": 31279
+    },
+    {
+      "request_id": "6c0a74ace357",
+      "start": "2026-09-08T11:41:39Z",
+      "body_bytes": 1762223,
+      "end": "2026-09-08T11:41:43Z",
+      "status": 200,
+      "duration_ms": 5084
+    },
+    {
+      "request_id": "b36215aac2e7",
+      "start": "2026-09-08T11:41:44Z",
+      "body_bytes": 1776680,
+      "end": "2026-09-08T11:41:48Z",
+      "status": 200,
+      "duration_ms": 4327
+    },
+    {
+      "request_id": "9ab5371098f2",
+      "start": "2026-09-08T11:41:55Z",
+      "body_bytes": 1777682,
+      "end": "2026-09-08T11:42:09Z",
+      "status": 200,
+      "duration_ms": 14466
+    },
+    {
+      "request_id": "5178b0aaa03c",
+      "start": "2026-09-08T11:42:09Z",
+      "body_bytes": 2153383,
+      "end": "2026-09-08T11:42:49Z",
+      "status": 200,
+      "duration_ms": 40052
+    },
+    {
+      "request_id": "1762c16b1305",
+      "start": "2026-09-08T11:42:51Z",
+      "body_bytes": 2155037,
+      "end": "2026-09-08T11:43:29Z",
+      "status": 200,
+      "duration_ms": 39489
+    },
+    {
+      "request_id": "39a80e90d24e",
+      "start": "2026-09-08T11:43:33Z",
+      "body_bytes": 2168865,
+      "end": "2026-09-08T11:43:47Z",
+      "status": 200,
+      "duration_ms": 15336
+    },
+    {
+      "request_id": "cd6022008487",
+      "start": "2026-09-08T11:43:48Z",
+      "body_bytes": 2285002,
+      "end": "2026-09-08T11:43:52Z",
+      "status": 200,
+      "duration_ms": 4833
+    },
+    {
+      "request_id": "0c9036be9950",
+      "start": "2026-09-08T11:44:01Z",
+      "body_bytes": 2286000,
+      "end": "2026-09-08T11:44:17Z",
+      "status": 200,
+      "duration_ms": 16633
+    },
+    {
+      "request_id": "8d26fee0f350",
+      "start": "2026-09-08T11:44:17Z",
+      "body_bytes": 2667084,
+      "end": "2026-09-08T11:44:27Z",
+      "status": 200,
+      "duration_ms": 9727
+    },
+    {
+      "request_id": "15ff8f54adff",
+      "start": "2026-09-08T11:44:28Z",
+      "body_bytes": 2668372,
+      "end": "2026-09-08T11:44:45Z",
+      "status": 200,
+      "duration_ms": 17409
+    },
+    {
+      "request_id": "e9f5c1f632aa",
+      "start": "2026-09-08T11:44:46Z",
+      "body_bytes": 2904320,
+      "end": "2026-09-08T11:45:03Z",
+      "status": 200,
+      "duration_ms": 18211
+    },
+    {
+      "request_id": "5539d62a1566",
+      "start": "2026-09-08T11:45:06Z",
+      "body_bytes": 2905513,
+      "end": "2026-09-08T11:45:17Z",
+      "status": 200,
+      "duration_ms": 12201
+    },
+    {
+      "request_id": "f74904bd686e",
+      "start": "2026-09-08T11:45:18Z",
+      "body_bytes": 3141643,
+      "end": "2026-09-08T11:45:33Z",
+      "status": 200,
+      "duration_ms": 15862
+    },
+    {
+      "request_id": "d7283d6d1510",
+      "start": "2026-09-08T11:45:35Z",
+      "body_bytes": 3142707,
+      "end": "2026-09-08T11:46:03Z",
+      "status": 200,
+      "duration_ms": 28573
+    },
+    {
+      "request_id": "7b253da29c42",
+      "start": "2026-09-08T11:46:04Z",
+      "body_bytes": 3272348,
+      "end": "2026-09-08T11:46:12Z",
+      "status": 200,
+      "duration_ms": 9238
+    },
+    {
+      "request_id": "8807e9f86a8e",
+      "start": "2026-09-08T11:46:13Z",
+      "body_bytes": 3273335,
+      "end": "2026-09-08T11:46:36Z",
+      "status": 200,
+      "duration_ms": 23433
+    },
+    {
+      "request_id": "bc7b0d849724",
+      "start": "2026-09-08T11:46:37Z",
+      "body_bytes": 3406298,
+      "end": "2026-09-08T11:47:00Z",
+      "status": 200,
+      "duration_ms": 23788
+    },
+    {
+      "request_id": "ef4d31bd91b1",
+      "start": "2026-09-08T11:47:02Z",
+      "body_bytes": 3407386,
+      "end": "2026-09-08T11:47:35Z",
+      "status": 200,
+      "duration_ms": 33494
+    },
+    {
+      "request_id": "485f2adb8d51",
+      "start": "2026-09-08T11:47:36Z",
+      "body_bytes": 3555722,
+      "end": "2026-09-08T11:48:08Z",
+      "status": 200,
+      "duration_ms": 32887
+    },
+    {
+      "request_id": "02a550e848a0",
+      "start": "2026-09-08T11:48:10Z",
+      "body_bytes": 3556756,
+      "end": "2026-09-08T11:48:20Z",
+      "status": 200,
+      "duration_ms": 10608
+    },
+    {
+      "request_id": "f519564b7ebb",
+      "start": "2026-09-08T11:48:20Z",
+      "body_bytes": 3679229,
+      "end": "2026-09-08T11:48:49Z",
+      "status": 200,
+      "duration_ms": 29408
+    },
+    {
+      "request_id": "f787c31fc433",
+      "start": "2026-09-08T11:48:51Z",
+      "body_bytes": 3680357,
+      "end": "2026-09-08T11:49:03Z",
+      "status": 200,
+      "duration_ms": 12293
+    },
+    {
+      "request_id": "752179429011",
+      "start": "2026-09-08T11:49:03Z",
+      "body_bytes": 3810922,
+      "end": "2026-09-08T11:49:43Z",
+      "status": 200,
+      "duration_ms": 40563
+    },
+    {
+      "request_id": "3d57a479c5d4",
+      "start": "2026-09-08T11:49:45Z",
+      "body_bytes": 3812228,
+      "end": "2026-09-08T11:50:17Z",
+      "status": 200,
+      "duration_ms": 32563
+    },
+    {
+      "request_id": "26898b428efe",
+      "start": "2026-09-08T11:50:18Z",
+      "body_bytes": 3936246,
+      "end": "2026-09-08T11:50:29Z",
+      "status": 200,
+      "duration_ms": 12117
+    },
+    {
+      "request_id": "dc43d62deee8",
+      "start": "2026-09-08T11:50:31Z",
+      "body_bytes": 3937240,
+      "end": "2026-09-08T11:51:07Z",
+      "status": 200,
+      "duration_ms": 36776
+    },
+    {
+      "request_id": "fb64d8520b0c",
+      "start": "2026-09-08T11:51:08Z",
+      "body_bytes": 4061348,
+      "end": "2026-09-08T11:51:17Z",
+      "status": 200,
+      "duration_ms": 10225
+    },
+    {
+      "request_id": "9e329638ba5e",
+      "start": "2026-09-08T11:51:19Z",
+      "body_bytes": 4062332,
+      "end": "2026-09-08T11:51:57Z",
+      "status": 200,
+      "duration_ms": 39165
+    },
+    {
+      "request_id": "6d5355afe660",
+      "start": "2026-09-08T11:51:58Z",
+      "body_bytes": 4191185,
+      "end": "2026-09-08T11:52:27Z",
+      "status": 200,
+      "duration_ms": 29538
+    },
+    {
+      "request_id": "d61edf1991c6",
+      "start": "2026-09-08T11:52:29Z",
+      "body_bytes": 4192175,
+      "end": "2026-09-08T11:53:25Z",
+      "status": 200,
+      "duration_ms": 56428
+    },
+    {
+      "request_id": "d999a722055c",
+      "start": "2026-09-08T11:53:25Z",
+      "body_bytes": 4315371,
+      "end": "2026-09-08T11:53:41Z",
+      "status": 200,
+      "duration_ms": 16352
+    },
+    {
+      "request_id": "38a326a250db",
+      "start": "2026-09-08T11:53:43Z",
+      "body_bytes": 4320462,
+      "end": "2026-09-08T11:54:18Z",
+      "status": 200,
+      "duration_ms": 36468
+    },
+    {
+      "request_id": "0a75c3ca8290",
+      "start": "2026-09-08T11:54:19Z",
+      "body_bytes": 4449676,
+      "end": "2026-09-08T11:54:32Z",
+      "status": 200,
+      "duration_ms": 13249
+    },
+    {
+      "request_id": "2d96c92a30e6",
+      "start": "2026-09-08T11:54:33Z",
+      "body_bytes": 4451467,
+      "end": "2026-09-08T11:55:22Z",
+      "status": 200,
+      "duration_ms": 49920
+    },
+    {
+      "request_id": "3c6b971ec7f0",
+      "start": "2026-09-08T11:55:24Z",
+      "body_bytes": 4452563,
+      "end": "2026-09-08T11:56:25Z",
+      "status": 200,
+      "duration_ms": 61890
+    },
+    {
+      "request_id": "966055285a1f",
+      "start": "2026-09-08T11:56:27Z",
+      "body_bytes": 4576741,
+      "end": "2026-09-08T11:57:47Z",
+      "status": 200,
+      "duration_ms": 81416
+    },
+    {
+      "request_id": "05c393b56d6e",
+      "start": "2026-09-08T11:57:47Z",
+      "body_bytes": 4578523,
+      "end": "2026-09-08T11:58:50Z",
+      "status": 200,
+      "duration_ms": 63195
+    },
+    {
+      "request_id": "8d9062ebe16c",
+      "start": "2026-09-08T11:58:51Z",
+      "body_bytes": 4579929,
+      "end": "2026-09-08T11:59:02Z",
+      "status": 200,
+      "duration_ms": 10801
+    },
+    {
+      "request_id": "3b706dc1bbe0",
+      "start": "2026-09-08T11:59:03Z",
+      "body_bytes": 4580849,
+      "end": "2026-09-08T11:59:58Z",
+      "status": 200,
+      "duration_ms": 54886
+    },
+    {
+      "request_id": "32ea8bc8d155",
+      "start": "2026-09-08T11:59:58Z",
+      "body_bytes": 4963018,
+      "end": "2026-09-08T12:01:10Z",
+      "status": 200,
+      "duration_ms": 72622
+    },
+    {
+      "request_id": "f33f7604ecd6",
+      "start": "2026-09-08T12:01:11Z",
+      "body_bytes": 4964199,
+      "end": "2026-09-08T12:02:51Z",
+      "status": 500,
+      "duration_ms": 100131
+    },
+    {
+      "request_id": "9ecd74bb22c1",
+      "start": "2026-09-08T12:02:51Z",
+      "body_bytes": 4964199,
+      "end": "2026-09-08T12:03:09Z",
+      "status": 200,
+      "duration_ms": 18346
+    },
+    {
+      "request_id": "55e2cd89e84e",
+      "start": "2026-09-08T12:03:11Z",
+      "body_bytes": 4965256,
+      "end": "2026-09-08T12:05:33Z",
+      "status": 500,
+      "duration_ms": 142283
+    },
+    {
+      "request_id": "3390fbc43752",
+      "start": "2026-09-08T12:05:34Z",
+      "body_bytes": 4965256,
+      "end": "2026-09-08T12:07:12Z",
+      "status": 500,
+      "duration_ms": 99477
+    },
+    {
+      "request_id": "4f417a578985",
+      "start": "2026-09-08T12:07:13Z",
+      "body_bytes": 4965256,
+      "end": "2026-09-08T12:08:59Z",
+      "status": 500,
+      "duration_ms": 105714
+    },
+    {
+      "request_id": "863fda121979",
+      "start": "2026-09-08T12:09:00Z",
+      "body_bytes": 4965256,
+      "end": "2026-09-08T12:11:02Z",
+      "status": 500,
+      "duration_ms": 122276
+    },
+    {
+      "request_id": "d174d17c3594",
+      "start": "2026-09-08T12:11:04Z",
+      "body_bytes": 4965256,
+      "end": "2026-09-08T12:11:26Z",
+      "status": 200,
+      "duration_ms": 23313
+    },
+    {
+      "request_id": "46d3f6a5b3eb",
+      "start": "2026-09-08T12:11:27Z",
+      "body_bytes": 5984896,
+      "end": "2026-09-08T12:14:28Z",
+      "status": 504,
+      "duration_ms": 181402,
+      "error": "gateway_pre_response_budget_exhausted",
+      "failure_phase": "response_headers"
+    },
+    {
+      "request_id": "bea5e9c3f972",
+      "start": "2026-09-08T12:14:29Z",
+      "body_bytes": 5984896,
+      "end": "2026-09-08T12:16:22Z",
+      "status": 502,
+      "duration_ms": 113403,
+      "error": "RemoteDisconnected",
+      "failure_phase": "tcp_connect"
+    },
+    {
+      "request_id": "bb39cd5f1053",
+      "start": "2026-09-08T12:16:23Z",
+      "body_bytes": 5984896,
+      "end": "2026-09-08T12:16:32Z",
+      "status": 200,
+      "duration_ms": 10255
+    },
+    {
+      "request_id": "471a026d843c",
+      "start": "2026-09-08T12:16:33Z",
+      "body_bytes": 5986093,
+      "end": "2026-09-08T12:20:05Z",
+      "status": 504,
+      "duration_ms": 212443,
+      "error": "gateway_pre_response_budget_exhausted",
+      "failure_phase": "unknown"
+    },
+    {
+      "request_id": "92fc80a1fa21",
+      "start": "2026-09-08T12:20:06Z",
+      "body_bytes": 5986093,
+      "end": "2026-09-08T12:20:45Z",
+      "status": 200,
+      "duration_ms": 39563
+    },
+    {
+      "request_id": "3a1791b5948a",
+      "start": "2026-09-08T12:20:47Z",
+      "body_bytes": 5987019,
+      "end": "2026-09-08T12:21:26Z",
+      "status": 200,
+      "duration_ms": 40300
+    },
+    {
+      "request_id": "3ac0e5d33647",
+      "start": "2026-09-08T12:21:27Z",
+      "body_bytes": 6232376,
+      "end": "2026-09-08T12:23:54Z",
+      "status": 500,
+      "duration_ms": 147038
+    },
+    {
+      "request_id": "6c71ba607330",
+      "start": "2026-09-08T12:23:55Z",
+      "body_bytes": 6232376,
+      "end": "2026-09-08T12:26:27Z",
+      "status": 500,
+      "duration_ms": 153583
+    },
+    {
+      "request_id": "996ffa2f6d40",
+      "start": "2026-09-08T12:26:28Z",
+      "body_bytes": 6232376,
+      "end": "2026-09-08T12:29:06Z",
+      "status": 500,
+      "duration_ms": 158417
+    },
+    {
+      "request_id": "0a531793a4ab",
+      "start": "2026-09-08T12:29:08Z",
+      "body_bytes": 6232376,
+      "end": "2026-09-08T12:29:49Z",
+      "status": 200,
+      "duration_ms": 42389
+    },
+    {
+      "request_id": "2fe92699e68e",
+      "start": "2026-09-08T12:29:50Z",
+      "body_bytes": 6233571,
+      "end": "2026-09-08T12:31:25Z",
+      "status": 502,
+      "duration_ms": 95362,
+      "error": "RemoteDisconnected",
+      "failure_phase": "tcp_connect"
+    },
+    {
+      "request_id": "c37411f1c74e",
+      "start": "2026-09-08T12:31:26Z",
+      "body_bytes": 6233571,
+      "end": "2026-09-08T12:33:00Z",
+      "status": 500,
+      "duration_ms": 95235
+    },
+    {
+      "request_id": "7eff2598b7cb",
+      "start": "2026-09-08T12:33:01Z",
+      "body_bytes": 6233571,
+      "end": "2026-09-08T12:35:32Z",
+      "status": 500,
+      "duration_ms": 151221
+    },
+    {
+      "request_id": "4bc717543f24",
+      "start": "2026-09-08T12:35:33Z",
+      "body_bytes": 6233571,
+      "end": "2026-09-08T12:37:33Z",
+      "status": 500,
+      "duration_ms": 120585
+    },
+    {
+      "request_id": "c11365858bdc",
+      "start": "2026-09-08T12:37:38Z",
+      "body_bytes": 6233571,
+      "end": "2026-09-08T12:40:00Z",
+      "status": 502,
+      "duration_ms": 144551,
+      "error": "URLError",
+      "failure_phase": "tcp_connect"
+    },
+    {
+      "request_id": "9f46b4f70e7a",
+      "start": "2026-09-08T12:40:00Z",
+      "body_bytes": 6233571,
+      "end": "2026-09-08T12:41:59Z",
+      "status": 502,
+      "duration_ms": 119230,
+      "error": "RemoteDisconnected",
+      "failure_phase": "tcp_connect"
+    },
+    {
+      "request_id": "7b239c686a3e",
+      "start": "2026-09-08T12:42:00Z",
+      "body_bytes": 6233571,
+      "end": "2026-09-08T12:43:07Z",
+      "status": 200,
+      "duration_ms": 68086
+    },
+    {
+      "request_id": "88efe6e7791f",
+      "start": "2026-09-08T12:43:10Z",
+      "body_bytes": 6234730,
+      "end": "2026-09-08T12:46:39Z",
+      "status": 504,
+      "duration_ms": 210096,
+      "error": "gateway_pre_response_budget_exhausted",
+      "failure_phase": "unknown"
+    },
+    {
+      "request_id": "cfad87b84a81",
+      "start": "2026-09-08T12:46:40Z",
+      "body_bytes": 6234730,
+      "end": "2026-09-08T12:47:43Z",
+      "status": 502,
+      "duration_ms": 64075,
+      "error": "URLError",
+      "failure_phase": "tcp_connect"
+    },
+    {
+      "request_id": "267319434c91",
+      "start": "2026-09-08T12:47:44Z",
+      "body_bytes": 6234730,
+      "end": "2026-09-08T12:48:50Z",
+      "status": 200,
+      "duration_ms": 66484
+    },
+    {
+      "request_id": "32000c897151",
+      "start": "2026-09-08T12:48:51Z",
+      "body_bytes": 6390768,
+      "end": "2026-09-08T12:51:28Z",
+      "status": 502,
+      "duration_ms": 157706,
+      "error": "URLError",
+      "failure_phase": "tcp_connect"
+    },
+    {
+      "request_id": "0936005dfe0d",
+      "start": "2026-09-08T12:51:29Z",
+      "body_bytes": 6390768,
+      "end": "2026-09-08T12:56:49Z",
+      "status": 504,
+      "duration_ms": 321054,
+      "error": "gateway_pre_response_budget_exhausted",
+      "failure_phase": "unknown"
+    },
+    {
+      "request_id": "0be1a0a0251d",
+      "start": "2026-09-08T12:56:50Z",
+      "body_bytes": 6390768,
+      "end": "2026-09-08T12:58:43Z",
+      "status": 502,
+      "duration_ms": 112804,
+      "error": "URLError",
+      "failure_phase": "tcp_connect"
+    },
+    {
+      "request_id": "a63a485333c8",
+      "start": "2026-09-08T12:58:44Z",
+      "body_bytes": 6390768,
+      "end": "2026-09-08T13:03:39Z",
+      "status": 504,
+      "duration_ms": 295692,
+      "error": "gateway_pre_response_budget_exhausted",
+      "failure_phase": "response_headers"
+    },
+    {
+      "request_id": "0d5439c1075a",
+      "start": "2026-09-08T13:03:41Z",
+      "body_bytes": 6390768,
+      "end": "2026-09-08T13:04:02Z",
+      "status": 502,
+      "duration_ms": 21406,
+      "error": "URLError",
+      "failure_phase": "tcp_connect"
+    },
+    {
+      "request_id": "63fdcf64fa80",
+      "start": "2026-09-08T13:04:03Z",
+      "body_bytes": 6390768,
+      "end": "2026-09-08T13:08:33Z",
+      "status": 504,
+      "duration_ms": 271000,
+      "error": "gateway_pre_response_budget_exhausted",
+      "failure_phase": "response_headers"
+    },
+    {
+      "request_id": "e732898e4f2a",
+      "start": "2026-09-08T13:08:34Z",
+      "body_bytes": 6390768,
+      "end": "2026-09-08T13:11:42Z",
+      "status": 504,
+      "duration_ms": 188063,
+      "error": "gateway_pre_response_budget_exhausted",
+      "failure_phase": "unknown"
+    },
+    {
+      "request_id": "ec7fb5d2655a",
+      "start": "2026-09-08T13:11:43Z",
+      "body_bytes": 6390768,
+      "end": "2026-09-08T13:12:47Z",
+      "status": 200,
+      "duration_ms": 65332
+    },
+    {
+      "request_id": "c07096e7a551",
+      "start": "2026-09-08T13:12:48Z",
+      "body_bytes": 6392034,
+      "end": "2026-09-08T13:14:52Z",
+      "status": 502,
+      "duration_ms": 123882,
+      "error": "URLError",
+      "failure_phase": "tcp_connect"
+    },
+    {
+      "request_id": "630bdd4ee210",
+      "start": "2026-09-08T13:14:53Z",
+      "body_bytes": 6392034,
+      "end": "2026-09-08T13:19:07Z",
+      "status": 504,
+      "duration_ms": 255687,
+      "error": "gateway_pre_response_budget_exhausted",
+      "failure_phase": "unknown"
+    },
+    {
+      "request_id": "cedb0c646457",
+      "start": "2026-09-08T13:19:09Z",
+      "body_bytes": 6392034,
+      "end": "2026-09-08T13:19:53Z",
+      "status": 502,
+      "duration_ms": 45444,
+      "error": "URLError",
+      "failure_phase": "tcp_connect"
+    },
+    {
+      "request_id": "11dc5eda079d",
+      "start": "2026-09-08T13:19:55Z",
+      "body_bytes": 6392034,
+      "end": "2026-09-08T13:24:08Z",
+      "status": 504,
+      "duration_ms": 254042,
+      "error": "gateway_pre_response_budget_exhausted",
+      "failure_phase": "response_headers"
+    },
+    {
+      "request_id": "a3537b11d96b",
+      "start": "2026-09-08T13:24:10Z",
+      "body_bytes": 6392034,
+      "end": "2026-09-08T13:26:41Z",
+      "status": 502,
+      "duration_ms": 151596,
+      "error": "RemoteDisconnected",
+      "failure_phase": "tcp_connect"
+    },
+    {
+      "request_id": "0c15b09f2d59",
+      "start": "2026-09-08T13:26:42Z",
+      "body_bytes": 6392034
+    }
+  ],
+  "case_id": "xai-timeout-investigation-20260908"
+}

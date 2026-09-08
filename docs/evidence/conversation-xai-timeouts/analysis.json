@@ -1,0 +1,66 @@
+{
+  "source": "docs/evidence/conversation-xai-timeouts/request-summary.json",
+  "cutoff_utc": "2026-09-08T13:26:42Z",
+  "request_count": 104,
+  "status_counts": {
+    "200": 72,
+    "500": 11,
+    "502": 11,
+    "504": 9,
+    "pending": 1
+  },
+  "same_body_groups_with_repeats": 9,
+  "max_same_body_attempts": 8,
+  "size_buckets": {
+    "unknown": {
+      "200": 1
+    },
+    "<1MB": {
+      "200": 8
+    },
+    "1-4MB": {
+      "200": 44
+    },
+    ">4MB": {
+      "200": 19,
+      "500": 11,
+      "502": 11,
+      "504": 9,
+      "pending": 1
+    }
+  },
+  "success_duration_ms": {
+    "n": 72,
+    "min": 4327,
+    "max": 142123,
+    "median": 23788
+  },
+  "failure_duration_ms": {
+    "n": 31,
+    "min": 21406,
+    "max": 321054,
+    "median": 144551
+  },
+  "largest_body_chain": {
+    "body_bytes": 6390768,
+    "attempts": 8,
+    "statuses": [
+      502,
+      504,
+      502,
+      504,
+      502,
+      504,
+      504,
+      200
+    ],
+    "failure_wait_ms_before_success": 1367725,
+    "note": "Same payload eventually returned HTTP 200; not a hard size cap."
+  },
+  "diagnostic_mislabel": {
+    "observed": "RemoteDisconnected and URLError/BrokenPipe labeled failure_phase=tcp_connect on request_error",
+    "retry_safety": "upstream_retry_suppressed with retry_safety_class=unknown, retry_forbidden=true",
+    "layers": "Gateway inner retry suppressed; Codex client resubmitted new request_id for same body"
+  },
+  "case_id": "xai-timeout-investigation-20260908"
+}
