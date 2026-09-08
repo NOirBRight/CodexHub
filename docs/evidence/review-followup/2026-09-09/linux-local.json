@@ -1,0 +1,108 @@
+{
+  "schema": "codexhub.review-followup-linux.v1",
+  "date": "2026-09-09",
+  "scope": "User-authorized review follow-up items 1-4; Linux lifecycle, schema and real CLI contracts",
+  "runtime_candidate_sha": "ef591f5b1a060c800213e53b0d18c1f78f5e780c",
+  "python_test_candidate_sha": "dcc3c36",
+  "binary_sha256": "f95f66fb937c1b8a0d38ee247eb7563fe9ba185a545217d05dafbf5de04296e2",
+  "python": {
+    "command": "./scripts/codexhub-python.sh -m pytest -q --ignore=tests/test_real_client_e2e.py",
+    "passed": 2223,
+    "skipped": 170,
+    "subtests": 265
+  },
+  "rust": {
+    "command": "cargo test --locked",
+    "passed": 715,
+    "ignored": 4
+  },
+  "clippy": {
+    "command": "cargo clippy --locked --all-targets -- -D warnings",
+    "outcome": "passed"
+  },
+  "physical_pointer_e2e": {
+    "entrypoint": "./scripts/verify-linux.sh",
+    "outcome": "passed",
+    "clicks": 13,
+    "window": "820x620",
+    "settings_open_close": "passed"
+  },
+  "frontend_build": {
+    "command": "npm run build",
+    "outcome": "passed"
+  },
+  "xai_live_schema": {
+    "command": "CODEXHUB_E2E_XAI=1 ./scripts/codexhub-python.sh scripts/e2e_xai_grok_tools.py",
+    "http_status": 200,
+    "schema_accepted": true,
+    "tool_executed": false
+  },
+  "real_cli": {
+    "command": "./scripts/codexhub-python.sh scripts/e2e_linux_cli_clients.py --bin src-tauri/target/debug/codexhub --providers <private-isolated-providers.toml> --output <private-report.json> --timeout 180",
+    "outcome": "passed",
+    "input_note": "Isolated copy of configured providers; Muse Spark 1.3 reasoning uses maintained xhigh default. User-saved max was not modified.",
+    "cases": [
+      {
+        "case_id": "codex-openai",
+        "client": "codex",
+        "provider": "openai",
+        "managed_model": "gpt-5.6-luna",
+        "live_ok": true
+      },
+      {
+        "case_id": "codex-opencode-go",
+        "client": "codex",
+        "provider": "opencode-go",
+        "managed_model": "opencode-go/muse-spark-1.3-contributor",
+        "live_ok": true
+      },
+      {
+        "case_id": "opencode-openai",
+        "client": "opencode",
+        "provider": "openai",
+        "managed_model": "openai/gpt-5.6-luna",
+        "live_ok": true
+      },
+      {
+        "case_id": "opencode-opencode-go",
+        "client": "opencode",
+        "provider": "opencode-go",
+        "managed_model": "opencode-go/muse-spark-1.3-contributor",
+        "live_ok": true
+      },
+      {
+        "case_id": "pi-openai",
+        "client": "pi",
+        "provider": "openai",
+        "managed_model": "openai/gpt-5.6-luna",
+        "live_ok": true
+      },
+      {
+        "case_id": "pi-opencode-go",
+        "client": "pi",
+        "provider": "opencode-go",
+        "managed_model": "opencode-go/muse-spark-1.3-contributor",
+        "live_ok": true
+      },
+      {
+        "case_id": "omp-openai",
+        "client": "omp",
+        "provider": "openai",
+        "managed_model": "openai/gpt-5.6-luna",
+        "live_ok": true
+      },
+      {
+        "case_id": "omp-opencode-go",
+        "client": "omp",
+        "provider": "opencode-go",
+        "managed_model": "opencode-go/muse-spark-1.3-contributor",
+        "live_ok": true
+      }
+    ]
+  },
+  "limitations": [
+    "This records the latest passing result per relevant suite, not one all-green invocation of verify-linux.sh. Its earlier Python timeout-phase assertion was corrected in dcc3c36 and the complete Python core was rerun.",
+    "Synthetic real-client contract suite requires Windows and is recorded separately.",
+    "CLI live coverage uses Luna and Muse Spark 1.3 across four clients; it does not certify every third-party provider or Desktop subagent spawning."
+  ]
+}
