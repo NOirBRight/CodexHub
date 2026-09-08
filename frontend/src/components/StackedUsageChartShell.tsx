@@ -9,9 +9,12 @@ import {
   differenceInDays,
   endOfDay,
   isSameDay,
+  localDayKey,
   startOfDay,
   startOfMonth,
   startOfWeekMonday,
+  usageQueryWindow as usageQueryWindowFromSpan,
+  usageRangeSpan,
 } from "../lib/dateRange";
 import { cx } from "../lib/format";
 import { providerLabel, providerLabelMap, titleizeProviderId } from "../lib/providerLabels";
@@ -128,12 +131,13 @@ export function StackedUsageChartShell({
   const [calendarMonth, setCalendarMonth] = useState(() => startOfMonth(initialCustomRange.start));
   const customRangeRef = useRef<HTMLDivElement | null>(null);
 
-  const queryWindow = useMemo(() => usageQueryWindow(range, customRange), [customRange, range]);
+  const todayKey = localDayKey(new Date());
+  const queryWindow = useMemo(() => usageQueryWindow(range, customRange), [customRange, range, todayKey]);
   const providerLabels = useMemo(() => providerLabelMap(providers), [providers]);
   const cacheCapableProviders = useMemo(() => cacheCapableProviderKeys(providers), [providers]);
   const stacked = useMemo(
     () => buildStackedBuckets(events, range, groupBy, customRange, metric, breakdown, providerLabels, locale, tr),
-    [breakdown, customRange, events, groupBy, locale, metric, providerLabels, range, tr],
+    [breakdown, customRange, events, groupBy, locale, metric, providerLabels, range, todayKey, tr],
   );
   const axis = useMemo(
     () => stacked.buckets.map((bucket) => bucket.label),
@@ -153,7 +157,7 @@ export function StackedUsageChartShell({
         summary,
         tr,
       }),
-    [breakdown, cacheCapableProviders, customRange, events, hiddenSeriesKeys, providerLabels, range, stacked.series, summary, tr],
+    [breakdown, cacheCapableProviders, customRange, events, hiddenSeriesKeys, providerLabels, range, stacked.series, summary, todayKey, tr],
   );
 
   useEffect(() => {
@@ -888,11 +892,7 @@ function NoTokenChart({
 }
 
 function usageQueryWindow(range: UsageRange, customRange: DateSpan): UsageQueryWindow {
-  const span = rangeToSpan(range, customRange);
-  return {
-    startTs: span.start.toISOString(),
-    endTs: endOfDay(span.end).toISOString(),
-  };
+  return usageQueryWindowFromSpan(usageRangeSpan(range, customRange));
 }
 
 function buildStackedBuckets(
@@ -1245,18 +1245,7 @@ function niceMax(value: number) {
 }
 
 function rangeToSpan(range: UsageRange, customRange: DateSpan): DateSpan {
-  if (range === "custom") {
-    return {
-      start: startOfDay(customRange.start),
-      end: endOfDay(customRange.end),
-    };
-  }
-  const end = startOfDay(new Date());
-  const days = range === "7d" ? 6 : 30;
-  return {
-    start: addDays(end, -days),
-    end,
-  };
+  return usageRangeSpan(range, customRange);
 }
 
 function Metric({ label, value, title }: { label: string; value: string; title?: string }) {

@@ -37,3 +37,37 @@ export function differenceInDays(start: Date, end: Date) {
 export function isSameDay(left: Date, right: Date) {
   return startOfDay(left).getTime() === startOfDay(right).getTime();
 }
+
+export type UsagePresetRange = "7d" | "1m" | "custom";
+
+export function localDayKey(date: Date) {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+export function usageRangeSpan(
+  range: UsagePresetRange,
+  customRange: { start: Date; end: Date },
+  now: Date = new Date(),
+) {
+  if (range === "custom") {
+    return {
+      start: startOfDay(customRange.start),
+      end: endOfDay(customRange.end),
+    };
+  }
+  const end = startOfDay(now);
+  const days = range === "7d" ? 6 : 30;
+  return {
+    start: addDays(end, -days),
+    end,
+  };
+}
+
+export function usageQueryWindow(span: { start: Date; end: Date }) {
+  return {
+    startTs: span.start.toISOString(),
+    endTs: endOfDay(span.end).toISOString(),
+  };
+}

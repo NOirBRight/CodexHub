@@ -63,6 +63,10 @@ export function normalizeSettings(settings: LegacySettings | null | undefined): 
 export function normalizeOfficialModelId(
   value: string,
   knownOfficialIds: ReadonlySet<string> = new Set([
+    "gpt-6-astra",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",

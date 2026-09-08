@@ -449,6 +449,53 @@ fn usage_snapshot_caps_visible_events_without_truncating_summary() {
 }
 
 #[test]
+fn usage_snapshot_bounded_window_returns_all_events() {
+    let root = unique_temp_dir("codexhub-usage-snapshot-window");
+    fs::create_dir_all(&root).unwrap();
+    let event_path = root.join("codex-proxy-events.jsonl");
+    let db_path = root.join("codex-proxy-telemetry.sqlite");
+    fs::write(&event_path, "").unwrap();
+    let mut connection = rusqlite::Connection::open(&db_path).unwrap();
+    super::initialize_telemetry_db(&connection).unwrap();
+    let transaction = connection.transaction().unwrap();
+    for index in 0..501 {
+        transaction
+            .execute(
+                r#"
+                INSERT INTO gateway_requests (
+                    request_id, completed_ts, method, path, route_reason,
+                    model_canonical, upstream, provider_id, status,
+                    usage_source, usage_input_tokens, usage_output_tokens,
+                    usage_total_tokens, created_at, updated_at
+                ) VALUES (?1, ?2, 'POST', '/v1/responses', 'model',
+                    'openai/gpt-5.5', 'official', 'official', 200,
+                    'upstream', 1, 1, 2, 'test', 'test')
+                "#,
+                rusqlite::params![
+                    format!("req-{index:03}"),
+                    format!("2026-07-03T01:{:02}:{:02}Z", index / 60, index % 60),
+                ],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+    drop(connection);
+
+    let snapshot = super::gateway_usage_snapshot_for_paths(
+        &event_path,
+        &db_path,
+        None,
+        Some("2026-07-03T00:00:00Z".to_string()),
+        Some("2026-07-03T02:00:00Z".to_string()),
+    )
+    .unwrap();
+
+    assert_eq!(snapshot.events.len(), 501);
+    assert_eq!(snapshot.summary.requests, 501);
+    assert_eq!(snapshot.summary.total_tokens, Some(1_002));
+}
+
+#[test]
 fn usage_events_normalize_official_bare_model_names() {
     let root = unique_temp_dir("codexhub-usage-official-models");
     fs::create_dir_all(&root).unwrap();

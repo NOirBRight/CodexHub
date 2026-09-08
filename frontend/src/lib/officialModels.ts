@@ -8,6 +8,7 @@ export const LEGACY_AUTOMATIC_OFFICIAL_MODEL_ORDER = [
   "gpt-5.3-codex-spark",
 ];
 export const DEFAULT_OFFICIAL_MODEL_ORDER = [
+  "gpt-6-astra",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
@@ -15,7 +16,11 @@ export const DEFAULT_OFFICIAL_MODEL_ORDER = [
 ];
 
 
-export function sortOfficialModels(models: Model[], sortOrder: string[]) {
+export function sortOfficialModels(
+  models: Model[],
+  sortOrder: string[],
+  disabledModels: string[] = [],
+) {
   const order = new Map<string, number>();
   const effectiveOrder = shouldFollowOfficialCatalogOrder(sortOrder)
     ? DEFAULT_OFFICIAL_MODEL_ORDER
@@ -25,7 +30,7 @@ export function sortOfficialModels(models: Model[], sortOrder: string[]) {
       order.set(key, index);
     }
   });
-  return [...models].sort((left, right) => {
+  const ranked = [...models].sort((left, right) => {
     const leftIndex = officialModelSortKeys(left.id).reduce(
       (current, key) => Math.min(current, order.get(key) ?? Number.MAX_SAFE_INTEGER),
       Number.MAX_SAFE_INTEGER,
@@ -38,6 +43,19 @@ export function sortOfficialModels(models: Model[], sortOrder: string[]) {
       return leftIndex - rightIndex;
     }
     return (left.sort_order ?? Number.MAX_SAFE_INTEGER) - (right.sort_order ?? Number.MAX_SAFE_INTEGER);
+  });
+  if (!shouldFollowOfficialCatalogOrder(sortOrder)) {
+    return ranked;
+  }
+  const disabled = new Set(
+    disabledModels
+      .map((id) => normalizeOfficialModelId(id))
+      .filter((id): id is string => Boolean(id)),
+  );
+  return [...ranked].sort((left, right) => {
+    const leftDisabled = disabled.has(normalizeOfficialModelId(left.id) ?? left.id) ? 1 : 0;
+    const rightDisabled = disabled.has(normalizeOfficialModelId(right.id) ?? right.id) ? 1 : 0;
+    return leftDisabled - rightDisabled;
   });
 }
 

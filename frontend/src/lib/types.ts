@@ -129,6 +129,7 @@ export interface AppStatus {
 }
 
 export interface CodexDesktopStatus {
+  instance_id?: number | null;
   running: boolean;
   restart_supported: boolean;
 }

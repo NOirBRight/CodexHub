@@ -566,10 +566,19 @@ pub(crate) fn normalize_official_model_id(
 }
 
 fn static_official_model_ids() -> HashSet<String> {
-    ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+    [
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex-spark",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 pub(crate) fn known_official_model_ids(paths: &ConfigPaths) -> HashSet<String> {

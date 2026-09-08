@@ -129,7 +129,11 @@ export function providerWorkspaceReducer(
       return { ...state, officialModels: intent.models, officialModelSnapshot: intent.models };
     case "initializeOfficialModels": {
       if (state.officialCatalogLoaded) return state;
-      const models = sortOfficialModels(filterCodexVisibleOfficialModels(intent.models), state.officialModelOrderDraft);
+      const models = sortOfficialModels(
+        filterCodexVisibleOfficialModels(intent.models),
+        state.officialModelOrderDraft,
+        state.officialDisabledModelsDraft,
+      );
       return { ...state, officialModels: models, officialModelSnapshot: models, officialCatalogLoaded: true };
     }
     case "applyOfficialRefresh": {
@@ -201,6 +205,7 @@ export function providerWorkspaceReducer(
         : sortOfficialModels(
           snapshot ?? mergeOfficialModelSources(intent.catalogModels, intent.modelMetadata),
           officialModelOrderDraft,
+          officialDisabledModelsDraft,
         );
       const next = {
         ...state,

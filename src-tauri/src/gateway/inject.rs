@@ -11,6 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(in crate::gateway) const DEFAULT_MODEL: &str = "gpt-5.5";
 
 pub(in crate::gateway) const OFFICIAL_MODELS: &[(&str, &str, u32)] = &[
+    ("gpt-6-astra", "6 Astra", 1_000_000),
+    ("gpt-5.6-sol", "5.6 Sol", 353_400),
+    ("gpt-5.6-terra", "5.6 Terra", 272_000),
+    ("gpt-5.6-luna", "5.6 Luna", 272_000),
     ("gpt-5.5", "5.5", 258400),
     ("gpt-5.4", "5.4", 272000),
     ("gpt-5.4-mini", "5.4 Mini", 272000),

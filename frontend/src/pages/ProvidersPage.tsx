@@ -1,3 +1,4 @@
+import { CODEX_RESTART_CHANGED, readPendingCodexRestart, storePendingCodexRestart, codexRestartObserved, type PendingCodexRestart } from "../lib/providerWorkspace/restart";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { ProviderWorkspaceView } from "../components/workspace/ProviderWorkspaceView";
 import type { WorkspacePage } from "../components/workspace/WorkspaceShell";
@@ -188,6 +189,39 @@ function ProvidersPageImpl({
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(
     appStatusSnapshot,
   );
+  const [pendingCodexRestart, setPendingCodexRestart] = useState<PendingCodexRestart | null>(readPendingCodexRestart);
+  useEffect(() => {
+    const sync = () => setPendingCodexRestart(readPendingCodexRestart());
+    window.addEventListener(CODEX_RESTART_CHANGED, sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(CODEX_RESTART_CHANGED, sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
+  function updatePendingCodexRestart(value: PendingCodexRestart | null) {
+    storePendingCodexRestart(value);
+    setPendingCodexRestart(value);
+  }
+  useEffect(() => {
+    if (!pendingCodexRestart) return;
+    let active = true;
+    let loading = false;
+    const check = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const status = await api.getCodexDesktopStatus();
+        if (active && codexRestartObserved(pendingCodexRestart, status)) {
+          updatePendingCodexRestart(null);
+        }
+      } catch { /* Keep pending state until restart is confirmed. */ }
+      finally { loading = false; }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [pendingCodexRestart]);
   const [connectionPendingMode, setConnectionPendingMode] =
     useState<ConnectionMode | null>(null);
   const [codexTargetOwnerOverride, setCodexTargetOwnerOverride] = useState<
@@ -759,38 +793,12 @@ function ProvidersPageImpl({
     );
   }
 
-  async function authorizeCodexRestart(): Promise<boolean | null> {
-    const desktopStatus = await api.getCodexDesktopStatus();
-    if (!desktopStatus.running) {
-      return false;
-    }
-    if (!desktopStatus.restart_supported) {
-      throw new Error(t("providers.codexRestartUnsupported"));
-    }
-    const confirmed = await confirmAction({
-      cancelLabel: t("common.cancel"),
-      confirmLabel: t("providers.restartCodexAndContinue"),
-      message: t("providers.codexRestartConfirmation"),
-      title: t("providers.codexRestartTitle"),
-    });
-    return confirmed ? true : null;
-  }
-
   async function applyCodexHubConnection(
     nextMode: ConnectionMode,
     forceTakeover: boolean,
+    restartCodex = false,
   ) {
-    let restartCodex: boolean | null;
-    try {
-      restartCodex = await authorizeCodexRestart();
-    } catch (err) {
-      setError(messageFromError(err));
-      return;
-    }
-    if (restartCodex === null) {
-      return;
-    }
-    const actionLabel =
+    const actionLabel = restartCodex ? t("workspace.restartCodex") :
       nextMode === "custom"
         ? t("providers.connectingToHub")
         : t("providers.disconnectingFromHub");
@@ -798,6 +806,7 @@ function ProvidersPageImpl({
     setOperationBusy("route");
     const toastId = showToast(`${actionLabel}...`, "loading");
     try {
+      const desktopBefore = await api.getCodexDesktopStatus().catch(() => null);
       let status = forceTakeover
         ? await api.switchMode(nextMode, false, true, restartCodex)
         : await api.switchMode(nextMode, false, false, restartCodex);
@@ -823,6 +832,12 @@ function ProvidersPageImpl({
         status = refreshedStatus
           ? { ...refreshedStatus, codex_restart_result: codexRestartResult }
           : status;
+      }
+      if (codexRestartResult === "restarted" || codexRestartResult === "not_running"
+          || (!restartCodex && desktopBefore?.running === false)) {
+        updatePendingCodexRestart(null);
+      } else {
+        updatePendingCodexRestart({ mode: nextMode, instanceId: desktopBefore?.instance_id ?? null });
       }
       setCodexStatus(status);
       setCodexTargetOwnerOverride(
@@ -867,7 +882,7 @@ function ProvidersPageImpl({
               : t("providers.codexRouteChangedRestart", {
                   status: codexHubConnectionSuccessMessage(nextMode, tr),
                 }),
-        tone: "success",
+        tone: status.codex_restart_result === "switched_relaunch_failed" ? "error" : "success",
       });
     } catch (err) {
       const message = messageFromError(err);
@@ -1012,6 +1027,7 @@ function ProvidersPageImpl({
           officialId={OFFICIAL_ID}
           officialCount={officialModels.length}
           officialModels={officialModels}
+          officialDisabledModels={officialDisabledModels}
           officialEnabled={officialEnabledCount}
           officialIncluded={settings?.include_official_models ?? false}
           limits={officialUsageSnapshot?.limits ?? []}
@@ -1025,6 +1041,10 @@ function ProvidersPageImpl({
               ? (codexRouteOwnerLabel ?? undefined)
               : undefined
           }
+          restartPending={Boolean(pendingCodexRestart)}
+          onRestartCodex={() => {
+            if (pendingCodexRestart) void applyCodexHubConnection(codexStatus?.mode === "custom" ? "custom" : "official", false, true);
+          }}
           connectionBusy={Boolean(connectionPendingMode)}
           busy={Boolean(busy)}
           onToggleConnection={() => void toggleCodexHubConnection()}

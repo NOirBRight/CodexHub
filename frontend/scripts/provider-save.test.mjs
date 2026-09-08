@@ -169,3 +169,21 @@ test('discovered-model save keeps editing locked until publication finishes', as
   assert.equal((await pending).kind, 'ok');
   assert.equal(busy, null);
 });
+
+test('published provider change persists and announces the pending desktop restart', async () => {
+  const values = new Map();
+  const events = [];
+  globalThis.localStorage = { getItem: k => values.get(k), setItem: (k,v) => values.set(k,v), removeItem: k => values.delete(k) };
+  globalThis.window = { dispatchEvent: event => { events.push(event.type); } };
+  try {
+    assert.equal(await readCodexRestartNotice({
+      getStatus: async () => ({ mode: 'custom' }),
+      getCodexDesktopStatus: async () => ({ running: true, instance_id: 321 }),
+    }), 'required');
+    assert.deepEqual(JSON.parse(values.get('codexhub.pendingConnectionRestart.v1') || 'null'), {mode:'custom', instanceId:321});
+    assert.ok(events.includes('codexhub:pending-restart-changed'));
+  } finally {
+    delete globalThis.localStorage;
+    delete globalThis.window;
+  }
+});

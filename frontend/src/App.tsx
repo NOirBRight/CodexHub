@@ -20,7 +20,7 @@ import {
   useWorkspaceTheme,
   type WorkspacePage,
 } from "./components/workspace/WorkspaceShell";
-import { addDays, endOfDay, startOfDay } from "./lib/dateRange";
+import { usageQueryWindow, usageRangeSpan } from "./lib/dateRange";
 import { api, messageFromError } from "./lib/tauri";
 import { useAppUpdateLifecycle } from "./hooks/useAppUpdateLifecycle";
 import contract from "./lib/ui-contract.json";
@@ -78,12 +78,8 @@ type GatewayClientVersionCacheEntry = {
 
 const GATEWAY_CLIENT_VERSION_CACHE_KEY = "codexhub.gatewayClientVersions.v1";
 
-function defaultUsageWindow(): UsageQueryWindow {
-  const end = startOfDay(new Date());
-  return {
-    startTs: addDays(end, -6).toISOString(),
-    endTs: endOfDay(end).toISOString(),
-  };
+function defaultUsageWindow(now = new Date()): UsageQueryWindow {
+  return usageQueryWindow(usageRangeSpan("7d", { start: now, end: now }, now));
 }
 
 function readGatewayClientVersionCache(): Map<
@@ -347,6 +343,7 @@ export default function App() {
       request = loader()
         .then((data) => {
           startUiTransition(() => {
+            if (runtimeInflight.current[key] !== request) return;
             setRuntime((current) =>
               options?.apply
                 ? options.apply(current, data)
@@ -358,9 +355,10 @@ export default function App() {
         .catch((err) => {
           const message = messageFromError(err);
           startUiTransition(() => {
+            if (runtimeInflight.current[key] !== request) return;
             setRuntime((current) => setCacheError(current, key, message));
           });
-          if (!options?.quiet) {
+          if (!options?.quiet && runtimeInflight.current[key] === request) {
             setBanner(message);
           }
           throw err;
@@ -469,16 +467,21 @@ export default function App() {
     [runCachedRequest],
   );
 
+  const usageWindowKey = `${usageWindow.startTs}|${usageWindow.endTs}`;
+  const fetchedUsageWindowKey = useRef<string | null>(null);
+
   const refreshGatewayTelemetry = useCallback(
     async (options?: { force?: boolean }) => {
       if (!gatewayVisited || visibleTab !== "gateway") {
         return;
       }
+      const windowChanged = fetchedUsageWindowKey.current !== usageWindowKey;
+      fetchedUsageWindowKey.current = usageWindowKey;
       await Promise.allSettled([
         runCachedRequest(
           "gatewayUsageSnapshot",
           () => api.gatewayUsageSnapshot(usageWindow),
-          { force: options?.force, quiet: true, staleMs: 4000 },
+          { force: Boolean(options?.force) || windowChanged, quiet: true, staleMs: 4000 },
         ),
         runCachedRequest("gatewayEvents", () => api.gatewayRecentEvents(80), {
           force: options?.force,
@@ -487,7 +490,7 @@ export default function App() {
         }),
       ]);
     },
-    [gatewayVisited, runCachedRequest, usageWindow, visibleTab],
+    [gatewayVisited, runCachedRequest, usageWindow, usageWindowKey, visibleTab],
   );
 
   const refreshCoreRuntime = useCallback(

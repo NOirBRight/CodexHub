@@ -2220,3 +2220,8 @@
   font-size: 13px;
   font-weight: 500;
 }
+
+.ws-bridge-action > .ws-restart-pending {
+  color: var(--ws-warning);
+  background: color-mix(in srgb, var(--ws-warning) 10%, var(--ws-surface));
+}

@@ -645,8 +645,17 @@ pub fn switch_mode(
     force_takeover: Option<bool>,
     restart_codex: Option<bool>,
 ) -> Result<AppStatus, String> {
-    let coordinated = codex_desktop::coordinate_switch(restart_codex.unwrap_or(false), || {
-        config::switch_mode_with_takeover(&mode, auto_sync, force_takeover.unwrap_or(false))
+    let takeover = force_takeover.unwrap_or(false);
+    if !restart_codex.unwrap_or(false) {
+        // Connect/disconnect writes the overlay while Codex Desktop stays open.
+        // The UI discloses that a manual restart is required for the route to
+        // take effect; this path must not close or relaunch Codex.
+        return codex_desktop::serialize_config_writer(|| {
+            config::switch_mode_with_takeover(&mode, auto_sync, takeover)
+        });
+    }
+    let coordinated = codex_desktop::coordinate_switch(true, || {
+        config::switch_mode_with_takeover(&mode, auto_sync, takeover)
     })?;
     finish_app_status_switch(coordinated, proxy::status)
 }

@@ -66,6 +66,22 @@ impl UsageTimeWindow {
             end_ts: non_empty_owned(end_ts),
         }
     }
+
+    fn is_bounded(&self) -> bool {
+        self.start_ts.is_some() || self.end_ts.is_some()
+    }
+}
+
+fn usage_event_read_limit(
+    limit: Option<usize>,
+    window: &UsageTimeWindow,
+    unbounded_default: usize,
+) -> usize {
+    match limit {
+        Some(value) => value.clamp(1, USAGE_SNAPSHOT_EVENT_CAP),
+        None if window.is_bounded() => usize::MAX,
+        None => unbounded_default.clamp(1, USAGE_SNAPSHOT_EVENT_CAP),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -118,9 +134,7 @@ pub(super) fn gateway_usage_events(
     end_ts: Option<String>,
 ) -> Result<Vec<GatewayUsageEvent>, String> {
     let window = UsageTimeWindow::new(start_ts, end_ts);
-    let limit = limit
-        .unwrap_or(USAGE_SNAPSHOT_EVENT_CAP)
-        .clamp(1, USAGE_SNAPSHOT_EVENT_CAP);
+    let limit = usage_event_read_limit(limit, &window, 100);
     let paths = GatewayTelemetryPaths::runtime(codex_home);
     ensure_telemetry_sqlite_ready(&paths.sqlite_db)?;
     read_usage_events_from_sqlite_path_with_window(&paths.sqlite_db, limit, &window)
@@ -1010,9 +1024,7 @@ pub(crate) fn gateway_usage_snapshot_for_paths(
     ensure_telemetry_sqlite_ready(db_path)?;
     let window = UsageTimeWindow::new(start_ts, end_ts);
     let pricing = usage_pricing_by_model();
-    let event_limit = limit
-        .unwrap_or(USAGE_SNAPSHOT_EVENT_CAP)
-        .clamp(1, USAGE_SNAPSHOT_EVENT_CAP);
+    let event_limit = usage_event_read_limit(limit, &window, USAGE_SNAPSHOT_EVENT_CAP);
     let events = read_usage_events_from_sqlite_path_with_window(db_path, event_limit, &window)?;
     let summary =
         read_usage_summary_from_sqlite_path_with_pricing_and_window(db_path, &pricing, &window)?;
