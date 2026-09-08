@@ -401,7 +401,10 @@ class DiagnosticRecorderGatewayTests(TestCase):
             )
 
         self.assertIn(0.75, sock.timeouts)
-        self.assertIsNone(gateway_transport.explicit_transport_phase(raised.exception))
+        self.assertEqual(
+            gateway_transport.explicit_transport_phase(raised.exception),
+            "response_headers",
+        )
 
     def test_official_pooled_read_translation_preserves_phase_and_disposition(self) -> None:
         inner = TimeoutError("simulated response body timeout")
