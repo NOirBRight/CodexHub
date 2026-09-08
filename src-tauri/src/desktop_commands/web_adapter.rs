@@ -81,13 +81,6 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
             .map_err(|error| format!("invalid settings argument: {error}"))?;
             to_value(config::save_settings(settings))
         }
-        Command::GetCodexContextGuardStatus => to_value(config::get_codex_context_guard_status()),
-        Command::SetCodexContextGuard => {
-            let enabled = bool_arg(args, "enabled")?;
-            let restart_codex =
-                registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
-            to_value(crate::set_codex_context_guard(enabled, Some(restart_codex)))
-        }
         Command::CancelOfficialModelRefresh => {
             let request_id = registry_optional_string_arg(args, command, "request_id")
                 .ok_or_else(|| "request_id is required".to_string())?;
@@ -458,12 +451,6 @@ fn registry_optional_u64_arg(args: &Value, command: Command, canonical: &str) ->
 fn registry_optional_bool_arg(args: &Value, command: Command, canonical: &str) -> Option<bool> {
     let names = registry_argument_names(command, canonical);
     optional_bool_arg(args, &names)
-}
-
-fn bool_arg(args: &Value, name: &str) -> Result<bool, String> {
-    args.get(name)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| format!("{name} argument is required"))
 }
 
 pub(crate) fn optional_string_arg(args: &Value, names: &[&str]) -> Option<String> {

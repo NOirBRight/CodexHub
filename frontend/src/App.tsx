@@ -241,8 +241,6 @@ function gatewayRuntimeSettingsChanged(
       next.gateway_auto_retry_max_attempts ||
     previous.gateway_image_proxy_enabled !== next.gateway_image_proxy_enabled ||
     previous.gateway_image_proxy_model !== next.gateway_image_proxy_model ||
-    previous.openai_context_guard_enabled !==
-      next.openai_context_guard_enabled ||
     previous.proxy_port !== next.proxy_port ||
     previous.gateway_request_timeout_seconds !==
       next.gateway_request_timeout_seconds
@@ -277,7 +275,6 @@ export default function App() {
   const { confirm: confirmAction, dialog: confirmDialog } = useConfirmDialog();
   const { showToast, updateToast } = useToasts();
   const [workspacePage, setWorkspacePage] = useState<WorkspacePage>("overview");
-  const [openOfficialRequest, setOpenOfficialRequest] = useState(0);
   const [settingsCategory, setSettingsCategory] = useState("general");
   const theme = useWorkspaceTheme();
   const [visibleTab, setVisibleTab] = useState<TabId>("codexhub");
@@ -1002,7 +999,6 @@ export default function App() {
       >
         <WindowResizeHandles />
         <ProvidersPage
-          openOfficialRequest={openOfficialRequest}
           desktopPage={workspacePage}
           onNavigate={navigateWorkspace}
           appFlavor={appFlavor}
@@ -1082,7 +1078,6 @@ export default function App() {
                 workspacePage === "gateway" ||
                 (workspacePage === "settings" && settingsCategory !== "diagnostics")
               }
-              onOpenContextGuard={() => setOpenOfficialRequest((n) => n + 1)}
               inlineCategory={
                 workspacePage === "gateway" ? "gateway" : settingsCategory
               }

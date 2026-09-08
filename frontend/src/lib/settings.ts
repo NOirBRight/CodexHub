@@ -24,7 +24,6 @@ const DEFAULT_SETTINGS: Settings = {
   gateway_auto_retry_max_attempts: 30,
   gateway_image_proxy_enabled: false,
   gateway_image_proxy_model: "",
-  openai_context_guard_enabled: false,
   gateway_fast_model_variants: DEFAULT_FAST_MODEL_VARIANTS,
   official_disabled_models: [],
   official_model_sort_order: [],
@@ -34,10 +33,13 @@ const DEFAULT_SETTINGS: Settings = {
 
 type LegacySettings = Partial<Settings> & {
   auto_start_proxy?: boolean;
+  openai_context_guard_enabled?: boolean;
 };
 
 export function normalizeSettings(settings: LegacySettings | null | undefined): Settings {
-  const source = settings ?? {};
+  const source = { ...settings };
+  // Retired setting must not be written back by older persisted preferences.
+  delete source.openai_context_guard_enabled;
   return {
     ...DEFAULT_SETTINGS,
     ...source,

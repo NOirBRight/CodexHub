@@ -1183,7 +1183,6 @@ fn official_gateway_models_fail_closed_without_a_published_context_limit() {
 
     let guarded = official_models_from_metadata(
         &Settings {
-            openai_context_guard_enabled: true,
             ..Settings::default()
         },
         Some(vec![Model {
@@ -1197,7 +1196,7 @@ fn official_gateway_models_fail_closed_without_a_published_context_limit() {
 }
 
 #[test]
-fn official_gateway_models_are_available_with_guard_disabled_when_safe_snapshot_exists() {
+fn official_gateway_models_are_available_when_published_snapshot_exists() {
     let settings = Settings::default();
     let published_contexts = published_context_windows(&[("gpt-5.6-terra", 272_000)]);
     let models = official_models_from_metadata(
@@ -1257,13 +1256,12 @@ fn gateway_models_exclude_official_and_include_external_when_safe_snapshot_is_un
 }
 
 #[test]
-fn openai_context_guard_clamps_gateway_official_models_without_changing_external_models() {
+fn official_gateway_models_keep_full_published_windows_without_a_cost_cap() {
     let settings = Settings {
-        openai_context_guard_enabled: true,
         ..Settings::default()
     };
     let published_contexts =
-        published_context_windows(&[("gpt-5.6-sol", 272_000), ("gpt-5.3-codex-spark", 128_000)]);
+        published_context_windows(&[("gpt-5.6-sol", 1_000_000), ("gpt-5.3-codex-spark", 128_000)]);
     let official = official_models_from_metadata(
         &settings,
         Some(vec![
@@ -1281,7 +1279,7 @@ fn openai_context_guard_clamps_gateway_official_models_without_changing_external
         &published_contexts,
     );
 
-    assert_eq!(official[0].context_window, Some(272_000));
+    assert_eq!(official[0].context_window, Some(1_000_000));
     assert_eq!(official[1].context_window, Some(128_000));
 
     let providers: Vec<Provider> = serde_json::from_value(json!([{

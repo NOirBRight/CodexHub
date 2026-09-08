@@ -45,7 +45,6 @@ API 余额与请求数字是示例数据，不代表真实账户。自定义或�
 | auto_start_gateway | SettingsDrawer | 通用 → 打开软件后启动 Gateway |
 | include_official_models | SettingsDrawer | Codex 与客户端 → 包含官方模型，影响模型统计和概览可见性 |
 | auto_sync_clients | SettingsDrawer | Codex 与客户端 → 自动同步已绑定客户端 |
-| openai_context_guard_enabled | ProvidersPage | Codex 与客户端 → 上下文保护；全局覆盖冲突 / 状态未知预览 |
 | unified_codex_history、手动历史同步 | SettingsDrawer | Codex 与客户端 → 历史对话；忙碌、目录占用、延期、归属冲突、迁移确认、写入失败与重启反馈 |
 | gateway_bind_address | Settings / runtime contract | Gateway → 只读 127.0.0.1 |
 | proxy_port | GatewayPage | Gateway → 端口，整数 1024–65535，保存后同步到服务条和接入端点 |

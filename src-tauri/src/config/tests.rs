@@ -1,11 +1,11 @@
 use super::{
     apply_history_sync_result, codex_overlay_owner, get_bundled_providers_with_paths,
-    get_codex_context_guard_status_with_paths, get_providers_with_paths, get_settings_with_paths,
+    get_providers_with_paths, get_settings_with_paths,
     managed_codex_projection_transaction_paths_with_paths, merge_post_switch_gateway_status,
     migrate_legacy_context_guard_with_paths, republish_managed_codex_context_budget_with_paths,
-    save_providers_with_paths, save_settings_with_paths, set_codex_context_guard_with_paths,
+    save_providers_with_paths, save_settings_with_paths,
     switch_mode_with_paths, switch_mode_with_paths_takeover_as_owner, takeover_metadata_path,
-    top_level_model_is_official, CommandOutcome, CommandRunner, ConfigPaths, ProcessCommandRunner,
+    CommandOutcome, CommandRunner, ConfigPaths, ProcessCommandRunner,
 };
 use crate::{Model, Provider, Settings, ToolProtocol, ToolSurfaceStrategy, UpstreamFormat};
 use std::cell::RefCell;
@@ -408,6 +408,20 @@ fn bundled_catalog_prefers_compile_time_repo_over_exe_copy() {
 }
 
 #[test]
+fn retired_context_guard_setting_is_ignored_and_not_saved() {
+    let root = temp_root("retired-context-guard-setting");
+    let paths = test_paths(&root);
+    fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+    fs::write(paths.settings_path(), r#"{"openai_context_guard_enabled":true,"proxy_port":4555}"#).unwrap();
+    let settings = get_settings_with_paths(&paths).expect("legacy settings load");
+    assert_eq!(settings.proxy_port, 4555);
+    save_settings_with_paths(settings, &paths).expect("settings save");
+    let written = fs::read_to_string(paths.settings_path()).unwrap();
+    assert!(!written.contains("openai_context_guard_enabled"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn settings_missing_file_returns_defaults_and_roundtrips_saved_values() {
     let root = temp_root("settings-roundtrip");
     let paths = test_paths(&root);
@@ -439,7 +453,6 @@ fn settings_missing_file_returns_defaults_and_roundtrips_saved_values() {
         gateway_auto_retry_max_attempts: 7,
         gateway_image_proxy_enabled: true,
         gateway_image_proxy_model: "minimax-cn/MiniMax-M3".to_string(),
-        openai_context_guard_enabled: true,
         gateway_fast_model_variants: vec!["gpt-5.5".to_string()],
         official_disabled_models: vec!["gpt-5.4-mini".to_string()],
         official_model_sort_order: vec!["gpt-5.4".to_string(), "gpt-5.5".to_string()],
@@ -458,7 +471,6 @@ fn settings_missing_file_returns_defaults_and_roundtrips_saved_values() {
     assert!(written.contains("\"gateway_auto_retry_max_attempts\": 7"));
     assert!(written.contains("\"gateway_image_proxy_enabled\": true"));
     assert!(written.contains("\"gateway_image_proxy_model\": \"minimax-cn/MiniMax-M3\""));
-    assert!(written.contains("\"openai_context_guard_enabled\": true"));
     assert!(written.contains("\"gateway_fast_model_variants\""));
     assert!(written.contains("\"official_disabled_models\""));
     assert!(written.contains("\"official_model_sort_order\""));
@@ -1333,75 +1345,6 @@ fn committed_restore_cleanup_warning_is_exposed_in_switch_status() {
 }
 
 #[test]
-fn context_guard_command_keeps_codex_and_gateway_state_in_sync() {
-    let root = temp_root("context-guard-command");
-    let paths = test_paths(&root);
-    let status_json =
-        r#"{"enabled":true,"model_context_window":272000,"model_auto_compact_token_limit":240000}"#;
-    let set_runner = RecordingRunner::sequence(vec![CommandOutcome {
-        code: Some(0),
-        stdout: status_json.to_string(),
-        stderr: String::new(),
-    }]);
-
-    let status =
-        set_codex_context_guard_with_paths(true, &paths, Path::new("python-test"), &set_runner)
-            .expect("context guard enabled");
-
-    assert!(status.enabled);
-    assert!(status.codex_enabled);
-    assert!(status.gateway_enabled);
-    assert_eq!(status.model_context_window, Some(272_000));
-    assert_eq!(status.model_auto_compact_token_limit, Some(240_000));
-    assert!(!status.global_override_conflict);
-    assert!(
-        get_settings_with_paths(&paths)
-            .expect("saved settings")
-            .openai_context_guard_enabled
-    );
-    let set_commands = set_runner.commands.borrow();
-    assert_eq!(set_commands.len(), 1);
-    assert_contains_sequence(
-        &set_commands[0].args,
-        &[
-            "context-guard-set",
-            "--config",
-            "--backup",
-            "--state",
-            "--enabled",
-            "true",
-        ],
-    );
-    drop(set_commands);
-
-    let get_runner = RecordingRunner::sequence(vec![CommandOutcome {
-        code: Some(0),
-        stdout: status_json.to_string(),
-        stderr: String::new(),
-    }]);
-    let refreshed =
-        get_codex_context_guard_status_with_paths(&paths, Path::new("python-test"), &get_runner)
-            .expect("context guard status");
-    assert!(refreshed.enabled);
-    assert_contains_sequence(
-        &get_runner.commands.borrow()[0].args,
-        &["context-guard-status", "--config"],
-    );
-}
-
-#[test]
-fn runtime_projection_recognizes_only_an_explicit_official_top_level_model() {
-    assert!(top_level_model_is_official("model = \"gpt-5.6-terra\"\n"));
-    assert!(top_level_model_is_official(
-        "model = 'openai/gpt-5.6-terra'\n"
-    ));
-    assert!(!top_level_model_is_official("model = \"volc/glm-5.2\"\n"));
-    assert!(!top_level_model_is_official(
-        "[profiles.work]\nmodel = \"gpt-5.6-terra\"\n"
-    ));
-}
-
-#[test]
 fn refreshed_budget_reapplies_the_owned_codex_overlay_from_the_published_catalog() {
     let root = temp_root("republish-owned-context-budget");
     let paths = test_paths(&root);
@@ -1628,10 +1571,6 @@ fn assert_settings_eq(left: &Settings, right: &Settings) {
     assert_eq!(
         left.gateway_image_proxy_model,
         right.gateway_image_proxy_model
-    );
-    assert_eq!(
-        left.openai_context_guard_enabled,
-        right.openai_context_guard_enabled
     );
     assert_eq!(
         left.gateway_fast_model_variants,

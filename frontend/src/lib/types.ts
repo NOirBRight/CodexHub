@@ -556,7 +556,6 @@ export interface Settings {
   gateway_auto_retry_max_attempts: number;
   gateway_image_proxy_enabled: boolean;
   gateway_image_proxy_model: string;
-  openai_context_guard_enabled: boolean;
   gateway_fast_model_variants: string[];
   official_disabled_models: string[];
   official_model_sort_order: string[];
@@ -568,16 +567,6 @@ export interface AutostartStatus {
   enabled: boolean;
   authoritative: boolean;
   state: "enabled" | "missing" | "malformed-or-stale" | "unsupported-readback";
-}
-
-export interface CodexContextGuardStatus {
-  enabled: boolean;
-  codex_enabled: boolean;
-  gateway_enabled: boolean;
-  model_context_window?: number | null;
-  model_auto_compact_token_limit?: number | null;
-  global_override_conflict?: boolean;
-  codex_restart_result?: "not_running" | "restarted" | "switch_failed_reopened" | "switched_relaunch_failed" | null;
 }
 
 export type TabId = "codexhub" | "gateway";

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
 import re
@@ -23,13 +23,11 @@ from config_overlay import (
     _overlay_marks_managed_catalog,
     _selected_official_context_budget,
     apply_overlay,
-    context_guard_status,
     inject_unified_history_config,
     inspect_unified_history_config,
     main as config_overlay_main,
     restore_overlay,
     catalog_config_value,
-    set_context_guard,
     set_feature_flags,
     strip_section,
     strip_top_level_keys,
@@ -70,6 +68,19 @@ class DeterministicCompactionReplay:
 
 
 class ConfigOverlayTests(unittest.TestCase):
+    def test_retired_context_guard_commands_are_rejected_without_writes(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = Path(root) / "config.toml"
+            original = "model_context_window = 1000000\n"
+            config.write_text(original, encoding="utf-8")
+            for command in ("context-guard-status", "context-guard-set"):
+                with self.subTest(command=command):
+                    with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                        config_overlay_main([command, "--config", str(config)])
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertEqual(config.read_text(encoding="utf-8"), original)
+                    self.assertEqual(list(Path(root).iterdir()), [config])
+
     def _agents_config(
         self,
         *,
@@ -949,7 +960,7 @@ class ConfigOverlayTests(unittest.TestCase):
             migrated_state = json.loads(state_path.read_text(encoding="utf-8"))
             for target in ("config", "backup"):
                 self.assertIsNone(migrated_state[target]["managed"]["model_context_window"])
-                self.assertTrue(migrated_state[target]["enabled"])
+                self.assertNotIn("enabled", migrated_state[target])
 
             restore_overlay(config_path, backup_path)
             restored = config_path.read_text(encoding="utf-8")
@@ -982,8 +993,6 @@ class ConfigOverlayTests(unittest.TestCase):
                 self.assertIn('model_reasoning_effort = "high"', text)
             self.assertFalse(state_path.exists())
 
-            status = context_guard_status(config_path, state_path)
-            self.assertTrue(status["global_override_conflict"])
 
     def test_startup_migrates_all_channel_backups_before_clearing_shared_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1043,54 +1052,6 @@ class ConfigOverlayTests(unittest.TestCase):
             migrated_state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertIsNone(migrated_state["backup"]["managed"]["model_context_window"])
 
-    def test_failed_official_guard_enable_does_not_migrate_config_or_state(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            config_path = tmp / "config.toml"
-            backup_path = tmp / "config.backup.toml"
-            state_path = tmp / "context-guard-state.json"
-            catalog_path = tmp / "catalog.json"
-            config_text = (
-                f"{MARKER_BEGIN}\n"
-                "# owner = release\n"
-                "model_context_window = 272000\n"
-                "model_auto_compact_token_limit = 244800\n"
-                f"{MARKER_END}\n"
-                'model = "gpt-5.6-terra"\n'
-            )
-            state = {
-                "config": {
-                    "previous": {
-                        "model_context_window": "400000",
-                        "model_auto_compact_token_limit": "360000",
-                    },
-                    "managed": {
-                        "model_context_window": "272000",
-                        "model_auto_compact_token_limit": "244800",
-                    },
-                }
-            }
-            config_path.write_text(config_text, encoding="utf-8")
-            backup_path.write_text(config_text, encoding="utf-8")
-            state_path.write_text(json.dumps(state), encoding="utf-8")
-            catalog_path.write_text("{not json", encoding="utf-8")
-            before = {
-                path: path.read_text(encoding="utf-8")
-                for path in (config_path, backup_path, state_path)
-            }
-
-            with self.assertRaisesRegex(ValueError, "safe current Official context budget"):
-                set_context_guard(
-                    config_path,
-                    backup_path,
-                    state_path,
-                    enabled=True,
-                    catalog_path=catalog_path,
-                )
-
-            self.assertEqual(config_path.read_text(encoding="utf-8"), before[config_path])
-            self.assertEqual(backup_path.read_text(encoding="utf-8"), before[backup_path])
-            self.assertEqual(state_path.read_text(encoding="utf-8"), before[state_path])
 
     def test_migration_restores_previous_user_override_from_legacy_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1255,8 +1216,6 @@ class ConfigOverlayTests(unittest.TestCase):
 
             self.assertIn("model_context_window = 600000", config_path.read_text(encoding="utf-8"))
             self.assertIn("model_context_window = 600000", backup_path.read_text(encoding="utf-8"))
-            status = context_guard_status(config_path, state_path)
-            self.assertTrue(status["global_override_conflict"])
 
     def test_restore_preserves_user_context_override_added_while_connected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2350,311 +2309,13 @@ class ConfigOverlayTests(unittest.TestCase):
             self.assertNotIn("[model_providers.custom]", updated)
             self.assertIn("[features]", updated)
 
-    def test_context_guard_does_not_write_global_values_and_preserves_user_overrides(self):
-        original = "\n".join(
-            [
-                "model_context_window = 400000",
-                "model_auto_compact_token_limit = 360000",
-                'model_reasoning_effort = "high"',
-                "",
-                "[features]",
-                "hooks = true",
-                "",
-            ]
-        )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            config_path = tmp / "config.toml"
-            backup_path = tmp / "config.backup.toml"
-            state_path = tmp / "context-guard-state.json"
-            config_path.write_text(original, encoding="utf-8")
-            backup_path.write_text(original, encoding="utf-8")
-            catalog_path = self._official_budget_catalog(tmp)
 
-            enabled = set_context_guard(
-                config_path,
-                backup_path,
-                state_path,
-                enabled=True,
-                catalog_path=catalog_path,
-            )
 
-            self.assertTrue(enabled["enabled"])
-            self.assertEqual(enabled["model_context_window"], 400_000)
-            self.assertEqual(enabled["model_auto_compact_token_limit"], 360_000)
-            self.assertTrue(enabled["global_override_conflict"])
-            for path in (config_path, backup_path):
-                text = path.read_text(encoding="utf-8")
-                self.assertIn("model_context_window = 400000", text)
-                self.assertIn("model_auto_compact_token_limit = 360000", text)
-                self.assertIn('model_reasoning_effort = "high"', text)
-                self.assertIn("[features]", text)
 
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            for target in ("config", "backup"):
-                self.assertEqual(state[target]["previous"]["model_context_window"], "400000")
-                self.assertEqual(
-                    state[target]["previous"]["model_auto_compact_token_limit"],
-                    "360000",
-                )
 
-            disabled = set_context_guard(config_path, backup_path, state_path, enabled=False)
 
-            self.assertFalse(disabled["enabled"])
-            self.assertFalse(state_path.exists())
-            for path in (config_path, backup_path):
-                text = path.read_text(encoding="utf-8")
-                self.assertIn("model_context_window = 400000", text)
-                self.assertIn("model_auto_compact_token_limit = 360000", text)
-                self.assertIn('model_reasoning_effort = "high"', text)
 
-    def test_context_guard_fails_closed_for_official_without_safe_catalog_budget(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            config_path = tmp / "config.toml"
-            backup_path = tmp / "config.backup.toml"
-            state_path = tmp / "context-guard-state.json"
-            catalog_path = tmp / "catalog.json"
-            config_path.write_text('model = "gpt-5.6-terra"\n', encoding="utf-8")
-            catalog_path.write_text('{"models": []}', encoding="utf-8")
-
-            with self.assertRaisesRegex(ValueError, "safe current Official context budget"):
-                set_context_guard(
-                    config_path,
-                    backup_path,
-                    state_path,
-                    enabled=True,
-                    catalog_path=catalog_path,
-                )
-
-            with self.assertRaisesRegex(ValueError, "safe current Official context budget"):
-                set_context_guard(
-                    config_path,
-                    backup_path,
-                    state_path,
-                    enabled=True,
-                )
-
-            self.assertEqual(
-                config_path.read_text(encoding="utf-8"),
-                'model = "gpt-5.6-terra"\n',
-            )
-            self.assertFalse(state_path.exists())
-
-    def test_context_guard_keeps_an_explicit_official_override_as_a_conflict(self):
-        original = "\n".join(
-            [
-                'model = "gpt-5.6-terra"',
-                "model_context_window = 400000",
-                "model_auto_compact_token_limit = 360000",
-                "",
-            ]
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            config_path = tmp / "config.toml"
-            backup_path = tmp / "config.backup.toml"
-            state_path = tmp / "context-guard-state.json"
-            catalog_path = self._official_budget_catalog(tmp)
-            config_path.write_text(original, encoding="utf-8")
-            backup_path.write_text(original, encoding="utf-8")
-
-            set_context_guard(
-                config_path,
-                backup_path,
-                state_path,
-                enabled=True,
-                catalog_path=catalog_path,
-            )
-            disabled = set_context_guard(
-                config_path,
-                backup_path,
-                state_path,
-                enabled=False,
-                catalog_path=catalog_path,
-            )
-
-            self.assertFalse(disabled["enabled"])
-            for path in (config_path, backup_path):
-                text = path.read_text(encoding="utf-8")
-                self.assertIn("model_context_window = 400000", text)
-                self.assertIn("model_auto_compact_token_limit = 360000", text)
-
-    def test_context_guard_disable_keeps_a_third_party_backup_unchanged(self):
-        official = (
-            'model = "gpt-5.6-terra"\n'
-            "model_context_window = 400000\n"
-            "model_auto_compact_token_limit = 360000\n"
-        )
-        third_party_backup = (
-            'model = "volc/glm-5.2"\n'
-            "model_context_window = 1000000\n"
-            "model_auto_compact_token_limit = 900000\n"
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            config_path = tmp / "config.toml"
-            backup_path = tmp / "config.backup.toml"
-            state_path = tmp / "context-guard-state.json"
-            catalog_path = self._official_budget_catalog(tmp)
-            config_path.write_text(official, encoding="utf-8")
-            backup_path.write_text(third_party_backup, encoding="utf-8")
-
-            set_context_guard(
-                config_path,
-                backup_path,
-                state_path,
-                enabled=True,
-                catalog_path=catalog_path,
-            )
-            set_context_guard(
-                config_path,
-                backup_path,
-                state_path,
-                enabled=False,
-                catalog_path=catalog_path,
-            )
-
-            self.assertIn("model_context_window = 400000", config_path.read_text(encoding="utf-8"))
-            restored_backup = backup_path.read_text(encoding="utf-8")
-            self.assertIn('model = "volc/glm-5.2"', restored_backup)
-            self.assertIn("model_context_window = 1000000", restored_backup)
-            self.assertIn("model_auto_compact_token_limit = 900000", restored_backup)
-
-    def test_context_guard_disable_removes_managed_values_when_no_previous_values_exist(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            config_path = tmp / "config.toml"
-            backup_path = tmp / "config.backup.toml"
-            state_path = tmp / "context-guard-state.json"
-            config_path.write_text("[features]\nhooks = true\n", encoding="utf-8")
-            catalog_path = self._official_budget_catalog(tmp)
-
-            set_context_guard(
-                config_path,
-                backup_path,
-                state_path,
-                enabled=True,
-                catalog_path=catalog_path,
-            )
-            self.assertTrue(context_guard_status(config_path, state_path)["enabled"])
-
-            set_context_guard(config_path, backup_path, state_path, enabled=False)
-            text = config_path.read_text(encoding="utf-8")
-            self.assertNotIn("model_context_window", text)
-            self.assertNotIn("model_auto_compact_token_limit", text)
-            self.assertIn("[features]", text)
-            self.assertIn("hooks = true", text)
-
-    def test_context_guard_restores_distinct_live_and_backup_values(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            config_path = tmp / "config.toml"
-            backup_path = tmp / "config.backup.toml"
-            state_path = tmp / "context-guard-state.json"
-            config_path.write_text(
-                "model_context_window = 500000\n"
-                "model_auto_compact_token_limit = 450000\n",
-                encoding="utf-8",
-            )
-            backup_path.write_text(
-                "model_context_window = 400000\n"
-                "model_auto_compact_token_limit = 360000\n",
-                encoding="utf-8",
-            )
-            catalog_path = self._official_budget_catalog(tmp)
-
-            set_context_guard(
-                config_path,
-                backup_path,
-                state_path,
-                enabled=True,
-                catalog_path=catalog_path,
-            )
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            self.assertEqual(state["config"]["previous"]["model_context_window"], "500000")
-            self.assertEqual(state["backup"]["previous"]["model_context_window"], "400000")
-
-            set_context_guard(config_path, backup_path, state_path, enabled=False)
-
-            self.assertIn(
-                "model_context_window = 500000",
-                config_path.read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                "model_auto_compact_token_limit = 450000",
-                config_path.read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                "model_context_window = 400000",
-                backup_path.read_text(encoding="utf-8"),
-            )
-            self.assertIn(
-                "model_auto_compact_token_limit = 360000",
-                backup_path.read_text(encoding="utf-8"),
-            )
-
-    def test_context_guard_disable_preserves_a_value_changed_after_enable(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            config_path = tmp / "config.toml"
-            backup_path = tmp / "config.backup.toml"
-            state_path = tmp / "context-guard-state.json"
-            config_path.write_text("model_context_window = 500000\n", encoding="utf-8")
-            catalog_path = self._official_budget_catalog(tmp)
-
-            set_context_guard(
-                config_path,
-                backup_path,
-                state_path,
-                enabled=True,
-                catalog_path=catalog_path,
-            )
-            changed = config_path.read_text(encoding="utf-8").replace(
-                "model_context_window = 500000",
-                "model_context_window = 600000",
-            )
-            config_path.write_text(changed, encoding="utf-8")
-
-            set_context_guard(config_path, backup_path, state_path, enabled=False)
-            text = config_path.read_text(encoding="utf-8")
-            self.assertIn("model_context_window = 600000", text)
-            self.assertNotIn("model_auto_compact_token_limit", text)
-
-    def test_context_guard_does_not_claim_unmarked_preexisting_values(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            config_path = tmp / "config.toml"
-            backup_path = tmp / "config.backup.toml"
-            state_path = tmp / "context-guard-state.json"
-            config_path.write_text(
-                "\n".join(
-                    [
-                        "model_context_window = 272000",
-                        "model_auto_compact_token_limit = 240000",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            catalog_path = self._official_budget_catalog(tmp)
-
-            set_context_guard(
-                config_path,
-                backup_path,
-                state_path,
-                enabled=True,
-                catalog_path=catalog_path,
-            )
-            set_context_guard(config_path, backup_path, state_path, enabled=False)
-
-            self.assertFalse(context_guard_status(config_path, state_path)["enabled"])
-            text = config_path.read_text(encoding="utf-8")
-            self.assertIn("model_context_window = 272000", text)
-            self.assertIn("model_auto_compact_token_limit = 240000", text)
 
 
 if __name__ == "__main__":

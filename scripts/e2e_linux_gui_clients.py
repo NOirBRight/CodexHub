@@ -126,7 +126,6 @@ def write_isolated_fixtures(root: Path) -> tuple[Path, Path]:
                 "gateway_auto_retry_max_attempts": 30,
                 "gateway_image_proxy_enabled": False,
                 "gateway_image_proxy_model": "",
-                "openai_context_guard_enabled": False,
                 "gateway_fast_model_variants": ["gpt-5.5", "gpt-5.4"],
                 "official_disabled_models": [],
                 "official_model_sort_order": [],

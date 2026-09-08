@@ -62,9 +62,7 @@ import {
 import type {
   AppFlavorInfo,
   AppStatus,
-  CodexContextGuardStatus,
   GatewayStatus,
-  GatewayClientSyncSummary,
   Model,
   OpenAIUsageSnapshot,
   Provider,
@@ -78,7 +76,6 @@ export type CodexSwitchRequest = { id: number; mode: ConnectionMode };
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
 type ProvidersPageProps = {
-  openOfficialRequest?: number;
   desktopPage?: WorkspacePage;
   onNavigate?: (page: WorkspacePage) => void;
   children?: ReactNode;
@@ -103,14 +100,12 @@ function ProvidersPageImpl({
   desktopPage,
   onNavigate,
   children,
-  openOfficialRequest,
   appFlavor,
   appStatus: appStatusSnapshot,
   catalogModels,
   gatewayStatus: gatewayStatusSnapshot,
   modelMetadata,
   onGatewayChanged,
-  onRefreshClients,
   onProvidersChanged,
   onSettingsChanged,
   onStartProxy,
@@ -168,7 +163,6 @@ function ProvidersPageImpl({
     settingsDraft,
   } = workspace.state;
   const {
-    stageSettings,
     updateForm,
     setProbeResult,
     setDiscoveryError,
@@ -659,17 +653,6 @@ function ProvidersPageImpl({
     }
   }
 
-  function reflectContextGuardSetting(enabled: boolean) {
-    stageSettings((current) => {
-      if (!current) {
-        return current;
-      }
-      const next = { ...current, openai_context_guard_enabled: enabled };
-      onSettingsChanged?.(next);
-      return next;
-    });
-  }
-
   async function updateProvider(next: Provider, successMessage?: string) {
     const result = await workspace.saveProvider(next, { successMessage });
     if (result.kind === "error") throw new Error(result.message);
@@ -1019,12 +1002,6 @@ function ProvidersPageImpl({
     }
   }
 
-  useEffect(() => {
-    if (!openOfficialRequest) return;
-    selectProvider(OFFICIAL_ID);
-    setEditorOpen(true);
-  }, [openOfficialRequest]);
-
   return (
     <>
       {desktopPage && (
@@ -1187,13 +1164,11 @@ function ProvidersPageImpl({
                         settings?.include_official_models ?? false
                       }
                       authIssue={gatewayStatus?.codex_auth?.issue ?? null}
-                      onContextGuardChanged={reflectContextGuardSetting}
                       onOpenCodexApp={() => void openCodexAppForLogin()}
                       onRefresh={(options) =>
                         refreshOfficialModelsAndCollaborationState(options)
                       }
                       onCancelRefresh={cancelOfficialModelRefresh}
-                      onRefreshClients={onRefreshClients}
                       onRefreshAuth={() => void refreshCodexAuthStatus()}
                       onRefreshUsage={() =>
                         void loadOfficialOpenAIUsage(true, true)
@@ -1203,7 +1178,6 @@ function ProvidersPageImpl({
                       onToggleModel={toggleOfficialModel}
                       dirty={officialModelDraftDirty}
                       saveBusy={busy === "save"}
-                      syncBoundClients={settings?.auto_sync_clients ?? true}
                       usageBusy={officialUsageBusy}
                       usageError={officialUsageError}
                       usageHidden={officialUsageHidden}
@@ -1875,18 +1849,15 @@ function OfficialDetail({
   onOfficialCollaborationOverridesChanged,
   officialDisabledModels,
   officialIncluded,
-  onContextGuardChanged,
   onOpenCodexApp,
   onRefresh,
   onCancelRefresh,
-  onRefreshClients,
   onRefreshAuth,
   onRefreshUsage,
   onReorder,
   onSave,
   onToggleModel,
   saveBusy,
-  syncBoundClients,
   usageBusy,
   usageError,
   usageHidden,
@@ -1905,21 +1876,18 @@ function OfficialDetail({
   ) => void;
   officialDisabledModels: string[];
   officialIncluded: boolean;
-  onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
   onRefresh: (options?: {
     quiet?: boolean;
     throwOnError?: boolean;
   }) => Promise<boolean>;
   onCancelRefresh: () => void;
-  onRefreshClients?: () => Promise<void>;
   onRefreshAuth: () => void;
   onRefreshUsage: () => void;
   onReorder: (models: Model[]) => void;
   onSave: () => void;
   onToggleModel: (modelId: string, enabled: boolean) => void;
   saveBusy: boolean;
-  syncBoundClients: boolean;
   usageBusy: boolean;
   usageError: string | null;
   usageHidden: boolean;
@@ -1963,136 +1931,6 @@ function OfficialDetail({
       setSignOutBusy(false);
     }
   }
-  const [contextGuardStatus, setContextGuardStatus] =
-    useState<CodexContextGuardStatus | null>(null);
-  const [contextGuardBusy, setContextGuardBusy] = useState(false);
-  // Gateway publishes the authoritative per-model window from the Official
-  // catalog.  A user-owned Codex top-level override is Desktop-only and must
-  // not shrink the Gateway display when the conflict diagnostic is active.
-  const displayedGatewayContextById = gatewayContextById;
-
-  useEffect(() => {
-    let active = true;
-    void api
-      .getCodexContextGuardStatus()
-      .then((status) => {
-        if (active) {
-          setContextGuardStatus(status);
-        }
-      })
-      .catch((err) => {
-        if (active) {
-          showToast(
-            t("providers.contextGuardStatusFailed", {
-              message: messageFromError(err),
-            }),
-            "error",
-          );
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [showToast, t]);
-
-  async function toggleContextGuard(enabled: boolean) {
-    if (contextGuardBusy) {
-      return;
-    }
-    setContextGuardBusy(true);
-    const toastId = showToast(
-      enabled
-        ? t("providers.enablingContextGuard")
-        : t("providers.disablingContextGuard"),
-      "loading",
-    );
-    try {
-      const status = await api.setCodexContextGuard(enabled, false);
-      setContextGuardStatus(status);
-      onContextGuardChanged(status.gateway_enabled);
-      let syncResult: GatewayClientSyncSummary | null = null;
-      let syncResultUncertain = false;
-      if (syncBoundClients) {
-        updateToast(toastId, {
-          action: null,
-          text: t("providers.syncBoundClients"),
-          tone: "loading",
-        });
-        try {
-          syncResult = await api.syncGatewayClients();
-        } catch {
-          syncResultUncertain = true;
-        }
-        await onRefreshClients?.().catch(() => undefined);
-      }
-      const restartNotice = await readCodexRestartNotice(api);
-      const restartMessage =
-        restartNotice === "required"
-          ? t("providers.catalogOverrideRestartCodex")
-          : restartNotice === "unknown"
-            ? t("providers.codexRestartStatusUnknown")
-            : t("common.saved");
-      const appliedClientCount = syncResult?.applied ?? 0;
-      const failedClientCount = syncResult?.failed ?? 0;
-      let clientSyncFeedback: { text: string; tone: "error" | "success" };
-      if (!syncBoundClients) {
-        clientSyncFeedback = {
-          text: t("providers.contextGuardClientsAutoSyncDisabled", {
-            restartMessage,
-          }),
-          tone: "success",
-        };
-      } else if (syncResultUncertain) {
-        clientSyncFeedback = {
-          text: t("providers.contextGuardClientSyncError", { restartMessage }),
-          tone: "error",
-        };
-      } else if (failedClientCount > 0 && appliedClientCount > 0) {
-        clientSyncFeedback = {
-          text: t("providers.contextGuardClientsPartiallySyncedRestart", {
-            restartMessage,
-          }),
-          tone: "error",
-        };
-      } else if (failedClientCount > 0) {
-        clientSyncFeedback = {
-          text: t("providers.contextGuardClientsSyncFailed", {
-            restartMessage,
-          }),
-          tone: "error",
-        };
-      } else if (appliedClientCount > 0) {
-        clientSyncFeedback = {
-          text: t("providers.contextGuardClientsSyncedRestart", {
-            restartMessage,
-          }),
-          tone: "success",
-        };
-      } else {
-        clientSyncFeedback = {
-          text: t("providers.contextGuardClientsNotUpdated", {
-            restartMessage,
-          }),
-          tone: "success",
-        };
-      }
-      updateToast(toastId, {
-        action: null,
-        ...clientSyncFeedback,
-      });
-    } catch (err) {
-      updateToast(toastId, {
-        action: null,
-        text: t("providers.contextGuardUpdateFailed", {
-          message: messageFromError(err),
-        }),
-        tone: "error",
-      });
-    } finally {
-      setContextGuardBusy(false);
-    }
-  }
-
   async function testOfficialModel(model: Model) {
     const label = displayModel(model);
     const endpointLabel = upstreamFormatLabel("responses", t as Translate);
@@ -2255,35 +2093,8 @@ function OfficialDetail({
         )}
       </div>
       <ModelSection
-        contextById={displayedGatewayContextById}
+        contextById={gatewayContextById}
         disabled
-        headerControl={
-          <div className="group relative">
-            <SwitchControl
-              ariaDescribedBy="context-guard-tooltip"
-              checked={contextGuardStatus?.enabled ?? false}
-              className="h-7"
-              disabled={contextGuardBusy || !contextGuardStatus}
-              label={t("providers.contextGuardShort")}
-              onChange={(enabled) => void toggleContextGuard(enabled)}
-            />
-            <div
-              id="context-guard-tooltip"
-              role="tooltip"
-              className="pointer-events-none absolute bottom-full right-0 z-30 mb-2 hidden w-80 whitespace-normal rounded-inner bg-ink px-3 py-2 text-left text-xs font-medium leading-5 text-white shadow-floating group-hover:block group-focus-within:block"
-            >
-              {t("providers.contextGuardTooltip")}
-            </div>
-            {contextGuardStatus?.global_override_conflict && (
-              <div
-                role="status"
-                className="mt-1 max-w-80 text-right text-[11px] font-medium leading-4 text-amber-700"
-              >
-                {t("providers.contextGuardGlobalOverrideConflict")}
-              </div>
-            )}
-          </div>
-        }
         interactionDisabled={authState !== "authorized"}
         models={models}
         officialCollaborationBaselines={officialCollaborationBaselines}

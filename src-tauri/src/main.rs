@@ -40,7 +40,7 @@ pub(crate) use desktop_commands::{
     sync_catalog_coordinated,
 };
 use desktop_commands::{
-    open_codex_app, restart_proxy, set_codex_context_guard, start_proxy, stop_proxy, switch_mode,
+    open_codex_app, restart_proxy, start_proxy, stop_proxy, switch_mode,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -318,8 +318,6 @@ pub struct Settings {
     pub gateway_image_proxy_enabled: bool,
     #[serde(default)]
     pub gateway_image_proxy_model: String,
-    #[serde(default)]
-    pub openai_context_guard_enabled: bool,
     #[serde(default = "default_fast_model_variants")]
     pub gateway_fast_model_variants: Vec<String>,
     #[serde(default)]
@@ -355,7 +353,6 @@ impl Default for Settings {
             gateway_auto_retry_max_attempts: default_gateway_auto_retry_max_attempts(),
             gateway_image_proxy_enabled: false,
             gateway_image_proxy_model: String::new(),
-            openai_context_guard_enabled: false,
             gateway_fast_model_variants: default_fast_model_variants(),
             official_disabled_models: Vec::new(),
             official_model_sort_order: Vec::new(),
