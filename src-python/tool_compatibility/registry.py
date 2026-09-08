@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 import hashlib
+import json
 from typing import Any, Iterable, Mapping
 
 from .collab_v2 import AGENT_MESSAGE_ENVELOPE_PREFIX
@@ -66,7 +67,8 @@ class RequestScopedToolAliasRegistry:
         max_tool_name_length: int = 128,
         max_alias_attempts: int = 128,
     ) -> None:
-        self._token = hashlib.sha256(str(request_token).encode("utf-8")).hexdigest()[:10]
+        # Keep request_token as a compatible call argument, never as tool identity.
+        # The registry/ledger is request-local; aliases must survive new requests.
         self._native_names = frozenset(str(name) for name in native_names if isinstance(name, str))
         self._max_length = max_tool_name_length
         self._max_attempts = max_alias_attempts
@@ -75,11 +77,6 @@ class RequestScopedToolAliasRegistry:
         self._by_declaration: dict[tuple[int, int | None], str] = {}
         self._calls: dict[str, AliasRecord] = {}
         self._agent_messages: dict[str, dict[str, Any]] = {}
-        # ``max_alias_attempts`` bounds collision probing for one allocation;
-        # it must not cap the total number of aliases in a request.  Keep the
-        # next ordinal per alias family so a request with more than that many
-        # adapted namespace/custom tools remains representable.
-        self._next_ordinals: dict[str, int] = {}
 
     @property
     def aliases(self) -> tuple[str, ...]:
@@ -117,10 +114,16 @@ class RequestScopedToolAliasRegistry:
         )
 
     def _allocate(self, record_without_alias: AliasRecord, prefix: str) -> str:
-        start_ordinal = self._next_ordinals.get(prefix, 1)
-        for offset in range(self._max_attempts):
-            ordinal = start_ordinal + offset
-            candidate = f"{prefix}{self._token}_{ordinal}"
+        identity = json.dumps(
+            [2, record_without_alias.family, record_without_alias.namespace,
+             record_without_alias.original_name, record_without_alias.version],
+            ensure_ascii=True, separators=(",", ":"),
+        ).encode("utf-8")
+        token = hashlib.sha256(identity).hexdigest()[:20]
+        # Collision probing is local to this identity. Adding unrelated tools
+        # must not change an earlier alias or exhaust a shared ordinal budget.
+        for ordinal in range(1, self._max_attempts + 1):
+            candidate = f"{prefix}{token}_{ordinal}"
             if len(candidate) > self._max_length:
                 raise ToolCompatibilityError(
                     "tool_compatibility_alias_limit",
@@ -140,7 +143,6 @@ class RequestScopedToolAliasRegistry:
             )
             self._aliases[candidate] = record
             self._by_declaration[(record.declaration_index, record.child_index)] = candidate
-            self._next_ordinals[prefix] = ordinal + 1
             return candidate
         raise ToolCompatibilityError(
             "tool_compatibility_alias_limit",
@@ -269,7 +271,6 @@ class RequestScopedToolAliasRegistry:
         from the failed attempt.
         """
         attempt = object.__new__(RequestScopedToolAliasRegistry)
-        attempt._token = self._token
         attempt._native_names = self._native_names
         attempt._max_length = self._max_length
         attempt._max_attempts = self._max_attempts
@@ -278,7 +279,4 @@ class RequestScopedToolAliasRegistry:
         attempt._by_declaration = dict(self._by_declaration)
         attempt._calls = {}
         attempt._agent_messages = dict(self._agent_messages)
-        attempt._next_ordinals = dict(self._next_ordinals)
         return attempt
-
-

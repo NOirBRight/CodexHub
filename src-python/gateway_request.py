@@ -47,6 +47,7 @@ _UPSTREAM_TO_PROVIDER = {
     "kimi": "kimi",
     "commandcode": "commandcode",
     "opencode_go": "opencode-go",
+    "xai": "xai",
 }
 OFFICIAL_ENCRYPTED_CONTENT_PREFIX = "gAAAA"
 BROWSER_CONTEXT_MARKERS = (
@@ -720,6 +721,8 @@ def request_observability_with_prefix(fields: Mapping[str, Any], prefix: str) ->
             renamed[f"{prefix}_prefix_bytes"] = value
         elif key == "prompt_cache_key_hash":
             renamed[f"{prefix}_prompt_cache_key_hash"] = value
+        elif key == "prompt_cache_key_state":
+            renamed[f"{prefix}_prompt_cache_key_state"] = value
         elif key == "body_bytes":
             renamed[f"{prefix}_body_bytes"] = value
         elif key == "body_sha256":

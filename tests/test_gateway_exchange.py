@@ -282,6 +282,25 @@ def test_execute_exchange_prepares_one_hop_attempt() -> None:
     assert any(e.kind == "request_start" for e in events)
 
 
+def test_execute_exchange_emits_sanitized_cache_key_drop_event() -> None:
+    body = json.dumps({"model": "model", "input": "hi", "prompt_cache_key": "private-cache-value"}).encode()
+    trace: list[str] = []
+    attempt = _Attempt(
+        inbound=RouteProtocol.RESPONSES,
+        outbound=RouteProtocol.CHAT_COMPLETIONS,
+        policy=MutationPolicy.TRANSPARENT,
+        trace=trace,
+    )
+    result, seen = _run(body, attempt, trace)
+    assert result.status == 200
+    drops = [event for event in seen["events"] if event.kind == "cache_control_dropped"]
+    assert len(drops) == 1
+    assert drops[0].fields["fields"] == ["prompt_cache_key"]
+    assert drops[0].fields["reason"] == "unverified_endpoint_capability"
+    assert drops[0].fields["route_attempt_index"] == 0
+    assert "private-cache-value" not in repr(seen["events"])
+
+
 def test_execute_exchange_orders_prepare_before_mutation_and_transport() -> None:
     body = json.dumps({"model": "model", "input": "hello"}).encode()
     trace: list[str] = []

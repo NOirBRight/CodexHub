@@ -8,6 +8,7 @@ import logging
 import re
 
 from catalog import canonical_model_id
+from prompt_cache_policy import PromptCacheKeyPolicy, cache_key_policy_for_endpoint
 from codex_semantic_adapter import COLLABORATION_V2
 from gateway_errors import (
     UnqualifiedRouteProtocolError,
@@ -446,6 +447,7 @@ class RouteAttemptPlan:
     native_responses_tool_codec: str
     named_mutations: frozenset[RouteMutation]
     fallback_http_statuses: frozenset[int]
+    prompt_cache_key_policy: PromptCacheKeyPolicy = PromptCacheKeyPolicy.DROP_UNVERIFIED
 
     @property
     def mutation_summary(self) -> tuple[RouteMutation, ...]:
@@ -475,6 +477,7 @@ class RouteAttemptPlan:
     def telemetry_snapshot(self) -> dict[str, Any]:
         return {
             "index": self.index,
+            "prompt_cache_key_policy": self.prompt_cache_key_policy.value,
             "upstream_protocol": self.upstream_protocol.value,
             "endpoint_url": _safe_route_endpoint_url(self.endpoint_url),
             "wire_format_adapter": self.wire_format_adapter,
@@ -542,6 +545,7 @@ class RouteAttemptPlan:
             request_body,
             inbound_format=inbound_format,
             outbound_format=outbound_format,
+            prompt_cache_key_policy=self.prompt_cache_key_policy,
         )
 
     def request_body(self, prepared_body: bytes) -> bytes:
@@ -1672,6 +1676,9 @@ def route_plan_for_request(
                 upstream_protocol=attempt_protocol,
                 selected_upstream_format=attempt_protocol.value,
                 endpoint_url=_route_endpoint_url(upstream, attempt_protocol),
+                prompt_cache_key_policy=cache_key_policy_for_endpoint(
+                    _route_endpoint_url(upstream, attempt_protocol), attempt_protocol.value,
+                ),
                 wire_format_adapter=attempt_wire_adapter,
                 request_conversion_steps=request_conversion_steps,
                 request_body_mode=request_body_mode,
@@ -2018,5 +2025,4 @@ def route_attempt_event_fields(
         "route_attempt_mutation_summary": snapshot["mutation_summary"],
     }
 _route_attempt_event_fields = route_attempt_event_fields
-
 

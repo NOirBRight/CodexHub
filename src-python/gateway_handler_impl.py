@@ -902,11 +902,6 @@ class GatewayHandlerMixin:
                     route_plan.request_mutation_policy
                     != MutationPolicy.OFFICIAL_PASSTHROUGH
                 ),
-                prompt_cache_key=prompt_cache_key,
-                extract_prompt_cache_key=(
-                    route_plan.request_mutation_policy
-                    != MutationPolicy.OFFICIAL_PASSTHROUGH
-                ),
             )
 
             def emit_request_start_once(observability_fields: Mapping[str, Any]) -> None:

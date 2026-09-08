@@ -356,7 +356,12 @@ def test_namespace_alias_count_is_not_limited_by_collision_attempt_budget() -> N
     aliases = plan.entries[0].aliases
     assert len(aliases) == 129
     assert len(set(aliases)) == 129
-    assert aliases[-1].rsplit("_", 1)[-1] == "129"
+    for index, alias in enumerate(aliases):
+        decoded = plan.decode_payload({"output": [{
+            "type": "function_call", "name": alias, "arguments": "{}",
+            "call_id": alias, "id": "item-" + alias,
+        }]})
+        assert decoded["output"][0]["name"] == f"tool_{index}"
 
 
 def test_namespace_child_names_are_part_of_final_declaration_identity() -> None:

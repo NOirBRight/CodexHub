@@ -441,11 +441,6 @@ def request_observability_for_attempt(
             attempt.request_mutation_policy
             != MutationPolicy.OFFICIAL_PASSTHROUGH
         ),
-        prompt_cache_key=request.prompt_cache_key,
-        extract_prompt_cache_key=(
-            attempt.request_mutation_policy
-            != MutationPolicy.OFFICIAL_PASSTHROUGH
-        ),
     )
     return {
         **upstream_observability,
@@ -606,6 +601,15 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
     else:
         prepared_exchange = replace(prepared_exchange, upstream_body=conversion_body)
     body = prepared_exchange.upstream_body
+    if prepared_exchange.dropped_cache_controls and observer is not None:
+        observer.record(ExchangeEvent("cache_control_dropped", {
+            "request_id": request.inbound.request_id,
+            "upstream": request.upstream_name,
+            "upstream_format": attempt.selected_upstream_format,
+            "route_attempt_index": attempt.index,
+            "fields": list(prepared_exchange.dropped_cache_controls),
+            "reason": "unverified_endpoint_capability",
+        }))
     if policy is MutationPolicy.OFFICIAL_PASSTHROUGH:
         payload = request.inbound_payload if attempt.selected_upstream_format == request.inbound.inbound_format and isinstance(request.inbound_payload, Mapping) else _passthrough._safe_json_mapping(body)
         return prepared_exchange, _gateway_compat.official_passthrough_request_body(body, payload, upstream, model_id=request.inbound.model)

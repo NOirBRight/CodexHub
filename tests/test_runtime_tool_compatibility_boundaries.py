@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 
 import pytest
@@ -2130,8 +2129,8 @@ def test_adapted_namespace_tool_choice_with_duplicate_child_name_fails_preflight
     ids=["hosted-name", "unknown-name"],
 )
 def test_namespace_alias_reserves_names_of_hosted_and_unknown_declarations(other_declaration):
-    token = hashlib.sha256(b"alias-collision").hexdigest()[:10]
-    candidate = f"__codexhub_ns_{token}_1"
+    initial = _adapted_namespace_plan(_namespace("vendor", child="run"))
+    candidate = initial.entries[0].aliases[0]
     other_declaration["name"] = candidate
     plan = build_tool_compatibility_plan(
         [_namespace("vendor", child="run"), other_declaration],

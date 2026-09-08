@@ -19,6 +19,7 @@ ARTIFACT_KIND = "chat_conversion_matrix"
 SOURCE_CONTRACT = Path("docs/evidence/issue-392/collaboration-runtime-contract.json")
 INVENTORY = Path("docs/evidence/issue-64/collaboration-v1-v2-inventory.json")
 TRANSLATION = Path("src-python/protocol_translation.py")
+CACHE_POLICY = Path("src-python/prompt_cache_policy.py")
 DEFAULT_OUTPUT = Path("docs/evidence/issue-66/chat-conversion-matrix.json")
 
 V2_TOOLS = (
@@ -280,10 +281,36 @@ def _request_fields() -> list[dict[str, Any]]:
             responses="string",
             chat="absent",
             disposition="consumed_locally",
-            when="missing, null, or string",
+            when="destination endpoint cache-key support is unverified; missing, null, or string",
             fail_closed=False,
             implementation=current,
-            notes="Codex cache identity is local transport bookkeeping and is never forwarded.",
+            notes="Cross-protocol conversion records a cache_control_dropped event for supplied keys on unverified endpoints. Cache usage reporting does not imply key support.",
+        ),
+        _row(
+            row_id="request.prompt_cache_key.verified_endpoint",
+            category="request_field",
+            key="prompt_cache_key",
+            execution_owner="gateway",
+            responses="string or null",
+            chat="same value",
+            disposition="native",
+            when="RoutePlan pins a verified destination endpoint capability",
+            fail_closed=True,
+            implementation="src-python/prompt_cache_policy.py; src-python/protocol_translation.py",
+            notes="Preserved in both conversion directions. Same-protocol requests retain original controls and bytes. Invalid key types fail before forwarding.",
+        ),
+        _row(
+            row_id="request.prompt_cache_options.cross_protocol",
+            category="request_field",
+            key="prompt_cache_options|prompt_cache_retention|prompt_cache_breakpoint",
+            execution_owner="caller",
+            responses="explicit cache options or content breakpoints",
+            chat="none",
+            disposition="unavailable",
+            when="cross-protocol request without a proven equivalent mapping",
+            fail_closed=True,
+            implementation=current,
+            notes="Explicit caching is never silently downgraded to implicit caching. Same-protocol controls remain untouched.",
         ),
         _row(
             row_id="request.store.false",
@@ -529,7 +556,7 @@ def _stream_and_identity() -> list[dict[str, Any]]:
             when="usage object present",
             fail_closed=False,
             implementation=current,
-            notes="Token fields map in both directions.",
+            notes="Token fields and details map in both directions, including cache_write_tokens. Gateway records cache writes separately without adding them again to total input tokens; missing values remain unknown.",
         ),
         _row(
             row_id="cancellation",
@@ -691,6 +718,10 @@ def build_matrix() -> dict[str, Any]:
             "protocol_translation": {
                 "file": TRANSLATION.as_posix(),
                 "sha256": _sha256_file(TRANSLATION),
+            },
+            "prompt_cache_policy": {
+                "file": CACHE_POLICY.as_posix(),
+                "sha256": _sha256_file(CACHE_POLICY),
             },
             "source_contract": {
                 "file": SOURCE_CONTRACT.name,
