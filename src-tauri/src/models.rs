@@ -24,6 +24,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(not(test))]
+const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+#[cfg(not(test))]
+const MODELS_DEV_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_VISIBILITY_DIAGNOSTIC_COUNT: u64 = 100;
 const GENERATED_CATALOG_FILE: &str = "codexhub-model-catalog.json";
 const LEGACY_GENERATED_CATALOG_FILE: &str = "codex-proxy-official-ollama.json";
@@ -192,7 +196,12 @@ pub fn discover_provider_models(
     provider_id: Option<&str>,
 ) -> Result<Vec<Model>, String> {
     let credential = resolve_provider_discovery_api_key(api_key, provider_id)?;
-    discover_provider_models_with_timeout(base_url, &credential, DISCOVERY_TIMEOUT)
+    let mut models =
+        discover_provider_models_with_timeout(base_url, &credential, DISCOVERY_TIMEOUT)?;
+    if let Some(id) = provider_id.filter(|id| id.eq_ignore_ascii_case("opencode-go")) {
+        overlay_models_dev_limits(id, &mut models);
+    }
+    Ok(models)
 }
 
 pub(crate) fn resolve_provider_discovery_api_key(
@@ -2470,7 +2479,11 @@ fn model_from_discovered_item(id: String, item: &Value) -> Model {
             &["context_window", "max_context_window", "context_length"],
             "context",
         ),
-        max_output_tokens: numeric_limit(item, &["max_output_tokens", "output_tokens"], "output"),
+        max_output_tokens: numeric_limit(
+            item,
+            &["max_output_tokens", "output_tokens", "max_tokens"],
+            "output",
+        ),
         input_modalities: discovered_input_modalities(item),
         supported_reasoning_levels: reasoning_levels,
         default_reasoning_level: default_reasoning,
@@ -2618,6 +2631,87 @@ fn optional_u32(value: &Value) -> Option<u32> {
         return u32::try_from(value).ok();
     }
     value.as_str().and_then(|text| text.trim().parse().ok())
+}
+
+fn positive_u32(value: Option<u32>) -> Option<u32> {
+    value.filter(|limit| *limit > 0)
+}
+
+fn apply_models_dev_limits(provider_id: &str, models: &mut [Model], document: &Value) {
+    let Some(provider_models) = document
+        .get(provider_id)
+        .and_then(Value::as_object)
+        .and_then(|provider| provider.get("models"))
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    for model in models {
+        let Some(row) = provider_models.get(&model.id).and_then(Value::as_object) else {
+            continue;
+        };
+        let limit = row.get("limit").and_then(Value::as_object);
+        if positive_u32(model.context_window).is_none() {
+            if let Some(context) = limit
+                .and_then(|limit| limit.get("context"))
+                .and_then(optional_u32)
+                .and_then(|value| positive_u32(Some(value)))
+            {
+                model.context_window = Some(context);
+                if positive_u32(model.max_context_window).is_none() {
+                    model.max_context_window = Some(context);
+                }
+            }
+        }
+        if positive_u32(model.max_output_tokens).is_none() {
+            if let Some(output) = limit
+                .and_then(|limit| limit.get("output"))
+                .and_then(optional_u32)
+                .and_then(|value| positive_u32(Some(value)))
+            {
+                model.max_output_tokens = Some(output);
+            }
+        }
+    }
+}
+
+fn overlay_models_dev_limits(provider_id: &str, models: &mut [Model]) {
+    #[cfg(not(test))]
+    {
+        let Some(document) = load_models_dev_document() else {
+            return;
+        };
+        apply_models_dev_limits(provider_id, models, document);
+    }
+    #[cfg(test)]
+    {
+        let _ = (provider_id, models);
+    }
+}
+
+#[cfg(not(test))]
+fn load_models_dev_document() -> Option<&'static Value> {
+    static DOCUMENT: OnceLock<Value> = OnceLock::new();
+    if let Some(value) = DOCUMENT.get() {
+        return Some(value);
+    }
+    let fetched = fetch_models_dev_document()?;
+    let _ = DOCUMENT.set(fetched);
+    DOCUMENT.get()
+}
+
+#[cfg(not(test))]
+fn fetch_models_dev_document() -> Option<Value> {
+    let client = Client::builder().timeout(MODELS_DEV_TIMEOUT).build().ok()?;
+    let response = client
+        .get(MODELS_DEV_URL)
+        .header(ACCEPT, "application/json")
+        .send()
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json::<Value>().ok()
 }
 
 fn optional_i32(value: &Value) -> Option<i32> {
@@ -3545,10 +3639,11 @@ fn find_python() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        discover_provider_models_with_timeout, enrich_models_with_ollama_show,
-        finish_official_multi_agent_save, generate_catalog_with_runner, list_model_metadata,
-        list_models, list_official_multi_agent_baselines, list_official_multi_agent_overrides,
-        load_json_file, merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
+        apply_models_dev_limits, discover_provider_models_with_timeout,
+        enrich_models_with_ollama_show, finish_official_multi_agent_save,
+        generate_catalog_with_runner, list_model_metadata, list_models,
+        list_official_multi_agent_baselines, list_official_multi_agent_overrides, load_json_file,
+        merge_metadata_with_overrides, ollama_show_endpoint, provider_api_endpoint,
         provider_models_endpoint, publish_collaboration_files_with, read_models_json,
         refresh_official_models_from_endpoint, refresh_official_models_with_runner,
         resolve_gateway_api_key_for_settings, resolve_provider_discovery_api_key,
@@ -5641,6 +5736,41 @@ for line in sys.stdin:
                 .contains("authorization: bearer provider-secret"));
             server.join();
         }
+    }
+
+    #[test]
+    fn models_dev_overlay_fills_missing_opencode_windows_without_overriding_listing() {
+        let mut models = vec![
+            Model {
+                id: "muse-spark-1.2-contributor".to_string(),
+                context_window: Some(202_752),
+                ..Model::default()
+            },
+            Model {
+                id: "omen-alpha".to_string(),
+                ..Model::default()
+            },
+            Model {
+                id: "still-unknown".to_string(),
+                ..Model::default()
+            },
+        ];
+        apply_models_dev_limits(
+            "opencode-go",
+            &mut models,
+            &json!({
+                "opencode-go": {
+                    "models": {
+                        "muse-spark-1.2-contributor": { "limit": { "context": 1_048_576, "output": 131_072 } },
+                        "omen-alpha": { "limit": { "context": 500_000, "output": 128_000 } }
+                    }
+                }
+            }),
+        );
+        assert_eq!(models[0].context_window, Some(202_752));
+        assert_eq!(models[1].context_window, Some(500_000));
+        assert_eq!(models[1].max_output_tokens, Some(128_000));
+        assert_eq!(models[2].context_window, None);
     }
 
     #[test]

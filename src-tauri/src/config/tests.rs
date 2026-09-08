@@ -343,6 +343,71 @@ base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
 }
 
 #[test]
+fn get_providers_fills_missing_catalog_windows_without_overriding_saved_numbers() {
+    let root = temp_root("providers-catalog-window-fill");
+    let paths = test_paths(&root);
+    fs::create_dir_all(paths.bundled_providers_path().parent().unwrap()).unwrap();
+    fs::create_dir_all(paths.runtime_providers_path().parent().unwrap()).unwrap();
+    fs::write(
+        paths.bundled_providers_path(),
+        r#"
+[[providers]]
+id = "opencode-go"
+name = "OpenCode Go"
+base_url = "https://opencode.ai/zen/go/v1"
+
+  [[providers.models]]
+  id = "omen-alpha"
+  context_window = 500000
+  max_output_tokens = 128000
+
+  [[providers.models]]
+  id = "muse-spark-1.2-contributor"
+  context_window = 1048576
+  max_output_tokens = 131072
+"#,
+    )
+    .unwrap();
+    fs::write(
+        paths.runtime_providers_path(),
+        r#"
+[[providers]]
+id = "opencode-go"
+name = "OpenCode Go"
+base_url = "https://opencode.ai/zen/go/v1"
+
+  [[providers.models]]
+  id = "omen-alpha"
+
+  [[providers.models]]
+  id = "muse-spark-1.2-contributor"
+  context_window = 202752
+"#,
+    )
+    .unwrap();
+
+    let loaded = get_providers_with_paths(&paths).expect("runtime providers");
+    assert_eq!(loaded[0].models[0].id, "omen-alpha");
+    assert_eq!(loaded[0].models[0].context_window, Some(500_000));
+    assert_eq!(loaded[0].models[0].max_output_tokens, Some(128_000));
+    assert_eq!(loaded[0].models[1].id, "muse-spark-1.2-contributor");
+    assert_eq!(loaded[0].models[1].context_window, Some(202_752));
+}
+
+#[test]
+fn bundled_catalog_prefers_compile_time_repo_over_exe_copy() {
+    let root = temp_root("bundled-catalog-order");
+    let paths = test_paths(&root);
+    let candidates = super::bundled_providers_candidate_paths(&paths);
+    let repo_catalog = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("config")
+        .join("providers.toml");
+    assert_eq!(candidates.first(), Some(&repo_catalog));
+}
+
+#[test]
 fn settings_missing_file_returns_defaults_and_roundtrips_saved_values() {
     let root = temp_root("settings-roundtrip");
     let paths = test_paths(&root);

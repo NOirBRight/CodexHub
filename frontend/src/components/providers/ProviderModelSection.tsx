@@ -4,11 +4,17 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SortableList } from "../SortableList";
 import i18n from "../../i18n";
-import { cx, displayModel } from "../../lib/format";
+import { cx, formatContextWindow } from "../../lib/format";
+import {
+  displayModelName,
+  sortModelsEnabledFirst,
+  type ModelLabelProvider,
+} from "../../lib/modelDisplay";
 import {
   officialCollaborationVersionOptions,
   resolveOfficialModelContextWindow,
 } from "../../lib/officialModels";
+import { applyCatalogModelDefaults, editorReasoningLevelOptions } from "../../lib/providerCatalog";
 import { normalizeOfficialModelId } from "../../lib/settings";
 import { reasoningLevelOptions, type InlineTestState } from "../../lib/providerForm";
 import { normalizeModel, providerQualifiedModelId } from "../../lib/providerModel";
@@ -38,12 +44,15 @@ export function ModelSection({
   officialCollaborationBaselines = {},
   officialCollaborationOverrides = {},
   providerId,
+  providerName,
+  providerDisplayPrefix,
   reorderable = true,
   refreshBusy,
   onToggleOfficialModel,
   onOfficialCollaborationVersionChange,
   onToggle,
   onUpdate,
+  catalogModels,
 }: {
   contextById?: Map<string, number>;
   disabled?: boolean;
@@ -66,12 +75,15 @@ export function ModelSection({
   officialCollaborationBaselines?: Readonly<Record<string, "v1" | "v2">>;
   officialCollaborationOverrides?: Readonly<Record<string, "v1" | "v2">>;
   providerId?: string;
+  providerName?: string;
+  providerDisplayPrefix?: string | null;
   reorderable?: boolean;
   refreshBusy?: boolean;
   onToggleOfficialModel?: (modelId: string, enabled: boolean) => void;
   onOfficialCollaborationVersionChange?: (modelId: string, version: "v1" | "v2" | null) => void;
   onToggle?: (modelId: string, enabled: boolean) => void;
   onUpdate?: (modelId: string, patch: Partial<Model>) => void;
+  catalogModels?: Model[];
 }) {
   const { t } = useTranslation();
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
@@ -80,6 +92,14 @@ export function ModelSection({
   const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const editingModel = editingModelId ? models.find((model) => model.id === editingModelId) ?? null : null;
   const editingModelIsNew = pendingNewModelId !== null && pendingNewModelId === editingModelId;
+  const labelProvider: ModelLabelProvider = {
+    id: providerId,
+    name: providerName,
+    display_prefix: providerDisplayPrefix,
+  };
+  const displayedModels = reorderable
+    ? models
+    : sortModelsEnabledFirst(models, officialDisabledModels);
 
 
   function addAndEdit() {
@@ -118,8 +138,10 @@ export function ModelSection({
   }
 
   function renderModelRow(model: Model) {
+    const catalogModel = catalogModels?.find((candidate) => candidate.id === model.id);
+    const displayed = applyCatalogModelDefaults(model, catalogModel);
     const contextWindow = resolveOfficialModelContextWindow(
-      model.context_window,
+      displayed.context_window,
       contextById?.get(model.id),
     );
     const modelEnabled = disabled
@@ -134,12 +156,18 @@ export function ModelSection({
     }
     const actions = (
       <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5 text-xs text-slate-500">
-        {modelCapabilityTags(model).map((tag) => (
+        {modelCapabilityTags(displayed).map((tag) => (
           <ModelCapabilityChip key={tag} tag={tag} />
         ))}
         <CapabilityChip
-          label={formatContextWindow(contextWindow)}
-          title={modelLimitDetails(model, contextWindow)}
+          label={
+            contextWindow
+              ? formatContextWindow(contextWindow)
+              : disabled
+                ? t("providers.contextDynamic")
+                : t("common.unknown")
+          }
+          title={modelLimitDetails(displayed, contextWindow)}
         />
         {(() => {
           const version = disabled
@@ -193,6 +221,7 @@ export function ModelSection({
         <ModelIdentity
           model={model}
           actionsDisabled={interactionDisabled}
+          provider={labelProvider}
           providerId={providerId}
           testDisabled={interactionDisabled || modelTestDisabled || Boolean(testingModelId)}
           testState={modelTestStates[model.id] ?? "idle"}
@@ -275,21 +304,21 @@ export function ModelSection({
           interactionDisabled && "opacity-60 grayscale",
         )}
       >
-        {models.length === 0 ? (
+        {displayedModels.length === 0 ? (
           <div className="rounded-inner bg-panel-soft p-4 text-sm text-slate-500 shadow-hairline">
             {t("common.noModels")}
           </div>
         ) : reorderable ? (
           <SortableList
             className="space-y-2"
-            items={models}
+            items={displayedModels}
             getId={(model) => model.id}
             onReorder={onReorder}
             renderItem={renderModelRow}
           />
         ) : (
           <div className="space-y-2">
-            {models.map((model) => (
+            {displayedModels.map((model) => (
               <div key={model.id} className="rounded-control border border-line bg-white shadow-subtle">
                 {renderModelRow(model)}
               </div>
@@ -304,6 +333,7 @@ export function ModelSection({
           readOnly={disabled}
           collaboration={disabled ? officialCollaborationVersionOptions(editingModel, officialCollaborationOverrides, officialCollaborationBaselines) : undefined}
           onCollaborationChange={onOfficialCollaborationVersionChange}
+          catalogModel={catalogModels?.find((candidate) => candidate.id === editingModel.id)}
           onApply={(nextModel) => applyModelUpdate(editingModel.id, nextModel)}
           onClose={closeModelEditor}
           onRemove={!disabled && onRemove ? () => {
@@ -323,6 +353,7 @@ function ModelIdentity({
   actionsDisabled = false,
   model,
   onTest,
+  provider,
   providerId,
   testDisabled,
   testState = "idle",
@@ -330,6 +361,7 @@ function ModelIdentity({
   actionsDisabled?: boolean;
   model: Model;
   onTest?: () => void;
+  provider?: ModelLabelProvider;
   providerId?: string;
   testDisabled?: boolean;
   testState?: InlineTestState;
@@ -356,7 +388,7 @@ function ModelIdentity({
 
   return (
     <div className="min-w-0">
-      <span className="block truncate text-sm font-medium">{displayModel(model)}</span>
+      <span className="block truncate text-sm font-medium">{displayModelName(model, provider)}</span>
       <span className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-slate-500">
         <span className="min-w-0 truncate font-mono">{model.id}</span>
         <button
@@ -395,6 +427,7 @@ function ModelIdentity({
 
 function ModelEditorOverlay({
   model,
+  catalogModel,
   readOnly = false,
   collaboration,
   onCollaborationChange,
@@ -403,6 +436,7 @@ function ModelEditorOverlay({
   onRemove,
 }: {
   model: Model;
+  catalogModel?: Model;
   readOnly?: boolean;
   collaboration?: ReturnType<typeof officialCollaborationVersionOptions>;
   onCollaborationChange?: (modelId: string, version: "v1" | "v2" | null) => void;
@@ -411,7 +445,9 @@ function ModelEditorOverlay({
   onRemove?: () => void;
 }) {
   const { t } = useTranslation();
-  const [draft, setDraft] = useState<Model>(() => normalizeModel(model));
+  const levelOptions = editorReasoningLevelOptions(catalogModel?.supported_reasoning_levels);
+  const catalogDefault = catalogModel?.default_reasoning_level ?? null;
+  const [draft, setDraft] = useState<Model>(() => normalizeModel(applyCatalogModelDefaults(model, catalogModel)));
   const [collaborationSelection, setCollaborationSelection] = useState<"v1" | "v2" | "default">(collaboration?.explicit ?? "default");
   const officialThinking = draft.thinking_mode === "none" || draft.thinking_mode === "always_on" || draft.thinking_mode === "toggle";
   const reasoningEnabled = officialThinking
@@ -419,21 +455,27 @@ function ModelEditorOverlay({
     : (draft.supported_reasoning_levels ?? []).length > 0;
 
   useEffect(() => {
-    setDraft(normalizeModel(model));
-  }, [model]);
+    setDraft(normalizeModel(applyCatalogModelDefaults(model, catalogModel)));
+  }, [model, catalogModel]);
 
   function setReasoningEnabled(enabled: boolean) {
     setDraft((current) => {
       const levels = current.supported_reasoning_levels?.length
         ? current.supported_reasoning_levels
-        : reasoningLevelOptions;
+        : levelOptions;
+      const fallbackDefault =
+        catalogDefault && levels.includes(catalogDefault)
+          ? catalogDefault
+          : levels.includes("medium")
+            ? "medium"
+            : levels[0] ?? null;
       return {
         ...current,
         supported_reasoning_levels: enabled ? levels : [],
         default_reasoning_level: enabled
           ? current.default_reasoning_level && levels.includes(current.default_reasoning_level)
             ? current.default_reasoning_level
-            : "medium"
+            : fallbackDefault
           : null,
       };
     });
@@ -555,7 +597,7 @@ function ModelEditorOverlay({
                   <div className="grid gap-2">
                     <span className="ws-model-capability-label">{t("providers.reasoningLevels")}</span>
                     <div className="flex flex-wrap gap-2">
-                      {reasoningLevelOptions.map((level) => (
+                      {levelOptions.map((level) => (
                         <label
                           key={level}
                           className="flex h-8 items-center gap-2 rounded-control border border-line bg-white px-2 text-xs font-medium"
@@ -755,21 +797,6 @@ export function isOfficialModelDisabled(disabledModels: string[], modelId: strin
 
 export function modelIdMatches(left: string, right: string) {
   return normalizeOfficialModelId(left) === normalizeOfficialModelId(right);
-}
-
-
-function formatContextWindow(value?: number | null) {
-  if (!value) {
-    return i18n.t("providers.contextDynamic");
-  }
-  if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(1)}M`;
-  }
-  if (value >= 1000) {
-    const rounded = Math.round(value / 1000);
-    return `${new Intl.NumberFormat(i18n.language || "en-US").format(rounded)}K`;
-  }
-  return new Intl.NumberFormat(i18n.language || "en-US").format(value);
 }
 
 function modelLimitDetails(model: Model, effective?: number | null) {

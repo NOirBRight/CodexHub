@@ -47,6 +47,7 @@ EXTERNAL_PROVIDER_UPSTREAM_NAMES = {
     "kimi": "kimi",
     "commandcode": "commandcode",
     "opencode-go": "opencode_go",
+    "xai": "xai",
 }
 THINKING_MODES = {"none", "always_on", "toggle"}
 EXTERNAL_PROVIDER_EXCLUDED_IDS = {"ollama-cloud"}
@@ -163,7 +164,7 @@ def discover_official_models(api_key: str, timeout_seconds: int = 20) -> list[di
             ),
             "max_output_tokens": _discovered_numeric_limit(
                 raw_model,
-                ("max_output_tokens", "output_tokens"),
+                ("max_output_tokens", "output_tokens", "max_tokens"),
                 "output",
             ),
         }
@@ -199,7 +200,7 @@ def discover_provider_models(base_url: str, api_key: str, timeout_seconds: int =
                 ),
                 "max_output_tokens": _discovered_numeric_limit(
                     raw_model,
-                    ("max_output_tokens", "output_tokens"),
+                    ("max_output_tokens", "output_tokens", "max_tokens"),
                     "output",
                 ),
             }
@@ -443,6 +444,7 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
         _apply_bundled_tool_surface_strategy_defaults(providers)
         _apply_bundled_native_responses_tool_codec_defaults(providers)
         _apply_bundled_multi_agent_version_defaults(providers)
+        _apply_bundled_model_limit_defaults(providers)
     return providers
 
 
@@ -638,6 +640,46 @@ def _apply_bundled_multi_agent_version_defaults(
             bundled_model = _matching_model_config(runtime_model, bundled_models_by_id)
             if bundled_model is not None:
                 runtime_model._bundled_multi_agent_version = bundled_model.multi_agent_version
+
+
+def _positive_model_limit(value: int | None) -> int | None:
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def _apply_bundled_model_limit_defaults(runtime_providers: Iterable[ProviderConfig]) -> None:
+    runtime_providers = list(runtime_providers)
+    if not any(
+        _positive_model_limit(model.context_window) is None
+        or _positive_model_limit(model.max_output_tokens) is None
+        for provider in runtime_providers
+        for model in provider.models
+    ):
+        return
+
+    try:
+        bundled_data = tomllib.loads(DEFAULT_PROVIDERS_PATH.read_text(encoding="utf-8"))
+        bundled_providers = _providers_from_data(bundled_data)
+    except (OSError, ValueError):
+        return
+
+    bundled_by_id = _provider_config_index_by_id(bundled_providers)
+    for runtime_provider in runtime_providers:
+        bundled_provider = bundled_by_id.get(_canonical_config_identifier(runtime_provider.id))
+        if bundled_provider is None:
+            continue
+        bundled_models_by_id = _model_config_index_by_identifier(bundled_provider.models)
+        for runtime_model in runtime_provider.models:
+            bundled_model = _matching_model_config(runtime_model, bundled_models_by_id)
+            if bundled_model is None:
+                continue
+            if _positive_model_limit(runtime_model.context_window) is None:
+                catalog_window = _positive_model_limit(bundled_model.context_window)
+                if catalog_window is not None:
+                    runtime_model.context_window = catalog_window
+            if _positive_model_limit(runtime_model.max_output_tokens) is None:
+                catalog_output = _positive_model_limit(bundled_model.max_output_tokens)
+                if catalog_output is not None:
+                    runtime_model.max_output_tokens = catalog_output
 
 
 def _provider_native_responses_tool_codec_is_explicit(provider: ProviderConfig) -> bool:

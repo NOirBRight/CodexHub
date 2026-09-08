@@ -6,27 +6,57 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn get_providers() -> Result<Vec<Provider>, String> {
-    get_providers_with_paths(&ConfigPaths::runtime()?)
+    let paths = ConfigPaths::runtime()?;
+    let mut providers = get_providers_with_paths(&paths)?;
+    if let Ok(catalog) =
+        load_bundled_providers_from_candidates(&bundled_providers_candidate_paths(&paths))
+    {
+        fill_missing_model_limits_from_catalog(&mut providers, &catalog);
+    }
+    Ok(providers)
 }
 
 pub fn get_bundled_providers() -> Result<Vec<Provider>, String> {
+    let paths = ConfigPaths::runtime()?;
+    load_bundled_providers_from_candidates(&bundled_providers_candidate_paths(&paths))
+}
+
+fn bundled_providers_candidate_paths(paths: &ConfigPaths) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+    // Prefer the checkout catalog when this binary was built from this tree.
+    // `tauri dev` copies resources next to the exe once per build, so an
+    // exe-adjacent providers.toml can lag behind config/providers.toml.
+    if let Some(repo_root) = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent() {
+        push_unique_path(
+            &mut candidates,
+            repo_root.join("config").join("providers.toml"),
+        );
+    }
+    push_unique_path(&mut candidates, paths.bundled_providers_path());
+    if let Ok(cwd) = std::env::current_dir() {
+        push_unique_path(&mut candidates, cwd.join("config").join("providers.toml"));
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("config").join("providers.toml"));
+            push_unique_path(&mut candidates, dir.join("config").join("providers.toml"));
         }
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("config").join("providers.toml"));
+    candidates
+}
+
+fn push_unique_path(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    if !candidates.iter().any(|existing| existing == &path) {
+        candidates.push(path);
     }
-    let paths = ConfigPaths::runtime()?;
-    candidates.push(paths.bundled_providers_path());
+}
+
+fn load_bundled_providers_from_candidates(candidates: &[PathBuf]) -> Result<Vec<Provider>, String> {
     let mut last_error = String::from("bundled providers.toml not found");
     for path in candidates {
         if !path.exists() {
             continue;
         }
-        match load_providers_from_path(&path) {
+        match load_providers_from_path(path) {
             Ok(providers) if !providers.is_empty() => return Ok(providers),
             Ok(_) => last_error = format!("bundled providers.toml is empty: {}", path.display()),
             Err(error) => last_error = error,
@@ -650,12 +680,52 @@ fn sanitize_settings_for_save(
 }
 
 fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String> {
-    let path = if paths.runtime_providers_path().exists() {
-        paths.runtime_providers_path()
+    let runtime_path = paths.runtime_providers_path();
+    let path = if runtime_path.exists() {
+        runtime_path
     } else {
         paths.bundled_providers_path()
     };
-    load_providers_from_path(&path)
+    let mut providers = load_providers_from_path(&path)?;
+    if path == paths.runtime_providers_path() {
+        if let Ok(catalog) = load_providers_from_path(&paths.bundled_providers_path()) {
+            fill_missing_model_limits_from_catalog(&mut providers, &catalog);
+        }
+    }
+    Ok(providers)
+}
+
+fn keep_positive_limit(current: Option<u32>, catalog: Option<u32>) -> Option<u32> {
+    match current {
+        Some(value) if value > 0 => Some(value),
+        _ => match catalog {
+            Some(value) if value > 0 => Some(value),
+            _ => current,
+        },
+    }
+}
+
+fn fill_missing_model_limits_from_catalog(providers: &mut [Provider], catalog: &[Provider]) {
+    for provider in providers {
+        let Some(preset) = catalog.iter().find(|candidate| candidate.id == provider.id) else {
+            continue;
+        };
+        for model in &mut provider.models {
+            let Some(catalog_model) = preset
+                .models
+                .iter()
+                .find(|candidate| candidate.id == model.id)
+            else {
+                continue;
+            };
+            model.context_window =
+                keep_positive_limit(model.context_window, catalog_model.context_window);
+            model.max_context_window =
+                keep_positive_limit(model.max_context_window, catalog_model.max_context_window);
+            model.max_output_tokens =
+                keep_positive_limit(model.max_output_tokens, catalog_model.max_output_tokens);
+        }
+    }
 }
 
 #[cfg(test)]

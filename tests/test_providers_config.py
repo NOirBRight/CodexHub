@@ -42,6 +42,30 @@ class ProvidersConfigTests(unittest.TestCase):
                 for model_id in models:
                     self.assertEqual(index[f"{provider_id}/{model_id}"]["multi_agent_version"], "v2")
 
+    def test_load_providers_fills_missing_opencode_windows_from_bundled_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "providers.toml"
+            save_providers(
+                [
+                    ProviderConfig(
+                        id="opencode-go",
+                        name="OpenCode Go",
+                        base_url="https://opencode.ai/zen/go/v1",
+                        api_key="fixture",
+                        models=[
+                            ModelConfig(id="omen-alpha"),
+                            ModelConfig(id="muse-spark-1.2-contributor", context_window=202_752),
+                        ],
+                    )
+                ],
+                path,
+            )
+            loaded = load_providers(path)
+            by_id = {model.id: model for model in loaded[0].models}
+            self.assertEqual(by_id["omen-alpha"].context_window, 500_000)
+            self.assertEqual(by_id["omen-alpha"].max_output_tokens, 128_000)
+            self.assertEqual(by_id["muse-spark-1.2-contributor"].context_window, 202_752)
+
     def test_bundled_volc_declares_responses_as_its_only_upstream_format(self):
         providers = load_providers(DEFAULT_PROVIDERS_PATH)
         volc = next(provider for provider in providers if provider.id == "volc")
@@ -1437,10 +1461,14 @@ enabled = true
             ["ollama-cloud", "volc", "minimax-cn", "kimi-cn", "kimi", "commandcode", "opencode-go", "xai"],
         )
         xai = next(provider for provider in providers if provider.id == "xai")
-        grok = next(model for model in xai.models if model.id == "grok-4")
-        self.assertEqual(grok.supported_reasoning_levels, ("low", "medium", "high", "xhigh"))
-        self.assertEqual(grok.default_reasoning_level, "high")
-        self.assertEqual(grok.input_modalities, ("text", "image"))
+        grok46 = next(model for model in xai.models if model.id == "grok-4.6")
+        grok45 = next(model for model in xai.models if model.id == "grok-4.5")
+        self.assertEqual(grok46.supported_reasoning_levels, ("low", "medium", "high", "xhigh"))
+        self.assertEqual(grok46.default_reasoning_level, "high")
+        self.assertEqual(grok46.context_window, 500000)
+        self.assertEqual(grok46.input_modalities, ("text", "image"))
+        self.assertEqual(grok45.supported_reasoning_levels, ("low", "medium", "high"))
+        self.assertEqual(grok45.default_reasoning_level, "high")
 
     def test_default_config_external_aliases_include_enabled_official_models(self):
         with (

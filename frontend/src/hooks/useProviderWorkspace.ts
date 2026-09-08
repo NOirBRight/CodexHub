@@ -3,7 +3,7 @@ import { createWorkspaceSaveCoordinator } from "../lib/providerWorkspace/save";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { useToasts } from "../components/PageToast";
 import { publishCatalog } from "../lib/catalogPublish";
-import { mergeDiscoveredModels } from "../lib/format";
+import { fillMissingModelLimits, mergeDiscoveredModels } from "../lib/format";
 import { applyProviderProbeResult, probeSucceeded, shortProviderDiscoveryError } from "../lib/providerEndpoint";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
 import type { GatewayClientSyncSummary, Model, Provider, Settings, UpstreamFormatProbeResult } from "../lib/types";
@@ -465,7 +465,7 @@ export function useProviderWorkspace(options: {
             const models = await api.discoverProviderModels(form.base_url, form.api_key, form.id.trim() || null);
             const nextForm = {
               ...form,
-              models: mergeDiscoveredModels(form.models, models),
+              models: fillMissingModelLimits(mergeDiscoveredModels(form.models, models), form.models),
             };
             dispatch({ type: "updateForm", form: nextForm });
             dispatch({ type: "setDiscoveryError", error: null });

@@ -32,6 +32,7 @@ async function loadCombinedModule() {
     // Stub the i18n-adjacent helpers core.ts imports (pure under test).
     "function instantiateCatalogProvider(preset, sortOrder) { return { ...preset, sort_order: sortOrder }; }",
     "function mergeDiscoveredModels(base, discovered) { const seen = new Set(base.map((m) => m.id)); return [...base, ...discovered.filter((m) => !seen.has(m.id))]; }",
+    "function fillMissingModelLimits(models) { return models; }",
     "function slugify(name) { return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''); }",
     "function normalizeModel(m) { return m; }",
     "function renumberModels(models) { return models.map((m, i) => ({ ...m, sort_order: i + 1 })); }",
