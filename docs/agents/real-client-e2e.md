@@ -304,7 +304,7 @@ prohibited.
 
 Always pass `-CliOnly` with `-ThirdPartyModel codexhub-opencode-go/muse-spark-1.3-contributor`.
 This runs eight automated cases for Codex CLI, OpenCode, Pi, and OMP (Official
-Luna and OpenCode Go Muse Spark 1.2 Contributor). The runner does not resolve
+Luna and OpenCode Go Muse Spark 1.3 Contributor). The runner does not resolve
 or start Codex Desktop or ZCode GUI, does not inspect GUI seeds, does not
 require `gui_ready = true`, and never creates or waits for
 `manual-evidence.template.json` or `manual-evidence.json`. A CLI-only summary

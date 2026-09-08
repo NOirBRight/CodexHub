@@ -3218,7 +3218,7 @@ enabled = true
 
   [[providers.models]]
   id = "$($script:ThirdPartyUpstreamModel)"
-  display_name = "OpenCode Muse Spark 1.2 Contributor"
+  display_name = "OpenCode Muse Spark 1.3 Contributor"
   context_window = 1000000
   max_output_tokens = 131072
   enabled = true
