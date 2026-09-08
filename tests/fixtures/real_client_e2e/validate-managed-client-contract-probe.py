@@ -13,9 +13,9 @@ EXPECTED = {
     (client, model)
     for client in ("codex", "opencode", "zcode", "pi", "omp")
     for model in (
-        ("gpt-5.6-luna", "opencode-go/muse-spark-1.2-contributor")
+        ("gpt-5.6-luna", "opencode-go/muse-spark-1.3-contributor")
         if client == "codex"
-        else ("openai/gpt-5.6-luna", "opencode-go/muse-spark-1.2-contributor")
+        else ("openai/gpt-5.6-luna", "opencode-go/muse-spark-1.3-contributor")
     )
 }
 
@@ -33,7 +33,7 @@ def main(path: Path) -> None:
     for row in rows:
         if row["model"] in ("gpt-5.6-luna", "openai/gpt-5.6-luna"):
             assert "--catalog-path" in row["flags"], row
-        elif row["model"] == "opencode-go/muse-spark-1.2-contributor":
+        elif row["model"] == "opencode-go/muse-spark-1.3-contributor":
             assert "--catalog-path" not in row["flags"], row
 
 
