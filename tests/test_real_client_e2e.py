@@ -3416,6 +3416,23 @@ def test_external_watchdog_replays_utf8_output_under_a_legacy_console_encoding(t
     assert "replacement" in result.stdout
 
 
+def test_windows_cli_preflight_covers_xai_grok_tool_root_shapes():
+    source = SCRIPT.read_text(encoding="utf-8")
+    probe = source[
+        source.index("function Invoke-XaiGrokToolsPreflight") :
+        source.index("function Test-GatewayHealth")
+    ]
+
+    assert "e2e_xai_grok_tools.py" in probe
+    assert "preflight_xai_grok_tools_script_missing" in probe
+    assert "preflight_xai_grok_tools_failed" in probe
+    assert "Start-Process -FilePath $script:RepositoryPython" in probe
+    assert "SetEnvironmentVariable('CODEXHUB_E2E_XAI', $null)" in probe
+    assert "Invoke-XaiGrokToolsPreflight" in source
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+    assert "e2e_xai_grok_tools.py` during preflight" in documentation
+
+
 def test_operator_commands_have_explicit_outer_and_manual_deadlines():
     documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
 

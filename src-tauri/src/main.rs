@@ -389,10 +389,7 @@ pub(crate) enum AppLifecycleAction {
 
 impl AppLifecycleAction {
     const fn requires_gateway_cleanup(self) -> bool {
-        matches!(
-            self,
-            Self::CloseToTray | Self::TrayExit | Self::UpdateRestart
-        )
+        matches!(self, Self::TrayExit | Self::UpdateRestart)
     }
 
     const fn label(self) -> &'static str {
@@ -586,6 +583,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_gui() {
+    proxy::enable_app_owned_gateway();
     #[cfg(target_os = "linux")]
     linux_window::initialize_identity();
 
@@ -625,12 +623,20 @@ fn run_gui() {
         .expect("error while building CodexHub Tauri application");
 
     app.run(|_app, event| {
-        if matches!(event, RunEvent::Resumed) {
-            tauri::async_runtime::spawn_blocking(|| {
-                if let Err(error) = official_refresh::refresh_after_resume() {
-                    log::warn!("overdue Official model refresh after resume failed: {error}");
-                }
-            });
+        match event {
+            // Close-to-tray keeps Gateway alive. Tray Exit already stops it;
+            // these events cover dock quit, SIGTERM, and other runtime teardown.
+            RunEvent::Exit | RunEvent::ExitRequested { .. } => {
+                let _ = proxy::stop_for_app_close();
+            }
+            RunEvent::Resumed => {
+                tauri::async_runtime::spawn_blocking(|| {
+                    if let Err(error) = official_refresh::refresh_after_resume() {
+                        log::warn!("overdue Official model refresh after resume failed: {error}");
+                    }
+                });
+            }
+            _ => {}
         }
     });
 }
@@ -849,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn close_to_tray_cleans_up_the_gateway_before_hiding() {
+    fn close_to_tray_keeps_the_gateway_running() {
         let cleanup_calls = Cell::new(0);
         let action_calls = Cell::new(0);
 
@@ -862,7 +868,7 @@ mod tests {
             || action_calls.set(action_calls.get() + 1),
         );
 
-        assert_eq!(cleanup_calls.get(), 1);
+        assert_eq!(cleanup_calls.get(), 0);
         assert_eq!(action_calls.get(), 1);
     }
 
@@ -901,6 +907,49 @@ mod tests {
         );
 
         assert_eq!(events.into_inner(), vec!["cleanup", "terminal"]);
+    }
+
+    #[test]
+    fn process_exit_stops_the_managed_gateway() {
+        let main = include_str!("main.rs");
+        assert!(
+            main.contains("RunEvent::Exit | RunEvent::ExitRequested { .. }"),
+            "process exit must stop the managed Gateway"
+        );
+        assert!(
+            main.contains("let _ = proxy::stop_for_app_close();"),
+            "process exit must invoke stop_for_app_close"
+        );
+    }
+
+    #[test]
+    fn close_to_tray_call_sites_do_not_stop_the_managed_gateway() {
+        let main = include_str!("main.rs");
+        let handlers = include_str!("desktop_commands/handlers.rs");
+        let close_at = main
+            .find("WindowEvent::CloseRequested")
+            .expect("window close handler");
+        let close_slice = &main[close_at..main.len().min(close_at + 350)];
+        assert!(
+            close_slice.contains("Ok(false)"),
+            "closing the window to tray must not stop Gateway"
+        );
+        assert!(
+            !close_slice.contains("stop_for_app_close"),
+            "closing the window to tray must not stop Gateway"
+        );
+        let hide_at = handlers
+            .find("pub fn window_close_to_tray")
+            .expect("window_close_to_tray");
+        let hide_slice = &handlers[hide_at..handlers.len().min(hide_at + 400)];
+        assert!(
+            hide_slice.contains("Ok(false)"),
+            "window_close_to_tray must not stop Gateway"
+        );
+        assert!(
+            !hide_slice.contains("stop_for_app_close"),
+            "window_close_to_tray must not stop Gateway"
+        );
     }
 
     fn status() -> AppStatus {

@@ -998,3 +998,31 @@ def test_codex_catalog_roundtrip_e2e_uses_live_app_catalog_and_isolated_custom_p
     assert "official model order changed after custom catalog roundtrip" in source
     assert "custom catalog exposed a prefixed official model id" in source
     assert "reasoning contract must preserve Light through Max" in source
+
+
+def test_xai_grok_tools_e2e_covers_root_union_without_joining_cli_matrix():
+    source = (ROOT / "scripts" / "e2e_xai_grok_tools.py").read_text(encoding="utf-8")
+
+    assert "tool parameter root must be an object type" in source
+    assert "https://api.x.ai/v1/responses" in source
+    assert "CODEXHUB_E2E_XAI" in source
+    assert "eight-case Official+OpenCode Go CLI gate" in source
+    assert "__codexhub_ns_a5e9029afd_33" in source
+    assert "compatible_response_body" in source
+    assert "inverse_mapped" in source
+    assert '{"type": "null"}' in source or '"type": "null"' in source
+    assert 'raise SystemExit(f"live xAI HTTP {error.code}: {detail}")' in source
+
+
+def test_xai_offline_preflight_preserves_caller_home(tmp_path):
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    sentinel = caller / "keep.txt"
+    sentinel.write_text("untouched")
+    env = dict(os.environ, CODEX_HOME=str(caller), CODEXHUB_RUNTIME_HOME=str(caller))
+    env.pop("CODEXHUB_E2E_XAI", None)
+    result = subprocess.run([sys.executable, "scripts/e2e_xai_grok_tools.py"], env=env,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert list(caller.iterdir()) == [sentinel]
+    assert sentinel.read_text() == "untouched"

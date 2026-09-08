@@ -1245,6 +1245,31 @@ function Test-LoopbackPortBindable {
     }
 }
 
+function Invoke-XaiGrokToolsPreflight {
+    $scriptPath = Join-Path $script:RepositoryRoot 'scripts\e2e_xai_grok_tools.py'
+    if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+        throw 'preflight_xai_grok_tools_script_missing'
+    }
+    # Live xAI uses the operator host session. The eight-case gate must only
+    # run the in-process sanitizer for the documented Grok tool-root 400.
+    $previousLive = [Environment]::GetEnvironmentVariable('CODEXHUB_E2E_XAI')
+    try {
+        [Environment]::SetEnvironmentVariable('CODEXHUB_E2E_XAI', $null)
+        $process = Start-Process -FilePath $script:RepositoryPython -ArgumentList @($scriptPath) -Wait -PassThru -NoNewWindow
+        if ($process.ExitCode -ne 0) {
+            throw 'preflight_xai_grok_tools_failed'
+        }
+    }
+    finally {
+        if ($null -eq $previousLive) {
+            [Environment]::SetEnvironmentVariable('CODEXHUB_E2E_XAI', $null)
+        }
+        else {
+            [Environment]::SetEnvironmentVariable('CODEXHUB_E2E_XAI', $previousLive)
+        }
+    }
+}
+
 function Test-GatewayHealth {
     param([int]$Port)
     $response = $null
@@ -3431,6 +3456,7 @@ if ([int]$script:GatewayConfig.listen_port -ge 49152) {
 if (-not (Test-LoopbackPortBindable -Port ([int]$script:GatewayConfig.listen_port))) {
     throw 'preflight_gateway_port_in_use'
 }
+Invoke-XaiGrokToolsPreflight
 $script:AccountAuthPath = $accountAuthPath
 if (Test-Path -LiteralPath $summaryPath) {
     throw 'preflight_output_already_contains_summary'

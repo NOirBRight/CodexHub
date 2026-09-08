@@ -1,3 +1,5 @@
+> Lifecycle clarification (2026-09-09): this document records the original design. Current GUI-owned Gateway processes stay alive on close-to-tray, but stop on explicit application exit/update restart. CLI `start` launches a detached Gateway that survives its launcher exiting. The independent-lifecycle statements below describe the original design, not the current GUI exit contract.
+
 # CodexHub Design Document
 
 ## Overview

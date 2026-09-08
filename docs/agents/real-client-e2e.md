@@ -20,6 +20,24 @@ Ollama remains prohibited. The live third-party CLI leg is OpenCode Go
 `isolated/credentials/opencode-go.json` with schema
 `codexhub.real-client-opencode-go.v1`. Issue #497 tracks the Yoga credential.
 
+xAI Grok is **not** one of those eight cases. Windows `Run-RealClientE2E.ps1`
+still runs `scripts/e2e_xai_grok_tools.py` during preflight with
+`CODEXHUB_E2E_XAI` unset, so a Grok tool-root union 400 cannot skip the
+CLI gate. That preflight covers root `anyOf`/`oneOf`+null, exclusive-required
+`anyOf`, nested unions/type arrays left intact, and namespace flatten plus
+inverse-map. Always-on unit coverage remains
+`tests/test_chat_completions_gateway.py` plus
+`tests/test_third_party_reasoning_request.py` (including
+`test_xai_codex_app_namespace_alias_inverse_maps_*` and the HTTP inverse-map).
+Optional live probes:
+
+- `CODEXHUB_LIVE_GATEWAY_CONFIG` → `test_live_gateway_accepts_xai_root_union_tools`
+- `CODEXHUB_E2E_XAI=1 ./scripts/codexhub-python.sh scripts/e2e_xai_grok_tools.py`
+  (uses the local `xai_auth` session; never sends the unsanitized union)
+
+Do not add xAI to `scripts/real_client_cli_contract.v1.json` without a
+dedicated credential contract and a new Issue.
+
 ## Authoritative host and compatibility baselines
 
 Run on the authoritative machine-bound local dedicated Windows host

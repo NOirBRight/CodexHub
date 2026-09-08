@@ -18,6 +18,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -74,6 +76,49 @@ def _assert_current_launcher(home: Path, binary: Path) -> None:
         raise RuntimeError("portable upgrade did not update the managed launcher")
 
 
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    """Stop a launched CodexHub tree, including a Gateway child on 9099."""
+
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            process.kill()
+        process.wait(timeout=5)
+
+
+def _codex_proxy_pids_from_pgrep(output: str, home: Path) -> list[int]:
+    needle = str(home)
+    pids: list[int] = []
+    for line in output.splitlines():
+        if needle not in line or "codex_proxy.py" not in line:
+            continue
+        pid_text = line.split(None, 1)[0]
+        if pid_text.isdigit():
+            pids.append(int(pid_text))
+    return pids
+
+
+def _kill_stray_gateways(home: Path) -> None:
+    try:
+        output = subprocess.check_output(["pgrep", "-af", "codex_proxy.py"], text=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return
+    for pid in _codex_proxy_pids_from_pgrep(output, home):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+
+
 def _sanitized_result_lines(output: str) -> list[str]:
     """Keep only the fixed, anonymous probe records from a child session."""
 
@@ -111,7 +156,7 @@ def main() -> int:
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=90,
+                timeout=120,
             )
         except subprocess.TimeoutExpired:
             print("isolated GNOME dock icon test timed out", file=sys.stderr)
@@ -135,6 +180,17 @@ def main() -> int:
                                 WAYLAND_DISPLAY='codexhub-dock-test', LIBGL_ALWAYS_SOFTWARE='1',
                                 NO_AT_BRIDGE='1', GSETTINGS_BACKEND='keyfile')
         (home / 'runtime').mkdir(mode=0o700)
+        # Exercise automatic Gateway startup on an isolated port. A dock icon
+        # alone can pass even when the startup thread kills its Gateway child.
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            gateway_port = listener.getsockname()[1]
+        (home / 'state/proxy').mkdir(parents=True)
+        (home / 'state/proxy/settings.json').write_text(json.dumps({
+            'auto_start_gateway': True,
+            'include_official_models': False,
+            'proxy_port': gateway_port,
+        }))
         extension = home / 'data/gnome-shell/extensions/codexhub-dock-test@local'
         extension.mkdir(parents=True)
         (extension / 'metadata.json').write_text(json.dumps({
@@ -184,7 +240,7 @@ export default class Probe {
             try:
                 shell = subprocess.Popen(['gnome-shell', '--headless', '--wayland',
                     '--wayland-display=codexhub-dock-test', '--virtual-monitor=1024x768',
-                    '--debug-control'], env=env, stdout=log, stderr=log)
+                    '--debug-control'], env=env, stdout=log, stderr=log, start_new_session=True)
                 processes.append(shell)
                 deadline = time.monotonic() + 15
                 while not (home / 'runtime/codexhub-dock-test').exists():
@@ -195,35 +251,50 @@ export default class Probe {
                 old_binary = _copy_portable_candidate(binary.parent, home / 'portable-old')
                 new_binary = _copy_portable_candidate(binary.parent, home / 'portable-new')
                 for phase, candidate in (("first_launch", old_binary), ("portable_upgrade", new_binary)):
-                    app = subprocess.Popen([str(candidate)], cwd=home, env=env, stdout=log, stderr=log)
+                    app = subprocess.Popen([str(candidate)], cwd=home, env=env, stdout=log, stderr=log, start_new_session=True)
                     processes.append(app)
-                    time.sleep(8)
-                    result = subprocess.check_output(['gdbus', 'call', '--session', '--dest',
-                        'org.gnome.Shell', '--object-path', '/org/gnome/Shell', '--method',
-                        'org.gnome.Shell.Eval', 'global.codexhubDockIdentity()'],
-                        env=env, text=True, timeout=10)
-                    success, payload = ast.literal_eval(result.replace('(true,', '(True,').replace('(false,', '(False,'))
-                    identities = json.loads(payload) if success else []
-                    passed = len(identities) == 1 and identities[0] == {
-                        'appId': 'com.codexhub.app.desktop', 'windowBacked': False,
-                        'iconFound': True, 'branded': True}
+                    deadline = time.monotonic() + 30
+                    while True:
+                        status = json.loads(subprocess.check_output(
+                            [str(candidate), 'status'], env=env, text=True, timeout=15))
+                        if status.get('proxy_running') and status.get('proxy_port') == gateway_port:
+                            break
+                        if app.poll() is not None or time.monotonic() >= deadline:
+                            raise RuntimeError('Gateway did not start automatically')
+                        time.sleep(.25)
+                    # A healthy startup snapshot alone misses PDEATHSIG when
+                    # the short-lived startup thread returns just afterwards.
+                    time.sleep(1)
+                    status = json.loads(subprocess.check_output(
+                        [str(candidate), 'status'], env=env, text=True, timeout=15))
+                    if not status.get('proxy_running'):
+                        raise RuntimeError('Gateway exited after automatic startup completed')
+                    deadline = time.monotonic() + 20
+                    while True:
+                        result = subprocess.check_output(['gdbus', 'call', '--session', '--dest',
+                            'org.gnome.Shell', '--object-path', '/org/gnome/Shell', '--method',
+                            'org.gnome.Shell.Eval', 'global.codexhubDockIdentity()'],
+                            env=env, text=True, timeout=10)
+                        success, payload = ast.literal_eval(result.replace('(true,', '(True,').replace('(false,', '(False,'))
+                        identities = json.loads(payload) if success else []
+                        passed = len(identities) == 1 and identities[0] == {
+                            'appId': 'com.codexhub.app.desktop', 'windowBacked': False,
+                            'iconFound': True, 'branded': True}
+                        if passed or time.monotonic() >= deadline:
+                            break
+                        time.sleep(.25)
                     _assert_current_launcher(home, candidate)
                     print(json.dumps({'phase': phase, 'passed': passed,
                                       'identity': identities}), flush=True)
                     if not passed:
                         raise RuntimeError('GNOME dock cannot resolve the running application icon')
-                    app.terminate()
-                    app.wait(timeout=5)
+                    _terminate_process_tree(app)
+                    _kill_stray_gateways(home)
                 return 0
             finally:
                 for process in reversed(processes):
-                    if process.poll() is None:
-                        process.terminate()
-                        try:
-                            process.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            process.wait(timeout=5)
+                    _terminate_process_tree(process)
+                _kill_stray_gateways(home)
 
 
 if __name__ == '__main__':
