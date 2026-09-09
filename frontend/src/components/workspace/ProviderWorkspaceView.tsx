@@ -24,6 +24,7 @@ import {
   displayModelName,
   enabledPreviewModels,
 } from "../../lib/modelDisplay";
+import { meanResponseDurationLabel } from "../../lib/workspaceResources";
 import { SwitchControl } from "../SettingsDrawer";
 import { WorkspaceHeading, type WorkspacePage } from "./WorkspaceShell";
 import { ResourceLimits } from "./ResourceLimits";
@@ -369,11 +370,7 @@ export function ProviderWorkspaceView(props: Props) {
               ],
               [
                 t("workspace.responseDuration"),
-                durations.length
-                  ? Math.round(
-                      durations.reduce((a, b) => a + b, 0) / durations.length,
-                    ) + " ms"
-                  : "—",
+                meanResponseDurationLabel(durations),
               ],
             ].map(([label, value]) => (
               <div key={label}>

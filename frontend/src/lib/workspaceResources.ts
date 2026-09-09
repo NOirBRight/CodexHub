@@ -47,3 +47,17 @@ export function resourceQuotaLayout(limits: OpenAIUsageLimit[]) {
     weekOnly: ordered.length === 1 && isWeeklyLimit(ordered[0]),
   };
 }
+
+/** Overview mean is full request duration, shown in seconds. */
+export function formatMeanResponseDuration(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return "—";
+  const seconds = Number((durationMs / 1000).toFixed(2));
+  return `${seconds} s`;
+}
+
+export function meanResponseDurationLabel(durationsMs: number[]): string {
+  if (durationsMs.length === 0) return "—";
+  const mean =
+    durationsMs.reduce((sum, value) => sum + value, 0) / durationsMs.length;
+  return formatMeanResponseDuration(mean);
+}
