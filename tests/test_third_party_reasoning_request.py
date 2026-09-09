@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from pathlib import Path
 import urllib.error
 import urllib.request
 
@@ -15,6 +16,59 @@ from collaboration_runtime_contract import COLLABORATION_V2, EXPECTED_PARAMETER_
 
 
 PATCH = "*** Begin Patch\n*** Update File: target.txt\n@@\n-before\n+after\n*** End Patch"
+
+
+def test_desktop_automation_nested_union_has_provider_compatible_object_root():
+    schema = json.loads((Path(__file__).parent / "fixtures/tool_schemas/codex_app_automation_update.json").read_text())
+    body = json.dumps({"input": [], "tools": [{
+        "type": "namespace", "name": "mcp__codex_app", "tools": [{
+            "type": "function", "name": "automation_update", "parameters": schema,
+        }],
+    }]}).encode()
+    transformed = json.loads(gateway_compat.compatible_request_body(
+        body, _xai_upstream(), inject_codex_tools=False,
+        event_context={},
+        behavior_profile="codex_app_external_adapter",
+    ))
+    tool = transformed["tools"][0]
+    assert tool["name"] == "__codexhub_ns_fa0cf542e6_1"
+    parameters = tool["parameters"]
+    assert parameters.get("type") == "object"
+    assert "oneOf" not in parameters
+    branches = parameters["allOf"][0]["oneOf"]
+    assert len(branches) == 4
+    assert len(branches[1]["oneOf"]) == 2
+    assert len(branches[2]["oneOf"]) == 2
+    assert branches[0]["required"] == ["mode", "id"]
+    assert branches[1]["oneOf"][0]["additionalProperties"] is False
+
+
+@pytest.mark.parametrize("union", ["anyOf", "oneOf"])
+def test_nested_root_union_preserves_conjunctions_and_exclusivity(union):
+    from gateway_compat.tool_parameter_root import coerce_tool_parameter_root
+
+    root = {
+        "type": "object", "required": ["scope"],
+        "allOf": [{"minProperties": 1}],
+        union: [
+            {"type": "object", "required": ["a"]},
+            {"type": "object", "oneOf": [
+                {"type": "object", "required": ["b"]},
+                {"type": "object", "required": ["c"]},
+            ]},
+        ],
+    }
+    before = copy.deepcopy(root)
+    projected, changed = coerce_tool_parameter_root(root)
+    assert changed
+    assert root == before
+    assert projected == {
+        "type": "object", "required": ["scope"],
+        "allOf": [{"minProperties": 1}, {union: root[union]}],
+    }
+    # In particular, keep the inner oneOf as one outer branch: flattening it
+    # changes acceptance when a, b, and c are all present.
+    assert coerce_tool_parameter_root(projected) == (projected, False)
 
 
 def _xai_upstream() -> dict[str, str]:

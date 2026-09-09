@@ -329,7 +329,8 @@ def test_user_requested_shutdown_outcome_is_sanitized_for_every_downstream_forma
         assert "bearer" not in serialized
 
 
-def test_requests_arriving_after_admission_closure_never_open_an_upstream_transport() -> None:
+@pytest.mark.parametrize("body_delivery", ["immediate", "delayed", "stalled"])
+def test_requests_arriving_after_admission_closure_never_open_an_upstream_transport(body_delivery: str) -> None:
     controller = gateway_admission.GatewayShutdownController()
     controller.close_admission()
     server = ThreadingHTTPServer(("127.0.0.1", 0), CodexProxyHandler)
@@ -345,12 +346,20 @@ def test_requests_arriving_after_admission_closure_never_open_an_upstream_transp
             "open_upstream_response",
             side_effect=AssertionError("closed admission must not open upstream work"),
         ) as open_upstream:
-            connection.request(
-                "POST",
-                "/v1/responses",
-                body=b'{"model":"gpt-5.6-terra","input":"must not reach upstream"}',
-                headers={"Content-Type": "application/json"},
-            )
+            body = b'{"model":"gpt-5.6-terra","input":"must not reach upstream"}'
+            if body_delivery != "immediate":
+                connection.putrequest("POST", "/v1/responses")
+                connection.putheader("Content-Type", "application/json")
+                connection.putheader("Content-Length", str(len(body)))
+                connection.endheaders()
+                if body_delivery == "delayed":
+                    time.sleep(0.05)
+                    connection.send(body)
+            else:
+                connection.request(
+                    "POST", "/v1/responses", body=body,
+                    headers={"Content-Type": "application/json"},
+                )
             response = connection.getresponse()
             payload = json.loads(response.read().decode("utf-8"))
         connection.close()
