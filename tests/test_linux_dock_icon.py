@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from e2e_linux_dock_icon import (  # noqa: E402
     ENVIRONMENT_PASSTHROUGH,
+    _codex_proxy_pids_from_pgrep,
     _copy_portable_candidate,
     _safe_environment,
     _sanitized_result_lines,
@@ -56,3 +57,14 @@ Traceback: /tmp/private.log\n
     assert _sanitized_result_lines(output) == [
         '{"passed": true, "phase": "first_launch"}'
     ]
+
+
+def test_dock_probe_identifies_stray_gateway_pids_for_the_isolated_home(tmp_path) -> None:
+    home = tmp_path / "codexhub-dock-test-izn69l6u"
+    output = (
+        f"1219043 python3 {home}/portable-new/src-python/codex_proxy.py --host 127.0.0.1 --port 9099\n"
+        "99 python3 /tmp/other/src-python/codex_proxy.py --port 9099\n"
+        f"12 python3 {home}/not-a-proxy.py --port 9099\n"
+    )
+
+    assert _codex_proxy_pids_from_pgrep(output, home) == [1219043]

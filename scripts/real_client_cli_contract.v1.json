@@ -74,10 +74,10 @@
       "provider_id": "opencode-go",
       "diagnostic_provider_id": "opencode_go",
       "models": {
-        "managed": "opencode-go/muse-spark-1.2-contributor",
-        "selector": "opencode-go/muse-spark-1.2-contributor",
-        "canonical": "opencode-go/muse-spark-1.2-contributor",
-        "gateway": "opencode-go/muse-spark-1.2-contributor"
+        "managed": "opencode-go/muse-spark-1.3-contributor",
+        "selector": "opencode-go/muse-spark-1.3-contributor",
+        "canonical": "opencode-go/muse-spark-1.3-contributor",
+        "gateway": "opencode-go/muse-spark-1.3-contributor"
       },
       "endpoint_binding": "/v1/providers/opencode-go/responses",
       "protocol": "responses",
@@ -111,10 +111,10 @@
       "provider_id": "opencode-go",
       "diagnostic_provider_id": "opencode_go",
       "models": {
-        "managed": "opencode-go/muse-spark-1.2-contributor",
-        "selector": "codexhub-opencode-go/muse-spark-1.2-contributor",
-        "canonical": "codexhub-opencode-go/muse-spark-1.2-contributor",
-        "gateway": "opencode-go/muse-spark-1.2-contributor"
+        "managed": "opencode-go/muse-spark-1.3-contributor",
+        "selector": "codexhub-opencode-go/muse-spark-1.3-contributor",
+        "canonical": "codexhub-opencode-go/muse-spark-1.3-contributor",
+        "gateway": "opencode-go/muse-spark-1.3-contributor"
       },
       "endpoint_binding": "/v1/providers/opencode-go/responses",
       "protocol": "responses",
@@ -148,10 +148,10 @@
       "provider_id": "opencode-go",
       "diagnostic_provider_id": "opencode_go",
       "models": {
-        "managed": "opencode-go/muse-spark-1.2-contributor",
-        "selector": "codexhub-opencode-go/muse-spark-1.2-contributor",
-        "canonical": "codexhub-opencode-go/muse-spark-1.2-contributor",
-        "gateway": "opencode-go/muse-spark-1.2-contributor"
+        "managed": "opencode-go/muse-spark-1.3-contributor",
+        "selector": "codexhub-opencode-go/muse-spark-1.3-contributor",
+        "canonical": "codexhub-opencode-go/muse-spark-1.3-contributor",
+        "gateway": "opencode-go/muse-spark-1.3-contributor"
       },
       "endpoint_binding": "/v1/providers/opencode-go/responses",
       "protocol": "responses",
@@ -185,10 +185,10 @@
       "provider_id": "opencode-go",
       "diagnostic_provider_id": "opencode_go",
       "models": {
-        "managed": "opencode-go/muse-spark-1.2-contributor",
-        "selector": "codexhub-opencode-go/muse-spark-1.2-contributor",
-        "canonical": "codexhub-opencode-go/muse-spark-1.2-contributor",
-        "gateway": "opencode-go/muse-spark-1.2-contributor"
+        "managed": "opencode-go/muse-spark-1.3-contributor",
+        "selector": "codexhub-opencode-go/muse-spark-1.3-contributor",
+        "canonical": "codexhub-opencode-go/muse-spark-1.3-contributor",
+        "gateway": "opencode-go/muse-spark-1.3-contributor"
       },
       "endpoint_binding": "/v1/providers/opencode-go/responses",
       "protocol": "responses",

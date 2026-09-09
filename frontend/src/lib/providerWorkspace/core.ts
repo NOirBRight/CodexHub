@@ -6,7 +6,7 @@ import {
   normalizeEndpointFormats,
   probeSucceeded,
 } from "../providerEndpoint";
-import { mergeDiscoveredModels, renumberModels, slugify } from "../format";
+import { fillMissingModelLimits, mergeDiscoveredModels, renumberModels, slugify } from "../format";
 import {
   filterCodexVisibleOfficialModels,
   officialModelSortKeys,
@@ -129,7 +129,11 @@ export function providerWorkspaceReducer(
       return { ...state, officialModels: intent.models, officialModelSnapshot: intent.models };
     case "initializeOfficialModels": {
       if (state.officialCatalogLoaded) return state;
-      const models = sortOfficialModels(filterCodexVisibleOfficialModels(intent.models), state.officialModelOrderDraft);
+      const models = sortOfficialModels(
+        filterCodexVisibleOfficialModels(intent.models),
+        state.officialModelOrderDraft,
+        state.officialDisabledModelsDraft,
+      );
       return { ...state, officialModels: models, officialModelSnapshot: models, officialCatalogLoaded: true };
     }
     case "applyOfficialRefresh": {
@@ -201,6 +205,7 @@ export function providerWorkspaceReducer(
         : sortOfficialModels(
           snapshot ?? mergeOfficialModelSources(intent.catalogModels, intent.modelMetadata),
           officialModelOrderDraft,
+          officialDisabledModelsDraft,
         );
       const next = {
         ...state,
@@ -298,13 +303,15 @@ export function applyDiscoveredModelsForProvider(
   retainIntersection: boolean,
 ): { provider: Provider; addedCount: number } {
   const previousModelIds = new Set(baseProvider.models.map((model) => model.id));
-  const withDefaults = applyPresetReasoningDefaults(discovered, preset);
   const retained = retainIntersection
-    ? baseProvider.models.filter((model) => withDefaults.some((item) => item.id === model.id))
+    ? baseProvider.models.filter((model) => discovered.some((item) => item.id === model.id))
     : baseProvider.models;
   const provider = {
     ...baseProvider,
-    models: mergeDiscoveredModels(retained, withDefaults),
+    models: fillMissingModelLimits(
+      applyPresetReasoningDefaults(mergeDiscoveredModels(retained, discovered), preset),
+      retained,
+    ),
   };
   const addedCount = provider.models.filter((model) => !previousModelIds.has(model.id)).length;
   return { provider, addedCount };

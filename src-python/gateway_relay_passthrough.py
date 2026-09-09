@@ -19,6 +19,7 @@ import gateway_transport
 import protocol_translation
 import route_primitives
 import sse_events
+from gateway_compat import collaboration_delivery
 
 import time
 from collections.abc import Callable, Mapping
@@ -245,6 +246,7 @@ def relay_official_passthrough_sse_response(
             if not send_downstream_headers_once():
                 return _handle_downstream_header_failure()
             _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
+            line = collaboration_delivery.decode_sse_line(line, event_context)
             if not seam.commit_data(line):
                 if seam.terminal_committed:
                     # Terminal ledger is sealed; suppress the post-terminal

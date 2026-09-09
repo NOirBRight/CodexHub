@@ -508,7 +508,10 @@ def compatible_response_body(
     upstream_name: str,
     event_context: Mapping[str, Any] | None = None,
 ) -> bytes:
-    if upstream_name == "official" or _official_passthrough._is_raw_provider_probe_context(event_context):
+    if upstream_name == "official":
+        from . import collaboration_delivery
+        return collaboration_delivery.decode_body(body, event_context)
+    if _official_passthrough._is_raw_provider_probe_context(event_context):
         return body
 
     try:

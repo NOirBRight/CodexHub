@@ -6,27 +6,57 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn get_providers() -> Result<Vec<Provider>, String> {
-    get_providers_with_paths(&ConfigPaths::runtime()?)
+    let paths = ConfigPaths::runtime()?;
+    let mut providers = get_providers_with_paths(&paths)?;
+    if let Ok(catalog) =
+        load_bundled_providers_from_candidates(&bundled_providers_candidate_paths(&paths))
+    {
+        fill_missing_model_limits_from_catalog(&mut providers, &catalog);
+    }
+    Ok(providers)
 }
 
 pub fn get_bundled_providers() -> Result<Vec<Provider>, String> {
+    let paths = ConfigPaths::runtime()?;
+    load_bundled_providers_from_candidates(&bundled_providers_candidate_paths(&paths))
+}
+
+fn bundled_providers_candidate_paths(paths: &ConfigPaths) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+    // Prefer the checkout catalog when this binary was built from this tree.
+    // `tauri dev` copies resources next to the exe once per build, so an
+    // exe-adjacent providers.toml can lag behind config/providers.toml.
+    if let Some(repo_root) = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent() {
+        push_unique_path(
+            &mut candidates,
+            repo_root.join("config").join("providers.toml"),
+        );
+    }
+    push_unique_path(&mut candidates, paths.bundled_providers_path());
+    if let Ok(cwd) = std::env::current_dir() {
+        push_unique_path(&mut candidates, cwd.join("config").join("providers.toml"));
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("config").join("providers.toml"));
+            push_unique_path(&mut candidates, dir.join("config").join("providers.toml"));
         }
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("config").join("providers.toml"));
+    candidates
+}
+
+fn push_unique_path(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    if !candidates.iter().any(|existing| existing == &path) {
+        candidates.push(path);
     }
-    let paths = ConfigPaths::runtime()?;
-    candidates.push(paths.bundled_providers_path());
+}
+
+fn load_bundled_providers_from_candidates(candidates: &[PathBuf]) -> Result<Vec<Provider>, String> {
     let mut last_error = String::from("bundled providers.toml not found");
     for path in candidates {
         if !path.exists() {
             continue;
         }
-        match load_providers_from_path(&path) {
+        match load_providers_from_path(path) {
             Ok(providers) if !providers.is_empty() => return Ok(providers),
             Ok(_) => last_error = format!("bundled providers.toml is empty: {}", path.display()),
             Err(error) => last_error = error,
@@ -49,39 +79,6 @@ pub fn save_settings(settings: Settings) -> Result<Settings, String> {
     crate::codex_desktop::serialize_config_writer(|| {
         save_settings_with_paths(settings, &ConfigPaths::runtime()?)
     })
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodexContextGuardStatus {
-    pub enabled: bool,
-    pub codex_enabled: bool,
-    pub gateway_enabled: bool,
-    pub model_context_window: Option<u32>,
-    pub model_auto_compact_token_limit: Option<u32>,
-    pub global_override_conflict: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_restart_result: Option<crate::codex_desktop::CodexRestartResult>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexConfigContextGuardStatus {
-    enabled: bool,
-    model_context_window: Option<u32>,
-    model_auto_compact_token_limit: Option<u32>,
-    #[serde(default)]
-    global_override_conflict: bool,
-}
-
-pub fn get_codex_context_guard_status() -> Result<CodexContextGuardStatus, String> {
-    let paths = ConfigPaths::runtime()?;
-    let python = find_python()?;
-    get_codex_context_guard_status_with_paths(&paths, &python, &ProcessCommandRunner)
-}
-
-pub fn set_codex_context_guard(enabled: bool) -> Result<CodexContextGuardStatus, String> {
-    let paths = ConfigPaths::runtime()?;
-    let python = find_python()?;
-    set_codex_context_guard_with_paths(enabled, &paths, &python, &ProcessCommandRunner)
 }
 
 /// Reapply only the CodexHub-managed runtime context projection after a new
@@ -429,7 +426,6 @@ struct SettingsDocument {
     gateway_auto_retry_max_attempts: Option<u32>,
     gateway_image_proxy_enabled: Option<bool>,
     gateway_image_proxy_model: Option<String>,
-    openai_context_guard_enabled: Option<bool>,
     gateway_fast_model_variants: Option<Vec<String>>,
     official_disabled_models: Option<Vec<String>>,
     official_model_sort_order: Option<Vec<String>>,
@@ -501,9 +497,6 @@ impl SettingsDocument {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .unwrap_or(defaults.gateway_image_proxy_model),
-            openai_context_guard_enabled: self
-                .openai_context_guard_enabled
-                .unwrap_or(defaults.openai_context_guard_enabled),
             gateway_fast_model_variants: self
                 .gateway_fast_model_variants
                 .map(sanitize_fast_model_variants)
@@ -573,10 +566,19 @@ pub(crate) fn normalize_official_model_id(
 }
 
 fn static_official_model_ids() -> HashSet<String> {
-    ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+    [
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex-spark",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 pub(crate) fn known_official_model_ids(paths: &ConfigPaths) -> HashSet<String> {
@@ -650,12 +652,52 @@ fn sanitize_settings_for_save(
 }
 
 fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String> {
-    let path = if paths.runtime_providers_path().exists() {
-        paths.runtime_providers_path()
+    let runtime_path = paths.runtime_providers_path();
+    let path = if runtime_path.exists() {
+        runtime_path
     } else {
         paths.bundled_providers_path()
     };
-    load_providers_from_path(&path)
+    let mut providers = load_providers_from_path(&path)?;
+    if path == paths.runtime_providers_path() {
+        if let Ok(catalog) = load_providers_from_path(&paths.bundled_providers_path()) {
+            fill_missing_model_limits_from_catalog(&mut providers, &catalog);
+        }
+    }
+    Ok(providers)
+}
+
+fn keep_positive_limit(current: Option<u32>, catalog: Option<u32>) -> Option<u32> {
+    match current {
+        Some(value) if value > 0 => Some(value),
+        _ => match catalog {
+            Some(value) if value > 0 => Some(value),
+            _ => current,
+        },
+    }
+}
+
+fn fill_missing_model_limits_from_catalog(providers: &mut [Provider], catalog: &[Provider]) {
+    for provider in providers {
+        let Some(preset) = catalog.iter().find(|candidate| candidate.id == provider.id) else {
+            continue;
+        };
+        for model in &mut provider.models {
+            let Some(catalog_model) = preset
+                .models
+                .iter()
+                .find(|candidate| candidate.id == model.id)
+            else {
+                continue;
+            };
+            model.context_window =
+                keep_positive_limit(model.context_window, catalog_model.context_window);
+            model.max_context_window =
+                keep_positive_limit(model.max_context_window, catalog_model.max_context_window);
+            model.max_output_tokens =
+                keep_positive_limit(model.max_output_tokens, catalog_model.max_output_tokens);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -740,118 +782,6 @@ fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<S
     Ok(settings)
 }
 
-fn get_codex_context_guard_status_with_paths(
-    paths: &ConfigPaths,
-    python: &Path,
-    runner: &dyn CommandRunner,
-) -> Result<CodexContextGuardStatus, String> {
-    let outcome = run_python_script(
-        "context guard status",
-        python,
-        paths.config_overlay_script(),
-        vec![
-            "context-guard-status".to_string(),
-            "--config".to_string(),
-            paths.codex_config_path().to_string_lossy().into_owned(),
-            "--state".to_string(),
-            paths
-                .context_guard_state_path()
-                .to_string_lossy()
-                .into_owned(),
-        ],
-        runner,
-    )?;
-    let codex_status: CodexConfigContextGuardStatus = serde_json::from_str(outcome.stdout.trim())
-        .map_err(|error| {
-        format!(
-            "failed to parse context guard status JSON: {error}; stdout: {}",
-            outcome.stdout.trim()
-        )
-    })?;
-    let gateway_enabled = get_settings_with_paths(paths)?.openai_context_guard_enabled;
-    Ok(combined_context_guard_status(codex_status, gateway_enabled))
-}
-
-fn set_codex_context_guard_with_paths(
-    enabled: bool,
-    paths: &ConfigPaths,
-    python: &Path,
-    runner: &dyn CommandRunner,
-) -> Result<CodexContextGuardStatus, String> {
-    ensure_mode_switch_directories(paths)?;
-    let mut settings = get_settings_with_paths(paths)?;
-    let current_app_owner = crate::app_flavor::current().routing_owner();
-    let target_owner = fs::read_to_string(paths.codex_config_path())
-        .ok()
-        .as_deref()
-        .and_then(codex_overlay_owner)
-        .unwrap_or(current_app_owner);
-    let backup_path = paths.config_backup_path_for_target_owner(current_app_owner, target_owner);
-    let script_args = |value: bool| {
-        vec![
-            "context-guard-set".to_string(),
-            "--config".to_string(),
-            paths.codex_config_path().to_string_lossy().into_owned(),
-            "--backup".to_string(),
-            backup_path.to_string_lossy().into_owned(),
-            "--state".to_string(),
-            paths
-                .context_guard_state_path()
-                .to_string_lossy()
-                .into_owned(),
-            "--catalog".to_string(),
-            paths
-                .generated_catalog_path()
-                .to_string_lossy()
-                .into_owned(),
-            "--enabled".to_string(),
-            value.to_string(),
-        ]
-    };
-    let rollback = || {
-        let _ = run_python_script(
-            "rollback context guard",
-            python,
-            paths.config_overlay_script(),
-            script_args(!enabled),
-            runner,
-        );
-    };
-    let outcome = run_python_script(
-        "set context guard",
-        python,
-        paths.config_overlay_script(),
-        script_args(enabled),
-        runner,
-    )?;
-    let codex_status: CodexConfigContextGuardStatus =
-        match serde_json::from_str(outcome.stdout.trim()) {
-            Ok(status) => status,
-            Err(error) => {
-                rollback();
-                return Err(format!(
-                    "failed to parse context guard status JSON: {error}; stdout: {}",
-                    outcome.stdout.trim()
-                ));
-            }
-        };
-    if codex_status.enabled != enabled {
-        rollback();
-        return Err(format!(
-            "context guard did not reach requested state; requested {enabled}, reported {}",
-            codex_status.enabled
-        ));
-    }
-
-    settings.openai_context_guard_enabled = enabled;
-    if let Err(error) = save_settings_with_paths(settings, paths) {
-        rollback();
-        return Err(error);
-    }
-
-    Ok(combined_context_guard_status(codex_status, enabled))
-}
-
 fn republish_managed_codex_context_budget_with_paths(
     paths: &ConfigPaths,
     python: &Path,
@@ -901,14 +831,6 @@ fn republish_managed_codex_context_budget_with_paths(
             args,
             runner,
         )?;
-    }
-
-    // The optional user-facing context guard has separate managed-state
-    // bookkeeping.  Refresh it only for an explicit Official selection; an
-    // unrelated third-party selection must remain untouched.
-    let after_overlay = fs::read_to_string(&config_path).unwrap_or_default();
-    if settings.openai_context_guard_enabled && top_level_model_is_official(&after_overlay) {
-        set_codex_context_guard_with_paths(true, paths, python, runner)?;
     }
 
     Ok(before != fs::read_to_string(config_path).unwrap_or_default())
@@ -977,42 +899,6 @@ pub(crate) fn migrate_legacy_context_guard_with_paths(
         .zip(before_backups)
         .any(|(path, before)| before != fs::read(path).unwrap_or_default());
     Ok(before_config != fs::read(&config_path).unwrap_or_default() || backups_changed)
-}
-
-fn top_level_model_is_official(text: &str) -> bool {
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            break;
-        }
-        let Some((key, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        if key.trim() != "model" {
-            continue;
-        }
-        let selected = value
-            .trim()
-            .trim_matches(|character| character == '\'' || character == '"');
-        let selected = selected.strip_prefix("openai/").unwrap_or(selected);
-        return selected.starts_with("gpt-");
-    }
-    false
-}
-
-fn combined_context_guard_status(
-    codex_status: CodexConfigContextGuardStatus,
-    gateway_enabled: bool,
-) -> CodexContextGuardStatus {
-    CodexContextGuardStatus {
-        enabled: codex_status.enabled && gateway_enabled,
-        codex_enabled: codex_status.enabled,
-        gateway_enabled,
-        model_context_window: codex_status.model_context_window,
-        model_auto_compact_token_limit: codex_status.model_auto_compact_token_limit,
-        global_override_conflict: codex_status.global_override_conflict,
-        codex_restart_result: None,
-    }
 }
 
 #[cfg(test)]

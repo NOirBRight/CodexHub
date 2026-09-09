@@ -902,11 +902,6 @@ class GatewayHandlerMixin:
                     route_plan.request_mutation_policy
                     != MutationPolicy.OFFICIAL_PASSTHROUGH
                 ),
-                prompt_cache_key=prompt_cache_key,
-                extract_prompt_cache_key=(
-                    route_plan.request_mutation_policy
-                    != MutationPolicy.OFFICIAL_PASSTHROUGH
-                ),
             )
 
             def emit_request_start_once(observability_fields: Mapping[str, Any]) -> None:
@@ -974,6 +969,7 @@ class GatewayHandlerMixin:
                     upstream,
                     operational_authentication,
                     drop_content_encoding=content_decoded,
+                    prompt_cache_key=prompt_cache_key,
                 )
                 primary_route_attempt = route_plan.attempts[0]
             usage_capture: dict[str, Any] = {}

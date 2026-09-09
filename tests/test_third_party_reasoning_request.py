@@ -274,3 +274,341 @@ def test_live_gateway_accepts_sanitized_xai_codex_app_history():
         raise AssertionError(f"live xAI E2E HTTP {exc.code}: {detail[:2000]}") from exc
     except urllib.error.URLError as exc:
         raise AssertionError(f"live Gateway unavailable for xAI E2E: {exc}") from exc
+
+
+def _xai_root_union_tools_request() -> dict:
+    return {
+        "model": "xai/grok-4.6",
+        "input": [{"role": "user", "content": "Reply with the single word pong."}],
+        "tools": [
+            {
+                "type": "function",
+                "name": "__codexhub_ns_a5e9029afd_33",
+                "description": "namespaced child",
+                "parameters": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {"action": {"type": "string"}},
+                            "required": ["action"],
+                        },
+                        {"type": "null"},
+                    ],
+                },
+            },
+            {
+                "type": "function",
+                "name": "note",
+                "description": "nested unions stay",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "combo": {"anyOf": [{"type": "number"}, {"type": "string"}]},
+                        "label": {"type": ["string", "null"]},
+                    },
+                },
+            },
+        ],
+        "tool_choice": "auto",
+    }
+
+
+def test_compatible_request_rewrites_xai_root_union_and_keeps_nested_unions():
+    transformed = json.loads(
+        gateway_compat.compatible_request_body(
+            json.dumps(_xai_root_union_tools_request()).encode(),
+            _xai_upstream(),
+            inject_codex_tools=False,
+            behavior_profile="codex_app_external_adapter",
+        )
+    )
+    tools = {tool["name"]: tool for tool in transformed["tools"] if isinstance(tool, dict)}
+    union_params = tools["__codexhub_ns_a5e9029afd_33"]["parameters"]
+    assert union_params["type"] == "object"
+    assert "oneOf" not in union_params
+    assert union_params["properties"]["action"] == {"type": "string"}
+    nested = tools["note"]["parameters"]["properties"]
+    assert nested["combo"]["anyOf"] == [{"type": "number"}, {"type": "string"}]
+    assert nested["label"]["type"] == ["string", "null"]
+
+
+def test_live_gateway_accepts_xai_root_union_tools():
+    if os.environ.get("CODEXHUB_SKIP_LIVE_XAI_E2E") == "1":
+        pytest.skip("live xAI E2E explicitly disabled")
+    gateway = configured_live_gateway()
+    body = json.dumps(_xai_root_union_tools_request()).encode()
+    req = urllib.request.Request(
+        f"{gateway.base_url}/v1/responses",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {gateway.client_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "codex-app",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            raw = resp.read(8000).decode("utf-8", "replace")
+            assert resp.status == 200
+            assert "tool parameter root must be an object type" not in raw
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        raise AssertionError(f"live xAI tool-schema E2E HTTP {exc.code}: {detail[:2000]}") from exc
+    except urllib.error.URLError as exc:
+        raise AssertionError(f"live Gateway unavailable for xAI tool-schema E2E: {exc}") from exc
+
+
+def _codex_app_xai_namespace_request() -> dict:
+    """Codex App namespace whose child schema is the live xAI 400 shape."""
+
+    return {
+        "model": "xai/grok-4.6",
+        "input": [{"role": "user", "content": "update then echo"}],
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "codex_app",
+                "description": "desktop",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "automation_update",
+                        "description": "update automation",
+                        "strict": False,
+                        "parameters": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {"action": {"type": "string"}},
+                                    "required": ["action"],
+                                },
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "name": "echo",
+                        "description": "echo text",
+                        "strict": False,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                            "required": ["text"],
+                        },
+                    },
+                ],
+            }
+        ],
+        "tool_choice": "auto",
+    }
+
+
+def _encode_xai_namespace_request() -> tuple[dict, dict]:
+    context: dict = {}
+    encoded = json.loads(
+        gateway_compat.compatible_request_body(
+            json.dumps(_codex_app_xai_namespace_request()).encode(),
+            _xai_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+            behavior_profile="codex_app_external_adapter",
+        )
+    )
+    return encoded, context
+
+
+def _alias_for_property(tools: list[dict], property_name: str) -> str:
+    for tool in tools:
+        parameters = tool.get("parameters") if isinstance(tool, dict) else None
+        properties = parameters.get("properties") if isinstance(parameters, dict) else None
+        if isinstance(properties, dict) and property_name in properties:
+            name = tool.get("name")
+            if isinstance(name, str) and name.startswith("__codexhub_ns_"):
+                return name
+    raise AssertionError(f"no __codexhub_ns_ alias exposed {property_name}")
+
+
+def test_xai_codex_app_namespace_alias_inverse_maps_function_call():
+    encoded, context = _encode_xai_namespace_request()
+    tools = encoded["tools"]
+    assert all(tool["type"] == "function" for tool in tools)
+    update_alias = _alias_for_property(tools, "action")
+    echo_alias = _alias_for_property(tools, "text")
+    assert update_alias != echo_alias
+    update_params = next(tool["parameters"] for tool in tools if tool["name"] == update_alias)
+    assert update_params["type"] == "object"
+    assert "oneOf" not in update_params
+    assert update_params["properties"]["action"] == {"type": "string"}
+
+    decoded = json.loads(
+        gateway_compat.compatible_response_body(
+            json.dumps(
+                {
+                    "id": "resp_xai_ns",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "name": update_alias,
+                            "call_id": "call_update",
+                            "arguments": '{"action":"ping"}',
+                        },
+                        {
+                            "type": "function_call",
+                            "name": echo_alias,
+                            "call_id": "call_echo",
+                            "arguments": '{"text":"pong"}',
+                        },
+                    ],
+                }
+            ).encode(),
+            "xai",
+            context,
+        )
+    )
+
+    calls = decoded["output"]
+    assert calls[0]["namespace"] == "codex_app"
+    assert calls[0]["name"] == "automation_update"
+    assert calls[0]["call_id"] == "call_update"
+    assert json.loads(calls[0]["arguments"]) == {"action": "ping"}
+    assert calls[1]["namespace"] == "codex_app"
+    assert calls[1]["name"] == "echo"
+    assert "__codexhub_ns_" not in json.dumps(decoded)
+
+
+def test_xai_codex_app_namespace_alias_inverse_maps_sse():
+    encoded, context = _encode_xai_namespace_request()
+    update_alias = _alias_for_property(encoded["tools"], "action")
+    added = {
+        "type": "response.output_item.added",
+        "item": {
+            "type": "function_call",
+            "name": update_alias,
+            "call_id": "call_update",
+            "item_id": "item_update",
+            "arguments": "",
+        },
+    }
+    mapped = json.loads(
+        gateway_compat.compatible_sse_line(
+            b"data: " + json.dumps(added).encode() + b"\n",
+            "xai",
+            context,
+        )
+        .split(b":", 1)[1]
+        .strip()
+    )
+    assert mapped["item"]["namespace"] == "codex_app"
+    assert mapped["item"]["name"] == "automation_update"
+    assert mapped["item"]["name"].startswith("__codexhub_ns_") is False
+
+
+def test_root_union_preserves_outer_constraints():
+    from gateway_compat.tool_parameter_root import coerce_tool_parameter_root
+    original = {"type": "object", "properties": {"token": {"type": "string"}},
+                "required": ["token"], "anyOf": [
+                    {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+                    {"type": "null"}]}
+    projected, changed = coerce_tool_parameter_root(original)
+    assert changed
+    assert projected["required"] == ["token"]
+    assert projected["properties"] == original["properties"]
+    assert projected["anyOf"][0]["required"] == ["path"]
+    assert len(original["anyOf"]) == 2
+
+
+@pytest.mark.parametrize("root", [{"type": "string"}, {"type": "array"}, {"type": ["number", "null"]}])
+def test_scalar_tool_root_rejected_without_argument_wrapping(root):
+    from protocol_translation import UnsupportedProtocolTranslationError
+    body = json.dumps({"model":"xai/grok-4.6", "input":[], "tools":[
+        {"type":"function", "name":"scalar", "parameters":root}]}).encode()
+    with pytest.raises(UnsupportedProtocolTranslationError, match="object|Scalar"):
+        gateway_compat.compatible_request_body(body, _xai_upstream(), inject_codex_tools=False)
+
+@pytest.mark.parametrize("root", [
+    False,
+    {"not": {}},
+    {"type": "object", "not": {}},
+    {"type": "object", "not": True},
+    {"type": "string", "anyOf": [{"type": "object"}]},
+])
+def test_impossible_tool_roots_are_not_broadened(root):
+    from gateway_compat.tool_parameter_root import coerce_tool_parameter_root
+    from protocol_translation import UnsupportedProtocolTranslationError
+    with pytest.raises(UnsupportedProtocolTranslationError):
+        coerce_tool_parameter_root(root)
+
+
+@pytest.mark.parametrize("root", [
+    {"allOf": [{"type": "string"}]},
+    {"allOf": [{"type": "object"}, {"type": "string"}]},
+    {"anyOf": [{"type": "string"}, {"type": "number"}]},
+    {"oneOf": [{"type": "string"}, {"type": "null"}]},
+    {"not": {"type": "object", "description": "all objects"}},
+    {"enum": ["scalar"]},
+    {"const": "scalar"},
+])
+def test_indirect_scalar_tool_roots_are_not_broadened(root):
+    from gateway_compat.tool_parameter_root import coerce_tool_parameter_root
+    from protocol_translation import UnsupportedProtocolTranslationError
+
+    with pytest.raises(UnsupportedProtocolTranslationError):
+        coerce_tool_parameter_root(root)
+
+
+def test_mixed_root_union_drops_provably_scalar_branch():
+    body = json.dumps({"input": [], "tools": [
+        {"type": "function", "name": "inspect", "parameters": {
+            "anyOf": [
+                {"allOf": [{"type": "string"}]},
+                {"type": "object", "required": ["path"]},
+                {"type": "null"},
+            ],
+        }},
+    ]}).encode()
+    transformed = json.loads(gateway_compat.compatible_request_body(
+        body, _xai_upstream(), inject_codex_tools=False,
+    ))
+    assert transformed["tools"][0]["parameters"] == {
+        "type": "object", "required": ["path"],
+    }
+
+
+@pytest.mark.parametrize("union", ["anyOf", "oneOf"])
+def test_nullable_outer_type_on_object_union_is_normalized(union):
+    from gateway_compat.tool_parameter_root import coerce_tool_parameter_root
+    root = {"type": ["object", "null"], union: [{"type": "object", "required": ["path"]}]}
+    result, changed = coerce_tool_parameter_root(root)
+    assert changed
+    assert result["type"] == "object"
+    assert result[union] == root[union]
+    assert root["type"] == ["object", "null"]
+
+
+@pytest.mark.parametrize("union", ["anyOf", "oneOf"])
+@pytest.mark.parametrize("branch", [
+    {"allOf": [{"type": "object", "required": ["path"]}]},
+    {"$ref": "#/$defs/path_args"},
+    {"not": {"required": ["forbidden"]}},
+    {"minProperties": 1},
+])
+def test_tool_union_retains_indirect_object_constraints(union, branch):
+    root = {
+        "$defs": {"path_args": {"type": "object", "required": ["path"]}},
+        union: [branch, {"type": "object", "required": ["other"]}, {"type": "null"}],
+    }
+    body = json.dumps({"input": [], "tools": [
+        {"type": "function", "name": "inspect", "parameters": root},
+    ]}).encode()
+    transformed = json.loads(gateway_compat.compatible_request_body(
+        body, _xai_upstream(), inject_codex_tools=False,
+    ))
+    parameters = transformed["tools"][0]["parameters"]
+    assert parameters["$defs"] == root["$defs"]
+    # The public adapter resolves local references before normalizing roots.
+    expected_branch = root["$defs"]["path_args"] if "$ref" in branch else branch
+    assert parameters[union] == [
+        {**expected_branch, "type": "object"}, {"type": "object", "required": ["other"]},
+    ]

@@ -1,0 +1,217 @@
+{
+  "schema": "codexhub.review-followup-windows.v1",
+  "date": "2026-09-09",
+  "scope": "Dedicated Yoga Windows host; isolated runtime and credential copies; CLI-only acceptance",
+  "runtime_candidate_sha": "ef591f5b1a060c800213e53b0d18c1f78f5e780c",
+  "portable_archive_sha256": "840be98cb5fc4e63fddba29491c9dd8dea3281083acaa540c305d25a0b2277b3",
+  "build": {
+    "command": "pwsh.exe -NoProfile -NonInteractive -File scripts/build-windows-portable.ps1 -Flavor debug",
+    "outcome": "passed_with_environment_cleanup",
+    "note": "MSVC telemetry vctip helpers outlived completed build; only identified helpers from this build were terminated to let watchdog finish."
+  },
+  "python_core": {
+    "test_delta_sha": "dcc3c36",
+    "command": ".\\scripts\\codexhub-python.cmd -m pytest -q --ignore=tests/test_real_client_e2e.py",
+    "passed": 2357,
+    "skipped": 36,
+    "subtests": 265
+  },
+  "network_targeted": {
+    "passed": 53
+  },
+  "synthetic": {
+    "candidate_sha": "d504a71",
+    "command": ".\\scripts\\codexhub-python.cmd tests/fixtures/real_client_e2e/run-with-windows-watchdog.py --timeout-seconds 3600 -- .\\scripts\\codexhub-python.cmd -m pytest -q tests/test_real_client_e2e.py",
+    "outcome": "passed_with_targeted_fix_reverification",
+    "full_run_passed": 145,
+    "full_run_failed": 7,
+    "duration_seconds": 1338.57,
+    "failure_cause": "Seven documentation assertions read UTF-8 as Windows locale GBK; all seven pass after e550a6b.",
+    "acceptance_note": "All 152 test cases covered: 145 passed in the complete run, seven changed documentation tests passed in targeted rerun. No claim of a single all-green full invocation."
+  },
+  "utf8_documentation_delta": {
+    "candidate_sha": "e550a6b",
+    "command": ".\\scripts\\codexhub-python.cmd -m pytest -q tests/test_real_client_e2e.py -k \"operator_workflow or opencode_compatibility_floor_records or operator_docs_define or windows_cli_preflight_covers_xai or operator_commands_have_explicit or matrix_documentation\"",
+    "passed": 7,
+    "deselected": 145
+  },
+  "real_cli": {
+    "entrypoint": "scripts/Run-RealClientE2E.ps1 -CliOnly -OverallTimeoutSeconds 5400",
+    "outcome": "passed",
+    "case_count": 8,
+    "attempts": [
+      {
+        "id": "r1",
+        "failure_classification": "preflight_debug_build_sha_sidecar_missing",
+        "resolution": "Verified portable build provenance and wrote matching ef591f5 candidate sidecar."
+      },
+      {
+        "id": "r2",
+        "failure_classification": "candidate_gateway_bootstrap_failed",
+        "diagnosis": "codex_desktop_restart_required: Codex Desktop is running; explicit restart authorization is required"
+      },
+      {
+        "id": "r3",
+        "outcome": "passed",
+        "resolution": "User authorized closing Yoga Codex Desktop. Restart Manager returned 350; closing the window left background processes. Ended the exact AppX application process tree, completed eight live cases, then relaunched the same registered application and observed eight application processes."
+      }
+    ],
+    "counts": {
+      "case_count": 8,
+      "passed_count": 8,
+      "failed_count": 0,
+      "manual_case_count": 0,
+      "automated_case_count": 8
+    },
+    "binary_hashes": {
+      "debug_build": "sha256:ba72338af408f8ea6e13d5d1b1b3590527d8213a98ed23d20a02ff9c40b5d5c8",
+      "managed_client_config_build": "sha256:ba72338af408f8ea6e13d5d1b1b3590527d8213a98ed23d20a02ff9c40b5d5c8"
+    },
+    "client_versions": {
+      "codex_cli": "0.153.4",
+      "opencode": "1.18.21",
+      "pi": "0.80.6",
+      "omp": "17.0.3"
+    },
+    "cases": [
+      {
+        "case_id": "codex-cli-luna",
+        "client": "codex-cli",
+        "provider_id": "official",
+        "canonical_model": "gpt-5.6-luna",
+        "gateway_model": "gpt-5.6-luna",
+        "protocol": "responses",
+        "outcome": "passed",
+        "duration_ms": 21517,
+        "http_status": 200,
+        "read_only_tool_call_count": 1,
+        "sentinel_chunk_count": 1,
+        "fallback_count": 0,
+        "error_event_count": 0,
+        "duplicate_terminal_count": 0,
+        "terminal_classification": "completed"
+      },
+      {
+        "case_id": "codex-cli-opencode-go",
+        "client": "codex-cli",
+        "provider_id": "opencode-go",
+        "canonical_model": "opencode-go/muse-spark-1.3-contributor",
+        "gateway_model": "opencode-go/muse-spark-1.3-contributor",
+        "protocol": "responses",
+        "outcome": "passed",
+        "duration_ms": 22061,
+        "http_status": 200,
+        "read_only_tool_call_count": 1,
+        "sentinel_chunk_count": 1,
+        "fallback_count": 0,
+        "error_event_count": 0,
+        "duplicate_terminal_count": 0,
+        "terminal_classification": "completed"
+      },
+      {
+        "case_id": "opencode-luna",
+        "client": "opencode",
+        "provider_id": "official",
+        "canonical_model": "codexhub-openai/gpt-5.6-luna",
+        "gateway_model": "openai/gpt-5.6-luna",
+        "protocol": "responses",
+        "outcome": "passed",
+        "duration_ms": 7260,
+        "http_status": 200,
+        "read_only_tool_call_count": 1,
+        "sentinel_chunk_count": 1,
+        "fallback_count": 0,
+        "error_event_count": 0,
+        "duplicate_terminal_count": 0,
+        "terminal_classification": "completed"
+      },
+      {
+        "case_id": "opencode-opencode-go",
+        "client": "opencode",
+        "provider_id": "opencode-go",
+        "canonical_model": "codexhub-opencode-go/muse-spark-1.3-contributor",
+        "gateway_model": "opencode-go/muse-spark-1.3-contributor",
+        "protocol": "responses",
+        "outcome": "passed",
+        "duration_ms": 7396,
+        "http_status": 200,
+        "read_only_tool_call_count": 1,
+        "sentinel_chunk_count": 1,
+        "fallback_count": 0,
+        "error_event_count": 0,
+        "duplicate_terminal_count": 0,
+        "terminal_classification": "completed"
+      },
+      {
+        "case_id": "pi-luna",
+        "client": "pi",
+        "provider_id": "official",
+        "canonical_model": "codexhub-openai/gpt-5.6-luna",
+        "gateway_model": "openai/gpt-5.6-luna",
+        "protocol": "responses",
+        "outcome": "passed",
+        "duration_ms": 6629,
+        "http_status": 200,
+        "read_only_tool_call_count": 1,
+        "sentinel_chunk_count": 1,
+        "fallback_count": 0,
+        "error_event_count": 0,
+        "duplicate_terminal_count": 0,
+        "terminal_classification": "completed"
+      },
+      {
+        "case_id": "pi-opencode-go",
+        "client": "pi",
+        "provider_id": "opencode-go",
+        "canonical_model": "codexhub-opencode-go/muse-spark-1.3-contributor",
+        "gateway_model": "opencode-go/muse-spark-1.3-contributor",
+        "protocol": "responses",
+        "outcome": "passed",
+        "duration_ms": 5513,
+        "http_status": 200,
+        "read_only_tool_call_count": 1,
+        "sentinel_chunk_count": 1,
+        "fallback_count": 0,
+        "error_event_count": 0,
+        "duplicate_terminal_count": 0,
+        "terminal_classification": "completed"
+      },
+      {
+        "case_id": "omp-luna",
+        "client": "omp",
+        "provider_id": "official",
+        "canonical_model": "codexhub-openai/gpt-5.6-luna",
+        "gateway_model": "openai/gpt-5.6-luna",
+        "protocol": "responses",
+        "outcome": "passed",
+        "duration_ms": 7037,
+        "http_status": 200,
+        "read_only_tool_call_count": 1,
+        "sentinel_chunk_count": 1,
+        "fallback_count": 0,
+        "error_event_count": 0,
+        "duplicate_terminal_count": 0,
+        "terminal_classification": "completed"
+      },
+      {
+        "case_id": "omp-opencode-go",
+        "client": "omp",
+        "provider_id": "opencode-go",
+        "canonical_model": "codexhub-opencode-go/muse-spark-1.3-contributor",
+        "gateway_model": "opencode-go/muse-spark-1.3-contributor",
+        "protocol": "responses",
+        "outcome": "passed",
+        "duration_ms": 8550,
+        "http_status": 200,
+        "read_only_tool_call_count": 1,
+        "sentinel_chunk_count": 1,
+        "fallback_count": 0,
+        "error_event_count": 0,
+        "duplicate_terminal_count": 0,
+        "terminal_classification": "completed"
+      }
+    ],
+    "desktop_restored": true
+  },
+  "privacy": "No credentials, raw client output or conversation identifiers included."
+}

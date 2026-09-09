@@ -213,6 +213,8 @@ class LiveObserver:
             _gateway_events.write_proxy_event("developer_role_rewrite_applied", **fields)
         elif kind == "tool_schema_boolean_normalized":
             _gateway_events.write_proxy_event("tool_schema_boolean_normalized", **fields)
+        elif kind == "cache_control_dropped":
+            _gateway_events.write_proxy_event("cache_control_dropped", **fields)
         elif kind == "lifecycle_guidance":
             _gateway_events.write_adapter_event(
                 self._live.adapter_event_context,
@@ -231,4 +233,3 @@ def build_exchange_ports(live: PostRequestLiveState) -> Any:
         control=LiveControl(),
         observer=LiveObserver(live),
     )
-

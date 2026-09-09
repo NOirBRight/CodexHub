@@ -171,11 +171,32 @@ def _looks_like_managed_catalog_path(value: str | None) -> bool:
     if len(parts) == 2 and parts[0] == "model-catalogs":
         return True
     try:
-        codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
         candidate = Path(value).expanduser().resolve()
-        return candidate == (codex_home / "model-catalogs" / parts[-1]).resolve()
+        return candidate == (_codex_home() / "model-catalogs" / parts[-1]).resolve()
     except (OSError, RuntimeError, ValueError):
         return False
+
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+
+
+def _overlay_catalog_value(
+    existing_catalog_value: str | None,
+    config_path: Path,
+    catalog_path: Path | None,
+    original: str,
+) -> str | None:
+    if catalog_path is None:
+        return existing_catalog_value
+    keep_existing = (
+        existing_catalog_value is not None
+        and not is_managed_catalog_path(existing_catalog_value, catalog_path)
+        and not _overlay_marks_managed_catalog(original)
+    )
+    if keep_existing:
+        return existing_catalog_value
+    return catalog_config_value(config_path, catalog_path)
 
 
 def _catalog_owner_secret_path(catalog_value: str) -> Path:
@@ -259,17 +280,6 @@ def set_top_level_values(text: str, values: dict[str, str | None]) -> str:
     return f"{prefix}\n"
 
 
-def _top_level_positive_int(text: str, key: str) -> int | None:
-    raw = top_level_value(text, key)
-    if raw is None:
-        return None
-    try:
-        value = int(raw.replace("_", ""))
-    except ValueError:
-        return None
-    return value if value > 0 else None
-
-
 def _positive_toml_int(value: str | None) -> int | None:
     if value is None:
         return None
@@ -278,50 +288,6 @@ def _positive_toml_int(value: str | None) -> int | None:
     except ValueError:
         return None
     return parsed if parsed > 0 else None
-
-
-def context_guard_status(
-    config_path: Path,
-    state_path: Path | None = None,
-) -> dict[str, int | bool | None]:
-    text = read_text_preserving_newlines(config_path) if config_path.exists() else ""
-    context_window = _top_level_positive_int(text, "model_context_window")
-    auto_compact_token_limit = _top_level_positive_int(
-        text,
-        "model_auto_compact_token_limit",
-    )
-    state = _read_context_guard_state(state_path) if state_path is not None else None
-    entry = (state or {}).get("config", {})
-    managed_values = entry.get("managed", {}) if isinstance(entry, dict) else {}
-    if not isinstance(managed_values, dict):
-        managed_values = {}
-    explicit_enabled = entry.get("enabled") if isinstance(entry, dict) else None
-    if isinstance(explicit_enabled, bool):
-        enabled = explicit_enabled
-    else:
-        # Version 1 state recorded only the values that it installed.  Treat
-        # a missing value as a migrated, enabled guard after the new overlay
-        # removes the old global projection; an explicit disable deletes state.
-        enabled = bool(managed_values) and all(
-            top_level_value(text, key) in {None, managed_values.get(key)}
-            for key in CONTEXT_GUARD_KEYS
-        )
-    current_values = {key: top_level_value(text, key) for key in CONTEXT_GUARD_KEYS}
-    global_override_conflict = any(
-        value is not None
-        and value != managed_values.get(key)
-        for key, value in current_values.items()
-    )
-    return {
-        "enabled": enabled,
-        "model_context_window": context_window,
-        "model_auto_compact_token_limit": auto_compact_token_limit,
-        "global_override_conflict": global_override_conflict,
-    }
-
-
-def _context_guard_previous_values(text: str) -> dict[str, str | None]:
-    return {key: top_level_value(text, key) for key in CONTEXT_GUARD_KEYS}
 
 
 def _context_guard_managed_values(text: str) -> dict[str, str | None]:
@@ -370,8 +336,6 @@ def _read_context_guard_state(
                 "previous": _normalized_context_guard_values(values.get("previous")),
                 "managed": _normalized_context_guard_values(values.get("managed")),
             }
-            if isinstance(values.get("enabled"), bool):
-                entry["enabled"] = values["enabled"]
             entries[target] = entry
         else:
             # Older state cannot identify the dynamic value it installed.  Do
@@ -395,7 +359,7 @@ def _migrate_legacy_context_guard_values_for_backups(
     ownership boundary is catalog-scoped, so those values must not survive a
     route switch.  A value is removed only while it still equals the recorded
     managed value; an edit made after the old guard was enabled remains a
-    user-owned global override and is surfaced by ``context_guard_status``.
+    user-owned global override and remains untouched.
     """
 
     default_backup_path = backup_paths[0] if backup_paths else config_path
@@ -450,7 +414,7 @@ def _migrate_legacy_context_guard_values_for_backups(
             continue
         updated_entry = dict(entry)
         updated_entry["managed"] = {key: None for key in CONTEXT_GUARD_KEYS}
-        updated_entry.setdefault("enabled", True)
+        updated_entry.pop("enabled", None)
         state[target] = updated_entry
         state_changed = True
 
@@ -510,131 +474,6 @@ def _preserve_context_guard_overrides(
         ):
             overrides[key] = None
     return set_top_level_values(restored_text, overrides) if overrides else restored_text
-
-
-def _safe_official_disable_updates(
-    text: str,
-    previous: dict[str, str | None],
-    managed: dict[str, str | None],
-    safe_budget: tuple[int, int],
-) -> dict[str, str]:
-    """Restore only a still-safe Official override when disabling the guard.
-
-    A disabled convenience switch must not revive a larger pre-guard Codex
-    runtime value after the current Direct Official authority lowered it.  A
-    post-enable user edit is retained only when it is also within the current
-    safe budget; otherwise the authoritative safe values remain in place.
-    """
-
-    def candidate(key: str) -> str | None:
-        current = top_level_value(text, key)
-        if managed.get(key) is not None and current == managed.get(key):
-            return previous.get(key)
-        return current
-
-    context_cap, compact_cap = safe_budget
-    requested_context = _positive_toml_int(candidate("model_context_window"))
-    context_window = (
-        requested_context
-        if requested_context is not None and requested_context <= context_cap
-        else context_cap
-    )
-    requested_compact = _positive_toml_int(candidate("model_auto_compact_token_limit"))
-    auto_compact_token_limit = (
-        requested_compact
-        if requested_compact is not None
-        and requested_compact <= min(compact_cap, context_window)
-        else min(compact_cap, context_window)
-    )
-    return {
-        "model_context_window": str(context_window),
-        "model_auto_compact_token_limit": str(auto_compact_token_limit),
-    }
-
-
-def set_context_guard(
-    config_path: Path,
-    backup_path: Path,
-    state_path: Path,
-    *,
-    enabled: bool,
-    catalog_path: Path | None = None,
-) -> dict[str, int | bool | None]:
-    selected_model = top_level_value(
-        read_text_preserving_newlines(config_path) if config_path.exists() else "",
-        "model",
-    )
-    selected_official = _selected_model_is_official(selected_model)
-    safe_official_budget = (
-        _selected_official_context_budget(catalog_path, selected_model)
-        if selected_official and catalog_path is not None
-        else None
-    )
-    if selected_official and safe_official_budget is None:
-        raise ValueError("safe current Official context budget is unavailable")
-    # Validate the requested Official budget before migrating legacy files.
-    # A failed enable/disable must not partially rewrite config or state while
-    # the Rust caller leaves the Gateway setting unchanged.
-    _migrate_legacy_context_guard_values(config_path, backup_path, state_path)
-    target_paths = {"config": config_path}
-    if backup_path.exists():
-        target_paths["backup"] = backup_path
-    if enabled:
-        state = _read_context_guard_state(state_path) or {}
-        for target, path in target_paths.items():
-            text = read_text_preserving_newlines(path) if path.exists() else ""
-            entry = state.get(target) if isinstance(state.get(target), dict) else {}
-            previous = _normalized_context_guard_values(entry.get("previous"))
-            managed = _normalized_context_guard_values(entry.get("managed"))
-            if not entry:
-                marker_managed = _context_guard_managed_values(text)
-                previous_source = text
-                if target == "config" and any(marker_managed.values()) and backup_path.exists():
-                    previous_source = read_text_preserving_newlines(backup_path)
-                previous = _context_guard_previous_values(previous_source)
-                # Only values inside the old CodexHub marker are known to be
-                # managed.  Unmarked top-level values remain user-owned.
-                managed = marker_managed
-            removable = {
-                key: value
-                for key, value in managed.items()
-                if value is not None and top_level_value(text, key) == value
-            }
-            if removable:
-                atomic_write_text(
-                    path,
-                    set_top_level_values(text, {key: None for key in removable}),
-                    encoding="utf-8",
-                )
-            state[target] = {
-                "enabled": True,
-                "previous": previous,
-                "managed": managed,
-            }
-        atomic_write_text(
-            state_path,
-            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    else:
-        state_by_target = _read_context_guard_state(state_path) or {}
-        for target, path in target_paths.items():
-            if not path.exists():
-                continue
-            entry = state_by_target.get(target, {})
-            previous = entry.get("previous", {key: None for key in CONTEXT_GUARD_KEYS})
-            managed = entry.get("managed", {key: None for key in CONTEXT_GUARD_KEYS})
-            text = read_text_preserving_newlines(path)
-            updates = {
-                key: previous.get(key)
-                for key, managed_value in managed.items()
-                if managed_value is not None and top_level_value(text, key) == managed_value
-            }
-            if updates:
-                atomic_write_text(path, set_top_level_values(text, updates), encoding="utf-8")
-        state_path.unlink(missing_ok=True)
-
-    return context_guard_status(config_path, state_path)
 
 
 def section_key_values(text: str, section_name: str) -> dict[str, str] | None:
@@ -1065,16 +904,7 @@ def apply_overlay(
     for section in STALE_PROXY_PROVIDER_SECTIONS:
         cleaned = strip_section(cleaned, section)
     existing_catalog_value = top_level_value(original, "model_catalog_json")
-    catalog_value = (
-        existing_catalog_value
-        if existing_catalog_value is not None
-        and not is_managed_catalog_path(existing_catalog_value, catalog_path)
-        else (
-            catalog_config_value(config_path, catalog_path)
-            if catalog_path is not None
-            else existing_catalog_value
-        )
-    )
+    catalog_value = _overlay_catalog_value(existing_catalog_value, config_path, catalog_path, original)
     catalog_owned = catalog_value is not None and is_managed_catalog_path(catalog_value, catalog_path)
     cleaned = strip_top_level_keys(cleaned)
     cleaned = set_feature_flags(cleaned, PROXY_FEATURE_FLAGS)
@@ -1196,17 +1026,6 @@ def main(argv: list[str] | None = None) -> int:
     inspect_parser.add_argument("--config", required=True, type=Path)
     inspect_parser.add_argument("--target", choices=["unified", "separated"], default="unified")
 
-    context_status_parser = subparsers.add_parser("context-guard-status")
-    context_status_parser.add_argument("--config", required=True, type=Path)
-    context_status_parser.add_argument("--state", type=Path)
-
-    context_set_parser = subparsers.add_parser("context-guard-set")
-    context_set_parser.add_argument("--config", required=True, type=Path)
-    context_set_parser.add_argument("--backup", required=True, type=Path)
-    context_set_parser.add_argument("--state", required=True, type=Path)
-    context_set_parser.add_argument("--catalog", required=True, type=Path)
-    context_set_parser.add_argument("--enabled", required=True, choices=("true", "false"))
-
     migrate_context_parser = subparsers.add_parser("migrate-context-guard")
     migrate_context_parser.add_argument("--config", required=True, type=Path)
     migrate_context_parser.add_argument("--backup", required=True, type=Path, action="append")
@@ -1239,21 +1058,6 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {"status": inspect_unified_history_config(text, args.target == "unified")},
                 ensure_ascii=True,
-            )
-        )
-    elif args.command == "context-guard-status":
-        print(json.dumps(context_guard_status(args.config, args.state), ensure_ascii=False))
-    elif args.command == "context-guard-set":
-        print(
-            json.dumps(
-                set_context_guard(
-                    args.config,
-                    args.backup,
-                    args.state,
-                    enabled=args.enabled == "true",
-                    catalog_path=args.catalog,
-                ),
-                ensure_ascii=False,
             )
         )
     elif args.command == "migrate-context-guard":

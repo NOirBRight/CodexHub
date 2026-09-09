@@ -14,7 +14,6 @@ use std::io::{self, Read};
 use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-#[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -86,6 +85,12 @@ pub fn status() -> Result<AppStatus, String> {
         .map(|snapshot| snapshot.status)
 }
 
+static APP_OWNS_GATEWAY: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn enable_app_owned_gateway() {
+    APP_OWNS_GATEWAY.store(true, Ordering::Relaxed);
+}
+
 pub fn start_after<Prepare>(prepare: Prepare) -> Result<AppStatus, String>
 where
     Prepare: FnOnce() -> Result<(), String>,
@@ -103,11 +108,12 @@ pub fn stop() -> Result<AppStatus, String> {
     gateway_lifecycle().stop(&backend)
 }
 
-/// Stops the managed Gateway before the desktop app hides or exits.
+/// Stops the managed Gateway before the desktop app exits or restarts.
 ///
-/// App transitions use the ordinary durable-identity stop path so a Gateway
-/// recovered from a previous app session is retired as well. The same
-/// process/listener fencing still applies before any shutdown request or kill.
+/// Closing the window to the tray keeps Gateway running so Codex can still
+/// use it. Tray Exit, process exit, and update restart retire the durable
+/// identity, including a Gateway recovered from a previous app session. The
+/// same process/listener fencing still applies before any shutdown request or kill.
 pub(crate) fn stop_for_app_close() -> Result<bool, String> {
     // Reconcile first only when the durable PID is missing. This lets an exact
     // listener whose PID file was lost by a previous app session be retired,
@@ -874,9 +880,9 @@ where
 
     remove_pid(paths)?;
     let python = find_python(paths)?;
-    let mut command = command_builder(&python, &script, paths, &settings);
+    let command = command_builder(&python, &script, paths, &settings);
 
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = spawn_gateway_child(command).map_err(|error| {
         format!(
             "failed to start Gateway with {} {}: {error}",
             python.display(),
@@ -1910,7 +1916,7 @@ fn build_start_command_with_diagnostics(
             settings.gateway_image_proxy_model.trim(),
         );
     configure_start_stdio(&mut command);
-    configure_detached(&mut command);
+    configure_detached(&mut command, APP_OWNS_GATEWAY.load(Ordering::Relaxed));
     command
 }
 
@@ -2826,17 +2832,83 @@ fn find_python(paths: &ProxyPaths) -> Result<PathBuf, String> {
     runtime_paths::find_python(Some(&paths.repo_root))
 }
 
+#[cfg(not(target_os = "linux"))]
+fn spawn_gateway_child(mut command: Command) -> io::Result<Child> {
+    command.spawn()
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_gateway_child(command: Command) -> io::Result<Child> {
+    use std::sync::{mpsc, OnceLock};
+    type SpawnRequest = (Command, mpsc::SyncSender<io::Result<Child>>);
+    static SPAWNER: OnceLock<Result<mpsc::Sender<SpawnRequest>, String>> = OnceLock::new();
+
+    // Linux PDEATHSIG tracks the thread that forks, not just the app process.
+    // A startup thread or retired IPC worker must not terminate its Gateway.
+    // The static sender keeps this spawning thread alive until the app exits.
+    let spawner = SPAWNER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<SpawnRequest>();
+        thread::Builder::new()
+            .name("gateway-spawn-owner".to_string())
+            .spawn(move || {
+                for (mut command, response) in receiver {
+                    if let Err(mpsc::SendError(Ok(mut child))) = response.send(command.spawn()) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
+            })
+            .map(|_| sender)
+            .map_err(|error| format!("failed to create Gateway spawning thread: {error}"))
+    });
+    let spawner = spawner
+        .as_ref()
+        .map_err(|error| io::Error::other(error.clone()))?;
+    let (response, result) = mpsc::sync_channel(1);
+    spawner
+        .send((command, response))
+        .map_err(|_| io::Error::other("Gateway spawning thread is unavailable"))?;
+    result
+        .recv()
+        .map_err(|_| io::Error::other("Gateway spawning thread returned no result"))?
+}
+
 #[cfg(windows)]
-fn configure_detached(command: &mut Command) {
+fn configure_detached(command: &mut Command, _app_owned: bool) {
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     command.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
 }
 
-#[cfg(not(windows))]
-fn configure_detached(_command: &mut Command) {}
+#[cfg(target_os = "linux")]
+fn configure_detached(command: &mut Command, app_owned: bool) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: `pre_exec` runs in the forked child before exec. `PR_SET_PDEATHSIG`
+    // and `getppid`/`raise` are process-local and do not touch shared memory.
+    // The getppid==1 check closes the race where the parent dies between fork
+    // and prctl; without it the child would be reparented to init and survive.
+    unsafe {
+        command.pre_exec(move || {
+            if !app_owned {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                return Ok(());
+            }
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() == 1 {
+                libc::raise(libc::SIGTERM);
+            }
+            Ok(())
+        });
+    }
+}
 
-#[cfg(windows)]
+#[cfg(all(unix, not(target_os = "linux")))]
+fn configure_detached(_command: &mut Command, _app_owned: bool) {}
+
 #[cfg(windows)]
 #[derive(Clone, Copy)]
 enum WindowsInspectionKind {
@@ -3561,6 +3633,123 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_gateway_child_requests_termination_when_the_app_dies() {
+        let source = include_str!("proxy.rs");
+        assert!(
+            source.contains("PR_SET_PDEATHSIG"),
+            "Linux Gateway children must receive SIGTERM when CodexHub exits"
+        );
+        assert!(
+            source.contains("libc::raise(libc::SIGTERM)"),
+            "if the parent already died before prctl, the Gateway child must exit"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_gateway_survives_the_startup_thread_returning() {
+        let mut child = thread::spawn(|| {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("30");
+            super::configure_detached(&mut command, true);
+            super::spawn_gateway_child(command).expect("spawn Gateway stand-in")
+        })
+        .join()
+        .expect("startup thread returns");
+        thread::sleep(Duration::from_millis(100));
+        let status = child.try_wait().expect("read child status");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            status.is_none(),
+            "Gateway died when the startup thread returned: {status:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_gateway_parent_fixture() {
+        let Some(pid_path) = std::env::var_os("CODEXHUB_TEST_GATEWAY_PARENT_PID_FILE") else {
+            return;
+        };
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        let detached = std::env::var_os("CODEXHUB_TEST_GATEWAY_DETACHED").is_some();
+        super::configure_detached(&mut command, !detached);
+        let mut child = super::spawn_gateway_child(command).expect("spawn fixture child");
+        fs::write(pid_path, child.id().to_string()).expect("publish fixture child PID");
+        if detached { std::process::exit(0); }
+        let _ = child.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_cli_gateway_survives_parent_normal_exit() {
+        let root = temp_root("cli-detached-gateway");
+        fs::create_dir_all(&root).unwrap();
+        let pid_path = root.join("child.pid");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "proxy::tests::linux_gateway_parent_fixture"])
+            .env("CODEXHUB_TEST_GATEWAY_PARENT_PID_FILE", &pid_path)
+            .env("CODEXHUB_TEST_GATEWAY_DETACHED", "1")
+            .stdout(std::process::Stdio::null()).status().unwrap();
+        assert!(status.success());
+        let pid = fs::read_to_string(&pid_path).unwrap().trim().parse::<u32>().unwrap();
+        thread::sleep(Duration::from_millis(150));
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let state = stat.rsplit_once(')').unwrap().1.split_whitespace().next().unwrap();
+        let _ = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        assert_ne!(state, "Z", "detached Gateway died when CLI returned");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_gateway_still_exits_when_the_app_process_dies() {
+        let root = temp_root("gateway-parent-death");
+        let pid_path = root.join("child.pid");
+        let mut app = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "proxy::tests::linux_gateway_parent_fixture"])
+            .env("CODEXHUB_TEST_GATEWAY_PARENT_PID_FILE", &pid_path)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn isolated app stand-in");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pid = loop {
+            if let Some(pid) = fs::read_to_string(&pid_path)
+                .ok()
+                .and_then(|text| text.parse::<u32>().ok())
+            {
+                break Some(pid);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        app.kill().expect("terminate app stand-in");
+        app.wait().expect("reap app stand-in");
+        let pid = pid.expect("fixture child was started");
+        wait_until_zombie(pid);
+        let running = fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(')')
+                    .map(|(_, rest)| rest.trim().starts_with('Z'))
+            })
+            .is_some_and(|zombie| !zombie);
+        if running {
+            // This PID belongs to the disposable child that has not exited.
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+        fs::remove_dir_all(root).expect("remove fixture files");
+        assert!(!running, "Gateway survived the app process exiting");
     }
 
     #[cfg(not(windows))]

@@ -20,6 +20,10 @@ import type {
   OpenAIUsageLimit,
   Provider,
 } from "../../lib/types";
+import {
+  displayModelName,
+  enabledPreviewModels,
+} from "../../lib/modelDisplay";
 import { SwitchControl } from "../SettingsDrawer";
 import { WorkspaceHeading, type WorkspacePage } from "./WorkspaceShell";
 import { ResourceLimits } from "./ResourceLimits";
@@ -33,6 +37,7 @@ type Props = {
   providers: Provider[];
   officialCount: number;
   officialModels: Model[];
+  officialDisabledModels: string[];
   officialEnabled: number;
   officialIncluded: boolean;
   limits: OpenAIUsageLimit[];
@@ -42,6 +47,8 @@ type Props = {
   connected: boolean;
   running: boolean;
   connectionBusy: boolean;
+  restartPending: boolean;
+  onRestartCodex: () => void;
   busy: boolean;
   ownerLabel?: string;
   onToggleConnection: () => void;
@@ -187,7 +194,7 @@ export function ProviderWorkspaceView(props: Props) {
         <b>Codex</b>
         <small>
           {t(
-            props.connected
+            props.restartPending ? "workspace.configSaved" : props.connected
               ? "workspace.externalModels"
               : "workspace.officialConfig",
           )}
@@ -206,10 +213,10 @@ export function ProviderWorkspaceView(props: Props) {
       <div className="ws-bridge-action">
         <span
           className={
-            props.connected && props.running ? "ws-online" : "ws-muted"
+            props.restartPending ? "ws-restart-pending" : props.connected && props.running ? "ws-online" : "ws-muted"
           }
         >
-          {props.ownerLabel ||
+          {props.restartPending ? t("workspace.restartPending") : props.ownerLabel ||
             t(
               props.connected
                 ? props.running
@@ -218,6 +225,12 @@ export function ProviderWorkspaceView(props: Props) {
                 : "workspace.disconnected",
             )}
         </span>
+        {props.restartPending && (
+          <button className="ws-button" disabled={props.busy || props.connectionBusy} onClick={props.onRestartCodex}>
+            <RefreshCw size={13} className={props.connectionBusy ? "animate-spin" : undefined} />
+            {t("workspace.restartCodex")}
+          </button>
+        )}
         <button
           className="ws-button"
           disabled={props.busy || props.connectionBusy}
@@ -527,8 +540,11 @@ export function ProviderWorkspaceView(props: Props) {
                         <ArrowRight size={12} />
                       </button>
                       <span className="ws-model-names">
-                      {(official ? props.officialModels : p.models).map((m) => (
-                        <code key={m.id} title={m.id}>{previewModelName(m, p)}</code>
+                      {enabledPreviewModels(
+                        official ? props.officialModels : p.models,
+                        official ? props.officialDisabledModels : undefined,
+                      ).map((m) => (
+                        <code key={m.id} title={m.id}>{displayModelName(m, p)}</code>
                       ))}
                       </span>
                       {!official && (
@@ -576,16 +592,4 @@ export function ProviderWorkspaceView(props: Props) {
       {props.children}
     </main>
   );
-}
-
-function previewModelName(model: Model, provider: Provider): string {
-  let name = model.display_name || model.id;
-  const prefixes = [provider.name, provider.id, ...(provider.id === "opencode-go" ? ["OpenCode"] : [])];
-  for (const prefix of prefixes.sort((a, b) => b.length - a.length)) {
-    if (name.toLowerCase().startsWith(prefix.toLowerCase()) && /^[\s/:_-]/.test(name.slice(prefix.length))) {
-      name = name.slice(prefix.length).replace(/^[\s/:_-]+/, "");
-      break;
-    }
-  }
-  return name || model.id;
 }

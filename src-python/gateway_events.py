@@ -174,6 +174,9 @@ def normalize_usage_for_event(
     cached_input_tokens = _usage_nested_int(usage, "input_tokens_details", "cached_tokens")
     if cached_input_tokens is None:
         cached_input_tokens = _usage_nested_int(usage, "prompt_tokens_details", "cached_tokens")
+    cache_write_input_tokens = _usage_nested_int(usage, "input_tokens_details", "cache_write_tokens")
+    if cache_write_input_tokens is None:
+        cache_write_input_tokens = _usage_nested_int(usage, "prompt_tokens_details", "cache_write_tokens")
     reasoning_tokens = _usage_nested_int(usage, "output_tokens_details", "reasoning_tokens")
     if reasoning_tokens is None:
         reasoning_tokens = _usage_nested_int(usage, "completion_tokens_details", "reasoning_tokens")
@@ -189,6 +192,8 @@ def normalize_usage_for_event(
         fields["usage_total_tokens"] = input_tokens + output_tokens
     if cached_input_tokens is not None:
         fields["usage_cached_input_tokens"] = cached_input_tokens
+    if cache_write_input_tokens is not None:
+        fields["usage_cache_write_input_tokens"] = cache_write_input_tokens
     if reasoning_tokens is not None:
         fields["usage_reasoning_tokens"] = reasoning_tokens
     if len(fields) == 1:

@@ -1,10 +1,12 @@
 """Gateway upstream transport: official adapter, open/retry, headers, and stream lifecycle.
 
-This module owns the Official urllib3 adapter, URL/header/auth materialization,
-HTTP error classification, Retry-After calculation, pre-response retry budgets,
-upstream open/retry, and the upstream SSE reader lifecycle. It is deliberately
-independent of the Gateway HTTP handler and SSE framing modules. Production
-functions read patchable dependencies from their owning modules at call time.
+This module owns Official and STANDARD urllib3 adapters, URL/header/auth
+materialization, HTTP error classification, Retry-After calculation,
+pre-response retry budgets, upstream open/retry, and the upstream SSE reader
+lifecycle. Shared pool classes live in gateway_http_pool; Official and
+third-party registries stay separate. It is deliberately independent of the
+Gateway HTTP handler and SSE framing modules. Production functions read
+patchable dependencies from their owning modules at call time.
 
 Relay state stays in gateway_relay. Protocol codecs stay in
 protocol_translation.
@@ -28,30 +30,30 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import timezone
 from email.utils import parsedate_to_datetime
-from http.client import IncompleteRead
-from pathlib import Path
+from http.client import IncompleteRead, RemoteDisconnected
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, getproxies, proxy_bypass, urlopen
+from urllib.request import (
+    Request,
+    getproxies,
+    proxy_bypass,
+    urlopen as _stdlib_urlopen,
+)
+
+urlopen = _stdlib_urlopen
 
 try:
     from urllib.request import getproxies_registry
 except ImportError:  # pragma: no cover - Windows-only urllib helper.
     getproxies_registry = None
 
-VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
-VENDORED_URLLIB3_WHEEL = VENDOR_DIR / "urllib3-2.7.0-py3-none-any.whl"
-if not VENDORED_URLLIB3_WHEEL.is_file():
-    raise RuntimeError(
-        f"missing pinned Gateway transport dependency: {VENDORED_URLLIB3_WHEEL}"
-    )
-sys.path.insert(0, str(VENDORED_URLLIB3_WHEEL))
-
+import gateway_http_pool
 import urllib3
 
 import gateway_admission
 import gateway_events
+import opencode_go_session
 from gateway_admission import sleep_for_retry_with_gateway_cancellation
 from gateway_errors import (
     CompactEmptyResponseError,
@@ -322,7 +324,7 @@ def _retry_safety(*args: Any, **kwargs: Any) -> str:
 
 
 def _retry_safety_phase(exc: BaseException | None) -> str | None:
-    fn = _retry_safety_failure_phase
+    fn = retry_safety_failure_phase
     if fn is None:
         return None
     return fn(exc)
@@ -413,8 +415,11 @@ def open_once(
     if selected_transport == TransportPolicy.OFFICIAL_KEEPALIVE:
         opener = _official_open or official_urlopen
         return opener(request, timeout=timeout)
-    opener = _standard_open or urlopen
-    return opener(request, timeout=timeout)
+    if _standard_open is not None:
+        return _standard_open(request, timeout=timeout)
+    if urlopen is not _stdlib_urlopen:
+        return urlopen(request, timeout=timeout)
+    return standard_urlopen(request, timeout=timeout)
 
 
 def build_request_url(
@@ -523,403 +528,17 @@ def open_response(request: Request, **kwargs: Any) -> Any:
     return _open_upstream_response(request, **kwargs)
 
 
-OFFICIAL_POOL_MAX_CONNECTIONS = 16
-OFFICIAL_POOL_MAX_IDLE_SECONDS = 30.0
-OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS = 300.0
-OFFICIAL_CONNECT_TIMEOUT_SECONDS = 15.0
-OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS = 1.0
-OFFICIAL_TCP_KEEPALIVE_IDLE_MS = 5000
-OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS = 5000
 OFFICIAL_HTTP_POOLS: dict[str, Any] = {}
 OFFICIAL_HTTP_POOLS_LOCK = threading.Lock()
-_OFFICIAL_ATTEMPT_CONNECTION_STATE = threading.local()
-_OFFICIAL_REQUEST_WRITE_DEADLINE_ATTRIBUTE = "_codexhub_request_write_deadline"
-_OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE = "_codexhub_request_write_active"
-_TRANSPORT_PHASE_ATTRIBUTE = "_codexhub_transport_phase"
-_OFFICIAL_SOCKET_TIMEOUT_UNSET = object()
-
-
-def _reset_official_attempt_state(timeout: float) -> None:
-    """Initialize request-scoped state before a new Official pool request."""
-
-    _OFFICIAL_ATTEMPT_CONNECTION_STATE.disposition = "unobserved"
-    _OFFICIAL_ATTEMPT_CONNECTION_STATE.request_write_deadline = (
-        time.monotonic() + timeout
-    )
-
-
-def _set_official_attempt_connection_disposition(disposition: str) -> None:
-    if disposition in {"new", "reused"}:
-        _OFFICIAL_ATTEMPT_CONNECTION_STATE.disposition = disposition
-
-
-def _official_attempt_connection_disposition() -> str:
-    disposition = getattr(
-        _OFFICIAL_ATTEMPT_CONNECTION_STATE, "disposition", "unobserved"
-    )
-    return disposition if disposition in {"new", "reused"} else "unobserved"
-
-
-def _official_attempt_request_write_deadline() -> float | None:
-    deadline = getattr(
-        _OFFICIAL_ATTEMPT_CONNECTION_STATE, "request_write_deadline", None
-    )
-    return deadline if isinstance(deadline, (int, float)) else None
-
-
-def _clear_official_attempt_state() -> None:
-    for attribute in ("disposition", "request_write_deadline"):
-        try:
-            delattr(_OFFICIAL_ATTEMPT_CONNECTION_STATE, attribute)
-        except AttributeError:
-            pass
-
-
-def _official_socket_options() -> list[tuple[int, int, int]]:
-    options = list(urllib3.connection.HTTPConnection.default_socket_options)
-    options.append((socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1))
-    if not sys.platform.startswith("win"):
-        if hasattr(socket, "TCP_KEEPIDLE"):
-            options.append(
-                (
-                    socket.IPPROTO_TCP,
-                    socket.TCP_KEEPIDLE,
-                    max(1, OFFICIAL_TCP_KEEPALIVE_IDLE_MS // 1000),
-                )
-            )
-        if hasattr(socket, "TCP_KEEPINTVL"):
-            options.append(
-                (
-                    socket.IPPROTO_TCP,
-                    socket.TCP_KEEPINTVL,
-                    max(1, OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS // 1000),
-                )
-            )
-        if hasattr(socket, "TCP_KEEPCNT"):
-            options.append((socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3))
-    return options
-
-
-def _configure_official_windows_keepalive(sock: Any) -> None:
-    if sys.platform.startswith("win") and hasattr(socket, "SIO_KEEPALIVE_VALS"):
-        sock.ioctl(
-            socket.SIO_KEEPALIVE_VALS,
-            (1, OFFICIAL_TCP_KEEPALIVE_IDLE_MS, OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS),
-        )
-
-
-class _OfficialHTTPSConnection(urllib3.connection.HTTPSConnection):
-    def connect(self) -> None:
-        super().connect()
-        if self.sock is not None:
-            _configure_official_windows_keepalive(self.sock)
-
-    def endheaders(
-        self, message_body: Any = None, *, encode_chunked: bool = False
-    ) -> None:
-        setattr(self, _OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE, True)
-        super().endheaders(message_body=message_body, encode_chunked=encode_chunked)
-
-    def send(self, data: Any) -> None:
-        request_write_active = getattr(
-            self, _OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE, False
-        )
-        sock = self.sock
-        previous_timeout: Any = _OFFICIAL_SOCKET_TIMEOUT_UNSET
-        if request_write_active and sock is not None:
-            gettimeout = getattr(sock, "gettimeout", None)
-            if callable(gettimeout):
-                try:
-                    previous_timeout = gettimeout()
-                except Exception:
-                    previous_timeout = _OFFICIAL_SOCKET_TIMEOUT_UNSET
-        try:
-            deadline = getattr(self, _OFFICIAL_REQUEST_WRITE_DEADLINE_ATTRIBUTE, None)
-            if request_write_active and isinstance(deadline, (int, float)):
-                remaining_timeout = deadline - time.monotonic()
-                if remaining_timeout <= 0:
-                    raise TimeoutError("Official request write budget exhausted")
-                if sock is not None:
-                    sock.settimeout(remaining_timeout)
-            super().send(data)
-        except TimeoutError as exc:
-            if request_write_active:
-                try:
-                    setattr(exc, _TRANSPORT_PHASE_ATTRIBUTE, "request_write")
-                except Exception:
-                    pass
-            raise
-        finally:
-            if (
-                request_write_active
-                and sock is not None
-                and previous_timeout is not _OFFICIAL_SOCKET_TIMEOUT_UNSET
-            ):
-                try:
-                    sock.settimeout(previous_timeout)
-                except Exception:
-                    pass
-
-
-class _OfficialHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
-    ConnectionCls = _OfficialHTTPSConnection
-
-    def _make_request(self, conn: Any, *args: Any, **kwargs: Any) -> Any:
-        request_write_deadline = _official_attempt_request_write_deadline()
-        if request_write_deadline is None:
-            timeout = kwargs.get("timeout")
-            request_write_timeout = getattr(timeout, "read_timeout", timeout)
-            if (
-                isinstance(request_write_timeout, (int, float))
-                and request_write_timeout > 0
-            ):
-                request_write_deadline = time.monotonic() + request_write_timeout
-        try:
-            setattr(
-                conn, _OFFICIAL_REQUEST_WRITE_DEADLINE_ATTRIBUTE, request_write_deadline
-            )
-            return super()._make_request(conn, *args, **kwargs)
-        finally:
-            try:
-                delattr(conn, _OFFICIAL_REQUEST_WRITE_DEADLINE_ATTRIBUTE)
-            except AttributeError:
-                pass
-            try:
-                delattr(conn, _OFFICIAL_REQUEST_WRITE_ACTIVE_ATTRIBUTE)
-            except AttributeError:
-                pass
-
-    def _get_conn(self, timeout: float | None = None) -> Any:
-        connection = super()._get_conn(timeout)
-        released_at = getattr(connection, "_codexhub_released_at", None)
-        try:
-            disposition = (
-                "reused"
-                if isinstance(released_at, (int, float))
-                and getattr(connection, "sock", None)
-                else "new"
-            )
-        except Exception:
-            disposition = "unobserved"
-        idle_seconds = (
-            time.monotonic() - released_at
-            if isinstance(released_at, (int, float))
-            else None
-        )
-        max_idle_seconds = (
-            OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS
-            if self.proxy is not None
-            else OFFICIAL_POOL_MAX_IDLE_SECONDS
-        )
-        if idle_seconds is not None and idle_seconds >= max_idle_seconds:
-            connection.close()
-            disposition = "new"
-        try:
-            connection._codexhub_diagnostic_connection_disposition = disposition
-        except Exception:
-            pass
-        _set_official_attempt_connection_disposition(disposition)
-        return connection
-
-    def _put_conn(self, connection: Any) -> None:
-        if connection is not None:
-            connection._codexhub_released_at = time.monotonic()
-        super()._put_conn(connection)
-
-
-class _OfficialPooledResponse:
-    def __init__(self, response: Any):
-        self._response = response
-        self._exhausted = False
-        self._released = False
-        self.status = response.status
-        self.reason = response.reason
-        self.headers = response.headers
-        self.connection_disposition = _connection_disposition(
-            getattr(response, "connection", None)
-        )
-        self._terminal_drain_socket: Any = None
-        self._terminal_drain_original_timeout: float | None = None
-
-    def read(self, amount: int | None = None) -> bytes:
-        try:
-            data = self._response.read(amount)
-        except (urllib3.exceptions.HTTPError, OSError, IncompleteRead) as exc:
-            translated = _stdlib_transport_error(exc)
-            _propagate_transport_metadata(
-                translated,
-                source=exc,
-                disposition=self.connection_disposition,
-                phase=_explicit_transport_phase(exc) or "response_body",
-            )
-            raise translated from exc
-        if amount is None or data == b"":
-            self._exhausted = True
-        return data
-
-    def readline(self, limit: int = -1) -> bytes:
-        try:
-            data = self._response.readline(limit)
-        except (urllib3.exceptions.HTTPError, OSError, IncompleteRead) as exc:
-            translated = _stdlib_transport_error(exc)
-            _propagate_transport_metadata(
-                translated,
-                source=exc,
-                disposition=self.connection_disposition,
-                phase=_explicit_transport_phase(exc) or "stream_body",
-            )
-            raise translated from exc
-        if data == b"":
-            self._exhausted = True
-        return data
-
-    def getcode(self) -> int:
-        return self.status
-
-    def shorten_terminal_drain_timeout(self, timeout_seconds: float) -> None:
-        connection = getattr(self._response, "connection", None)
-        sock = getattr(connection, "sock", None)
-        if sock is None or self._terminal_drain_socket is not None:
-            return
-        try:
-            original_timeout = sock.gettimeout()
-            sock.settimeout(timeout_seconds)
-        except OSError:
-            return
-        self._terminal_drain_socket = sock
-        self._terminal_drain_original_timeout = original_timeout
-
-    def _restore_terminal_drain_timeout(self) -> None:
-        if self._terminal_drain_socket is None:
-            return
-        try:
-            self._terminal_drain_socket.settimeout(
-                self._terminal_drain_original_timeout
-            )
-        except OSError:
-            pass
-        self._terminal_drain_socket = None
-        self._terminal_drain_original_timeout = None
-
-    def close(self) -> None:
-        if self._released:
-            return
-        self._released = True
-        if self._exhausted:
-            self._restore_terminal_drain_timeout()
-            self._response.release_conn()
-        else:
-            self._response.close()
-            self._response.release_conn()
-
-    def __enter__(self) -> "_OfficialPooledResponse":
-        return self
-
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
-        self.close()
-        return False
-
-
-def _connection_disposition(connection: Any) -> str:
-    try:
-        disposition = getattr(
-            connection, "_codexhub_diagnostic_connection_disposition", "unobserved"
-        )
-    except Exception:
-        return "unobserved"
-    return disposition if disposition in {"new", "reused"} else "unobserved"
-
-
-def _explicit_transport_phase(exc: BaseException | None) -> str | None:
-    pending: list[Any] = [exc]
-    seen: set[int] = set()
-    supported = {
-        "request_write",
-        "response_headers",
-        "response_body",
-        "stream_body",
-    }
-    while pending:
-        candidate = pending.pop(0)
-        if not isinstance(candidate, BaseException) or id(candidate) in seen:
-            continue
-        seen.add(id(candidate))
-        try:
-            phase = getattr(candidate, _TRANSPORT_PHASE_ATTRIBUTE, None)
-        except Exception:
-            phase = None
-        if phase in supported:
-            return phase
-        pending.extend(
-            value
-            for value in (
-                getattr(candidate, "reason", None),
-                candidate.__cause__,
-                candidate.__context__,
-                *candidate.args,
-            )
-            if isinstance(value, BaseException)
-        )
-    return None
-
-
-def _propagate_transport_metadata(
-    target: BaseException,
-    *,
-    source: BaseException | None = None,
-    disposition: str | None = None,
-    phase: str | None = None,
-) -> BaseException:
-    resolved_phase = (
-        phase
-        if phase
-        in {
-            "request_write",
-            "response_headers",
-            "response_body",
-            "stream_body",
-        }
-        else _explicit_transport_phase(source)
-    )
-    if resolved_phase is not None:
-        try:
-            setattr(target, _TRANSPORT_PHASE_ATTRIBUTE, resolved_phase)
-        except Exception:
-            pass
-    if disposition in {"new", "reused"}:
-        try:
-            setattr(target, "_codexhub_diagnostic_connection_disposition", disposition)
-        except Exception:
-            pass
-    return target
-
-
-def _stdlib_transport_error(exc: BaseException) -> BaseException:
-    pending: list[Any] = [exc]
-    seen: set[int] = set()
-    while pending:
-        candidate = pending.pop(0)
-        if not isinstance(candidate, BaseException) or id(candidate) in seen:
-            continue
-        seen.add(id(candidate))
-        if isinstance(
-            candidate,
-            (ssl.SSLError, TimeoutError, ConnectionError, OSError, IncompleteRead),
-        ):
-            return candidate
-        pending.extend(
-            value
-            for value in (
-                getattr(candidate, "reason", None),
-                candidate.__cause__,
-                candidate.__context__,
-                *candidate.args,
-            )
-            if isinstance(value, BaseException)
-        )
-    if isinstance(exc, urllib3.exceptions.TimeoutError):
-        return TimeoutError(str(exc))
-    return URLError(exc)
+STANDARD_HTTP_POOLS: dict[str, Any] = {}
+STANDARD_HTTP_POOLS_LOCK = threading.Lock()
+OFFICIAL_CONNECT_TIMEOUT_SECONDS = gateway_http_pool.CONNECT_TIMEOUT_SECONDS
+OFFICIAL_POOL_MAX_CONNECTIONS = gateway_http_pool.POOL_MAX_CONNECTIONS
+OFFICIAL_POOL_MAX_IDLE_SECONDS = gateway_http_pool.POOL_MAX_IDLE_SECONDS
+OFFICIAL_PROXY_POOL_MAX_IDLE_SECONDS = gateway_http_pool.PROXY_POOL_MAX_IDLE_SECONDS
+OFFICIAL_TCP_KEEPALIVE_IDLE_MS = gateway_http_pool.TCP_KEEPALIVE_IDLE_MS
+OFFICIAL_TCP_KEEPALIVE_INTERVAL_MS = gateway_http_pool.TCP_KEEPALIVE_INTERVAL_MS
+OFFICIAL_TERMINAL_DRAIN_TIMEOUT_SECONDS = gateway_http_pool.TERMINAL_DRAIN_TIMEOUT_SECONDS
 
 
 def official_proxy_url(
@@ -984,24 +603,11 @@ def official_pool_manager(
     with resolved_lock:
         existing = resolved_pools.get(pool_key)
         if existing is None:
-            pool_options = {
-                "num_pools": 4,
-                "maxsize": OFFICIAL_POOL_MAX_CONNECTIONS,
-                "block": True,
-                "retries": False,
-                "socket_options": socket_options
-                if socket_options is not None
-                else _official_socket_options(),
-            }
-            existing = (
-                urllib3.ProxyManager(resolved_proxy, **pool_options)
-                if resolved_proxy is not None
-                else urllib3.PoolManager(**pool_options)
+            existing = gateway_http_pool.create_pool_manager(
+                proxy_url=resolved_proxy,
+                socket_options=socket_options,
+                include_http=False,
             )
-            existing.pool_classes_by_scheme = {
-                **existing.pool_classes_by_scheme,
-                "https": _OfficialHTTPSConnectionPool,
-            }
             resolved_pools[pool_key] = existing
         return existing
 
@@ -1016,64 +622,61 @@ def official_urlopen(
     timeout: float,
     pool_manager: Callable[[str], Any] | None = None,
 ) -> Any:
-    _reset_official_attempt_state(timeout)
+    gateway_http_pool.reset_attempt_state(timeout)
     try:
         manager = (pool_manager or _official_pool_manager)(request.full_url)
-        headers = {
-            key: value
-            for key, value in request.header_items()
-            if key.lower() != "connection"
-        }
-        response = manager.request(
-            request.get_method(),
-            request.full_url,
-            body=request.data,
-            headers=headers,
-            preload_content=False,
-            decode_content=False,
-            redirect=False,
-            retries=False,
-            timeout=urllib3.Timeout(
-                connect=min(timeout, OFFICIAL_CONNECT_TIMEOUT_SECONDS), read=timeout
-            ),
-            pool_timeout=timeout,
+        return gateway_http_pool.execute_pooled_urlopen(
+            request, timeout=timeout, manager=manager
         )
-    except (urllib3.exceptions.HTTPError, OSError, IncompleteRead) as exc:
-        translated = _stdlib_transport_error(exc)
-        _propagate_transport_metadata(
-            translated,
-            source=exc,
-            disposition=_official_attempt_connection_disposition(),
-            phase=_explicit_transport_phase(exc)
-            or (
-                "response_headers"
-                if isinstance(exc, urllib3.exceptions.ReadTimeoutError)
-                else None
-            ),
-        )
-        raise translated from exc
     finally:
-        _clear_official_attempt_state()
-
-    pooled_response = _OfficialPooledResponse(response)
-    if response.status >= 400:
-        error = HTTPError(
-            request.full_url,
-            response.status,
-            str(response.reason or "upstream error"),
-            response.headers,
-            pooled_response,
-        )
-        _propagate_transport_metadata(
-            error,
-            disposition=pooled_response.connection_disposition,
-        )
-        raise error
-    return pooled_response
+        gateway_http_pool.clear_attempt_state()
 
 
 def _official_urlopen(request: Request, *, timeout: float) -> Any:
     return official_urlopen(request, timeout=timeout)
+
+
+def standard_pool_manager(
+    url: str,
+    *,
+    pools: dict[str, Any] | None = None,
+    pools_lock: threading.Lock | None = None,
+    proxy_url: Any = _UNSET_PROXY,
+    socket_options: list[tuple[int, int, int]] | None = None,
+) -> Any:
+    resolved_pools = STANDARD_HTTP_POOLS if pools is None else pools
+    resolved_lock = STANDARD_HTTP_POOLS_LOCK if pools_lock is None else pools_lock
+    resolved_proxy = (
+        _official_proxy_url(url) if proxy_url is _UNSET_PROXY else proxy_url
+    )
+    return gateway_http_pool.standard_pool_manager(
+        url,
+        pools=resolved_pools,
+        pools_lock=resolved_lock,
+        proxy_url=resolved_proxy,
+        socket_options=socket_options,
+    )
+
+
+def _standard_pool_manager(url: str) -> Any:
+    return standard_pool_manager(url)
+
+
+def standard_urlopen(
+    request: Request,
+    *,
+    timeout: float,
+    pool_manager: Callable[[str], Any] | None = None,
+) -> Any:
+    """Open a third-party upstream through an origin-isolated urllib3 pool."""
+    gateway_http_pool.reset_attempt_state(timeout)
+    try:
+        manager = (pool_manager or _standard_pool_manager)(request.full_url)
+        return gateway_http_pool.execute_pooled_urlopen(
+            request, timeout=timeout, manager=manager
+        )
+    finally:
+        gateway_http_pool.clear_attempt_state()
 
 
 def header_items(headers: Mapping[str, str] | Any) -> list[tuple[str, str]]:
@@ -1391,7 +994,7 @@ def transport_failure_phase(exc: BaseException | None) -> str | None:
     """Best-effort phase label for failures before an upstream response is relayed."""
     if exc is None:
         return None
-    explicit_phase = _explicit_transport_phase(exc)
+    explicit_phase = gateway_http_pool.explicit_transport_phase(exc)
     if explicit_phase is not None:
         return explicit_phase
     reason = getattr(exc, "reason", None)
@@ -1401,6 +1004,10 @@ def transport_failure_phase(exc: BaseException | None) -> str | None:
             return nested
     if isinstance(exc, HTTPError):
         return "response_headers"
+    if isinstance(exc, RemoteDisconnected):
+        return "response_headers"
+    if isinstance(exc, BrokenPipeError):
+        return "request_write"
     if isinstance(exc, ssl.SSLEOFError):
         return "tls_handshake"
     if isinstance(exc, ssl.SSLError):
@@ -1424,6 +1031,8 @@ def transport_failure_phase(exc: BaseException | None) -> str | None:
         or "winerror 10054" in detail
     ):
         return "request_write"
+    if isinstance(exc, ConnectionRefusedError):
+        return "tcp_connect"
     if isinstance(exc, (OSError, URLError)):
         return "tcp_connect"
     return None
@@ -2315,7 +1924,7 @@ def retry_identity_from_context(event_context: Mapping[str, Any] | None) -> str 
 _retry_identity_from_context = retry_identity_from_context
 
 
-def _retry_safety_failure_phase(exc: BaseException | None) -> str | None:
+def retry_safety_failure_phase(exc: BaseException | None) -> str | None:
     """Phase label used for the request-scoped retry-safety decision.
 
     This function is conservative: it returns a pre-write phase only when the
@@ -2325,13 +1934,15 @@ def _retry_safety_failure_phase(exc: BaseException | None) -> str | None:
     ``None`` so the caller-supplied ``failure_phase`` or the ``unknown`` safety
     class is used.  Only specifically inspected exception types carry
     authoritative phase evidence: socket.gaierror (DNS), ConnectionRefusedError
-    (TCP connect), and ssl.SSLCertVerificationError (TLS handshake).  Text
-    needles in OS-level error messages are never treated as proof because the
-    same message can occur after the request has been written.
+    (TCP connect), ssl.SSLCertVerificationError (TLS handshake),
+    BrokenPipeError (request write), RemoteDisconnected (response headers),
+    and HTTPError / IncompleteRead (response headers).  Text needles in
+    OS-level error messages are never treated as proof because the same
+    message can occur after the request has been written.
     """
     if exc is None:
         return None
-    explicit_phase = _explicit_transport_phase(exc)
+    explicit_phase = gateway_http_pool.explicit_transport_phase(exc)
     if explicit_phase is not None:
         return explicit_phase
     if isinstance(exc, (UpstreamStreamIncompleteError, _STREAM_ERROR_EVENT)):
@@ -2340,6 +1951,10 @@ def _retry_safety_failure_phase(exc: BaseException | None) -> str | None:
         return "response_headers"
     if isinstance(exc, IncompleteRead):
         return "response_headers"
+    if isinstance(exc, RemoteDisconnected):
+        return "response_headers"
+    if isinstance(exc, BrokenPipeError):
+        return "request_write"
     if isinstance(exc, socket.gaierror):
         return "dns"
     if isinstance(exc, ConnectionRefusedError):
@@ -2347,7 +1962,7 @@ def _retry_safety_failure_phase(exc: BaseException | None) -> str | None:
     if isinstance(exc, ssl.SSLCertVerificationError):
         return "tls_handshake"
     if isinstance(exc, URLError):
-        nested = _retry_safety_failure_phase(exc.reason)
+        nested = retry_safety_failure_phase(exc.reason)
         if nested is not None:
             return nested
     return None
@@ -2455,7 +2070,7 @@ def _retry_safety_class(
     if _model_access_path_idempotency_guaranteed(model_access_path):
         return RETRY_SAFETY_GUARANTEED_IDEMPOTENT
     phase = (
-        failure_phase if failure_phase is not None else _retry_safety_failure_phase(exc)
+        failure_phase if failure_phase is not None else retry_safety_failure_phase(exc)
     )
     if phase in {"dns", "tcp_connect", "tls_handshake"}:
         return RETRY_SAFETY_SAFE_PREWRITE
@@ -2747,6 +2362,7 @@ def bind_route_plan_operational_authentication(
     operational_authentication: OperationalAuthentication,
     *,
     drop_content_encoding: bool = False,
+    prompt_cache_key: str | None = None,
 ) -> Any:
     """Return a new plan whose attempts freeze one request-scoped auth snapshot."""
 
@@ -2782,21 +2398,39 @@ def bind_route_plan_operational_authentication(
     return replace(
         plan,
         attempts=tuple(
-            replace(attempt, request_headers=request_headers)
+            replace(attempt, request_headers=FrozenRequestHeaders(
+                opencode_go_session.bind_session_headers(
+                    request_headers.to_dict(), attempt.endpoint_url, prompt_cache_key,
+                ),
+                materialized=True,
+            ))
             for attempt in plan.attempts
         ),
     )
 
 
 # Public aliases matching the former facade surface.
-OfficialHTTPSConnection = _OfficialHTTPSConnection
-OfficialHTTPSConnectionPool = _OfficialHTTPSConnectionPool
-OfficialPooledResponse = _OfficialPooledResponse
-TRANSPORT_PHASE_ATTRIBUTE = _TRANSPORT_PHASE_ATTRIBUTE
-explicit_transport_phase = _explicit_transport_phase
-connection_disposition = _connection_disposition
-set_official_attempt_connection_disposition = (
-    _set_official_attempt_connection_disposition
-)
+OfficialHTTPSConnection = gateway_http_pool.PooledHTTPSConnection
+OfficialHTTPConnection = gateway_http_pool.PooledHTTPConnection
+OfficialHTTPSConnectionPool = gateway_http_pool.PooledHTTPSConnectionPool
+OfficialHTTPConnectionPool = gateway_http_pool.PooledHTTPConnectionPool
+OfficialPooledResponse = gateway_http_pool.PooledResponse
+TRANSPORT_PHASE_ATTRIBUTE = gateway_http_pool.TRANSPORT_PHASE_ATTRIBUTE
 diagnostic_connection_disposition = _diagnostic_connection_disposition_value
 diagnostic_error_connection_disposition = _diagnostic_error_connection_disposition_value
+
+
+def official_socket_options() -> list[tuple[int, int, int]]:
+    return gateway_http_pool.pooled_socket_options()
+
+
+def explicit_transport_phase(exc: BaseException | None) -> str | None:
+    return gateway_http_pool.explicit_transport_phase(exc)
+
+
+def connection_disposition(connection: Any) -> str:
+    return gateway_http_pool.connection_disposition(connection)
+
+
+def set_official_attempt_connection_disposition(disposition: str) -> None:
+    gateway_http_pool.set_attempt_connection_disposition(disposition)

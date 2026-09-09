@@ -1,0 +1,12 @@
+{
+    "schema":  "codexhub.real-client-candidate-startup.v1",
+    "outcome":  "failed",
+    "failure_classification":  "candidate_gateway_bootstrap_failed",
+    "duration_ms":  5541,
+    "portable_resources_ready":  true,
+    "candidate_running":  false,
+    "python_child_seen":  false,
+    "listener_seen":  false,
+    "health_ready":  false,
+    "diagnostics_ready":  true
+}

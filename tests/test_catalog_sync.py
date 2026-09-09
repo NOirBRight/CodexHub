@@ -696,7 +696,7 @@ class CatalogSyncTests(unittest.TestCase):
         for slug, multi_agent_version in (
             ("gpt-5.6-sol", "v2"),
             ("gpt-5.6-terra", "v2"),
-            ("gpt-5.6-luna", "v1"),
+            ("gpt-5.6-luna", "v2"),
         ):
             with self.subTest(slug=slug):
                 model = by_slug[slug]
@@ -711,7 +711,7 @@ class CatalogSyncTests(unittest.TestCase):
                 self.assertIn("tool_mode", model)
                 self.assertIsNone(model["tool_mode"])
                 self.assertIn("multi_agent_version", model)
-                self.assertIsNone(model["multi_agent_version"])
+                self.assertEqual(model["multi_agent_version"], "v2" if slug == "gpt-5.5" else None)
                 self.assertIs(model["prefer_websockets"], True)
                 self.assertIs(model["use_responses_lite"], False)
 
@@ -746,10 +746,10 @@ class CatalogSyncTests(unittest.TestCase):
 
         self.assertEqual(by_slug["gpt-5.6-sol"]["multi_agent_version"], "v2")
         self.assertEqual(by_slug["gpt-5.6-terra"]["multi_agent_version"], "v2")
-        self.assertEqual(by_slug["gpt-5.6-luna"]["multi_agent_version"], "v1")
+        self.assertEqual(by_slug["gpt-5.6-luna"]["multi_agent_version"], "v2")
         self.assertIs(by_slug["gpt-5.5"]["use_responses_lite"], False)
         self.assertIsNone(by_slug["gpt-5.5"]["tool_mode"])
-        self.assertIsNone(by_slug["gpt-5.5"]["multi_agent_version"])
+        self.assertEqual(by_slug["gpt-5.5"]["multi_agent_version"], "v2")
         for slug in ("gpt-5.4", "gpt-5.4-mini"):
             with self.subTest(slug=slug):
                 self.assertIs(by_slug[slug]["use_responses_lite"], False)
@@ -763,6 +763,64 @@ class CatalogSyncTests(unittest.TestCase):
                 self.assertNotIn("tool_mode", by_slug[slug])
                 self.assertNotIn("multi_agent_version", by_slug[slug])
 
+    def test_qualified_v2_defaults_preserve_explicit_v1_across_catalog_refresh(self):
+        from contextlib import ExitStack
+
+        official = [{"slug": slug, "visibility": "list"} for slug in ("gpt-5.6-luna", "gpt-5.5")]
+        with tempfile.TemporaryDirectory() as tmpdir, ExitStack() as stack:
+            root = Path(tmpdir)
+            paths = {
+                "GENERATED_CATALOG_PATH": root / "catalog.json",
+                "MANAGED_CATALOG_BASELINE_PATH": root / "baseline.json",
+                "CATALOG_OVERRIDES_PATH": root / "overrides.json",
+                "GENERATED_STATE_PATH": root / "state.json",
+            }
+            for key, value in paths.items():
+                stack.enter_context(patch.object(catalog_sync, key, value))
+            stack.enter_context(patch.object(catalog_sync, "_CATALOG_OWNER_SECRET_CACHE", None))
+            values = {
+                "catalog_cache_is_fresh": False,
+                "load_policy": self.policy,
+                "load_include_official_models": True,
+                "load_official_model_sort_order": [],
+                "load_official_disabled_models": [],
+                "load_official_seed_snapshot": catalog_sync.OfficialSeedSnapshot(official, "direct", "fresh", True),
+                "load_previous_official_context_budgets": {},
+                "load_fresh_direct_official_cache_authority": None,
+                "official_context_signals_from_snapshot": {},
+                "load_fallback_catalog_models": [],
+                "read_client_version": "0.146.0",
+                "discover_ollama_ids": ([], "test", "ok", ""),
+                "load_providers": [],
+                "catalog_visible_ollama_cloud_models": (False, []),
+                "catalog_visible_external_models": [],
+                "discover_ollama_model_metadata": ({}, ""),
+            }
+            for key, value in values.items():
+                stack.enter_context(patch.object(catalog_sync, key, return_value=value))
+            # Build the historical native baseline, then upgrade to qualified V2.
+            with patch.dict("catalog_sync.QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS", {}, clear=True):
+                catalog_sync.sync_catalog()
+            paths["CATALOG_OVERRIDES_PATH"].write_text(json.dumps({
+                "schema_version": 1,
+                "overrides": [{"provider": "openai", "upstream_name": "official", "upstream_model": row["slug"], "fields": {"multi_agent_version": "v1"}} for row in official],
+            }), encoding="utf-8")
+            for _ in range(2):
+                catalog_sync.sync_catalog()
+                managed = json.loads(paths["MANAGED_CATALOG_BASELINE_PATH"].read_text())
+                effective = json.loads(paths["GENERATED_CATALOG_PATH"].read_text())
+                self.assertEqual([row["multi_agent_version"] for row in managed["models"]], ["v2", "v2"])
+                self.assertEqual([row["multi_agent_version"] for row in effective["models"]], ["v1", "v1"])
+            # Clear through the same sidecar contract as the model-details command.
+            paths["CATALOG_OVERRIDES_PATH"].write_text(json.dumps({"schema_version": 1, "overrides": []}), encoding="utf-8")
+            effective["models"] = managed["models"]
+            paths["GENERATED_CATALOG_PATH"].write_text(json.dumps(effective), encoding="utf-8")
+            catalog_sync.sync_catalog()
+            self.assertEqual([row["multi_agent_version"] for row in json.loads(paths["GENERATED_CATALOG_PATH"].read_text())["models"]], ["v2", "v2"])
+            self.assertEqual(catalog_sync.PINNED_OFFICIAL_CATALOG_METADATA["gpt-5.6-luna"]["multi_agent_version"], "v1")
+            self.assertIsNone(catalog_sync.PINNED_OFFICIAL_CATALOG_METADATA["gpt-5.5"]["multi_agent_version"])
+
+    @patch.dict("catalog_sync.QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS", {"gpt-5.6-luna": "v1"})
     def test_sync_catalog_preserves_legacy_luna_multi_agent_override_across_restart(self):
         official = [
             {"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"},
@@ -926,7 +984,7 @@ class CatalogSyncTests(unittest.TestCase):
             {
                 "prefer_websockets": True,
                 "tool_mode": "code_mode_only",
-                "multi_agent_version": "v2",
+                "multi_agent_version": "v1",
                 "use_responses_lite": True,
                 "codex_proxy_metadata": {
                     "official_context_budget": {"context_window": 272000},
@@ -934,7 +992,7 @@ class CatalogSyncTests(unittest.TestCase):
                 },
             },
         )
-        self.assertNotIn("multi_agent_version", model)
+        self.assertEqual(model["multi_agent_version"], "v2")
         self.assertNotIn("tool_mode", model)
         self.assertNotIn("prefer_websockets", model)
         self.assertIs(model["use_responses_lite"], False)
@@ -956,17 +1014,31 @@ class CatalogSyncTests(unittest.TestCase):
             {
                 "prefer_websockets": True,
                 "tool_mode": "code_mode_only",
-                "multi_agent_version": "v2",
+                "multi_agent_version": "v1",
                 "use_responses_lite": True,
             },
         )
-        self.assertNotIn("multi_agent_version", ollama)
+        self.assertEqual(ollama["multi_agent_version"], "v2")
         self.assertNotIn("tool_mode", ollama)
         self.assertNotIn("prefer_websockets", ollama)
         self.assertIs(ollama["use_responses_lite"], False)
         self.assertEqual(ollama["codex_proxy_metadata"]["provider"], "ollama-cloud")
         self.assertEqual(ollama["codex_proxy_metadata"]["upstream_name"], "ollama_cloud")
         self.assertEqual(ollama["codex_proxy_metadata"]["upstream_model"], "glm-5.2")
+
+    def test_external_v2_default_keeps_explicit_v1_configuration(self):
+        external = {
+            "alias": "custom/model", "provider_alias": "custom",
+            "upstream_name": "custom", "upstream_model": "model",
+            "multi_agent_version": "v1",
+        }
+        model = catalog_sync.build_external_provider_model(external, self.policy, None)
+        self.assertEqual(model["multi_agent_version"], "v1")
+        ollama = catalog_sync.build_ollama_model(
+            "custom-model", self.policy, {}, None,
+            model_metadata={"custom-model": {"multi_agent_version": "v1"}},
+        )
+        self.assertEqual(ollama["multi_agent_version"], "v1")
 
     def test_catalog_override_rejects_invalid_unknown_and_cross_provider_entries(self):
         valid_identity = ("openai", "official", "gpt-5.6-luna")
@@ -1169,6 +1241,7 @@ class CatalogSyncTests(unittest.TestCase):
             self.assertEqual(overrides, {})
             self.assertEqual(diagnostics["reasons"]["invalid_row_identity"], 1)
 
+    @patch.dict("catalog_sync.QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS", {"gpt-5.6-luna": "v1"})
     def test_catalog_override_validates_managed_identity_digest(self):
         official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
 
@@ -1213,6 +1286,7 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertNotEqual(target.get("multi_agent_version"), "v2")
         self.assertEqual(diagnostics["reasons"]["invalid_row_identity"], 1)
 
+    @patch.dict("catalog_sync.QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS", {"gpt-5.6-luna": "v1"})
     def test_catalog_override_rejects_recomputed_public_digest_without_owner_signature(self):
         official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
         identity = ("openai", "official", "gpt-5.6-luna")
@@ -1245,6 +1319,7 @@ class CatalogSyncTests(unittest.TestCase):
             self.assertEqual(collected, {})
             self.assertEqual(diagnostics["reasons"]["invalid_row_identity"], 1)
 
+    @patch.dict("catalog_sync.QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS", {"gpt-5.6-luna": "v1"})
     def test_marker_only_beta2_baseline_migrates_existing_luna_override(self):
         official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
         identity = ("openai", "official", "gpt-5.6-luna")
@@ -1287,6 +1362,7 @@ class CatalogSyncTests(unittest.TestCase):
             )
             self.assertEqual(diagnostics["accepted"], 1)
 
+    @patch.dict("catalog_sync.QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS", {"gpt-5.6-luna": "v1"})
     def test_marker_only_legacy_catalog_migrates_against_fresh_generated_baseline(self):
         official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
         identity = ("openai", "official", "gpt-5.6-luna")
@@ -1328,6 +1404,7 @@ class CatalogSyncTests(unittest.TestCase):
             )
             self.assertEqual(diagnostics["accepted"], 1)
 
+    @patch.dict("catalog_sync.QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS", {"gpt-5.6-luna": "v1"})
     def test_generated_legacy_baseline_rejects_markerless_forged_row(self):
         official = [{"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}]
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1454,6 +1531,7 @@ class CatalogSyncTests(unittest.TestCase):
             self.assertEqual(collected, {})
             self.assertEqual(diagnostics["reasons"]["invalid_baseline"], 1)
 
+    @patch.dict("catalog_sync.QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS", {}, clear=True)
     def test_managed_baseline_accepts_pinned_legacy_null_multi_agent_versions(self):
         official = [
             {"slug": slug, "display_name": slug, "visibility": "list"}
@@ -1706,6 +1784,7 @@ class CatalogSyncTests(unittest.TestCase):
             {},
         )
 
+    @patch.dict("catalog_sync.QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS", {"gpt-5.6-luna": "v1"})
     def test_catalog_override_survives_managed_baseline_refresh_publication(self):
         official = [
             {"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list"}
@@ -1745,7 +1824,7 @@ class CatalogSyncTests(unittest.TestCase):
 
                     pinned_v2 = json.loads(json.dumps(catalog_sync.PINNED_OFFICIAL_CATALOG_METADATA))
                     pinned_v2["gpt-5.6-luna"]["multi_agent_version"] = "v2"
-                    with patch.object(catalog_sync, "PINNED_OFFICIAL_CATALOG_METADATA", pinned_v2):
+                    with patch.object(catalog_sync, "PINNED_OFFICIAL_CATALOG_METADATA", pinned_v2), patch.dict(catalog_sync.QUALIFIED_OFFICIAL_CODE_MODE_MULTI_AGENT_VERSIONS, {"gpt-5.6-luna": "v2"}):
                         managed_v2 = catalog_sync.build_codex_catalog(
                             official,
                             [],

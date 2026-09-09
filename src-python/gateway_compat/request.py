@@ -151,7 +151,7 @@ def compatible_request_body(
     requested_reasoning = _official_passthrough._requested_reasoning_effort(payload)
     changed = False
     if official_passthrough:
-        return _official_passthrough.official_passthrough_request_body(body, payload, upstream, model_id=model_id)
+        return _official_passthrough.official_passthrough_request_body(body, payload, upstream, model_id=model_id, event_context=event_context)
 
     collaboration_protocol = _collaboration_adapter_module.resolve_boundary(
         payload,

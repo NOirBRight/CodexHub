@@ -1,0 +1,152 @@
+{
+  "event_counts": {
+    "request_start": 16,
+    "request_complete": 16,
+    "runtime_tool_compatibility_planned": 2,
+    "explicit_codex_tools_injected": 2,
+    "runtime_tool_adapter_request": 2,
+    "external_tool_surface_prepared": 2,
+    "sse_reasoning_summary": 2,
+    "structured_tool_input_items_rewritten": 1,
+    "usage_observed": 12
+  },
+  "failures": [],
+  "cache_usage": [
+    {
+      "model": "openai/gpt-5.6-luna",
+      "provider_id": "official",
+      "prompt_cache_key_state": "present",
+      "usage_input_tokens": 8997,
+      "usage_output_tokens": 140,
+      "usage_cached_input_tokens": 0,
+      "usage_cache_write_input_tokens": 0
+    },
+    {
+      "model": "openai/gpt-5.6-luna",
+      "provider_id": "official",
+      "prompt_cache_key_state": "present",
+      "usage_input_tokens": 9180,
+      "usage_output_tokens": 23,
+      "usage_cached_input_tokens": 7936,
+      "usage_cache_write_input_tokens": 0
+    },
+    {
+      "model": "opencode-go/muse-spark-1.2-contributor",
+      "provider_id": "opencode_go",
+      "prompt_cache_key_state": "present",
+      "usage_input_tokens": 10973,
+      "usage_output_tokens": 360,
+      "usage_cached_input_tokens": 0
+    },
+    {
+      "model": "opencode-go/muse-spark-1.2-contributor",
+      "provider_id": "opencode_go",
+      "prompt_cache_key_state": "present",
+      "usage_input_tokens": 11101,
+      "usage_output_tokens": 218,
+      "usage_cached_input_tokens": 10865
+    },
+    {
+      "model": "openai/gpt-5.6-luna",
+      "provider_id": "official",
+      "usage_input_tokens": 6229,
+      "usage_output_tokens": 75,
+      "usage_cached_input_tokens": 0,
+      "usage_cache_write_input_tokens": 0,
+      "prompt_cache_key_state": "present"
+    },
+    {
+      "model": "openai/gpt-5.6-luna",
+      "provider_id": "official",
+      "usage_input_tokens": 6398,
+      "usage_output_tokens": 22,
+      "usage_cached_input_tokens": 0,
+      "usage_cache_write_input_tokens": 0,
+      "prompt_cache_key_state": "present"
+    },
+    {
+      "model": "opencode-go/muse-spark-1.2-contributor",
+      "provider_id": "opencode_go",
+      "usage_input_tokens": 7587,
+      "usage_output_tokens": 758,
+      "usage_cached_input_tokens": 0,
+      "prompt_cache_key_state": "present"
+    },
+    {
+      "model": "opencode-go/muse-spark-1.2-contributor",
+      "provider_id": "opencode_go",
+      "usage_input_tokens": 7791,
+      "usage_output_tokens": 72,
+      "usage_cached_input_tokens": 7537,
+      "prompt_cache_key_state": "present"
+    },
+    {
+      "model": "openai/gpt-5.6-luna",
+      "provider_id": "official",
+      "usage_input_tokens": 653,
+      "usage_output_tokens": 39,
+      "usage_cached_input_tokens": 0,
+      "usage_cache_write_input_tokens": 0,
+      "prompt_cache_key_state": "present"
+    },
+    {
+      "model": "openai/gpt-5.6-luna",
+      "provider_id": "official",
+      "usage_input_tokens": 719,
+      "usage_output_tokens": 21,
+      "usage_cached_input_tokens": 0,
+      "usage_cache_write_input_tokens": 0,
+      "prompt_cache_key_state": "present"
+    },
+    {
+      "model": "opencode-go/muse-spark-1.2-contributor",
+      "provider_id": "opencode_go",
+      "usage_input_tokens": 1141,
+      "usage_output_tokens": 254,
+      "usage_cached_input_tokens": 0,
+      "prompt_cache_key_state": "present"
+    },
+    {
+      "model": "opencode-go/muse-spark-1.2-contributor",
+      "provider_id": "opencode_go",
+      "usage_input_tokens": 1245,
+      "usage_output_tokens": 116,
+      "usage_cached_input_tokens": 1137,
+      "prompt_cache_key_state": "present"
+    },
+    {
+      "model": "openai/gpt-5.6-luna",
+      "provider_id": "official",
+      "usage_input_tokens": 3265,
+      "usage_output_tokens": 55,
+      "usage_cached_input_tokens": 0,
+      "usage_cache_write_input_tokens": 0,
+      "prompt_cache_key_state": "present"
+    },
+    {
+      "model": "openai/gpt-5.6-luna",
+      "provider_id": "official",
+      "usage_input_tokens": 3347,
+      "usage_output_tokens": 21,
+      "usage_cached_input_tokens": 0,
+      "usage_cache_write_input_tokens": 0,
+      "prompt_cache_key_state": "present"
+    },
+    {
+      "model": "opencode-go/muse-spark-1.2-contributor",
+      "provider_id": "opencode_go",
+      "usage_input_tokens": 3734,
+      "usage_output_tokens": 355,
+      "usage_cached_input_tokens": 0,
+      "prompt_cache_key_state": "present"
+    },
+    {
+      "model": "opencode-go/muse-spark-1.2-contributor",
+      "provider_id": "opencode_go",
+      "usage_input_tokens": 3848,
+      "usage_output_tokens": 276,
+      "usage_cached_input_tokens": 3697,
+      "prompt_cache_key_state": "present"
+    }
+  ]
+}

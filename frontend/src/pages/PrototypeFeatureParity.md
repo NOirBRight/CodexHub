@@ -2,7 +2,7 @@
 
 设计已锁定：revision 5 的紧凑桌面框架、顶部导航、浅深双主题和 SVG 标识。当前 revision 6 补齐功能界面与演示状态，保存于 `codex/prototype-ui-020`。**这是可交互原型，不是已接通后端的生产重构。**
 
-对照范围是现有源码向用户暴露的功能，不为内部 API 或兼容字段凭空增加开关。生产组件、API、持久化格式和安装资源未替换。所有新增操作使用内存状态；Provider 目录来自 `config/providers.toml` 的脱敏快照（8 个维护预设、123 个模型）。
+对照范围是现有源码向用户暴露的功能，不为内部 API 或兼容字段凭空增加开关。生产组件、API、持久化格式和安装资源未替换。所有新增操作使用内存状态；Provider 目录来自 `config/providers.toml` 的脱敏快照（8 个维护预设、136 个模型）。
 
 ## 常用工作区
 
@@ -45,7 +45,6 @@ API 余额与请求数字是示例数据，不代表真实账户。自定义或�
 | auto_start_gateway | SettingsDrawer | 通用 → 打开软件后启动 Gateway |
 | include_official_models | SettingsDrawer | Codex 与客户端 → 包含官方模型，影响模型统计和概览可见性 |
 | auto_sync_clients | SettingsDrawer | Codex 与客户端 → 自动同步已绑定客户端 |
-| openai_context_guard_enabled | ProvidersPage | Codex 与客户端 → 上下文保护；全局覆盖冲突 / 状态未知预览 |
 | unified_codex_history、手动历史同步 | SettingsDrawer | Codex 与客户端 → 历史对话；忙碌、目录占用、延期、归属冲突、迁移确认、写入失败与重启反馈 |
 | gateway_bind_address | Settings / runtime contract | Gateway → 只读 127.0.0.1 |
 | proxy_port | GatewayPage | Gateway → 端口，整数 1024–65535，保存后同步到服务条和接入端点 |

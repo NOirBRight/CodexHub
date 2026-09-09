@@ -26,8 +26,26 @@ test("Codex keeps connected surfaces visible for a foreign owner and takes over 
   assert.match(providers, /!realCodexConnected &&[\s\S]*effectiveCodexTargetOwner !== appFlavor\?\.routing_owner/);
   assert.match(providers, /const codexOwnedByOtherApp =/);
   assert.match(providers, /const codexConnected = realCodexConnected \|\| codexOwnedByOtherApp/);
-  assert.match(providers, /await applyCodexHubConnection\(nextMode, Boolean\(appFlavor\?\.codex_takeover_required\)\)/);
-  assert.match(providers, /setCodexTargetOwnerOverride\(nextMode === "custom" \? appFlavor\?\.routing_owner \?\? null : "official"\)/);
+  assert.match(providers, /await applyCodexHubConnection\(\s*nextMode,\s*Boolean\(appFlavor\?\.codex_takeover_required\),\s*\)/);
+  assert.match(providers, /await api\.switchMode\(nextMode, false, true, restartCodex\)/);
+  assert.match(providers, /await api\.switchMode\(nextMode, false, false, restartCodex\)/);
+  assert.doesNotMatch(providers, /authorizeCodexRestart/);
+  assert.match(providers, /providers\.codexRouteChangedRestart/);
+  const localesEn = await source("../src/i18n/locales/en-US.ts");
+  const localesZh = await source("../src/i18n/locales/zh-CN.ts");
+  assert.match(localesEn, /codexRouteChangedRestart: "\{\{status\}\}; restart Codex Desktop to apply"/);
+  assert.match(localesZh, /codexRouteChangedRestart: "\{\{status\}\}；请重启 Codex Desktop 使其生效"/);
+  assert.doesNotMatch(localesEn, /codexRouteChangedRestart: "\{\{status\}\}; restart Codex App to apply"/);
+  const handlers = await source("../../src-tauri/src/desktop_commands/handlers.rs");
+  assert.match(
+    handlers,
+    /Connect\/disconnect writes the overlay while Codex Desktop stays open/,
+  );
+  assert.match(handlers, /serialize_config_writer\(\|\| \{/);
+  assert.match(
+    providers,
+    /setCodexTargetOwnerOverride\(\s*nextMode === "custom" \? \(appFlavor\?\.routing_owner \?\? null\) : "official",\s*\)/,
+  );
   assert.match(providers, /codexForeignOwner=\{codexOwnedByOtherApp\}/);
   assert.match(providers, /codexOwnerLabel=\{codexRouteOwnerLabel\}/);
   assert.match(providers, /foreignOwner[\s\S]*bg-emerald-100 text-emerald-700/);

@@ -191,5 +191,8 @@ explicit `CODEXHUB_LIVE_GATEWAY_CONFIG` pointing to a private JSON file with
 Use a separately started candidate Gateway and dedicated provider inputs. Never
 check this file into Git or include it in uploaded evidence. Without the input,
 these optional probes report skips; an invalid explicit input or a configured
-Gateway's connection/auth/provider failure remains a failure. The mandatory
-Windows and Linux eight-case CLI release gates remain unchanged.
+Gateway's connection/auth/provider failure remains a failure. The xAI tool-schema
+probe (`test_live_gateway_accepts_xai_root_union_tools`) is in that same optional
+set; `scripts/e2e_xai_grok_tools.py` is an additional direct-to-xAI check gated
+on `CODEXHUB_E2E_XAI=1`. The mandatory Windows and Linux eight-case CLI release
+gates remain unchanged.

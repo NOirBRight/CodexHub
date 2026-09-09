@@ -1,7 +1,7 @@
 """Catalog-backed model routing and request-time catalog projection.
 
 The module owns published-catalog validation, exact provider resolution, model
-limits, Official context guards, fast-variant projection, and modality lookup.
+limits, published Official budgets, fast-variant projection, and modality lookup.
 Callers inject live readers so a facade can preserve request-time patches while
 tests exercise the same typed seam directly.
 """
@@ -980,12 +980,12 @@ def current_catalog_data() -> CatalogDocument:
     fast_projection = (
         _official_fast_projection_reader or catalog_with_official_fast_variants
     )
-    context_guard = _context_guard_reader or catalog_with_openai_context_guard
+    published_context_projection = _published_context_projection_reader or catalog_with_published_official_budgets
     vision_projection = (
         _vision_projection_reader or catalog_with_vision_proxy_capabilities
     )
     return vision_projection(
-        context_guard(
+        published_context_projection(
             fast_projection(catalog), published_budgets, require_published_snapshot=True
         )
     )
@@ -1044,7 +1044,7 @@ def _positive_int(value: Any) -> int | None:
     )
 
 
-def catalog_with_openai_context_guard(
+def catalog_with_published_official_budgets(
     catalog: dict[str, Any],
     published_budgets: Mapping[str, Mapping[str, Any]] | None = None,
     *,
@@ -1054,7 +1054,7 @@ def catalog_with_openai_context_guard(
     if not isinstance(models, list):
         return catalog
 
-    def guarded_model(model: Any) -> Any:
+    def projected_model(model: Any) -> Any:
         if not isinstance(model, Mapping):
             return model
 
@@ -1085,20 +1085,20 @@ def catalog_with_openai_context_guard(
         )
         if not trusted:
             return without_context_budget()
-        guard_window = _positive_int(budget.get("model_context_window"))
-        if guard_window is None:
-            guard_window = _positive_int(budget.get("context_window"))
+        published_window = _positive_int(budget.get("model_context_window"))
+        if published_window is None:
+            published_window = _positive_int(budget.get("context_window"))
         effective_percent = _positive_int(
             budget.get("effective_context_window_percent")
         )
         effective_window = _positive_int(budget.get("effective_context_window"))
         auto_compact_limit = _positive_int(budget.get("model_auto_compact_token_limit"))
         if (
-            guard_window is None
+            published_window is None
             or effective_percent is None
             or effective_percent > 100
             or (effective_window is None)
-            or (effective_window > guard_window)
+            or (effective_window > published_window)
             or (auto_compact_limit is None)
             or (auto_compact_limit > effective_window)
         ):
@@ -1131,16 +1131,16 @@ def catalog_with_openai_context_guard(
             )
             if value is not None
         ]
-        guarded_window = min(guard_window, *reported) if reported else guard_window
+        projected_window = min(published_window, *reported) if reported else published_window
         return {
             **model,
-            "context_window": guarded_window,
-            "max_context_window": guarded_window,
+            "context_window": projected_window,
+            "max_context_window": projected_window,
             "effective_context_window_percent": effective_percent,
         }
 
     updated = dict(catalog)
-    updated["models"] = [guarded_model(model) for model in models]
+    updated["models"] = [projected_model(model) for model in models]
     return updated
 
 
@@ -1384,7 +1384,7 @@ def _internal_model_reader(value: Any) -> bool:
 _official_base_url_reader = None
 _ollama_base_url_reader = None
 _official_fast_projection_reader = None
-_context_guard_reader = None
+_published_context_projection_reader = None
 _vision_projection_reader = None
 _canonical_models_reader = None
 _modalities_reader = None
@@ -1417,7 +1417,7 @@ __all__ = [
     "catalog_max_output_tokens",
     "catalog_output_limit",
     "catalog_with_official_fast_variants",
-    "catalog_with_openai_context_guard",
+    "catalog_with_published_official_budgets",
     "catalog_with_vision_proxy_capabilities",
     "choose_upstream",
     "current_catalog_data",

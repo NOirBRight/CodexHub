@@ -57,6 +57,8 @@ impl From<crate::file_transaction::FileTransactionError> for SwitchMutationError
 pub struct CodexDesktopStatus {
     pub running: bool,
     pub restart_supported: bool,
+    #[serde(default)]
+    pub instance_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -473,12 +475,18 @@ impl CodexDesktopLifecycle for SystemCodexDesktopLifecycle {
             return Ok(CodexDesktopStatus {
                 running: false,
                 restart_supported: false,
+                instance_id: None,
             });
         };
+        let pids = linux_main_process_ids(Path::new("/proc"), &installation.executable_path)?;
+        let instance_id = pids.iter().filter_map(|pid| {
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse::<u64>().ok()
+        }).min();
         Ok(CodexDesktopStatus {
-            running: !linux_main_process_ids(Path::new("/proc"), &installation.executable_path)?
-                .is_empty(),
+            running: !pids.is_empty(),
             restart_supported: true,
+            instance_id,
         })
     }
 
@@ -818,18 +826,26 @@ if ($result -ne 0) { throw "Restart Manager graceful shutdown failed with code $
 
 #[cfg(any(target_os = "windows", test))]
 fn parse_windows_status(output: &str) -> Result<CodexDesktopStatus, String> {
+    if let Some((base, instance)) = output.trim().split_once(" instance=") {
+        let mut status = parse_windows_status(base)?;
+        status.instance_id = Some(instance.parse::<u64>().map_err(|_| "Invalid Codex process instance".to_string())?);
+        return Ok(status);
+    }
     match output.trim() {
         "unsupported" => Ok(CodexDesktopStatus {
             running: false,
             restart_supported: false,
+                instance_id: None,
         }),
         "supported=1 running=0" => Ok(CodexDesktopStatus {
             running: false,
             restart_supported: true,
+                instance_id: None,
         }),
         "supported=1 running=1" => Ok(CodexDesktopStatus {
             running: true,
             restart_supported: true,
+                instance_id: None,
         }),
         other => Err(format!(
             "Codex Desktop lifecycle returned an unrecognized status: {other:?}"
@@ -841,7 +857,7 @@ fn parse_windows_status(output: &str) -> Result<CodexDesktopStatus, String> {
 impl CodexDesktopLifecycle for SystemCodexDesktopLifecycle {
     fn status(&self) -> Result<CodexDesktopStatus, String> {
         let script = format!(
-            "{}\nif (-not $executable) {{ exit 0 }}\n$running = @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $executable }}).Count -gt 0\nWrite-Output ('supported=1 running=' + [int]$running)",
+            "{}\nif (-not $executable) {{ exit 0 }}\n$processes = @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $executable }})\n$running = $processes.Count -gt 0\n$instance = if ($running) {{ ' instance=' + [long](($processes | Sort-Object CreationDate | Select-Object -First 1).CreationDate.ToUniversalTime().Ticks / 10000) }} else {{ '' }}\nWrite-Output ('supported=1 running=' + [int]$running + $instance)",
             WINDOWS_APPX_RESOLUTION
         );
         parse_windows_status(&run_windows_lifecycle_script(
@@ -891,6 +907,7 @@ impl CodexDesktopLifecycle for SystemCodexDesktopLifecycle {
         Ok(CodexDesktopStatus {
             running: false,
             restart_supported: false,
+                instance_id: None,
         })
     }
 
@@ -938,6 +955,7 @@ mod tests {
             Ok(CodexDesktopStatus {
                 running: self.running.get(),
                 restart_supported: true,
+                instance_id: None,
             })
         }
 
@@ -1329,10 +1347,20 @@ mod tests {
     #[test]
     fn windows_status_parser_fails_closed_on_ambiguous_output() {
         assert_eq!(
+            parse_windows_status("supported=1 running=1 instance=123456789").unwrap(),
+            CodexDesktopStatus {
+                running: true,
+                restart_supported: true,
+                instance_id: Some(123456789),
+            }
+        );
+        assert!(parse_windows_status("supported=1 running=1 instance=invalid").is_err());
+        assert_eq!(
             parse_windows_status("supported=1 running=1").unwrap(),
             CodexDesktopStatus {
                 running: true,
                 restart_supported: true,
+                instance_id: None,
             }
         );
         assert_eq!(
@@ -1340,6 +1368,7 @@ mod tests {
             CodexDesktopStatus {
                 running: false,
                 restart_supported: false,
+                instance_id: None,
             }
         );
         assert!(parse_windows_status("warning\nsupported=1 running=0").is_err());
@@ -1387,6 +1416,7 @@ mod tests {
             Ok(CodexDesktopStatus {
                 running: self.running.get(),
                 restart_supported: true,
+                instance_id: None,
             })
         }
 
@@ -1594,6 +1624,7 @@ finally {{
             Ok(CodexDesktopStatus {
                 running: false,
                 restart_supported: true,
+                instance_id: None,
             })
         }
 

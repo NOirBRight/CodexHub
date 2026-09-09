@@ -12,6 +12,20 @@ export function formatLimit(value?: number | null) {
   return new Intl.NumberFormat(i18n.language || "en-US").format(value);
 }
 
+export function formatContextWindow(value?: number | null) {
+  if (!value) {
+    return i18n.t("common.unknown");
+  }
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1)}M`;
+  }
+  if (value >= 1000) {
+    const rounded = Math.round(value / 1000);
+    return `${new Intl.NumberFormat(i18n.language || "en-US").format(rounded)}K`;
+  }
+  return new Intl.NumberFormat(i18n.language || "en-US").format(value);
+}
+
 export function displayModel(model: Model) {
   return model.display_name?.trim() || model.id;
 }
@@ -39,6 +53,28 @@ export function renumberModels(models: Model[]) {
   }));
 }
 
+function positiveLimit(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+export function fillMissingModelLimits(models: Model[], fallback: Model[]) {
+  const byId = new Map(fallback.map((model) => [model.id, model]));
+  return models.map((model) => {
+    const prior = byId.get(model.id);
+    if (!prior) {
+      return model;
+    }
+    return {
+      ...model,
+      context_window: positiveLimit(model.context_window) ?? prior.context_window ?? model.context_window,
+      max_context_window:
+        positiveLimit(model.max_context_window) ?? prior.max_context_window ?? model.max_context_window,
+      max_output_tokens:
+        positiveLimit(model.max_output_tokens) ?? prior.max_output_tokens ?? model.max_output_tokens,
+    };
+  });
+}
+
 export function mergeDiscoveredModels(existing: Model[], discovered: Model[]) {
   const existingById = new Map(existing.map((model) => [model.id, model]));
   const merged: Model[] = discovered.map((model, index) => {
@@ -49,6 +85,9 @@ export function mergeDiscoveredModels(existing: Model[], discovered: Model[]) {
       upstream_model: previous?.upstream_model ?? model.upstream_model ?? null,
       tool_surface_strategy: previous?.tool_surface_strategy ?? model.tool_surface_strategy ?? null,
       input_modalities: previous?.input_modalities ?? model.input_modalities ?? null,
+      context_window: positiveLimit(model.context_window) ?? null,
+      max_context_window: positiveLimit(model.max_context_window) ?? null,
+      max_output_tokens: positiveLimit(model.max_output_tokens) ?? null,
       supported_reasoning_levels:
         nonempty(model.supported_reasoning_levels) ??
         nonempty(previous?.supported_reasoning_levels) ??

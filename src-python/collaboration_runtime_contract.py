@@ -474,6 +474,14 @@ def validate_collaboration_result(version: str, name: str, value: Any) -> None:
         try:
             parsed = _json_object_or_value(value, "malformed_collaboration_result")
         except CollaborationContractError:
+            # Argument deserialization fails before any V2 handler runs.
+            # The client records this shared error as plain text (for example
+            # a number-schema timeout emitted as 180000.0 but parsed as i64).
+            # Replay it unchanged so the model can correct the failed call.
+            if version == COLLABORATION_V2 and value.startswith(
+                "failed to parse function arguments: "
+            ) and value.removeprefix("failed to parse function arguments: ").strip():
+                return
             # Codex CLI serializes a failed V2 interrupt as the tool's plain
             # error text rather than a JSON result object.  Preserve that
             # replay value; JSON-shaped failures (including duplicate keys)

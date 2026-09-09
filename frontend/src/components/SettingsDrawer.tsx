@@ -42,7 +42,6 @@ interface SettingsDrawerProps {
   gatewayStatus?: GatewayStatus | null;
   dark?: boolean;
   onTheme?: () => void;
-  onOpenContextGuard?: () => void;
   appVersion: AppVersionInfo | null;
   busy?: string | null;
   open: boolean;
@@ -65,7 +64,6 @@ export function SettingsDrawer({
   gatewayStatus,
   dark,
   onTheme,
-  onOpenContextGuard,
   appVersion,
   busy,
   onCheckUpdate,
@@ -386,20 +384,6 @@ export function SettingsDrawer({
                         setDraft({ ...draft, include_official_models: value })
                       }
                     />
-                    {inlineCategory && onOpenContextGuard && (
-                      <div className="ws-setting-line">
-                        <span>
-                          {t("providers.contextGuardShort")}
-                          <small>{t("providers.contextGuardTooltip")}</small>
-                        </span>
-                        <button
-                          className="ws-button"
-                          onClick={onOpenContextGuard}
-                        >
-                          {t("workspace.configure")}
-                        </button>
-                      </div>
-                    )}
                     <Toggle
                       checked={draft.unified_codex_history}
                       disabled={historyBusy || Boolean(busy)}

@@ -9,9 +9,12 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(in crate::gateway) const DEFAULT_MODEL: &str = "gpt-5.5";
-pub(in crate::gateway) const OPENAI_CONTEXT_GUARD_WINDOW: u32 = 272_000;
 
 pub(in crate::gateway) const OFFICIAL_MODELS: &[(&str, &str, u32)] = &[
+    ("gpt-6-astra", "6 Astra", 1_000_000),
+    ("gpt-5.6-sol", "5.6 Sol", 353_400),
+    ("gpt-5.6-terra", "5.6 Terra", 272_000),
+    ("gpt-5.6-luna", "5.6 Luna", 272_000),
     ("gpt-5.5", "5.5", 258400),
     ("gpt-5.4", "5.4", 272000),
     ("gpt-5.4-mini", "5.4 Mini", 272000),
@@ -222,14 +225,6 @@ pub(in crate::gateway) fn official_models_from_metadata(
         }
     }
 
-    if settings.openai_context_guard_enabled {
-        for model in &mut models {
-            model.context_window = model
-                .context_window
-                .map(|context_window| context_window.min(OPENAI_CONTEXT_GUARD_WINDOW));
-        }
-    }
-
     models
 }
 
@@ -240,9 +235,6 @@ pub(in crate::gateway) fn official_gateway_model_from_metadata(
 ) -> Option<GatewayModel> {
     let id = official_gateway_model_id(&model.id)?;
     let context_window = published_context_windows.get(&id).copied();
-    if settings.openai_context_guard_enabled && context_window.is_none() {
-        return None;
-    }
     if official_model_disabled(settings, &id) || is_gateway_fast_variant_id(&id) {
         return None;
     }
@@ -295,7 +287,6 @@ pub(in crate::gateway) fn fallback_official_gateway_models(
             supported_reasoning_levels: Some(official_gateway_reasoning_levels()),
             default_reasoning_level: Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string()),
         })
-        .filter(|model| !settings.openai_context_guard_enabled || model.context_window.is_some())
         .collect()
 }
 

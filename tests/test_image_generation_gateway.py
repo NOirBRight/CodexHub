@@ -165,6 +165,7 @@ def test_image_generation_relays_official_raw_contract(
             patch.object(codex_auth, "access_token", return_value="synthetic-official-token"),
             patch.object(codex_auth, "account_id", return_value="synthetic-account-id"),
             patch.object(gateway_transport, "OFFICIAL_HTTP_POOLS", {}),
+            patch.object(gateway_transport, "STANDARD_HTTP_POOLS", {}),
             _http_server(codex_proxy.CodexProxyHandler) as gateway,
         ):
             status, headers, response_body = _request_image_generation(gateway, request_body)

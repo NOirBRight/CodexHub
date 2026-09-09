@@ -33,7 +33,7 @@ async function readFormatModule() {
   const moduleExports = {};
   const wrappedModule = new Function(
     "exports",
-    jsOutput + "\nexports.mergeDiscoveredModels = mergeDiscoveredModels; exports.renumberModels = renumberModels;",
+    jsOutput + "\nexports.mergeDiscoveredModels = mergeDiscoveredModels; exports.renumberModels = renumberModels; exports.fillMissingModelLimits = fillMissingModelLimits;",
   );
   wrappedModule(moduleExports);
   return moduleExports;
@@ -128,6 +128,45 @@ test("mergeDiscoveredModels preserves existing per-model settings when a model i
   assert.equal(result.codex_enabled, false, "codex_enabled should be preserved");
   assert.equal(result.gateway_exported, false, "gateway_exported should be preserved");
   assert.equal(result.enabled, false, "enabled should be preserved");
+});
+
+test("mergeDiscoveredModels keeps a live listing window and does not invent one", async () => {
+  const { mergeDiscoveredModels } = await readFormatModule();
+  const existing = makeModel({ id: "glm-5.3", context_window: 1_000_000, max_output_tokens: 131_072 });
+  const listed = makeModel({
+    id: "glm-5.3",
+    display_name: "Discovered Display",
+    context_window: 202_752,
+    max_output_tokens: 32_768,
+    source_kind: "discovered",
+  });
+  const missing = makeModel({
+    id: "glm-5.3",
+    context_window: null,
+    max_output_tokens: null,
+    source_kind: "discovered",
+  });
+  const fromListing = mergeDiscoveredModels([existing], [listed]).find((model) => model.id === "glm-5.3");
+  const fromEmptyListing = mergeDiscoveredModels([existing], [missing]).find((model) => model.id === "glm-5.3");
+  assert.equal(fromListing.context_window, 202_752);
+  assert.equal(fromListing.max_output_tokens, 32_768);
+  assert.equal(fromEmptyListing.context_window, null);
+  assert.equal(fromEmptyListing.max_output_tokens, null);
+});
+
+test("fillMissingModelLimits restores a previous window only after upstream and catalog are absent", async () => {
+  const { fillMissingModelLimits } = await readFormatModule();
+  const previous = makeModel({ id: "omen-alpha", context_window: 500_000, max_output_tokens: 128_000 });
+  const unknown = makeModel({ id: "omen-alpha", context_window: null, max_output_tokens: null });
+  const listed = makeModel({ id: "omen-alpha", context_window: 256_000, max_output_tokens: 64_000 });
+  assert.equal(
+    fillMissingModelLimits([unknown], [previous]).find((model) => model.id === "omen-alpha")?.context_window,
+    500_000,
+  );
+  assert.equal(
+    fillMissingModelLimits([listed], [previous]).find((model) => model.id === "omen-alpha")?.context_window,
+    256_000,
+  );
 });
 
 test("mergeDiscoveredModels leaves existing models unchanged on empty discovery", async () => {

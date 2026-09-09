@@ -1,3 +1,4 @@
+import { CODEX_RESTART_CHANGED, readPendingCodexRestart, storePendingCodexRestart, codexRestartObserved, type PendingCodexRestart } from "../lib/providerWorkspace/restart";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { ProviderWorkspaceView } from "../components/workspace/ProviderWorkspaceView";
 import type { WorkspacePage } from "../components/workspace/WorkspaceShell";
@@ -62,9 +63,7 @@ import {
 import type {
   AppFlavorInfo,
   AppStatus,
-  CodexContextGuardStatus,
   GatewayStatus,
-  GatewayClientSyncSummary,
   Model,
   OpenAIUsageSnapshot,
   Provider,
@@ -78,7 +77,6 @@ export type CodexSwitchRequest = { id: number; mode: ConnectionMode };
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
 type ProvidersPageProps = {
-  openOfficialRequest?: number;
   desktopPage?: WorkspacePage;
   onNavigate?: (page: WorkspacePage) => void;
   children?: ReactNode;
@@ -103,14 +101,12 @@ function ProvidersPageImpl({
   desktopPage,
   onNavigate,
   children,
-  openOfficialRequest,
   appFlavor,
   appStatus: appStatusSnapshot,
   catalogModels,
   gatewayStatus: gatewayStatusSnapshot,
   modelMetadata,
   onGatewayChanged,
-  onRefreshClients,
   onProvidersChanged,
   onSettingsChanged,
   onStartProxy,
@@ -168,7 +164,6 @@ function ProvidersPageImpl({
     settingsDraft,
   } = workspace.state;
   const {
-    stageSettings,
     updateForm,
     setProbeResult,
     setDiscoveryError,
@@ -194,6 +189,39 @@ function ProvidersPageImpl({
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(
     appStatusSnapshot,
   );
+  const [pendingCodexRestart, setPendingCodexRestart] = useState<PendingCodexRestart | null>(readPendingCodexRestart);
+  useEffect(() => {
+    const sync = () => setPendingCodexRestart(readPendingCodexRestart());
+    window.addEventListener(CODEX_RESTART_CHANGED, sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(CODEX_RESTART_CHANGED, sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
+  function updatePendingCodexRestart(value: PendingCodexRestart | null) {
+    storePendingCodexRestart(value);
+    setPendingCodexRestart(value);
+  }
+  useEffect(() => {
+    if (!pendingCodexRestart) return;
+    let active = true;
+    let loading = false;
+    const check = async () => {
+      if (loading) return;
+      loading = true;
+      try {
+        const status = await api.getCodexDesktopStatus();
+        if (active && codexRestartObserved(pendingCodexRestart, status)) {
+          updatePendingCodexRestart(null);
+        }
+      } catch { /* Keep pending state until restart is confirmed. */ }
+      finally { loading = false; }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [pendingCodexRestart]);
   const [connectionPendingMode, setConnectionPendingMode] =
     useState<ConnectionMode | null>(null);
   const [codexTargetOwnerOverride, setCodexTargetOwnerOverride] = useState<
@@ -659,17 +687,6 @@ function ProvidersPageImpl({
     }
   }
 
-  function reflectContextGuardSetting(enabled: boolean) {
-    stageSettings((current) => {
-      if (!current) {
-        return current;
-      }
-      const next = { ...current, openai_context_guard_enabled: enabled };
-      onSettingsChanged?.(next);
-      return next;
-    });
-  }
-
   async function updateProvider(next: Provider, successMessage?: string) {
     const result = await workspace.saveProvider(next, { successMessage });
     if (result.kind === "error") throw new Error(result.message);
@@ -776,38 +793,12 @@ function ProvidersPageImpl({
     );
   }
 
-  async function authorizeCodexRestart(): Promise<boolean | null> {
-    const desktopStatus = await api.getCodexDesktopStatus();
-    if (!desktopStatus.running) {
-      return false;
-    }
-    if (!desktopStatus.restart_supported) {
-      throw new Error(t("providers.codexRestartUnsupported"));
-    }
-    const confirmed = await confirmAction({
-      cancelLabel: t("common.cancel"),
-      confirmLabel: t("providers.restartCodexAndContinue"),
-      message: t("providers.codexRestartConfirmation"),
-      title: t("providers.codexRestartTitle"),
-    });
-    return confirmed ? true : null;
-  }
-
   async function applyCodexHubConnection(
     nextMode: ConnectionMode,
     forceTakeover: boolean,
+    restartCodex = false,
   ) {
-    let restartCodex: boolean | null;
-    try {
-      restartCodex = await authorizeCodexRestart();
-    } catch (err) {
-      setError(messageFromError(err));
-      return;
-    }
-    if (restartCodex === null) {
-      return;
-    }
-    const actionLabel =
+    const actionLabel = restartCodex ? t("workspace.restartCodex") :
       nextMode === "custom"
         ? t("providers.connectingToHub")
         : t("providers.disconnectingFromHub");
@@ -815,6 +806,7 @@ function ProvidersPageImpl({
     setOperationBusy("route");
     const toastId = showToast(`${actionLabel}...`, "loading");
     try {
+      const desktopBefore = await api.getCodexDesktopStatus().catch(() => null);
       let status = forceTakeover
         ? await api.switchMode(nextMode, false, true, restartCodex)
         : await api.switchMode(nextMode, false, false, restartCodex);
@@ -840,6 +832,12 @@ function ProvidersPageImpl({
         status = refreshedStatus
           ? { ...refreshedStatus, codex_restart_result: codexRestartResult }
           : status;
+      }
+      if (codexRestartResult === "restarted" || codexRestartResult === "not_running"
+          || (!restartCodex && desktopBefore?.running === false)) {
+        updatePendingCodexRestart(null);
+      } else {
+        updatePendingCodexRestart({ mode: nextMode, instanceId: desktopBefore?.instance_id ?? null });
       }
       setCodexStatus(status);
       setCodexTargetOwnerOverride(
@@ -884,7 +882,7 @@ function ProvidersPageImpl({
               : t("providers.codexRouteChangedRestart", {
                   status: codexHubConnectionSuccessMessage(nextMode, tr),
                 }),
-        tone: "success",
+        tone: status.codex_restart_result === "switched_relaunch_failed" ? "error" : "success",
       });
     } catch (err) {
       const message = messageFromError(err);
@@ -1019,12 +1017,6 @@ function ProvidersPageImpl({
     }
   }
 
-  useEffect(() => {
-    if (!openOfficialRequest) return;
-    selectProvider(OFFICIAL_ID);
-    setEditorOpen(true);
-  }, [openOfficialRequest]);
-
   return (
     <>
       {desktopPage && (
@@ -1035,6 +1027,7 @@ function ProvidersPageImpl({
           officialId={OFFICIAL_ID}
           officialCount={officialModels.length}
           officialModels={officialModels}
+          officialDisabledModels={officialDisabledModels}
           officialEnabled={officialEnabledCount}
           officialIncluded={settings?.include_official_models ?? false}
           limits={officialUsageSnapshot?.limits ?? []}
@@ -1048,6 +1041,10 @@ function ProvidersPageImpl({
               ? (codexRouteOwnerLabel ?? undefined)
               : undefined
           }
+          restartPending={Boolean(pendingCodexRestart)}
+          onRestartCodex={() => {
+            if (pendingCodexRestart) void applyCodexHubConnection(codexStatus?.mode === "custom" ? "custom" : "official", false, true);
+          }}
           connectionBusy={Boolean(connectionPendingMode)}
           busy={Boolean(busy)}
           onToggleConnection={() => void toggleCodexHubConnection()}
@@ -1187,13 +1184,11 @@ function ProvidersPageImpl({
                         settings?.include_official_models ?? false
                       }
                       authIssue={gatewayStatus?.codex_auth?.issue ?? null}
-                      onContextGuardChanged={reflectContextGuardSetting}
                       onOpenCodexApp={() => void openCodexAppForLogin()}
                       onRefresh={(options) =>
                         refreshOfficialModelsAndCollaborationState(options)
                       }
                       onCancelRefresh={cancelOfficialModelRefresh}
-                      onRefreshClients={onRefreshClients}
                       onRefreshAuth={() => void refreshCodexAuthStatus()}
                       onRefreshUsage={() =>
                         void loadOfficialOpenAIUsage(true, true)
@@ -1203,7 +1198,6 @@ function ProvidersPageImpl({
                       onToggleModel={toggleOfficialModel}
                       dirty={officialModelDraftDirty}
                       saveBusy={busy === "save"}
-                      syncBoundClients={settings?.auto_sync_clients ?? true}
                       usageBusy={officialUsageBusy}
                       usageError={officialUsageError}
                       usageHidden={officialUsageHidden}
@@ -1875,18 +1869,15 @@ function OfficialDetail({
   onOfficialCollaborationOverridesChanged,
   officialDisabledModels,
   officialIncluded,
-  onContextGuardChanged,
   onOpenCodexApp,
   onRefresh,
   onCancelRefresh,
-  onRefreshClients,
   onRefreshAuth,
   onRefreshUsage,
   onReorder,
   onSave,
   onToggleModel,
   saveBusy,
-  syncBoundClients,
   usageBusy,
   usageError,
   usageHidden,
@@ -1905,21 +1896,18 @@ function OfficialDetail({
   ) => void;
   officialDisabledModels: string[];
   officialIncluded: boolean;
-  onContextGuardChanged: (enabled: boolean) => void;
   onOpenCodexApp: () => void;
   onRefresh: (options?: {
     quiet?: boolean;
     throwOnError?: boolean;
   }) => Promise<boolean>;
   onCancelRefresh: () => void;
-  onRefreshClients?: () => Promise<void>;
   onRefreshAuth: () => void;
   onRefreshUsage: () => void;
   onReorder: (models: Model[]) => void;
   onSave: () => void;
   onToggleModel: (modelId: string, enabled: boolean) => void;
   saveBusy: boolean;
-  syncBoundClients: boolean;
   usageBusy: boolean;
   usageError: string | null;
   usageHidden: boolean;
@@ -1963,136 +1951,6 @@ function OfficialDetail({
       setSignOutBusy(false);
     }
   }
-  const [contextGuardStatus, setContextGuardStatus] =
-    useState<CodexContextGuardStatus | null>(null);
-  const [contextGuardBusy, setContextGuardBusy] = useState(false);
-  // Gateway publishes the authoritative per-model window from the Official
-  // catalog.  A user-owned Codex top-level override is Desktop-only and must
-  // not shrink the Gateway display when the conflict diagnostic is active.
-  const displayedGatewayContextById = gatewayContextById;
-
-  useEffect(() => {
-    let active = true;
-    void api
-      .getCodexContextGuardStatus()
-      .then((status) => {
-        if (active) {
-          setContextGuardStatus(status);
-        }
-      })
-      .catch((err) => {
-        if (active) {
-          showToast(
-            t("providers.contextGuardStatusFailed", {
-              message: messageFromError(err),
-            }),
-            "error",
-          );
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [showToast, t]);
-
-  async function toggleContextGuard(enabled: boolean) {
-    if (contextGuardBusy) {
-      return;
-    }
-    setContextGuardBusy(true);
-    const toastId = showToast(
-      enabled
-        ? t("providers.enablingContextGuard")
-        : t("providers.disablingContextGuard"),
-      "loading",
-    );
-    try {
-      const status = await api.setCodexContextGuard(enabled, false);
-      setContextGuardStatus(status);
-      onContextGuardChanged(status.gateway_enabled);
-      let syncResult: GatewayClientSyncSummary | null = null;
-      let syncResultUncertain = false;
-      if (syncBoundClients) {
-        updateToast(toastId, {
-          action: null,
-          text: t("providers.syncBoundClients"),
-          tone: "loading",
-        });
-        try {
-          syncResult = await api.syncGatewayClients();
-        } catch {
-          syncResultUncertain = true;
-        }
-        await onRefreshClients?.().catch(() => undefined);
-      }
-      const restartNotice = await readCodexRestartNotice(api);
-      const restartMessage =
-        restartNotice === "required"
-          ? t("providers.catalogOverrideRestartCodex")
-          : restartNotice === "unknown"
-            ? t("providers.codexRestartStatusUnknown")
-            : t("common.saved");
-      const appliedClientCount = syncResult?.applied ?? 0;
-      const failedClientCount = syncResult?.failed ?? 0;
-      let clientSyncFeedback: { text: string; tone: "error" | "success" };
-      if (!syncBoundClients) {
-        clientSyncFeedback = {
-          text: t("providers.contextGuardClientsAutoSyncDisabled", {
-            restartMessage,
-          }),
-          tone: "success",
-        };
-      } else if (syncResultUncertain) {
-        clientSyncFeedback = {
-          text: t("providers.contextGuardClientSyncError", { restartMessage }),
-          tone: "error",
-        };
-      } else if (failedClientCount > 0 && appliedClientCount > 0) {
-        clientSyncFeedback = {
-          text: t("providers.contextGuardClientsPartiallySyncedRestart", {
-            restartMessage,
-          }),
-          tone: "error",
-        };
-      } else if (failedClientCount > 0) {
-        clientSyncFeedback = {
-          text: t("providers.contextGuardClientsSyncFailed", {
-            restartMessage,
-          }),
-          tone: "error",
-        };
-      } else if (appliedClientCount > 0) {
-        clientSyncFeedback = {
-          text: t("providers.contextGuardClientsSyncedRestart", {
-            restartMessage,
-          }),
-          tone: "success",
-        };
-      } else {
-        clientSyncFeedback = {
-          text: t("providers.contextGuardClientsNotUpdated", {
-            restartMessage,
-          }),
-          tone: "success",
-        };
-      }
-      updateToast(toastId, {
-        action: null,
-        ...clientSyncFeedback,
-      });
-    } catch (err) {
-      updateToast(toastId, {
-        action: null,
-        text: t("providers.contextGuardUpdateFailed", {
-          message: messageFromError(err),
-        }),
-        tone: "error",
-      });
-    } finally {
-      setContextGuardBusy(false);
-    }
-  }
-
   async function testOfficialModel(model: Model) {
     const label = displayModel(model);
     const endpointLabel = upstreamFormatLabel("responses", t as Translate);
@@ -2255,35 +2113,8 @@ function OfficialDetail({
         )}
       </div>
       <ModelSection
-        contextById={displayedGatewayContextById}
+        contextById={gatewayContextById}
         disabled
-        headerControl={
-          <div className="group relative">
-            <SwitchControl
-              ariaDescribedBy="context-guard-tooltip"
-              checked={contextGuardStatus?.enabled ?? false}
-              className="h-7"
-              disabled={contextGuardBusy || !contextGuardStatus}
-              label={t("providers.contextGuardShort")}
-              onChange={(enabled) => void toggleContextGuard(enabled)}
-            />
-            <div
-              id="context-guard-tooltip"
-              role="tooltip"
-              className="pointer-events-none absolute bottom-full right-0 z-30 mb-2 hidden w-80 whitespace-normal rounded-inner bg-ink px-3 py-2 text-left text-xs font-medium leading-5 text-white shadow-floating group-hover:block group-focus-within:block"
-            >
-              {t("providers.contextGuardTooltip")}
-            </div>
-            {contextGuardStatus?.global_override_conflict && (
-              <div
-                role="status"
-                className="mt-1 max-w-80 text-right text-[11px] font-medium leading-4 text-amber-700"
-              >
-                {t("providers.contextGuardGlobalOverrideConflict")}
-              </div>
-            )}
-          </div>
-        }
         interactionDisabled={authState !== "authorized"}
         models={models}
         officialCollaborationBaselines={officialCollaborationBaselines}

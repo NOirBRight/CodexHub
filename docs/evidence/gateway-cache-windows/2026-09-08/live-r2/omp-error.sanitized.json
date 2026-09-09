@@ -1,0 +1,28 @@
+[
+  {
+    "error": "{\"status\": 400, \"message\": \"400 Error from provider (Console Go): Request is missing x-opencode-session and cannot be routed efficiently. Please see <URL> from provider (Console Go): Request is missing x-opencode-session and cannot be routed efficiently. Please see <URL> (type=MissingSessionID)\"}",
+    "request_fields": [
+      "model",
+      "input",
+      "instructions",
+      "stream",
+      "prompt_cache_key",
+      "store",
+      "max_output_tokens",
+      "tools"
+    ],
+    "max_output_tokens": 32768,
+    "tools": [
+      {
+        "type": "function",
+        "name": "read",
+        "parameter_root_keys": [
+          "type",
+          "properties",
+          "required",
+          "additionalProperties"
+        ]
+      }
+    ]
+  }
+]

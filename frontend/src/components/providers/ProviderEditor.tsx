@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { OfficialOpenAIUsageLimitBars } from "./OfficialOpenAIUsagePanel";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useToasts } from "../PageToast";
 import {
@@ -42,7 +42,9 @@ import {
 } from "../../lib/providerEndpoint";
 import {
   applyCatalogPresetDefaults,
+  applyPresetReasoningDefaults,
   bundledPresetFor,
+  modelsMissingFromPreset,
   subscriptionAuthAdapter,
 } from "../../lib/providerCatalog";
 import {
@@ -107,8 +109,22 @@ export function ProviderDetail({
   const dirty = unsaved || isProviderDirty(normalizedProvider, draft);
   const draftRef = useRef(draft);
   const ensuringXaiCatalog = useRef(false);
+  const catalogRetryKey = useRef<string | null>(null);
+  const bundledRequest = useRef<Promise<Provider[]> | null>(null);
+  const loadBundledPresets = useCallback(() => {
+    if (!bundledRequest.current) {
+      bundledRequest.current = api.getBundledProviders().finally(() => {
+        bundledRequest.current = null;
+      });
+    }
+    return bundledRequest.current;
+  }, []);
   draftRef.current = draft;
   const preset = bundledPresetFor(provider.id, bundledPresets);
+  const listedModels = useMemo(
+    () => applyPresetReasoningDefaults(draft.models, preset),
+    [draft.models, preset],
+  );
   const subscriptionAuth =
     subscriptionAuthAdapter(provider) ?? subscriptionAuthAdapter(preset);
   const xaiSubscriptionAuth = subscriptionAuth === "xai_oauth";
@@ -123,8 +139,9 @@ export function ProviderDetail({
   }, [provider.id]);
 
   useEffect(() => {
+    catalogRetryKey.current = null;
     let cancelled = false;
-    void api.getBundledProviders().then((presets) => {
+    void loadBundledPresets().then((presets) => {
       if (!cancelled) {
         setBundledPresets(presets);
       }
@@ -132,7 +149,30 @@ export function ProviderDetail({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadBundledPresets, provider.id]);
+
+  useEffect(() => {
+    if (!modelsMissingFromPreset(draft.models, preset)) {
+      return;
+    }
+    const retryKey = `${provider.id}:${draft.models
+      .map((model) => model.id)
+      .sort()
+      .join(",")}`;
+    if (catalogRetryKey.current === retryKey) {
+      return;
+    }
+    catalogRetryKey.current = retryKey;
+    let cancelled = false;
+    void loadBundledPresets().then((presets) => {
+      if (!cancelled) {
+        setBundledPresets(presets);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [draft.models, loadBundledPresets, preset, provider.id]);
 
   useEffect(() => {
     if (!preset) {
@@ -509,8 +549,11 @@ export function ProviderDetail({
         discoverDisabled={!draft.base_url.trim()}
         discoverBusy={busy === draft.id}
         discoverError={discoverError}
-        models={draft.models}
+        models={listedModels}
+        catalogModels={preset?.models}
         providerId={draft.id}
+        providerName={draft.name}
+        providerDisplayPrefix={draft.display_prefix}
         onAdd={addModel}
         onDiscover={() => onRefresh(draft)}
         onReorder={(models) =>
@@ -704,6 +747,8 @@ export function AddProviderPanel({
         discoverError={discoverError}
         models={form.models}
         providerId={form.id.trim() || slugify(form.name)}
+        providerName={form.name}
+        providerDisplayPrefix={form.display_prefix}
         onAdd={addModel}
         onDiscover={onDiscover}
         onReorder={(models) =>

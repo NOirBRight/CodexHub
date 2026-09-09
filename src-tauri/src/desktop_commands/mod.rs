@@ -102,8 +102,6 @@ macro_rules! desktop_command_registry {
             GetSettings => "get_settings" => $crate::desktop_commands::get_settings, true, true, true, false, NO_ALIASES;
             GetAppFlavor => "get_app_flavor" => $crate::desktop_commands::get_app_flavor, true, true, true, false, NO_ALIASES;
             SaveSettings => "save_settings" => $crate::desktop_commands::save_settings, true, true, true, false, NO_ALIASES;
-            GetCodexContextGuardStatus => "get_codex_context_guard_status" => $crate::desktop_commands::get_codex_context_guard_status, true, true, true, false, NO_ALIASES;
-            SetCodexContextGuard => "set_codex_context_guard" => $crate::desktop_commands::set_codex_context_guard, true, true, true, false, ALIASES_RESTART;
             CancelOfficialModelRefresh => "cancel_official_model_refresh" => $crate::desktop_commands::cancel_official_model_refresh, true, true, true, false, ALIASES_REQUEST_ID;
             RefreshOfficialModels => "refresh_official_models" => $crate::desktop_commands::refresh_official_models, true, true, true, false, ALIASES_OFFICIAL_REFRESH;
             OpenaiUsageCompletions => "openai_usage_completions" => $crate::desktop_commands::openai_usage_completions, true, true, true, false, ALIASES_USAGE;

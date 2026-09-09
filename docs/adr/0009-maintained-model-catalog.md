@@ -29,11 +29,19 @@ module object and read attributes at call time (ADR-0007).
 - Thinking mode (`none` / `always_on` / `toggle`) is orthogonal to effort grades.
   CodexHub does not add a global `off` effort.
 - Maintained models do not get the five-level fill. Empty levels stay empty.
-  Custom providers still get the five-level fill.
+  Custom providers with no declared list still get the five-level fill.
+  A declared list is never padded to Codex `max`.
 - Bundled official model ids that a runtime Preset is missing are inserted
   additively. User-disabled rows, user-edited fields, custom ids, and leftover
   retired ids (for example `volc/glm-5.2`) are not overwritten or deleted.
   URL, protocol, and prefix remain empty-only (ADR-0008).
+- Families without documented effort grades stay empty: GLM-5 and LongCat-2.0
+  are thinking on/off; Qwen 3.6 / 3.7 are hybrid thinking without
+  `reasoning_effort`; Hy3 is `low` / `medium` / `high`; Hy4 family is `high`
+  only (Command Code still advertises the CLI three-level table on that id).
+  MiMo includes Pro ids and defaults to `xhigh` inside `low` / `medium` /
+  `xhigh`. A requested default that is not in the declared list is snapped to
+  the nearest offered grade, not the first list item.
 
 The bundled Maintained Provider catalog is:
 
@@ -46,7 +54,11 @@ The bundled Maintained Provider catalog is:
 - `opencode-go`
 
 The standalone `xai` Preset is not maintained by this catalog; it keeps its
-Preset-owned rows while sharing the `grok` family policy.
+Preset-owned rows while sharing the `grok` family policy. `resolve_model`
+applies that overlay so Codex catalogs and request-time thinking do not
+five-level-fill Grok. `grok-4.6` is `low` / `medium` / `high` / `xhigh`
+(default `high`); `grok-4.5` omits `xhigh`. Declared reasoning lists are
+never padded to Codex's five-level `max` set.
 
 ## Consequences
 

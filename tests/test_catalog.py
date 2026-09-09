@@ -80,6 +80,8 @@ class CatalogPolicyTests(unittest.TestCase):
         self.assertFalse(should_include_model("volc/minimax-m2.7", policy))
         self.assertFalse(should_include_model("gemma3:12b", policy))
         self.assertTrue(should_include_model("gpt-5.5", policy))
+        self.assertIn("gpt-6-astra", policy.official_models)
+        self.assertIn("gpt-5.6-sol", policy.official_models)
 
     def test_external_provider_models_use_runtime_config_visibility_plus_policy_denies(self):
         policy = load_policy(POLICY_PATH)

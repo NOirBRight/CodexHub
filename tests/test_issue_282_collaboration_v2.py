@@ -732,6 +732,79 @@ def test_v2_external_encrypted_agent_message_fails_closed_without_forwarding_con
     assert "opaque-test-only" not in str(caught.value)
 
 
+@pytest.mark.parametrize("embedded", [False, True])
+def test_official_parent_declares_portable_collaboration_messages_before_spawn(embedded) -> None:
+    declaration = _declaration(COLLABORATION_V2)
+    original = copy.deepcopy(declaration)
+    history = _v2_history()
+    payload = {"model": "gpt-6-astra", "tools": [declaration], "input": history}
+    if embedded:
+        payload = {"model": "gpt-6-astra", "input": [
+            {"type": "additional_tools", "tools": [declaration]}, *history,
+        ]}
+    encoded = json.loads(gateway_compat.compatible_request_body(
+        json.dumps(payload).encode(),
+        {"name": "official"},
+        behavior_profile=route_primitives.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+    ))
+    tools = encoded["input"][0]["tools"] if embedded else encoded["tools"]
+    for child in tools[0]["tools"]:
+        if child["name"] in {"spawn_agent", "send_message", "followup_task"}:
+            assert child["parameters"]["properties"]["message"] == {"type": "string"}
+    assert (encoded["input"][1:] if embedded else encoded["input"]) == history
+    assert declaration == original
+
+
+@pytest.mark.parametrize("tool", ["spawn_agent", "send_message", "followup_task"])
+def test_official_portable_messages_decode_and_replay_with_plaintext_marker(tool) -> None:
+    context = {}
+    encoded = json.loads(gateway_compat.compatible_request_body(
+        json.dumps(_request(COLLABORATION_V2)).encode(), {"name": "official"},
+        event_context=context,
+        behavior_profile=route_primitives.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+    ))
+    wire_call = {
+        "type": "function_call", "id": "portable-item", "call_id": "portable-call",
+        "namespace": encoded["tools"][0]["name"], "name": tool,
+        "arguments": json.dumps(V2_ARGUMENTS[tool]),
+    }
+    decoded = json.loads(gateway_compat.compatible_response_body(
+        json.dumps({"output": [wire_call]}).encode(), "official", context,
+    ))["output"][0]
+    assert decoded == {**wire_call, "namespace": "collaboration", "encrypted_function_args": []}
+    replay = {**_request(COLLABORATION_V2), "input": [decoded]}
+    upstream = json.loads(gateway_compat.compatible_request_body(
+        json.dumps(replay).encode(), {"name": "official"}, event_context={},
+        behavior_profile=route_primitives.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+    ))
+    assert upstream["input"][0] == {**decoded, "namespace": wire_call["namespace"]}
+
+
+@pytest.mark.parametrize("case", ["unrelated", "collision", "unknown_contract"])
+def test_official_portability_preserves_unowned_tool_declarations(case) -> None:
+    from gateway_compat.collaboration_delivery import ALIAS
+
+    declaration = _declaration(COLLABORATION_V2)
+    if case == "unrelated":
+        declaration["name"] = "vendor"
+    elif case == "unknown_contract":
+        declaration["tools"].pop()
+    tools = [declaration]
+    if case == "collision":
+        tools.append({"type": "namespace", "name": ALIAS, "tools": []})
+    context = {}
+    encoded = json.loads(gateway_compat.compatible_request_body(
+        json.dumps({"tools": tools}).encode(), {"name": "official"}, event_context=context,
+        behavior_profile=route_primitives.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+    ))
+    assert encoded["tools"] == tools
+    response = json.dumps({"output": [{
+        "type": "function_call", "namespace": ALIAS, "name": "spawn_agent",
+        "arguments": "{}",
+    }]}).encode()
+    assert gateway_compat.compatible_response_body(response, "official", context) == response
+
+
 def test_v2_native_agent_message_keeps_official_encrypted_history_opaque() -> None:
     plan = _v2_plan(native=True)
     item = _v2_history()[-1]
@@ -842,6 +915,43 @@ def test_v2_void_result_empty_string_is_normalized_to_null() -> None:
 
     validate_collaboration_result(COLLABORATION_V2, "send_message", "")
     validate_collaboration_result(COLLABORATION_V2, "followup_task", "")
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
+def test_v2_wait_argument_parse_error_history_round_trips(native: bool) -> None:
+    history = _v2_history_without_encrypted_agent_message()
+    history[10]["arguments"] = '{"timeout_ms":180000.0}'
+    history[11]["output"] = (
+        "failed to parse function arguments: invalid type: floating point "
+        "`180000.0`, expected i64 at line 1 column 22"
+    )
+    history = history[10:12]
+    plan = _v2_plan(native=native)
+    encoded = plan.encode_payload({
+        "tool_choice": "auto",
+        "tools": [_declaration(COLLABORATION_V2)],
+        "input": history,
+    })
+    decoded = plan.decode_payload({"input": encoded["input"]})
+    assert decoded["input"][0]["arguments"] == history[0]["arguments"]
+    assert decoded["input"][1] == history[1]
+
+
+@pytest.mark.parametrize("output", [
+    "unrecognized result text",
+    "failed to parse function arguments: ",
+    '{"message":"failed to parse function arguments: bad","timed_out":"false"}',
+    '{"message":"a","message":"b","timed_out":false}',
+])
+def test_v2_wait_error_replay_keeps_invalid_results_closed(output: str) -> None:
+    history = _v2_history()[10:12]
+    history[1]["output"] = output
+    with pytest.raises(ToolCompatibilityError):
+        _v2_plan().encode_payload({
+            "tool_choice": "auto",
+            "tools": [_declaration(COLLABORATION_V2)],
+            "input": history,
+        })
 
 
 @pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])

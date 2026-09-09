@@ -138,7 +138,7 @@ class GatewayHarness:
 
         self._stack.enter_context(patch("gateway_transport.getproxies", return_value={"no": "localhost,127.0.0.1"}))
         self._stack.enter_context(patch.object(gateway_transport, "OFFICIAL_HTTP_POOLS", {}))
-        self._stack.enter_context(patch.object(gateway_transport, "OFFICIAL_HTTP_POOLS", {}))
+        self._stack.enter_context(patch.object(gateway_transport, "STANDARD_HTTP_POOLS", {}))
         self._stack.enter_context(patch.object(gateway_settings, "gateway_client_key", return_value=GATEWAY_CLIENT_KEY))
         self._stack.enter_context(patch.object(codex_auth, "access_token", return_value="synthetic-official-token"))
         self._stack.enter_context(patch.object(codex_auth, "account_id", return_value="synthetic-account-id"))

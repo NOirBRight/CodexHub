@@ -20,6 +20,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
+from prompt_cache_policy import PromptCacheKeyPolicy
 import uuid
 
 from gateway_errors import (
@@ -3432,6 +3433,7 @@ class PreparedExchange:
     upstream_body: bytes
     stream: bool
     function_name_from_response_item: FunctionNameFromResponseItem | None = None
+    dropped_cache_controls: tuple[str, ...] = ()
 
     def decode_stream(self) -> ChatToResponsesStreamConverter | ResponsesToChatStreamConverter:
         if self.inbound_format == "responses" and self.outbound_format == "chat_completions":
@@ -3487,17 +3489,44 @@ def prepare_exchange(
     *,
     inbound_format: str,
     outbound_format: str,
+    prompt_cache_key_policy: PromptCacheKeyPolicy = PromptCacheKeyPolicy.DROP_UNVERIFIED,
 ) -> PreparedExchange:
     inbound = str(inbound_format or "").strip().lower()
     outbound = str(outbound_format or "").strip().lower()
     try:
-        if inbound == "responses" and outbound == "chat_completions":
-            request_payload = json.loads(request_body.decode("utf-8-sig"))
-            if not isinstance(request_payload, dict):
+        cache_key_present = False
+        cache_key = None
+        dropped_cache_controls: tuple[str, ...] = ()
+        conversion_body = request_body
+        if inbound != outbound:
+            source_payload = json.loads(request_body.decode("utf-8-sig"))
+            if not isinstance(source_payload, dict):
                 raise UnsupportedProtocolTranslationError(
-                    "unsupported_protocol_semantics",
-                    "Cannot prepare a non-object Responses request.",
+                    "unsupported_protocol_semantics", "Cannot prepare a non-object conversion request.",
                 )
+            if "prompt_cache_key" in source_payload:
+                cache_key_present = True
+                cache_key = source_payload.pop("prompt_cache_key")
+                if cache_key is not None and not isinstance(cache_key, str):
+                    raise UnsupportedProtocolTranslationError(
+                        "unsupported_protocol_semantics", "Cannot translate non-string prompt_cache_key.",
+                    )
+                if prompt_cache_key_policy is not PromptCacheKeyPolicy.PRESERVE:
+                    dropped_cache_controls = ("prompt_cache_key",)
+                conversion_body = json.dumps(source_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+        def converted(upstream: bytes) -> PreparedExchange:
+            payload = json.loads(upstream.decode("utf-8"))
+            if cache_key_present and prompt_cache_key_policy is PromptCacheKeyPolicy.PRESERVE:
+                payload["prompt_cache_key"] = cache_key
+                upstream = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+            return PreparedExchange(
+                inbound, outbound, upstream, bool(payload.get("stream")),
+                dropped_cache_controls=dropped_cache_controls,
+            )
+
+        if inbound == "responses" and outbound == "chat_completions":
+            request_payload = source_payload
             _consume_codex_chat_transport_fields(request_payload)
             prepared_request_body = json.dumps(
                 request_payload,
@@ -3505,14 +3534,10 @@ def prepare_exchange(
                 separators=(",", ":"),
             ).encode("utf-8")
             upstream = responses_request_to_chat_completion_body(prepared_request_body)
-            payload = json.loads(upstream.decode("utf-8"))
-            stream = bool(payload.get("stream")) if isinstance(payload, dict) else False
-            return PreparedExchange(inbound, outbound, upstream, stream)
+            return converted(upstream)
         if inbound == "chat_completions" and outbound == "responses":
-            upstream = chat_completions_request_to_responses_body(request_body)
-            payload = json.loads(upstream.decode("utf-8"))
-            stream = bool(payload.get("stream")) if isinstance(payload, dict) else False
-            return PreparedExchange(inbound, outbound, upstream, stream)
+            upstream = chat_completions_request_to_responses_body(conversion_body)
+            return converted(upstream)
         if inbound == outbound:
             stream = bool(
                 re.search(rb'"stream"\s*:\s*true\b', request_body, flags=re.IGNORECASE)

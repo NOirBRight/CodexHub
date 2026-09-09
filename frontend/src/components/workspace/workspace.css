@@ -2190,3 +2190,38 @@
   flex-direction: column;
 }
 .ws-clients .ws-client-bottom { margin-top: auto; }
+
+
+/* Model-detail capability groups share typography, spacing and theme tokens. */
+.workspace-root .ws-model-capability-group {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius-control);
+  background: var(--ws-surface);
+}
+.workspace-root .ws-model-capability-field {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.workspace-root .ws-model-capability-label {
+  color: var(--ws-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.workspace-root .ws-model-capability-group select.field {
+  height: var(--ws-control-height);
+  padding: 0 10px;
+  border-radius: var(--ws-radius-control);
+  color: var(--ws-ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.ws-bridge-action > .ws-restart-pending {
+  color: var(--ws-warning);
+  background: color-mix(in srgb, var(--ws-warning) 10%, var(--ws-surface));
+}

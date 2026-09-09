@@ -5,9 +5,13 @@
       "file": "docs/evidence/issue-64/collaboration-v1-v2-inventory.json",
       "sha256": "2c050ef39a1e14d9526289fe68bb81be25298b4d89164b9ef7ac7a0591f699fc"
     },
+    "prompt_cache_policy": {
+      "file": "src-python/prompt_cache_policy.py",
+      "sha256": "aacfa7203b81e3ad7bba5ce408f09bac446a098bc9609075a1ae545b9c0fbea4"
+    },
     "protocol_translation": {
       "file": "src-python/protocol_translation.py",
-      "sha256": "59734feb27cf2a0b17f3cd6baef6bcb7e5a98f7609d46009c68dbcc786802421"
+      "sha256": "5315ade22d1beaaec57dcfa2c3e828126d7e06c97d8661519c3c210987a9052a"
     },
     "source_contract": {
       "file": "collaboration-runtime-contract.json",
@@ -242,9 +246,35 @@
       "id": "request.prompt_cache_key",
       "implementation": "protocol_translation",
       "key": "prompt_cache_key",
-      "notes": "Codex cache identity is local transport bookkeeping and is never forwarded.",
+      "notes": "Cross-protocol conversion records a cache_control_dropped event for supplied keys on unverified endpoints. Cache usage reporting does not imply key support.",
       "responses": "string",
-      "when": "missing, null, or string"
+      "when": "destination endpoint cache-key support is unverified; missing, null, or string"
+    },
+    {
+      "category": "request_field",
+      "chat": "same value",
+      "disposition": "native",
+      "execution_owner": "gateway",
+      "fail_closed": true,
+      "id": "request.prompt_cache_key.verified_endpoint",
+      "implementation": "src-python/prompt_cache_policy.py; src-python/protocol_translation.py",
+      "key": "prompt_cache_key",
+      "notes": "Preserved in both conversion directions. Same-protocol requests retain original controls and bytes. Invalid key types fail before forwarding.",
+      "responses": "string or null",
+      "when": "RoutePlan pins a verified destination endpoint capability"
+    },
+    {
+      "category": "request_field",
+      "chat": "none",
+      "disposition": "unavailable",
+      "execution_owner": "caller",
+      "fail_closed": true,
+      "id": "request.prompt_cache_options.cross_protocol",
+      "implementation": "protocol_translation",
+      "key": "prompt_cache_options|prompt_cache_retention|prompt_cache_breakpoint",
+      "notes": "Explicit caching is never silently downgraded to implicit caching. Same-protocol controls remain untouched.",
+      "responses": "explicit cache options or content breakpoints",
+      "when": "cross-protocol request without a proven equivalent mapping"
     },
     {
       "category": "request_field",
@@ -476,7 +506,7 @@
       "id": "usage",
       "implementation": "protocol_translation",
       "key": "usage",
-      "notes": "Token fields map in both directions.",
+      "notes": "Token fields and details map in both directions, including cache_write_tokens. Gateway records cache writes separately without adding them again to total input tokens; missing values remain unknown.",
       "responses": "input_tokens/output_tokens",
       "when": "usage object present"
     },

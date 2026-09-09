@@ -20,7 +20,7 @@ import {
   useWorkspaceTheme,
   type WorkspacePage,
 } from "./components/workspace/WorkspaceShell";
-import { addDays, endOfDay, startOfDay } from "./lib/dateRange";
+import { usageQueryWindow, usageRangeSpan } from "./lib/dateRange";
 import { api, messageFromError } from "./lib/tauri";
 import { useAppUpdateLifecycle } from "./hooks/useAppUpdateLifecycle";
 import contract from "./lib/ui-contract.json";
@@ -78,12 +78,8 @@ type GatewayClientVersionCacheEntry = {
 
 const GATEWAY_CLIENT_VERSION_CACHE_KEY = "codexhub.gatewayClientVersions.v1";
 
-function defaultUsageWindow(): UsageQueryWindow {
-  const end = startOfDay(new Date());
-  return {
-    startTs: addDays(end, -6).toISOString(),
-    endTs: endOfDay(end).toISOString(),
-  };
+function defaultUsageWindow(now = new Date()): UsageQueryWindow {
+  return usageQueryWindow(usageRangeSpan("7d", { start: now, end: now }, now));
 }
 
 function readGatewayClientVersionCache(): Map<
@@ -241,8 +237,6 @@ function gatewayRuntimeSettingsChanged(
       next.gateway_auto_retry_max_attempts ||
     previous.gateway_image_proxy_enabled !== next.gateway_image_proxy_enabled ||
     previous.gateway_image_proxy_model !== next.gateway_image_proxy_model ||
-    previous.openai_context_guard_enabled !==
-      next.openai_context_guard_enabled ||
     previous.proxy_port !== next.proxy_port ||
     previous.gateway_request_timeout_seconds !==
       next.gateway_request_timeout_seconds
@@ -277,7 +271,6 @@ export default function App() {
   const { confirm: confirmAction, dialog: confirmDialog } = useConfirmDialog();
   const { showToast, updateToast } = useToasts();
   const [workspacePage, setWorkspacePage] = useState<WorkspacePage>("overview");
-  const [openOfficialRequest, setOpenOfficialRequest] = useState(0);
   const [settingsCategory, setSettingsCategory] = useState("general");
   const theme = useWorkspaceTheme();
   const [visibleTab, setVisibleTab] = useState<TabId>("codexhub");
@@ -350,6 +343,7 @@ export default function App() {
       request = loader()
         .then((data) => {
           startUiTransition(() => {
+            if (runtimeInflight.current[key] !== request) return;
             setRuntime((current) =>
               options?.apply
                 ? options.apply(current, data)
@@ -361,9 +355,10 @@ export default function App() {
         .catch((err) => {
           const message = messageFromError(err);
           startUiTransition(() => {
+            if (runtimeInflight.current[key] !== request) return;
             setRuntime((current) => setCacheError(current, key, message));
           });
-          if (!options?.quiet) {
+          if (!options?.quiet && runtimeInflight.current[key] === request) {
             setBanner(message);
           }
           throw err;
@@ -472,16 +467,21 @@ export default function App() {
     [runCachedRequest],
   );
 
+  const usageWindowKey = `${usageWindow.startTs}|${usageWindow.endTs}`;
+  const fetchedUsageWindowKey = useRef<string | null>(null);
+
   const refreshGatewayTelemetry = useCallback(
     async (options?: { force?: boolean }) => {
       if (!gatewayVisited || visibleTab !== "gateway") {
         return;
       }
+      const windowChanged = fetchedUsageWindowKey.current !== usageWindowKey;
+      fetchedUsageWindowKey.current = usageWindowKey;
       await Promise.allSettled([
         runCachedRequest(
           "gatewayUsageSnapshot",
           () => api.gatewayUsageSnapshot(usageWindow),
-          { force: options?.force, quiet: true, staleMs: 4000 },
+          { force: Boolean(options?.force) || windowChanged, quiet: true, staleMs: 4000 },
         ),
         runCachedRequest("gatewayEvents", () => api.gatewayRecentEvents(80), {
           force: options?.force,
@@ -490,7 +490,7 @@ export default function App() {
         }),
       ]);
     },
-    [gatewayVisited, runCachedRequest, usageWindow, visibleTab],
+    [gatewayVisited, runCachedRequest, usageWindow, usageWindowKey, visibleTab],
   );
 
   const refreshCoreRuntime = useCallback(
@@ -1002,7 +1002,6 @@ export default function App() {
       >
         <WindowResizeHandles />
         <ProvidersPage
-          openOfficialRequest={openOfficialRequest}
           desktopPage={workspacePage}
           onNavigate={navigateWorkspace}
           appFlavor={appFlavor}
@@ -1082,7 +1081,6 @@ export default function App() {
                 workspacePage === "gateway" ||
                 (workspacePage === "settings" && settingsCategory !== "diagnostics")
               }
-              onOpenContextGuard={() => setOpenOfficialRequest((n) => n + 1)}
               inlineCategory={
                 workspacePage === "gateway" ? "gateway" : settingsCategory
               }

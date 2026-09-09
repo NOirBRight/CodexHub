@@ -1,0 +1,115 @@
+{
+  "schema": "codexhub.linux-cli-diagnostic-verification.v1",
+  "source_head": "fb664ed727bdf454c972528423e476bc7a268f95",
+  "includes_working_tree_changes": true,
+  "binary_sha256": "fb29bd3f18ba0ef5e25415f2eb8b8a9750df3b0f0fc9aace0c0a8064e9ebd04a",
+  "client_versions": {
+    "codex": "0.153.4",
+    "opencode": "1.18.29",
+    "pi": "0.85.1",
+    "omp": "18.1.14"
+  },
+  "original_runner": {
+    "outcome": "failed",
+    "case_count": 0,
+    "failure": "Gateway failed to become healthy after native start returned success"
+  },
+  "persistent_app_diagnostic": {
+    "outcome": "interrupted_after_gateway_disappeared",
+    "qualifying_e2e": false
+  },
+  "direct_gateway_diagnostic": {
+    "outcome": "passed",
+    "qualifying_original_e2e": false,
+    "startup": "production Python Gateway held by temporary harness; native candidate used for managed apply/readback",
+    "case_count": 8,
+    "passed_count": 8,
+    "cases": [
+      {
+        "case_id": "codex-openai",
+        "client": "codex",
+        "provider": "openai",
+        "apply": true,
+        "readback": true,
+        "live": true,
+        "returncode": 0,
+        "saw_sentinel": true
+      },
+      {
+        "case_id": "codex-opencode-go",
+        "client": "codex",
+        "provider": "opencode-go",
+        "apply": true,
+        "readback": true,
+        "live": true,
+        "returncode": 0,
+        "saw_sentinel": true
+      },
+      {
+        "case_id": "opencode-openai",
+        "client": "opencode",
+        "provider": "openai",
+        "apply": true,
+        "readback": true,
+        "live": true,
+        "returncode": 0,
+        "saw_sentinel": true
+      },
+      {
+        "case_id": "opencode-opencode-go",
+        "client": "opencode",
+        "provider": "opencode-go",
+        "apply": true,
+        "readback": true,
+        "live": true,
+        "returncode": 0,
+        "saw_sentinel": true
+      },
+      {
+        "case_id": "pi-openai",
+        "client": "pi",
+        "provider": "openai",
+        "apply": true,
+        "readback": true,
+        "live": true,
+        "returncode": 0,
+        "saw_sentinel": true
+      },
+      {
+        "case_id": "pi-opencode-go",
+        "client": "pi",
+        "provider": "opencode-go",
+        "apply": true,
+        "readback": true,
+        "live": true,
+        "returncode": 0,
+        "saw_sentinel": true
+      },
+      {
+        "case_id": "omp-openai",
+        "client": "omp",
+        "provider": "openai",
+        "apply": true,
+        "readback": true,
+        "live": true,
+        "returncode": 0,
+        "saw_sentinel": true
+      },
+      {
+        "case_id": "omp-opencode-go",
+        "client": "omp",
+        "provider": "opencode-go",
+        "apply": true,
+        "readback": true,
+        "live": true,
+        "returncode": 0,
+        "saw_sentinel": true
+      }
+    ]
+  },
+  "source_hashes": {
+    "src-python/gateway_transport.py": "d8f6af6d93105de4a3e01157919da21a9e45ee0c200bce216d1599a67f326ed8",
+    "src-python/gateway_handler_impl.py": "c78dff2e6091bc74f704c33e4d5914d13e514baaadb7d9d636fac8850b75b2ba",
+    "scripts/e2e_linux_cli_clients.py": "7d1817717eed5ffd44e71e5472b15879ea25e339de8e5d5c8c1416455085d3f0"
+  }
+}

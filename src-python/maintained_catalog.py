@@ -27,6 +27,9 @@ MAINTAINED_PROVIDER_IDS = frozenset(
     }
 )
 
+# xAI is Preset-owned (ADR-0009) but still shares grok family policy.
+FAMILY_POLICY_PROVIDER_IDS = MAINTAINED_PROVIDER_IDS | {"xai"}
+
 KIMI_PROVIDER_IDS = frozenset({"kimi", "kimi-cn"})
 
 
@@ -77,6 +80,7 @@ FAMILIES: dict[str, FamilyPolicy] = {
     ),
     "glm-5.2": FamilyPolicy(("high", "max"), "max", THINKING_ALWAYS_ON),
     "glm-5.1": FamilyPolicy(("high",), "high", THINKING_ALWAYS_ON),
+    "glm-5": FamilyPolicy((), None, THINKING_TOGGLE),
     "kimi-k3": FamilyPolicy(("low", "high", "max"), "max", THINKING_ALWAYS_ON, ("text", "image")),
     "kimi-k2.7": FamilyPolicy((), None, THINKING_ALWAYS_ON, ("text", "image")),
     "kimi-k2.6": FamilyPolicy((), None, THINKING_TOGGLE, ("text", "image")),
@@ -85,13 +89,19 @@ FAMILIES: dict[str, FamilyPolicy] = {
     "deepseek-v4-pro": FamilyPolicy(("low", "high", "max"), "high", THINKING_ALWAYS_ON),
     "deepseek-v4-flash": FamilyPolicy(("low", "high", "max"), "high", THINKING_ALWAYS_ON),
     "qwen3.5": FamilyPolicy(("high",), "high", THINKING_ALWAYS_ON, ("text", "image")),
+    "qwen3.6": FamilyPolicy((), None, THINKING_TOGGLE, ("text", "image")),
+    "qwen3.7": FamilyPolicy((), None, THINKING_TOGGLE, ("text", "image")),
     "qwen3.8": FamilyPolicy(("low", "medium", "xhigh"), "xhigh", THINKING_ALWAYS_ON, ("text", "image")),
     "claude": FamilyPolicy(("low", "medium", "high", "xhigh", "max"), "high", THINKING_ALWAYS_ON, ("text", "image")),
     "gpt-5": FamilyPolicy(("low", "medium", "high", "xhigh", "max"), "high", THINKING_ALWAYS_ON, ("text", "image")),
     "gemini": FamilyPolicy(("low", "medium", "high"), "high", THINKING_ALWAYS_ON, ("text", "image")),
     "grok": FamilyPolicy(("low", "medium", "high", "xhigh"), "high", THINKING_ALWAYS_ON, ("text", "image")),
+    "grok-4.5": FamilyPolicy(("low", "medium", "high"), "high", THINKING_ALWAYS_ON, ("text", "image")),
     "muse": FamilyPolicy(("low", "medium", "high", "xhigh"), "xhigh", THINKING_ALWAYS_ON, ("text", "image")),
-    "mimo": FamilyPolicy(("low", "medium", "xhigh"), "high", THINKING_ALWAYS_ON, ("text", "image")),
+    "mimo": FamilyPolicy(("low", "medium", "xhigh"), "xhigh", THINKING_ALWAYS_ON, ("text", "image")),
+    "hy3": FamilyPolicy(("low", "medium", "high"), "high", THINKING_ALWAYS_ON),
+    "hy4": FamilyPolicy(("high",), "high", THINKING_ALWAYS_ON),
+    "longcat": FamilyPolicy((), None, THINKING_TOGGLE),
     "kimi-k2.5": FamilyPolicy(("low", "high", "max"), "max", THINKING_TOGGLE, ("text", "image")),
     "deepseek-v4-flash-vision": FamilyPolicy(("high", "max"), "high", THINKING_ALWAYS_ON, ("text", "image")),
     "gemma4": FamilyPolicy(("high",), "high", THINKING_ALWAYS_ON, ("text", "image")),
@@ -103,6 +113,22 @@ FAMILIES: dict[str, FamilyPolicy] = {
     "doubao": FamilyPolicy(("high",), "high", THINKING_ALWAYS_ON, ("text", "image")),
     "generic": _GENERIC,
 }
+
+_LEVEL_RANK = ("low", "medium", "high", "xhigh", "max")
+
+
+def _valid_default(default: str | None, levels: tuple[str, ...]) -> str | None:
+    """Keep a default that the level list actually offers; otherwise pick the nearest."""
+    if not levels:
+        return None
+    if default is not None and default in levels:
+        return default
+    rank = {name: index for index, name in enumerate(_LEVEL_RANK)}
+    ranked = [level for level in levels if level in rank]
+    if default in rank and ranked:
+        target = rank[default]
+        return min(ranked, key=lambda level: (abs(rank[level] - target), -rank[level]))
+    return levels[0]
 
 
 def is_maintained_provider(provider_id: str | None) -> bool:
@@ -142,6 +168,8 @@ def family_for(model_id: str) -> str:
         return "glm-5.2"
     if identity.startswith("glm-5.1"):
         return "glm-5.1"
+    if identity == "glm-5" or identity.startswith("glm-5-"):
+        return "glm-5"
     if identity.startswith("deepseek-v4-pro"):
         return "deepseek-v4-pro"
     if identity.startswith("deepseek-v4-flash"):
@@ -154,14 +182,20 @@ def family_for(model_id: str) -> str:
         return "gpt-5"
     if identity.startswith("gemini"):
         return "gemini"
+    if identity.startswith("grok-4.5"):
+        return "grok-4.5"
     if identity.startswith("grok-"):
         return "grok"
     if identity.startswith("muse-"):
         return "muse"
-    if identity.startswith("mimo-v2-omni") or (
-        identity.startswith("mimo-v2.5") and "pro" not in identity
-    ):
+    if identity.startswith("mimo-"):
         return "mimo"
+    if identity.startswith("hy4"):
+        return "hy4"
+    if identity == "hy3" or identity.startswith("hy3-"):
+        return "hy3"
+    if identity.startswith("longcat"):
+        return "longcat"
     if identity.startswith("gpt-oss"):
         return "gpt-oss"
     if identity.startswith("gemma4"):
@@ -174,6 +208,10 @@ def family_for(model_id: str) -> str:
         return "nemotron-3-nano"
     if identity.startswith("qwen3.8"):
         return "qwen3.8"
+    if identity.startswith("qwen3.7"):
+        return "qwen3.7"
+    if identity.startswith("qwen3.6"):
+        return "qwen3.6"
     if identity.startswith("qwen3.5"):
         return "qwen3.5"
     if identity.startswith("mistral-large-3"):
@@ -210,8 +248,7 @@ def _row(
     policy = family_policy(model_id)
     levels = policy.levels if reasoning_levels is None else reasoning_levels
     default = policy.default_level if default_reasoning_level is None else default_reasoning_level
-    if default is not None and default not in levels:
-        default = levels[0] if levels else None
+    default = _valid_default(default, levels)
     return MaintainedModel(
         provider_id=provider_id,
         id=model_id,
@@ -256,6 +293,7 @@ _HIGH_MAX = ("high", "max")
 _LOW_HIGH_MAX = ("low", "high", "max")
 _LOW_MEDIUM_XHIGH = ("low", "medium", "xhigh")
 _HIGH_XHIGH = ("high", "xhigh")
+_LOW_HIGH = ("low", "high")
 
 
 def _commandcode_rows() -> tuple[MaintainedModel, ...]:
@@ -266,11 +304,20 @@ def _commandcode_rows() -> tuple[MaintainedModel, ...]:
         "gpt-5.6-sol": "high",
         "gpt-5.6-terra": "xhigh",
         "gpt-5.6-luna": "max",
+        "xai/grok-4.5": "high",
+        "xai/grok-4.6": "high",
+        "claude-fable-5-1": "high",
+        "moonshotai/kimi-k3": "high",
+        "qwen/qwen3.8-max-0902": "xhigh",
+        "deepseek/deepseek-v4-flash-fast": "max",
+        "meta/muse-spark-1.3": "max",
+        "meta/muse-spark-1.3-contributor": "max",
     }
     specs: tuple[tuple[str, tuple[str, ...], int, int], ...] = (
         ("claude-sonnet-5", _ALL, 1_000_000, 128_000),
         ("claude-sonnet-4-6", _ALL, 1_000_000, 128_000),
         ("claude-fable-5", _ALL, 1_000_000, 128_000),
+        ("claude-fable-5-1", _ALL, 1_000_000, 128_000),
         ("claude-opus-5", _ALL, 1_000_000, 128_000),
         ("claude-opus-4-8", _ALL, 1_000_000, 128_000),
         ("claude-opus-4-7", _ALL, 1_000_000, 128_000),
@@ -285,6 +332,8 @@ def _commandcode_rows() -> tuple[MaintainedModel, ...]:
         ("deepseek/deepseek-v4-pro", _HIGH_MAX, 1_000_000, 384_000),
         ("deepseek/deepseek-v4-flash", _HIGH_MAX, 1_000_000, 384_000),
         ("deepseek/deepseek-v4-flash-vision-exp", _HIGH_MAX, 1_000_000, 384_000),
+        ("deepseek/deepseek-v4-flash-fast", _LOW_HIGH_MAX, 1_000_000, 384_000),
+        ("moonshotai/kimi-k3", _LOW_HIGH_MAX, 1_048_576, 131_072),
         ("moonshotai/kimi-k2.7-code", _LOW_HIGH_MAX, 262_144, 32_768),
         ("moonshotai/kimi-k2.7-code-highspeed", _LOW_HIGH_MAX, 262_144, 32_768),
         ("moonshotai/kimi-k2.6", _LOW_HIGH_MAX, 262_144, 32_768),
@@ -297,12 +346,15 @@ def _commandcode_rows() -> tuple[MaintainedModel, ...]:
         ("xiaomi/mimo-v2.5-pro", _LOW_MEDIUM_XHIGH, 1_048_576, 128_000),
         ("xiaomi/mimo-v2.5", _LOW_MEDIUM_XHIGH, 1_000_000, 128_000),
         ("qwen/qwen3.8-max", _LOW_MEDIUM_XHIGH, 1_000_000, 131_072),
+        ("qwen/qwen3.8-max-0902", _LOW_MEDIUM_XHIGH, 1_000_000, 131_072),
         ("qwen/qwen3.8-27b", _LOW_MEDIUM_XHIGH, 262_144, 65_536),
         ("qwen/qwen3.8-flash", _LOW_MEDIUM_XHIGH, 1_000_000, 65_536),
         ("stepfun/step-3.7-flash", _THREE, 256_000, 64_000),
         ("stepfun/step-3.5-flash", _THREE, 256_000, 64_000),
         ("tencent/hy3", _THREE, 256_000, 64_000),
         ("tencent/hy3-paid", _THREE, 256_000, 64_000),
+        ("tencent/hy4-preview", _THREE, 1_024_000, 64_000),
+        ("google/gemini-3.8-flash", _THREE, 1_000_000, 65_536),
         ("google/gemini-3.7-flash", _THREE, 1_000_000, 65_536),
         ("google/gemini-3.6-flash", _THREE, 1_000_000, 65_536),
         ("google/gemini-3.5-flash", _THREE, 1_000_000, 65_536),
@@ -312,6 +364,8 @@ def _commandcode_rows() -> tuple[MaintainedModel, ...]:
         ("meta/muse-spark-1.1", _FOUR, 1_048_576, 131_072),
         ("meta/muse-spark-1.2", _FOUR, 1_048_576, 131_072),
         ("meta/muse-spark-1.2-contributor", _FOUR, 1_048_576, 131_072),
+        ("meta/muse-spark-1.3", _ALL, 1_048_576, 131_072),
+        ("meta/muse-spark-1.3-contributor", _ALL, 1_048_576, 131_072),
         ("xai/grok-4.5", _THREE, 500_000, 500_000),
         ("xai/grok-4.6", _FOUR, 500_000, 500_000),
     )
@@ -323,7 +377,7 @@ def _commandcode_rows() -> tuple[MaintainedModel, ...]:
             _row(
                 "commandcode",
                 model_id,
-                f"Command Code {leaf}",
+                leaf,
                 context_window,
                 max_output_tokens,
                 index,
@@ -340,34 +394,44 @@ def _opencode_rows() -> tuple[MaintainedModel, ...]:
         ("grok-4.5", "OpenCode Grok 4.5", 500_000, 500_000, True, "high"),
         ("gpt-5.6-luna", "OpenCode GPT 5.6 Luna", 1_050_000, 128_000, True, "max"),
         ("muse-spark-1.2-contributor", "OpenCode Muse Spark 1.2 Contributor", 1_048_576, 131_072, True, "xhigh"),
-        ("glm-5.3-flash", "OpenCode GLM-5.3 Flash", 1_000_000, 131_072, False, "high"),
-        ("glm-5.3", "OpenCode GLM-5.3", 1_000_000, 131_072, False, "max"),
-        ("glm-5.2", "OpenCode GLM-5.2", 1_000_000, 131_072, False, "max"),
-        ("glm-5.1", "OpenCode GLM-5.1", 202_752, 32_768, False, "high"),
-        ("glm-5", "OpenCode GLM-5", 202_752, 131_072, False, "high"),
-        ("kimi-k3", "OpenCode Kimi K3", 1_048_576, 131_072, True, "high"),
+        ("muse-spark-1.3-contributor", "OpenCode Muse Spark 1.3 Contributor", 1_048_576, 131_072, True, "xhigh"),
+        ("glm-5.3-flash", "OpenCode GLM-5.3 Flash", 1_000_000, 131_072, True, None),
+        ("glm-5.3", "OpenCode GLM-5.3", 1_000_000, 131_072, False, None),
+        ("glm-5.2", "OpenCode GLM-5.2", 1_000_000, 131_072, False, None),
+        ("glm-5.1", "OpenCode GLM-5.1", 202_752, 32_768, False, None),
+        ("glm-5", "OpenCode GLM-5", 202_752, 131_072, False, None),
+        ("kimi-k3", "OpenCode Kimi K3", 1_048_576, 131_072, True, None),
         ("kimi-k2.7-code", "OpenCode Kimi K2.7 Code", 262_144, 262_144, True, None),
         ("kimi-k2.6", "OpenCode Kimi K2.6", 262_144, 65_536, True, None),
-        ("kimi-k2.5", "OpenCode Kimi K2.5", 262_144, 65_536, True, "max"),
-        ("longcat-2.0", "OpenCode LongCat 2.0", 1_000_000, 131_072, False, "high"),
+        ("kimi-k2.5", "OpenCode Kimi K2.5", 262_144, 65_536, True, None),
+        ("longcat-2.0", "OpenCode LongCat 2.0", 1_000_000, 131_072, False, None),
         ("deepseek-v4-pro", "OpenCode DeepSeek V4 Pro", 1_000_000, 384_000, False, "max"),
         ("deepseek-v4-flash", "OpenCode DeepSeek V4 Flash", 1_000_000, 384_000, False, "max"),
         ("deepseek-v4-flash-vision-exp", "OpenCode DeepSeek V4 Flash Vision Exp", 1_000_000, 384_000, True, "max"),
-        ("mimo-v2.5", "OpenCode MiMo V2.5", 1_000_000, 128_000, True, "high"),
-        ("mimo-v2.5-pro", "OpenCode MiMo V2.5 Pro", 1_048_576, 128_000, False, "high"),
-        ("mimo-v2-pro", "OpenCode MiMo V2 Pro", 1_048_576, 131_072, False, "high"),
-        ("mimo-v2-omni", "OpenCode MiMo V2 Omni", 262_144, 65_536, True, "high"),
-        ("hy3", "OpenCode Hy3", 256_000, 64_000, False, "high"),
-        ("hy3-preview", "OpenCode Hy3 Preview", 256_000, 64_000, False, "high"),
-        ("minimax-m3", "OpenCode MiniMax M3", 1_000_000, 131_072, True, "max"),
-        ("minimax-m2.7", "OpenCode MiniMax M2.7", 204_800, 131_072, False, "max"),
-        ("minimax-m2.5", "OpenCode MiniMax M2.5", 196_608, 131_072, False, "max"),
-        ("qwen3.8-max", "OpenCode Qwen3.8 Max", 1_000_000, 131_072, True, "high"),
-        ("qwen3.7-max", "OpenCode Qwen3.7 Max", 1_000_000, 65_536, False, "high"),
-        ("qwen3.7-plus", "OpenCode Qwen3.7 Plus", 1_000_000, 65_536, True, "high"),
-        ("qwen3.6-plus", "OpenCode Qwen3.6 Plus", 1_000_000, 65_536, True, "high"),
-        ("qwen3.5-plus", "OpenCode Qwen3.5 Plus", 1_000_000, 65_536, True, "high"),
+        ("mimo-v2.5", "OpenCode MiMo V2.5", 1_000_000, 128_000, True, None),
+        ("mimo-v2.5-pro", "OpenCode MiMo V2.5 Pro", 1_048_576, 128_000, False, None),
+        ("mimo-v2-pro", "OpenCode MiMo V2 Pro", 1_048_576, 131_072, False, None),
+        ("mimo-v2-omni", "OpenCode MiMo V2 Omni", 262_144, 65_536, True, None),
+        ("hy3", "OpenCode Hy3", 256_000, 64_000, False, None),
+        ("hy3-preview", "OpenCode Hy3 Preview", 256_000, 64_000, False, None),
+        ("hy4-preview", "OpenCode Hy4 Preview", 1_024_000, 64_000, False, None),
+        ("minimax-m3", "OpenCode MiniMax M3", 1_000_000, 131_072, True, None),
+        ("minimax-m2.7", "OpenCode MiniMax M2.7", 204_800, 131_072, False, None),
+        ("minimax-m2.5", "OpenCode MiniMax M2.5", 196_608, 131_072, False, None),
+        ("qwen3.8-max", "OpenCode Qwen3.8 Max", 1_000_000, 131_072, True, None),
+        ("qwen3.8-flash", "OpenCode Qwen3.8 Flash", 1_000_000, 131_072, True, None),
+        ("qwen3.7-max", "OpenCode Qwen3.7 Max", 1_000_000, 65_536, False, None),
+        ("qwen3.7-plus", "OpenCode Qwen3.7 Plus", 1_000_000, 65_536, True, None),
+        ("qwen3.6-plus", "OpenCode Qwen3.6 Plus", 1_000_000, 65_536, True, None),
+        ("qwen3.5-plus", "OpenCode Qwen3.5 Plus", 1_000_000, 65_536, True, None),
+        ("omen-alpha", "OpenCode Omen Alpha", 500_000, 128_000, True, "high"),
     )
+    extra_levels = {
+        "muse-spark-1.3-contributor": _FOUR,
+        "deepseek-v4-pro": _LOW_HIGH_MAX,
+        "deepseek-v4-flash": _LOW_HIGH_MAX,
+        "omen-alpha": _LOW_HIGH,
+    }
     rows: list[MaintainedModel] = []
     for index, (model_id, name, context_window, max_output_tokens, vision, default) in enumerate(specs, 1):
         rows.append(
@@ -380,6 +444,7 @@ def _opencode_rows() -> tuple[MaintainedModel, ...]:
                 index,
                 input_modalities=_VISION if vision else _TEXT,
                 default_reasoning_level=default,
+                reasoning_levels=extra_levels.get(model_id),
             )
         )
     return tuple(rows)
@@ -460,7 +525,7 @@ def official_models(provider_id: str) -> tuple[MaintainedModel, ...]:
 
 
 def resolve_model(provider_id: str | None, model_id: str | None) -> MaintainedModel | None:
-    """Return the official row, or a family overlay for a maintained provider."""
+    """Return the official row, or a family overlay for a policy-backed provider."""
     provider = str(provider_id or "").strip()
     wire_id = str(model_id or "").strip()
     if not provider or not wire_id:
@@ -468,15 +533,13 @@ def resolve_model(provider_id: str | None, model_id: str | None) -> MaintainedMo
     exact = _OFFICIAL_INDEX.get((provider, wire_id))
     if exact is not None:
         return exact
-    if not is_maintained_provider(provider):
+    if provider not in FAMILY_POLICY_PROVIDER_IDS:
         return None
     family = family_for(wire_id)
     if family == "generic":
         return None
     policy = family_policy(wire_id)
-    default = policy.default_level
-    if default is not None and default not in policy.levels:
-        default = policy.levels[0] if policy.levels else None
+    default = _valid_default(policy.default_level, policy.levels)
     return MaintainedModel(
         provider_id=provider,
         id=wire_id,
@@ -529,7 +592,7 @@ def thinking_payload(
             return ThinkingPayload(drop_reasoning_effort=True, thinking={"type": "adaptive"})
         return ThinkingPayload(drop_reasoning_effort=True, thinking={"type": "disabled"})
 
-    if family == "kimi-k2.6":
+    if family in {"kimi-k2.6", "glm-5", "longcat"}:
         return ThinkingPayload(
             drop_reasoning_effort=True,
             thinking={"type": "enabled" if enabled else "disabled"},

@@ -1083,7 +1083,7 @@ def _assert_exact_summary_schema(summary: dict) -> None:
 
 
 def test_operator_workflow_requires_release_optimized_debug_portable_build():
-    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text(encoding="utf-8")
 
     assert "build-windows-portable.ps1" in documentation
     assert "-Flavor debug" in documentation
@@ -1093,7 +1093,7 @@ def test_operator_workflow_requires_release_optimized_debug_portable_build():
 
 
 def test_operator_workflow_uses_authoritative_machine_bound_local_host():
-    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text(encoding="utf-8")
 
     assert "machine-bound local dedicated Windows host" in documentation
     assert "A VM or named snapshot is not required" in documentation
@@ -1855,7 +1855,7 @@ def test_opencode_1_18_3_is_rejected_as_missing_header_timeout_fix(tmp_path):
 
 
 def test_opencode_compatibility_floor_records_upstream_header_timeout_fix():
-    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text(encoding="utf-8")
     runner = SCRIPT.read_text()
 
     assert "real_client_cli_contract.v1.json" in runner
@@ -1864,7 +1864,7 @@ def test_opencode_compatibility_floor_records_upstream_header_timeout_fix():
 
 
 def test_operator_docs_define_compatibility_floors_and_actual_version_evidence():
-    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text(encoding="utf-8")
 
     assert "Minimum stable version" in documentation
     assert "floor recorded in the CLI contract" in documentation
@@ -3416,8 +3416,25 @@ def test_external_watchdog_replays_utf8_output_under_a_legacy_console_encoding(t
     assert "replacement" in result.stdout
 
 
+def test_windows_cli_preflight_covers_xai_grok_tool_root_shapes():
+    source = SCRIPT.read_text(encoding="utf-8")
+    probe = source[
+        source.index("function Invoke-XaiGrokToolsPreflight") :
+        source.index("function Test-GatewayHealth")
+    ]
+
+    assert "e2e_xai_grok_tools.py" in probe
+    assert "preflight_xai_grok_tools_script_missing" in probe
+    assert "preflight_xai_grok_tools_failed" in probe
+    assert "Start-Process -FilePath $script:RepositoryPython" in probe
+    assert "SetEnvironmentVariable('CODEXHUB_E2E_XAI', $null)" in probe
+    assert "Invoke-XaiGrokToolsPreflight" in source
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text(encoding="utf-8")
+    assert "e2e_xai_grok_tools.py` during preflight" in documentation
+
+
 def test_operator_commands_have_explicit_outer_and_manual_deadlines():
-    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text(encoding="utf-8")
 
     assert "run-with-windows-watchdog.py --timeout-seconds 3600 --" in documentation
     assert "-OverallTimeoutSeconds 5400" in documentation
@@ -3609,7 +3626,7 @@ Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 
 
 def test_matrix_documentation_declares_native_responses_release_gate():
-    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text()
+    documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text(encoding="utf-8")
 
     assert "OpenCode Go" in documentation and THIRD_PARTY_MANAGED_MODEL.split("/", 1)[1] in documentation
     assert "-CliOnly" in documentation

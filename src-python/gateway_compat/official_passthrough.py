@@ -37,7 +37,6 @@ from gateway_errors import UpstreamProtocolTranslationError
 from gateway_sse import sse_line_ending as _sse_line_ending, sse_payload_bytes as _sse_payload_bytes
 from protocol_translation import UnsupportedProtocolTranslationError
 from runtime_tool_compatibility import (
-    HostedCapabilityFacts as RuntimeHostedCapabilityFacts,
     ProtocolCapabilities as RuntimeProtocolCapabilities,
     ToolCompatibilityError as RuntimeToolCompatibilityError,
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
@@ -75,6 +74,8 @@ from route_primitives import (
 from . import multi_agent as _multi_agent
 from . import response as _response
 from . import host
+from . import collaboration_delivery as _collaboration_delivery
+from . import tool_parameter_root as _tool_parameter_root
 
 def _compatible_compaction_message(item: Mapping[str, Any]) -> dict[str, str] | None:
     seen: set[str] = set()
@@ -355,43 +356,6 @@ def _raise_runtime_tool_compatibility_error(error: RuntimeToolCompatibilityError
     ) from error
 
 
-def _runtime_tool_alias_token(
-    declarations: list[Any],
-    *,
-    selected_protocol: str,
-    protocol_capabilities: RuntimeProtocolCapabilities,
-    provider_hosted_capabilities: Any,
-) -> str:
-    capability_set = {
-        "function_lifecycle": protocol_capabilities.function_lifecycle,
-        "namespace_lifecycle": protocol_capabilities.namespace_lifecycle,
-        "custom_lifecycle": protocol_capabilities.custom_lifecycle,
-        "tool_search_lifecycle": protocol_capabilities.tool_search_lifecycle,
-        "hosted_lifecycles": sorted(protocol_capabilities.hosted_lifecycles),
-        "unknown_lifecycles": sorted(protocol_capabilities.unknown_lifecycles),
-        "accepts_namespace_adapter": protocol_capabilities.accepts_namespace_adapter,
-        "accepts_custom_adapter": protocol_capabilities.accepts_custom_adapter,
-        "accepts_tool_search_adapter": protocol_capabilities.accepts_tool_search_adapter,
-        "max_tool_name_length": protocol_capabilities.max_tool_name_length,
-        "provider_hosted_kinds": sorted(
-            RuntimeHostedCapabilityFacts.from_value(
-                provider_hosted_capabilities
-            ).supported_kinds
-        ),
-    }
-    canonical = json.dumps(
-        {
-            "capability_set": capability_set,
-            "declarations": declarations,
-            "selected_protocol": selected_protocol,
-        },
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
-
-
 def _prepare_runtime_tool_compatibility(
     payload: dict[str, Any],
     upstream: Mapping[str, Any],
@@ -458,12 +422,6 @@ def _prepare_runtime_tool_compatibility(
             provider_hosted_capabilities=provider_hosted_capabilities,
             tool_choice=payload.get("tool_choice"),
             protocol_capabilities=protocol_capabilities,
-            request_token=_runtime_tool_alias_token(
-                planned_declarations,
-                selected_protocol=tool_protocol,
-                protocol_capabilities=protocol_capabilities,
-                provider_hosted_capabilities=provider_hosted_capabilities,
-            ),
             collaboration_protocol=event_context.get("collaboration_protocol"),
         )
     except RuntimeToolCompatibilityError as exc:
@@ -1590,6 +1548,7 @@ def official_passthrough_request_body(
     payload: Mapping[str, Any] | None,
     upstream: Mapping[str, Any],
     model_id: str | None = None,
+    event_context: dict[str, Any] | None = None,
 ) -> bytes:
     if not isinstance(payload, Mapping):
         # Strict official passthrough has no parsed shape to safely rewrite.
@@ -1598,6 +1557,10 @@ def official_passthrough_request_body(
     next_payload = dict(payload)
     upstream_model = upstream.get("upstream_model")
     changed = False
+    if _collaboration_delivery.make_messages_portable(next_payload):
+        changed = True
+        if event_context is not None:
+            event_context[_collaboration_delivery.CONTEXT_KEY] = True
     if isinstance(upstream_model, str) and upstream_model and next_payload.get("model") != upstream_model:
         next_payload["model"] = upstream_model
         changed = True
@@ -1752,6 +1715,20 @@ _TOOL_SCHEMA_VALUE_KEYS = (
     "contentSchema",
 )
 
+# JSON Schema applicators that publishers emit as booleans. OpenCode Go 400s
+# `{not: {}}` in these positions (OMP `strict` read tools); xAI documents
+# boolean additionalProperties as the normal form. Boolean *property* schemas
+# still rewrite through MAP_KEYS / combinators.
+_TOOL_SCHEMA_BOOLEAN_APPLICATOR_KEYS = frozenset(
+    {
+        "additionalProperties",
+        "unevaluatedProperties",
+        "items",
+        "additionalItems",
+        "unevaluatedItems",
+    }
+)
+
 
 _TOOL_SCHEMA_LIST_KEYS = ("allOf", "anyOf", "oneOf", "prefixItems")
 
@@ -1796,9 +1773,11 @@ def _normalize_tool_json_schema(
     """Normalize tool JSON Schema for third-party upstreams.
 
     Boolean subschemas become objects (``true`` -> ``{}``, ``false`` ->
-    ``{"not": {}}``). Local ``$ref`` values are inlined; recursive refs are
-    replaced with an open object so providers such as OpenCode Go do not reject
-    the request with "Recursive JSON schemas are not currently supported".
+    ``{"not": {}}``), except JSON Schema boolean applicators such as
+    ``additionalProperties`` / ``items`` which stay booleans. Local ``$ref``
+    values are inlined; recursive refs are replaced with an open object so
+    providers such as OpenCode Go do not reject the request with
+    "Recursive JSON schemas are not currently supported".
     """
     if visiting is None:
         visiting = set()
@@ -1832,6 +1811,9 @@ def _normalize_tool_json_schema(
             for key, value in next_node.items():
                 if key in {"$ref", "$dynamicRef"} or key in merged:
                     continue
+                if isinstance(value, bool) and key in _TOOL_SCHEMA_BOOLEAN_APPLICATOR_KEYS:
+                    merged[key] = value
+                    continue
                 merged[key] = (
                     _normalize_tool_json_schema(value, state, root=root, visiting=visiting)
                     if isinstance(value, (dict, bool))
@@ -1849,6 +1831,8 @@ def _normalize_tool_json_schema(
             }
     for key in _TOOL_SCHEMA_VALUE_KEYS:
         value = next_node.get(key)
+        if isinstance(value, bool) and key in _TOOL_SCHEMA_BOOLEAN_APPLICATOR_KEYS:
+            continue
         if isinstance(value, (dict, bool)):
             next_node[key] = _normalize_tool_json_schema(value, state, root=root, visiting=visiting)
         elif isinstance(value, list):
@@ -1879,12 +1863,22 @@ def _rewrite_tool_entry_schemas(tool: Any, state: dict[str, int]) -> Any:
         for key in ("parameters", "input_schema"):
             schema = next_function.get(key)
             if isinstance(schema, (dict, bool)):
-                next_function[key] = _normalize_tool_json_schema(schema, state)
+                normalized = _normalize_tool_json_schema(schema, state)
+                coerced, root_changed = _tool_parameter_root.coerce_tool_parameter_root(
+                    normalized
+                )
+                if root_changed:
+                    state["rewritten"] += 1
+                next_function[key] = coerced
         next_tool["function"] = next_function
     for key in ("parameters", "input_schema"):
         schema = next_tool.get(key)
         if isinstance(schema, (dict, bool)):
-            next_tool[key] = _normalize_tool_json_schema(schema, state)
+            normalized = _normalize_tool_json_schema(schema, state)
+            coerced, root_changed = _tool_parameter_root.coerce_tool_parameter_root(normalized)
+            if root_changed:
+                state["rewritten"] += 1
+            next_tool[key] = coerced
     nested = next_tool.get("tools")
     if isinstance(nested, list):
         next_tool["tools"] = [_rewrite_tool_entry_schemas(item, state) for item in nested]

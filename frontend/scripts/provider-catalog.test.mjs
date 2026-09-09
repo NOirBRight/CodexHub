@@ -6,7 +6,7 @@ import ts from "typescript";
 const catalogPath = new URL("../src/lib/providerCatalog.ts", import.meta.url);
 const source = await readFile(catalogPath, "utf8");
 const jsOutput = ts.transpileModule(
-  source.replace(/^\s*import[\s\S]*?;\s*$/m, ""),
+  source.replace(/^\s*import[\s\S]*?;\s*$/gm, ""),
   {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
@@ -19,8 +19,9 @@ const jsOutput = ts.transpileModule(
 const moduleExports = {};
 new Function(
   "exports",
-  jsOutput +
-    "\nexports.applyCatalogPresetDefaults = applyCatalogPresetDefaults; exports.subscriptionAuthAdapter = subscriptionAuthAdapter; exports.usesSubscriptionAuth = usesSubscriptionAuth; exports.applyPresetReasoningDefaults = applyPresetReasoningDefaults; exports.instantiateCatalogProvider = instantiateCatalogProvider; exports.mergeOfficialPresetModels = mergeOfficialPresetModels;",
+  "function sortModelsEnabledFirst(models) { return [...models].sort((left, right) => Number(left.enabled === false) - Number(right.enabled === false)); }\n" +
+    jsOutput +
+    "\nexports.applyCatalogPresetDefaults = applyCatalogPresetDefaults; exports.subscriptionAuthAdapter = subscriptionAuthAdapter; exports.usesSubscriptionAuth = usesSubscriptionAuth; exports.applyPresetReasoningDefaults = applyPresetReasoningDefaults; exports.instantiateCatalogProvider = instantiateCatalogProvider; exports.mergeOfficialPresetModels = mergeOfficialPresetModels; exports.editorReasoningLevelOptions = editorReasoningLevelOptions; exports.modelsMissingFromPreset = modelsMissingFromPreset;",
 )(moduleExports);
 const {
   applyCatalogPresetDefaults,
@@ -29,6 +30,8 @@ const {
   applyPresetReasoningDefaults,
   instantiateCatalogProvider,
   mergeOfficialPresetModels,
+  editorReasoningLevelOptions,
+  modelsMissingFromPreset,
 } = moduleExports;
 
 function makeProvider(overrides = {}) {
@@ -108,6 +111,97 @@ test("subscription auth is declared on the preset, not by provider id", () => {
   );
 });
 
+test("missing catalog windows fill from the preset without replacing a live listing window", () => {
+  const catalog = makeProvider({
+    models: [
+      {
+        id: "muse-spark-1.2-contributor",
+        context_window: 1_048_576,
+        max_output_tokens: 131_072,
+        input_modalities: ["text", "image"],
+        supported_reasoning_levels: ["low", "medium", "high", "xhigh"],
+        default_reasoning_level: "xhigh",
+      },
+    ],
+  });
+  const filled = applyPresetReasoningDefaults(
+    [
+      { id: "muse-spark-1.2-contributor", enabled: true, context_window: null },
+      { id: "muse-spark-1.2-contributor", enabled: true, context_window: 202_752, max_output_tokens: 32_768 },
+      { id: "omen-alpha", enabled: true, context_window: null },
+    ],
+    catalog,
+  );
+  assert.equal(filled[0].context_window, 1_048_576);
+  assert.equal(filled[0].max_output_tokens, 131_072);
+  assert.equal(filled[1].context_window, 202_752);
+  assert.equal(filled[1].max_output_tokens, 32_768);
+  assert.equal(filled[2].context_window, null);
+});
+
+test("omen-alpha missing a window is filled from the OpenCode Go catalog", () => {
+  const catalog = makeProvider({
+    id: "opencode-go",
+    models: [
+      {
+        id: "omen-alpha",
+        context_window: 500_000,
+        max_output_tokens: 128_000,
+        input_modalities: ["text", "image"],
+        supported_reasoning_levels: ["low", "high"],
+        default_reasoning_level: "high",
+      },
+    ],
+  });
+  const filled = applyPresetReasoningDefaults(
+    [{ id: "omen-alpha", enabled: true, context_window: null }],
+    catalog,
+  );
+  assert.equal(filled[0].context_window, 500_000);
+  assert.equal(filled[0].max_output_tokens, 128_000);
+});
+
+test("saved listing rows are missing from a stale catalog snapshot", () => {
+  const catalog = makeProvider({
+    id: "opencode-go",
+    models: [{ id: "muse-spark-1.2-contributor", context_window: 1_048_576 }],
+  });
+  assert.equal(
+    modelsMissingFromPreset([{ id: "omen-alpha" }, { id: "muse-spark-1.2-contributor" }], catalog),
+    true,
+  );
+  assert.equal(
+    modelsMissingFromPreset(
+      [{ id: "omen-alpha" }],
+      makeProvider({ id: "opencode-go", models: [{ id: "omen-alpha", context_window: 500_000 }] }),
+    ),
+    false,
+  );
+  assert.equal(modelsMissingFromPreset([{ id: "omen-alpha" }], null), false);
+});
+
+test("saved rows missing a window are backfilled from the catalog without adding extra ids", () => {
+  const filled = applyCatalogPresetDefaults(
+    makeProvider({
+      models: [
+        {
+          id: "grok-4",
+          enabled: true,
+          input_modalities: ["text", "image"],
+          supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max"],
+          default_reasoning_level: "high",
+        },
+      ],
+    }),
+    catalogXai,
+    { includeModels: false },
+  );
+  assert.equal(filled.models.length, 1);
+  assert.equal(filled.models[0].id, "grok-4");
+  assert.equal(filled.models[0].context_window, 256000);
+  assert.equal(filled.models[0].max_output_tokens, 65536);
+});
+
 test("discovered models inherit thinking metadata only from the matching official id", () => {
   const filled = applyPresetReasoningDefaults(
     [
@@ -119,6 +213,68 @@ test("discovered models inherit thinking metadata only from the matching officia
   assert.deepEqual(filled[0].supported_reasoning_levels, ["low", "medium", "high", "xhigh", "max"]);
   assert.equal(filled[0].default_reasoning_level, "high");
   assert.equal(filled[1].supported_reasoning_levels, undefined);
+});
+
+test("saved grok-4.6 five-level fill is replaced by catalog without seeding extra ids", () => {
+  const grok46 = {
+    id: "grok-4.6",
+    display_name: "Grok 4.6",
+    enabled: true,
+    input_modalities: ["text", "image"],
+    supported_reasoning_levels: ["low", "medium", "high", "xhigh"],
+    default_reasoning_level: "high",
+    thinking_mode: "always_on",
+  };
+  const filled = applyCatalogPresetDefaults(
+    makeProvider({
+      models: [
+        {
+          id: "grok-4.6",
+          enabled: true,
+          context_window: 500000,
+          input_modalities: ["text"],
+          supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max"],
+          default_reasoning_level: "medium",
+        },
+      ],
+    }),
+    makeProvider({
+      ...catalogXai,
+      models: [grok46],
+    }),
+    { includeModels: false },
+  );
+  assert.equal(filled.models.length, 1);
+  assert.equal(filled.models[0].id, "grok-4.6");
+  assert.deepEqual(filled.models[0].supported_reasoning_levels, ["low", "medium", "high", "xhigh"]);
+  assert.equal(filled.models[0].default_reasoning_level, "high");
+  assert.deepEqual(filled.models[0].input_modalities, ["text", "image"]);
+});
+
+test("empty discovered grok-4.6 inherits catalog levels instead of Codex max", () => {
+  const grok46 = {
+    id: "grok-4.6",
+    display_name: "Grok 4.6",
+    enabled: true,
+    input_modalities: ["text", "image"],
+    supported_reasoning_levels: ["low", "medium", "high", "xhigh"],
+    default_reasoning_level: "high",
+    thinking_mode: "always_on",
+  };
+  const filled = applyPresetReasoningDefaults(
+    [
+      {
+        id: "grok-4.6",
+        enabled: true,
+        context_window: 500000,
+        supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max"],
+        default_reasoning_level: "medium",
+      },
+    ],
+    makeProvider({ models: [grok46] }),
+  );
+  assert.deepEqual(filled[0].supported_reasoning_levels, ["low", "medium", "high", "xhigh"]);
+  assert.equal(filled[0].default_reasoning_level, "high");
 });
 
 test("additive merge inserts missing official models without re-enabling user-disabled rows", () => {
@@ -143,6 +299,16 @@ test("includeModels false fills the endpoint without seeding grok-4", () => {
   const filled = applyCatalogPresetDefaults(makeProvider(), catalogXai, { includeModels: false });
   assert.equal(filled.base_url, "https://api.x.ai/v1");
   assert.deepEqual(filled.models, []);
+});
+
+test("editor reasoning checkboxes follow catalog levels when present", () => {
+  assert.deepEqual(editorReasoningLevelOptions(["low", "medium", "high", "xhigh"]), [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+  ]);
+  assert.deepEqual(editorReasoningLevelOptions([]), ["low", "medium", "high", "xhigh", "max"]);
 });
 
 test("saved xAI rows inherit subscription capabilities from the preset", () => {

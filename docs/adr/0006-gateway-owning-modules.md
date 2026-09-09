@@ -31,7 +31,8 @@ Each seam lives in one owning module. Tests patch and import that module:
 |---|---|
 | Route Plan | `route_plan` / `route_primitives` |
 | Catalog / model identity | `gateway_catalog_runtime`, `catalog`, `catalog_sync` |
-| Transport / retry / Official HTTP | `gateway_transport` |
+| Transport / retry / Official and third-party pooled HTTP | `gateway_transport`, `gateway_http_pool` |
+| OpenCode Go routing-session header | `opencode_go_session` |
 | Events / diagnostics | `gateway_events` |
 | Compatibility application | `gateway_compat/` |
 | Stream semantics / terminal detection | `gateway_stream_semantics`, `gateway_sse` |

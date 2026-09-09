@@ -17,7 +17,7 @@ providers, balances, request events or scenario controls are imported by product
 | Usage | GatewayPage → unchanged StackedUsageChartShell | Metrics, provider/model/client breakdown, daily/weekly grouping, custom dates, legend filters, hover details, cost/cache summaries |
 | Clients | GatewayPage, GatewayClientCard, WorkspaceDialog | Existing adapters and routing lifecycle; independent cards scroll; connection filters; real icons, paths, versions, ownership and redacted config preview; saved manual connection parameters |
 | Settings / General | SettingsDrawer | Language and autostart operations; appearance; Gateway-on-open |
-| Settings / Codex & clients | SettingsDrawer, OfficialDetail | Include official models, client auto-sync, history sync/repair; context-guard management opens its existing model controls and conflict feedback |
+| Settings / Codex & clients | SettingsDrawer, OfficialDetail | Include official models, client auto-sync, history sync/repair |
 | Settings / Gateway | SettingsDrawer → App.saveSettings | Bind address readback, port, timeout, key visibility/copy/regeneration, saved endpoint URLs; one settings draft and fixed save/discard footer |
 | Settings / Request policy | SettingsDrawer | Retry enable/count and image proxy/model selection |
 | Settings / Diagnostics | RecoveryActivityPanel, DebugDiagnosticsOverlay | Recovery activity, retry shortcut; debug-build diagnostic actions and production-build restrictions remain intact |
@@ -36,9 +36,10 @@ list regions scroll independently of their actions.
   uses the accurate label “Mean response time”. Missing token usage stays unknown.
 - Unknown clients receive connection parameters only; their configuration files
   are not guessed or rewritten. Supported clients retain their actual adapters.
-- Existing Settings fields, IPC command names, auth, routing and persistence formats
-  remain unchanged. The frontend uses the existing context-guard workflow instead
-  of duplicating its sensitive restart/sync behavior in a new settings toggle.
+- Long-context cost protection is retired: its controls, persisted setting, IPC
+  commands, and 272K cap are removed. Official windows follow published catalog
+  budgets. Legacy migration only restores values proven to have been written by
+  CodexHub; user overrides and the previous-value recovery records are preserved.
 - Fixed native Linux navigation targets were updated in the physical pointer E2E
   because Settings is now a page. Its event-capture checks and transition thresholds
   are unchanged. Native Linux still uses webview zoom instead of CSS transform scaling.

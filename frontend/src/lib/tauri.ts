@@ -12,7 +12,6 @@ import type {
   AppVersionInfo,
   AutostartStatus,
   CatalogOverrideDiagnostics,
-  CodexContextGuardStatus,
   CodexHubError,
   DiagnosticsActionResult,
   DiagnosticsStatus,
@@ -222,14 +221,6 @@ export const api = {
         settings: normalizeSettings(settings),
       }),
     ),
-  getCodexContextGuardStatus: () =>
-    call<CodexContextGuardStatus>(COMMANDS.getCodexContextGuardStatus),
-  setCodexContextGuard: (enabled: boolean, restartCodex = false) =>
-    call<CodexContextGuardStatus>(COMMANDS.setCodexContextGuard, {
-      enabled,
-      restartCodex,
-      restart_codex: restartCodex,
-    }),
   cancelOfficialModelRefresh: (requestId: string) => call<void>(COMMANDS.cancelOfficialModelRefresh, { requestId, request_id: requestId }),
   refreshOfficialModels: (restartCodex = false, requestId?: string) =>
     call<OfficialRefreshResult>(COMMANDS.refreshOfficialModels, {

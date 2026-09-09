@@ -51,7 +51,7 @@ Existing navigation, settings, interactions and production component reuse are p
 
 ## Revision 6 — functional interface coverage
 
-The approved finish remains intact. PrototypeFeatureParity.md maps the original user-visible source controls to the new locations. Complete maintained Provider catalog snapshot (8 providers / 123 models), custom onboarding, unified Provider management, ordering, xAI device authorization, official quota windows, client detection/version/drift/ownership, history conflict/defer, updater and diagnostic lifecycles are represented. Chinese/English rendering, in-memory draft protection, loading/success/error/retry feedback and exact restart notices are included. Titlebar controls simulate minimize/restore, maximize and close-to-tray.
+The approved finish remains intact. PrototypeFeatureParity.md maps the original user-visible source controls to the new locations. Complete maintained Provider catalog snapshot (8 providers / 136 models), custom onboarding, unified Provider management, ordering, xAI device authorization, official quota windows, client detection/version/drift/ownership, history conflict/defer, updater and diagnostic lifecycles are represented. Chinese/English rendering, in-memory draft protection, loading/success/error/retry feedback and exact restart notices are included. Titlebar controls simulate minimize/restore, maximize and close-to-tray.
 
 Scenario controls live behind the titlebar prototype control or a disclosure in the relevant detail. They do not add overview warnings. Authentication, client file edits, process operations, installation and persistence remain simulated. Closing the browser resets the prototype; no account or production configuration is changed.
 
@@ -84,3 +84,8 @@ No implementation issue was supplied, so the approved design verdict and branch 
 ### Revision 9 follow-up — weekly alignment
 
 User correction: a provider with only weekly quota uses the right-hand resource slot, aligned with OpenAI's weekly window; the left slot stays empty. Other single-resource types keep their existing layout. Browser measurement confirmed identical x-position and width for both weekly groups; TypeScript and diff checks pass.
+
+2026-09-09 catalog refresh: regenerated `PrototypeCatalog.json` from the checked-in
+`config/providers.toml` provider array, replacing API keys with
+`demo-not-a-real-key` (8 providers / 136 models). The viewport and 46-model-list
+checks above are historical observations, not new visual acceptance for this data.

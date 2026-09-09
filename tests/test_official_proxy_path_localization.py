@@ -89,6 +89,7 @@ class OfficialProxyPathLocalizationTests(TestCase):
                         return_value=connection,
                     ),
                     patch("gateway_transport.time.monotonic", return_value=100.0),
+                    patch("gateway_http_pool.time.monotonic", return_value=100.0),
                     patch("gateway_transport.official_pool_manager", return_value=manager),
                     patch.object(gateway_events, "GATEWAY_DIAGNOSTIC_RECORDER", recorder),
                 ):
@@ -184,8 +185,8 @@ class OfficialProxyPathLocalizationTests(TestCase):
                 "gateway_transport.official_proxy_url",
                 side_effect=[None, "http://registry-proxy.invalid"],
             ),
-            patch("gateway_transport.urllib3.ProxyManager", return_value=proxy_manager) as make_proxy_manager,
-            patch("gateway_transport.urllib3.PoolManager", return_value=direct_manager) as make_direct_manager,
+            patch("gateway_http_pool.urllib3.ProxyManager", return_value=proxy_manager) as make_proxy_manager,
+            patch("gateway_http_pool.urllib3.PoolManager", return_value=direct_manager) as make_direct_manager,
         ):
             direct = gateway_transport.official_pool_manager("https://example.test/v1/responses")
             proxied = gateway_transport.official_pool_manager("https://example.test/v1/responses")

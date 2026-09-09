@@ -63,11 +63,6 @@ pub fn save_settings(settings: Settings) -> Result<Settings, String> {
 }
 
 #[tauri::command]
-pub fn get_codex_context_guard_status() -> Result<config::CodexContextGuardStatus, String> {
-    config::get_codex_context_guard_status()
-}
-
-#[tauri::command]
 pub fn get_catalog_override_diagnostics() -> Result<catalog::CatalogOverrideDiagnostics, String> {
     catalog::catalog_override_diagnostics()
 }
@@ -650,8 +645,17 @@ pub fn switch_mode(
     force_takeover: Option<bool>,
     restart_codex: Option<bool>,
 ) -> Result<AppStatus, String> {
-    let coordinated = codex_desktop::coordinate_switch(restart_codex.unwrap_or(false), || {
-        config::switch_mode_with_takeover(&mode, auto_sync, force_takeover.unwrap_or(false))
+    let takeover = force_takeover.unwrap_or(false);
+    if !restart_codex.unwrap_or(false) {
+        // Connect/disconnect writes the overlay while Codex Desktop stays open.
+        // The UI discloses that a manual restart is required for the route to
+        // take effect; this path must not close or relaunch Codex.
+        return codex_desktop::serialize_config_writer(|| {
+            config::switch_mode_with_takeover(&mode, auto_sync, takeover)
+        });
+    }
+    let coordinated = codex_desktop::coordinate_switch(true, || {
+        config::switch_mode_with_takeover(&mode, auto_sync, takeover)
     })?;
     finish_app_status_switch(coordinated, proxy::status)
 }
@@ -688,29 +692,6 @@ where
                 .unwrap_or_else(|| "unknown relaunch failure".to_string())
         );
     }
-    Ok(status)
-}
-
-#[tauri::command]
-pub fn set_codex_context_guard(
-    enabled: bool,
-    restart_codex: Option<bool>,
-) -> Result<config::CodexContextGuardStatus, String> {
-    if !restart_codex.unwrap_or(false) {
-        return codex_desktop::serialize_config_writer(|| config::set_codex_context_guard(enabled));
-    }
-    let coordinated = codex_desktop::coordinate_switch(restart_codex.unwrap_or(false), || {
-        config::set_codex_context_guard(enabled)
-    })?;
-    let Some(mut status) = coordinated.value else {
-        return Err(format!(
-            "codex_desktop_switch_failed_reopened: {}",
-            coordinated
-                .switch_error
-                .unwrap_or_else(|| "context guard update failed".to_string())
-        ));
-    };
-    status.codex_restart_result = Some(coordinated.restart_result);
     Ok(status)
 }
 

@@ -32,6 +32,7 @@ SENSITIVE_FIELD_NAMES = {
     "credentials",
     "openai-api-key",
     "prompt",
+    "prompt_cache_key",
     "proxy-authorization",
     "reasoning_text",
     "response_id",
@@ -79,10 +80,12 @@ REQUEST_COLUMNS = [
     "request_prefix_hmac",
     "prefix_bytes",
     "prompt_cache_key_hash",
+    "prompt_cache_key_state",
     "usage_source",
     "usage_missing_reason",
     "usage_input_tokens",
     "usage_cached_input_tokens",
+    "usage_cache_write_input_tokens",
     "usage_output_tokens",
     "usage_total_tokens",
     "usage_reasoning_tokens",
@@ -103,6 +106,7 @@ INTEGER_COLUMNS = {
     "prefix_bytes",
     "usage_input_tokens",
     "usage_cached_input_tokens",
+    "usage_cache_write_input_tokens",
     "usage_output_tokens",
     "usage_total_tokens",
     "usage_reasoning_tokens",
@@ -163,8 +167,6 @@ def enrich_request_observability(
     codex_home: Path,
     upstream: Mapping[str, Any] | None = None,
     include_body_hmac: bool = True,
-    prompt_cache_key: str | None = None,
-    extract_prompt_cache_key: bool = True,
 ) -> dict[str, Any]:
     prefix = body[:REQUEST_PREFIX_BYTES]
     fields: dict[str, Any] = {
@@ -181,10 +183,9 @@ def enrich_request_observability(
         fields["request_body_hmac"] = telemetry_hmac(codex_home, b"body", body)
     else:
         fields["request_body_hmac_skipped"] = True
-    cache_key = prompt_cache_key
-    if cache_key is None and extract_prompt_cache_key:
-        cache_key = _extract_prompt_cache_key(body)
-    if cache_key:
+    state, cache_key = _prompt_cache_key_from_body(body)
+    fields["prompt_cache_key_state"] = state
+    if cache_key is not None:
         fields["prompt_cache_key_hash"] = telemetry_hmac(codex_home, b"prompt-cache-key", cache_key.encode("utf-8"))
     if upstream:
         provider_config = {
@@ -358,10 +359,12 @@ def initialize_db(connection: sqlite3.Connection, *, busy_timeout_ms: int = BACK
             request_prefix_hmac TEXT,
             prefix_bytes INTEGER,
             prompt_cache_key_hash TEXT,
+            prompt_cache_key_state TEXT,
             usage_source TEXT,
             usage_missing_reason TEXT,
             usage_input_tokens INTEGER,
             usage_cached_input_tokens INTEGER,
+            usage_cache_write_input_tokens INTEGER,
             usage_output_tokens INTEGER,
             usage_total_tokens INTEGER,
             usage_reasoning_tokens INTEGER,
@@ -437,6 +440,9 @@ def _upsert_request(connection: sqlite3.Connection, payload: Mapping[str, Any], 
 
     assignments = []
     parameters: list[Any] = []
+    if values.get("prompt_cache_key_state") in {"absent", "null", "invalid", "unavailable"}:
+        assignments.append("prompt_cache_key_hash = NULL")
+        values.pop("prompt_cache_key_hash", None)
     for column in REQUEST_COLUMNS:
         if column == "created_at" or column not in values:
             continue
@@ -527,15 +533,21 @@ def _load_or_create_secret(codex_home: Path) -> bytes:
     return secret.encode("utf-8")
 
 
-def _extract_prompt_cache_key(body: bytes) -> str | None:
+def _prompt_cache_key_from_body(body: bytes) -> tuple[str, str | None]:
     try:
         payload = json.loads(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
+        return "unavailable", None
     if not isinstance(payload, dict):
-        return None
+        return "unavailable", None
+    if "prompt_cache_key" not in payload:
+        return "absent", None
     value = payload.get("prompt_cache_key")
-    return value if isinstance(value, str) and value else None
+    if value is None:
+        return "null", None
+    if not isinstance(value, str):
+        return "invalid", None
+    return ("present" if value else "empty"), value
 
 
 def _sanitize_value(value: Any) -> Any:

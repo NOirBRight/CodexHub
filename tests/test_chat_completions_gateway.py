@@ -21,23 +21,26 @@ from gateway_compat import response as gateway_compat_response
 import route_plan
 import route_primitives
 from protocol_translation import prepare_exchange as _real_prepare_exchange
+from prompt_cache_policy import PromptCacheKeyPolicy
 
 
-def prepare_exchange(request_body, *, inbound_format, outbound_format):
+def prepare_exchange(request_body, *, inbound_format, outbound_format, prompt_cache_key_policy=PromptCacheKeyPolicy.DROP_UNVERIFIED):
     return _real_prepare_exchange(
         request_body,
         inbound_format=inbound_format,
         outbound_format=outbound_format,
+        prompt_cache_key_policy=prompt_cache_key_policy,
     )
 
 
-def _assert_identity_prepare_exchange(request_body, *, inbound_format, outbound_format):
+def _assert_identity_prepare_exchange(request_body, *, inbound_format, outbound_format, prompt_cache_key_policy=PromptCacheKeyPolicy.DROP_UNVERIFIED):
     if inbound_format != outbound_format:
         raise AssertionError(f"converted {inbound_format} -> {outbound_format}")
     return _real_prepare_exchange(
         request_body,
         inbound_format=inbound_format,
         outbound_format=outbound_format,
+        prompt_cache_key_policy=prompt_cache_key_policy,
     )
 
 
@@ -1023,6 +1026,55 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIsInstance(payload.get("error"), dict)
         return payload["error"]
 
+    def test_official_parent_portable_collaboration_roundtrips_real_http_seam(self):
+        from collaboration_runtime_contract import COLLABORATION_V2, EXPECTED_PARAMETER_SCHEMAS
+
+        namespace = {"type": "namespace", "name": "collaboration", "description": "team", "tools": [
+            {"type": "function", "name": name, "description": name, "strict": False, "parameters": schema}
+            for name, schema in EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2].items()
+        ]}
+        body = json.dumps({
+            "model": "gpt-5.5", "stream": True,
+            "input": [{"type": "additional_tools", "tools": [namespace]},
+                      {"role": "user", "content": "delegate"}],
+        }).encode()
+        handler = self._make_handler(body, path="/v1/responses")
+        handler.headers["User-Agent"] = "codex-app"
+
+        def upstream_response(request, **kwargs):
+            tools = json.loads(request.data)["input"][0]["tools"]
+            self.assertNotEqual(tools[0]["name"], "collaboration")
+            self.assertNotIn('"encrypted": true', json.dumps(tools))
+            call = {
+                "type": "function_call", "id": "fc-portable", "call_id": "call-portable",
+                "namespace": tools[0]["name"], "name": "spawn_agent",
+                "arguments": '{"task_name":"worker","message":"compute","fork_turns":"none"}',
+            }
+            events = [
+                {"type": "response.output_item.added", "output_index": 0, "item": call},
+                {"type": "response.output_item.done", "output_index": 0, "item": call},
+                {"type": "response.completed", "response": {
+                    "id": "resp-portable", "status": "completed", "output": [call],
+                }},
+            ]
+            lines = []
+            for event in events:
+                lines.extend([b"data: " + json.dumps(event).encode() + b"\n", b"\n"])
+            return _FakeSseResponse([*lines, b""])
+
+        with patch("gateway_transport.official_urlopen", side_effect=upstream_response):
+            CodexProxyHandler.do_POST(handler)
+        written = b"".join(handler.wfile.writes)
+        self.assertEqual(handler._fake.status, 200)
+        self.assertNotIn(b"codexhub_plaintext_collaboration", written)
+        events = [json.loads(line[5:]) for line in written.splitlines() if line.startswith(b"data:")]
+        calls = [event["item"] for event in events if "item" in event]
+        calls += events[-1]["response"]["output"]
+        self.assertEqual(len(calls), 3)
+        for call in calls:
+            self.assertEqual(call["namespace"], "collaboration")
+            self.assertEqual(call["encrypted_function_args"], [])
+
     def test_post_chat_completions_routes_to_official_and_injects_subscription_token(self):
         body = json.dumps({
             "model": "gpt-5.5",
@@ -1481,6 +1533,29 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "max_output_source": "providers_toml",
         }
 
+    def _xai_transparent_external_model(self):
+        return {
+            "alias": "xai/grok-4.6",
+            "provider_alias": "xai",
+            "upstream_name": "xai",
+            "display_prefix": "XAI",
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "xai-test-token",
+            "upstream_model": "grok-4.6",
+            "upstream_format": "chat_completions",
+            "priority_base": 200,
+            "context_window": 256000,
+            "max_output_tokens": 32768,
+            "input_modalities": ("text", "image"),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+
+    def _xai_responses_external_model(self):
+        model = dict(self._xai_transparent_external_model())
+        model["upstream_format"] = "responses"
+        return model
+
     def _run_kimi_transparent_chat(self, body: bytes, response_id: str):
         policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         handler = self._make_handler(body, path="/v1/providers/kimi/chat/completions")
@@ -1517,6 +1592,91 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             patch(
                 "gateway_catalog_runtime.resolve_external_model_alias",
                 return_value=self._kimi_transparent_external_model(),
+            ),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+        return handler, mock_urlopen
+
+    def _run_xai_transparent_chat(self, body: bytes, response_id: str):
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
+        handler = self._make_handler(body, path="/v1/providers/xai/chat/completions")
+        upstream_body = json.dumps({
+            "id": response_id,
+            "object": "chat.completion",
+            "model": "grok-4.6",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi"},
+                "finish_reason": "stop",
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "gateway_catalog_runtime.generated_catalog_slugs",
+                return_value={"gpt-5.5", "xai/grok-4.6"},
+            ),
+            patch(
+                "gateway_catalog_runtime.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "xai/grok-4.6": {"slug": "xai/grok-4.6"},
+                },
+            ),
+            patch(
+                "gateway_catalog_runtime.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("xai/grok-4.6",),
+                ),
+            ),
+            patch(
+                "gateway_catalog_runtime.resolve_external_model_alias",
+                return_value=self._xai_transparent_external_model(),
+            ),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+        return handler, mock_urlopen
+
+    def _run_xai_transparent_responses(self, body: bytes, response_id: str):
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
+        handler = self._make_handler(body, path="/v1/providers/xai/responses")
+        upstream_body = json.dumps({
+            "id": response_id,
+            "object": "response",
+            "status": "completed",
+            "model": "grok-4.6",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi"}],
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "gateway_catalog_runtime.generated_catalog_slugs",
+                return_value={"gpt-5.5", "xai/grok-4.6"},
+            ),
+            patch(
+                "gateway_catalog_runtime.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "xai/grok-4.6": {"slug": "xai/grok-4.6"},
+                },
+            ),
+            patch(
+                "gateway_catalog_runtime.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("xai/grok-4.6",),
+                ),
+            ),
+            patch(
+                "gateway_catalog_runtime.resolve_external_model_alias",
+                return_value=self._xai_responses_external_model(),
             ),
             patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
         ):
@@ -1613,11 +1773,11 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(params["properties"]["combo"]["allOf"][0], {})
         self.assertEqual(params["properties"]["combo"]["allOf"][1], {"type": "string"})
         self.assertEqual(params["properties"]["combo"]["anyOf"][0], {"type": "number"})
-        self.assertEqual(params["properties"]["extra"]["additionalProperties"], {"not": {}})
+        self.assertIs(params["properties"]["extra"]["additionalProperties"], False)
         self.assertEqual(handler._fake.status, 200)
         marker_events = self._tool_schema_marker_events()
         self.assertEqual(len(marker_events), 1)
-        self.assertEqual(marker_events[0]["schemas_rewritten"], 3)
+        self.assertEqual(marker_events[0]["schemas_rewritten"], 2)
 
     def test_provider_scoped_transparent_chat_preserves_object_only_tool_schemas(self):
         tool_parameters = {
@@ -1642,6 +1802,348 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(sent_payload["tools"][0]["function"]["parameters"], tool_parameters)
         self.assertEqual(handler._fake.status, 200)
         self.assertEqual(self._tool_schema_marker_events(), [])
+
+    def test_third_party_tool_parameter_root_collapses_anyof_union_to_object(self):
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "use the tool"}],
+            "stream": False,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "__codexhub_ns_a5e9029afd_33",
+                    "parameters": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {
+                                "type": "object",
+                                "properties": {"path": {"type": "string"}},
+                                "required": ["path"],
+                            },
+                        ],
+                    },
+                },
+            }],
+        }).encode("utf-8")
+
+        handler, mock_urlopen = self._run_kimi_transparent_chat(body, "chatcmpl_schema_root_anyof")
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        params = sent_payload["tools"][0]["function"]["parameters"]
+        self.assertEqual(params["type"], "object")
+        self.assertNotIn("anyOf", params)
+        self.assertEqual(params["properties"]["path"], {"type": "string"})
+        self.assertEqual(params["required"], ["path"])
+        self.assertEqual(handler._fake.status, 200)
+
+    def test_third_party_tool_parameter_root_collapses_oneof_and_type_array(self):
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "use the tool"}],
+            "stream": False,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "combo",
+                    "parameters": {
+                        "type": ["object", "null"],
+                        "oneOf": [
+                            {"type": "null"},
+                            {
+                                "type": "object",
+                                "properties": {"query": {"type": "string"}},
+                            },
+                        ],
+                    },
+                },
+            }],
+        }).encode("utf-8")
+
+        handler, mock_urlopen = self._run_kimi_transparent_chat(body, "chatcmpl_schema_root_oneof")
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        params = sent_payload["tools"][0]["function"]["parameters"]
+        self.assertEqual(params["type"], "object")
+        self.assertNotIn("oneOf", params)
+        self.assertNotIsInstance(params["type"], list)
+        self.assertEqual(params["properties"]["query"], {"type": "string"})
+        self.assertEqual(handler._fake.status, 200)
+
+    def test_third_party_nested_anyof_stays_in_place_after_root_object_guard(self):
+        body = json.dumps({
+            "model": "k3",
+            "messages": [{"role": "user", "content": "deep"}],
+            "stream": False,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "deep",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "combo": {
+                                "anyOf": [{"type": "number"}, {"type": "string"}],
+                            },
+                        },
+                    },
+                },
+            }],
+        }).encode("utf-8")
+
+        handler, mock_urlopen = self._run_kimi_transparent_chat(body, "chatcmpl_schema_nested_anyof")
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        combo = sent_payload["tools"][0]["function"]["parameters"]["properties"]["combo"]
+        self.assertEqual(combo["anyOf"], [{"type": "number"}, {"type": "string"}])
+        self.assertEqual(handler._fake.status, 200)
+
+    def test_xai_chat_rejects_are_avoided_when_root_union_is_coerced(self):
+        body = json.dumps({
+            "model": "grok-4.6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "__codexhub_ns_a5e9029afd_33",
+                    "parameters": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "object", "properties": {"id": {"type": "string"}}},
+                        ],
+                    },
+                },
+            }],
+        }).encode("utf-8")
+
+        handler, mock_urlopen = self._run_xai_transparent_chat(body, "chatcmpl_xai_root_union")
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        params = sent_payload["tools"][0]["function"]["parameters"]
+        self.assertEqual(params["type"], "object")
+        self.assertNotIn("anyOf", params)
+        self.assertNotIn("oneOf", params)
+        self.assertEqual(params["properties"]["id"], {"type": "string"})
+        self.assertEqual(handler._fake.status, 200)
+
+    def test_third_party_object_only_root_oneof_is_preserved(self):
+        body = json.dumps({
+            "model": "k3",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "contact",
+                    "parameters": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "email"},
+                                    "address": {"type": "string"},
+                                },
+                                "required": ["kind", "address"],
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "sms"},
+                                    "phone": {"type": "string"},
+                                },
+                                "required": ["kind", "phone"],
+                            },
+                        ],
+                    },
+                },
+            }],
+        }).encode("utf-8")
+
+        next_body, rewritten = gateway_compat.normalize_transparent_tool_schema_booleans(body)
+        self.assertEqual(rewritten, 0)
+        params = json.loads(next_body)["tools"][0]["function"]["parameters"]
+        self.assertEqual(len(params["oneOf"]), 2)
+        self.assertEqual(params["oneOf"][0]["type"], "object")
+        self.assertEqual(params["oneOf"][1]["properties"]["phone"], {"type": "string"})
+
+    def test_third_party_exclusive_required_root_anyof_is_annotated_object(self):
+        body = json.dumps({
+            "model": "k3",
+            "tools": [{
+                "type": "function",
+                "name": "search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "project": {"type": "string"},
+                        "paths": {"type": "array", "items": {"type": "string"}},
+                        "scopes": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["project"],
+                    "anyOf": [{"required": ["paths"]}, {"required": ["scopes"]}],
+                },
+            }],
+        }).encode("utf-8")
+
+        next_body, rewritten = gateway_compat.normalize_transparent_tool_schema_booleans(body)
+        self.assertGreater(rewritten, 0)
+        params = json.loads(next_body)["tools"][0]["parameters"]
+        self.assertEqual(params["type"], "object")
+        self.assertEqual(
+            params["anyOf"],
+            [
+                {"required": ["paths"], "type": "object"},
+                {"required": ["scopes"], "type": "object"},
+            ],
+        )
+
+    def test_third_party_nested_type_array_stays_in_place(self):
+        body = json.dumps({
+            "model": "k3",
+            "tools": [{
+                "type": "function",
+                "name": "note",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": ["string", "null"]},
+                    },
+                },
+            }],
+        }).encode("utf-8")
+
+        next_body, rewritten = gateway_compat.normalize_transparent_tool_schema_booleans(body)
+        self.assertEqual(rewritten, 0)
+        params = json.loads(next_body)["tools"][0]["parameters"]
+        self.assertEqual(params["properties"]["label"]["type"], ["string", "null"])
+
+    def test_xai_responses_root_oneof_null_branch_is_dropped(self):
+        body = json.dumps({
+            "model": "grok-4.6",
+            "input": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "tools": [{
+                "type": "function",
+                "name": "__codexhub_ns_a5e9029afd_33",
+                "parameters": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {"action": {"type": "string"}},
+                            "required": ["action"],
+                        },
+                        {"type": "null"},
+                    ],
+                },
+            }],
+        }).encode("utf-8")
+
+        handler, mock_urlopen = self._run_xai_transparent_responses(body, "resp_xai_root_oneof")
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        params = sent_payload["tools"][0]["parameters"]
+        self.assertEqual(params["type"], "object")
+        self.assertNotIn("oneOf", params)
+        self.assertNotIn("anyOf", params)
+        self.assertEqual(params["properties"]["action"], {"type": "string"})
+        self.assertEqual(params["required"], ["action"])
+        self.assertEqual(handler._fake.status, 200)
+
+    def test_xai_codex_app_http_inverse_maps_namespace_function_call(self):
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
+        body = json.dumps({
+            "model": "grok-4.6",
+            "input": [{"role": "user", "content": "update then echo"}],
+            "stream": False,
+            "tools": [{
+                "type": "namespace",
+                "name": "codex_app",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "automation_update",
+                        "parameters": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {"action": {"type": "string"}},
+                                    "required": ["action"],
+                                },
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "name": "echo",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                            "required": ["text"],
+                        },
+                    },
+                ],
+            }],
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/xai/responses")
+        handler.headers["X-Codex-Client-Id"] = "codex-app"
+        handler.headers["User-Agent"] = "codex-app"
+
+        def fake_urlopen(request, *args, **kwargs):
+            sent = json.loads(request.data)
+            tools = sent["tools"]
+            self.assertTrue(all(tool.get("type") == "function" for tool in tools))
+            update_alias = next(
+                tool["name"]
+                for tool in tools
+                if (tool.get("parameters") or {}).get("properties", {}).get("action")
+            )
+            self.assertTrue(update_alias.startswith("__codexhub_ns_"))
+            self.assertNotIn("oneOf", json.dumps(sent["tools"]))
+            upstream_body = json.dumps({
+                "id": "resp_xai_inverse",
+                "object": "response",
+                "status": "completed",
+                "model": "grok-4.6",
+                "output": [{
+                    "type": "function_call",
+                    "name": update_alias,
+                    "call_id": "call_update",
+                    "arguments": '{"action":"ping"}',
+                }],
+            }).encode("utf-8")
+            return _FakeJsonResponse(upstream_body)
+
+        with (
+            patch(
+                "gateway_catalog_runtime.generated_catalog_slugs",
+                return_value={"gpt-5.5", "xai/grok-4.6"},
+            ),
+            patch(
+                "gateway_catalog_runtime.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "xai/grok-4.6": {"slug": "xai/grok-4.6"},
+                },
+            ),
+            patch(
+                "gateway_catalog_runtime.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("xai/grok-4.6",),
+                ),
+            ),
+            patch(
+                "gateway_catalog_runtime.resolve_external_model_alias",
+                return_value=self._xai_responses_external_model(),
+            ),
+            patch("gateway_transport.urlopen", side_effect=fake_urlopen),
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(handler._fake.status, 200)
+        client_payload = json.loads(b"".join(handler.wfile.writes))
+        call = client_payload["output"][0]
+        self.assertEqual(call["namespace"], "codex_app")
+        self.assertEqual(call["name"], "automation_update")
+        self.assertEqual(json.loads(call["arguments"]), {"action": "ping"})
+        self.assertNotIn("__codexhub_ns_", json.dumps(client_payload))
 
     def test_normalize_tool_schema_booleans_ignores_non_tool_booleans(self):
         body = json.dumps({
@@ -1686,6 +2188,54 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         child = params["properties"]["root"]["properties"]["child"]
         self.assertEqual(child.get("type"), "object")
         self.assertNotIn("$ref", child)
+
+    def test_normalize_preserves_boolean_applicators_on_strict_read_tools(self):
+        body = json.dumps({
+            "model": "muse-spark-1.2-contributor",
+            "tools": [{
+                "type": "function",
+                "name": "read",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Local path"},
+                        "blocked": False,
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            }],
+        }).encode("utf-8")
+
+        next_body, rewritten = gateway_compat.normalize_transparent_tool_schema_booleans(body)
+        self.assertEqual(rewritten, 1)
+        params = json.loads(next_body)["tools"][0]["parameters"]
+        self.assertIs(params["additionalProperties"], False)
+        self.assertEqual(params["properties"]["blocked"], {"not": {}})
+        self.assertEqual(params["properties"]["path"]["type"], "string")
+
+    def test_normalize_preserves_items_false_boolean_applicator(self):
+        body = json.dumps({
+            "model": "muse-spark-1.2-contributor",
+            "tools": [{
+                "type": "function",
+                "name": "empty_tuple",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "flags": {"type": "array", "items": False},
+                    },
+                    "additionalProperties": True,
+                },
+            }],
+        }).encode("utf-8")
+
+        next_body, rewritten = gateway_compat.normalize_transparent_tool_schema_booleans(body)
+        self.assertEqual(rewritten, 0)
+        params = json.loads(next_body)["tools"][0]["parameters"]
+        self.assertIs(params["additionalProperties"], True)
+        self.assertIs(params["properties"]["flags"]["items"], False)
 
     def test_normalize_tool_schema_booleans_without_tools_is_byte_identical(self):
         body = json.dumps({

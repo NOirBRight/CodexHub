@@ -1118,7 +1118,7 @@ fn normalize_usage_limit_object(map: &mut Map<String, Value>, fallback_key: Opti
         }
     }
 
-    let window_minutes = object_f64(map, &["windowMinutes", "window_minutes"]);
+    let window_minutes = object_f64(map, &["windowDurationMins", "windowMinutes", "window_minutes"]);
     let normalized_period = window_minutes.and_then(rate_limit_period_from_window_minutes);
     if !contains_any(map, &["period", "type", "kind", "window"]) {
         let period = normalized_period
@@ -1592,6 +1592,29 @@ mod tests {
         assert_eq!(limits[1].period.as_deref(), Some("week"));
         assert_eq!(limits[1].used, Some(72.0));
         assert_eq!(limits[1].remaining, Some(28.0));
+    }
+
+    #[test]
+    fn current_account_rate_limit_window_survives_local_fallback() {
+        let response = json!({
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 27, "windowDurationMins": 10080, "resetsAt": 1789435336},
+                "secondary": null,
+                "credits": {"hasCredits": false, "balance": "0"}
+            }
+        });
+        let mut usage = CodexAccountUsageResponse {
+            daily_usage_buckets: None,
+            usage_limits: None,
+            summary: CodexAccountUsageSummary::default(),
+        };
+        merge_rate_limits_into_usage(&mut usage, response);
+        assert!(usage_has_windowed_quotas(&usage), "live weekly quota must bypass log fallback");
+        let snapshot = snapshot_from_codex_account_usage(0, 1, usage).unwrap();
+        assert_eq!(snapshot.limits.len(), 1);
+        assert_eq!(snapshot.limits[0].period, "week");
+        assert_eq!(snapshot.limits[0].remaining, Some(73.0));
     }
 
     #[test]

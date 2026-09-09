@@ -214,7 +214,7 @@ def test_external_resolution_returns_ephemeral_provider_model_facts() -> None:
     assert upstream["input_modalities"] == ("text",)
 
 
-def test_context_guard_uses_only_complete_published_official_budget() -> None:
+def test_context_projection_uses_only_complete_published_official_budget() -> None:
     budget = {
         "source": "current_direct_official",
         "freshness": "fresh",
@@ -238,7 +238,7 @@ def test_context_guard_uses_only_complete_published_official_budget() -> None:
         ]
     }
 
-    guarded = CatalogRuntime().catalog_with_openai_context_guard(
+    guarded = CatalogRuntime().catalog_with_published_official_budgets(
         catalog,
         {"gpt-test": budget},
         require_published_snapshot=True,

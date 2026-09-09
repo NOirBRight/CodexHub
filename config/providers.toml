@@ -573,7 +573,7 @@ enabled = true
 
   [[providers.models]]
   id = "claude-sonnet-5"
-  display_name = "Command Code claude-sonnet-5"
+  display_name = "claude-sonnet-5"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -585,7 +585,7 @@ enabled = true
 
   [[providers.models]]
   id = "claude-sonnet-4-6"
-  display_name = "Command Code claude-sonnet-4-6"
+  display_name = "claude-sonnet-4-6"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -597,7 +597,7 @@ enabled = true
 
   [[providers.models]]
   id = "claude-fable-5"
-  display_name = "Command Code claude-fable-5"
+  display_name = "claude-fable-5"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -608,20 +608,20 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "claude-opus-5"
-  display_name = "Command Code claude-opus-5"
+  id = "claude-fable-5-1"
+  display_name = "claude-fable-5-1"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
-  default_reasoning_level = "max"
+  default_reasoning_level = "high"
   thinking_mode = "always_on"
   sort_order = 4
   enabled = true
 
   [[providers.models]]
-  id = "claude-opus-4-8"
-  display_name = "Command Code claude-opus-4-8"
+  id = "claude-opus-5"
+  display_name = "claude-opus-5"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -632,8 +632,8 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "claude-opus-4-7"
-  display_name = "Command Code claude-opus-4-7"
+  id = "claude-opus-4-8"
+  display_name = "claude-opus-4-8"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -644,10 +644,10 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "claude-haiku-4-5-20251001"
-  display_name = "Command Code claude-haiku-4-5-20251001"
-  context_window = 200000
-  max_output_tokens = 64000
+  id = "claude-opus-4-7"
+  display_name = "claude-opus-4-7"
+  context_window = 1000000
+  max_output_tokens = 128000
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
   default_reasoning_level = "max"
@@ -656,56 +656,56 @@ enabled = true
   enabled = true
 
   [[providers.models]]
+  id = "claude-haiku-4-5-20251001"
+  display_name = "claude-haiku-4-5-20251001"
+  context_window = 200000
+  max_output_tokens = 64000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 8
+  enabled = true
+
+  [[providers.models]]
   id = "gpt-5.6-sol"
-  display_name = "Command Code gpt-5.6-sol"
+  display_name = "gpt-5.6-sol"
   context_window = 1048576
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 8
+  sort_order = 9
   enabled = true
 
   [[providers.models]]
   id = "gpt-5.6-terra"
-  display_name = "Command Code gpt-5.6-terra"
+  display_name = "gpt-5.6-terra"
   context_window = 1048576
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
   default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
-  sort_order = 9
+  sort_order = 10
   enabled = true
 
   [[providers.models]]
   id = "gpt-5.6-luna"
-  display_name = "Command Code gpt-5.6-luna"
+  display_name = "gpt-5.6-luna"
   context_window = 1050000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 10
-  enabled = true
-
-  [[providers.models]]
-  id = "gpt-5.5"
-  display_name = "Command Code gpt-5.5"
-  context_window = 256000
-  max_output_tokens = 128000
-  input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
-  default_reasoning_level = "xhigh"
-  thinking_mode = "always_on"
   sort_order = 11
   enabled = true
 
   [[providers.models]]
-  id = "gpt-5.4"
-  display_name = "Command Code gpt-5.4"
+  id = "gpt-5.5"
+  display_name = "gpt-5.5"
   context_window = 256000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -716,8 +716,8 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "gpt-5.3-codex"
-  display_name = "Command Code gpt-5.3-codex"
+  id = "gpt-5.4"
+  display_name = "gpt-5.4"
   context_window = 256000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -728,32 +728,32 @@ enabled = true
   enabled = true
 
   [[providers.models]]
+  id = "gpt-5.3-codex"
+  display_name = "gpt-5.3-codex"
+  context_window = 256000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 14
+  enabled = true
+
+  [[providers.models]]
   id = "gpt-5.4-mini"
-  display_name = "Command Code gpt-5.4-mini"
+  display_name = "gpt-5.4-mini"
   context_window = 256000
   max_output_tokens = 64000
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 14
-  enabled = true
-
-  [[providers.models]]
-  id = "deepseek/deepseek-v4-pro"
-  display_name = "Command Code deepseek-v4-pro"
-  context_window = 1000000
-  max_output_tokens = 384000
-  input_modalities = ["text"]
-  supported_reasoning_levels = ["high", "max"]
-  default_reasoning_level = "max"
-  thinking_mode = "always_on"
   sort_order = 15
   enabled = true
 
   [[providers.models]]
-  id = "deepseek/deepseek-v4-flash"
-  display_name = "Command Code deepseek-v4-flash"
+  id = "deepseek/deepseek-v4-pro"
+  display_name = "deepseek-v4-pro"
   context_window = 1000000
   max_output_tokens = 384000
   input_modalities = ["text"]
@@ -764,11 +764,11 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "deepseek/deepseek-v4-flash-vision-exp"
-  display_name = "Command Code deepseek-v4-flash-vision-exp"
+  id = "deepseek/deepseek-v4-flash"
+  display_name = "deepseek-v4-flash"
   context_window = 1000000
   max_output_tokens = 384000
-  input_modalities = ["text", "image"]
+  input_modalities = ["text"]
   supported_reasoning_levels = ["high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
@@ -776,23 +776,23 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "moonshotai/kimi-k2.7-code"
-  display_name = "Command Code kimi-k2.7-code"
-  context_window = 262144
-  max_output_tokens = 32768
+  id = "deepseek/deepseek-v4-flash-vision-exp"
+  display_name = "deepseek-v4-flash-vision-exp"
+  context_window = 1000000
+  max_output_tokens = 384000
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "high", "max"]
+  supported_reasoning_levels = ["high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
   sort_order = 18
   enabled = true
 
   [[providers.models]]
-  id = "moonshotai/kimi-k2.7-code-highspeed"
-  display_name = "Command Code kimi-k2.7-code-highspeed"
-  context_window = 262144
-  max_output_tokens = 32768
-  input_modalities = ["text", "image"]
+  id = "deepseek/deepseek-v4-flash-fast"
+  display_name = "deepseek-v4-flash-fast"
+  context_window = 1000000
+  max_output_tokens = 384000
+  input_modalities = ["text"]
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
@@ -800,34 +800,34 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "moonshotai/kimi-k2.6"
-  display_name = "Command Code kimi-k2.6"
+  id = "moonshotai/kimi-k3"
+  display_name = "kimi-k3"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 20
+  enabled = true
+
+  [[providers.models]]
+  id = "moonshotai/kimi-k2.7-code"
+  display_name = "kimi-k2.7-code"
   context_window = 262144
   max_output_tokens = 32768
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
-  thinking_mode = "toggle"
-  sort_order = 20
-  enabled = true
-
-  [[providers.models]]
-  id = "moonshotai/kimi-k2.5"
-  display_name = "Command Code kimi-k2.5"
-  context_window = 262144
-  max_output_tokens = 65536
-  input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "high", "max"]
-  default_reasoning_level = "max"
-  thinking_mode = "toggle"
+  thinking_mode = "always_on"
   sort_order = 21
   enabled = true
 
   [[providers.models]]
-  id = "z-ai/glm-5.3-flash"
-  display_name = "Command Code glm-5.3-flash"
-  context_window = 1000000
-  max_output_tokens = 131072
+  id = "moonshotai/kimi-k2.7-code-highspeed"
+  display_name = "kimi-k2.7-code-highspeed"
+  context_window = 262144
+  max_output_tokens = 32768
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
@@ -836,71 +836,71 @@ enabled = true
   enabled = true
 
   [[providers.models]]
+  id = "moonshotai/kimi-k2.6"
+  display_name = "kimi-k2.6"
+  context_window = 262144
+  max_output_tokens = 32768
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "toggle"
+  sort_order = 23
+  enabled = true
+
+  [[providers.models]]
+  id = "moonshotai/kimi-k2.5"
+  display_name = "kimi-k2.5"
+  context_window = 262144
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "toggle"
+  sort_order = 24
+  enabled = true
+
+  [[providers.models]]
+  id = "z-ai/glm-5.3-flash"
+  display_name = "glm-5.3-flash"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 25
+  enabled = true
+
+  [[providers.models]]
   id = "zai-org/glm-5.3"
-  display_name = "Command Code glm-5.3"
+  display_name = "glm-5.3"
   context_window = 1000000
   max_output_tokens = 131072
   input_modalities = ["text"]
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 23
+  sort_order = 26
   enabled = true
 
   [[providers.models]]
   id = "zai-org/glm-5.2"
-  display_name = "Command Code glm-5.2"
+  display_name = "glm-5.2"
   context_window = 1000000
   max_output_tokens = 131072
   input_modalities = ["text"]
   supported_reasoning_levels = ["high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 24
-  enabled = true
-
-  [[providers.models]]
-  id = "minimax/minimax-m2.7-free"
-  display_name = "Command Code minimax-m2.7-free"
-  context_window = 204800
-  max_output_tokens = 131072
-  input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "xhigh"
-  thinking_mode = "always_on"
-  sort_order = 25
-  enabled = true
-
-  [[providers.models]]
-  id = "minimaxai/minimax-m2.5"
-  display_name = "Command Code minimax-m2.5"
-  context_window = 204800
-  max_output_tokens = 131072
-  input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "xhigh"
-  thinking_mode = "always_on"
-  sort_order = 26
-  enabled = true
-
-  [[providers.models]]
-  id = "xiaomi/mimo-v2.5-pro"
-  display_name = "Command Code mimo-v2.5-pro"
-  context_window = 1048576
-  max_output_tokens = 128000
-  input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "xhigh"
-  thinking_mode = "always_on"
   sort_order = 27
   enabled = true
 
   [[providers.models]]
-  id = "xiaomi/mimo-v2.5"
-  display_name = "Command Code mimo-v2.5"
-  context_window = 1000000
-  max_output_tokens = 128000
-  input_modalities = ["text", "image"]
+  id = "minimax/minimax-m2.7-free"
+  display_name = "minimax-m2.7-free"
+  context_window = 204800
+  max_output_tokens = 131072
+  input_modalities = ["text"]
   supported_reasoning_levels = ["low", "medium", "xhigh"]
   default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
@@ -908,11 +908,11 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "qwen/qwen3.8-max"
-  display_name = "Command Code qwen3.8-max"
-  context_window = 1000000
+  id = "minimaxai/minimax-m2.5"
+  display_name = "minimax-m2.5"
+  context_window = 204800
   max_output_tokens = 131072
-  input_modalities = ["text", "image"]
+  input_modalities = ["text"]
   supported_reasoning_levels = ["low", "medium", "xhigh"]
   default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
@@ -920,10 +920,10 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "qwen/qwen3.8-27b"
-  display_name = "Command Code qwen3.8-27b"
-  context_window = 262144
-  max_output_tokens = 65536
+  id = "xiaomi/mimo-v2.5-pro"
+  display_name = "mimo-v2.5-pro"
+  context_window = 1048576
+  max_output_tokens = 128000
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "xhigh"]
   default_reasoning_level = "xhigh"
@@ -932,10 +932,10 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "qwen/qwen3.8-flash"
-  display_name = "Command Code qwen3.8-flash"
+  id = "xiaomi/mimo-v2.5"
+  display_name = "mimo-v2.5"
   context_window = 1000000
-  max_output_tokens = 65536
+  max_output_tokens = 128000
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "xhigh"]
   default_reasoning_level = "xhigh"
@@ -944,59 +944,59 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "stepfun/step-3.7-flash"
-  display_name = "Command Code step-3.7-flash"
-  context_window = 256000
-  max_output_tokens = 64000
-  input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high"]
-  default_reasoning_level = "high"
+  id = "qwen/qwen3.8-max"
+  display_name = "qwen3.8-max"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
   sort_order = 32
   enabled = true
 
   [[providers.models]]
-  id = "stepfun/step-3.5-flash"
-  display_name = "Command Code step-3.5-flash"
-  context_window = 256000
-  max_output_tokens = 64000
-  input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high"]
-  default_reasoning_level = "high"
+  id = "qwen/qwen3.8-max-0902"
+  display_name = "qwen3.8-max-0902"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
   sort_order = 33
   enabled = true
 
   [[providers.models]]
-  id = "tencent/hy3"
-  display_name = "Command Code hy3"
-  context_window = 256000
-  max_output_tokens = 64000
-  input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high"]
-  default_reasoning_level = "high"
+  id = "qwen/qwen3.8-27b"
+  display_name = "qwen3.8-27b"
+  context_window = 262144
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
   sort_order = 34
   enabled = true
 
   [[providers.models]]
-  id = "tencent/hy3-paid"
-  display_name = "Command Code hy3-paid"
-  context_window = 256000
-  max_output_tokens = 64000
-  input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high"]
-  default_reasoning_level = "high"
+  id = "qwen/qwen3.8-flash"
+  display_name = "qwen3.8-flash"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
   sort_order = 35
   enabled = true
 
   [[providers.models]]
-  id = "google/gemini-3.7-flash"
-  display_name = "Command Code gemini-3.7-flash"
-  context_window = 1000000
-  max_output_tokens = 65536
-  input_modalities = ["text", "image"]
+  id = "stepfun/step-3.7-flash"
+  display_name = "step-3.7-flash"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
   supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
@@ -1004,11 +1004,11 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "google/gemini-3.6-flash"
-  display_name = "Command Code gemini-3.6-flash"
-  context_window = 1000000
-  max_output_tokens = 65536
-  input_modalities = ["text", "image"]
+  id = "stepfun/step-3.5-flash"
+  display_name = "step-3.5-flash"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
   supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
@@ -1016,11 +1016,11 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "google/gemini-3.5-flash"
-  display_name = "Command Code gemini-3.5-flash"
-  context_window = 1000000
-  max_output_tokens = 65536
-  input_modalities = ["text", "image"]
+  id = "tencent/hy3"
+  display_name = "hy3"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
   supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
@@ -1028,11 +1028,11 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "google/gemini-3.5-flash-lite"
-  display_name = "Command Code gemini-3.5-flash-lite"
-  context_window = 1000000
-  max_output_tokens = 65536
-  input_modalities = ["text", "image"]
+  id = "tencent/hy3-paid"
+  display_name = "hy3-paid"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
   supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
@@ -1040,11 +1040,11 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "google/gemini-3.1-flash-lite"
-  display_name = "Command Code gemini-3.1-flash-lite"
-  context_window = 1000000
-  max_output_tokens = 65536
-  input_modalities = ["text", "image"]
+  id = "tencent/hy4-preview"
+  display_name = "hy4-preview"
+  context_window = 1024000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
   supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
@@ -1052,58 +1052,58 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "sakana/fugu-ultra"
-  display_name = "Command Code fugu-ultra"
-  context_window = 256000
-  max_output_tokens = 64000
-  input_modalities = ["text"]
-  supported_reasoning_levels = ["high", "xhigh"]
-  default_reasoning_level = "xhigh"
+  id = "google/gemini-3.8-flash"
+  display_name = "gemini-3.8-flash"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
   thinking_mode = "always_on"
   sort_order = 41
   enabled = true
 
   [[providers.models]]
-  id = "meta/muse-spark-1.1"
-  display_name = "Command Code muse-spark-1.1"
-  context_window = 1048576
-  max_output_tokens = 131072
+  id = "google/gemini-3.7-flash"
+  display_name = "gemini-3.7-flash"
+  context_window = 1000000
+  max_output_tokens = 65536
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
-  default_reasoning_level = "xhigh"
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
   thinking_mode = "always_on"
   sort_order = 42
   enabled = true
 
   [[providers.models]]
-  id = "meta/muse-spark-1.2"
-  display_name = "Command Code muse-spark-1.2"
-  context_window = 1048576
-  max_output_tokens = 131072
+  id = "google/gemini-3.6-flash"
+  display_name = "gemini-3.6-flash"
+  context_window = 1000000
+  max_output_tokens = 65536
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
-  default_reasoning_level = "xhigh"
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
   thinking_mode = "always_on"
   sort_order = 43
   enabled = true
 
   [[providers.models]]
-  id = "meta/muse-spark-1.2-contributor"
-  display_name = "Command Code muse-spark-1.2-contributor"
-  context_window = 1048576
-  max_output_tokens = 131072
+  id = "google/gemini-3.5-flash"
+  display_name = "gemini-3.5-flash"
+  context_window = 1000000
+  max_output_tokens = 65536
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
-  default_reasoning_level = "xhigh"
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
   thinking_mode = "always_on"
   sort_order = 44
   enabled = true
 
   [[providers.models]]
-  id = "xai/grok-4.5"
-  display_name = "Command Code grok-4.5"
-  context_window = 500000
-  max_output_tokens = 500000
+  id = "google/gemini-3.5-flash-lite"
+  display_name = "gemini-3.5-flash-lite"
+  context_window = 1000000
+  max_output_tokens = 65536
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
@@ -1112,15 +1112,111 @@ enabled = true
   enabled = true
 
   [[providers.models]]
-  id = "xai/grok-4.6"
-  display_name = "Command Code grok-4.6"
-  context_window = 500000
-  max_output_tokens = 500000
+  id = "google/gemini-3.1-flash-lite"
+  display_name = "gemini-3.1-flash-lite"
+  context_window = 1000000
+  max_output_tokens = 65536
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 46
+  enabled = true
+
+  [[providers.models]]
+  id = "sakana/fugu-ultra"
+  display_name = "fugu-ultra"
+  context_window = 256000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 47
+  enabled = true
+
+  [[providers.models]]
+  id = "meta/muse-spark-1.1"
+  display_name = "muse-spark-1.1"
+  context_window = 1048576
+  max_output_tokens = 131072
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
   default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
-  sort_order = 46
+  sort_order = 48
+  enabled = true
+
+  [[providers.models]]
+  id = "meta/muse-spark-1.2"
+  display_name = "muse-spark-1.2"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 49
+  enabled = true
+
+  [[providers.models]]
+  id = "meta/muse-spark-1.2-contributor"
+  display_name = "muse-spark-1.2-contributor"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 50
+  enabled = true
+
+  [[providers.models]]
+  id = "meta/muse-spark-1.3"
+  display_name = "muse-spark-1.3"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 51
+  enabled = true
+
+  [[providers.models]]
+  id = "meta/muse-spark-1.3-contributor"
+  display_name = "muse-spark-1.3-contributor"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 52
+  enabled = true
+
+  [[providers.models]]
+  id = "xai/grok-4.5"
+  display_name = "grok-4.5"
+  context_window = 500000
+  max_output_tokens = 500000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 53
+  enabled = true
+
+  [[providers.models]]
+  id = "xai/grok-4.6"
+  display_name = "grok-4.6"
+  context_window = 500000
+  max_output_tokens = 500000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 54
   enabled = true
 
 [[providers]]
@@ -1152,7 +1248,7 @@ enabled = true
   context_window = 500000
   max_output_tokens = 500000
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
   sort_order = 2
@@ -1183,15 +1279,27 @@ enabled = true
   enabled = true
 
   [[providers.models]]
+  id = "muse-spark-1.3-contributor"
+  display_name = "OpenCode Muse Spark 1.3 Contributor"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 5
+  enabled = true
+
+  [[providers.models]]
   id = "glm-5.3-flash"
   display_name = "OpenCode GLM-5.3 Flash"
   context_window = 1000000
   max_output_tokens = 131072
-  input_modalities = ["text"]
+  input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "high", "max"]
-  default_reasoning_level = "high"
+  default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 5
+  sort_order = 6
   enabled = true
 
   [[providers.models]]
@@ -1203,7 +1311,7 @@ enabled = true
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 6
+  sort_order = 7
   enabled = true
 
   [[providers.models]]
@@ -1215,7 +1323,7 @@ enabled = true
   supported_reasoning_levels = ["high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 7
+  sort_order = 8
   enabled = true
 
   [[providers.models]]
@@ -1227,7 +1335,7 @@ enabled = true
   supported_reasoning_levels = ["high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 8
+  sort_order = 9
   enabled = true
 
   [[providers.models]]
@@ -1236,10 +1344,8 @@ enabled = true
   context_window = 202752
   max_output_tokens = 131072
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
-  default_reasoning_level = "high"
-  thinking_mode = "always_on"
-  sort_order = 9
+  thinking_mode = "toggle"
+  sort_order = 10
   enabled = true
 
   [[providers.models]]
@@ -1249,9 +1355,9 @@ enabled = true
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "high", "max"]
-  default_reasoning_level = "high"
+  default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 10
+  sort_order = 11
   enabled = true
 
   [[providers.models]]
@@ -1261,7 +1367,7 @@ enabled = true
   max_output_tokens = 262144
   input_modalities = ["text", "image"]
   thinking_mode = "always_on"
-  sort_order = 11
+  sort_order = 12
   enabled = true
 
   [[providers.models]]
@@ -1271,7 +1377,7 @@ enabled = true
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
   thinking_mode = "toggle"
-  sort_order = 12
+  sort_order = 13
   enabled = true
 
   [[providers.models]]
@@ -1283,7 +1389,7 @@ enabled = true
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "toggle"
-  sort_order = 13
+  sort_order = 14
   enabled = true
 
   [[providers.models]]
@@ -1292,10 +1398,8 @@ enabled = true
   context_window = 1000000
   max_output_tokens = 131072
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
-  default_reasoning_level = "high"
-  thinking_mode = "always_on"
-  sort_order = 14
+  thinking_mode = "toggle"
+  sort_order = 15
   enabled = true
 
   [[providers.models]]
@@ -1307,7 +1411,7 @@ enabled = true
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 15
+  sort_order = 16
   enabled = true
 
   [[providers.models]]
@@ -1319,7 +1423,7 @@ enabled = true
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 16
+  sort_order = 17
   enabled = true
 
   [[providers.models]]
@@ -1331,7 +1435,7 @@ enabled = true
   supported_reasoning_levels = ["high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 17
+  sort_order = 18
   enabled = true
 
   [[providers.models]]
@@ -1341,9 +1445,9 @@ enabled = true
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "low"
+  default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
-  sort_order = 18
+  sort_order = 19
   enabled = true
 
   [[providers.models]]
@@ -1352,10 +1456,10 @@ enabled = true
   context_window = 1048576
   max_output_tokens = 128000
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
-  default_reasoning_level = "high"
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
-  sort_order = 19
+  sort_order = 20
   enabled = true
 
   [[providers.models]]
@@ -1364,10 +1468,10 @@ enabled = true
   context_window = 1048576
   max_output_tokens = 131072
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
-  default_reasoning_level = "high"
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
-  sort_order = 20
+  sort_order = 21
   enabled = true
 
   [[providers.models]]
@@ -1377,9 +1481,9 @@ enabled = true
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "low"
+  default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
-  sort_order = 21
+  sort_order = 22
   enabled = true
 
   [[providers.models]]
@@ -1388,10 +1492,10 @@ enabled = true
   context_window = 256000
   max_output_tokens = 64000
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 22
+  sort_order = 23
   enabled = true
 
   [[providers.models]]
@@ -1400,10 +1504,22 @@ enabled = true
   context_window = 256000
   max_output_tokens = 64000
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+  supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 23
+  sort_order = 24
+  enabled = true
+
+  [[providers.models]]
+  id = "hy4-preview"
+  display_name = "OpenCode Hy4 Preview"
+  context_window = 1024000
+  max_output_tokens = 64000
+  input_modalities = ["text"]
+  supported_reasoning_levels = ["high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 25
   enabled = true
 
   [[providers.models]]
@@ -1413,7 +1529,7 @@ enabled = true
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
   thinking_mode = "toggle"
-  sort_order = 24
+  sort_order = 26
   enabled = true
 
   [[providers.models]]
@@ -1423,7 +1539,7 @@ enabled = true
   max_output_tokens = 131072
   input_modalities = ["text"]
   thinking_mode = "always_on"
-  sort_order = 25
+  sort_order = 27
   enabled = true
 
   [[providers.models]]
@@ -1433,7 +1549,7 @@ enabled = true
   max_output_tokens = 131072
   input_modalities = ["text"]
   thinking_mode = "always_on"
-  sort_order = 26
+  sort_order = 28
   enabled = true
 
   [[providers.models]]
@@ -1443,9 +1559,21 @@ enabled = true
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "low"
+  default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
-  sort_order = 27
+  sort_order = 29
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen3.8-flash"
+  display_name = "OpenCode Qwen3.8 Flash"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 30
   enabled = true
 
   [[providers.models]]
@@ -1454,10 +1582,8 @@ enabled = true
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
-  default_reasoning_level = "high"
-  thinking_mode = "always_on"
-  sort_order = 28
+  thinking_mode = "toggle"
+  sort_order = 31
   enabled = true
 
   [[providers.models]]
@@ -1466,10 +1592,8 @@ enabled = true
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
-  default_reasoning_level = "high"
-  thinking_mode = "always_on"
-  sort_order = 29
+  thinking_mode = "toggle"
+  sort_order = 32
   enabled = true
 
   [[providers.models]]
@@ -1478,10 +1602,8 @@ enabled = true
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
-  default_reasoning_level = "high"
-  thinking_mode = "always_on"
-  sort_order = 30
+  thinking_mode = "toggle"
+  sort_order = 33
   enabled = true
 
   [[providers.models]]
@@ -1493,7 +1615,19 @@ enabled = true
   supported_reasoning_levels = ["high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 31
+  sort_order = 34
+  enabled = true
+
+  [[providers.models]]
+  id = "omen-alpha"
+  display_name = "OpenCode Omen Alpha"
+  context_window = 500000
+  max_output_tokens = 128000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 35
   enabled = true
 
 [[providers]]
@@ -1512,13 +1646,25 @@ sort_order = 8
 enabled = true
 
   [[providers.models]]
-  id = "grok-4"
-  display_name = "Grok 4"
-  context_window = 256000
-  max_output_tokens = 65536
+  id = "grok-4.6"
+  display_name = "Grok 4.6"
+  context_window = 500000
+  max_output_tokens = 500000
   input_modalities = ["text", "image"]
   supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
   sort_order = 1
+  enabled = true
+
+  [[providers.models]]
+  id = "grok-4.5"
+  display_name = "Grok 4.5"
+  context_window = 500000
+  max_output_tokens = 500000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 2
   enabled = true
