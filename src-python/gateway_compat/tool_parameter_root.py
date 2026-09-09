@@ -195,6 +195,23 @@ def coerce_tool_parameter_root(schema: Any) -> tuple[Any, bool]:
         for key in ("anyOf", "oneOf")
     )
     if has_object_union:
+        # xAI rejects a union root whose object branches themselves contain
+        # unions, even with explicit object types. Keep the exact conjunction
+        # under an object root instead of flattening non-associative oneOf.
+        # Leave definitions at the document root so local references still work.
+        if any(
+            isinstance(branch, dict)
+            and any(isinstance(branch.get(key), list) for key in ("anyOf", "oneOf"))
+            for union in ("anyOf", "oneOf")
+            for branch in next_node.get(union, [])
+        ):
+            conjunctions = list(next_node.get("allOf", []))
+            for union in ("anyOf", "oneOf"):
+                if union in next_node:
+                    conjunctions.append({union: next_node.pop(union)})
+            next_node["allOf"] = conjunctions
+            next_node["type"] = "object"
+            return next_node, True
         return next_node, changed
     if isinstance(type_value, list):
         if "object" in type_value:

@@ -20,6 +20,8 @@ ACTIVATION = ROOT / "scripts" / "Enter-CodexHubPython.ps1"
 PREPARE_RUNTIME = ROOT / "scripts" / "Prepare-PythonRuntime.ps1"
 
 DIRECT_PYTHON_ENTRYPOINTS = (
+    "scripts/capture_desktop_tool_catalog.py",
+    "scripts/e2e_desktop_tool_matrix.py",
     "src-python/bucket_sync.py",
     "src-python/catalog_sync.py",
     "src-python/codex_proxy.py",
@@ -330,7 +332,7 @@ def test_relative_windows_entrypoints_keep_the_repository_runtime_contract() -> 
         "-DryRun",
     )
     assert portable_plan.returncode == 0, portable_plan.stdout + portable_plan.stderr
-    assert '"version":"0.2.2"' in portable_plan.stdout
+    assert '"version":"0.2.3-rc.1"' in portable_plan.stdout
 
     runtime_check = _run_relative_powershell_script(
         r".\scripts\Prepare-PythonRuntime.ps1", "-CheckOnly"
