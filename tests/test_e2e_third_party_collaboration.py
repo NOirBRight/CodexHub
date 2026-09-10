@@ -480,3 +480,25 @@ def test_both_fixture_turns_require_native_edit_tool_not_shell_spelling():
     for prompt in (runner._scenario_prompt(collaboration_version="v1", child_model="xai/grok-4.6", child_effort="high"), runner._no_subagent_turn_prompt()):
         assert "declared apply_patch tool directly" in prompt
         assert "not an exec_command shell command" in prompt
+
+
+def test_test_command_diagnostics_preserve_reason_without_secrets():
+    runner = _runner_module()
+    item = {"id": "item_7", "type": "command_execution", "status": "completed", "exit_code": 0,
+            "command": 'cd /private/secret && "$CODEXHUB_E2E_PYTHON" -m unittest -q test_parent_task.py'}
+    detail = runner._test_command_diagnostic(item, "test_parent_task.py")
+    assert detail["accepted"] is False
+    assert detail["reason"] == "argument_count_mismatch"
+    assert "secret" not in json.dumps(detail)
+    assert "&&" in detail["argv_shape"]
+    item["command"] = '"$CODEXHUB_E2E_PYTHON" -m unittest -q test_parent_task.py'
+    assert runner._test_command_diagnostic(item, "test_parent_task.py")["accepted"] is True
+
+
+def test_collected_test_diagnostics_are_linked_to_client_items(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v2")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v2", parent_effort="high", child_effort="high", client_outputs=(output,))
+    details = evidence["execution_diagnostics"]["test_commands"]
+    assert any(d["accepted"] for d in details)
+    assert all(d["thread_id"] and d["item_id"] is not None and d["turn_index"] == 0 for d in details)

@@ -231,17 +231,42 @@ def _test_tool_call_count(records: list[dict[str, object]], test_filename: str) 
 
 
 def _successful_test_item(item: dict, test_filename: str) -> bool:
-    if item.get("type") != "command_execution" or item.get("status") != "completed" or item.get("exit_code") != 0:
-        return False
+    return _test_command_diagnostic(item, test_filename)["accepted"]
+
+
+def _test_command_diagnostic(item: dict, test_filename: str) -> dict:
+    """Keep predicate evidence, never arbitrary command arguments or output."""
+    argv = []
+    reason = None
+    wrapper = False
     try:
         argv = shlex.split(item.get("command", ""))
         if len(argv) == 3 and Path(argv[0]).name in {"bash", "sh", "zsh"} and argv[1] in {"-lc", "-c"}:
+            wrapper = True
             argv = shlex.split(argv[2])
-    except ValueError:
-        return False
-    return len(argv) == 5 and argv[0] in {
-        sys.executable, os.environ.get("CODEXHUB_E2E_PYTHON"), "$CODEXHUB_E2E_PYTHON",
-    } and argv[1:] == ["-m", "unittest", "-q", test_filename]
+    except (ValueError, TypeError):
+        reason = "command_parse_error"
+    interpreters = {sys.executable, os.environ.get("CODEXHUB_E2E_PYTHON"), "$CODEXHUB_E2E_PYTHON"} - {None}
+    if item.get("type") != "command_execution":
+        reason = "not_command_execution"
+    elif item.get("status") != "completed" or item.get("exit_code") != 0:
+        reason = "command_not_successful"
+    elif reason is None:
+        if len(argv) != 5:
+            reason = "argument_count_mismatch"
+        elif argv[0] not in interpreters:
+            reason = "interpreter_mismatch"
+        elif argv[1:] != ["-m", "unittest", "-q", test_filename]:
+            reason = "test_arguments_mismatch"
+    safe_tokens = {"-m", "unittest", "-q", "-v", "test_parent_task.py", "test_resume_turn.py",
+                   "&&", ";", "cd", "echo", "python", "python3"}
+    return {
+        "item_id": item.get("id"), "status": item.get("status"), "exit_code": item.get("exit_code"),
+        "expected_test": test_filename, "accepted": reason is None, "reason": reason,
+        "shell_wrapper": wrapper,
+        "argv_shape": ["<BOUND_PYTHON>" if arg in interpreters else arg if arg in safe_tokens
+                       else "<REDACTED>" for arg in argv],
+    }
 
 
 def _read_client_turn(path: Path) -> dict:
@@ -629,6 +654,12 @@ def collect_evidence(
         "lifecycle_diagnostics": lifecycle_diagnostics,
         "execution_diagnostics": {
             "tests_and_terminals_verified": tests_and_terminals_verified,
+            "test_commands": [
+                dict(_test_command_diagnostic(item, "test_parent_task.py" if index == 0 else "test_resume_turn.py"),
+                     thread_id=turn["thread_id"], turn_index=index)
+                for index, turn in enumerate(client_turns)
+                for item in turn["items"] if item.get("type") == "command_execution"
+            ],
             "parent_edits_verified": parent_edits_verified,
             "cli_source_edit_counts": [sum(
                 item.get("type") == "file_change" and item.get("status") == "completed"
@@ -963,7 +994,7 @@ def main() -> int:
     ).is_file():
         parser.error("the selected xAI model requires source-home/proxy/xai_auth.json")
     report = {
-        "report_version": 6,
+        "report_version": 7,
         "cli_version": cli_version,
         "gateway_sha": subprocess.check_output(["git", "-C", str(gateway_root), "rev-parse", "HEAD"], text=True).strip(),
         "gateway_dirty": bool(subprocess.check_output(["git", "-C", str(gateway_root), "status", "--porcelain"], text=True).strip()),
