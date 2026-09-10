@@ -279,7 +279,11 @@ def _require_omittable_responses_transport_fields(payload: Mapping[str, Any]) ->
             )
 
 
-def _consume_codex_chat_transport_fields(payload: dict[str, Any]) -> None:
+def _consume_codex_chat_transport_fields(
+    payload: dict[str, Any],
+    *,
+    preserve_reasoning_history: bool = False,
+) -> None:
     """Consume the bounded Codex transport defaults with no Chat wire form."""
 
     client_metadata = payload.get("client_metadata")
@@ -400,7 +404,12 @@ def _consume_codex_chat_transport_fields(payload: dict[str, Any]) -> None:
                 "unsupported_protocol_semantics",
                 "Cannot consume unknown Responses reasoning context.",
             )
-    payload.pop("reasoning", None)
+    # Keep an explicit reasoning selector for the capability-bound Chat route
+    # so the upstream can actually enter its thinking mode and return the
+    # reasoning trace that must be echoed on a follow-up tool call.  Ordinary
+    # cross-protocol routes still consume this Responses-only control.
+    if not preserve_reasoning_history:
+        payload.pop("reasoning", None)
 
 
 def _function_arguments(value: Mapping[str, Any], label: str) -> str:
@@ -870,11 +879,43 @@ def responses_request_to_chat_completion_body(
         "Responses request",
     )
     _require_omittable_responses_transport_fields(payload)
-    if payload.get("reasoning") is not None:
-        raise UnsupportedProtocolTranslationError(
-            "unsupported_protocol_semantics",
-            "Cannot translate Responses reasoning controls to Chat Completions without a proven equivalent.",
+    chat_reasoning_effort: str | None = None
+    reasoning_control = payload.get("reasoning")
+    if reasoning_control is not None:
+        if not preserve_reasoning_history:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate Responses reasoning controls to Chat Completions without a proven equivalent.",
+            )
+        if not isinstance(reasoning_control, Mapping):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a non-object Responses reasoning control to Chat Completions.",
+            )
+        _require_supported_fields(
+            reasoning_control,
+            {"effort", "summary"},
+            "Responses reasoning control",
         )
+        effort = reasoning_control.get("effort")
+        if not isinstance(effort, str) or effort not in {
+            "none", "minimal", "low", "medium", "high", "xhigh", "max",
+        }:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate an unknown Responses reasoning effort to Chat Completions.",
+            )
+        # ``summary=auto`` is Codex's default selector and does not request a
+        # provider-specific summary representation.  It is therefore safe to
+        # consume at this protocol seam.  Any explicit alternative (including
+        # null) could change the requested output semantics and must remain
+        # fail-closed rather than being silently dropped.
+        if "summary" in reasoning_control and reasoning_control.get("summary") != "auto":
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate non-default Responses reasoning summary to Chat Completions.",
+            )
+        chat_reasoning_effort = effort
     if "input" in payload and not isinstance(payload["input"], (str, list)):
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
@@ -918,6 +959,12 @@ def responses_request_to_chat_completion_body(
         chat_payload["stream_options"] = stream_options
     if "max_output_tokens" in payload:
         chat_payload["max_tokens"] = payload["max_output_tokens"]
+    if chat_reasoning_effort is not None:
+        # This field is a provider-neutral Chat Completions control accepted
+        # only on the explicit reasoning-history capability route.  It is not
+        # inferred from a provider name or silently added to ordinary Chat
+        # requests.
+        chat_payload["reasoning_effort"] = chat_reasoning_effort
 
     tools = responses_tools_to_chat_tools(payload.get("tools"))
     tools.extend(loaded_tools)
@@ -1972,6 +2019,36 @@ def _validate_chat_stream_source(source: Mapping[str, Any]) -> None:
     _raise_for_unsupported_chat_message_semantics(source)
 
 
+def _chat_stream_source(choice: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Select the semantic source from a Chat stream choice.
+
+    OpenAI-compatible providers normally send either ``delta`` or
+    ``message``.  A few send both, with an empty delta as a framing marker and
+    the actual ``reasoning_content`` on the message object.  Treating the
+    empty delta as authoritative silently drops the thinking trace and makes
+    thinking-mode tool continuations invalid.  Prefer a non-empty delta while
+    carrying over any missing reasoning fields from the companion message;
+    when the delta is empty, use the message as the source.
+    """
+
+    delta = choice.get("delta")
+    message = choice.get("message")
+    if isinstance(delta, Mapping):
+        if not delta and isinstance(message, Mapping):
+            return message
+        if isinstance(message, Mapping):
+            merged = dict(delta)
+            for field in ("reasoning", "reasoning_content", "reasoning_details"):
+                value = merged.get(field)
+                if value in (None, "", [], {}) and field in message:
+                    merged[field] = message[field]
+            return merged
+        return delta
+    if isinstance(message, Mapping):
+        return message
+    return None
+
+
 def chat_stream_chunks_to_response_events(
     chunks: list[Mapping[str, Any] | str],
     *,
@@ -2100,9 +2177,7 @@ def chat_stream_chunks_to_response_events(
                         "unsupported_protocol_semantics",
                         f"Cannot translate Chat Completions finish_reason {finish_reason!r} to Responses stream events.",
                     )
-            delta = choice.get("delta")
-            message = choice.get("message")
-            source = delta if isinstance(delta, dict) else message if isinstance(message, dict) else None
+            source = _chat_stream_source(choice)
             if not isinstance(source, dict):
                 continue
             _validate_chat_stream_source(source)
@@ -3510,9 +3585,7 @@ class ChatToResponsesStreamConverter:
         for choice in choices:
             if not isinstance(choice, Mapping):
                 continue
-            delta = choice.get("delta")
-            message = choice.get("message")
-            source = delta if isinstance(delta, Mapping) else message if isinstance(message, Mapping) else None
+            source = _chat_stream_source(choice)
             if isinstance(source, Mapping):
                 _validate_chat_stream_source(source)
                 reasoning_output = _chat_reasoning_output(source)
@@ -4133,7 +4206,10 @@ def prepare_exchange(
 
         if inbound == "responses" and outbound == "chat_completions":
             request_payload = source_payload
-            _consume_codex_chat_transport_fields(request_payload)
+            _consume_codex_chat_transport_fields(
+                request_payload,
+                preserve_reasoning_history=preserve_reasoning_history,
+            )
             prepared_request_body = json.dumps(
                 request_payload,
                 ensure_ascii=True,

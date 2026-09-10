@@ -508,8 +508,31 @@ class RequestObserver:
                             str(item.get("type")) for item in input_items
                             if isinstance(item, dict) and isinstance(item.get("type"), str)
                         ) if isinstance(input_items, list) else [],
+                        # Preserve ordering of semantic item roles for
+                        # cross-protocol diagnostics, but never retain item
+                        # text, arguments, or identifiers in the report.
+                        "input_role_sequence": [
+                            {
+                                "type": item.get("type"),
+                                "role": item.get("role") if isinstance(item.get("role"), str) else None,
+                                "has_call_id": isinstance(item.get("call_id"), str)
+                                and bool(item.get("call_id")),
+                            }
+                            for item in input_items
+                            if isinstance(item, dict)
+                        ] if isinstance(input_items, list) else [],
                         "tool_choice_type": type(payload.get("tool_choice")).__name__
                         if "tool_choice" in payload else None,
+                        "reasoning_keys": sorted(
+                            str(key) for key in payload.get("reasoning", {})
+                            if isinstance(payload.get("reasoning"), dict) and isinstance(key, str)
+                        ),
+                        "reasoning_effort": (
+                            payload.get("reasoning", {}).get("effort")
+                            if isinstance(payload.get("reasoning"), dict)
+                            and isinstance(payload.get("reasoning", {}).get("effort"), str)
+                            else None
+                        ),
                     }
                     if len(observations) < 1024:
                         observations.append(observation)
@@ -2804,6 +2827,61 @@ def main() -> int:
                     server.wait()
                 report["request_trace"] = observer.observations
                 report["gateway_log_signals"] = collect_gateway_log_signals(private / "gateway.log")
+                # The client-facing observer only sees the Responses request
+                # before the Gateway seam.  Include the Gateway's own
+                # value-free ``body_shape`` records so a provider 4xx can be
+                # diagnosed against the actual Chat/Responses wire body
+                # (without retaining prompts, arguments, or credentials).
+                gateway_event_path = server_home / "proxy" / "codex-proxy-events.jsonl"
+                gateway_shapes: list[dict[str, object]] = []
+                gateway_stream_shapes: list[dict[str, object]] = []
+                if gateway_event_path.is_file():
+                    try:
+                        for line in gateway_event_path.read_text(encoding="utf-8").splitlines():
+                            event = json.loads(line)
+                            if (
+                                isinstance(event, dict)
+                                and event.get("event") == "request_start"
+                                and isinstance(event.get("body_shape"), dict)
+                            ):
+                                gateway_shapes.append({
+                                    "model": event.get("model"),
+                                    "upstream": event.get("upstream"),
+                                    "upstream_format": event.get("upstream_format"),
+                                    "body_shape": event["body_shape"],
+                                })
+                            if (
+                                isinstance(event, dict)
+                                and event.get("event") in {
+                                    "chat_stream_shape_summary",
+                                    "sse_reasoning_summary",
+                                }
+                            ):
+                                # These fields are structural counters only;
+                                # the event writer has already removed text,
+                                # arguments and credentials.
+                                gateway_stream_shapes.append({
+                                    "event": event.get("event"),
+                                    "model": event.get("model"),
+                                    "upstream": event.get("upstream"),
+                                    "upstream_format": event.get("upstream_format"),
+                                    "inbound_format": event.get("inbound_format"),
+                                    "reasoning_source_count": event.get("reasoning_source_count"),
+                                    "reasoning_chars": event.get("reasoning_chars"),
+                                    "text_chars": event.get("text_chars"),
+                                    "tool_call_count": event.get("tool_call_count"),
+                                    "source_keys": event.get("source_keys"),
+                                    "finish_reasons": event.get("finish_reasons"),
+                                    "tool_call_names": event.get("tool_call_names"),
+                                    "original_event_counts": event.get("original_event_counts"),
+                                    "rewritten_event_counts": event.get("rewritten_event_counts"),
+                                    "delta_events": event.get("delta_events"),
+                                    "delta_chars": event.get("delta_chars"),
+                                })
+                    except (OSError, UnicodeError, ValueError):
+                        gateway_shapes = []
+                report["gateway_request_shapes"] = gateway_shapes[:1024]
+                report["gateway_stream_shapes"] = gateway_stream_shapes[:1024]
                 report["upstream_statuses"] = sorted({
                     entry.get("upstream_status")
                     for entry in observer.observations

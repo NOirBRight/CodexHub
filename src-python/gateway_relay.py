@@ -35,6 +35,30 @@ from route_primitives import MutationPolicy, StreamingPolicy, UsagePolicy
 RelayResponse = UpstreamResponseLike
 
 
+def _should_suppress_chat_reasoning_extensions(
+    upstream_name: str,
+    *,
+    want_chat_output: bool,
+    preserve_reasoning_history: bool,
+) -> bool:
+    """Decide whether provider-private Chat thinking fields may be removed.
+
+    A normal third-party Chat→Responses conversion hides raw reasoning
+    extensions because Responses has no portable private-thinking field.  An
+    explicitly capability-bound route (for example a thinking-mode provider
+    that requires ``reasoning_content`` on the next tool turn) must retain the
+    fields long enough for the shared converter to emit a portable reasoning
+    history item.  Keeping this predicate pure makes the distinction visible
+    to deterministic tests and avoids provider-name dispatch in the relay.
+    """
+
+    return (
+        upstream_name != "official"
+        and not want_chat_output
+        and not preserve_reasoning_history
+    )
+
+
 class FilteredHeaders(Protocol):
     def __call__(
         self,
@@ -1902,7 +1926,20 @@ def relay_upstream_response(
                     )
                 _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
-            if upstream_name != "official" and not want_chat_output:
+            # Most third-party Chat providers do not expose a portable
+            # Responses reasoning history, so their provider-private thinking
+            # fields are suppressed before conversion.  A route that has
+            # explicitly proved it requires ``reasoning_content`` on the next
+            # Chat request is different: dropping those fields would make the
+            # very next tool-call turn invalid (for example DeepSeek thinking
+            # mode returns 400 when the prior reasoning is not echoed).  Keep
+            # the provider-neutral reasoning item for that opt-in route and
+            # let the shared converter preserve it in the Responses history.
+            if _should_suppress_chat_reasoning_extensions(
+                upstream_name,
+                want_chat_output=want_chat_output,
+                preserve_reasoning_history=preserve_reasoning_history,
+            ):
                 chunks, _ = _suppress_chat_reasoning_extensions(
                     chunks,
                     event_context=event_context,

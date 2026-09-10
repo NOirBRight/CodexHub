@@ -6,12 +6,31 @@ from types import SimpleNamespace
 import codex_proxy
 from gateway_relay import (
     SseLineRelayContext,
+    _should_suppress_chat_reasoning_extensions,
     iter_upstream_sse_lines,
     relay_raw_response,
     write_non_streaming_body,
     write_sse_bytes,
     write_sse_done,
 )
+
+
+def test_reasoning_extensions_are_retained_for_capability_bound_responses_route():
+    assert not _should_suppress_chat_reasoning_extensions(
+        "commandcode",
+        want_chat_output=False,
+        preserve_reasoning_history=True,
+    )
+    assert _should_suppress_chat_reasoning_extensions(
+        "other-provider",
+        want_chat_output=False,
+        preserve_reasoning_history=False,
+    )
+    assert not _should_suppress_chat_reasoning_extensions(
+        "other-provider",
+        want_chat_output=True,
+        preserve_reasoning_history=False,
+    )
 
 
 class Writer:
