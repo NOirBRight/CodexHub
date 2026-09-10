@@ -592,3 +592,28 @@ def test_worker_signature_with_non_ascii_text_is_a_controlled_rejection(tmp_path
     verified, reason = collaboration_adapter.verified_requested_binding({**sidecar, "signature": "中" * 64}, "worker-call")
     assert verified is None
     assert reason == "unknown_requested_binding_sidecar"
+
+
+@pytest.mark.parametrize("surface", ["body", "sse"])
+@pytest.mark.parametrize("selector", [None, "default", "reviewer"])
+def test_optional_v1_selector_is_not_required_by_worker_stream_state(surface, selector, monkeypatch):
+    monkeypatch.setattr(gateway_events, "write_proxy_event", lambda *args, **kwargs: None)
+    context = {}
+    gateway_compat.compatible_request_body(_request([], tools=[_namespace(COLLABORATION_V1)]), _upstream(), event_context=context)
+    context["_worker_binding_required"] = True
+    arguments = {"message": "Inspect only."}
+    if selector is not None:
+        arguments["agent_type"] = selector
+    call = _call("optional-selector", "spawn_agent", arguments)
+    if surface == "body":
+        result = gateway_compat.compatible_response_body(json.dumps({"object": "response", "output": [call]}).encode(), "fixture-provider", event_context=context)
+        assert json.loads(result)["output"][0]["arguments"] == call["arguments"]
+    else:
+        events = [
+            {"type": "response.output_item.added", "output_index": 0, "item": {**call, "arguments": ""}},
+            {"type": "response.function_call_arguments.done", "output_index": 0, "item_id": call["id"], "arguments": call["arguments"]},
+            {"type": "response.output_item.done", "output_index": 0, "item": call},
+            {"type": "response.completed", "response": {"output": [call]}},
+        ]
+        for event in events:
+            gateway_compat.compatible_sse_line(("data: " + json.dumps(event) + "\n\n").encode(), "fixture-provider", event_context=context)

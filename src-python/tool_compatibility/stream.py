@@ -1289,7 +1289,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 if fragments and "".join(fragments) != arguments:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
                 if expected_entry.version == "v1" and expected_entry.family == NAMESPACE:
-                    validate_v1_arguments({"name": self._native_wire_identities[item_id][2], "arguments": arguments}, surface="stream")
+                    validate_v1_arguments({"name": self._native_wire_identities[item_id][1], "arguments": arguments}, surface="stream")
                 if expected_entry.version == "v2" and expected_entry.family == NAMESPACE:
                     complete_item = _copy_mapping(
                         self._collaboration_v2_calls.get(item_id, {})

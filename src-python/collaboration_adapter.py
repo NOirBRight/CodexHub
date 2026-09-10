@@ -606,10 +606,10 @@ def remember_stream_item(
                 raw_arguments, ensure_ascii=True, separators=(",", ":")
             )
         parsed = strict_json_object(record.get("arguments"))
-        if parsed is not None and isinstance(parsed.get("agent_type"), str):
+        if parsed is not None and ("agent_type" not in parsed or isinstance(parsed["agent_type"], str)):
             if not record.get("selector_invalid"):
                 record["selector_delta_incomplete"] = False
-                record["agent_type"] = parsed["agent_type"]
+                record["agent_type"] = parsed.get("agent_type")
         elif terminal:
             record["selector_invalid"] = True
             record.pop("agent_type", None)
@@ -657,10 +657,10 @@ def remember_stream_event(
         record["arguments"] = f"{record.get('arguments', '')}{delta}"
         record["selector_arguments_pending"] = True
         parsed = strict_json_object(record["arguments"])
-        if parsed is not None and isinstance(parsed.get("agent_type"), str):
+        if parsed is not None and ("agent_type" not in parsed or isinstance(parsed["agent_type"], str)):
             if not record.get("selector_invalid"):
                 record["selector_delta_incomplete"] = False
-                record["agent_type"] = parsed["agent_type"]
+                record["agent_type"] = parsed.get("agent_type")
         else:
             record["selector_delta_incomplete"] = True
             record.pop("agent_type", None)
@@ -684,10 +684,10 @@ def remember_stream_event(
             record["selector_arguments_done"] = True
             record["selector_arguments_pending"] = False
             parsed = strict_json_object(arguments)
-            if parsed is not None and isinstance(parsed.get("agent_type"), str):
+            if parsed is not None and ("agent_type" not in parsed or isinstance(parsed["agent_type"], str)):
                 if not record.get("selector_invalid"):
                     record["selector_delta_incomplete"] = False
-                    record["agent_type"] = parsed["agent_type"]
+                    record["agent_type"] = parsed.get("agent_type")
             else:
                 record["selector_invalid"] = True
                 record.pop("agent_type", None)
