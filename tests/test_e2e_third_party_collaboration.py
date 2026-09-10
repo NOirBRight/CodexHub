@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -467,6 +468,7 @@ def test_v2_delivery_accepts_identity_bearing_replay_without_optional_metadata(t
     output = _complete_fixture(tmp_path, "v2")
     parent_path = tmp_path / "sessions" / "parent.jsonl"
     rows = [json.loads(line) for line in parent_path.read_text().splitlines()]
+    identity_replays = []
     for row in rows:
         payload = row.get("payload", {})
         if row.get("type") == "response_item" and payload.get("type") == "agent_message":
@@ -475,6 +477,13 @@ def test_v2_delivery_accepts_identity_bearing_replay_without_optional_metadata(t
                     part["text"] = "/root/reviewer " + part["text"]
             payload.pop("author", None)
             payload.pop("recipient", None)
+            # The child has two completed turns.  A replay without optional
+            # author/recipient fields must still provide one identity-bearing
+            # delivery item per completion; otherwise accepting one item for
+            # both turns would make the correlation ambiguous.
+            identity_replays.append(copy.deepcopy(row))
+    assert len(identity_replays) == 1
+    rows.insert(rows.index(identity_replays[0]) + 1, copy.deepcopy(identity_replays[0]))
     parent_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
     evidence = runner.collect_evidence(
         tmp_path,

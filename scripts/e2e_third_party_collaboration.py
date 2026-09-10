@@ -60,6 +60,7 @@ COMMANDCODE_DEEPSEEK_41_RE = re.compile(
 SENTINELS = ("E2E_CHILD_OK 323", "E2E_FOLLOWUP_OK 667")
 PARENT_SENTINEL = "E2E_PARENT_IMPLEMENTED_OK 941"
 NO_SUBAGENT_TURN_SENTINEL = "E2E_NO_SUBAGENT_TURN_OK 818"
+TRUSTED_BASELINE_SHA = "d069caf5156c62194fa4861a6cd538973eac3a1a"
 
 
 class MatrixCase:
@@ -1159,16 +1160,30 @@ def _lifecycle_passed(parent: dict, child: dict, version: str, diagnostics: dict
         # and identity-bearing content are still an unambiguous correlation;
         # accept that protocol shape without accepting plain user text.
         observed_delivery = diagnostics.get("delivery_candidates", [])
-        text_delivery = all(
-            any(
-                candidate.get("identity_present") is True
-                and isinstance(candidate.get("child_message_matches"), list)
-                and index < len(candidate["child_message_matches"])
-                and candidate["child_message_matches"][index] is True
-                for candidate in observed_delivery
-            )
-            for index in range(len(messages))
-        )
+        used_candidates: set[int] = set()
+        text_delivery = True
+        completion_times = [record.get("timestamp") for record in diagnostics.get("completion_records", [])]
+        for index, _message in enumerate(messages):
+            matches = []
+            for candidate_index, candidate in enumerate(observed_delivery):
+                candidate_matches = candidate.get("child_message_matches")
+                candidate_time = candidate.get("timestamp")
+                completion_time = completion_times[index] if index < len(completion_times) else None
+                if (
+                    candidate_index not in used_candidates
+                    and candidate.get("identity_present") is True
+                    and isinstance(candidate_matches, list)
+                    and index < len(candidate_matches)
+                    and candidate_matches[index] is True
+                    and isinstance(candidate_time, str)
+                    and isinstance(completion_time, str)
+                    and candidate_time >= completion_time
+                ):
+                    matches.append(candidate_index)
+            if not matches:
+                text_delivery = False
+                break
+            used_candidates.add(matches[0])
         if not strict_delivery and not text_delivery:
             return reject("child_result_delivery_not_correlated")
     diagnostics["failure"] = None
@@ -2093,6 +2108,38 @@ def _safe_matrix_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "case"
 
 
+def _terminate_matrix_child(process: subprocess.Popen[object]) -> None:
+    """Stop a timed-out matrix child and its real client/Gateway descendants."""
+
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            process.terminate()
+    else:
+        process.terminate()
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False, capture_output=True, timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                process.kill()
+        else:
+            process.kill()
+        process.wait(timeout=10)
+
+
 def _run_trusted_matrix(args: argparse.Namespace) -> int:
     """Run the fixed A/B matrix through this same single-scenario harness.
 
@@ -2110,6 +2157,23 @@ def _run_trusted_matrix(args: argparse.Namespace) -> int:
             "status": "unverified",
             "passed": False,
             "failure_classification": "baseline_root_required",
+            "candidate_root": str(candidate_root),
+        }
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(report))
+        return 2
+
+    baseline_state = _git_revision_state(baseline_root)
+    if baseline_state.get("gateway_sha") != TRUSTED_BASELINE_SHA:
+        report = {
+            "report_version": 1,
+            "evidence_contract": "codexhub.e2e-matrix.v1",
+            "status": "unverified",
+            "passed": False,
+            "failure_classification": "baseline_revision_mismatch",
+            "expected_baseline_sha": TRUSTED_BASELINE_SHA,
+            "baseline_revision": baseline_state,
             "candidate_root": str(candidate_root),
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -2143,17 +2207,21 @@ def _run_trusted_matrix(args: argparse.Namespace) -> int:
         ]
         started = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=str(root),
                 env=dict(os.environ),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                timeout=args.timeout + 60,
-                check=False,
+                start_new_session=(os.name == "posix"),
             )
-            exit_code = completed.returncode
+            try:
+                process.communicate(timeout=args.timeout * 2 + 60)
+                exit_code = process.returncode
+            except subprocess.TimeoutExpired:
+                _terminate_matrix_child(process)
+                exit_code = None
         except subprocess.TimeoutExpired:
             exit_code = None
         row: dict[str, object] = {
