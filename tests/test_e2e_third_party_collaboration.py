@@ -553,3 +553,20 @@ def test_observed_shell_edit_requires_change_after_child_result(tmp_path, write_
     evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v2", parent_effort="high",
                                       child_effort="high", client_outputs=(output,))
     assert evidence["passed"] is accepted
+
+
+def test_failed_sequence_still_retains_completion_and_delivery_diagnostics(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v1")
+    path = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        item = row.get("payload", {})
+        if item.get("type") == "function_call_output" and item.get("call_id") in {"1", "5"}:
+            item["output"] = '{"status": {}, "timed_out": true}'
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v1", parent_effort="high",
+                                      child_effort="high", client_outputs=(output,))
+    diagnostic = evidence["lifecycle_diagnostics"]
+    assert len(diagnostic["completion_records"]) == 2
+    assert diagnostic["native_results"][1]["timed_out"] is True

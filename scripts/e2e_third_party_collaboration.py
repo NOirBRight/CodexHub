@@ -450,6 +450,39 @@ def _lifecycle_passed(parent: dict, child: dict, version: str, diagnostics: dict
     identity = output.get("task_name") if version == "v2" else output.get("agent_id")
     if not isinstance(identity, str) or not identity or identity != (child.get("agent_path") if version == "v2" else child["id"]):
         return reject("spawn_child_identity_mismatch")
+    completions_for_diagnostics = [row for row in child["rows"] if row.get("type") == "event_msg"
+                                  and row.get("payload", {}).get("type") == "task_complete"]
+    messages_for_diagnostics = [row["payload"].get("last_agent_message", "") for row in completions_for_diagnostics]
+    diagnostics["completion_records"] = [
+        {"timestamp": row.get("timestamp"), "turn_id": row["payload"].get("turn_id")}
+        for row in completions_for_diagnostics]
+    diagnostics["native_results"] = []
+    for call in calls:
+        result = call["output"] if isinstance(call["output"], dict) else {}
+        status = result.get("status", {})
+        target_status = status.get(identity, {}) if isinstance(status, dict) else {}
+        previous = result.get("previous_status", {})
+        diagnostics["native_results"].append({
+            "call_id": call["id"], "name": call["name"], "timestamp": call.get("timestamp"),
+            "timed_out": result.get("timed_out") if isinstance(result.get("timed_out"), bool) else None,
+            "target_completed": isinstance(target_status, dict) and "completed" in target_status,
+            "previous_completed": isinstance(previous, dict) and "completed" in previous,
+            "child_message_matches": [bool(message) and message in json.dumps(call["output"], ensure_ascii=False)
+                                      for message in messages_for_diagnostics],
+        })
+    diagnostics["delivery_candidates"] = []
+    for row in parent["rows"]:
+        item = row.get("payload", {})
+        if row.get("type") != "response_item" or item.get("type") not in {"message", "agent_message"}:
+            continue
+        content = _item_text(item.get("content"))
+        matches = [bool(message) and message in content for message in messages_for_diagnostics]
+        if any(matches):
+            diagnostics["delivery_candidates"].append({
+                "timestamp": row.get("timestamp"), "type": item.get("type"), "role": item.get("role"),
+                "identity_present": identity in content, "child_message_matches": matches,
+                "native_notification_marker": "<subagent_notification>" in content,
+            })
     targets = {identity}
     if version == "v2" and isinstance(spawn["arguments"].get("task_name"), str):
         targets.add(spawn["arguments"]["task_name"])
