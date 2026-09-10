@@ -74,68 +74,6 @@ def validate_v2_native_arguments(item: Mapping[str, Any], *, surface: str) -> No
         ) from exc
 
 
-def repair_external_v2_spawn_agent_response_arguments(
-    item: Mapping[str, Any],
-) -> tuple[Mapping[str, Any], bool]:
-    """Project a known cross-version spawn shape onto the frozen V2 contract.
-
-    This is deliberately response-only at the caller: completed third-party
-    calls may carry the V1 ``fork_context`` field or use ``agent_type`` as the
-    task label.  History remains an exact, fail-closed contract boundary.
-    """
-
-    arguments = item.get("arguments")
-    if not isinstance(arguments, str):
-        return item, False
-
-    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError
-            result[key] = value
-        return result
-
-    def reject_non_json_constant(_value: str) -> None:
-        raise ValueError
-
-    try:
-        parsed = json.loads(
-            arguments,
-            object_pairs_hook=unique_object,
-            parse_constant=reject_non_json_constant,
-        )
-    except (TypeError, ValueError):
-        return item, False
-    if not isinstance(parsed, Mapping):
-        return item, False
-
-    schema = EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]["spawn_agent"]
-    properties = schema.get("properties")
-    if not isinstance(properties, Mapping):
-        return item, False
-    projected = {key: value for key, value in parsed.items() if key in properties}
-    task_name = projected.get("task_name")
-    agent_type = projected.get("agent_type")
-    if task_name is None and isinstance(agent_type, str) and agent_type:
-        projected["task_name"] = agent_type
-    if projected == parsed:
-        return item, False
-
-    repaired_arguments = json.dumps(projected, ensure_ascii=True, separators=(",", ":"))
-    try:
-        validate_collaboration_arguments(
-            COLLABORATION_V2,
-            "spawn_agent",
-            repaired_arguments,
-        )
-    except CollaborationContractError:
-        return item, False
-    repaired = dict(item)
-    repaired["arguments"] = repaired_arguments
-    return repaired, True
-
-
 class CollaborationV2PlanMixin:
     """V2 namespace adaptation mixed into ``ToolCompatibilityPlan``."""
 
@@ -175,6 +113,7 @@ class CollaborationV2PlanMixin:
         *,
         surface: str,
         allow_incomplete_arguments: bool = False,
+        allow_failed_arguments: bool = False,
     ) -> tuple[str, str]:
         if (
             item.get("type") != "function_call"
@@ -240,7 +179,9 @@ class CollaborationV2PlanMixin:
                 surface=surface,
             )
         arguments = item.get("arguments")
-        if allow_incomplete_arguments and arguments in {None, ""}:
+        if allow_incomplete_arguments and (arguments is None or arguments == ""):
+            return item_id, call_id
+        if allow_failed_arguments:
             return item_id, call_id
         try:
             validate_collaboration_arguments(
@@ -302,6 +243,16 @@ class CollaborationV2PlanMixin:
             target.add(call_id)
 
         calls: dict[str, str] = {}
+        failed_argument_call_ids = {
+            item.get("call_id")
+            for item in items
+            if isinstance(item, Mapping)
+            and item.get("type") == "function_call_output"
+            and isinstance(item.get("call_id"), str)
+            and isinstance(item.get("output"), str)
+            and item["output"].startswith("failed to parse function arguments: ")
+            and bool(item["output"].removeprefix("failed to parse function arguments: ").strip())
+        }
         seen_result_call_ids: set[str] = set()
         seen_item_ids: set[str] = set()
         for item in items:
@@ -315,9 +266,13 @@ class CollaborationV2PlanMixin:
                     self._raise_collaboration_contract(exc, surface=surface)
                 item_id = item.get("id")
             elif item_type == "function_call" and claims_collaboration_v2_identity(item):
+                item_call_id = item.get("call_id")
                 item_id, call_id = self._validate_collaboration_v2_call_item(
                     item,
                     surface=surface,
+                    allow_failed_arguments=(
+                        surface == "history" and item_call_id in failed_argument_call_ids
+                    ),
                 )
                 if call_id in calls:
                     raise ToolCompatibilityError(
@@ -591,4 +546,3 @@ class CollaborationV2StreamMixin:
                 "ambiguous_native_identity",
                 surface="stream",
             )
-

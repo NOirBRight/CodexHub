@@ -486,15 +486,12 @@ def relay_upstream_response(
     _chat_stream_lifecycle_final_issue = gateway_stream_semantics._chat_stream_lifecycle_final_issue
     _chat_stream_shape_summary = gateway_stream_semantics._chat_stream_shape_summary
     _chat_terminal_observer = gateway_stream_semantics._chat_terminal_observer
-    _coerce_exact_spawn_prompt_tool_calls = gateway_compat.sse._coerce_exact_spawn_prompt_tool_calls
-    _coerce_required_subagent_tool_calls = gateway_compat.sse._coerce_required_subagent_tool_calls
     _compact_response_body_is_empty = gateway_stream_semantics._compact_response_body_is_empty
     _converted_sse_payload = gateway_stream_semantics._converted_sse_payload
     _count_sse_reasoning_event = gateway_stream_semantics._count_sse_reasoning_event
     _downgrade_invalid_third_party_tool_calls = gateway_compat.official_passthrough._downgrade_invalid_third_party_tool_calls
     _events_to_responses_body = gateway_stream_semantics._events_to_responses_body
     _filtered_response_headers = gateway_request._filtered_response_headers
-    _guard_duplicate_multi_agent_spawn_calls = gateway_compat.multi_agent._guard_duplicate_multi_agent_spawn_calls
     _handler_downstream_stream_commit = glue._handler_downstream_stream_commit
     _incomplete_stream_json_error_body = gateway_stream_semantics._incomplete_stream_json_error_body
     _is_event_stream = gateway_request._is_event_stream
@@ -515,7 +512,6 @@ def relay_upstream_response(
     _raise_runtime_tool_compatibility_error = gateway_compat.official_passthrough._raise_runtime_tool_compatibility_error
     _reconcile_function_call_argument_events = gateway_compat.sse._reconcile_function_call_argument_events
     _redact_identity_in_text = gateway_errors._redact_identity_in_text
-    _repair_missing_required_subagent_call_events = gateway_compat.sse._repair_missing_required_subagent_call_events
     _response_body_lifecycle_final_issue = gateway_stream_semantics._response_body_lifecycle_final_issue
     _response_body_to_chat_completion_body = gateway_stream_semantics._response_body_to_chat_completion_body
     _response_body_to_response_sse_events = gateway_stream_semantics._response_body_to_response_sse_events
@@ -542,8 +538,6 @@ def relay_upstream_response(
     _sse_line_ending = gateway_sse._sse_line_ending
     _suppress_bounded_tool_search_calls = gateway_compat.multi_agent._suppress_bounded_tool_search_calls
     _suppress_chat_reasoning_extensions = gateway_stream_semantics._suppress_chat_reasoning_extensions
-    _suppress_coordinator_forbidden_tool_calls = gateway_compat.multi_agent._suppress_coordinator_forbidden_tool_calls
-    _suppress_worker_multi_agent_tool_calls = gateway_compat.multi_agent._suppress_worker_multi_agent_tool_calls
     _synthetic_response_completed_from_tool_items = gateway_stream_semantics._synthetic_response_completed_from_tool_items
     _upstream_failure_class = gateway_transport._upstream_failure_class
     _usage_from_json_body = gateway_events._usage_from_json_body
@@ -1150,7 +1144,6 @@ def relay_upstream_response(
                         if event is None:
                             continue
                         event, _ = _downgrade_invalid_third_party_tool_calls(event)
-                        event, _ = _guard_duplicate_multi_agent_spawn_calls(event, compatibility_event_context)
                     event_type = event.get("type")
                     if isinstance(event_type, str) and event_type:
                         if not output.event(event_type, event):
@@ -1985,7 +1978,6 @@ def relay_upstream_response(
                     stage="converted",
                     **_response_events_shape_summary(events),
                 )
-                events, _ = _repair_missing_required_subagent_call_events(events, event_context)
                 events, _ = _adapt_third_party_apply_patch_stream_events(
                     events,
                     event_context=compatibility_event_context,
@@ -2004,8 +1996,6 @@ def relay_upstream_response(
                     stage="normalized",
                     **_response_events_shape_summary(events),
                 )
-                events, _ = _suppress_worker_multi_agent_tool_calls(events, event_context)
-                events, _ = _suppress_coordinator_forbidden_tool_calls(events, event_context)
                 events, _ = _downgrade_invalid_third_party_tool_calls(events)
                 _write_adapter_event(
                     event_context,
@@ -2016,21 +2006,13 @@ def relay_upstream_response(
                     stage="downgraded",
                     **_response_events_shape_summary(events),
                 )
-                events, _ = _guard_duplicate_multi_agent_spawn_calls(events, event_context)
                 events, _ = _apply_external_worker_response_contract(
                     events,
                     compatibility_event_context,
                     surface="sse",
                     attach_sidecars=False,
                 )
-                events, _ = _coerce_exact_spawn_prompt_tool_calls(events, event_context)
-                events, _ = _coerce_required_subagent_tool_calls(
-                    events,
-                    event_context,
-                    surface="sse",
-                )
                 events, _ = _reconcile_function_call_argument_events(events)
-                events, _ = _repair_missing_required_subagent_call_events(events, event_context)
                 events, _ = _apply_external_worker_response_contract(
                     events,
                     compatibility_event_context,

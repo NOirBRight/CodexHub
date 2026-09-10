@@ -13,8 +13,11 @@ def fixture_payload():
     return json.loads((ROOT / 'tests/fixtures/issue_108_tool_surface_replay.json').read_text())
 
 
-def test_tool_surface_replay_retains_original_evidence():
-    assert validate_tool_surface_fixture(fixture_payload(), ROOT)['passed'] is True
+def test_old_tool_surface_evidence_cannot_qualify_a_candidate_without_injected_agents():
+    # Keep the historical digest intact. Its injected V1 surface no longer
+    # qualifies a candidate that preserves the client's declared authority.
+    with pytest.raises(EvidenceValidationError, match='tool_surface_prepared_digest_mismatch'):
+        validate_tool_surface_fixture(fixture_payload(), ROOT)
 
 
 @pytest.mark.parametrize('change', ['allow_extra_properties', 'description', 'tool_name'])

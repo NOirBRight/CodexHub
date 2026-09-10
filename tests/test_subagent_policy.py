@@ -17,37 +17,23 @@ class SubagentPolicyTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(subagent_assist_mode(), "assisted")
 
-    def test_guided_has_guidance_without_repair(self):
+    def test_legacy_modes_remain_readable_but_never_enable_gateway_scheduling(self):
         context = {"repair_policy": REPAIR_CODEX_SUBAGENT}
-        with patch.dict(os.environ, {"CODEXHUB_SUBAGENT_ASSIST_MODE": "guided"}, clear=False):
-            self.assertTrue(guidance_enabled(context))
-            self.assertFalse(semantic_repair_enabled(context))
+        for value in ("strict", "guided", "assisted", "invalid"):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {"CODEXHUB_SUBAGENT_ASSIST_MODE": value}, clear=False
+            ):
+                self.assertIn(subagent_assist_mode(), {"strict", "guided", "assisted"})
+                self.assertFalse(guidance_enabled(context))
+                self.assertFalse(semantic_repair_enabled(context))
 
-    def test_guidance_and_repair_require_repair_policy(self):
-        with patch.dict(os.environ, {"CODEXHUB_SUBAGENT_ASSIST_MODE": "assisted"}, clear=False):
-            self.assertFalse(guidance_enabled({}))
-            self.assertFalse(guidance_enabled({"repair_policy": "none"}))
-            self.assertTrue(guidance_enabled({"repair_policy": REPAIR_CODEX_SUBAGENT}))
-            self.assertFalse(semantic_repair_enabled({}))
-            self.assertFalse(semantic_repair_enabled({"repair_policy": "none"}))
-            self.assertTrue(semantic_repair_enabled({"repair_policy": REPAIR_CODEX_SUBAGENT}))
-
-    def test_raw_probe_disables_guidance_and_repair(self):
-        context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "raw_provider_probe": True}
-        with patch.dict(os.environ, {"CODEXHUB_SUBAGENT_ASSIST_MODE": "assisted"}, clear=False):
-            self.assertFalse(guidance_enabled(context))
-            self.assertFalse(semantic_repair_enabled(context))
-
-    def test_deterministic_required_action_returns_single_known_action(self):
-        action = {"kind": "protocol", "tool_name": "wait_agent", "arguments": {"targets": ["agent-1"]}}
-        self.assertEqual(deterministic_required_action([action]), action)
-
-    def test_deterministic_required_action_refuses_multiple_valid_actions(self):
-        actions = [
-            {"kind": "workflow", "tool_name": "spawn_agent", "arguments": {"message": "task B"}},
-            {"kind": "workflow", "tool_name": "spawn_agent", "arguments": {"message": "review A"}},
-        ]
-        self.assertIsNone(deterministic_required_action(actions))
+    def test_scheduler_cannot_select_a_client_action(self):
+        action = {
+            "kind": "protocol",
+            "tool_name": "wait_agent",
+            "arguments": {"targets": ["agent-1"]},
+        }
+        self.assertIsNone(deterministic_required_action([action]))
 
     def test_gateway_settings_uses_policy_helpers_as_single_source_of_truth(self):
         self.assertIs(gateway_settings._subagent_policy_assist_mode, subagent_assist_mode)

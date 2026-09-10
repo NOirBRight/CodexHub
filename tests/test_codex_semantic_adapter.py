@@ -179,6 +179,10 @@ def test_strict_json_object_rejects_noncanonical_readback_strings():
     assert codex_semantic_adapter.strict_json_object('{"synthetic":"shape"} trailing') is None
     assert codex_semantic_adapter.strict_json_object('{"synthetic":"shape"}{"second":true}') is None
     assert codex_semantic_adapter.strict_json_object('{"synthetic":') is None
+    assert codex_semantic_adapter.strict_json_object('{"value":1,"value":2}') is None
+    assert codex_semantic_adapter.strict_json_object('{"value":NaN}') is None
+    assert codex_semantic_adapter.strict_json_object('{"value":1e400}') is None
+    assert codex_semantic_adapter.strict_json_object({"value": float("inf")}) is None
 
 
 def test_validate_effective_worker_binding_rejects_unversioned_extensions():

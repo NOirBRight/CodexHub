@@ -9,6 +9,7 @@ check and dynamic description text is deliberately excluded from matching.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Mapping, Sequence
 
 
@@ -268,21 +269,10 @@ def classify_collaboration_tools(tools: Sequence[Any]) -> str:
     )
     candidates = _namespace_candidates(tools)
     _require(bool(candidates), "collaboration_marker_missing")
-    candidate_ids = {id(candidate) for candidate in candidates}
-    collaboration_names = {V1_NAMESPACE, V2_NAMESPACE}
-    child_names = set(V1_TOOLS) | set(V2_TOOLS)
-    conflicts = [
-        tool
-        for tool in tools
-        if isinstance(tool, Mapping)
-        and id(tool) not in candidate_ids
-        and (
-            tool.get("name") in collaboration_names
-            or (tool.get("type") == "function" and tool.get("name") in child_names)
-        )
-    ]
+    # Ordinary functions occupy a different identity from namespace children.
+    # Their names cannot select, duplicate, or override Collaboration.
     _require(
-        len(candidates) == 1 and not conflicts,
+        len(candidates) == 1,
         "collaboration_marker_duplicate_or_mixed",
     )
     candidate = candidates[0]
@@ -380,8 +370,15 @@ def _json_object_or_value(value: Any, malformed: str) -> Any:
             result[key] = child
         return result
 
+    def reject_non_json_constant(_value: str) -> None:
+        raise ValueError
+
     try:
-        return json.loads(value, object_pairs_hook=unique_object)
+        return json.loads(
+            value,
+            object_pairs_hook=unique_object,
+            parse_constant=reject_non_json_constant,
+        )
     except CollaborationContractError:
         raise
     except (TypeError, ValueError):
@@ -409,7 +406,7 @@ def _matches_schema(value: Any, schema: Mapping[str, Any]) -> bool:
         if type(value) is not bool:
             return False
     elif expected_type == "number":
-        if type(value) not in {int, float}:
+        if type(value) not in {int, float} or not math.isfinite(value):
             return False
     elif expected_type == "array":
         if not isinstance(value, list):

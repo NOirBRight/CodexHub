@@ -281,7 +281,7 @@ def test_history_collaboration_namespace_requires_exact_contract(mutate) -> None
         collaboration_protocols({"input": [declaration]})
 
 
-def test_v2_disables_v1_guidance_and_semantic_repair() -> None:
+def test_legacy_assist_settings_cannot_enable_v2_scheduling() -> None:
     context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "collaboration_protocol": COLLABORATION_V2}
     assert guidance_enabled(context) is False
     assert semantic_repair_enabled(context) is False
@@ -304,7 +304,6 @@ def test_v2_request_preserves_native_namespace_and_does_not_inject_v1_tools() ->
     payload = json.loads(transformed)
 
     assert context["collaboration_protocol"] == COLLABORATION_V2
-    assert context["subagent_spawn_allowed"] is False
     assert payload["input"] == body["input"]
     assert payload["tools"] == body["tools"]
     assert "multi_agent_v1__spawn_agent" not in {
@@ -926,7 +925,7 @@ def test_official_passthrough_does_not_interpret_collaboration_metadata() -> Non
     assert payload["input"] == body_payload["input"]
 
 
-def test_v1_request_keeps_existing_repair_path_and_rejects_mixed_history() -> None:
+def test_v1_history_does_not_grant_current_tools_and_rejects_mixed_history() -> None:
     context = {"repair_policy": REPAIR_CODEX_SUBAGENT, "request_id": "issue198-v1"}
     transformed = gateway_compat.compatible_request_body(
         json.dumps({"model": "glm-5.2", "input": [_v1_spawn_call()]}).encode(),
@@ -935,7 +934,7 @@ def test_v1_request_keeps_existing_repair_path_and_rejects_mixed_history() -> No
     )
     payload = json.loads(transformed)
     assert context["collaboration_protocol"] == COLLABORATION_V1
-    assert any(
+    assert not any(
         isinstance(item, dict)
         and item.get("name") in {"multi_agent_v1__spawn_agent", "spawn_agent"}
         for item in payload.get("tools", [])

@@ -47,6 +47,6 @@ def sign(root: Path, payload: bytes) -> str:
 
 
 def verify(root: Path, payload: bytes, signature: str) -> bool:
-    if not isinstance(signature, str):
+    if not isinstance(signature, str) or not signature.isascii():
         return False
     return hmac.compare_digest(sign(root, payload), signature)

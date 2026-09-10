@@ -33,7 +33,6 @@ from codex_semantic_adapter import (
     dump_arguments_like,
     json_object_from_arguments,
     strict_json_object,
-    synthesize_effective_worker_binding_readback,
     validate_effective_worker_binding,
     validate_requested_worker_binding,
     validate_worker_selector,
@@ -135,15 +134,13 @@ def _v1_tool_name_from_wire(name: Any) -> str | None:
 
 
 def collaboration_v1_function_call_name(item: Mapping[str, Any]) -> str | None:
-    """Return the V1 tool name for a namespaced or aliased function call."""
+    """Identify client V1 calls after request-local alias decoding."""
     if item.get("type") != "function_call":
         return None
     namespace = item.get("namespace")
     name = item.get("name")
     tool_name = _v1_tool_name_from_wire(name)
     if namespace == COLLABORATION_V1_NAMESPACE and tool_name is not None:
-        return tool_name
-    if tool_name is not None and name != tool_name:
         return tool_name
     return None
 
@@ -365,7 +362,9 @@ def validate_external_worker_selectors(
         arguments = json_object_from_arguments(raw_arguments)
         if arguments is not None and raw_arguments not in (None, ""):
             agent_type = arguments.get("agent_type")
-            if agent_type in {"general", "default"}:
+            if agent_type is None or (isinstance(agent_type, str) and agent_type != "worker"):
+                # Runtime role names are client-owned. Only the explicit
+                # worker contract belongs to this adapter; no role allowlist.
                 pass
             elif agent_type == "worker":
                 if not worker_caller_carrier_supported(event_context):
@@ -1044,7 +1043,19 @@ def validate_worker_binding_history(payload: Mapping[str, Any]) -> bool:
                 classification="malformed_readback",
             )
         requested = worker_calls[call_id]
-        readback = synthesize_effective_worker_binding_readback(requested, readback)
+        # Native Codex reports only successful creation (`agent_id` and an
+        # optional nickname).  That is evidence that the child exists, not
+        # evidence that the external model/reasoning request took effect.
+        # Keep historical native sessions usable without manufacturing an
+        # `effective_binding` from the requested values.
+        if is_legacy_native_worker_spawn_readback(readback):
+            _emit(
+                "worker_effective_binding_validated",
+                outcome="accepted",
+                classification="native_spawn_created",
+            )
+            validated_call_ids.add(call_id)
+            continue
         validation = validate_effective_worker_binding(requested, readback)
         if validation.outcome != _facts().binding_accepted:
             raise_worker_contract_error(

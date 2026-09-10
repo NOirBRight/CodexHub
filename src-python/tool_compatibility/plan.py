@@ -22,7 +22,6 @@ from .collab_v2 import (
     CollaborationV2PlanMixin,
     apply_v2_namespace_decode,
     is_opaque_v2_history_item,
-    repair_external_v2_spawn_agent_response_arguments,
     strip_encrypted_annotations as strip_v2_encrypted_annotations,
     validate_v2_fields,
     validate_v2_native_arguments,
@@ -269,8 +268,8 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                     ) if family == NAMESPACE else (),
                 )
             )
-        # ``_set_required_subagent_tool_choice`` may already have translated a
-        # namespace child to this request's generated alias.  That alias is a
+        # A caller may already have translated a namespace child to this
+        # request's generated alias. That alias is a
         # valid choice even though it is not the original declaration spelling
         # present in ``final``.  Unknown aliases remain fail-closed.
         choice_name = (
@@ -1898,46 +1897,17 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
         self._validate_collaboration_v2_items(result, surface=surface)
         return result, changed
 
-    def _repair_external_v2_spawn_response_items(self, items: Any) -> tuple[Any, bool]:
-        """Repair only aliased V2 spawn calls received in a provider response."""
-
-        if not isinstance(items, list):
-            return items, False
-        repaired_items: list[Any] = []
-        changed = False
-        for item in items:
-            if not isinstance(item, Mapping) or item.get("type") != "function_call":
-                repaired_items.append(item)
-                continue
-            record = self.registry.record_for_alias(item.get("name"))
-            if not (
-                record is not None
-                and record.family == NAMESPACE
-                and record.version == "v2"
-                and record.namespace == "collaboration"
-                and record.child_name == "spawn_agent"
-            ):
-                repaired_items.append(item)
-                continue
-            repaired, item_changed = repair_external_v2_spawn_agent_response_arguments(item)
-            repaired_items.append(repaired)
-            changed = changed or item_changed
-        return (repaired_items if changed else items), changed
-
     def decode_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result = _copy_mapping(payload)
         for key in ("output", "input", "history"):
             if key in result:
                 encoded_items = result[key]
-                repair_changed = False
-                if key == "output":
-                    encoded_items, repair_changed = self._repair_external_v2_spawn_response_items(encoded_items)
                 decoded, item_changed = self._decode_items(
                     encoded_items,
                     reject_omitted_response=key == "output",
                     decode_agent_messages=key != "output",
                 )
-                if item_changed or repair_changed:
+                if item_changed:
                     result[key] = decoded
         return result
 
@@ -1996,4 +1966,3 @@ def __getattr__(name: str):
 
         return CompatibilityStreamState
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-

@@ -774,13 +774,6 @@ def inject_explicit_codex_tools(
             for tool in flattened_namespace_tools
             if not is_local_tool_gateway_tool_schema(tool)
         ]
-    if not include_multi_agent_tools:
-        filtered_tools = [
-            tool for tool in tools if not is_multi_agent_tool_schema(tool)
-        ]
-        if len(filtered_tools) != len(tools):
-            tools[:] = filtered_tools
-            changed = True
     if not include_node_repl_tools:
         filtered_tools = [tool for tool in tools if not is_node_repl_tool_schema(tool)]
         if len(filtered_tools) != len(tools):
@@ -790,13 +783,6 @@ def inject_explicit_codex_tools(
     search_name = _facts().tool_search_explicit_function_tool["name"]
     if not include_tool_search:
         excluded_tool_names.add(search_name)
-    if not include_multi_agent_tools:
-        excluded_tool_names.update(
-            (
-                f"multi_agent_v1__{tool_name}"
-                for tool_name in _facts().multi_agent_tool_names
-            )
-        )
     if not include_spawn_agent:
         excluded_tool_names.add("multi_agent_v1__spawn_agent")
     if not include_wait_agent:
@@ -839,15 +825,6 @@ def inject_explicit_codex_tools(
                 worker_selector_values=worker_selector_values,
             )
         )
-    if not include_multi_agent_tools:
-        core_additions = [
-            tool for tool in core_additions if not is_multi_agent_tool_schema(tool)
-        ]
-        flattened_namespace_tools = [
-            tool
-            for tool in flattened_namespace_tools
-            if not is_multi_agent_tool_schema(tool)
-        ]
     if not include_node_repl_tools:
         core_additions = [
             tool for tool in core_additions if not is_node_repl_tool_schema(tool)
@@ -904,9 +881,8 @@ def inject_explicit_codex_tools(
                     or tool_schema_name(existing_tool) != name
                 ):
                     continue
-                if name.startswith("multi_agent_v1__") and dict(existing_tool) != tool:
-                    tools[index] = tool
-                    changed = True
+                # A spelling collision is not permission to replace a client
+                # declaration. Namespace adapters own their registered aliases.
                 replaced_existing = True
                 break
         if replaced_existing:
@@ -1474,7 +1450,9 @@ def _should_preserve_owned_wire_value(
     if plan is None or not plan.owns_wire_value(value):
         return False
     name = value.get("name")
-    if name == "tool_search" or name in _facts().multi_agent_namespace_aliases:
+    # The request-local plan restores registered aliases itself. Global V1
+    # spellings must never override a plain function owned by that plan.
+    if name == "tool_search":
         return False
     return True
 
@@ -1505,6 +1483,15 @@ def normalize_third_party_tool_call(
     if not isinstance(value, dict):
         return (value, False)
     if _should_preserve_owned_wire_value(value, compatibility_plan):
+        return (value, False)
+    if (
+        value.get("namespace") == "multi_agent_v1"
+        or multi_agent_alias_tool_name(value.get("name")) is not None
+        or value.get("name") in _facts().multi_agent_namespace_aliases
+    ):
+        # Collaboration aliases are decoded only by the declaration-derived
+        # plan. With no provenance, neither a bare name nor an alias-shaped
+        # spelling permits namespace restoration or argument fabrication.
         return (value, False)
     changed = False
     rewritten = dict(value)

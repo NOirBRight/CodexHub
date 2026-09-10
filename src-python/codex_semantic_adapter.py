@@ -114,9 +114,6 @@ def _classify_collaboration_item(
         namespace = inherited_namespace
 
     if namespace is None:
-        alias_protocol = _collaboration_alias_protocol(name)
-        if alias_protocol is not None:
-            return alias_protocol
         if (
             request_protocol is not None
             and item_type == "function_call"
@@ -168,8 +165,6 @@ def _classify_collaboration_item(
     # the exact frozen Collaboration namespace (or the wire name is one of our
     # generated aliases).  Do not reject ordinary provider namespaces merely
     # because one child happens to be called ``send_message`` or ``spawn_agent``.
-    if _collaboration_alias_protocol(name):
-        return _collaboration_alias_protocol(name)
     return None
 
 
@@ -190,6 +185,10 @@ def collaboration_protocols(value: Any) -> frozenset[str]:
     protocols: set[str] = set()
     exact_request_root: Mapping[str, Any] | None = None
     exact_protocol: str | None = None
+    ordinary_names = {
+        tool.get("name") for tool in value.get("tools", [])
+        if isinstance(tool, Mapping) and tool.get("type") == "function"
+    } if isinstance(value, Mapping) and isinstance(value.get("tools"), list) else set()
     if isinstance(value, Mapping):
         try:
             exact_protocol = classify_collaboration_request(value)
@@ -207,7 +206,7 @@ def collaboration_protocols(value: Any) -> frozenset[str]:
             protocol = _classify_collaboration_item(
                 item,
                 inherited_namespace,
-                exact_protocol,
+                None if item.get("namespace") is None and item.get("name") in ordinary_names else exact_protocol,
             )
             if protocol is not None:
                 protocols.add(protocol)
@@ -286,12 +285,19 @@ class BindingValidation:
 
 
 def strict_json_object(value: Any) -> dict[str, Any] | None:
-    if isinstance(value, Mapping):
-        return dict(value)
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, (str, Mapping)):
         return None
+    def unique_object(pairs):
+        result = {}
+        for key, child in pairs:
+            if key in result:
+                raise ValueError("duplicate_json_key")
+            result[key] = child
+        return result
     try:
-        parsed = json.loads(value)
+        parsed = json.loads(value, object_pairs_hook=unique_object) if isinstance(value, str) else dict(value)
+        # Also reject exponent overflow and non-finite values in dict inputs.
+        json.dumps(parsed, allow_nan=False)
     except (TypeError, ValueError):
         return None
     return dict(parsed) if isinstance(parsed, Mapping) else None
@@ -385,41 +391,6 @@ def validate_effective_worker_binding(
     if effective_reasoning != requested_reasoning:
         return BindingValidation(BINDING_REJECTED, "contradictory_reasoning")
     return BindingValidation(BINDING_ACCEPTED, "matched")
-
-
-def synthesize_effective_worker_binding_readback(
-    requested: Mapping[str, Any],
-    readback: Mapping[str, Any] | None,
-) -> Mapping[str, Any] | None:
-    """Return a readback that includes an effective_binding for a successful native CLI spawn.
-
-    The native Codex CLI runtime does not emit the CodexHub-internal
-    ``effective_binding`` readback; it only returns ``{"agent_id", "nickname"}``
-    on success. When the historical output matches that successful native shape
-    and we already have a verified requested-binding sidecar, synthesize the
-    matching effective binding so the fail-closed history validator can succeed
-    without weakening its real safety boundary.
-    """
-    if readback is None:
-        return None
-    if "effective_binding" in readback:
-        return readback
-    # Require the minimum fields that identify a successful native spawn.
-    if not isinstance(readback.get("agent_id"), str) or not (
-        readback.get("nickname") is None or isinstance(readback.get("nickname"), str)
-    ):
-        return readback
-    return {
-        **readback,
-        "effective_binding": {
-            "contract_version": WORKER_BINDING_CONTRACT_VERSION,
-            "support": "supported",
-            "status": "accepted",
-            "agent_type": requested.get("agent_type"),
-            "model": requested.get("model"),
-            "reasoning": requested.get("reasoning"),
-        },
-    }
 
 
 def json_object_from_arguments(value: Any) -> dict[str, Any] | None:

@@ -348,10 +348,9 @@ class RetryExecutionPlan:
         self,
         event_context: Mapping[str, Any] | None,
     ) -> int:
-        return int(
-            self.lifecycle_final_retry_eligible
-            and bool((event_context or {}).get("subagent_lifecycle_complete"))
-        )
+        """Retained plan API; Collaboration history cannot buy another retry."""
+        _ = event_context
+        return 0
 
     def retry_delay_seconds(
         self,
@@ -2025,4 +2024,3 @@ def route_attempt_event_fields(
         "route_attempt_mutation_summary": snapshot["mutation_summary"],
     }
 _route_attempt_event_fields = route_attempt_event_fields
-
