@@ -506,12 +506,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                 changed = True
                 continue
             if entry.disposition != ADAPT:
-                declaration = _copy_mapping(raw_tool)
-                if entry.family == NAMESPACE and entry.version in {"v1", "v2"}:
-                    for child in declaration.get("tools", []):
-                        self._encode_timeout_contract(child)
-                encoded.append(declaration)
-                changed = changed or declaration != raw_tool
+                encoded.append(_copy_mapping(raw_tool))
                 continue
             if entry.family == NAMESPACE:
                 namespace, children, _version, valid = _namespace_details(raw_tool)
