@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import textwrap
 
 import pytest
@@ -57,6 +58,31 @@ def test_trusted_matrix_has_thirteen_candidate_runs_and_four_baseline_runs() -> 
         ("opencode-go/muse-spark-1.3-contributor", "v2"),
         ("commandcode/deepseek/deepseek-v4.1-flash", "v2"),
     ]
+
+
+def test_git_revision_state_marks_untracked_source_dirty_but_allows_evidence(tmp_path):
+    runner = _runner_module()
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    tracked = tmp_path / "tracked.py"
+    tracked.write_text("SOURCE = 1\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.py"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(tmp_path),
+            "-c", "user.name=CodexHub Test", "-c", "user.email=test@example.invalid",
+            "commit", "-qm", "fixture",
+        ],
+        check=True,
+    )
+    (tmp_path / "docs" / "evidence").mkdir(parents=True)
+    (tmp_path / "docs" / "evidence" / "run.json").write_text("{}\n")
+    state = runner._git_revision_state(tmp_path)
+    assert state["gateway_dirty"] is False
+    assert state["gateway_source_untracked_count"] == 0
+    (tmp_path / "untracked.py").write_text("SOURCE = 2\n")
+    state = runner._git_revision_state(tmp_path)
+    assert state["gateway_dirty"] is True
+    assert state["gateway_source_untracked_count"] == 1
 
 
 def test_provider_http_status_is_classified_without_attributing_gateway_failure() -> None:
@@ -498,6 +524,40 @@ def test_v2_delivery_accepts_identity_bearing_replay_without_optional_metadata(t
     assert evidence["passed"] is True
     assert evidence["parent_test_tool_call_count"] == 1
     assert evidence["parent_child_relationships"] == [{"child": "child", "parent": "parent"}]
+
+
+def test_v2_delivery_does_not_accept_identity_text_in_user_messages(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v2")
+    parent_path = tmp_path / "sessions" / "parent.jsonl"
+    rows = [json.loads(line) for line in parent_path.read_text().splitlines()]
+    spoofed = []
+    for row in rows:
+        payload = row.get("payload", {})
+        if row.get("type") == "response_item" and payload.get("type") == "agent_message":
+            payload["type"] = "message"
+            payload["role"] = "user"
+            for part in payload.get("content", []):
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    part["text"] = "/root/reviewer " + part["text"]
+            payload.pop("author", None)
+            payload.pop("recipient", None)
+            spoofed.append(copy.deepcopy(row))
+    assert len(spoofed) == 1
+    rows.insert(rows.index(spoofed[0]) + 1, copy.deepcopy(spoofed[0]))
+    parent_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    evidence = runner.collect_evidence(
+        tmp_path,
+        "xai/grok-4.6",
+        "v2",
+        parent_model="xai/grok-4.6",
+        parent_effort="high",
+        child_effort="high",
+        client_outputs=(output,),
+        fixture_directory=tmp_path,
+    )
+    assert evidence["passed"] is False
+    assert evidence["lifecycle_diagnostics"]["failure"] == "child_result_delivery_not_correlated"
 
 
 @pytest.mark.parametrize("fault", ["exit_code", "missing_start", "duplicate_item", "missing_terminal", "wrong_thread", "no_parent_edit", "echo_only"])

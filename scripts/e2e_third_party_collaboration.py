@@ -1067,7 +1067,11 @@ def _lifecycle_passed(parent: dict, child: dict, version: str, diagnostics: dict
     diagnostics["delivery_candidates"] = []
     for row in parent["rows"]:
         item = row.get("payload", {})
-        if row.get("type") != "response_item" or item.get("type") not in {"message", "agent_message"}:
+        # The metadata-free fallback is intentionally limited to the
+        # structured Collaboration replay item.  A normal user/assistant
+        # message containing the child name and result text is not lifecycle
+        # evidence and must never satisfy delivery correlation.
+        if row.get("type") != "response_item" or item.get("type") != "agent_message":
             continue
         content = _item_text(item.get("content"))
         matches = [bool(message) and message in content for message in messages_for_diagnostics]
@@ -2095,12 +2099,22 @@ def _git_revision_state(gateway_root: Path) -> dict[str, object]:
         ["git", "-C", str(gateway_root), "status", "--porcelain", "--untracked-files=all"],
         text=True,
     ).splitlines()
-    untracked_count = sum(1 for line in untracked if line.startswith("?? "))
+    untracked_paths = [line[3:] for line in untracked if line.startswith("?? ")]
+    # The checkout deliberately retains local evidence/research notes outside
+    # the candidate commit.  They are not executable Gateway source.  Any
+    # other untracked path is source drift and must invalidate a matrix row;
+    # merely exposing its count is not a sufficient clean-tree check.
+    allowed_untracked_prefixes = ("docs/evidence/", "docs/research/")
+    source_untracked = [
+        path for path in untracked_paths
+        if not path.startswith(allowed_untracked_prefixes)
+    ]
     return {
         "gateway_sha": revision,
-        "gateway_dirty": bool(tracked),
+        "gateway_dirty": bool(tracked) or bool(source_untracked),
         "gateway_tracked_status": tracked,
-        "gateway_untracked_count": untracked_count,
+        "gateway_untracked_count": len(untracked_paths),
+        "gateway_source_untracked_count": len(source_untracked),
     }
 
 
