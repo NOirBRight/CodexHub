@@ -62,6 +62,68 @@ PARENT_SENTINEL = "E2E_PARENT_IMPLEMENTED_OK 941"
 NO_SUBAGENT_TURN_SENTINEL = "E2E_NO_SUBAGENT_TURN_OK 818"
 
 
+class MatrixCase:
+    """One real-provider collaboration scenario in the trusted matrix.
+
+    ``repeats`` is the number of independent candidate runs.  The baseline
+    is intentionally run once: it is a symptom reference, not evidence that
+    the retired implementation is safe to release.
+    """
+
+    __slots__ = ("parent_model", "effort", "collaboration_version", "repeats")
+
+    def __init__(self, parent_model: str, effort: str, collaboration_version: str, repeats: int):
+        self.parent_model = parent_model
+        self.effort = effort
+        self.collaboration_version = collaboration_version
+        self.repeats = repeats
+
+    @property
+    def slug(self) -> str:
+        model = re.sub(r"[^A-Za-z0-9]+", "-", self.parent_model).strip("-").lower()
+        return f"{model}-{self.collaboration_version}"
+
+
+def build_trusted_matrix_cases(*, candidate_repeats: int = 3) -> tuple[MatrixCase, ...]:
+    """Return the fixed 13-scenario candidate matrix.
+
+    Keep this data in the harness rather than in shell snippets so the report
+    can prove exactly which model/protocol/effort combination was requested.
+    The CommandCode case is deliberately V2-only and uses the exact confirmed
+    DeepSeek V4.1 Flash selector.
+    """
+
+    if candidate_repeats < 1:
+        raise ValueError("candidate_repeats_must_be_positive")
+    return (
+        MatrixCase("xai/grok-4.6", "high", "v1", candidate_repeats),
+        MatrixCase("xai/grok-4.6", "high", "v2", candidate_repeats),
+        MatrixCase(
+            "opencode-go/muse-spark-1.3-contributor",
+            "xhigh",
+            "v1",
+            candidate_repeats,
+        ),
+        MatrixCase(
+            "opencode-go/muse-spark-1.3-contributor",
+            "xhigh",
+            "v2",
+            candidate_repeats,
+        ),
+        MatrixCase("commandcode/deepseek/deepseek-v4.1-flash", "max", "v2", 1),
+    )
+
+
+def build_trusted_baseline_cases() -> tuple[MatrixCase, ...]:
+    """Return the four one-shot A/B baseline scenarios."""
+
+    return tuple(
+        MatrixCase(case.parent_model, case.effort, case.collaboration_version, 1)
+        for case in build_trusted_matrix_cases(candidate_repeats=1)
+        if case.parent_model.startswith(("xai/", "opencode-go/"))
+    )
+
+
 def confirm_commandcode_deepseek_41(
     providers_path: Path,
     *,
@@ -1978,6 +2040,176 @@ def write_reviewer_config(client_home: Path, model: str, effort: str) -> Path:
     return path
 
 
+def _git_revision_state(gateway_root: Path) -> dict[str, object]:
+    """Capture source identity without treating evidence files as source edits.
+
+    The checkout intentionally keeps untracked, local evidence outside the
+    candidate commit.  ``gateway_dirty`` therefore describes tracked changes
+    only; the bounded untracked count remains visible so a report cannot hide
+    a genuinely modified source tree.
+    """
+
+    revision = subprocess.check_output(
+        ["git", "-C", str(gateway_root), "rev-parse", "HEAD"], text=True,
+    ).strip()
+    tracked = subprocess.check_output(
+        ["git", "-C", str(gateway_root), "status", "--porcelain", "--untracked-files=no"],
+        text=True,
+    ).strip()
+    untracked = subprocess.check_output(
+        ["git", "-C", str(gateway_root), "status", "--porcelain", "--untracked-files=all"],
+        text=True,
+    ).splitlines()
+    untracked_count = sum(1 for line in untracked if line.startswith("?? "))
+    return {
+        "gateway_sha": revision,
+        "gateway_dirty": bool(tracked),
+        "gateway_tracked_status": tracked,
+        "gateway_untracked_count": untracked_count,
+    }
+
+
+def _safe_matrix_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "case"
+
+
+def _run_trusted_matrix(args: argparse.Namespace) -> int:
+    """Run the fixed A/B matrix through this same single-scenario harness.
+
+    This is deliberately an orchestration mode, not a second evidence
+    implementation.  Every child process writes the normal v8 report, while
+    this function only joins bounded structural fields and classifications.
+    """
+
+    baseline_root = args.baseline_root.resolve() if args.baseline_root else None
+    candidate_root = args.gateway_root.resolve()
+    if baseline_root is None or not baseline_root.is_dir():
+        report = {
+            "report_version": 1,
+            "evidence_contract": "codexhub.e2e-matrix.v1",
+            "status": "unverified",
+            "passed": False,
+            "failure_classification": "baseline_root_required",
+            "candidate_root": str(candidate_root),
+        }
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(report))
+        return 2
+
+    cases = build_trusted_matrix_cases(candidate_repeats=args.candidate_repeats)
+    baseline_cases = build_trusted_baseline_cases()
+    output_dir = args.matrix_output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    child_script = Path(__file__).resolve()
+    source_home = args.source_home.expanduser().resolve()
+    rows: list[dict[str, object]] = []
+
+    def execute(label: str, root: Path, case: MatrixCase, run_index: int) -> None:
+        output = output_dir / (
+            f"{label}-{_safe_matrix_name(case.parent_model)}-"
+            f"{case.collaboration_version}-{run_index}.json"
+        )
+        command = [
+            sys.executable,
+            str(child_script),
+            "--source-home", str(source_home),
+            "--parent-model", case.parent_model,
+            "--parent-effort", case.effort,
+            "--parent-collaboration-version", case.collaboration_version,
+            "--gateway-root", str(root),
+            "--timeout", str(args.timeout),
+            "--output", str(output),
+        ]
+        started = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(root),
+                env=dict(os.environ),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=args.timeout + 60,
+                check=False,
+            )
+            exit_code = completed.returncode
+        except subprocess.TimeoutExpired:
+            exit_code = None
+        row: dict[str, object] = {
+            "label": label,
+            "run_index": run_index,
+            "parent_model": case.parent_model,
+            "effort": case.effort,
+            "collaboration_version": case.collaboration_version,
+            "started_at": started,
+            "finished_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "exit_code": exit_code,
+            "report_path": str(output),
+        }
+        if output.is_file():
+            try:
+                child = json.loads(output.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                child = {}
+            if isinstance(child, dict):
+                for key in (
+                    "status", "passed", "failure_classification", "gateway_sha",
+                    "gateway_dirty", "request_namespace_verified", "upstream_statuses",
+                    "client_exit_code", "resume_client_exit_code",
+                ):
+                    if key in child:
+                        row[key] = child[key]
+        if "status" not in row:
+            row["status"] = "unverified"
+            row["failure_classification"] = "matrix_child_no_report"
+        rows.append(row)
+
+    # Baseline A is intentionally four one-shot reference runs.
+    for case in baseline_cases:
+        execute("baseline", baseline_root, case, 1)
+    # Candidate B is the fixed 13-scenario matrix (Grok/Muse x3; CommandCode x1).
+    for case in cases:
+        for run_index in range(1, case.repeats + 1):
+            execute("candidate", candidate_root, case, run_index)
+
+    counts = {"passed": 0, "failed": 0, "unverified": 0}
+    for row in rows:
+        status = row.get("status")
+        if status not in counts:
+            status = "unverified"
+            row["status"] = status
+        counts[status] += 1
+    candidate_rows = [row for row in rows if row.get("label") == "candidate"]
+    candidate_complete = len(candidate_rows) == sum(case.repeats for case in cases)
+    status = "passed" if candidate_complete and all(
+        row.get("status") == "passed" and row.get("passed") is True
+        for row in candidate_rows
+    ) and all(row.get("gateway_dirty") is False for row in candidate_rows) else "failed"
+    if any(row.get("status") == "unverified" for row in rows):
+        status = "unverified"
+    matrix = {
+        "report_version": 1,
+        "evidence_contract": "codexhub.e2e-matrix.v1",
+        "cli_version": "codex-cli 0.153.4",
+        "status": status,
+        "passed": status == "passed",
+        "candidate_root": str(candidate_root),
+        "baseline_root": str(baseline_root),
+        "candidate_revision": _git_revision_state(candidate_root),
+        "baseline_revision": _git_revision_state(baseline_root),
+        "candidate_repeat_policy": args.candidate_repeats,
+        "expected_candidate_scenarios": sum(case.repeats for case in cases),
+        "expected_baseline_scenarios": len(baseline_cases),
+        "counts": counts,
+        "runs": rows,
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(matrix, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(matrix))
+    return 0 if status == "passed" else (2 if status == "unverified" else 1)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-home", type=Path, required=True)
@@ -1992,6 +2224,21 @@ def main() -> int:
     parser.add_argument("--child-model")
     parser.add_argument("--child-effort")
     parser.add_argument("--gateway-root", type=Path, default=ROOT)
+    parser.add_argument(
+        "--matrix", action="store_true",
+        help="orchestrate the fixed baseline/candidate matrix through this harness",
+    )
+    parser.add_argument(
+        "--baseline-root", type=Path,
+        help="clean checkout of the legacy baseline (required with --matrix)",
+    )
+    parser.add_argument(
+        "--candidate-repeats", type=int, default=3,
+        help="candidate repeats for Grok/Muse matrix groups (default: 3)",
+    )
+    parser.add_argument(
+        "--matrix-output-dir", type=Path, default=Path("test-results/third-party-matrix"),
+    )
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--output", type=Path, default=Path("test-results/third-party-collaboration.json"))
     args = parser.parse_args()
@@ -1999,6 +2246,10 @@ def main() -> int:
     cli_version = subprocess.check_output(["codex", "--version"], text=True).strip()
     if cli_version != "codex-cli 0.153.4":
         parser.error("requires codex-cli 0.153.4")
+    if args.matrix:
+        if args.candidate_repeats < 1:
+            parser.error("--candidate-repeats must be positive")
+        return _run_trusted_matrix(args)
     source = args.source_home.expanduser().resolve()
     parent_effort = args.parent_effort or DEFAULT_REASONING.get(args.parent_model, "high")
     child_model = args.child_model or args.parent_model
@@ -2016,8 +2267,7 @@ def main() -> int:
     report = {
         "report_version": 8,
         "cli_version": cli_version,
-        "gateway_sha": subprocess.check_output(["git", "-C", str(gateway_root), "rev-parse", "HEAD"], text=True).strip(),
-        "gateway_dirty": bool(subprocess.check_output(["git", "-C", str(gateway_root), "status", "--porcelain"], text=True).strip()),
+        **_git_revision_state(gateway_root),
         "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "parent_model": args.parent_model,
         "parent_effort": parent_effort,

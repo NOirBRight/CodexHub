@@ -43,6 +43,21 @@ def test_commandcode_deepseek_matrix_uses_the_confirmed_v41_identifier() -> None
     assert not runner.COMMANDCODE_DEEPSEEK_41_RE.search("deepseek/deepseek-v4-flash")
 
 
+def test_trusted_matrix_has_thirteen_candidate_runs_and_four_baseline_runs() -> None:
+    runner = _runner_module()
+    candidate = runner.build_trusted_matrix_cases()
+    baseline = runner.build_trusted_baseline_cases()
+    assert len(baseline) == 4
+    assert sum(case.repeats for case in candidate) == 13
+    assert [(case.parent_model, case.collaboration_version) for case in candidate] == [
+        ("xai/grok-4.6", "v1"),
+        ("xai/grok-4.6", "v2"),
+        ("opencode-go/muse-spark-1.3-contributor", "v1"),
+        ("opencode-go/muse-spark-1.3-contributor", "v2"),
+        ("commandcode/deepseek/deepseek-v4.1-flash", "v2"),
+    ]
+
+
 def test_provider_http_status_is_classified_without_attributing_gateway_failure() -> None:
     runner = _runner_module()
     assert runner.classify_request_trace([{"upstream_status": 400}]) == "provider_request_permanent"
