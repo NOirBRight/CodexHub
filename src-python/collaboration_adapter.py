@@ -888,7 +888,16 @@ def validate_worker_binding_history(payload: Mapping[str, Any]) -> bool:
             arguments = json_object_from_arguments(raw_arguments)
             strict_arguments = strict_json_object(raw_arguments)
             agent_type = arguments.get("agent_type") if arguments is not None else None
-            if agent_type in {"general", "default"}:
+            # Only explicit worker calls (or persisted worker sidecars) belong
+            # to this contract. Client role names and omitted optional roles
+            # must survive history replay, including paired execution errors.
+            if (
+                agent_type != "worker"
+                and isinstance(arguments, Mapping)
+                and (agent_type is None or isinstance(agent_type, str))
+                and binding_field not in arguments
+                and binding_field not in item
+            ):
                 continue
             if not isinstance(call_id, str) or not call_id:
                 raise_worker_contract_error(

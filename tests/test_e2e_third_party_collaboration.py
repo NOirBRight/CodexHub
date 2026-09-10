@@ -416,3 +416,19 @@ def test_shell_edit_evidence_gap_does_not_erase_completed_child_lifecycle(tmp_pa
     assert evidence["lifecycle_passed"] is True
     assert evidence["passed"] is False
     assert evidence["status"] == "unverified"
+
+
+def test_failed_native_spawn_without_child_identity_does_not_count_as_creation(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path)
+    path = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    failed = json.loads(json.dumps(rows[3:5]))
+    for row in failed:
+        row["payload"]["call_id"] = "failed-client-spawn"
+    failed[1]["payload"]["output"] = "agent type is currently unavailable"
+    rows[3:3] = failed
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", parent_effort="high", child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is True
+    assert evidence["successful_child_creation_count"] == 1

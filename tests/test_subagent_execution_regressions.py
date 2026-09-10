@@ -617,3 +617,18 @@ def test_optional_v1_selector_is_not_required_by_worker_stream_state(surface, se
         ]
         for event in events:
             gateway_compat.compatible_sse_line(("data: " + json.dumps(event) + "\n\n").encode(), "fixture-provider", event_context=context)
+
+
+@pytest.mark.parametrize("selector", [None, "reviewer", "custom-role"])
+@pytest.mark.parametrize("output", [{"agent_id": "child", "nickname": "review"}, {"error": "client role unavailable"}])
+def test_client_owned_v1_role_history_is_not_revalidated_as_worker(selector, output, monkeypatch):
+    monkeypatch.setattr(gateway_events, "write_proxy_event", lambda *args, **kwargs: None)
+    arguments = {"message": "Inspect only."}
+    if selector is not None:
+        arguments["agent_type"] = selector
+    call = _call("client-role", "spawn_agent", arguments)
+    result = gateway_compat.compatible_request_body(
+        _request([call, _result("client-role", output)], tools=[_namespace(COLLABORATION_V1)]),
+        _upstream(), event_context={},
+    )
+    assert json.loads(result)["input"][0]["arguments"] == call["arguments"]

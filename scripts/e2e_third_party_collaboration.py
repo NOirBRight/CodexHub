@@ -334,6 +334,12 @@ def _paired_collaboration_calls(record: dict, version: str) -> list[dict]:
         call["output"] = results[call_id]
         output = call["output"]
         call["failed"] = isinstance(output, dict) and bool(output.get("error") or output.get("isError"))
+        identity_key = "task_name" if version == "v2" else "agent_id"
+        call["creation_verified"] = (
+            call["name"] == "spawn_agent" and not call["failed"]
+            and isinstance(output, dict) and isinstance(output.get(identity_key), str)
+            and bool(output[identity_key])
+        )
     return list(calls.values())
 
 
@@ -378,7 +384,8 @@ def _child_inspect_only(record: dict) -> bool:
 
 def _lifecycle_passed(parent: dict, child: dict, version: str) -> tuple[bool, list[dict]]:
     calls = _paired_collaboration_calls(parent, version)
-    successful = [call for call in calls if not call["failed"]]
+    successful = [call for call in calls if not call["failed"]
+                  and (call["name"] != "spawn_agent" or call["creation_verified"])]
     spawns = [call for call in successful if call["name"] == "spawn_agent"]
     if len(spawns) != 1 or not isinstance(spawns[0]["output"], dict):
         return False, calls
@@ -625,6 +632,7 @@ def collect_evidence(
         "handoff_contract_passed": handoff_contract_passed,
         "portable_calls": sorted(portable_calls),
         "parent_spawn_call_count": call_names.count("spawn_agent"),
+        "successful_child_creation_count": sum(call["creation_verified"] for call in calls),
         "parent_child_relationships": [
             {"child": child, "parent": parent} for child, parent in relationships
         ],

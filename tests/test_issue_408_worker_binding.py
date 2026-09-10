@@ -133,12 +133,12 @@ class Issue408WorkerBindingRegressionTests(unittest.TestCase):
 class Issue408SemanticAdapterTests(unittest.TestCase):
     """Unit-level coverage for the semantic selector helper from #408."""
 
-    def test_normalize_multi_agent_arguments_maps_general_to_default(self):
+    def test_normalize_multi_agent_arguments_preserves_client_role(self):
         value, tool_name, changed = codex_semantic_adapter.normalize_multi_agent_arguments(
             '{"message":"do work","agent_type":"general"}',
             "spawn_agent",
         )
 
-        self.assertTrue(changed)
+        self.assertFalse(changed)
         self.assertEqual(tool_name, "spawn_agent")
-        self.assertEqual(json.loads(value)["agent_type"], "default")
+        self.assertEqual(json.loads(value)["agent_type"], "general")

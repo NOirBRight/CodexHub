@@ -33,54 +33,17 @@ def test_multi_agent_discovery_arguments_turns_empty_call_into_search_query():
     }
 
 
-def test_normalize_multi_agent_spawn_arguments_from_prompt_alias():
-    value, tool_name, changed = normalize_multi_agent_arguments(
-        '{"prompt":"do work","name":"worker","fork_context":"true","timeout_ms":"1500"}',
-        "spawn_agent",
-    )
-
-    assert changed is True
+@pytest.mark.parametrize("arguments", [
+    '{"prompt":"do work","name":"worker","fork_context":"true","timeout_ms":"1500"}',
+    '{"message":"do work","agent_type":"worker"}',
+    '{"message":"do work","agent_type":"synthetic-unknown"}',
+    '{"message":"do work","agent_type":"general"}',
+])
+def test_normalize_multi_agent_spawn_does_not_repair_client_arguments(arguments):
+    value, tool_name, changed = normalize_multi_agent_arguments(arguments, "spawn_agent")
+    assert changed is False
     assert tool_name == "spawn_agent"
-    payload = json.loads(value)
-    assert payload["message"] == "do work"
-    assert payload["nickname"] == "worker"
-    assert payload["fork_context"] is True
-    assert payload["timeout_ms"] == 1500
-    assert "prompt" not in payload
-    assert "name" not in payload
-
-
-def test_normalize_multi_agent_spawn_preserves_worker_selector():
-    value, tool_name, changed = normalize_multi_agent_arguments(
-        '{"message":"do work","agent_type":"worker"}',
-        "spawn_agent",
-    )
-
-    assert changed is True
-    assert tool_name == "spawn_agent"
-    assert json.loads(value)["agent_type"] == "worker"
-
-
-def test_normalize_multi_agent_spawn_preserves_unknown_selector_for_rejection():
-    value, tool_name, changed = normalize_multi_agent_arguments(
-        '{"message":"do work","agent_type":"synthetic-unknown"}',
-        "spawn_agent",
-    )
-
-    assert changed is True
-    assert tool_name == "spawn_agent"
-    assert json.loads(value)["agent_type"] == "synthetic-unknown"
-
-
-def test_normalize_multi_agent_spawn_maps_general_to_default_for_native_runtime():
-    value, tool_name, changed = normalize_multi_agent_arguments(
-        '{"message":"do work","agent_type":"general"}',
-        "spawn_agent",
-    )
-
-    assert changed is True
-    assert tool_name == "spawn_agent"
-    assert json.loads(value)["agent_type"] == "default"
+    assert value == arguments
 
 
 @pytest.mark.parametrize(
@@ -217,12 +180,12 @@ def test_validate_effective_worker_binding_fails_closed(readback_name, classific
     ) == codex_semantic_adapter.BindingValidation("rejected", classification)
 
 
-def test_normalize_multi_agent_wait_target_to_targets():
+def test_normalize_multi_agent_wait_preserves_target_for_schema_validation():
     value, tool_name, changed = normalize_multi_agent_arguments({"target": "agent-1"}, "wait_agent")
 
-    assert changed is True
+    assert changed is False
     assert tool_name == "wait_agent"
-    assert value == {"targets": ["agent-1"]}
+    assert value == {"target": "agent-1"}
 
 
 def test_coercion_helpers_preserve_existing_semantics():
