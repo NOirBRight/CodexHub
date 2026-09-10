@@ -434,21 +434,29 @@ def _lifecycle_passed(parent: dict, child: dict, version: str) -> tuple[bool, li
                      and row["payload"].get("recipient") == identity.rsplit("/", 1)[0]]
         if not all(any(message in _item_text(item.get("content")) for item in delivered) for message in messages):
             return False, calls
+    return True, calls
+
+
+def _parent_patch_after_reviews(parent: dict, child: dict) -> bool:
     # Correlate the parent edit request/result with the CLI file-change event.
     # Without the child's completed review before that edit, completion text
     # alone would wrongly accept a parent that bypassed the review altogether.
-    last_review = completions[-1].get("timestamp")
+    completions = [row for row in child["rows"] if row.get("type") == "event_msg"
+                   and row.get("payload", {}).get("type") == "task_complete"]
+    if not completions or not isinstance(completions[-1].get("timestamp"), str):
+        return False
+    last_review = completions[-1]["timestamp"]
     if any(row.get("timestamp", "") < last_review for row in parent["rows"]
            if row.get("type") == "response_item" and row.get("payload", {}).get("type") in {"custom_tool_call", "function_call"}
            and row["payload"].get("name") == "apply_patch"):
-        return False, calls
+        return False
     patch_ids = {row["payload"].get("call_id") for row in parent["rows"]
                  if row.get("type") == "response_item" and row.get("payload", {}).get("type") in {"custom_tool_call", "function_call"}
                  and row["payload"].get("name") == "apply_patch"
                  and isinstance(last_review, str) and row.get("timestamp", "") >= last_review}
     patch_results = {row["payload"].get("call_id") for row in parent["rows"]
                      if row.get("type") == "response_item" and row.get("payload", {}).get("type") in {"custom_tool_call_output", "function_call_output"}}
-    return bool((patch_ids - {None}) & patch_results), calls
+    return bool((patch_ids - {None}) & patch_results)
 
 
 def _parent_session_id(home: Path, parent_model: str) -> str | None:
@@ -578,6 +586,7 @@ def collect_evidence(
                         for change in item.get("changes", [])) for item in turn["items"])
         for turn in client_turns
     )
+    parent_edits_verified = parent_edits_verified and len(parent_records) == len(child_records) == 1 and _parent_patch_after_reviews(parent_records[0], child_records[0])
     execution_passed = tests_and_terminals_verified and parent_edits_verified
     passed = lifecycle_passed and contexts_match and execution_passed and no_subagent_turn
     child_read_only = bool(child_records) and all(

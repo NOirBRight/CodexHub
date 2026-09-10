@@ -400,3 +400,19 @@ def test_gateway_worker_rejection_is_not_attributed_to_the_provider():
     runner = _runner_module()
     signals = [{"code": "upstream.error", "source": "xai", "failure_class": "permanent", "type": "external_worker_binding_rejected"}]
     assert runner.classify_failure_signals(signals) == "gateway_collaboration_boundary"
+
+
+def test_shell_edit_evidence_gap_does_not_erase_completed_child_lifecycle(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path)
+    path = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows = [row for row in rows if row.get("payload", {}).get("call_id") != "patch-call"]
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n")
+    events = [json.loads(line) for line in output.read_text().splitlines()]
+    events = [event for event in events if event.get("item", {}).get("type") != "file_change"]
+    output.write_text("\n".join(map(json.dumps, events)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", parent_effort="high", child_effort="high", client_outputs=(output,))
+    assert evidence["lifecycle_passed"] is True
+    assert evidence["passed"] is False
+    assert evidence["status"] == "unverified"
