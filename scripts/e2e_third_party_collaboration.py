@@ -456,6 +456,28 @@ def _lifecycle_passed(parent: dict, child: dict, version: str, diagnostics: dict
     diagnostics["completion_records"] = [
         {"timestamp": row.get("timestamp"), "turn_id": row["payload"].get("turn_id")}
         for row in completions_for_diagnostics]
+    def native_summary(value):
+        if isinstance(value, dict):
+            return {str(key): native_summary(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [native_summary(item) for item in value[:8]]
+        if isinstance(value, str):
+            # Synthetic lifecycle responses only. Keep error semantics without
+            # retaining review bodies, paths, or opaque provider tokens.
+            if any(word in value.lower() for word in ("error", "invalid", "missing", "unknown", "expected")):
+                clean = re.sub(r"(?:sk-|Bearer )[^\s\"']+", "<REDACTED>", value)
+                clean = re.sub(r"/(?:home|tmp)/[^\s\"']+", "<PATH>", clean)
+                return clean[:1200]
+            return {"text_length": len(value)}
+        return value
+    def contains_message(value, message):
+        if isinstance(value, str):
+            return bool(message) and message in value
+        if isinstance(value, dict):
+            return any(contains_message(item, message) for item in value.values())
+        if isinstance(value, list):
+            return any(contains_message(item, message) for item in value)
+        return False
     diagnostics["native_results"] = []
     for call in calls:
         result = call["output"] if isinstance(call["output"], dict) else {}
@@ -467,7 +489,8 @@ def _lifecycle_passed(parent: dict, child: dict, version: str, diagnostics: dict
             "timed_out": result.get("timed_out") if isinstance(result.get("timed_out"), bool) else None,
             "target_completed": isinstance(target_status, dict) and "completed" in target_status,
             "previous_completed": isinstance(previous, dict) and "completed" in previous,
-            "child_message_matches": [bool(message) and message in json.dumps(call["output"], ensure_ascii=False)
+            "result_shape": native_summary(call["output"]),
+            "child_message_matches": [contains_message(call["output"], message)
                                       for message in messages_for_diagnostics],
         })
     diagnostics["delivery_candidates"] = []
