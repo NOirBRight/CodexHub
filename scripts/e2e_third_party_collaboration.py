@@ -671,6 +671,11 @@ def collect_evidence(
         "lifecycle_diagnostics": lifecycle_diagnostics,
         "execution_diagnostics": {
             "tests_and_terminals_verified": tests_and_terminals_verified,
+            "process_observations": [
+                json.loads(Path(str(path) + ".process.json").read_text())
+                if Path(str(path) + ".process.json").is_file() else {"available": False}
+                for path in client_outputs
+            ],
             "test_commands": [
                 dict(_test_command_diagnostic(item, "test_parent_task.py" if index == 0 else "test_resume_turn.py"),
                      thread_id=turn["thread_id"], turn_index=index)
@@ -902,8 +907,15 @@ def _run_client(
     output: Path,
     working_directory: Path,
     timeout: int,
+    observe_processes: bool = False,
 ) -> int | None:
     """Run one explicitly requested client turn in the isolated fixture root."""
+    if observe_processes:
+        tracer = shutil.which("strace")
+        if sys.platform != "linux" or not tracer:
+            raise RuntimeError("process_observer_unavailable")
+        command = [tracer, "-ff", "-qq", "-yy", "-s", "8192", "-e",
+                   "trace=execve,exit_group,openat", "-o", str(output) + ".process"] + command
     with output.open("a", encoding="utf-8") as stream:
         client = subprocess.Popen(
             command,
@@ -919,6 +931,12 @@ def _run_client(
         except subprocess.TimeoutExpired:
             _stop_client_process(client)
             return None
+        finally:
+            if observe_processes:
+                from collaboration_process_evidence import read_process_evidence
+                evidence = read_process_evidence(Path(str(output) + ".process"),
+                                                 working_directory, Path(sys.executable))
+                Path(str(output) + ".process.json").write_text(json.dumps(evidence), encoding="utf-8")
 
 
 def collect_failure_signals(path: Path) -> list[dict]:
@@ -986,6 +1004,7 @@ def main() -> int:
     parser.add_argument("--parent-effort")
     parser.add_argument("--parent-collaboration-version", choices=("v1", "v2"), default="v2")
     parser.add_argument("--refresh-official", action="store_true")
+    parser.add_argument("--observe-processes", action="store_true")
     parser.add_argument("--child-model")
     parser.add_argument("--child-effort")
     parser.add_argument("--gateway-root", type=Path, default=ROOT)
@@ -1134,6 +1153,7 @@ def main() -> int:
                     output=client_output,
                     working_directory=work,
                     timeout=args.timeout,
+                    observe_processes=args.observe_processes,
                 )
                 report["client_exit_code"] = client_exit_code
                 report["failure_signals"] = collect_failure_signals(client_output)
@@ -1185,6 +1205,7 @@ def main() -> int:
                         output=client_output,
                         working_directory=work,
                         timeout=args.timeout,
+                    observe_processes=args.observe_processes,
                     )
                 elif first_turn_passed:
                     report["failure_type"] = "parent_session_unavailable"
