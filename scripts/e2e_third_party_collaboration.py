@@ -11,6 +11,7 @@ from python_runtime_contract import require_python_313
 require_python_313(__file__)
 
 import argparse
+import ast
 from contextlib import ExitStack
 import hashlib
 import http.client
@@ -566,14 +567,18 @@ def collect_evidence(
     no_subagent_turn = len(parent_turns) <= 1 or not any(
         _collaboration_call_names([parent_turns[1]], version) for version in ("v1", "v2")
     )
-    execution_passed = bool(client_turns) and len(client_turns) == len(parent_turns) and all(
+    tests_and_terminals_verified = bool(client_turns) and len(client_turns) == len(parent_turns) and all(
         turn["terminal"] == "turn.completed" and parent_turns[index]["terminal"] == "task_complete"
         and any(_successful_test_item(item, "test_parent_task.py" if index == 0 else "test_resume_turn.py") for item in turn["items"])
-        and any(item.get("type") == "file_change" and item.get("status") == "completed"
-                and any(Path(change.get("path", "")).name == "parent_task.py" and change.get("kind") == "update"
-                        for change in item.get("changes", [])) for item in turn["items"])
         for index, turn in enumerate(client_turns)
     )
+    parent_edits_verified = bool(client_turns) and all(
+        any(item.get("type") == "file_change" and item.get("status") == "completed"
+                and any(Path(change.get("path", "")).name == "parent_task.py" and change.get("kind") == "update"
+                        for change in item.get("changes", [])) for item in turn["items"])
+        for turn in client_turns
+    )
+    execution_passed = tests_and_terminals_verified and parent_edits_verified
     passed = lifecycle_passed and contexts_match and execution_passed and no_subagent_turn
     child_read_only = bool(child_records) and all(
         row["payload"].get("sandbox_policy", {}).get("type") == "read-only"
@@ -581,7 +586,14 @@ def collect_evidence(
     )
     child_inspection_verified = bool(child_records) and all(_child_inspect_only(record) for record in child_records)
     passed = passed and child_inspection_verified
+    missing_evidence = []
+    if tests_and_terminals_verified and not parent_edits_verified:
+        # A shell edit need not emit file_change. Absence of attribution is
+        # neither proof of model failure nor permission to accept the run.
+        missing_evidence.append("parent_source_edit_attribution")
+    attribution_only_gap = bool(missing_evidence) and lifecycle_passed and contexts_match and no_subagent_turn and child_inspection_verified
     return {
+        "missing_evidence": missing_evidence,
         "child_read_only": child_read_only,
         "child_inspection_verified": child_inspection_verified,
         "child_sandbox_types": sorted({str(row["payload"].get("sandbox_policy", {}).get("type"))
@@ -612,7 +624,7 @@ def collect_evidence(
             parent_records
         ),
         "passed": passed,
-        "status": "passed" if passed else "failed" if client_outputs else "unverified",
+        "status": "passed" if passed else "unverified" if attribution_only_gap or not client_outputs else "failed",
     }
 
 
@@ -712,12 +724,35 @@ def _verify_fixture(
     test = work / test_name
     if not source.is_file() or not test.is_file() or test.read_text(encoding="utf-8") != expected_test:
         return {fixed_key: False, exit_code_key: 1}
+    # This deliberately tiny fixture needs only a pure value function. Never
+    # import arbitrary model-produced code into the trusted unittest process:
+    # os._exit(0), monkeypatching unittest, or file writes could forge success.
+    # Unsupported implementations remain unaccepted, not silently executed.
+    source_text = source.read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(source_text)
+        allowed = (ast.Module, ast.FunctionDef, ast.arguments, ast.arg,
+                   ast.Return, ast.If, ast.IfExp, ast.Compare, ast.Eq, ast.NotEq,
+                   ast.Constant, ast.Name, ast.Load, ast.Expr, ast.Pass)
+        safe = (
+            len(tree.body) == 1 and isinstance(tree.body[0], ast.FunctionDef)
+            and tree.body[0].name == "normalize"
+            and not tree.body[0].decorator_list
+            and not tree.body[0].args.defaults
+            and not any(tree.body[0].args.kw_defaults)
+            and all(isinstance(node, allowed) for node in ast.walk(tree))
+        )
+    except (SyntaxError, ValueError, RecursionError):
+        safe = False
+    if not safe:
+        return {fixed_key: False, exit_code_key: None,
+                "validator_rejection": "unsupported_fixture_source"}
     try:
         # Execute a copied source against the harness-owned test in a separate
         # directory. Neither mutable fixture tests nor source spelling decide PASS.
         with tempfile.TemporaryDirectory(prefix="codexhub-trusted-validator-") as directory:
             trusted = Path(directory)
-            shutil.copyfile(source, trusted / source_name)
+            (trusted / source_name).write_text(source_text, encoding="utf-8")
             (trusted / test_name).write_text(expected_test, encoding="utf-8")
             result = subprocess.run(
                 [sys.executable, "-E", "-s", "-m", "unittest", "-q", test_name],
@@ -843,7 +878,7 @@ def main() -> int:
     ).is_file():
         parser.error("the selected xAI model requires source-home/proxy/xai_auth.json")
     report = {
-        "report_version": 2,
+        "report_version": 3,
         "cli_version": cli_version,
         "gateway_sha": subprocess.check_output(["git", "-C", str(gateway_root), "rev-parse", "HEAD"], text=True).strip(),
         "gateway_dirty": bool(subprocess.check_output(["git", "-C", str(gateway_root), "status", "--porcelain"], text=True).strip()),

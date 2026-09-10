@@ -374,3 +374,23 @@ def test_no_child_is_a_recorded_lifecycle_failure_not_a_missing_parent(tmp_path)
     assert evidence["passed"] is False
     assert evidence["parent_models"] == ["xai/grok-4.6"]
     assert evidence["client_trace"][0]["terminal"] == "turn.completed"
+
+
+def test_missing_parent_edit_provenance_is_unverified_not_model_failure(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path)
+    events = [json.loads(line) for line in output.read_text().splitlines()]
+    events = [event for event in events if event.get("item", {}).get("type") != "file_change"]
+    output.write_text("\n".join(map(json.dumps, events)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", parent_effort="high", child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is False
+    assert evidence["status"] == "unverified"
+    assert evidence["missing_evidence"] == ["parent_source_edit_attribution"]
+
+
+def test_fixture_cannot_fake_success_by_exiting_the_trusted_validator(tmp_path):
+    runner = _runner_module()
+    runner._write_parent_fixture(tmp_path)
+    (tmp_path / "parent_task.py").write_text("import os\nos._exit(0)\ndef normalize(value):\n    return 'BROKEN'\n")
+    checked = runner._verify_parent_fixture(tmp_path)
+    assert checked["parent_fixture_fixed"] is False
