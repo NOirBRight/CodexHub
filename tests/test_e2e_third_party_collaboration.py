@@ -394,3 +394,9 @@ def test_fixture_cannot_fake_success_by_exiting_the_trusted_validator(tmp_path):
     (tmp_path / "parent_task.py").write_text("import os\nos._exit(0)\ndef normalize(value):\n    return 'BROKEN'\n")
     checked = runner._verify_parent_fixture(tmp_path)
     assert checked["parent_fixture_fixed"] is False
+
+
+def test_gateway_worker_rejection_is_not_attributed_to_the_provider():
+    runner = _runner_module()
+    signals = [{"code": "upstream.error", "source": "xai", "failure_class": "permanent", "type": "external_worker_binding_rejected"}]
+    assert runner.classify_failure_signals(signals) == "gateway_collaboration_boundary"

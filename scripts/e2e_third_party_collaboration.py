@@ -846,6 +846,23 @@ def collect_failure_signals(path: Path) -> list[dict]:
     return signals
 
 
+def classify_failure_signals(signals: list[dict]) -> str | None:
+    # The outer source names the route, not necessarily the component that
+    # rejected it. Local boundary codes take precedence over that label.
+    from collaboration_adapter import (
+        COLLABORATION_BOUNDARY_ERROR_CODE, WORKER_SELECTOR_ERROR_CODE,
+        WORKER_BINDING_ERROR_CODE,
+    )
+    boundary_codes = {COLLABORATION_BOUNDARY_ERROR_CODE, WORKER_SELECTOR_ERROR_CODE,
+                      WORKER_BINDING_ERROR_CODE}
+    if any(signal.get("type") in boundary_codes or signal.get("code") in boundary_codes
+           for signal in signals):
+        return "gateway_collaboration_boundary"
+    if any(signal.get("failure_class") == "permanent" for signal in signals):
+        return "provider_request_permanent"
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-home", type=Path, required=True)
@@ -878,7 +895,7 @@ def main() -> int:
     ).is_file():
         parser.error("the selected xAI model requires source-home/proxy/xai_auth.json")
     report = {
-        "report_version": 3,
+        "report_version": 4,
         "cli_version": cli_version,
         "gateway_sha": subprocess.check_output(["git", "-C", str(gateway_root), "rev-parse", "HEAD"], text=True).strip(),
         "gateway_dirty": bool(subprocess.check_output(["git", "-C", str(gateway_root), "status", "--porcelain"], text=True).strip()),
@@ -1086,11 +1103,9 @@ def main() -> int:
                 )
                 if not report["passed"]:
                     report["failure_signals"] = collect_failure_signals(client_output)
-                    if any(
-                        signal.get("failure_class") == "permanent"
-                        for signal in report["failure_signals"]
-                    ):
-                        report["failure_classification"] = "provider_request_permanent"
+                    signal_classification = classify_failure_signals(report["failure_signals"])
+                    if signal_classification:
+                        report["failure_classification"] = signal_classification
                     elif client_exit_code is None or (
                         report["resume_attempted"]
                         and report["resume_client_exit_code"] is None
