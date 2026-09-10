@@ -880,6 +880,20 @@ def classify_failure_signals(signals: list[dict]) -> str | None:
     return None
 
 
+def write_reviewer_config(client_home: Path, model: str, effort: str) -> Path:
+    """Use the standalone custom-agent contract, not retired role tables."""
+    path = client_home / "agents" / "reviewer.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        'name = "reviewer"\ndescription = "Read-only fixture reviewer"\n'
+        'developer_instructions = "Inspect only the requested fixture files; do not edit or execute code."\n'
+        'sandbox_mode = "read-only"\n'
+        + f'model = {json.dumps(model)}\nmodel_reasoning_effort = {json.dumps(effort)}\n',
+        encoding="utf-8",
+    )
+    return path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-home", type=Path, required=True)
@@ -912,7 +926,7 @@ def main() -> int:
     ).is_file():
         parser.error("the selected xAI model requires source-home/proxy/xai_auth.json")
     report = {
-        "report_version": 4,
+        "report_version": 5,
         "cli_version": cli_version,
         "gateway_sha": subprocess.check_output(["git", "-C", str(gateway_root), "rev-parse", "HEAD"], text=True).strip(),
         "gateway_dirty": bool(subprocess.check_output(["git", "-C", str(gateway_root), "status", "--porcelain"], text=True).strip()),
@@ -981,11 +995,8 @@ def main() -> int:
             for name in ("CODEXHUB_CODEX_TARGET_HOME", "CODEXHUB_RUNTIME_HOME", "CODEXHUB_HOME", "CODEX_PROXY_HOME"):
                 environment.pop(name, None)
         client_env["CODEXHUB_E2E_PYTHON"] = sys.executable
-        reviewer_config = client_home / "reviewer.toml"
-        reviewer_config.write_text(
-            'sandbox_mode = "read-only"\n' + f'model = {json.dumps(child_model)}\n'
-            + f'model_reasoning_effort = {json.dumps(child_effort)}\n', encoding="utf-8",
-        )
+        reviewer_config = write_reviewer_config(client_home, child_model, child_effort)
+        report["reviewer_configuration_sha256"] = hashlib.sha256(reviewer_config.read_bytes()).hexdigest()
         observer = RequestObserver(port)
         cleanup.callback(observer.close)
         (client_home / "config.toml").write_text(
@@ -998,8 +1009,6 @@ def main() -> int:
             'env_key = "CODEXHUB_E2E_GATEWAY_KEY"\nsupports_websockets = false\n'
             '[features]\nmulti_agent = true\napps = false\nplugins = false\n'
             'responses_websockets = false\nresponses_websockets_v2 = false\n'
-            '[agents.reviewer]\ndescription = "Read-only fixture reviewer"\n'
-            f'config_file = {json.dumps(str(reviewer_config))}\n'
         )
         _write_parent_fixture(work)
         report["configuration_sha256"] = hashlib.sha256((client_home / "config.toml").read_bytes()).hexdigest()

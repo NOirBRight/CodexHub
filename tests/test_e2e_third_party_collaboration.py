@@ -432,3 +432,17 @@ def test_failed_native_spawn_without_child_identity_does_not_count_as_creation(t
     evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", parent_effort="high", child_effort="high", client_outputs=(output,))
     assert evidence["passed"] is True
     assert evidence["successful_child_creation_count"] == 1
+
+
+def test_reviewer_uses_standalone_custom_agent_file(tmp_path):
+    import tomllib
+    runner = _runner_module()
+    path = runner.write_reviewer_config(tmp_path, "xai/grok-4.6", "high")
+    assert path == tmp_path / "agents/reviewer.toml"
+    config = tomllib.loads(path.read_text())
+    assert config["name"] == "reviewer"
+    assert config["description"]
+    assert config["developer_instructions"]
+    assert config["sandbox_mode"] == "read-only"
+    assert config["model"] == "xai/grok-4.6"
+    assert config["model_reasoning_effort"] == "high"
