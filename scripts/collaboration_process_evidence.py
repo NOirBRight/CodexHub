@@ -17,21 +17,23 @@ def read_process_evidence(prefix: Path, fixture: Path, interpreter: Path) -> dic
         if not path.suffix[1:].isdigit():
             continue
         pid = int(path.suffix[1:])
-        text = path.read_text(encoding="utf-8", errors="strict")
-        # Only the final successful exec image can own the process exit.
-        images = re.findall(r'^execve\(("(?:[^"\\]|\\.)*"), (\[.*?\]), .*\)\s+= 0$', text, re.M)
+        raw = path.read_text(encoding="utf-8", errors="strict")
+        for line in raw.splitlines():
+            for name in ("parent_task.py", "test_parent_task.py", "test_resume_turn.py"):
+                if ("<" + str(fixture / name) + ">") in line and re.search(r'O_WRONLY|O_RDWR', line):
+                    stamp = re.match(r"^(\d+\.\d+) ", line)
+                    writes.append({"pid": pid, "file": name,
+                                   "timestamp": float(stamp[1]) if stamp else None})
+        text = re.sub(r"^\d+\.\d+ ", "", raw, flags=re.M)
+        images = list(re.finditer(r'^execve\(("(?:[^"\\]|\\.)*"), (\[.*?\]), .*\)\s+= 0$', text, re.M))
         if not images:
             continue
         try:
-            executable, argv = (ast.literal_eval(value) for value in images[-1])
+            executable, argv = (ast.literal_eval(value) for value in images[-1].groups())
         except (ValueError, SyntaxError):
             continue
+        text = text[images[-1].end():]
         opened = set(re.findall(r'= \d+<([^>]+)>', text))
-        for name in ("parent_task.py", "test_parent_task.py", "test_resume_turn.py"):
-            target = str(fixture / name)
-            if any(target in line and re.search(r'O_WRONLY|O_RDWR', line)
-                   for line in text.splitlines()):
-                writes.append({"pid": pid, "file": name})
         if Path(executable).resolve() != interpreter.resolve():
             continue
         if not isinstance(argv, list) or argv[1:3] != ["-m", "unittest"]:

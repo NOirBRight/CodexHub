@@ -14,6 +14,7 @@ import argparse
 import ast
 from contextlib import ExitStack
 import hashlib
+from datetime import datetime
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -224,10 +225,23 @@ def _parent_resume_test_tool_call_count(records: list[dict[str, object]]) -> int
 
 
 def _test_tool_call_count(records: list[dict[str, object]], test_filename: str) -> int:
-    return sum(
-        _successful_test_item(item, test_filename)
-        for record in records for item in record.get("cli_items", [])
+    return max(
+        sum(_successful_test_item(item, test_filename)
+            for record in records for item in record.get("cli_items", [])),
+        sum(_observed_test_count(observation, test_filename)
+            for record in records for observation in record.get("process_observations", [])),
     )
+
+
+def _observed_test_count(observation: dict, test_filename: str) -> int:
+    if not observation.get("available") or any(
+        write.get("file") in {"test_parent_task.py", "test_resume_turn.py"}
+        for write in observation.get("writes", [])
+    ):
+        return 0
+    return sum(test.get("test") == test_filename and test.get("exit_code") == 0
+               and test.get("interpreter_verified") is True and test.get("fixture_open_verified") is True
+               for test in observation.get("tests", []))
 
 
 def _successful_test_item(item: dict, test_filename: str) -> bool:
@@ -578,7 +592,9 @@ def collect_evidence(
         {record["model"] for record in parent_records if isinstance(record.get("model"), str)}
     )
     client_turns = [_read_client_turn(path) for path in client_outputs]
-    for turn in client_turns:
+    for turn, path in zip(client_turns, client_outputs):
+        observation_path = Path(str(path) + ".process.json")
+        turn["process_observation"] = json.loads(observation_path.read_text()) if observation_path.is_file() else {}
         for item in turn["items"]:
             # Overwrite any client-supplied value with harness-owned context.
             item["_fixture_directory"] = str(fixture_directory.resolve()) if fixture_directory else None
@@ -589,6 +605,7 @@ def collect_evidence(
         if parent not in parent_records:
             parent_records.append(parent)
         parent.setdefault("cli_items", []).extend(turn["items"])
+        parent.setdefault("process_observations", []).append(turn["process_observation"])
     if len({turn["thread_id"] for turn in client_turns}) > 1:
         raise RuntimeError("multiple_client_parents")
     parent_models = sorted({record["model"] for record in parent_records if isinstance(record.get("model"), str)})
@@ -643,7 +660,8 @@ def collect_evidence(
     )
     tests_and_terminals_verified = bool(client_turns) and len(client_turns) == len(parent_turns) and all(
         turn["terminal"] == "turn.completed" and parent_turns[index]["terminal"] == "task_complete"
-        and any(_successful_test_item(item, "test_parent_task.py" if index == 0 else "test_resume_turn.py") for item in turn["items"])
+        and (any(_successful_test_item(item, "test_parent_task.py" if index == 0 else "test_resume_turn.py") for item in turn["items"])
+             or _observed_test_count(turn["process_observation"], "test_parent_task.py" if index == 0 else "test_resume_turn.py") > 0)
         for index, turn in enumerate(client_turns)
     )
     parent_edits_verified = bool(client_turns) and all(
@@ -653,6 +671,22 @@ def collect_evidence(
         for turn in client_turns
     )
     parent_edits_verified = parent_edits_verified and len(parent_records) == len(child_records) == 1 and _parent_patch_after_reviews(parent_records[0], child_records[0])
+    # Shell edits need not generate a CLI file_change item. Kernel-observed
+    # writes plus an external digest change provide an alternative, only when
+    # every child tool is independently proven inspection-only.
+    child_inspection_proven = bool(child_records) and all(_child_inspect_only(record) for record in child_records)
+    second_done = lifecycle_diagnostics.get("completion_timing", {}).get("second_done")
+    review_end = datetime.fromisoformat(second_done.replace("Z", "+00:00")).timestamp() if second_done else None
+    observed_edits = bool(client_turns) and child_inspection_proven and review_end is not None and all(
+        turn["process_observation"].get("source_changed") is True
+        and any(write.get("file") == "parent_task.py" and isinstance(write.get("timestamp"), (float, int))
+                and write["timestamp"] >= review_end for write in turn["process_observation"].get("writes", []))
+        for turn in client_turns
+    )
+    parent_edits_verified = parent_edits_verified or observed_edits
+    if any(write.get("file") in {"test_parent_task.py", "test_resume_turn.py"}
+           for turn in client_turns for write in turn["process_observation"].get("writes", [])):
+        tests_and_terminals_verified = False
     execution_passed = tests_and_terminals_verified and parent_edits_verified
     passed = lifecycle_passed and contexts_match and execution_passed and no_subagent_turn
     child_read_only = bool(child_records) and all(
@@ -755,9 +789,7 @@ def _scenario_prompt(*, collaboration_version: str, child_model: str, child_effo
         "Include these inspection restrictions in both messages sent to the child. Its first response must contain "
         "E2E_CHILD_OK 323 and its follow-up response must contain E2E_FOLLOWUP_OK 667. "
         "After receiving both actual child results, the parent itself must edit parent_task.py so "
-        "normalize(7) returns exactly `FIXED`. Use the declared apply_patch tool directly "
-        "for the source edit, not an exec_command shell command named apply_patch, Python, sed, "
-        "or a heredoc that writes the source. This lets the client record the edit attribution. "
+        "normalize(7) returns exactly `FIXED`. Use any available editing tool. "
         "Then run `\"$CODEXHUB_E2E_PYTHON\" -m unittest -q test_parent_task.py`. "
         "Report E2E_PARENT_IMPLEMENTED_OK 941 only after that command succeeds. Do not fabricate "
         "tool results or use a different model/provider."
@@ -873,9 +905,7 @@ def _no_subagent_turn_prompt() -> str:
         "This is a new user turn in the same parent task. Do not inspect, call, "
         "resume, create, or delegate to any subagent or collaboration tool. Work "
         "yourself: edit parent_task.py so normalize(7) remains exactly `FIXED` and "
-        "normalize(8) returns exactly `RESUMED`. Use the declared apply_patch tool directly "
-        "for the source edit, not an exec_command shell command named apply_patch, Python, sed, "
-        "or a heredoc that writes the source. "
+        "normalize(8) returns exactly `RESUMED`. Use any available editing tool. "
         "Then run `\"$CODEXHUB_E2E_PYTHON\" -m unittest -q "
         "test_resume_turn.py`. Report "
         "E2E_NO_SUBAGENT_TURN_OK 818 only after that command succeeds."
@@ -910,11 +940,13 @@ def _run_client(
     observe_processes: bool = False,
 ) -> int | None:
     """Run one explicitly requested client turn in the isolated fixture root."""
+    source_path = working_directory / "parent_task.py"
+    source_before = hashlib.sha256(source_path.read_bytes()).hexdigest() if source_path.is_file() else None
     if observe_processes:
         tracer = shutil.which("strace")
         if sys.platform != "linux" or not tracer:
             raise RuntimeError("process_observer_unavailable")
-        command = [tracer, "-ff", "-qq", "-yy", "-s", "8192", "-e",
+        command = [tracer, "-ff", "-qq", "-yy", "-ttt", "-s", "8192", "-e",
                    "trace=execve,exit_group,openat", "-o", str(output) + ".process"] + command
     with output.open("a", encoding="utf-8") as stream:
         client = subprocess.Popen(
@@ -936,6 +968,7 @@ def _run_client(
                 from collaboration_process_evidence import read_process_evidence
                 evidence = read_process_evidence(Path(str(output) + ".process"),
                                                  working_directory, Path(sys.executable))
+                evidence["source_changed"] = source_before is not None and source_path.is_file() and hashlib.sha256(source_path.read_bytes()).hexdigest() != source_before
                 Path(str(output) + ".process.json").write_text(json.dumps(evidence), encoding="utf-8")
 
 

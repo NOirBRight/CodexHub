@@ -475,11 +475,11 @@ def test_lifecycle_failure_reports_exact_failed_predicate(tmp_path):
     assert evidence["lifecycle_diagnostics"]["rejected_steps"][0]["reason"] == "target_identity_mismatch"
 
 
-def test_both_fixture_turns_require_native_edit_tool_not_shell_spelling():
+def test_both_fixture_turns_allow_available_editing_tools():
     runner = _runner_module()
     for prompt in (runner._scenario_prompt(collaboration_version="v1", child_model="xai/grok-4.6", child_effort="high"), runner._no_subagent_turn_prompt()):
-        assert "declared apply_patch tool directly" in prompt
-        assert "not an exec_command shell command" in prompt
+        assert "Use any available editing tool" in prompt
+        assert "not an exec_command shell command" not in prompt
 
 
 def test_test_command_diagnostics_preserve_reason_without_secrets():
@@ -519,3 +519,37 @@ def test_fixture_cd_test_command_is_narrowly_validated(prefix, tail, accepted):
             "_fixture_directory": "/tmp/fixture",
             "command": prefix + '"$CODEXHUB_E2E_PYTHON" -m unittest -q test_parent_task.py' + tail}
     assert runner._successful_test_item(item, "test_parent_task.py") is accepted
+
+
+def test_kernel_observation_accepts_test_without_prescribed_shell_spelling(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v2")
+    events = [json.loads(line) for line in output.read_text().splitlines()]
+    for event in events:
+        if event.get("item", {}).get("type") == "command_execution":
+            event["item"]["command"] = 'export EXAMPLE=1 && "$CODEXHUB_E2E_PYTHON" -m unittest test_parent_task.py -q'
+    output.write_text("\n".join(map(json.dumps, events)) + "\n")
+    Path(str(output) + ".process.json").write_text(json.dumps({
+        "available": True, "tests": [{"pid": 123, "test": "test_parent_task.py", "exit_code": 0,
+            "interpreter_verified": True, "fixture_open_verified": True}], "writes": []}))
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v2", parent_effort="high",
+                                      child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is True
+    assert evidence["parent_test_tool_call_count"] == 1
+
+
+@pytest.mark.parametrize("write_time,changed,accepted", [(4102444800, True, True), (1, True, False), (4102444800, False, False)])
+def test_observed_shell_edit_requires_change_after_child_result(tmp_path, write_time, changed, accepted):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v2")
+    events = [json.loads(line) for line in output.read_text().splitlines()]
+    for event in events:
+        if event.get("item", {}).get("type") == "file_change":
+            event["item"]["type"] = "agent_message"
+    output.write_text("\n".join(map(json.dumps, events)) + "\n")
+    Path(str(output) + ".process.json").write_text(json.dumps({
+        "available": True, "source_changed": changed, "tests": [],
+        "writes": [{"pid": 123, "file": "parent_task.py", "timestamp": write_time}]}))
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v2", parent_effort="high",
+                                      child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is accepted
