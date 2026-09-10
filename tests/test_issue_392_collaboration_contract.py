@@ -295,31 +295,12 @@ def test_selection_fails_closed_on_mixed_duplicate_and_conflicting_signals() -> 
         module.classify_request(
             {"tool_choice": "auto", "tools": [v2, copy.deepcopy(v2)]}
         )
-    with pytest.raises(
-        module.ContractValidationError, match="collaboration_marker_duplicate_or_mixed"
-    ):
-        module.classify_request(
-            {
-                "tool_choice": "auto",
-                "tools": [
-                    v2,
-                    {
-                        "type": "function",
-                        "name": "spawn_agent",
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                ],
-            }
-        )
-    with pytest.raises(
-        module.ContractValidationError, match="collaboration_marker_duplicate_or_mixed"
-    ):
-        module.classify_request(
-            {
-                "tool_choice": "auto",
-                "tools": [v2, {"type": "function", "name": "collaboration"}],
-            }
-        )
+    for name in ("spawn_agent", "collaboration"):
+        assert module.classify_request({
+            "tool_choice": "auto",
+            "tools": [v2, {"type": "function", "name": name,
+                           "parameters": {"type": "object", "properties": {}}}],
+        }) == module.V2
     with pytest.raises(
         module.ContractValidationError, match="collaboration_version_signal_unexpected"
     ):

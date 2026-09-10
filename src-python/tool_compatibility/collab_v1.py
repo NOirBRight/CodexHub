@@ -6,6 +6,7 @@ This module must not import the V2 adapter. V1 repair cannot execute V2 paths.
 from __future__ import annotations
 
 from typing import Any, Mapping
+from collaboration_runtime_contract import COLLABORATION_V1, CollaborationContractError, validate_collaboration_arguments
 
 from .contracts import ToolCompatibilityEntry, ToolCompatibilityError
 from .dispositions import NATIVE, NAMESPACE, PLAIN_FUNCTION
@@ -17,6 +18,13 @@ V1_NAMES = frozenset(
 V1_FORBIDDEN = frozenset({"task_path", "continuation_id", "task_name", "fork_turns"})
 V1_NAMESPACE = "multi_agent_v1"
 V1_FLAT_PREFIX = "multi_agent_v1__"
+
+
+def validate_v1_arguments(item: Mapping[str, Any], *, surface: str) -> None:
+    try:
+        validate_collaboration_arguments(COLLABORATION_V1, str(item.get("name")), item.get("arguments"))
+    except CollaborationContractError as exc:
+        raise ToolCompatibilityError("tool_compatibility_boundary", exc.classification, surface=surface) from exc
 
 
 def validate_v1_fields(fields: Mapping[str, Any]) -> None:

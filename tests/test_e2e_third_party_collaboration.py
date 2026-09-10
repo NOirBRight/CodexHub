@@ -364,3 +364,13 @@ def test_second_parent_turn_can_complete_without_any_new_collaboration(tmp_path,
     assert evidence["passed"] is True
     assert evidence["parent_turn_ids"] == ["parent-turn", "second-turn"]
     assert evidence["parent_resume_test_tool_call_count"] == 1
+
+
+def test_no_child_is_a_recorded_lifecycle_failure_not_a_missing_parent(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path)
+    (tmp_path / "sessions/child.jsonl").unlink()
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", parent_effort="high", child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is False
+    assert evidence["parent_models"] == ["xai/grok-4.6"]
+    assert evidence["client_trace"][0]["terminal"] == "turn.completed"

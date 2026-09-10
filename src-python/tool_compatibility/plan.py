@@ -11,12 +11,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 from typing import Any, Iterable, Mapping
+from codex_semantic_adapter import strict_json_object
 
 from .collab_v1 import (
     CollaborationV1PlanMixin,
     is_opaque_v1_history_item,
     validate_plain_native_item,
     validate_v1_fields,
+    validate_v1_arguments,
 )
 from .collab_v2 import (
     CollaborationV2PlanMixin,
@@ -105,16 +107,8 @@ def _validate_version_fields(item: Mapping[str, Any], record: AliasRecord) -> No
     arguments = item.get("arguments")
     if arguments in (None, ""):
         return
-    if isinstance(arguments, Mapping):
-        parsed = _copy_mapping(arguments)
-    elif isinstance(arguments, str):
-        try:
-            parsed = json.loads(arguments)
-        except (TypeError, ValueError):
-            raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_arguments") from None
-    else:
-        raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_arguments")
-    if not isinstance(parsed, Mapping):
+    parsed = strict_json_object(arguments)
+    if parsed is None:
         raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_arguments")
     if record.version == "v1":
         validate_v1_fields(parsed)
@@ -1672,6 +1666,8 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             and item.get("arguments") != ""
         ):
             validate_v2_native_arguments(item, surface=surface)
+        if entry.version == "v1" and entry.family == NAMESPACE and surface != "history" and item.get("arguments") not in (None, ""):
+            validate_v1_arguments(item, surface=surface)
         item_type = item.get("type")
         if entry.family == PLAIN_FUNCTION:
             validate_plain_native_item(item, entry, surface=surface)
@@ -1892,6 +1888,8 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                 decoded, item_changed = item, False
                 if self.registry.looks_like_alias(item.get("name")):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
+            if surface == "response" and decoded.get("type") == "function_call" and decoded.get("namespace") == "multi_agent_v1":
+                validate_v1_arguments(decoded, surface=surface)
             result.append(decoded)
             changed = changed or item_changed
         self._validate_collaboration_v2_items(result, surface=surface)

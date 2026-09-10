@@ -17,7 +17,7 @@ from collaboration_runtime_contract import (
     validate_collaboration_arguments,
 )
 
-from .collab_v1 import is_legacy_flattened_spawn
+from .collab_v1 import is_legacy_flattened_spawn, validate_v1_arguments
 from .collab_v2 import CollaborationV2StreamMixin, V2_NAMES as _V2_NAMES
 from .contracts import ToolCompatibilityError, copy_mapping as _copy_mapping, freeze as _freeze, item_id as _item_id, native_wire_identity as _native_wire_identity, thaw as _thaw
 from .dispositions import (
@@ -1288,6 +1288,8 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 fragments = self._native_fragments.get(item_id, [])
                 if fragments and "".join(fragments) != arguments:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
+                if expected_entry.version == "v1" and expected_entry.family == NAMESPACE:
+                    validate_v1_arguments({"name": self._native_wire_identities[item_id][2], "arguments": arguments}, surface="stream")
                 if expected_entry.version == "v2" and expected_entry.family == NAMESPACE:
                     complete_item = _copy_mapping(
                         self._collaboration_v2_calls.get(item_id, {})
@@ -1356,6 +1358,8 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
             if not arguments:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
+            if pending.record.version == "v1" and pending.record.family == NAMESPACE:
+                validate_v1_arguments({"name": pending.record.child_name, "arguments": arguments}, surface="stream")
             if pending.record.version == "v2" and pending.record.family == NAMESPACE:
                 complete_item = {
                     "type": "function_call",
@@ -1991,5 +1995,4 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
         for event in events:
             decoded.extend(self.decode_events_for_event(event))
         return decoded
-
 

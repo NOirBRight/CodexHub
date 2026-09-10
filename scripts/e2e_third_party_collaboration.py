@@ -510,9 +510,14 @@ def collect_evidence(
     client_turns = [_read_client_turn(path) for path in client_outputs]
     for turn in client_turns:
         parent = records_by_id.get(turn["thread_id"])
-        if parent is None or parent not in parent_records:
+        if parent is None or parent.get("parent_id") is not None:
             raise RuntimeError("client_parent_relationship_mismatch")
+        if parent not in parent_records:
+            parent_records.append(parent)
         parent.setdefault("cli_items", []).extend(turn["items"])
+    if len({turn["thread_id"] for turn in client_turns}) > 1:
+        raise RuntimeError("multiple_client_parents")
+    parent_models = sorted({record["model"] for record in parent_records if isinstance(record.get("model"), str)})
     for record in child_records:
         for row in record["rows"]:
             item = row.get("payload", {})
@@ -543,8 +548,10 @@ def collect_evidence(
         else plaintext_handoffs == 0 and encrypted_handoffs == 0
     )
     lifecycle_passed, calls = (False, [])
-    if len(parent_records) == len(child_records) == 1:
-        lifecycle_passed, calls = _lifecycle_passed(parent_records[0], child_records[0], collaboration_version)
+    if len(parent_records) == 1:
+        calls = _paired_collaboration_calls(parent_records[0], collaboration_version)
+        if len(child_records) == 1:
+            lifecycle_passed, calls = _lifecycle_passed(parent_records[0], child_records[0], collaboration_version)
     contexts_match = True
     for group, model, effort in ((parent_records, parent_model, parent_effort), (child_records, child_model, child_effort)):
         for record in group:
@@ -965,6 +972,8 @@ def main() -> int:
                     working_directory=work,
                     timeout=args.timeout,
                 )
+                report["client_exit_code"] = client_exit_code
+                report["failure_signals"] = collect_failure_signals(client_output)
                 first_evidence = collect_evidence(
                     client_home,
                     child_model,

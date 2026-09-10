@@ -347,6 +347,31 @@ def test_declared_plain_spawn_history_can_coexist_with_real_namespace(version, m
     assert "namespace" not in prepared["input"][0]
 
 
+@pytest.mark.parametrize("arguments", ['{"message":"a","message":"b"}', '{"model":NaN}', '{"model":1e400}'])
+@pytest.mark.parametrize("native", [True, False])
+@pytest.mark.parametrize("surface", ["body", "sse"])
+def test_v1_new_calls_reject_noncanonical_json_at_public_response_boundary(arguments, native, surface, monkeypatch):
+    monkeypatch.setattr(gateway_events, "write_proxy_event", lambda *args, **kwargs: None)
+    context = {}
+    upstream = {**_upstream(), "tool_protocol_capabilities": {"namespace_lifecycle": native}}
+    gateway_compat.compatible_request_body(_request([], tools=[_namespace(COLLABORATION_V1)]), upstream, event_context=context, inject_codex_tools=False)
+    call = {"type": "function_call", "id": "strict-item", "call_id": "strict-call", "name": "spawn_agent", "arguments": arguments}
+    if native:
+        call["namespace"] = "multi_agent_v1"
+    else:
+        entry = context["_runtime_tool_compatibility_plan"].entries[0]
+        call["name"] = entry.aliases[entry.child_names.index("spawn_agent")]
+    if surface == "body":
+        with pytest.raises(gateway_errors.UpstreamProtocolTranslationError):
+            gateway_compat.compatible_response_body(json.dumps({"object": "response", "output": [call]}).encode(), "fixture-provider", event_context=context)
+    else:
+        added = {"type": "response.output_item.added", "output_index": 0, "item": {**call, "arguments": "", "status": "in_progress"}}
+        gateway_compat.compatible_sse_line(("data: " + json.dumps(added) + "\n\n").encode(), "fixture-provider", event_context=context)
+        done = {"type": "response.function_call_arguments.done", "output_index": 0, "item_id": "strict-item", "arguments": arguments}
+        with pytest.raises(gateway_errors.UpstreamProtocolTranslationError):
+            gateway_compat.compatible_sse_line(("data: " + json.dumps(done) + "\n\n").encode(), "fixture-provider", event_context=context)
+
+
 def test_v1_registered_alias_is_restored_to_a_client_executable_namespace_call(monkeypatch) -> None:
     """A Gateway-only alias must never reach Codex's native tool router."""
     monkeypatch.setattr(gateway_events, "write_proxy_event", lambda *args, **kwargs: None)
