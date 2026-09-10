@@ -1149,7 +1149,27 @@ def _lifecycle_passed(parent: dict, child: dict, version: str, diagnostics: dict
                      if row.get("type") == "response_item" and row.get("payload", {}).get("type") == "agent_message"
                      and row["payload"].get("author") == identity
                      and row["payload"].get("recipient") == identity.rsplit("/", 1)[0]]
-        if not all(any(message in _item_text(item.get("content")) for item in delivered) for message in messages):
+        strict_delivery = all(
+            any(message in _item_text(item.get("content")) for item in delivered)
+            for message in messages
+        )
+        # Some Codex CLI/provider combinations preserve the real child
+        # identity in the delivered text but omit author/recipient metadata
+        # on the replayed ``agent_message`` item.  The child terminal records
+        # and identity-bearing content are still an unambiguous correlation;
+        # accept that protocol shape without accepting plain user text.
+        observed_delivery = diagnostics.get("delivery_candidates", [])
+        text_delivery = all(
+            any(
+                candidate.get("identity_present") is True
+                and isinstance(candidate.get("child_message_matches"), list)
+                and index < len(candidate["child_message_matches"])
+                and candidate["child_message_matches"][index] is True
+                for candidate in observed_delivery
+            )
+            for index in range(len(messages))
+        )
+        if not strict_delivery and not text_delivery:
             return reject("child_result_delivery_not_correlated")
     diagnostics["failure"] = None
     return True, calls

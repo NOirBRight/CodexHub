@@ -460,6 +460,33 @@ def test_complete_correlated_evidence_accepts_same_model_parent_and_child(tmp_pa
     output = _complete_fixture(tmp_path, version)
     evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", version, parent_effort="high", child_effort="high", client_outputs=(output,))
     assert evidence["passed"] is True
+
+
+def test_v2_delivery_accepts_identity_bearing_replay_without_optional_metadata(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v2")
+    parent_path = tmp_path / "sessions" / "parent.jsonl"
+    rows = [json.loads(line) for line in parent_path.read_text().splitlines()]
+    for row in rows:
+        payload = row.get("payload", {})
+        if row.get("type") == "response_item" and payload.get("type") == "agent_message":
+            for part in payload.get("content", []):
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    part["text"] = "/root/reviewer " + part["text"]
+            payload.pop("author", None)
+            payload.pop("recipient", None)
+    parent_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    evidence = runner.collect_evidence(
+        tmp_path,
+        "xai/grok-4.6",
+        "v2",
+        parent_model="xai/grok-4.6",
+        parent_effort="high",
+        child_effort="high",
+        client_outputs=(output,),
+        fixture_directory=tmp_path,
+    )
+    assert evidence["passed"] is True
     assert evidence["parent_test_tool_call_count"] == 1
     assert evidence["parent_child_relationships"] == [{"child": "child", "parent": "parent"}]
 
