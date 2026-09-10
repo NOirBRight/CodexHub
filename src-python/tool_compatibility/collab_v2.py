@@ -10,14 +10,14 @@ from typing import Any, Mapping
 
 from collaboration_runtime_contract import (
     COLLABORATION_V2,
-    EXPECTED_PARAMETER_SCHEMAS,
     CollaborationContractError,
+    normalize_collaboration_arguments,
     validate_agent_message,
     validate_collaboration_arguments,
     validate_collaboration_result,
 )
 
-from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, copy_mapping as _copy_mapping, freeze as _freeze
+from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, copy_mapping as _copy_mapping
 from .dispositions import ADAPT, NAMESPACE
 
 
@@ -61,6 +61,9 @@ def apply_v2_namespace_decode(result: dict[str, Any], record: Any) -> None:
 
 def validate_v2_native_arguments(item: Mapping[str, Any], *, surface: str) -> None:
     try:
+        # Native passthrough is validation-only.  Adapted paths normalize the
+        # known CLI integer representation explicitly and must not leak that
+        # rewrite into a provider's native namespace lifecycle.
         validate_collaboration_arguments(
             COLLABORATION_V2,
             str(item.get("name")),
@@ -71,6 +74,17 @@ def validate_v2_native_arguments(item: Mapping[str, Any], *, surface: str) -> No
             "tool_compatibility_boundary",
             exc.classification,
             surface=surface,
+        ) from exc
+
+
+def normalize_v2_native_arguments(item: Mapping[str, Any], *, surface: str) -> tuple[str, bool]:
+    try:
+        return normalize_collaboration_arguments(
+            COLLABORATION_V2, str(item.get("name")), item.get("arguments")
+        )
+    except CollaborationContractError as exc:
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary", exc.classification, surface=surface
         ) from exc
 
 
@@ -517,6 +531,15 @@ class CollaborationV2StreamMixin:
             canonical,
             surface=surface,
         )
+        # Body and SSE must expose the same lossless timeout normalization.
+        # The validator above establishes identity and schema; this second
+        # step only canonicalizes the one CLI integer mismatch and leaves all
+        # other argument bytes untouched.
+        if record is not None and isinstance(canonical.get("arguments"), str) and canonical.get("arguments") != "":
+            canonical["arguments"], _ = normalize_v2_native_arguments(
+                {"name": canonical.get("name"), "arguments": canonical["arguments"]},
+                surface=surface,
+            )
         expected = self._collaboration_v2_calls.get(item_id)
         if expected is None:
             raise ToolCompatibilityError(
@@ -532,6 +555,16 @@ class CollaborationV2StreamMixin:
                     surface=surface,
                 )
         return canonical
+
+    def _canonicalize_collaboration_v2_stream_arguments(
+        self, item_id: str, arguments: str
+    ) -> str:
+        complete_item = _copy_mapping(self._collaboration_v2_calls.get(item_id, {}))
+        record = self.plan.registry.record_for_call(complete_item.get("call_id"))
+        if record is not None:
+            complete_item["name"] = record.alias
+        complete_item["arguments"] = arguments
+        return self._validate_collaboration_v2_stream_call(item_id, complete_item)["arguments"]
 
     def _validate_collaboration_v2_event_index(
         self,

@@ -537,7 +537,31 @@ def test_v2_parse_error_history_is_replayed_without_revalidating_failed_argument
             "output": "failed to parse function arguments: missing field `task_name`",
         },
     ]
-    assert plan.encode_payload({"tool_choice": "auto", "tools": [_namespace(COLLABORATION_V2)], "input": history})["input"]
+    encoded = plan.encode_payload({"tool_choice": "auto", "tools": [_namespace(COLLABORATION_V2)], "input": history})["input"]
+    assert encoded[0]["arguments"] == arguments
+
+
+@pytest.mark.parametrize("arguments", ['{"timeout_ms":NaN}', '{"timeout_ms":1,"timeout_ms":2}'])
+def test_v2_failed_parse_history_preserves_noncanonical_argument_bytes(arguments: str) -> None:
+    plan = _v2_plan()
+    history = [
+        {
+            "type": "function_call",
+            "id": "failed-call-item",
+            "call_id": "failed-call",
+            "namespace": "collaboration",
+            "name": "wait_agent",
+            "arguments": arguments,
+        },
+        {
+            "type": "function_call_output",
+            "id": "failed-output-item",
+            "call_id": "failed-call",
+            "output": "failed to parse function arguments: invalid timeout_ms",
+        },
+    ]
+    encoded = plan.encode_payload({"tool_choice": "auto", "tools": [_namespace(COLLABORATION_V2)], "input": history})["input"]
+    assert encoded[0]["arguments"] == arguments
 
 
 @pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e999"])

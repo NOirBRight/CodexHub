@@ -16,9 +16,9 @@ from collaboration_runtime_contract import (
     CollaborationContractError,
     validate_collaboration_arguments,
 )
-
-from .collab_v1 import is_legacy_flattened_spawn, validate_v1_arguments
-from .collab_v2 import CollaborationV2StreamMixin, V2_NAMES as _V2_NAMES
+from .collab_v1 import V1_NAMESPACE as _V1_NAMESPACE, is_legacy_flattened_spawn
+from .argument_contract import normalize_v1_stream_arguments
+from .collab_v2 import CollaborationV2StreamMixin, V2_NAMES as _V2_NAMES, V2_NAMESPACE as _V2_NAMESPACE
 from .contracts import ToolCompatibilityError, copy_mapping as _copy_mapping, freeze as _freeze, item_id as _item_id, native_wire_identity as _native_wire_identity, thaw as _thaw
 from .dispositions import (
     ADAPT,
@@ -39,7 +39,6 @@ from .plan import (
     AliasRecord,
     ToolCompatibilityEntry,
     ToolCompatibilityPlan,
-    is_legacy_message_identity as _is_legacy_message_identity,
     item_identity as _item_identity,
     json_object_exact as _json_object_exact,
     json_object_with_key as _json_object_with_key,
@@ -1288,17 +1287,14 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 fragments = self._native_fragments.get(item_id, [])
                 if fragments and "".join(fragments) != arguments:
                     raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
-                if expected_entry.version == "v1" and expected_entry.family == NAMESPACE:
-                    validate_v1_arguments({"name": self._native_wire_identities[item_id][1], "arguments": arguments}, surface="stream")
-                if expected_entry.version == "v2" and expected_entry.family == NAMESPACE:
-                    complete_item = _copy_mapping(
-                        self._collaboration_v2_calls.get(item_id, {})
+                if expected_entry.version == "v1" and expected_entry.family == NAMESPACE and expected_entry.namespace == _V1_NAMESPACE:
+                    arguments = normalize_v1_stream_arguments(
+                        arguments,
+                        name=self._native_wire_identities[item_id][1],
+                        adapted=expected_entry.disposition == ADAPT,
                     )
-                    complete_item["arguments"] = arguments
-                    self._validate_collaboration_v2_stream_call(
-                        item_id,
-                        complete_item,
-                    )
+                if expected_entry.version == "v2" and expected_entry.family == NAMESPACE and expected_entry.namespace == _V2_NAMESPACE:
+                    arguments = self._canonicalize_collaboration_v2_stream_arguments(item_id, arguments)
                 payload_item = (
                     {"type": "custom_tool_call", "input": result.get("input", arguments)}
                     if expected_entry.family == CUSTOM_FREEFORM
@@ -1358,20 +1354,14 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                 raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
             if not arguments:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "incomplete_stream_delta", surface="stream")
-            if pending.record.version == "v1" and pending.record.family == NAMESPACE:
-                validate_v1_arguments({"name": pending.record.child_name, "arguments": arguments}, surface="stream")
-            if pending.record.version == "v2" and pending.record.family == NAMESPACE:
-                complete_item = {
-                    "type": "function_call",
-                    "id": item_id,
-                    "call_id": pending.call_id,
-                    "name": pending.record.alias,
-                    "arguments": arguments,
-                }
-                self._validate_collaboration_v2_stream_call(
-                    item_id,
-                    complete_item,
+            if pending.record.version == "v1" and pending.record.family == NAMESPACE and pending.record.namespace == _V1_NAMESPACE:
+                arguments = normalize_v1_stream_arguments(
+                    arguments,
+                    name=pending.record.child_name,
+                    adapted=True,
                 )
+            if pending.record.version == "v2" and pending.record.family == NAMESPACE and pending.record.namespace == _V2_NAMESPACE:
+                arguments = self._canonicalize_collaboration_v2_stream_arguments(item_id, arguments)
             pending.delta_done = True
             if pending.record.family == CUSTOM_FREEFORM:
                 envelope = _json_object_exact(arguments)
@@ -1518,10 +1508,7 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
                                 "ambiguous_native_identity",
                                 surface="stream",
                             )
-                        self._validate_collaboration_v2_stream_call(
-                            native_item_id,
-                            item,
-                        )
+                        item = self._validate_collaboration_v2_stream_call(native_item_id, item)
                     if expected_entry.family == SELECTED_PROVIDER_HOSTED:
                         hosted_entry = self._native_entry_for_item(item)
                         if hosted_entry is None or hosted_entry is not expected_entry:
@@ -1995,4 +1982,3 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
         for event in events:
             decoded.extend(self.decode_events_for_event(event))
         return decoded
-

@@ -94,7 +94,7 @@ V2_ARGUMENTS = {
     "list_agents": {},
     "send_message": {"target": "/root/worker", "message": "status"},
     "spawn_agent": {"task_name": "worker", "message": "do work", "fork_turns": "all"},
-    "wait_agent": {"timeout_ms": 1000},
+    "wait_agent": {"timeout_ms": 10000},
 }
 V2_RESULTS = {
     "followup_task": None,

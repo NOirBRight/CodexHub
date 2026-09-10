@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import textwrap
 
 import pytest
 
@@ -33,6 +34,125 @@ def test_e2e_muse_default_reasoning_matches_the_maintained_provider_capability()
     assert runner.DEFAULT_REASONING["opencode-go/muse-spark-1.3-contributor"] == (
         muse.default_reasoning_level
     )
+
+
+def test_commandcode_deepseek_matrix_uses_the_confirmed_v41_identifier() -> None:
+    runner = _runner_module()
+    assert runner.DEFAULT_REASONING["commandcode/deepseek/deepseek-v4.1-flash"] == "max"
+    assert runner.COMMANDCODE_DEEPSEEK_41_RE.search("deepseek/deepseek-v4.1-flash")
+    assert not runner.COMMANDCODE_DEEPSEEK_41_RE.search("deepseek/deepseek-v4-flash")
+
+
+def test_provider_http_status_is_classified_without_attributing_gateway_failure() -> None:
+    runner = _runner_module()
+    assert runner.classify_request_trace([{"upstream_status": 400}]) == "provider_request_permanent"
+    assert runner.classify_request_trace([{"upstream_status": 429}]) == "provider_request_permanent"
+    assert runner.classify_request_trace([{"upstream_status": 503}]) == "provider_request_transient"
+    assert runner.classify_request_trace([{"upstream_status": 200}]) is None
+
+
+def test_commandcode_confirmation_requires_exact_selected_id_and_max(monkeypatch, tmp_path) -> None:
+    runner = _runner_module()
+    providers = tmp_path / "providers.toml"
+    providers.write_text(
+        textwrap.dedent(
+            """
+            [[providers]]
+            id = "commandcode"
+            name = "CommandCode"
+            base_url = "https://commandcode.invalid/v1"
+            api_key = "test-key"
+            [[providers.models]]
+            id = "deepseek/deepseek-v4-flash"
+            supported_reasoning_levels = ["high", "max"]
+            """
+        ).strip()
+        + "\n"
+    )
+
+    monkeypatch.setattr(
+        "providers_config.discover_provider_models",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "deepseek/deepseek-v4.1-flash",
+                "supported_reasoning_levels": ["high", "max"],
+                "context_window": 100,
+                "max_output_tokens": 50,
+            }
+        ],
+    )
+    confirmation = runner.confirm_commandcode_deepseek_41(
+        providers,
+        selected_model="commandcode/deepseek/deepseek-v4.1-flash",
+        requested_effort="max",
+    )
+    assert confirmation["confirmed"] is True
+    assert confirmation["configuration_model_present"] is False
+    assert confirmation["isolated_model_config_required"] is True
+
+    mismatch = runner.confirm_commandcode_deepseek_41(
+        providers,
+        selected_model="commandcode/deepseek/deepseek-v4-flash",
+        requested_effort="max",
+    )
+    assert mismatch["confirmed"] is False
+    assert mismatch["classification"] == "selected_model_not_v41_flash"
+
+    monkeypatch.setattr(
+        "providers_config.discover_provider_models",
+        lambda *_args, **_kwargs: [{"id": "deepseek/deepseek-v4.1-flash"}],
+    )
+    no_effort = runner.confirm_commandcode_deepseek_41(
+        providers,
+        selected_model="commandcode/deepseek/deepseek-v4.1-flash",
+        requested_effort="max",
+    )
+    assert no_effort["confirmed"] is False
+    assert no_effort["classification"] == "requested_effort_unconfirmed"
+
+
+def test_confirmed_commandcode_model_is_added_only_to_isolated_config(monkeypatch, tmp_path) -> None:
+    runner = _runner_module()
+    source = tmp_path / "source.toml"
+    target = tmp_path / "target.toml"
+    source.write_text(
+        textwrap.dedent(
+            """
+            [[providers]]
+            id = "commandcode"
+            name = "CommandCode"
+            base_url = "https://commandcode.invalid/v1"
+            api_key = "test-key"
+            [[providers.models]]
+            id = "deepseek/deepseek-v4-flash"
+            supported_reasoning_levels = ["high", "max"]
+            """
+        ).strip()
+        + "\n"
+    )
+    confirmation = {
+        "confirmed": True,
+        "selected_model": "commandcode/deepseek/deepseek-v4.1-flash",
+        "selected_upstream_model": "deepseek/deepseek-v4.1-flash",
+        "reasoning_levels": ["high", "max"],
+        "metadata": {"context_window": 100, "max_output_tokens": 50},
+    }
+    result = runner.install_confirmed_commandcode_model(
+        source,
+        target,
+        confirmation,
+        collaboration_version="v2",
+    )
+    assert result["added"] is True
+    assert "deepseek/deepseek-v4.1-flash" not in source.read_text()
+    assert "deepseek/deepseek-v4.1-flash" in target.read_text()
+
+    payload = {"models": []}
+    assert runner.inject_confirmed_model_into_catalog(
+        payload, confirmation, collaboration_version="v2"
+    ) is True
+    assert payload["models"][0]["slug"] == "commandcode/deepseek/deepseek-v4.1-flash"
+    assert payload["models"][0]["multi_agent_version"] == "v2"
 
 
 def test_initial_fixture_is_a_real_failing_test_not_a_missing_module(tmp_path) -> None:
@@ -158,7 +278,7 @@ def test_e2e_resume_selects_the_related_parent_not_the_last_session(tmp_path) ->
         + "\n"
     )
 
-    assert runner._parent_session_id(tmp_path, model) == "parent"
+    assert runner._parent_session_id(tmp_path, "parent") == "parent"
 
 
 def test_e2e_client_turn_keeps_the_resume_in_the_isolated_working_directory(

@@ -23,7 +23,7 @@ _V2_ARGUMENTS = {
     "spawn_agent": {"task_name": "worker", "message": "do work", "fork_turns": "all"},
     "send_message": {"target": "/root/worker", "message": "status"},
     "followup_task": {"target": "/root/worker", "message": "continue"},
-    "wait_agent": {"timeout_ms": 1000},
+    "wait_agent": {"timeout_ms": 10000},
     "list_agents": {},
     "interrupt_agent": {"target": "/root/worker"},
 }

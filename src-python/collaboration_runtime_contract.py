@@ -9,6 +9,7 @@ check and dynamic description text is deliberately excluded from matching.
 from __future__ import annotations
 
 import json
+from decimal import Decimal, InvalidOperation
 import math
 from typing import Any, Mapping, Sequence
 
@@ -358,6 +359,15 @@ def classify_collaboration_request(request: Mapping[str, Any]) -> str | None:
     return classify_collaboration_tools(tools)  # type: ignore[arg-type]
 
 
+# CLI 0.153.4 exposes these bounds in the native V1/V2 wait handlers.  Keep
+# versioned names even though the currently shipped values coincide; a future
+# client change must update one contract without silently changing the other.
+COLLABORATION_V1_TIMEOUT_MIN = 10_000
+COLLABORATION_V1_TIMEOUT_MAX = 3_600_000
+COLLABORATION_V2_TIMEOUT_MIN = 10_000
+COLLABORATION_V2_TIMEOUT_MAX = 3_600_000
+
+
 def _json_object_or_value(value: Any, malformed: str) -> Any:
     if not isinstance(value, str):
         return value
@@ -385,6 +395,93 @@ def _json_object_or_value(value: Any, malformed: str) -> Any:
         raise CollaborationContractError(malformed) from None
 
 
+def _parse_collaboration_arguments(value: str, malformed: str) -> Any:
+    """Parse a Collaboration argument object without accepting JSON extensions."""
+
+    def unique_object(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, child in items:
+            if key in result:
+                raise CollaborationContractError(malformed)
+            result[key] = child
+        return result
+
+    def reject_non_json_constant(_value: str) -> None:
+        raise ValueError
+
+    try:
+        return json.loads(
+            value,
+            object_pairs_hook=unique_object,
+            parse_float=Decimal,
+            parse_constant=reject_non_json_constant,
+        )
+    except (CollaborationContractError, TypeError, ValueError, InvalidOperation):
+        raise CollaborationContractError(malformed) from None
+
+
+def _normalize_timeout_value(value: Any, *, version: str) -> tuple[int, bool]:
+    """Return an exact integer timeout, never rounding or truncating."""
+
+    bounds = {
+        COLLABORATION_V1: (COLLABORATION_V1_TIMEOUT_MIN, COLLABORATION_V1_TIMEOUT_MAX),
+        COLLABORATION_V2: (COLLABORATION_V2_TIMEOUT_MIN, COLLABORATION_V2_TIMEOUT_MAX),
+    }.get(version)
+    if bounds is None:
+        raise CollaborationContractError("unknown_collaboration_version")
+    minimum, maximum = bounds
+    if type(value) is int:
+        normalized = value
+    elif isinstance(value, Decimal):
+        if not value.is_finite() or value != value.to_integral_value():
+            raise CollaborationContractError("collaboration_timeout_not_integer")
+        # Compare against the bounded contract before converting to ``int``.
+        # A syntactically valid exponent such as ``1e1000000000`` must fail
+        # closed without attempting to allocate a billion-digit Python int.
+        if value < minimum or value > maximum:
+            raise CollaborationContractError("collaboration_timeout_out_of_range")
+        normalized = int(value)
+    else:
+        raise CollaborationContractError("collaboration_timeout_not_integer")
+    if not minimum <= normalized <= maximum:
+        raise CollaborationContractError("collaboration_timeout_out_of_range")
+    return normalized, type(value) is not int or normalized != value
+
+
+def normalize_collaboration_arguments(version: str, name: str, value: Any) -> tuple[str, bool]:
+    """Validate and losslessly canonicalize known Collaboration arguments.
+
+    Only the request-local ``wait_agent.timeout_ms`` field is normalized.  The
+    returned wire string is deterministic; callers must use it for the body,
+    history, and completed SSE item, while preserving failed history verbatim.
+    """
+
+    schemas = EXPECTED_PARAMETER_SCHEMAS.get(version)
+    if schemas is None or name not in schemas:
+        raise CollaborationContractError("unknown_collaboration_function")
+    if not isinstance(value, str):
+        raise CollaborationContractError("collaboration_arguments_wire_type_invalid")
+    parsed = _parse_collaboration_arguments(value, "malformed_collaboration_arguments")
+    changed = False
+    if name == "wait_agent" and isinstance(parsed, dict) and "timeout_ms" in parsed:
+        timeout, timeout_changed = _normalize_timeout_value(parsed["timeout_ms"], version=version)
+        parsed["timeout_ms"] = timeout
+        changed = timeout_changed
+    if not _matches_schema(parsed, schemas[name]):
+        raise CollaborationContractError("collaboration_arguments_schema_mismatch")
+    # Preserve the caller's exact JSON spelling for every argument except the
+    # one known CLI mismatch (wait_agent.timeout_ms).  Message payloads and
+    # failed history must not be rewritten merely because they crossed this
+    # boundary.
+    if not changed:
+        return value, False
+    try:
+        encoded = json.dumps(parsed, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        raise CollaborationContractError("malformed_collaboration_arguments") from None
+    return encoded, changed
+
+
 def _matches_schema(value: Any, schema: Mapping[str, Any]) -> bool:
     alternatives = schema.get("oneOf")
     if isinstance(alternatives, list):
@@ -406,7 +503,10 @@ def _matches_schema(value: Any, schema: Mapping[str, Any]) -> bool:
         if type(value) is not bool:
             return False
     elif expected_type == "number":
-        if type(value) not in {int, float} or not math.isfinite(value):
+        if isinstance(value, Decimal):
+            if not value.is_finite():
+                return False
+        elif type(value) not in {int, float} or not math.isfinite(value):
             return False
     elif expected_type == "array":
         if not isinstance(value, list):
@@ -443,14 +543,7 @@ def _matches_schema(value: Any, schema: Mapping[str, Any]) -> bool:
 
 
 def validate_collaboration_arguments(version: str, name: str, value: Any) -> None:
-    schemas = EXPECTED_PARAMETER_SCHEMAS.get(version)
-    if schemas is None or name not in schemas:
-        raise CollaborationContractError("unknown_collaboration_function")
-    if not isinstance(value, str):
-        raise CollaborationContractError("collaboration_arguments_wire_type_invalid")
-    parsed = _json_object_or_value(value, "malformed_collaboration_arguments")
-    if not _matches_schema(parsed, schemas[name]):
-        raise CollaborationContractError("collaboration_arguments_schema_mismatch")
+    normalize_collaboration_arguments(version, name, value)
 
 
 def validate_collaboration_result(version: str, name: str, value: Any) -> None:
@@ -527,9 +620,14 @@ def validate_agent_message(value: Mapping[str, Any]) -> None:
 __all__ = [
     "COLLABORATION_V1",
     "COLLABORATION_V2",
+    "COLLABORATION_V1_TIMEOUT_MIN",
+    "COLLABORATION_V1_TIMEOUT_MAX",
+    "COLLABORATION_V2_TIMEOUT_MIN",
+    "COLLABORATION_V2_TIMEOUT_MAX",
     "CollaborationContractError",
     "EXPECTED_PARAMETER_SCHEMAS",
     "EXPECTED_OUTPUT_SCHEMAS",
+    "normalize_collaboration_arguments",
     "V1_NAMESPACE",
     "V1_TOOLS",
     "V2_NAMESPACE",
