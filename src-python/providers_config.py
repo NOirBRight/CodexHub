@@ -141,7 +141,14 @@ class ProviderConfig:
 
 
 def discover_official_models(api_key: str, timeout_seconds: int = 20) -> list[dict[str, Any]]:
-    headers = {"Accept": "application/json"}
+    # A few OpenAI-compatible gateways reject Python's default
+    # ``urllib`` user-agent (CommandCode currently answers that request with
+    # 403). Keep discovery identifiable without carrying credentials or
+    # provider-specific behavior into the request.
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "CodexHub-model-discovery/1",
+    }
     stripped_api_key = api_key.strip()
     if stripped_api_key:
         headers["Authorization"] = f"Bearer {stripped_api_key}"
@@ -186,7 +193,12 @@ def discover_provider_models(
     same exact identifier twice is treated as ambiguous rather than silently
     converted into a unique fact.
     """
-    headers = {"Accept": "application/json"}
+    # Some provider gateways reject the Python urllib default user agent with
+    # a bare 403 even though the same authenticated request is accepted by a
+    # normal client.  Keep the identity stable and deliberately generic; it
+    # carries no credentials and is not used for routing or capability
+    # inference.
+    headers = {"Accept": "application/json", "User-Agent": "CodexHub/1.0"}
     stripped_api_key = api_key.strip()
     if stripped_api_key:
         headers["Authorization"] = f"Bearer {stripped_api_key}"

@@ -59,6 +59,7 @@ from route_plan import (
     NATIVE_RESPONSES_TOOL_CODEC_ERROR_CODE,
     TOOL_SURFACE_STRATEGY_ERROR_CODE,
     external_native_responses_tool_codec as _external_native_responses_tool_codec,
+    external_requires_reasoning_content_history as _external_requires_reasoning_content_history,
     external_tool_protocol as _external_tool_protocol,
     external_tool_surface_strategy as _external_tool_surface_strategy,
 )
@@ -376,6 +377,7 @@ def compatible_request_body(
             changed = True
         if (
             upstream.get("upstream_format") == "chat_completions"
+            and not _external_requires_reasoning_content_history(upstream)
             and _response._drop_v2_chat_reasoning_history(
                 payload,
                 event_context=event_context,

@@ -137,6 +137,7 @@ class RelayExecutionPlanLike(Protocol):
     sse_mutation_policy: Any
     verify_cross_protocol_source: bool
     lifecycle_final_retry_enabled: bool
+    preserve_reasoning_history: bool
 
 
 class RouteAttemptLike(Protocol):

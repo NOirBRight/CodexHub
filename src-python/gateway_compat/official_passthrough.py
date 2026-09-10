@@ -287,6 +287,7 @@ def _validate_runtime_tool_capability_facts(facts: Mapping[str, Any]) -> None:
         "custom_adapter",
         "accepts_tool_search_adapter",
         "tool_search_adapter",
+        "requires_reasoning_content_history",
     }
     for key in boolean_keys:
         if key in facts and type(facts[key]) is not bool:

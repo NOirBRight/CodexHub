@@ -565,6 +565,9 @@ def relay_upstream_response(
     lifecycle_final_retry_enabled = (
         relay_execution_plan.lifecycle_final_retry_enabled
     )
+    preserve_reasoning_history = bool(
+        getattr(relay_execution_plan, "preserve_reasoning_history", False)
+    )
     status = getattr(response, "status", None) or getattr(response, "code", 502)
     is_event_stream = _is_event_stream(response.headers)
     # When the caller spoke Chat Completions, the response must be converted
@@ -940,7 +943,8 @@ def relay_upstream_response(
                             _chat_completion_to_response_body(body),
                             upstream_name,
                             event_context=compatibility_event_context,
-                        )
+                        ),
+                        preserve_reasoning_history=preserve_reasoning_history,
                     )
                 else:
                     exchange = relay_context.prepared_exchange
@@ -1227,7 +1231,9 @@ def relay_upstream_response(
             and upstream_format != "chat_completions"
         ):
             line_ending = b"\n"
-            converter = _ResponsesToChatStreamConverter()
+            converter = _ResponsesToChatStreamConverter(
+                preserve_reasoning_history=preserve_reasoning_history,
+            )
             incomplete_frame = False
             try:
                 for frame in iter_upstream_sse_events(
@@ -1738,7 +1744,10 @@ def relay_upstream_response(
 
             try:
                 converted_chat_chunks = _chat_completion_body_to_stream_chunks(
-                    _response_body_to_chat_completion_body(response_body)
+                    _response_body_to_chat_completion_body(
+                        response_body,
+                        preserve_reasoning_history=preserve_reasoning_history,
+                    )
                 )
             except UpstreamProtocolTranslationError:
                 if verified_source_format is None:
@@ -1939,7 +1948,10 @@ def relay_upstream_response(
                         seam.last_write_error() or OSError("downstream closed")
                     )
                 for chunk in _chat_completion_body_to_stream_chunks(
-                    _response_body_to_chat_completion_body(response_body)
+                    _response_body_to_chat_completion_body(
+                        response_body,
+                        preserve_reasoning_history=preserve_reasoning_history,
+                    )
                 ):
                     if not output.data(chunk):
                         return finish_downstream_stream_closed(

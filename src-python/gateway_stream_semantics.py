@@ -1035,12 +1035,14 @@ def _responses_request_to_chat_completion_body(
     drop_client_metadata: bool = False,
     drop_client_transport_fields: bool = False,
     drop_reasoning: bool = False,
+    preserve_reasoning_history: bool = False,
 ) -> bytes:
     return responses_request_to_chat_completion_body(
         body,
         drop_client_metadata=drop_client_metadata,
         drop_client_transport_fields=drop_client_transport_fields,
         drop_reasoning=drop_reasoning,
+        preserve_reasoning_history=preserve_reasoning_history,
     )
 
 
@@ -1633,12 +1635,17 @@ def _chat_function_name_from_response_item(item: Mapping[str, Any]) -> str | Non
     return name
 
 
-def _response_body_to_chat_completion_body(body: bytes) -> bytes:
+def _response_body_to_chat_completion_body(
+    body: bytes,
+    *,
+    preserve_reasoning_history: bool = False,
+) -> bytes:
     try:
         return response_body_to_chat_completion_body(
             body,
             function_name_from_response_item=_chat_function_name_from_response_item,
             error_body=_chat_completion_error_body,
+            preserve_reasoning_history=preserve_reasoning_history,
         )
     except UnsupportedProtocolTranslationError as exc:
         raise UpstreamProtocolTranslationError(exc) from exc
@@ -1708,12 +1715,14 @@ def _response_events_to_chat_stream_chunks(
     events: list[Mapping[str, Any]],
     *,
     require_completed: bool = False,
+    preserve_reasoning_history: bool = False,
 ) -> list[dict[str, Any]]:
     try:
         return response_events_to_chat_stream_chunks(
             events,
             require_completed=require_completed,
             function_name_from_response_item=_chat_function_name_from_response_item,
+            preserve_reasoning_history=preserve_reasoning_history,
         )
     except UnsupportedProtocolTranslationError as exc:
         raise UpstreamProtocolTranslationError(exc) from exc

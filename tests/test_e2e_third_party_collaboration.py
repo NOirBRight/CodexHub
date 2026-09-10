@@ -199,6 +199,80 @@ def test_commandcode_confirmation_rejects_duplicate_live_model_ids(monkeypatch, 
     ]
 
 
+def test_commandcode_confirmation_uses_exact_model_capability_probe(monkeypatch, tmp_path) -> None:
+    runner = _runner_module()
+    providers = tmp_path / "providers.toml"
+    providers.write_text(
+        textwrap.dedent(
+            """
+            [[providers]]
+            id = "commandcode"
+            name = "CommandCode"
+            base_url = "https://commandcode.invalid/v1"
+            api_key = "test-key"
+            [[providers.models]]
+            id = "deepseek/deepseek-v4-flash"
+            supported_reasoning_levels = ["high", "max"]
+            """
+        ).strip()
+        + "\n"
+    )
+    monkeypatch.setattr(
+        "providers_config.discover_provider_models",
+        lambda *_args, **_kwargs: [{"id": "deepseek/deepseek-v4.1-flash"}],
+    )
+    calls = []
+
+    def probe(base_url, api_key, model, effort, **kwargs):
+        calls.append((base_url, api_key, model, effort))
+        return {"route": "chat_completions", "status": 200, "accepted": True}
+
+    monkeypatch.setattr(runner, "probe_provider_chat_reasoning_effort", probe)
+    confirmation = runner.confirm_commandcode_deepseek_41(
+        providers,
+        selected_model="commandcode/deepseek/deepseek-v4.1-flash",
+        requested_effort="max",
+        probe_reasoning=True,
+    )
+    assert confirmation["confirmed"] is True
+    assert confirmation["reasoning_levels"] == ["max"]
+    assert calls == [("https://commandcode.invalid/v1", "test-key", "deepseek/deepseek-v4.1-flash", "max")]
+
+
+def test_commandcode_confirmation_rejects_unaccepted_capability_probe(monkeypatch, tmp_path) -> None:
+    runner = _runner_module()
+    providers = tmp_path / "providers.toml"
+    providers.write_text(
+        textwrap.dedent(
+            """
+            [[providers]]
+            id = "commandcode"
+            name = "CommandCode"
+            base_url = "https://commandcode.invalid/v1"
+            api_key = "test-key"
+            """
+        ).strip()
+        + "\n"
+    )
+    monkeypatch.setattr(
+        "providers_config.discover_provider_models",
+        lambda *_args, **_kwargs: [{"id": "deepseek/deepseek-v4.1-flash"}],
+    )
+    monkeypatch.setattr(
+        runner,
+        "probe_provider_chat_reasoning_effort",
+        lambda *_args, **_kwargs: {"route": "chat_completions", "status": 400, "accepted": False},
+    )
+    confirmation = runner.confirm_commandcode_deepseek_41(
+        providers,
+        selected_model="commandcode/deepseek/deepseek-v4.1-flash",
+        requested_effort="max",
+        probe_reasoning=True,
+    )
+    assert confirmation["confirmed"] is False
+    assert confirmation["classification"] == "requested_effort_unconfirmed"
+
+
 def test_confirmed_commandcode_model_is_added_only_to_isolated_config(monkeypatch, tmp_path) -> None:
     runner = _runner_module()
     source = tmp_path / "source.toml"
@@ -241,6 +315,12 @@ def test_confirmed_commandcode_model_is_added_only_to_isolated_config(monkeypatc
     ) is True
     assert payload["models"][0]["slug"] == "commandcode/deepseek/deepseek-v4.1-flash"
     assert payload["models"][0]["multi_agent_version"] == "v2"
+    assert payload["models"][0]["supported_reasoning_levels"] == [
+        {"effort": "high", "description": "Reasoning effort: high"},
+        {"effort": "max", "description": "Reasoning effort: max"},
+    ]
+    assert payload["models"][0]["base_instructions"].startswith("You are Codex")
+    assert payload["models"][0]["truncation_policy"] == {"mode": "tokens", "limit": 10000}
 
 
 def test_initial_fixture_is_a_real_failing_test_not_a_missing_module(tmp_path) -> None:

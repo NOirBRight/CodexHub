@@ -32,7 +32,7 @@ import tempfile
 import time
 import threading
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src-python"))
@@ -125,11 +125,59 @@ def build_trusted_baseline_cases() -> tuple[MatrixCase, ...]:
     )
 
 
+def probe_provider_chat_reasoning_effort(
+    base_url: str,
+    api_key: str,
+    model: str,
+    effort: str,
+    *,
+    timeout_seconds: int = 30,
+) -> dict[str, object]:
+    """Verify one exact Chat Completions capability without retaining data."""
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply exactly OK"}],
+        "max_tokens": 1,
+        "reasoning_effort": effort,
+    }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "CodexHub-commandcode-capability-probe/1",
+    }
+    stripped_api_key = api_key.strip()
+    if stripped_api_key:
+        headers["Authorization"] = f"Bearer {stripped_api_key}"
+    request = Request(
+        base_url.rstrip("/") + "/chat/completions",
+        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            # Read only a bounded amount to complete the HTTP exchange; never
+            # persist provider text, echoed prompts, or credentials.
+            response.read(4096)
+            status = int(getattr(response, "status", 200))
+        return {"route": "chat_completions", "status": status, "accepted": status == 200}
+    except HTTPError as exc:
+        return {"route": "chat_completions", "status": int(exc.code), "accepted": False}
+    except (OSError, TimeoutError) as exc:
+        return {
+            "route": "chat_completions",
+            "status": None,
+            "accepted": False,
+            "error_type": type(exc).__name__,
+        }
+
+
 def confirm_commandcode_deepseek_41(
     providers_path: Path,
     *,
     selected_model: str = "commandcode/deepseek/deepseek-v4.1-flash",
     requested_effort: str = "max",
+    probe_reasoning: bool = False,
 ) -> dict[str, object]:
     """Confirm the requested CommandCode model without guessing an alias.
 
@@ -158,6 +206,7 @@ def confirm_commandcode_deepseek_41(
         "reasoning_levels": [],
         "configuration_model_present": False,
         "isolated_model_config_required": False,
+        "reasoning_capability_probe": None,
     }
     if not selected or not selected_upstream or not COMMANDCODE_DEEPSEEK_41_RE.fullmatch(selected_upstream):
         base_result["classification"] = "selected_model_not_v41_flash"
@@ -235,6 +284,21 @@ def confirm_commandcode_deepseek_41(
     # fallback only when the selected ID itself is already declared there;
     # never borrow capabilities from ``deepseek-v4-flash`` or another alias.
     levels = discovered_levels or configured_levels
+    # Providers are not required to publish reasoning capabilities in
+    # ``/models``. When the real E2E asks for a capability check, perform a
+    # single bounded chat request with the exact model and requested effort
+    # instead of borrowing ``max`` from a similarly named model. Unit callers
+    # keep strict metadata-only behavior by leaving ``probe_reasoning`` false.
+    if not levels and probe_reasoning:
+        probe = probe_provider_chat_reasoning_effort(
+            provider.base_url,
+            api_key,
+            selected_upstream,
+            requested_effort,
+        )
+        base_result["reasoning_capability_probe"] = probe
+        if probe.get("accepted") is True:
+            levels = (requested_effort.strip().lower(),)
     base_result["reasoning_levels"] = sorted(set(levels))
     if requested_effort.strip().lower() not in levels:
         base_result["classification"] = "requested_effort_unconfirmed"
@@ -305,6 +369,9 @@ def install_confirmed_commandcode_model(
                 ),
                 thinking_mode="always_on",
                 multi_agent_version=collaboration_version,
+                tool_protocol_capabilities={
+                    "requires_reasoning_content_history": True,
+                },
             )
         )
     else:
@@ -313,6 +380,11 @@ def install_confirmed_commandcode_model(
         # throwaway copy when it is absent.
         if existing.multi_agent_version is None:
             existing.multi_agent_version = collaboration_version
+        capabilities = existing.tool_protocol_capabilities
+        if not isinstance(capabilities, dict):
+            capabilities = {}
+            existing.tool_protocol_capabilities = capabilities
+        capabilities["requires_reasoning_content_history"] = True
     save_providers(providers, target_path)
     return {
         "model_id": selected,
@@ -349,8 +421,35 @@ def inject_confirmed_model_into_catalog(
     metadata = metadata if isinstance(metadata, dict) else {}
     entry = existing if isinstance(existing, dict) else {"slug": selected}
     entry.setdefault("display_name", selected)
+    # Codex CLI 0.153.4 deserializes reasoning levels as structured presets,
+    # not bare strings.  Build the smallest complete ModelInfo shape for a
+    # newly discovered model; these are neutral protocol defaults, not copied
+    # capabilities from another model.
+    entry.setdefault("description", "External provider model.")
+    entry.setdefault(
+        "base_instructions",
+        "You are Codex, a coding agent. Follow the current session instructions and use tools when needed.",
+    )
+    entry.setdefault("shell_type", "shell_command")
+    entry.setdefault("visibility", "list")
+    entry.setdefault("supported_in_api", True)
+    entry.setdefault("priority", 200)
+    entry.setdefault("availability_nux", None)
+    entry.setdefault("upgrade", None)
+    entry.setdefault("support_verbosity", False)
+    entry.setdefault("default_verbosity", None)
+    entry.setdefault("truncation_policy", {"mode": "tokens", "limit": 10000})
+    entry.setdefault("experimental_supported_tools", [])
+    entry.setdefault("input_modalities", ["text"])
     entry.setdefault("provider", "commandcode")
-    entry["supported_reasoning_levels"] = list(confirmation.get("reasoning_levels", []))
+    reasoning_presets = []
+    for level in confirmation.get("reasoning_levels", []):
+        if isinstance(level, str) and level.strip():
+            reasoning_presets.append({
+                "effort": level.strip().lower(),
+                "description": f"Reasoning effort: {level.strip().lower()}",
+            })
+    entry["supported_reasoning_levels"] = reasoning_presets
     entry["default_reasoning_level"] = metadata.get("default_reasoning_level", "max")
     entry["multi_agent_version"] = collaboration_version
     for key in ("context_window", "max_output_tokens"):
@@ -813,6 +912,9 @@ def _test_evidence_order(
         for write in process_writes
         if write.get("file") == "parent_task.py" and isinstance(write.get("timestamp"), (int, float))
     )
+    changed_at = observation.get("source_changed_at") if isinstance(observation, dict) else None
+    if isinstance(changed_at, (int, float)):
+        edit_times.append(float(changed_at))
     edit = min(edit_times) if edit_times else None
     suite_start = _timestamp_value(recorder.get("suite_started_at")) if isinstance(recorder, dict) else None
     suite_end = _timestamp_value(recorder.get("suite_finished_at")) if isinstance(recorder, dict) else None
@@ -1448,8 +1550,14 @@ def collect_evidence(
     review_end = datetime.fromisoformat(second_done.replace("Z", "+00:00")).timestamp() if second_done else None
     observed_edits = bool(client_turns) and child_inspection_proven and review_end is not None and all(
         turn["process_observation"].get("source_changed") is True
-        and any(write.get("file") == "parent_task.py" and isinstance(write.get("timestamp"), (float, int))
+        and (
+            any(write.get("file") == "parent_task.py" and isinstance(write.get("timestamp"), (float, int))
                 and write["timestamp"] >= review_end for write in turn["process_observation"].get("writes", []))
+            or (
+                isinstance(turn["process_observation"].get("source_changed_at"), (float, int))
+                and turn["process_observation"]["source_changed_at"] >= review_end
+            )
+        )
         for turn in client_turns
     )
     parent_edits_verified = parent_edits_verified or observed_edits
@@ -1907,6 +2015,7 @@ def _run_client(
     client_entrypoint = Path(command[0]).name if command else None
     observed_tree: dict[int, set[int]] = {}
     observed_client_pids: set[int] = set()
+    source_changed_at: float | None = None
     if observe_processes:
         tracer = shutil.which("strace")
         if sys.platform != "linux" or not tracer:
@@ -1934,6 +2043,18 @@ def _run_client(
                 for parent, children in edges.items():
                     observed_tree.setdefault(parent, set()).update(children)
                 observed_client_pids.update(client_pids)
+                # ``strace`` intentionally observes process/file-open identity,
+                # not arbitrary write syscalls.  Poll the trusted fixture
+                # digest while the real client tree is alive so a shell/editor
+                # edit still has a bounded timestamp that can be ordered after
+                # the child review and before the test process.
+                if source_changed_at is None and source_before is not None:
+                    try:
+                        current_source = hashlib.sha256(source_path.read_bytes()).hexdigest()
+                    except OSError:
+                        current_source = None
+                    if current_source is not None and current_source != source_before:
+                        source_changed_at = time.time()
                 exit_code = client.poll()
                 if exit_code is not None:
                     break
@@ -1968,6 +2089,7 @@ def _run_client(
                 evidence["test_sha_before"] = test_before
                 evidence["test_sha_after"] = test_after
                 evidence["source_changed"] = source_before is not None and source_after != source_before
+                evidence["source_changed_at"] = source_changed_at
                 evidence["test_changed"] = test_before is not None and test_after != test_before
                 evidence["started_at"] = started_at
                 evidence["finished_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -2396,6 +2518,7 @@ def main() -> int:
                 source / "proxy/config/providers.toml",
                 selected_model=selected_model,
                 requested_effort=selected_effort,
+                probe_reasoning=True,
             )
             commandcode_confirmations[selected_model] = confirmation
             if not confirmation.get("confirmed"):
