@@ -1073,6 +1073,11 @@ def _lifecycle_passed(parent: dict, child: dict, version: str, diagnostics: dict
         # evidence and must never satisfy delivery correlation.
         if row.get("type") != "response_item" or item.get("type") != "agent_message":
             continue
+        # Native replays have no role field on the current CLI, while some
+        # providers label them as assistant items.  A user/system role is
+        # not a child delivery even if its text contains the child identity.
+        if item.get("role") not in (None, "assistant"):
+            continue
         content = _item_text(item.get("content"))
         matches = [bool(message) and message in content for message in messages_for_diagnostics]
         if any(matches):
@@ -2083,9 +2088,10 @@ def _git_revision_state(gateway_root: Path) -> dict[str, object]:
     """Capture source identity without treating evidence files as source edits.
 
     The checkout intentionally keeps untracked, local evidence outside the
-    candidate commit.  ``gateway_dirty`` therefore describes tracked changes
-    only; the bounded untracked count remains visible so a report cannot hide
-    a genuinely modified source tree.
+    candidate commit.  Evidence/research notes are allowlisted, while any
+    other untracked path is treated as source drift.  Both tracked and source
+    untracked changes therefore make ``gateway_dirty`` true; the bounded
+    counts remain visible in the report.
     """
 
     revision = subprocess.check_output(

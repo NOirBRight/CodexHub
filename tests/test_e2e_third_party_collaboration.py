@@ -526,7 +526,8 @@ def test_v2_delivery_accepts_identity_bearing_replay_without_optional_metadata(t
     assert evidence["parent_child_relationships"] == [{"child": "child", "parent": "parent"}]
 
 
-def test_v2_delivery_does_not_accept_identity_text_in_user_messages(tmp_path):
+@pytest.mark.parametrize("spoof_type", ["message", "agent_message"])
+def test_v2_delivery_does_not_accept_identity_text_in_user_messages(tmp_path, spoof_type):
     runner = _runner_module()
     output = _complete_fixture(tmp_path, "v2")
     parent_path = tmp_path / "sessions" / "parent.jsonl"
@@ -535,7 +536,7 @@ def test_v2_delivery_does_not_accept_identity_text_in_user_messages(tmp_path):
     for row in rows:
         payload = row.get("payload", {})
         if row.get("type") == "response_item" and payload.get("type") == "agent_message":
-            payload["type"] = "message"
+            payload["type"] = spoof_type
             payload["role"] = "user"
             for part in payload.get("content", []):
                 if isinstance(part, dict) and isinstance(part.get("text"), str):
