@@ -242,7 +242,7 @@ def _complete_fixture(home, version="v2"):
         args = ({"task_name": "reviewer", "message": "inspect"} if name == "spawn_agent" else {"target": "reviewer", "message": "inspect again"}) if version == "v2" else (
             {"message": "inspect"} if name == "spawn_agent" else {"targets": ["child"]} if name == "wait_agent" else {"id": "child"} if name == "resume_agent" else {"target": "child", "message": "inspect again"} if name == "send_input" else {"target": "child"})
         output = ({"task_name": "/root/reviewer"} if version == "v2" else {"agent_id": "child"}) if name == "spawn_agent" else (
-            {"status": {"child": {"completed": "review"}}} if name == "wait_agent" else {"previous_status": {"completed": "review"}} if version == "v1" else "")
+            {"status": {"child": {"completed": "fixture review result"}}} if name == "wait_agent" else {"previous_status": {"completed": "fixture review result"}} if version == "v1" else "")
         parent.extend([row("response_item", {"type": "function_call", "namespace": namespace, "name": name, "call_id": str(index), "arguments": json.dumps(args)}),
                        row("response_item", {"type": "function_call_output", "call_id": str(index), "output": json.dumps(output)})])
     if version == "v2":
@@ -585,3 +585,20 @@ def test_native_argument_parse_error_is_a_failed_call(tmp_path):
     evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v1", parent_effort="high",
                                       child_effort="high", client_outputs=(output,))
     assert next(c for c in evidence["call_trace"] if c["id"] == "1")["failed"] is True
+
+
+@pytest.mark.parametrize("message,passed", [("fixture review result", True), ("unrelated result", False)])
+def test_v1_close_can_deliver_real_completed_result_without_wait(tmp_path, message, passed):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v1")
+    path = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows = [row for row in rows if row.get("payload", {}).get("call_id") not in {"1", "5"}]
+    for row in rows:
+        item = row.get("payload", {})
+        if item.get("type") == "function_call_output" and item.get("call_id") in {"2", "6"}:
+            item["output"] = json.dumps({"previous_status": {"completed": message}})
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v1", parent_effort="high",
+                                      child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is passed

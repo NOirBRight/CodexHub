@@ -475,6 +475,19 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             return True
         return self.registry.record_for_call(value.get("call_id")) is not None
 
+    @staticmethod
+    def _encode_timeout_contract(child: dict[str, Any]) -> None:
+        # The client declaration uses JSON Schema number, but its handler
+        # deserializes an integer. Narrow only a registered native wait tool.
+        if child.get("name") != "wait_agent":
+            return
+        fields = child.get("parameters", {}).get("properties", {})
+        if isinstance(fields.get("timeout_ms"), dict):
+            fields["timeout_ms"] = {
+                **fields["timeout_ms"], "type": "integer",
+                "description": "Timeout in milliseconds. Emit a JSON integer, e.g. 300000, not 300000.0.",
+            }
+
     def _encode_tool_declarations(self, tools: Any) -> tuple[Any, bool]:
         if not isinstance(tools, list):
             return tools, False
@@ -493,7 +506,12 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                 changed = True
                 continue
             if entry.disposition != ADAPT:
-                encoded.append(_copy_mapping(raw_tool))
+                declaration = _copy_mapping(raw_tool)
+                if entry.family == NAMESPACE and entry.version in {"v1", "v2"}:
+                    for child in declaration.get("tools", []):
+                        self._encode_timeout_contract(child)
+                encoded.append(declaration)
+                changed = changed or declaration != raw_tool
                 continue
             if entry.family == NAMESPACE:
                 namespace, children, _version, valid = _namespace_details(raw_tool)
@@ -505,6 +523,9 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                         if namespace == "collaboration"
                         else child
                     )
+                    child = _copy_mapping(child)
+                    if entry.version in {"v1", "v2"}:
+                        self._encode_timeout_contract(child)
                     encoded.append(
                         _provider_function_declaration(child, entry.aliases[child_index])
                     )

@@ -514,7 +514,7 @@ def _lifecycle_passed(parent: dict, child: dict, version: str, diagnostics: dict
     if version == "v2" and isinstance(spawn["arguments"].get("task_name"), str):
         targets.add(spawn["arguments"]["task_name"])
     steps = ["spawn_agent", "followup_task"] if version == "v2" else [
-        "spawn_agent", "wait_agent", "close_agent", "resume_agent", "send_input", "wait_agent", "close_agent",
+        "spawn_agent", "close_agent", "resume_agent", "send_input", "close_agent",
     ]
     position = 0
     matched_calls = []
@@ -560,6 +560,24 @@ def _lifecycle_passed(parent: dict, child: dict, version: str, diagnostics: dict
         first_done <= followup["timestamp"] <= second_done
     ):
         return reject("followup_completion_order_invalid")
+    if version == "v1":
+        closes = [call for call in matched_calls if call["name"] == "close_agent"]
+        for index, (done, close) in enumerate(zip((first_done, second_done), closes)):
+            if not isinstance(close.get("timestamp"), str) or close["timestamp"] < done:
+                return reject("close_before_child_completion")
+            prior_status = close["output"].get("previous_status", {}) if isinstance(close["output"], dict) else {}
+            close_delivered = isinstance(prior_status, dict) and prior_status.get("completed") == messages[index]
+            wait_delivered = any(
+                call["name"] == "wait_agent" and call["arguments"].get("targets") == [identity]
+                and isinstance(call["output"], dict)
+                and isinstance(call["output"].get("status"), dict)
+                and isinstance(call["output"]["status"].get(identity), dict)
+                and call["output"]["status"][identity].get("completed") == messages[index]
+                and call.get("timestamp", "") <= close["timestamp"]
+                and (index == 0 or call.get("timestamp", "") >= followup["timestamp"])
+                for call in successful)
+            if not (close_delivered or wait_delivered):
+                return reject("child_result_delivery_not_correlated")
     if version == "v2":
         delivered = [row.get("payload", {}) for row in parent["rows"]
                      if row.get("type") == "response_item" and row.get("payload", {}).get("type") == "agent_message"
