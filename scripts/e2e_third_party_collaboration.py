@@ -382,18 +382,23 @@ def _child_inspect_only(record: dict) -> bool:
     return bool(calls) and set(calls) == set(results) and all(results.values())
 
 
-def _lifecycle_passed(parent: dict, child: dict, version: str) -> tuple[bool, list[dict]]:
+def _lifecycle_passed(parent: dict, child: dict, version: str, diagnostics: dict | None = None) -> tuple[bool, list[dict]]:
+    diagnostics = diagnostics if diagnostics is not None else {}
+    diagnostics["rejected_steps"] = []
     calls = _paired_collaboration_calls(parent, version)
+    def reject(reason):
+        diagnostics["failure"] = reason
+        return False, calls
     successful = [call for call in calls if not call["failed"]
                   and (call["name"] != "spawn_agent" or call["creation_verified"])]
     spawns = [call for call in successful if call["name"] == "spawn_agent"]
     if len(spawns) != 1 or not isinstance(spawns[0]["output"], dict):
-        return False, calls
+        return reject("successful_spawn_count_or_result_invalid")
     spawn = spawns[0]
     output = spawn["output"]
     identity = output.get("task_name") if version == "v2" else output.get("agent_id")
     if not isinstance(identity, str) or not identity or identity != (child.get("agent_path") if version == "v2" else child["id"]):
-        return False, calls
+        return reject("spawn_child_identity_mismatch")
     targets = {identity}
     if version == "v2" and isinstance(spawn["arguments"].get("task_name"), str):
         targets.add(spawn["arguments"]["task_name"])
@@ -407,41 +412,51 @@ def _lifecycle_passed(parent: dict, child: dict, version: str) -> tuple[bool, li
             continue
         args = call["arguments"]
         if position and version == "v2" and args.get("target") not in targets:
+            diagnostics["rejected_steps"].append({"call_id": call["id"], "name": call["name"], "reason": "target_identity_mismatch"})
             continue
         if position and version == "v1":
             ids = (args.get("targets") if call["name"] == "wait_agent"
                    else [args.get("id" if call["name"] == "resume_agent" else "target")])
             if ids != [identity]:
+                diagnostics["rejected_steps"].append({"call_id": call["id"], "name": call["name"], "reason": "target_identity_mismatch"})
                 continue
             if call["name"] == "wait_agent":
                 status = call["output"].get("status", {}) if isinstance(call["output"], dict) else {}
                 if not isinstance(status.get(identity), dict) or "completed" not in status[identity]:
+                    diagnostics["rejected_steps"].append({"call_id": call["id"], "name": call["name"], "reason": "wait_has_no_completed_child_result"})
                     continue
         matched_calls.append(call)
         position += 1
     child_turns = _turns(child)
+    diagnostics["matched_steps"] = [call["name"] for call in matched_calls]
+    diagnostics["next_expected_step"] = steps[position] if position < len(steps) else None
+    diagnostics["child_turns"] = [{"id": turn["id"], "terminal": turn["terminal"]} for turn in child_turns]
+    if position != len(steps):
+        return reject("native_sequence_incomplete")
     lifecycle = position == len(steps) and len(child_turns) == 2 and all(
         turn["terminal"] == "task_complete" for turn in child_turns
     )
     completions = [row for row in child["rows"] if row.get("type") == "event_msg" and row.get("payload", {}).get("type") == "task_complete"]
     if not lifecycle or len(completions) != 2:
-        return False, calls
+        return reject("child_completion_count_or_terminal_invalid")
     messages = [row["payload"].get("last_agent_message") for row in completions]
     if not all(isinstance(message, str) and message.strip() for message in messages):
-        return False, calls
+        return reject("child_completion_message_missing")
     followup = next(call for call in matched_calls if call["name"] == ("followup_task" if version == "v2" else "send_input"))
     first_done, second_done = [row.get("timestamp") for row in completions]
+    diagnostics["completion_timing"] = {"first_done": first_done, "followup": followup.get("timestamp"), "second_done": second_done}
     if not all(isinstance(value, str) for value in (first_done, second_done, followup.get("timestamp"))) or not (
         first_done <= followup["timestamp"] <= second_done
     ):
-        return False, calls
+        return reject("followup_completion_order_invalid")
     if version == "v2":
         delivered = [row.get("payload", {}) for row in parent["rows"]
                      if row.get("type") == "response_item" and row.get("payload", {}).get("type") == "agent_message"
                      and row["payload"].get("author") == identity
                      and row["payload"].get("recipient") == identity.rsplit("/", 1)[0]]
         if not all(any(message in _item_text(item.get("content")) for item in delivered) for message in messages):
-            return False, calls
+            return reject("child_result_delivery_not_correlated")
+    diagnostics["failure"] = None
     return True, calls
 
 
@@ -565,10 +580,11 @@ def collect_evidence(
         else plaintext_handoffs == 0 and encrypted_handoffs == 0
     )
     lifecycle_passed, calls = (False, [])
+    lifecycle_diagnostics = {"failure": "parent_or_child_relationship_missing"}
     if len(parent_records) == 1:
         calls = _paired_collaboration_calls(parent_records[0], collaboration_version)
         if len(child_records) == 1:
-            lifecycle_passed, calls = _lifecycle_passed(parent_records[0], child_records[0], collaboration_version)
+            lifecycle_passed, calls = _lifecycle_passed(parent_records[0], child_records[0], collaboration_version, lifecycle_diagnostics)
     contexts_match = True
     for group, model, effort in ((parent_records, parent_model, parent_effort), (child_records, child_model, child_effort)):
         for record in group:
@@ -610,6 +626,11 @@ def collect_evidence(
         missing_evidence.append("parent_source_edit_attribution")
     attribution_only_gap = bool(missing_evidence) and lifecycle_passed and contexts_match and no_subagent_turn and child_inspection_verified
     return {
+        "lifecycle_diagnostics": lifecycle_diagnostics,
+        "execution_diagnostics": {
+            "tests_and_terminals_verified": tests_and_terminals_verified,
+            "parent_edits_verified": parent_edits_verified,
+        },
         "missing_evidence": missing_evidence,
         "child_read_only": child_read_only,
         "child_inspection_verified": child_inspection_verified,
@@ -824,6 +845,7 @@ def _run_client(
     with output.open("a", encoding="utf-8") as stream:
         client = subprocess.Popen(
             command,
+            stdin=subprocess.DEVNULL,
             env=environment,
             cwd=working_directory,
             stdout=stream,
@@ -927,7 +949,7 @@ def main() -> int:
     ).is_file():
         parser.error("the selected xAI model requires source-home/proxy/xai_auth.json")
     report = {
-        "report_version": 5,
+        "report_version": 6,
         "cli_version": cli_version,
         "gateway_sha": subprocess.check_output(["git", "-C", str(gateway_root), "rev-parse", "HEAD"], text=True).strip(),
         "gateway_dirty": bool(subprocess.check_output(["git", "-C", str(gateway_root), "status", "--porcelain"], text=True).strip()),

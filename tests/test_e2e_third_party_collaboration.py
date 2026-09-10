@@ -456,3 +456,20 @@ def test_success_fixture_uses_frozen_native_argument_schemas(tmp_path, version):
         item = json.loads(line).get("payload", {})
         if item.get("type") == "function_call":
             validate_collaboration_arguments("collaboration_" + version, item["name"], item["arguments"])
+
+
+def test_lifecycle_failure_reports_exact_failed_predicate(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v1")
+    path = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        item = row.get("payload", {})
+        if item.get("name") == "resume_agent":
+            item["arguments"] = json.dumps({"id": "unrelated-child"})
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v1", parent_effort="high", child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is False
+    assert evidence["lifecycle_diagnostics"]["failure"] == "native_sequence_incomplete"
+    assert evidence["lifecycle_diagnostics"]["next_expected_step"] == "resume_agent"
+    assert evidence["lifecycle_diagnostics"]["rejected_steps"][0]["reason"] == "target_identity_mismatch"
