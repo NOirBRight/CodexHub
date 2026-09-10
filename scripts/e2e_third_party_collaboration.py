@@ -630,6 +630,16 @@ def collect_evidence(
         "execution_diagnostics": {
             "tests_and_terminals_verified": tests_and_terminals_verified,
             "parent_edits_verified": parent_edits_verified,
+            "cli_source_edit_counts": [sum(
+                item.get("type") == "file_change" and item.get("status") == "completed"
+                and any(Path(change.get("path", "")).name == "parent_task.py"
+                        and change.get("kind") == "update" for change in item.get("changes", []))
+                for item in turn["items"]) for turn in client_turns],
+            "rollout_patch_call_count": sum(
+                row.get("type") == "response_item"
+                and row.get("payload", {}).get("type") in {"custom_tool_call", "function_call"}
+                and row["payload"].get("name") == "apply_patch"
+                for record in parent_records for row in record["rows"]),
         },
         "missing_evidence": missing_evidence,
         "child_read_only": child_read_only,
@@ -692,8 +702,10 @@ def _scenario_prompt(*, collaboration_version: str, child_model: str, child_effo
         "Include these inspection restrictions in both messages sent to the child. Its first response must contain "
         "E2E_CHILD_OK 323 and its follow-up response must contain E2E_FOLLOWUP_OK 667. "
         "After receiving both actual child results, the parent itself must edit parent_task.py so "
-        "normalize(7) returns exactly `FIXED`. Use apply_patch for the source edit so the client "
-        "records its attribution. Then run `\"$CODEXHUB_E2E_PYTHON\" -m unittest -q test_parent_task.py`. "
+        "normalize(7) returns exactly `FIXED`. Use the declared apply_patch tool directly "
+        "for the source edit, not an exec_command shell command named apply_patch, Python, sed, "
+        "or a heredoc that writes the source. This lets the client record the edit attribution. "
+        "Then run `\"$CODEXHUB_E2E_PYTHON\" -m unittest -q test_parent_task.py`. "
         "Report E2E_PARENT_IMPLEMENTED_OK 941 only after that command succeeds. Do not fabricate "
         "tool results or use a different model/provider."
     )
@@ -808,7 +820,9 @@ def _no_subagent_turn_prompt() -> str:
         "This is a new user turn in the same parent task. Do not inspect, call, "
         "resume, create, or delegate to any subagent or collaboration tool. Work "
         "yourself: edit parent_task.py so normalize(7) remains exactly `FIXED` and "
-        "normalize(8) returns exactly `RESUMED`. Use apply_patch for the source edit. "
+        "normalize(8) returns exactly `RESUMED`. Use the declared apply_patch tool directly "
+        "for the source edit, not an exec_command shell command named apply_patch, Python, sed, "
+        "or a heredoc that writes the source. "
         "Then run `\"$CODEXHUB_E2E_PYTHON\" -m unittest -q "
         "test_resume_turn.py`. Report "
         "E2E_NO_SUBAGENT_TURN_OK 818 only after that command succeeds."

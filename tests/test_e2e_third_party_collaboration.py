@@ -473,3 +473,10 @@ def test_lifecycle_failure_reports_exact_failed_predicate(tmp_path):
     assert evidence["lifecycle_diagnostics"]["failure"] == "native_sequence_incomplete"
     assert evidence["lifecycle_diagnostics"]["next_expected_step"] == "resume_agent"
     assert evidence["lifecycle_diagnostics"]["rejected_steps"][0]["reason"] == "target_identity_mismatch"
+
+
+def test_both_fixture_turns_require_native_edit_tool_not_shell_spelling():
+    runner = _runner_module()
+    for prompt in (runner._scenario_prompt(collaboration_version="v1", child_model="xai/grok-4.6", child_effort="high"), runner._no_subagent_turn_prompt()):
+        assert "declared apply_patch tool directly" in prompt
+        assert "not an exec_command shell command" in prompt
