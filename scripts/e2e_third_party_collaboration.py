@@ -384,7 +384,11 @@ def _paired_collaboration_calls(record: dict, version: str) -> list[dict]:
     for call_id, call in calls.items():
         call["output"] = results[call_id]
         output = call["output"]
-        call["failed"] = isinstance(output, dict) and bool(output.get("error") or output.get("isError"))
+        call["failed"] = (
+            isinstance(output, dict) and bool(output.get("error") or output.get("isError"))
+        ) or (
+            isinstance(output, str) and output.startswith("failed to parse function arguments:")
+        )
         identity_key = "task_name" if version == "v2" else "agent_id"
         call["creation_verified"] = (
             call["name"] == "spawn_agent" and not call["failed"]
