@@ -13,14 +13,12 @@ import json
 from typing import Any, Iterable, Mapping
 from .collab_v1 import (
     CollaborationV1PlanMixin,
-    V1_NAMESPACE,
     is_opaque_v1_history_item,
     validate_plain_native_item,
     validate_v1_arguments,
 )
 from .collab_v2 import (
     CollaborationV2PlanMixin,
-    V2_NAMESPACE,
     apply_v2_namespace_decode,
     is_opaque_v2_history_item,
     strip_encrypted_annotations as strip_v2_encrypted_annotations,
@@ -1724,15 +1722,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
         response_call_owners: dict[str, ToolCompatibilityEntry] = {}
         response_call_positions: dict[str, int] = {}
         surface = "response" if reject_omitted_response else "history"
-        failed_argument_call_ids = {
-            item.get("call_id")
-            for item in items
-            if isinstance(item, Mapping)
-            and item.get("type") in {"function_call_output", "custom_tool_call_output"}
-            and isinstance(item.get("call_id"), str)
-            and isinstance(item.get("output"), str)
-            and item["output"].startswith("failed to parse function arguments:")
-        }
+        failed_calls = failed_argument_call_ids(items)
         for item_index, raw_item in enumerate(items):
             if not isinstance(raw_item, Mapping):
                 continue
@@ -1817,7 +1807,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                 if record is not None or legacy_record is not None:
                     decoded, _record, item_changed = self._decode_call_compat(
                         item,
-                        preserve_failed_arguments=call_id in failed_argument_call_ids,
+                        preserve_failed_arguments=call_id in failed_calls,
                     )
                 else:
                     native_entry = self._native_entry_for_item(item)
@@ -1825,7 +1815,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                         self._validate_native_item(
                             item,
                             native_entry,
-                            skip_arguments_validation=call_id in failed_argument_call_ids,
+                            skip_arguments_validation=call_id in failed_calls,
                         )
                         decoded, item_changed = item, False
                     elif self.registry.looks_like_alias(item.get("name")):

@@ -111,6 +111,52 @@ def test_commandcode_confirmation_requires_exact_selected_id_and_max(monkeypatch
     assert no_effort["classification"] == "requested_effort_unconfirmed"
 
 
+def test_commandcode_confirmation_rejects_duplicate_live_model_ids(monkeypatch, tmp_path) -> None:
+    runner = _runner_module()
+    providers = tmp_path / "providers.toml"
+    providers.write_text(
+        textwrap.dedent(
+            """
+            [[providers]]
+            id = "commandcode"
+            name = "CommandCode"
+            base_url = "https://commandcode.invalid/v1"
+            api_key = "test-key"
+            [[providers.models]]
+            id = "deepseek/deepseek-v4-flash"
+            supported_reasoning_levels = ["high", "max"]
+            """
+        ).strip()
+        + "\n"
+    )
+    monkeypatch.setattr(
+        "providers_config.discover_provider_models",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "deepseek/deepseek-v4.1-flash",
+                "supported_reasoning_levels": ["high", "max"],
+            },
+            {
+                "id": "deepseek/deepseek-v4.1-flash",
+                "supported_reasoning_levels": ["high", "max"],
+            },
+        ],
+    )
+
+    confirmation = runner.confirm_commandcode_deepseek_41(
+        providers,
+        selected_model="commandcode/deepseek/deepseek-v4.1-flash",
+        requested_effort="max",
+    )
+
+    assert confirmation["confirmed"] is False
+    assert confirmation["classification"] == "model_id_not_unique"
+    assert confirmation["model_ids"] == [
+        "deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-v4.1-flash",
+    ]
+
+
 def test_confirmed_commandcode_model_is_added_only_to_isolated_config(monkeypatch, tmp_path) -> None:
     runner = _runner_module()
     source = tmp_path / "source.toml"

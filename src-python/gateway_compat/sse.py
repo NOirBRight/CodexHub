@@ -99,15 +99,42 @@ def _raise_on_invalid_worker_stream_event(
     )
 
 
-def _reconcile_function_call_argument_events(events: list[Mapping[str, Any]]) -> tuple[list[Mapping[str, Any]], bool]:
+def _reconcile_function_call_argument_events(
+    events: list[Mapping[str, Any]],
+    *,
+    runtime_tool_plan: RuntimeToolCompatibilityPlan | None = None,
+) -> tuple[list[Mapping[str, Any]], bool]:
+    """Validate adapted Collaboration argument events without dropping deltas.
+
+    Chat-to-Responses conversion already emits progressive argument deltas.
+    The old reconciliation pass discarded those deltas and kept only ``done``;
+    that made the SSE path observably different from the body/native path.  A
+    request-scoped plan lets this check touch only registered Collaboration
+    aliases, leaving provider-owned functions untouched.
+    """
     arguments_by_item_id: dict[str, str] = {}
+    collaboration_item_ids: set[str] = set()
+    delta_arguments_by_item_id: dict[str, list[str]] = {}
+
+    def collaboration_record(item: Any) -> Any | None:
+        if runtime_tool_plan is None or not isinstance(item, Mapping):
+            return None
+        record = runtime_tool_plan.registry.record_for_alias(item.get("name"))
+        if record is None:
+            return None
+        if record.family != "namespace" or record.version not in {"v1", "v2"}:
+            return None
+        return record
 
     def remember_item(item: Any) -> None:
         if not isinstance(item, Mapping) or item.get("type") != "function_call":
             return
+        if collaboration_record(item) is None:
+            return
         item_id = item.get("id")
         if not isinstance(item_id, str) or not item_id:
             return
+        collaboration_item_ids.add(item_id)
         arguments = item.get("arguments")
         if isinstance(arguments, str):
             arguments_text = arguments
@@ -124,6 +151,13 @@ def _reconcile_function_call_argument_events(events: list[Mapping[str, Any]]) ->
         if event.get("type") in {"response.output_item.added", "response.output_item.done"}:
             remember_item(event.get("item"))
             continue
+        if event.get("type") == "response.function_call_arguments.delta":
+            item_id = event.get("item_id")
+            if isinstance(item_id, str) and item_id in collaboration_item_ids:
+                delta = event.get("delta")
+                if isinstance(delta, str):
+                    delta_arguments_by_item_id.setdefault(item_id, []).append(delta)
+            continue
         if event.get("type") == "response.completed":
             response = event.get("response")
             output = response.get("output") if isinstance(response, Mapping) else None
@@ -131,18 +165,29 @@ def _reconcile_function_call_argument_events(events: list[Mapping[str, Any]]) ->
                 for item in output:
                     remember_item(item)
 
+    # A completed item is the authoritative snapshot.  When deltas are
+    # present, their concatenation must agree with that snapshot before the
+    # executable completion event is allowed through.
+    for item_id, fragments in delta_arguments_by_item_id.items():
+        expected = arguments_by_item_id.get(item_id)
+        if expected is not None and "".join(fragments) != expected:
+            raise UpstreamProtocolTranslationError(
+                RuntimeToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "arguments_event_mismatch",
+                    surface="stream",
+                )
+            )
+
     changed = False
     rewritten: list[Mapping[str, Any]] = []
     for event in events:
-        if isinstance(event, Mapping) and event.get("type") == "response.function_call_arguments.delta":
-            changed = True
-            continue
         if not isinstance(event, Mapping) or event.get("type") != "response.function_call_arguments.done":
             rewritten.append(event)
             continue
         item_id = event.get("item_id")
-        if not isinstance(item_id, str) or item_id not in arguments_by_item_id:
-            changed = True
+        if not isinstance(item_id, str) or item_id not in collaboration_item_ids:
+            rewritten.append(event)
             continue
         expected_arguments = arguments_by_item_id[item_id]
         if event.get("arguments") != expected_arguments:

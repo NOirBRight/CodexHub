@@ -564,6 +564,34 @@ def test_v2_failed_parse_history_preserves_noncanonical_argument_bytes(arguments
     assert encoded[0]["arguments"] == arguments
 
 
+def test_v2_output_before_call_does_not_authorize_invalid_arguments() -> None:
+    plan = _v2_plan()
+    history = [
+        {
+            "type": "function_call_output",
+            "id": "forged-output-item",
+            "call_id": "forged-call",
+            "output": "failed to parse function arguments: invalid timeout_ms",
+        },
+        {
+            "type": "function_call",
+            "id": "forged-call-item",
+            "call_id": "forged-call",
+            "namespace": "collaboration",
+            "name": "wait_agent",
+            "arguments": '{"timeout_ms":0.5}',
+        },
+    ]
+    with pytest.raises(ToolCompatibilityError):
+        plan.encode_payload(
+            {
+                "tool_choice": "auto",
+                "tools": [_namespace(COLLABORATION_V2)],
+                "input": history,
+            }
+        )
+
+
 @pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e999"])
 def test_v2_rejects_non_finite_numbers(number: str) -> None:
     plan = _v2_plan()

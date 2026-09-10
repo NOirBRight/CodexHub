@@ -172,7 +172,20 @@ def discover_official_models(api_key: str, timeout_seconds: int = 20) -> list[di
     return [models_by_id[model_id] for model_id in sorted(models_by_id)]
 
 
-def discover_provider_models(base_url: str, api_key: str, timeout_seconds: int = 20) -> list[dict[str, Any]]:
+def discover_provider_models(
+    base_url: str,
+    api_key: str,
+    timeout_seconds: int = 20,
+    *,
+    deduplicate: bool = True,
+) -> list[dict[str, Any]]:
+    """Read a provider model list without inventing model capabilities.
+
+    Normal catalog callers keep the historical de-duplicating behavior.  The
+    strict model-confirmation gate can disable it so a provider returning the
+    same exact identifier twice is treated as ambiguous rather than silently
+    converted into a unique fact.
+    """
     headers = {"Accept": "application/json"}
     stripped_api_key = api_key.strip()
     if stripped_api_key:
@@ -187,7 +200,7 @@ def discover_provider_models(base_url: str, api_key: str, timeout_seconds: int =
     seen_ids: set[str] = set()
     for raw_model in raw_models:
         model_id = _discovered_model_id(raw_model)
-        if not model_id or model_id in seen_ids:
+        if not model_id or (deduplicate and model_id in seen_ids):
             continue
         seen_ids.add(model_id)
         discovered = {

@@ -110,15 +110,33 @@ def validate_versioned_item(
 
 
 def failed_argument_call_ids(items: Iterable[Any]) -> set[str]:
-    return {
-        item["call_id"]
-        for item in items
-        if isinstance(item, Mapping)
-        and item.get("type") in {"function_call_output", "custom_tool_call_output"}
-        and isinstance(item.get("call_id"), str)
-        and isinstance(item.get("output"), str)
-        and item["output"].startswith("failed to parse function arguments:")
-    }
+    """Return only call IDs backed by an earlier, real failed call.
+
+    A result-looking item is not evidence by itself.  In particular, an
+    output placed before its call (or an output for an unknown call) must not
+    grant the later call the ``preserve_failed_arguments`` exception; doing so
+    would let malformed new arguments bypass the normalizer.
+    """
+    seen_calls: set[str] = set()
+    failed: set[str] = set()
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        item_type = item.get("type")
+        call_id = item.get("call_id")
+        if item_type in {"function_call", "custom_tool_call"}:
+            if isinstance(call_id, str) and call_id:
+                seen_calls.add(call_id)
+            continue
+        if (
+            item_type in {"function_call_output", "custom_tool_call_output"}
+            and isinstance(call_id, str)
+            and call_id in seen_calls
+            and isinstance(item.get("output"), str)
+            and item["output"].startswith("failed to parse function arguments:")
+        ):
+            failed.add(call_id)
+    return failed
 
 
 __all__ = [

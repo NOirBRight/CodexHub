@@ -100,7 +100,6 @@ const SUBAGENT_FEATURES: &[&str] = &[
     "third-party-explicit-codex-native-tools",
     "third-party-spawn-hidden-while-agent-open",
     "third-party-multi-agent-wait-close-argument-shim",
-    "third-party-single-loop-completion-gate",
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -1597,8 +1596,11 @@ fn subagent_readiness(features: &[String]) -> Vec<SubagentReadiness> {
         },
         SubagentReadiness {
             step: "close_agent".to_string(),
-            ready: has("third-party-single-loop-completion-gate"),
-            feature: "third-party-single-loop-completion-gate".to_string(),
+            // close_agent is a client-owned call.  It needs the same
+            // request-local argument/namespace adapter as wait_agent; there
+            // is no Gateway completion gate or synthetic terminal step.
+            ready: has("third-party-multi-agent-wait-close-argument-shim"),
+            feature: "third-party-multi-agent-wait-close-argument-shim".to_string(),
         },
     ]
 }

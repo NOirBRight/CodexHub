@@ -110,7 +110,15 @@ def confirm_commandcode_deepseek_41(
         base_result["classification"] = "provider_api_key_unavailable"
         return base_result
     try:
-        discovered = discover_provider_models(provider.base_url, api_key, timeout_seconds=20)
+        # This gate proves a *unique* provider fact.  Do not let the general
+        # catalog helper collapse duplicate IDs before we decide whether the
+        # requested model is unambiguous.
+        discovered = discover_provider_models(
+            provider.base_url,
+            api_key,
+            timeout_seconds=20,
+            deduplicate=False,
+        )
     except TimeoutError:
         base_result["classification"] = "provider_model_list_timeout"
         return base_result

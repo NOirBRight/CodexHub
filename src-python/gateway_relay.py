@@ -2012,7 +2012,10 @@ def relay_upstream_response(
                     surface="sse",
                     attach_sidecars=False,
                 )
-                events, _ = _reconcile_function_call_argument_events(events)
+                events, _ = _reconcile_function_call_argument_events(
+                    events,
+                    runtime_tool_plan=runtime_tool_plan,
+                )
                 events, _ = _apply_external_worker_response_contract(
                     events,
                     compatibility_event_context,
