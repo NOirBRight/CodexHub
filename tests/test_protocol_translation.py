@@ -317,7 +317,74 @@ class ProtocolTranslationTests(unittest.TestCase):
             )
         )
         self.assertEqual(translated["messages"][0]["reasoning_content"], "think before tool")
+        # The trailing reasoning item belongs to the earlier tool-call turn;
+        # a newer plain assistant message must not inherit it by position.
         self.assertNotIn("reasoning_content", translated["messages"][2])
+
+    def test_responses_intervening_assistant_gets_observed_reasoning_for_thinking_chat(self):
+        body = {
+            "model": "example-model",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": "think before tool"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "fixture_tool",
+                    "arguments": "{}",
+                },
+                {"type": "message", "role": "assistant", "content": "metadata"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "ok",
+                },
+            ],
+        }
+        translated = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+        )
+        self.assertEqual(translated["messages"][0]["reasoning_content"], "think before tool")
+        self.assertEqual(translated["messages"][2]["reasoning_content"], "think before tool")
+
+    def test_responses_trailing_reasoning_fills_deferred_assistant_after_tool_output(self):
+        """A late reasoning item still covers a message deferred around output."""
+        body = {
+            "model": "example-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "fixture_tool",
+                    "arguments": "{}",
+                },
+                {"type": "message", "role": "assistant", "content": "metadata"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "ok",
+                },
+                {
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": "think after tool"}],
+                },
+            ],
+        }
+        translated = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+        )
+        self.assertEqual(translated["messages"][0]["reasoning_content"], "think after tool")
+        self.assertEqual(translated["messages"][2]["reasoning_content"], "think after tool")
 
     def test_chat_stream_reasoning_is_represented_in_responses_history(self):
         chunks = [

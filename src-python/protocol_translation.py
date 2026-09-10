@@ -559,6 +559,13 @@ def responses_input_to_chat_messages(
     pending_call_ids: list[str] = []
     deferred_messages: list[dict[str, Any]] = []
     pending_reasoning: list[str] = []
+    # Keep the association between a Responses assistant tool-call turn and
+    # any assistant metadata/message items that had to be deferred until its
+    # tool result.  A reasoning item can be replayed after that result; in
+    # that case the observed trace may be copied only to the deferred items
+    # from the same turn, never to an unrelated newer assistant message.
+    tool_turn_records: list[dict[str, Any]] = []
+    active_tool_turn: dict[str, Any] | None = None
 
     def pending_reasoning_text() -> str:
         return "\n".join(dict.fromkeys(text for text in pending_reasoning if text))
@@ -614,8 +621,26 @@ def responses_input_to_chat_messages(
                 # Preserve the original order rather than attaching an
                 # assistant's private reasoning to a following user turn.
                 flush_reasoning_message()
+            elif (
+                pending_call_ids
+                and preserve_reasoning_history
+                and role == "assistant"
+                and active_tool_turn is not None
+                and active_tool_turn.get("reasoning_text")
+            ):
+                # Thinking-mode Chat providers validate assistant messages
+                # that are deferred around a tool result as well.  The
+                # Responses stream can place an assistant metadata/message
+                # item between a function call and its output, after the
+                # corresponding reasoning item has already been attached to
+                # the tool-call turn.  Reuse that observed trace on the
+                # deferred assistant message; do not invent or normalize
+                # provider-private reasoning.
+                translated_message["reasoning_content"] = active_tool_turn["reasoning_text"]
             if pending_call_ids:
                 deferred_messages.append(translated_message)
+                if role == "assistant" and active_tool_turn is not None:
+                    active_tool_turn.setdefault("deferred_assistants", []).append(translated_message)
             else:
                 messages.append(translated_message)
             continue
@@ -674,6 +699,12 @@ def responses_input_to_chat_messages(
                 }
                 attach_reasoning(translated_call)
                 messages.append(translated_call)
+                active_tool_turn = {
+                    "message": translated_call,
+                    "reasoning_text": translated_call.get("reasoning_content"),
+                    "deferred_assistants": [],
+                }
+                tool_turn_records.append(active_tool_turn)
             pending_call_ids.append(call_id)
             continue
         if item_type == "function_call_output":
@@ -695,6 +726,8 @@ def responses_input_to_chat_messages(
                 if not pending_call_ids and deferred_messages:
                     messages.extend(deferred_messages)
                     deferred_messages.clear()
+                if not pending_call_ids:
+                    active_tool_turn = None
             continue
         if item_type == "tool_search_call":
             _require_supported_fields(
@@ -765,6 +798,21 @@ def responses_input_to_chat_messages(
             flush_reasoning_message()
         else:
             attach_reasoning(target)
+            # Record the association for the matching tool turn.  The actual
+            # deferred messages may already have been flushed after their
+            # function-call output, so they are kept by reference in the
+            # per-turn record above.
+            for record in tool_turn_records:
+                if record.get("message") is target:
+                    record["reasoning_text"] = target.get("reasoning_content")
+                    break
+    for record in tool_turn_records:
+        reasoning_text = record.get("reasoning_text")
+        if not isinstance(reasoning_text, str) or not reasoning_text:
+            continue
+        for candidate in record.get("deferred_assistants", []):
+            if isinstance(candidate, dict) and not candidate.get("reasoning_content"):
+                candidate["reasoning_content"] = reasoning_text
     return messages
 
 
