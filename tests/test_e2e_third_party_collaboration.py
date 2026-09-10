@@ -240,7 +240,7 @@ def _complete_fixture(home, version="v2"):
         "spawn_agent", "wait_agent", "close_agent", "resume_agent", "send_input", "wait_agent", "close_agent"]
     for index, name in enumerate(names):
         args = ({"task_name": "reviewer", "message": "inspect"} if name == "spawn_agent" else {"target": "reviewer", "message": "inspect again"}) if version == "v2" else (
-            {"message": "inspect"} if name == "spawn_agent" else {"ids": ["child"]} if name == "wait_agent" else {"id": "child", "message": "inspect again"})
+            {"message": "inspect"} if name == "spawn_agent" else {"targets": ["child"]} if name == "wait_agent" else {"id": "child"} if name == "resume_agent" else {"target": "child", "message": "inspect again"} if name == "send_input" else {"target": "child"})
         output = ({"task_name": "/root/reviewer"} if version == "v2" else {"agent_id": "child"}) if name == "spawn_agent" else (
             {"status": {"child": {"completed": "review"}}} if name == "wait_agent" else {"previous_status": {"completed": "review"}} if version == "v1" else "")
         parent.extend([row("response_item", {"type": "function_call", "namespace": namespace, "name": name, "call_id": str(index), "arguments": json.dumps(args)}),
@@ -446,3 +446,13 @@ def test_reviewer_uses_standalone_custom_agent_file(tmp_path):
     assert config["sandbox_mode"] == "read-only"
     assert config["model"] == "xai/grok-4.6"
     assert config["model_reasoning_effort"] == "high"
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_success_fixture_uses_frozen_native_argument_schemas(tmp_path, version):
+    from collaboration_runtime_contract import validate_collaboration_arguments
+    _complete_fixture(tmp_path, version)
+    for line in (tmp_path / "sessions/parent.jsonl").read_text().splitlines():
+        item = json.loads(line).get("payload", {})
+        if item.get("type") == "function_call":
+            validate_collaboration_arguments("collaboration_" + version, item["name"], item["arguments"])

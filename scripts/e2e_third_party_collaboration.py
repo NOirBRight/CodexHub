@@ -409,7 +409,8 @@ def _lifecycle_passed(parent: dict, child: dict, version: str) -> tuple[bool, li
         if position and version == "v2" and args.get("target") not in targets:
             continue
         if position and version == "v1":
-            ids = args.get("ids") if call["name"] == "wait_agent" else [args.get("id")]
+            ids = (args.get("targets") if call["name"] == "wait_agent"
+                   else [args.get("id" if call["name"] == "resume_agent" else "target")])
             if ids != [identity]:
                 continue
             if call["name"] == "wait_agent":
