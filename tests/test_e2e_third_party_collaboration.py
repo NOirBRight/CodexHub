@@ -502,3 +502,20 @@ def test_collected_test_diagnostics_are_linked_to_client_items(tmp_path):
     details = evidence["execution_diagnostics"]["test_commands"]
     assert any(d["accepted"] for d in details)
     assert all(d["thread_id"] and d["item_id"] is not None and d["turn_index"] == 0 for d in details)
+
+
+@pytest.mark.parametrize("prefix,tail,accepted", [
+    ("cd /tmp/fixture && ", "", True),
+    ('cd "/tmp/fixture" && ', "", True),
+    ("cd /tmp/other && ", "", False),
+    ("echo /tmp/fixture && ", "", False),
+    ("cd /tmp/fixture ; ", "", False),
+    ("cd /tmp/fixture && ", " || true", False),
+    ("cd /tmp/fixture && ", " ; echo ok", False),
+])
+def test_fixture_cd_test_command_is_narrowly_validated(prefix, tail, accepted):
+    runner = _runner_module()
+    item = {"type": "command_execution", "status": "completed", "exit_code": 0,
+            "_fixture_directory": "/tmp/fixture",
+            "command": prefix + '"$CODEXHUB_E2E_PYTHON" -m unittest -q test_parent_task.py' + tail}
+    assert runner._successful_test_item(item, "test_parent_task.py") is accepted

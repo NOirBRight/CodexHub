@@ -239,11 +239,23 @@ def _test_command_diagnostic(item: dict, test_filename: str) -> dict:
     argv = []
     reason = None
     wrapper = False
+    fixture_cd = False
     try:
-        argv = shlex.split(item.get("command", ""))
+        command = item.get("command", "")
+        argv = shlex.split(command)
         if len(argv) == 3 and Path(argv[0]).name in {"bash", "sh", "zsh"} and argv[1] in {"-lc", "-c"}:
             wrapper = True
-            argv = shlex.split(argv[2])
+            command = argv[2]
+            argv = shlex.split(command)
+        fixture = item.get("_fixture_directory")
+        # Only literal absolute fixture paths; never evaluate shell syntax.
+        if isinstance(fixture, str) and re.fullmatch(r"/[A-Za-z0-9_./-]+", fixture):
+            for spelling in (fixture, "'" + fixture + "'", '"' + fixture + '"'):
+                prefix = "cd " + spelling + " && "
+                if command.startswith(prefix):
+                    argv = shlex.split(command[len(prefix):])
+                    fixture_cd = True
+                    break
     except (ValueError, TypeError):
         reason = "command_parse_error"
     interpreters = {sys.executable, os.environ.get("CODEXHUB_E2E_PYTHON"), "$CODEXHUB_E2E_PYTHON"} - {None}
@@ -263,7 +275,7 @@ def _test_command_diagnostic(item: dict, test_filename: str) -> dict:
     return {
         "item_id": item.get("id"), "status": item.get("status"), "exit_code": item.get("exit_code"),
         "expected_test": test_filename, "accepted": reason is None, "reason": reason,
-        "shell_wrapper": wrapper,
+        "shell_wrapper": wrapper, "fixture_cd_verified": fixture_cd,
         "argv_shape": ["<BOUND_PYTHON>" if arg in interpreters else arg if arg in safe_tokens
                        else "<REDACTED>" for arg in argv],
     }
@@ -537,6 +549,7 @@ def collect_evidence(
     parent_effort: str | None = None,
     child_effort: str | None = None,
     client_outputs: tuple[Path, ...] = (),
+    fixture_directory: Path | None = None,
 ) -> dict:
     """Collect structural evidence without retaining prompts or session contents."""
     parent_model = parent_model or child_model
@@ -565,6 +578,10 @@ def collect_evidence(
         {record["model"] for record in parent_records if isinstance(record.get("model"), str)}
     )
     client_turns = [_read_client_turn(path) for path in client_outputs]
+    for turn in client_turns:
+        for item in turn["items"]:
+            # Overwrite any client-supplied value with harness-owned context.
+            item["_fixture_directory"] = str(fixture_directory.resolve()) if fixture_directory else None
     for turn in client_turns:
         parent = records_by_id.get(turn["thread_id"])
         if parent is None or parent.get("parent_id") is not None:
@@ -1128,6 +1145,7 @@ def main() -> int:
                     parent_effort=parent_effort,
                     child_effort=child_effort,
                     client_outputs=client_outputs,
+                    fixture_directory=work,
                 )
                 first_fixture = _verify_parent_fixture(work)
                 report["client_exit_code"] = client_exit_code
@@ -1180,6 +1198,7 @@ def main() -> int:
                         parent_effort=parent_effort,
                         child_effort=child_effort,
                         client_outputs=client_outputs,
+                    fixture_directory=work,
                     )
                 )
                 report.update(_verify_resume_fixture(work))
