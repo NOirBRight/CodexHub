@@ -1,0 +1,408 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/__schema0"
+    },
+    {
+      "$ref": "#/$defs/__schema3"
+    },
+    {
+      "$ref": "#/$defs/__schema21"
+    },
+    {
+      "$ref": "#/$defs/__schema24"
+    }
+  ],
+  "$defs": {
+    "__schema0": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "const": "view"
+        },
+        "id": {
+          "$ref": "#/$defs/__schema1"
+        }
+      },
+      "required": [
+        "mode",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "__schema1": {
+      "description": "Automation id. Required for mode=view, mode=update, mode=delete, and mode=suggested_update. Omit for mode=create and mode=suggested_create.",
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema2": {
+      "type": "string",
+      "minLength": 1
+    },
+    "__schema3": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/__schema4"
+        },
+        {
+          "$ref": "#/$defs/__schema17"
+        }
+      ]
+    },
+    "__schema4": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/__schema5"
+        },
+        "prompt": {
+          "$ref": "#/$defs/__schema6"
+        },
+        "rrule": {
+          "$ref": "#/$defs/__schema7"
+        },
+        "status": {
+          "$ref": "#/$defs/__schema8"
+        },
+        "notificationPolicy": {
+          "$ref": "#/$defs/__schema9"
+        },
+        "kind": {
+          "$ref": "#/$defs/__schema11"
+        },
+        "projectId": {
+          "$ref": "#/$defs/__schema12"
+        },
+        "model": {
+          "$ref": "#/$defs/__schema14"
+        },
+        "reasoningEffort": {
+          "$ref": "#/$defs/__schema15"
+        },
+        "mode": {
+          "$ref": "#/$defs/__schema16"
+        },
+        "destination": {
+          "type": "string",
+          "const": "local"
+        },
+        "executionEnvironment": {
+          "type": "string",
+          "const": "local"
+        }
+      },
+      "required": [
+        "name",
+        "prompt",
+        "rrule",
+        "status",
+        "kind",
+        "projectId",
+        "model",
+        "reasoningEffort",
+        "mode",
+        "executionEnvironment"
+      ],
+      "additionalProperties": false
+    },
+    "__schema5": {
+      "description": "Short human-readable automation name. If the user does not provide one, choose a concise name.",
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema6": {
+      "description": "The automation prompt. Describe only the task itself; do not include schedule, workspace, or thread details because those are provided separately. Keep it self-sufficient, include output expectations when useful, and do not ask it to write a file or announce nothing to do unless the user explicitly asked for that.",
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema7": {
+      "description": "RRULE schedule string. Interpret requested times in the user's locale. For mode=create, do not include DTSTART or convert local wall-clock times to UTC; encode them directly with FREQ, BYDAY, BYHOUR, and BYMINUTE. When the user intentionally requests a DTSTART-anchored or timezone-specific schedule, use mode=suggested_create so they can review it before saving. Cron automations use hourly interval or weekly schedules. Heartbeat automations attached to a thread can use minute-based intervals such as FREQ=MINUTELY;INTERVAL=30 or daily/weekly wall-clock schedules.",
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema8": {
+      "type": "string",
+      "enum": [
+        "ACTIVE",
+        "PAUSED"
+      ],
+      "description": "One of ACTIVE or PAUSED. Default to ACTIVE unless the user asks to start paused."
+    },
+    "__schema9": {
+      "description": "Optional notification policy. Use failed_runs_only when the user asks to mute or suppress completed-run notifications. For updates, omit to preserve the existing value and use null only when the user explicitly asks to unmute. On create, omit for the existing default behavior.",
+      "$ref": "#/$defs/__schema10"
+    },
+    "__schema10": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "failed_runs_only"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "__schema11": {
+      "type": "string",
+      "const": "cron",
+      "description": "Use cron only when the user explicitly wants each run to start a new task or standalone recurring work against a workspace."
+    },
+    "__schema12": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/__schema13"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Cron automations only. The target project id, or null for Threads. Use list_projects to find project ids."
+    },
+    "__schema13": {
+      "type": "string",
+      "minLength": 1
+    },
+    "__schema14": {
+      "description": "Model to use for cron automations.",
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema15": {
+      "type": "string",
+      "enum": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "description": "Reasoning effort to use for cron automations. One of none, minimal, low, medium, high, xhigh, max, or ultra."
+    },
+    "__schema16": {
+      "type": "string",
+      "enum": [
+        "create",
+        "suggested_create"
+      ]
+    },
+    "__schema17": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/__schema5"
+        },
+        "prompt": {
+          "$ref": "#/$defs/__schema6"
+        },
+        "rrule": {
+          "$ref": "#/$defs/__schema7"
+        },
+        "status": {
+          "$ref": "#/$defs/__schema8"
+        },
+        "notificationPolicy": {
+          "$ref": "#/$defs/__schema9"
+        },
+        "kind": {
+          "$ref": "#/$defs/__schema18"
+        },
+        "destination": {
+          "$ref": "#/$defs/__schema19"
+        },
+        "targetThreadId": {
+          "$ref": "#/$defs/__schema20"
+        },
+        "mode": {
+          "$ref": "#/$defs/__schema16"
+        }
+      },
+      "required": [
+        "name",
+        "prompt",
+        "rrule",
+        "status",
+        "kind",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "__schema18": {
+      "type": "string",
+      "const": "heartbeat",
+      "description": "Default to heartbeat so recurring runs continue in this thread. Use cron only when the user explicitly wants a new task for each run."
+    },
+    "__schema19": {
+      "type": "string",
+      "enum": [
+        "local",
+        "thread"
+      ],
+      "description": "Optional automation destination. Use thread for heartbeat automations attached to the current local thread."
+    },
+    "__schema20": {
+      "type": "string",
+      "minLength": 1,
+      "format": "uuid",
+      "description": "Target thread UUID for heartbeat automations. Prefer destination=thread for the current local thread instead of inventing or copying raw thread ids.",
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema21": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/__schema5"
+            },
+            "prompt": {
+              "$ref": "#/$defs/__schema6"
+            },
+            "rrule": {
+              "$ref": "#/$defs/__schema22"
+            },
+            "status": {
+              "$ref": "#/$defs/__schema8"
+            },
+            "notificationPolicy": {
+              "$ref": "#/$defs/__schema9"
+            },
+            "kind": {
+              "$ref": "#/$defs/__schema11"
+            },
+            "projectId": {
+              "$ref": "#/$defs/__schema12"
+            },
+            "model": {
+              "$ref": "#/$defs/__schema14"
+            },
+            "reasoningEffort": {
+              "$ref": "#/$defs/__schema15"
+            },
+            "mode": {
+              "$ref": "#/$defs/__schema23"
+            },
+            "id": {
+              "$ref": "#/$defs/__schema1"
+            },
+            "destination": {
+              "type": "string",
+              "enum": [
+                "local",
+                "worktree"
+              ]
+            },
+            "executionEnvironment": {
+              "type": "string",
+              "enum": [
+                "worktree",
+                "local"
+              ],
+              "description": "Cron automation execution environment. New automations must use local; updates may preserve worktree for existing automations."
+            },
+            "localEnvironmentConfigPath": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "prompt",
+            "rrule",
+            "status",
+            "kind",
+            "projectId",
+            "model",
+            "reasoningEffort",
+            "mode",
+            "id",
+            "executionEnvironment"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/__schema5"
+            },
+            "prompt": {
+              "$ref": "#/$defs/__schema6"
+            },
+            "rrule": {
+              "$ref": "#/$defs/__schema22"
+            },
+            "status": {
+              "$ref": "#/$defs/__schema8"
+            },
+            "notificationPolicy": {
+              "$ref": "#/$defs/__schema9"
+            },
+            "kind": {
+              "$ref": "#/$defs/__schema18"
+            },
+            "destination": {
+              "$ref": "#/$defs/__schema19"
+            },
+            "targetThreadId": {
+              "$ref": "#/$defs/__schema20"
+            },
+            "mode": {
+              "$ref": "#/$defs/__schema23"
+            },
+            "id": {
+              "$ref": "#/$defs/__schema1"
+            }
+          },
+          "required": [
+            "name",
+            "prompt",
+            "rrule",
+            "status",
+            "kind",
+            "mode",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "__schema22": {
+      "description": "RRULE schedule string. Preserve the existing value for unrelated updates. When changing the schedule, interpret requested times in the user's locale and do not include DTSTART or convert local wall-clock times to UTC; encode them directly with FREQ, BYDAY, BYHOUR, and BYMINUTE. Cron automations use hourly interval or weekly schedules. Heartbeat automations attached to a thread can use minute-based intervals such as FREQ=MINUTELY;INTERVAL=30 or daily/weekly wall-clock schedules.",
+      "$ref": "#/$defs/__schema2"
+    },
+    "__schema23": {
+      "type": "string",
+      "enum": [
+        "update",
+        "suggested_update"
+      ]
+    },
+    "__schema24": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "const": "delete"
+        },
+        "id": {
+          "$ref": "#/$defs/__schema1"
+        }
+      },
+      "required": [
+        "mode",
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

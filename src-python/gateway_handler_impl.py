@@ -445,6 +445,7 @@ class GatewayHandlerMixin:
         shutdown_controller = _gateway_shutdown_controller_for_handler(self)
         admission = shutdown_controller.admit()
         if admission is None:
+            self._drain_rejected_shutdown_body()
             send_user_requested_shutdown()
             return
         previous_admission = _activate_gateway_request(admission)
@@ -697,6 +698,7 @@ class GatewayHandlerMixin:
         shutdown_controller = _gateway_shutdown_controller_for_handler(self)
         admission = shutdown_controller.admit()
         if admission is None:
+            self._drain_rejected_shutdown_body()
             send_user_requested_shutdown()
             return
         previous_admission = _activate_gateway_request(admission)
@@ -1370,6 +1372,35 @@ class GatewayHandlerMixin:
                 **proxy_request_context,
             )
             self._safe_send_json(502, {"error": type(exc).__name__, "detail": detail}, request_id)
+
+    def _drain_rejected_shutdown_body(self) -> None:
+        # HTTPConnection sends headers and body separately. Closing with unread
+        # bytes can reset the socket on Windows and discard our structured 503.
+        # Drain only within a short deadline: shutdown must not wait for a slow
+        # sender, and rejected requests must never enter upstream processing.
+        try:
+            remaining = min(
+                max(0, int(self.headers.get("Content-Length", "0"))),
+                gateway_settings.max_request_body_bytes(),
+            )
+        except ValueError:
+            return
+        previous_timeout = self.connection.gettimeout()
+        deadline = time.monotonic() + 0.25
+        try:
+            while remaining > 0:
+                budget = deadline - time.monotonic()
+                if budget <= 0:
+                    break
+                self.connection.settimeout(budget)
+                chunk = self.rfile.read1(min(remaining, 65536))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            pass
+        finally:
+            self.connection.settimeout(previous_timeout)
 
     def _send_user_requested_shutdown_outcome(
         self,

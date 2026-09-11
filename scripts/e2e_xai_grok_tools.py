@@ -86,6 +86,16 @@ NESTED_ALLOWED = {
     },
 }
 
+# Captured from the Desktop tool catalog. Its nested oneOf/$ref structure
+# previously passed our simplified probes but prevented every Grok turn.
+DESKTOP_AUTOMATION = {
+    "type": "function",
+    "name": "__codexhub_ns_fa0cf542e6_1",
+    "parameters": json.loads(
+        (ROOT / "tests/fixtures/tool_schemas/codex_app_automation_update.json").read_text(encoding="utf-8")
+    ),
+}
+
 
 def _parameters(tool: dict) -> dict:
     function = tool.get("function")
@@ -120,6 +130,8 @@ def _assert_object_root(params: dict, *, allow_object_union: bool = False) -> No
 
 
 def _sanitizer_suite() -> dict:
+    desktop_tools, _ = _sanitize([DESKTOP_AUTOMATION])
+    _assert_object_root(_parameters(desktop_tools[0]))
     union_tools, union_count = _sanitize([ROOT_UNION_WITH_NULL])
     union_params = _parameters(union_tools[0])
     _assert_object_root(union_params)
@@ -244,7 +256,7 @@ def _live_xai_roundtrip(tools: list[dict]) -> None:
 def main() -> int:
     result = _sanitizer_suite()
     if os.environ.get("CODEXHUB_E2E_XAI") == "1":
-        tools, _count = _sanitize([ROOT_UNION_WITH_NULL, EXCLUSIVE_REQUIRED, NESTED_ALLOWED])
+        tools, _count = _sanitize([ROOT_UNION_WITH_NULL, EXCLUSIVE_REQUIRED, NESTED_ALLOWED, DESKTOP_AUTOMATION])
         _live_xai_roundtrip(tools)
         return 0
     print(json.dumps(result))
