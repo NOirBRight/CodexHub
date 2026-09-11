@@ -54,7 +54,7 @@ def test_linux_real_process_observer_handles_shell_setup(tmp_path):
 
 def _write_test_evidence(path: Path, *, outcome: str = "passed", extra_case: bool = False,
                          changed_source: bool = False) -> None:
-    recorder = {"recorder_path": "/harness/e2e_test_recorder.py", "recorder_sha256": "a" * 64}
+    recorder = {"recorder_path": str(Path("/harness/e2e_test_recorder.py").resolve()), "recorder_sha256": "a" * 64}
     events = [
         {
             "schema": "codexhub.e2e-test-evidence.v1", "timestamp": "2026-09-10T00:00:00Z",

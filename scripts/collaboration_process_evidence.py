@@ -5,8 +5,9 @@ from python_runtime_contract import require_python_313
 require_python_313(__file__)
 
 import ast
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
+import posixpath
 from datetime import datetime
 import json
 import math
@@ -330,11 +331,13 @@ def _fixture_mutations(traces: dict[int, str], fixture: Path) -> list[dict]:
     change a file). Actual writes are independently timestamped, including
     writes through descriptors inherited across fork or duplicated by dup.
     """
-    files = {str(fixture / name): name for name in (
+    # Kernel traces use POSIX paths even when replayed on a Windows verifier.
+    fixture_path = PurePosixPath(fixture.as_posix())
+    files = {str(fixture_path / name): name for name in (
         "parent_task.py", "test_parent_task.py", "test_resume_turn.py",
     )}
     descriptors: dict[int, dict[int, str]] = {}
-    directories: dict[int, Path] = {}
+    directories: dict[int, PurePosixPath] = {}
     events = []
     mutations = []
     for pid, raw in traces.items():
@@ -355,7 +358,7 @@ def _fixture_mutations(traces: dict[int, str], fixture: Path) -> list[dict]:
                 events.append((timestamp, index, pid, syscall, finished_at))
     for timestamp, _, pid, line, finished_at in sorted(events):
         fds = descriptors.setdefault(pid, {})
-        cwd = directories.setdefault(pid, fixture)
+        cwd = directories.setdefault(pid, fixture_path)
         call = re.match(r"(\w+)\((.*)\)\s+=\s+(\S+)", line)
         if not call:
             continue
@@ -370,25 +373,25 @@ def _fixture_mutations(traces: dict[int, str], fixture: Path) -> list[dict]:
         paths = []
         for value in quoted:
             try:
-                path = Path(ast.literal_eval(value))
+                path = PurePosixPath(ast.literal_eval(value))
             except (ValueError, SyntaxError):
                 continue
-            paths.append(str((path if path.is_absolute() else cwd / path).resolve()))
+            paths.append(posixpath.normpath(str(path if path.is_absolute() else cwd / path)))
         if name in {"renameat", "renameat2", "unlinkat"}:
             paths = []
             for match in re.finditer(r'(AT_FDCWD|\d+(?:<([^>]+)>)?),\s*("(?:[^"\\]|\\.)*")', args):
                 try:
-                    path = Path(ast.literal_eval(match[3]))
+                    path = PurePosixPath(ast.literal_eval(match[3]))
                 except (ValueError, SyntaxError):
                     continue
-                base = Path(match[2]) if match[2] else cwd
-                paths.append(str((path if path.is_absolute() else base / path).resolve()))
+                base = PurePosixPath(match[2]) if match[2] else cwd
+                paths.append(posixpath.normpath(str(path if path.is_absolute() else base / path)))
         if name in {"clone", "clone3", "fork", "vfork"}:
             # CLONE_FILES shares the fd table; fork snapshots it.
             descriptors[returned] = fds if "CLONE_FILES" in args else dict(fds)
             directories[returned] = cwd
         elif name == "chdir" and paths:
-            directories[pid] = Path(paths[0])
+            directories[pid] = PurePosixPath(paths[0])
         elif name in {"open", "openat", "openat2", "creat"}:
             annotated = re.search(r"=\s+\d+<([^>]+)>", line)
             if annotated:
@@ -482,7 +485,7 @@ def read_process_evidence(
                     client_pids.add(pid)
         for line in raw.splitlines():
             for name in ("parent_task.py", "test_parent_task.py", "test_resume_turn.py"):
-                if ("<" + str(fixture / name) + ">") in line and re.search(r'O_WRONLY|O_RDWR', line):
+                if ("<" + (fixture / name).as_posix() + ">") in line and re.search(r'O_WRONLY|O_RDWR', line):
                     stamp = re.match(r"^(\d+\.\d+) ", line)
                     writes.append({"pid": pid, "file": name,
                                    "timestamp": float(stamp[1]) if stamp else None})
@@ -507,7 +510,7 @@ def read_process_evidence(
             continue
         test_files = sorted(
             name for name in ("test_parent_task.py", "test_resume_turn.py")
-            if str(fixture / name) in opened
+            if (fixture / name).as_posix() in opened
         )
         recorder_open_verified = _recorder_opened(opened, recorder_path)
         evidence_target = evidence_path.resolve() if evidence_path is not None else None
