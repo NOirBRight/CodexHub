@@ -288,3 +288,20 @@ def test_split_mutation_overlapping_suite_is_rejected():
         [{"file": "parent_task.py", "timestamp": 100.0, "finished_at": 102.0}],
         101.0, 101.5,
     )
+
+
+def test_mutation_guard_rejects_malformed_interval_evidence():
+    m = module()
+    for end in (None, "bad", float("nan"), False):
+        assert m.fixture_mutated_during(
+            [{"file": "parent_task.py", "timestamp": 1.0, "finished_at": end}], 0.0, 2.0,
+        )
+
+
+def test_creat_without_write_is_still_a_source_mutation(tmp_path):
+    (tmp_path / "trace.101").write_text(
+        '100.000000 creat("/fixture/parent_task.py", 0666) = 3</fixture/parent_task.py>\n'
+        '101.000000 close(3</fixture/parent_task.py>) = 0\n'
+    )
+    evidence = module().read_process_evidence(tmp_path / "trace", Path("/fixture"), Path("/usr/bin/python"))
+    assert evidence["writes"]

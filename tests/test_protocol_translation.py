@@ -2713,5 +2713,15 @@ def test_public_conversion_seams_reject_ambiguous_json_envelopes(body):
         assert caught.value.code == "invalid_json_envelope"
 
 
+
+
+@pytest.mark.parametrize("field", ['"model":"m","model":"evil"', '"stream":false,"stream":true', '"temperature":NaN'])
+def test_prepare_exchange_rejects_ambiguous_envelope_before_reshaping(field):
+    body = ('{"input":[],' + field + '}').encode()
+    with pytest.raises(protocol_translation.NonForwardable) as caught:
+        protocol_translation.prepare_exchange(body, inbound_format="responses", outbound_format="chat_completions")
+    assert caught.value.code == "invalid_json_envelope"
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4233,7 +4233,7 @@ def prepare_exchange(
         dropped_cache_controls: tuple[str, ...] = ()
         conversion_body = request_body
         if inbound != outbound:
-            source_payload = json.loads(request_body.decode("utf-8-sig"))
+            source_payload = decode_protocol_json(request_body)
             if not isinstance(source_payload, dict):
                 raise UnsupportedProtocolTranslationError(
                     "unsupported_protocol_semantics", "Cannot prepare a non-object conversion request.",
@@ -4250,7 +4250,7 @@ def prepare_exchange(
                 conversion_body = json.dumps(source_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
         def converted(upstream: bytes) -> PreparedExchange:
-            payload = json.loads(upstream.decode("utf-8"))
+            payload = decode_protocol_json(upstream)
             if cache_key_present and prompt_cache_key_policy is PromptCacheKeyPolicy.PRESERVE:
                 payload["prompt_cache_key"] = cache_key
                 upstream = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")

@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from datetime import datetime
 import json
+import math
 
 
 _RECORDER_SCHEMA = "codexhub.e2e-test-evidence.v1"
@@ -295,16 +296,31 @@ def _recorder_opened(opened: set[str], recorder_path: Path | None) -> bool:
 
 def fixture_mutated_during(writes: list[dict], start: float | None, end: float | None) -> bool:
     """Check every required fixture file, including first-turn tests on resume."""
-    if start is None or end is None:
-        return False
-    return any(
-        isinstance(write, dict)
-        and write.get("file") in {"parent_task.py", "test_parent_task.py", "test_resume_turn.py"}
-        and type(write.get("timestamp")) in {int, float}
-        and write["timestamp"] <= end
-        and write.get("finished_at", write["timestamp"]) >= start
-        for write in writes
-    )
+    def finite_number(value: object) -> bool:
+        if type(value) not in {int, float}:
+            return False
+        try:
+            return math.isfinite(value)
+        except OverflowError:
+            return False
+
+    if not finite_number(start) or not finite_number(end) or start > end:
+        return True
+    if not isinstance(writes, list):
+        return True
+    for write in writes:
+        if not isinstance(write, dict):
+            return True
+        if write.get("file") not in {"parent_task.py", "test_parent_task.py", "test_resume_turn.py"}:
+            continue
+        began = write.get("timestamp")
+        finished = write.get("finished_at", began)
+        if not finite_number(began) or not finite_number(finished) or finished < began:
+            return True
+        if began <= end and finished >= start:
+            return True
+    return False
+
 
 
 def _fixture_mutations(traces: dict[int, str], fixture: Path) -> list[dict]:
@@ -395,7 +411,9 @@ def _fixture_mutations(traces: dict[int, str], fixture: Path) -> list[dict]:
             first = re.match(r"(0x[0-9a-f]+|\d+)", args)
             if first and (returned > 0 or name == "ftruncate"):
                 targets.append(fds.get(int(first[1], 0)))
-        elif name in {"rename", "renameat", "renameat2", "unlink", "unlinkat", "truncate"}:
+        elif name in {"open", "openat", "openat2"} and "O_TRUNC" in args:
+            targets.append(fds.get(returned))
+        elif name in {"creat", "rename", "renameat", "renameat2", "unlink", "unlinkat", "truncate"}:
             targets.extend(paths)
         for target in targets:
             if target in files:
