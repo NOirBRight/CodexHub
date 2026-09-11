@@ -36,6 +36,7 @@ fn opencode_apply_records_baseline_before_first_managed_write() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-opencode-first-apply-baseline");
     let config_path = root.join("opencode.json");
@@ -71,6 +72,7 @@ fn pi_apply_records_absence_tombstone_before_first_managed_write() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-pi-first-apply-tombstone");
     let settings_path = root.join("settings.json");
@@ -1651,6 +1653,11 @@ fn opencode_restore_empty_legacy_roots_classifies_bounded_cleanup() {
 
 #[test]
 fn plan_omp_apply_does_not_write_or_backup() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let root = unique_temp_dir("codexhub-omp-plan");
     let config_path = root.join("config.yml");
     let models_path = root.join("models.yml");
@@ -1677,6 +1684,11 @@ fn plan_omp_apply_does_not_write_or_backup() {
 
 #[test]
 fn omp_apply_writes_models_yml_and_model_roles_with_backup() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let root = unique_temp_dir("codexhub-omp");
     let config_path = root.join("config.yml");
     let models_path = root.join("models.yml");
@@ -1949,6 +1961,11 @@ fn omp_config_migrates_legacy_codexhub_model_roles() {
 
 #[test]
 fn plan_zcode_apply_does_not_write_or_backup() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let root = unique_temp_dir("codexhub-zcode-plan");
     let catalog_path = root.join("model-providers").join("codexhub.json");
     let v2_config_path = root.join("v2").join("config.json");
