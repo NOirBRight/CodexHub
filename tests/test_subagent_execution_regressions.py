@@ -684,3 +684,72 @@ def test_client_owned_v1_role_history_is_not_revalidated_as_worker(selector, out
         _upstream(), event_context={},
     )
     assert json.loads(result)["input"][0]["arguments"] == call["arguments"]
+
+
+@pytest.mark.parametrize("version", [COLLABORATION_V1, COLLABORATION_V2])
+@pytest.mark.parametrize("output", ["failed to parse function arguments:", "failed to parse function arguments:   "])
+def test_empty_parse_error_is_not_failed_history_evidence(version, output):
+    tools = [_namespace(version)]
+    plan = build_tool_compatibility_plan(
+        tools, selected_protocol="chat_tools", tool_choice="auto",
+        protocol_capabilities=ProtocolCapabilities(function_lifecycle=True, accepts_namespace_adapter=True),
+    )
+    call = {
+        "type": "function_call", "id": "bad-item", "call_id": "bad-call",
+        "namespace": "multi_agent_v1" if version == COLLABORATION_V1 else "collaboration",
+        "name": "wait_agent", "arguments": "{",
+    }
+    with pytest.raises(ToolCompatibilityError):
+        plan.encode_payload({"tools": tools, "input": [call, {
+            "type": "function_call_output", "call_id": "bad-call", "output": output,
+        }]})
+
+
+@pytest.mark.parametrize("surface", ["request", "response", "sse"])
+@pytest.mark.parametrize("ambiguous", ['"duplicate":1,"duplicate":2', '"invalid_number":NaN', '"invalid_number":1e999'])
+def test_adapted_json_envelope_rejects_ambiguous_fields(surface, ambiguous, monkeypatch):
+    monkeypatch.setattr(gateway_events, "write_proxy_event", lambda *args, **kwargs: None)
+    context = {}
+    gateway_compat.compatible_request_body(_request([]), _upstream(), event_context=context)
+    if surface == "request":
+        raw = _request([])[:-1] + b',' + ambiguous.encode() + b'}'
+        invoke = lambda: gateway_compat.compatible_request_body(raw, _upstream(), event_context={})
+    elif surface == "response":
+        raw = ('{"object":"response","output":[],' + ambiguous + '}').encode()
+        invoke = lambda: gateway_compat.compatible_response_body(raw, 'fixture-provider', event_context=context)
+    else:
+        raw = ('data: {"type":"response.created","response":{"output":[]},' + ambiguous + '}\n').encode()
+        invoke = lambda: gateway_compat.compatible_sse_line(raw, 'fixture-provider', event_context=context)
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError):
+        invoke()
+
+
+@pytest.mark.parametrize("upstream,context", [("official", {}), ("fixture-provider", {"raw_provider_probe": True})])
+def test_raw_passthrough_keeps_original_envelope_bytes(upstream, context):
+    body = b'{"object":"response","output":[],"duplicate":1,"duplicate":2}'
+    assert gateway_compat.compatible_response_body(body, upstream, event_context=context) == body
+    line = b'data: {"type":"response.created","duplicate":1,"duplicate":2}\n'
+    assert gateway_compat.compatible_sse_line(line, upstream, event_context=context) == line
+
+
+@pytest.mark.parametrize("namespace", ["multi_agent_v1", "collaboration"])
+def test_reserved_namespace_field_is_not_a_real_tool_declaration(namespace, monkeypatch):
+    monkeypatch.setattr(gateway_events, "write_proxy_event", lambda *args, **kwargs: None)
+    ordinary = {**_parent_tool(), "name": "spawn_agent", "namespace": namespace}
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError):
+        gateway_compat.compatible_request_body(
+            _request([], tools=[ordinary]), _upstream(), inject_codex_tools=False,
+            event_context={},
+        )
+
+
+def test_nonreserved_namespace_function_remains_provider_owned(monkeypatch):
+    monkeypatch.setattr(gateway_events, "write_proxy_event", lambda *args, **kwargs: None)
+    tool = {**_parent_tool(), "name": "spawn_agent", "namespace": "provider_owned"}
+    context = {}
+    body = gateway_compat.compatible_request_body(
+        _request([], tools=[tool]), _upstream(), inject_codex_tools=False,
+        event_context=context,
+    )
+    assert json.loads(body)["tools"] == [tool]
+    assert context.get("collaboration_protocol") is None

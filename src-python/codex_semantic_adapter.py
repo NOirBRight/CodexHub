@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from protocol_json import strict_json_loads
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -287,15 +288,8 @@ class BindingValidation:
 def strict_json_object(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, (str, Mapping)):
         return None
-    def unique_object(pairs):
-        result = {}
-        for key, child in pairs:
-            if key in result:
-                raise ValueError("duplicate_json_key")
-            result[key] = child
-        return result
     try:
-        parsed = json.loads(value, object_pairs_hook=unique_object) if isinstance(value, str) else dict(value)
+        parsed = strict_json_loads(value) if isinstance(value, str) else dict(value)
         # Also reject exponent overflow and non-finite values in dict inputs.
         json.dumps(parsed, allow_nan=False)
     except (TypeError, ValueError):

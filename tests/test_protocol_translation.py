@@ -1,6 +1,8 @@
 import json
 import unittest
 
+import pytest
+
 import protocol_translation
 
 
@@ -2695,6 +2697,20 @@ class ProtocolTranslationTests(unittest.TestCase):
             }
         )
         self.assertEqual(chunks[0]["choices"][0]["finish_reason"], "stop")
+
+
+
+
+@pytest.mark.parametrize("body", [b'{"id":"a","id":"b"}', b'{"value":NaN}', b'{"value":1e999}', b'{"value":' + b'9' * 5000 + b'}'])
+def test_public_conversion_seams_reject_ambiguous_json_envelopes(body):
+    for convert in (
+        protocol_translation.responses_request_to_chat_completion_body,
+        protocol_translation.chat_completions_request_to_responses_body,
+        protocol_translation.chat_completion_to_response_body,
+    ):
+        with pytest.raises(protocol_translation.UnsupportedProtocolTranslationError) as caught:
+            convert(body)
+        assert caught.value.code == "invalid_json_envelope"
 
 
 if __name__ == "__main__":

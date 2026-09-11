@@ -293,6 +293,118 @@ def _recorder_opened(opened: set[str], recorder_path: Path | None) -> bool:
     return False
 
 
+def fixture_mutated_during(writes: list[dict], start: float | None, end: float | None) -> bool:
+    """Check every required fixture file, including first-turn tests on resume."""
+    if start is None or end is None:
+        return False
+    return any(
+        isinstance(write, dict)
+        and write.get("file") in {"parent_task.py", "test_parent_task.py", "test_resume_turn.py"}
+        and type(write.get("timestamp")) in {int, float}
+        and write["timestamp"] <= end
+        and write.get("finished_at", write["timestamp"]) >= start
+        for write in writes
+    )
+
+
+def _fixture_mutations(traces: dict[int, str], fixture: Path) -> list[dict]:
+    """Follow traced descriptors; raw write syscalls never expose buffer data.
+
+    Opens are retained as conservative mutation evidence (O_TRUNC can itself
+    change a file). Actual writes are independently timestamped, including
+    writes through descriptors inherited across fork or duplicated by dup.
+    """
+    files = {str(fixture / name): name for name in (
+        "parent_task.py", "test_parent_task.py", "test_resume_turn.py",
+    )}
+    descriptors: dict[int, dict[int, str]] = {}
+    directories: dict[int, Path] = {}
+    events = []
+    mutations = []
+    for pid, raw in traces.items():
+        pending = None
+        for index, line in enumerate(raw.splitlines()):
+            match = re.match(r"^(\d+\.\d+) (.*)$", line)
+            if match:
+                timestamp, syscall = float(match[1]), match[2]
+                finished_at = timestamp
+                if syscall.endswith("<unfinished ...>"):
+                    pending = (timestamp, index, syscall.removesuffix("<unfinished ...>"))
+                    continue
+                resumed = re.match(r"<\.\.\. (\w+) resumed>(.*)", syscall)
+                if resumed and pending:
+                    timestamp, index, prefix = pending
+                    syscall = prefix + resumed[2]
+                    pending = None
+                events.append((timestamp, index, pid, syscall, finished_at))
+    for timestamp, _, pid, line, finished_at in sorted(events):
+        fds = descriptors.setdefault(pid, {})
+        cwd = directories.setdefault(pid, fixture)
+        call = re.match(r"(\w+)\((.*)\)\s+=\s+(\S+)", line)
+        if not call:
+            continue
+        name, args, result = call.groups()
+        try:
+            returned = int(result.split("<", 1)[0], 0)
+        except ValueError:
+            continue
+        if returned < 0:
+            continue
+        quoted = re.findall(r'"(?:[^"\\]|\\.)*"', args)
+        paths = []
+        for value in quoted:
+            try:
+                path = Path(ast.literal_eval(value))
+            except (ValueError, SyntaxError):
+                continue
+            paths.append(str((path if path.is_absolute() else cwd / path).resolve()))
+        if name in {"renameat", "renameat2", "unlinkat"}:
+            paths = []
+            for match in re.finditer(r'(AT_FDCWD|\d+(?:<([^>]+)>)?),\s*("(?:[^"\\]|\\.)*")', args):
+                try:
+                    path = Path(ast.literal_eval(match[3]))
+                except (ValueError, SyntaxError):
+                    continue
+                base = Path(match[2]) if match[2] else cwd
+                paths.append(str((path if path.is_absolute() else base / path).resolve()))
+        if name in {"clone", "clone3", "fork", "vfork"}:
+            # CLONE_FILES shares the fd table; fork snapshots it.
+            descriptors[returned] = fds if "CLONE_FILES" in args else dict(fds)
+            directories[returned] = cwd
+        elif name == "chdir" and paths:
+            directories[pid] = Path(paths[0])
+        elif name in {"open", "openat", "openat2", "creat"}:
+            annotated = re.search(r"=\s+\d+<([^>]+)>", line)
+            if annotated:
+                fds[returned] = annotated[1]
+        elif name in {"dup", "dup2", "dup3", "fcntl"}:
+            if name == "fcntl" and "F_DUPFD" not in args:
+                continue
+            first = re.match(r"(\d+)", args)
+            if first:
+                source = fds.get(int(first[1]))
+                fds.pop(returned, None)
+                if source:
+                    fds[returned] = source
+        elif name == "close":
+            first = re.match(r"(\d+)", args)
+            if first:
+                fds.pop(int(first[1]), None)
+        targets = []
+        if name in {"write", "writev", "pwrite64", "pwritev", "pwritev2", "ftruncate"}:
+            first = re.match(r"(0x[0-9a-f]+|\d+)", args)
+            if first and (returned > 0 or name == "ftruncate"):
+                targets.append(fds.get(int(first[1], 0)))
+        elif name in {"rename", "renameat", "renameat2", "unlink", "unlinkat", "truncate"}:
+            targets.extend(paths)
+        for target in targets:
+            if target in files:
+                mutations.append({"pid": pid, "file": files[target],
+                                  "timestamp": timestamp, "operation": name,
+                                  **({"finished_at": finished_at} if finished_at > timestamp else {})})
+    return mutations
+
+
 def read_process_evidence(
     prefix: Path,
     fixture: Path,
@@ -321,11 +433,13 @@ def read_process_evidence(
     parent_children: dict[int, set[int]] = {}
     client_pids: set[int] = set()
     files = list(prefix.parent.glob(prefix.name + ".*"))
+    traces = {}
     for path in files:
         if not path.suffix[1:].isdigit():
             continue
         pid = int(path.suffix[1:])
         raw = path.read_text(encoding="utf-8", errors="strict")
+        traces[pid] = raw
         # Keep the process tree structural: no command arguments or request
         # bodies are copied into the report.  ``-ttt`` puts a timestamp before
         # each syscall, hence the optional numeric prefix below.
@@ -406,6 +520,7 @@ def read_process_evidence(
             # print its name or run another directory's identically named test.
             tests.append({"pid": pid, "test": name, "exit_code": 0,
                           "interpreter_verified": True, "fixture_open_verified": True})
+    writes.extend(_fixture_mutations(traces, fixture))
     if observed_process_tree:
         for parent, children in observed_process_tree.items():
             parent_children.setdefault(int(parent), set()).update(int(child) for child in children)

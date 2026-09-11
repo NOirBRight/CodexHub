@@ -468,7 +468,7 @@ def test_e2e_client_turn_keeps_the_resume_in_the_isolated_working_directory(
     monkeypatch.setattr(runner.subprocess, "Popen", fake_popen)
     output = tmp_path / "client.jsonl"
 
-    assert runner._run_client(
+    assert runner.run_client(
         ["codex", "exec", "resume", "parent"],
         environment={"CODEX_HOME": str(tmp_path / "client")},
         output=output,
@@ -960,3 +960,14 @@ def test_v1_close_can_deliver_real_completed_result_without_wait(tmp_path, messa
     evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v1", parent_effort="high",
                                       child_effort="high", client_outputs=(output,))
     assert evidence["passed"] is passed
+
+
+def test_observed_client_requires_exact_python_binding_before_start(tmp_path):
+    runner = _runner_module()
+    output = tmp_path / "must-not-exist.jsonl"
+    with pytest.raises(RuntimeError, match="fixture_python_binding_missing"):
+        runner.run_client(
+            ["must-not-execute"], environment={}, output=output,
+            working_directory=tmp_path, timeout=1, observe_processes=True,
+        )
+    assert not output.exists()

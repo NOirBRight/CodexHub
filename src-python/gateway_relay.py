@@ -534,7 +534,7 @@ def relay_upstream_response(
     _public_event_context = gateway_events.public_event_context
     _raise_lifecycle_final_issue = gateway_stream_semantics._raise_lifecycle_final_issue
     _raise_runtime_tool_compatibility_error = gateway_compat.official_passthrough._raise_runtime_tool_compatibility_error
-    _reconcile_function_call_argument_events = gateway_compat.sse._reconcile_function_call_argument_events
+    reconcile_function_call_argument_events = gateway_compat.sse.reconcile_function_call_argument_events
     _redact_identity_in_text = gateway_errors._redact_identity_in_text
     _response_body_lifecycle_final_issue = gateway_stream_semantics._response_body_lifecycle_final_issue
     _response_body_to_chat_completion_body = gateway_stream_semantics._response_body_to_chat_completion_body
@@ -2061,7 +2061,7 @@ def relay_upstream_response(
                     surface="sse",
                     attach_sidecars=False,
                 )
-                events, _ = _reconcile_function_call_argument_events(
+                events, _ = reconcile_function_call_argument_events(
                     events,
                     runtime_tool_plan=runtime_tool_plan,
                 )

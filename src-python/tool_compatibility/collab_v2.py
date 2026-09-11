@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from collaboration_runtime_contract import (
     COLLABORATION_V2,
+    failed_argument_call_ids,
     CollaborationContractError,
     normalize_collaboration_arguments,
     validate_agent_message,
@@ -27,32 +28,6 @@ V2_NAMES = frozenset(
 V2_FORBIDDEN = frozenset({"agent_id", "fork_context"})
 V2_NAMESPACE = "collaboration"
 AGENT_MESSAGE_ENVELOPE_PREFIX = "__codexhub_agent_message_v2__:"
-
-
-def _failed_argument_call_ids_in_order(items: Any) -> set[str]:
-    """Only trust parse-error results that follow a real call item."""
-    seen_calls: set[str] = set()
-    failed: set[str] = set()
-    if not isinstance(items, list):
-        return failed
-    for item in items:
-        if not isinstance(item, Mapping):
-            continue
-        item_type = item.get("type")
-        call_id = item.get("call_id")
-        if item_type in {"function_call", "custom_tool_call"}:
-            if isinstance(call_id, str) and call_id:
-                seen_calls.add(call_id)
-        elif (
-            item_type in {"function_call_output", "custom_tool_call_output"}
-            and isinstance(call_id, str)
-            and call_id in seen_calls
-            and isinstance(item.get("output"), str)
-            and item["output"].startswith("failed to parse function arguments:")
-            and item["output"].removeprefix("failed to parse function arguments:").strip()
-        ):
-            failed.add(call_id)
-    return failed
 
 
 def validate_v2_fields(fields: Mapping[str, Any]) -> None:
@@ -283,7 +258,7 @@ class CollaborationV2PlanMixin:
             target.add(call_id)
 
         calls: dict[str, str] = {}
-        failed_calls = _failed_argument_call_ids_in_order(items)
+        failed_calls = failed_argument_call_ids(items)
         seen_result_call_ids: set[str] = set()
         seen_item_ids: set[str] = set()
         for item in items:

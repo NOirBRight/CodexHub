@@ -196,3 +196,95 @@ def test_process_evidence_correlates_unittest_to_client_tree(tmp_path):
         observed_client_pids={10},
     )
     assert rejected["client_tree_verified"] is False
+
+
+def test_writable_source_handle_covers_later_test_window(tmp_path):
+    """An fd opened before unittest may still mutate source during its run."""
+    (tmp_path / "trace.101").write_text(
+        '100.000000 openat(AT_FDCWD, "parent_task.py", O_RDWR) = 3</fixture/parent_task.py>\n'
+        '102.000000 write(0x3, 0xabcdef, 0x3) = 0x3\n'
+        '103.000000 close(3</fixture/parent_task.py>) = 0\n'
+        '104.000000 exit_group(0) = ?\n'
+    )
+    observation = module().read_process_evidence(
+        tmp_path / "trace", Path("/fixture"), Path("/usr/bin/python")
+    )
+    assert any(w["timestamp"] == 102.0 and w["file"] == "parent_task.py"
+               for w in observation["writes"])
+
+
+def test_fixture_mutations_follow_inherited_and_reused_descriptors(tmp_path):
+    (tmp_path / "trace.101").write_text(
+        '100.000000 openat(AT_FDCWD, "parent_task.py", O_RDWR) = 3</fixture/parent_task.py>\n'
+        '101.000000 clone(child_stack=NULL, flags=SIGCHLD) = 102\n'
+        '102.000000 close(3</fixture/parent_task.py>) = 0\n'
+        '104.000000 openat(AT_FDCWD, "other.txt", O_WRONLY) = 3</fixture/other.txt>\n'
+        '105.000000 write(0x3, 0xbeef, 0x2) = 0x2\n'
+    )
+    (tmp_path / "trace.102").write_text(
+        '103.000000 write(0x3, 0xbeef, 0x2) = 0x2\n'
+    )
+    evidence = module().read_process_evidence(
+        tmp_path / "trace", Path("/fixture"), Path("/usr/bin/python")
+    )
+    writes = [w for w in evidence["writes"] if w.get("operation") == "write"]
+    assert writes == [{"pid": 102, "file": "parent_task.py", "timestamp": 103.0, "operation": "write"}]
+
+
+def test_real_mutation_trace_records_write_and_atomic_replace_without_buffer_data(tmp_path):
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import pytest
+    if sys.platform != "linux" or not shutil.which("strace"):
+        pytest.skip("Linux strace observation")
+    source = tmp_path / "parent_task.py"
+    source.write_text("initial")
+    script = (
+        "import os\n"
+        "f=open('parent_task.py','w');f.write('PRIVATE_BUFFER_MUST_NOT_BE_TRACED');f.close()\n"
+        "open('replacement','w').write('final')\n"
+        "os.replace('replacement','parent_task.py')\n"
+    )
+    prefix = tmp_path / "trace"
+    result = subprocess.run([
+        "strace", "-ff", "-qq", "-yy", "-ttt", "-e",
+        "trace=openat,close,write,rename", "-e", "raw=write", "-o", str(prefix),
+        sys.executable, "-c", script,
+    ], cwd=tmp_path, capture_output=True, env=dict(os.environ))
+    assert result.returncode == 0
+    traces = "".join(p.read_text() for p in tmp_path.glob("trace.*"))
+    assert "PRIVATE_BUFFER_MUST_NOT_BE_TRACED" not in traces
+    evidence = module().read_process_evidence(prefix, tmp_path, Path(sys.executable))
+    operations = {w.get("operation") for w in evidence["writes"] if w["file"] == source.name}
+    assert {"write", "rename"}.issubset(operations)
+
+
+def test_resume_mutation_guard_includes_retained_first_turn_tests():
+    m = module()
+    writes = [{"file": "test_parent_task.py", "timestamp": 102.0}]
+    assert m.fixture_mutated_during(writes, 101.0, 103.0)
+    assert not m.fixture_mutated_during(writes, 103.0, 104.0)
+
+
+def test_mutation_trace_handles_split_write_and_directory_relative_rename(tmp_path):
+    (tmp_path / "trace.101").write_text(
+        '100.000000 openat(AT_FDCWD, "parent_task.py", O_RDWR) = 3</fixture/parent_task.py>\n'
+        '101.000000 write(0x3, 0xbeef, 0x2 <unfinished ...>\n'
+        '102.000000 <... write resumed>) = 0x2\n'
+        '103.000000 chdir("/elsewhere") = 0\n'
+        '104.000000 renameat(4</fixture>, "replacement", 4</fixture>, "parent_task.py") = 0\n'
+    )
+    evidence = module().read_process_evidence(
+        tmp_path / "trace", Path("/fixture"), Path("/usr/bin/python")
+    )
+    writes = [w for w in evidence["writes"] if w.get("operation")]
+    assert [(w["timestamp"], w["operation"]) for w in writes] == [(101.0, "write"), (104.0, "renameat")]
+
+
+def test_split_mutation_overlapping_suite_is_rejected():
+    assert module().fixture_mutated_during(
+        [{"file": "parent_task.py", "timestamp": 100.0, "finished_at": 102.0}],
+        101.0, 101.5,
+    )

@@ -10,6 +10,7 @@ from __future__ import annotations
 from functools import partial
 import html
 import json
+from protocol_json import AmbiguousJSONError, strict_json_loads
 import re
 import time
 import uuid
@@ -442,8 +443,8 @@ def _converted_sse_payload(
     if event.data == b"[DONE]":
         return "[DONE]"
     try:
-        payload = json.loads(event.data.decode("utf-8-sig"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = strict_json_loads(event.data.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError, AmbiguousJSONError) as exc:
         raise UpstreamSseSemanticError(
             "Upstream returned a malformed complete SSE event."
         ) from exc

@@ -8,7 +8,7 @@ from collaboration_runtime_contract import (
 )
 from runtime_tool_compatibility import build_tool_compatibility_plan, ProtocolCapabilities
 import gateway_compat
-from gateway_compat.sse import _reconcile_function_call_argument_events
+from gateway_compat.sse import reconcile_function_call_argument_events
 
 
 @pytest.mark.parametrize("version,namespace", [("v1", "multi_agent_v1"), ("v2", "collaboration")])
@@ -318,7 +318,7 @@ def test_reconcile_adapted_argument_events_preserves_deltas_and_validates_snapsh
             "arguments": arguments,
         },
     ]
-    rewritten, changed = _reconcile_function_call_argument_events(
+    rewritten, changed = reconcile_function_call_argument_events(
         events,
         runtime_tool_plan=plan,
     )

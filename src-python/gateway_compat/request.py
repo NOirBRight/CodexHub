@@ -131,7 +131,11 @@ def compatible_request_body(
             else _external_tool_surface_strategy(upstream)
         )
     try:
-        payload = json.loads(body.decode("utf-8-sig"))
+        decode = json.loads if (
+            official_passthrough or upstream_name == "official"
+            or _official_passthrough._is_raw_provider_probe_context(event_context)
+        ) else _collaboration_adapter_module.decode_adapted_json
+        payload = decode(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         if official_passthrough:
             return body

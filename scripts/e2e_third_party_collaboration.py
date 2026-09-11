@@ -37,6 +37,8 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src-python"))
 sys.path.insert(0, str(ROOT / "scripts"))
+import collaboration_process_evidence
+
 RECORDER_PATH = (ROOT / "scripts" / "e2e_test_recorder.py").resolve()
 RECORDER_SHA256 = hashlib.sha256(RECORDER_PATH.read_bytes()).hexdigest()
 DEFAULT_PARENT = "xai/grok-4.6"
@@ -859,7 +861,7 @@ def _process_test_is_trusted(observation: dict, test_filename: str) -> bool:
         return False
     if recorder.get("recorder_sha256") != RECORDER_SHA256:
         return False
-    # ``_run_client`` snapshots the fixture immediately after the client turn.
+    # ``run_client`` snapshots the fixture immediately after the client turn.
     # If the model edits the source or test after running unittest, the
     # recorder's end digest no longer covers the final workspace version and
     # this turn is unverified rather than falsely green.
@@ -882,14 +884,10 @@ def _process_test_is_trusted(observation: dict, test_filename: str) -> bool:
     suite_end = _timestamp_value(recorder.get("suite_finished_at"))
     if suite_start is None or suite_end is None:
         return False
-    for write in observation.get("writes", []):
-        if not isinstance(write, dict) or write.get("file") not in {
-            "parent_task.py", test_filename,
-        }:
-            continue
-        timestamp = write.get("timestamp")
-        if isinstance(timestamp, (int, float)) and suite_start <= timestamp <= suite_end:
-            return False
+    if collaboration_process_evidence.fixture_mutated_during(
+        observation.get("writes", []), suite_start, suite_end
+    ):
+        return False
     evidence_pids = {
         event.get("pid") for event in recorder.get("events", [])
         if isinstance(event, dict) and isinstance(event.get("pid"), int)
@@ -1507,14 +1505,8 @@ def collect_evidence(
             recorder_evidence = observation.get("test_evidence", {}) or {}
             suite_start = _timestamp_value(recorder_evidence.get("suite_started_at"))
             suite_end = _timestamp_value(recorder_evidence.get("suite_finished_at"))
-            writes_during_test = any(
-                isinstance(write, dict)
-                and write.get("file") in {"parent_task.py", test_filename}
-                and isinstance(write.get("timestamp"), (int, float))
-                and suite_start is not None
-                and suite_end is not None
-                and suite_start <= write["timestamp"] <= suite_end
-                for write in observation.get("writes", [])
+            writes_during_test = collaboration_process_evidence.fixture_mutated_during(
+                observation.get("writes", []), suite_start, suite_end
             )
             test_diagnostics.append({
                 "turn_index": index, "test": test_filename,
@@ -2007,7 +1999,7 @@ def _fixture_digest(work: Path, names: tuple[str, ...]) -> str | None:
     return digest.hexdigest()
 
 
-def _run_client(
+def run_client(
     command: list[str],
     *,
     environment: dict[str, str],
@@ -2020,6 +2012,8 @@ def _run_client(
     test_name: str | None = None,
 ) -> int | None:
     """Run one explicitly requested client turn in the isolated fixture root."""
+    if observe_processes and not environment.get("CODEXHUB_E2E_PYTHON"):
+        raise RuntimeError("fixture_python_binding_missing")
     if test_evidence is not None:
         environment["CODEXHUB_E2E_TEST_EVIDENCE"] = str(test_evidence)
     test_names = (
@@ -2044,7 +2038,8 @@ def _run_client(
         if sys.platform != "linux" or not tracer:
             raise RuntimeError("process_observer_unavailable")
         command = [tracer, "-ff", "-qq", "-yy", "-ttt", "-s", "8192", "-e",
-                   "trace=execve,exit_group,openat,clone,clone3,fork,vfork", "-o",
+                   "trace=execve,exit_group,open,openat,openat2,creat,close,dup,dup2,dup3,fcntl,chdir,clone,clone3,fork,vfork,write,writev,pwrite64,pwritev,pwritev2,ftruncate,truncate,rename,renameat,renameat2,unlink,unlinkat",
+                   "-e", "raw=write,writev,pwrite64,pwritev,pwritev2", "-o",
                    str(output) + ".process"] + command
     with output.open("a", encoding="utf-8") as stream:
         client = subprocess.Popen(
@@ -2093,7 +2088,7 @@ def _run_client(
             if observe_processes:
                 from collaboration_process_evidence import read_process_evidence
                 from collaboration_process_evidence import read_test_evidence
-                interpreter_name = environment.get("CODEXHUB_E2E_PYTHON") or str(sys.executable)
+                interpreter_name = environment["CODEXHUB_E2E_PYTHON"]
                 evidence = read_process_evidence(
                     Path(str(output) + ".process"),
                     working_directory,
@@ -2667,7 +2662,7 @@ def main() -> int:
                 client_outputs = (client_output,)
                 first_test_evidence = private / "test-first.evidence.jsonl"
                 client_env["CODEXHUB_E2E_TEST_EVIDENCE"] = str(first_test_evidence)
-                client_exit_code = _run_client(
+                client_exit_code = run_client(
                     [
                         "codex",
                         "exec",
@@ -2736,7 +2731,7 @@ def main() -> int:
                     second_test_evidence = private / "test-second.evidence.jsonl"
                     client_env["CODEXHUB_E2E_TEST_EVIDENCE"] = str(second_test_evidence)
                     client_env["CODEXHUB_E2E_COMBINED"] = "1"
-                    report["resume_client_exit_code"] = _run_client(
+                    report["resume_client_exit_code"] = run_client(
                         [
                             "codex",
                             "exec",

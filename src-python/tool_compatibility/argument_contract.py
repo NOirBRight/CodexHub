@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 from codex_semantic_adapter import strict_json_object
 
@@ -109,39 +109,8 @@ def validate_versioned_item(
         validate_v1_arguments(item, surface=surface)
 
 
-def failed_argument_call_ids(items: Iterable[Any]) -> set[str]:
-    """Return only call IDs backed by an earlier, real failed call.
-
-    A result-looking item is not evidence by itself.  In particular, an
-    output placed before its call (or an output for an unknown call) must not
-    grant the later call the ``preserve_failed_arguments`` exception; doing so
-    would let malformed new arguments bypass the normalizer.
-    """
-    seen_calls: set[str] = set()
-    failed: set[str] = set()
-    for item in items:
-        if not isinstance(item, Mapping):
-            continue
-        item_type = item.get("type")
-        call_id = item.get("call_id")
-        if item_type in {"function_call", "custom_tool_call"}:
-            if isinstance(call_id, str) and call_id:
-                seen_calls.add(call_id)
-            continue
-        if (
-            item_type in {"function_call_output", "custom_tool_call_output"}
-            and isinstance(call_id, str)
-            and call_id in seen_calls
-            and isinstance(item.get("output"), str)
-            and item["output"].startswith("failed to parse function arguments:")
-        ):
-            failed.add(call_id)
-    return failed
-
-
 __all__ = [
     "child_name_for_entry",
-    "failed_argument_call_ids",
     "normalize_namespace_arguments",
     "normalize_v1_stream_arguments",
     "validate_versioned_item",

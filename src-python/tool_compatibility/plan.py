@@ -23,9 +23,10 @@ from .collab_v2 import (
     is_opaque_v2_history_item,
     strip_encrypted_annotations as strip_v2_encrypted_annotations,
 )
+from collaboration_runtime_contract import failed_argument_call_ids
+
 from .argument_contract import (
     child_name_for_entry,
-    failed_argument_call_ids,
     normalize_namespace_arguments,
     validate_versioned_item,
     validate_version_fields as _validate_version_fields,

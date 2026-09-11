@@ -39,7 +39,7 @@ from codex_semantic_adapter import (
 )
 from gateway_errors import UpstreamProtocolTranslationError
 from route_primitives import WORKER_REQUESTED_BINDING_FIELD
-from protocol_translation import UnsupportedProtocolTranslationError
+from protocol_translation import UnsupportedProtocolTranslationError, decode_protocol_json
 import gateway_settings
 import worker_binding_signing
 
@@ -163,6 +163,14 @@ def raise_boundary_error(
     if cause is not None:
         raise error from cause
     raise error
+
+
+def decode_adapted_json(value: str) -> Any:
+    """Decode adapted envelopes without silently selecting conflicting fields."""
+    try:
+        return decode_protocol_json(value)
+    except UnsupportedProtocolTranslationError as exc:
+        raise UpstreamProtocolTranslationError(exc) from exc
 
 
 def resolve_boundary(

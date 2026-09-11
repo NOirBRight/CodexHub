@@ -99,7 +99,7 @@ def _raise_on_invalid_worker_stream_event(
     )
 
 
-def _reconcile_function_call_argument_events(
+def reconcile_function_call_argument_events(
     events: list[Mapping[str, Any]],
     *,
     runtime_tool_plan: RuntimeToolCompatibilityPlan | None = None,
@@ -216,7 +216,7 @@ def compatible_sse_line(
         return line
 
     try:
-        payload = json.loads(payload_bytes.decode("utf-8-sig"))
+        payload = _collaboration_adapter_module.decode_adapted_json(payload_bytes.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return line
 

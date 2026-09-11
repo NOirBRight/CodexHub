@@ -511,7 +511,7 @@ def compatible_response_body(
         return body
 
     try:
-        payload = json.loads(body.decode("utf-8-sig"))
+        payload = _collaboration_adapter_module.decode_adapted_json(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return body
 

@@ -9,9 +9,10 @@ check and dynamic description text is deliberately excluded from matching.
 from __future__ import annotations
 
 import json
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import math
-from typing import Any, Mapping, Sequence
+from protocol_json import strict_json_loads
+from typing import Any, Iterable, Mapping, Sequence
 
 
 COLLABORATION_V1 = "collaboration_v1"
@@ -346,6 +347,13 @@ def classify_collaboration_request(request: Mapping[str, Any]) -> str | None:
 
     _require(isinstance(request, Mapping), "request_invalid")
     tools = request.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if isinstance(tool, Mapping) and tool.get("namespace") in {V1_NAMESPACE, V2_NAMESPACE}:
+                # A function with a reserved namespace field is not the
+                # client's complete namespace declaration. Do not infer
+                # Collaboration authority from that malformed tool shape.
+                raise CollaborationContractError("malformed_collaboration_declaration")
     if not _has_collaboration_marker(tools):
         # Ordinary provider requests may carry similarly named metadata and
         # may omit tool_choice.  They are not Collaboration requests unless
@@ -372,51 +380,17 @@ def _json_object_or_value(value: Any, malformed: str) -> Any:
     if not isinstance(value, str):
         return value
 
-    def unique_object(items: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, child in items:
-            if key in result:
-                raise CollaborationContractError(malformed)
-            result[key] = child
-        return result
-
-    def reject_non_json_constant(_value: str) -> None:
-        raise ValueError
-
     try:
-        return json.loads(
-            value,
-            object_pairs_hook=unique_object,
-            parse_constant=reject_non_json_constant,
-        )
-    except CollaborationContractError:
-        raise
+        return strict_json_loads(value)
     except (TypeError, ValueError):
         raise CollaborationContractError(malformed) from None
 
 
 def _parse_collaboration_arguments(value: str, malformed: str) -> Any:
-    """Parse a Collaboration argument object without accepting JSON extensions."""
-
-    def unique_object(items: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, child in items:
-            if key in result:
-                raise CollaborationContractError(malformed)
-            result[key] = child
-        return result
-
-    def reject_non_json_constant(_value: str) -> None:
-        raise ValueError
-
+    """Parse arguments without losing exact timeout-number representations."""
     try:
-        return json.loads(
-            value,
-            object_pairs_hook=unique_object,
-            parse_float=Decimal,
-            parse_constant=reject_non_json_constant,
-        )
-    except (CollaborationContractError, TypeError, ValueError, InvalidOperation):
+        return strict_json_loads(value, exact_numbers=True)
+    except (TypeError, ValueError):
         raise CollaborationContractError(malformed) from None
 
 
@@ -546,6 +520,43 @@ def validate_collaboration_arguments(version: str, name: str, value: Any) -> Non
     normalize_collaboration_arguments(version, name, value)
 
 
+def is_client_argument_parse_error(value: Any) -> bool:
+    """A bare prefix is not evidence that the client rejected arguments."""
+    prefix = "failed to parse function arguments:"
+    return isinstance(value, str) and value.startswith(prefix) and bool(value[len(prefix):].strip())
+
+
+def failed_argument_call_ids(items: Iterable[Any]) -> set[str]:
+    """Return only call IDs backed by an earlier, real failed call.
+
+    A result-looking item is not evidence by itself.  In particular, an
+    output placed before its call (or an output for an unknown call) must not
+    grant the later call the ``preserve_failed_arguments`` exception; doing so
+    would let malformed new arguments bypass the normalizer.
+    """
+    if items is None:
+        return set()
+    seen_calls: set[str] = set()
+    failed: set[str] = set()
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        item_type = item.get("type")
+        call_id = item.get("call_id")
+        if item_type in {"function_call", "custom_tool_call"}:
+            if isinstance(call_id, str) and call_id:
+                seen_calls.add(call_id)
+            continue
+        if (
+            item_type in {"function_call_output", "custom_tool_call_output"}
+            and isinstance(call_id, str)
+            and call_id in seen_calls
+            and is_client_argument_parse_error(item.get("output"))
+        ):
+            failed.add(call_id)
+    return failed
+
+
 def validate_collaboration_result(version: str, name: str, value: Any) -> None:
     schemas = EXPECTED_OUTPUT_SCHEMAS.get(version)
     if schemas is None or name not in schemas:
@@ -568,9 +579,7 @@ def validate_collaboration_result(version: str, name: str, value: Any) -> None:
             # The client records this shared error as plain text (for example
             # a number-schema timeout emitted as 180000.0 but parsed as i64).
             # Replay it unchanged so the model can correct the failed call.
-            if version == COLLABORATION_V2 and value.startswith(
-                "failed to parse function arguments: "
-            ) and value.removeprefix("failed to parse function arguments: ").strip():
+            if version == COLLABORATION_V2 and is_client_argument_parse_error(value):
                 return
             # Codex CLI serializes a failed V2 interrupt as the tool's plain
             # error text rather than a JSON result object.  Preserve that
@@ -618,6 +627,8 @@ def validate_agent_message(value: Mapping[str, Any]) -> None:
 
 
 __all__ = [
+    "failed_argument_call_ids",
+    "is_client_argument_parse_error",
     "COLLABORATION_V1",
     "COLLABORATION_V2",
     "COLLABORATION_V1_TIMEOUT_MIN",

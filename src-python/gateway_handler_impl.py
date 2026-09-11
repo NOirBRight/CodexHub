@@ -320,12 +320,6 @@ def _rewrite_transparent_developer_role_messages(*args: Any, **kwargs: Any) -> A
     return gateway_compat.official_passthrough._rewrite_transparent_developer_role_messages(*args, **kwargs)
 
 
-def _responses_body_with_lifecycle_final_retry_guidance(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.multi_agent._responses_body_with_lifecycle_final_retry_guidance(
-        *args, **kwargs
-    )
-
-
 def _safe_json_mapping(*args: Any, **kwargs: Any) -> Any:
     return gateway_compat.official_passthrough._safe_json_mapping(*args, **kwargs)
 

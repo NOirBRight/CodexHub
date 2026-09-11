@@ -16,6 +16,7 @@ dropped or rewritten.
 from __future__ import annotations
 
 import json
+from protocol_json import AmbiguousJSONError, strict_json_loads
 import re
 import time
 from dataclasses import dataclass
@@ -43,6 +44,16 @@ class UnsupportedProtocolTranslationError(ValueError):
     def __init__(self, code: str, detail: str):
         self.code = code
         super().__init__(detail)
+
+
+def decode_protocol_json(value: str | bytes) -> Any:
+    """Reject ambiguous JSON at an explicitly selected conversion seam."""
+    try:
+        return strict_json_loads(value)
+    except AmbiguousJSONError as exc:
+        raise UnsupportedProtocolTranslationError(
+            "invalid_json_envelope", "Adapted JSON contains ambiguous fields or unsupported numeric/nesting limits."
+        ) from exc
 
 
 def _default_collect_text_fragments(value: Any) -> list[str]:
@@ -884,7 +895,7 @@ def responses_request_to_chat_completion_body(
     drop_reasoning: bool = False,
     preserve_reasoning_history: bool = False,
 ) -> bytes:
-    payload = json.loads(body.decode("utf-8-sig"))
+    payload = decode_protocol_json(body)
     if not isinstance(payload, dict):
         return body
     # ``client_metadata`` is Codex transport bookkeeping.  It has no
@@ -1319,7 +1330,7 @@ def chat_completions_request_to_responses_body(
     *,
     chat_content_text: ChatContentText = _default_chat_content_text,
 ) -> bytes:
-    payload = json.loads(body.decode("utf-8-sig"))
+    payload = decode_protocol_json(body)
     if not isinstance(payload, dict):
         return body
     _require_supported_fields(
@@ -1571,7 +1582,7 @@ def chat_completion_to_response_body(
     xmlish_tool_outputs: XmlishToolOutputs | None = None,
     repair_response: ResponseRepair | None = None,
 ) -> bytes:
-    payload = json.loads(body.decode("utf-8-sig"))
+    payload = decode_protocol_json(body)
     if not isinstance(payload, dict):
         return body
 
@@ -1707,7 +1718,7 @@ def response_body_to_chat_completion_body(
     error_body: Callable[[Mapping[str, Any]], bytes] = chat_completion_error_body,
     preserve_reasoning_history: bool = False,
 ) -> bytes:
-    payload = json.loads(body.decode("utf-8-sig"))
+    payload = decode_protocol_json(body)
     if not isinstance(payload, dict):
         return body
     output = payload.get("output")
@@ -1835,7 +1846,7 @@ def response_body_to_chat_completion_body(
 
 
 def chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
-    payload = json.loads(body.decode("utf-8-sig"))
+    payload = decode_protocol_json(body)
     if not isinstance(payload, dict):
         return []
     if "choices" in payload and not isinstance(payload["choices"], list):
@@ -3888,7 +3899,7 @@ def response_body_to_response_sse_events(
     *,
     collect_text_fragments: CollectTextFragments = _default_collect_text_fragments,
 ) -> list[dict[str, Any]]:
-    payload = json.loads(body.decode("utf-8-sig"))
+    payload = decode_protocol_json(body)
     if not isinstance(payload, dict):
         return []
 
