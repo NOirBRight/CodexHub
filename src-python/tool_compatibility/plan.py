@@ -1723,7 +1723,16 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
         response_call_owners: dict[str, ToolCompatibilityEntry] = {}
         response_call_positions: dict[str, int] = {}
         surface = "response" if reject_omitted_response else "history"
-        failed_calls = failed_argument_call_ids(items)
+        # Only request-registered V2 wait aliases may carry a timeout failure.
+        wait_aliases = {
+            alias
+            for entry in self.entries
+            if entry.family == NAMESPACE and entry.version == "v2" and entry.namespace == "collaboration"
+            for alias in entry.aliases
+            if (record := self.registry.record_for_alias(alias)) is not None
+            and record.child_name == "wait_agent"
+        }
+        failed_calls = failed_argument_call_ids(items, v2_wait_aliases=wait_aliases) if surface == "history" else set()
         for item_index, raw_item in enumerate(items):
             if not isinstance(raw_item, Mapping):
                 continue

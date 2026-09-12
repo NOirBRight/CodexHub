@@ -527,7 +527,42 @@ def is_client_argument_parse_error(value: Any) -> bool:
     return isinstance(value, str) and value.startswith(prefix) and bool(value[len(prefix):].strip())
 
 
-def failed_argument_call_ids(items: Iterable[Any]) -> set[str]:
+def _client_timeout_limit(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"timeout_ms must be at most ([0-9]{1,7})", value)
+    if match is not None and int(match[1]) <= COLLABORATION_V2_TIMEOUT_MAX:
+        return int(match[1])
+    return None
+
+
+def _is_client_execution_error(name: str, value: str) -> bool:
+    """CLI 0.153.4 RespondToModel outputs, not arbitrary non-JSON prose.
+
+    The wire has no separate error tag. Keep known handler errors scoped to
+    their tools; successful JSON still uses the frozen output schemas.
+    """
+    if name == "wait_agent":
+        return _client_timeout_limit(value) is not None
+    if value == "collab manager unavailable":
+        return name in {"spawn_agent", "list_agents", "send_message", "followup_task"}
+    if name in {"send_message", "followup_task"} and value in {
+        "Empty message can't be sent to an agent",
+        "target agent is missing an agent_path",
+    }:
+        return True
+    if name == "followup_task" and value == "Follow-up tasks can't target the root agent":
+        return True
+    if name == "spawn_agent":
+        return value == "fork_turns must be `none`, `all`, or a positive integer string" or bool(
+            re.fullmatch(r"agent path `[^`\r\n]+` already exists", value)
+        )
+    return False
+
+
+def failed_argument_call_ids(
+    items: Iterable[Any], *, v2_wait_aliases: Iterable[str] = (),
+) -> set[str]:
     """Return only call IDs backed by an earlier, real failed call.
 
     A result-looking item is not evidence by itself.  In particular, an
@@ -537,7 +572,8 @@ def failed_argument_call_ids(items: Iterable[Any]) -> set[str]:
     """
     if items is None:
         return set()
-    seen_calls: set[str] = set()
+    seen_calls: dict[str, Mapping[str, Any]] = {}
+    wait_aliases = frozenset(v2_wait_aliases)
     failed: set[str] = set()
     for item in items:
         if not isinstance(item, Mapping):
@@ -546,15 +582,38 @@ def failed_argument_call_ids(items: Iterable[Any]) -> set[str]:
         call_id = item.get("call_id")
         if item_type in {"function_call", "custom_tool_call"}:
             if isinstance(call_id, str) and call_id:
-                seen_calls.add(call_id)
+                seen_calls[call_id] = item
             continue
         if (
             item_type in {"function_call_output", "custom_tool_call_output"}
             and isinstance(call_id, str)
             and call_id in seen_calls
-            and is_client_argument_parse_error(item.get("output"))
         ):
-            failed.add(call_id)
+            output = item.get("output")
+            if is_client_argument_parse_error(output):
+                failed.add(call_id)
+                continue
+            call = seen_calls[call_id]
+            limit = _client_timeout_limit(output)
+            is_v2_wait = call.get("type") == "function_call" and item_type == "function_call_output" and (
+                (call.get("namespace") == V2_NAMESPACE and call.get("name") == "wait_agent")
+                or (call.get("namespace") is None and isinstance(call.get("name"), str)
+                    and call["name"] in wait_aliases)
+            )
+            if limit is None or not is_v2_wait or not isinstance(call.get("arguments"), str):
+                continue
+            try:
+                arguments = _parse_collaboration_arguments(call["arguments"], "malformed_collaboration_arguments")
+            except CollaborationContractError:
+                continue
+            # A handler range error proves integer deserialization succeeded.
+            # Never use it to waive JSON, field, type, or i64 validation.
+            if (
+                isinstance(arguments, dict) and set(arguments) == {"timeout_ms"}
+                and type(arguments["timeout_ms"]) is int
+                and limit < arguments["timeout_ms"] <= 2**63 - 1
+            ):
+                failed.add(call_id)
     return failed
 
 
@@ -580,14 +639,8 @@ def validate_collaboration_result(version: str, name: str, value: Any) -> None:
             # The client records this shared error as plain text (for example
             # a number-schema timeout emitted as 180000.0 but parsed as i64).
             # Replay it unchanged so the model can correct the failed call.
-            if version == COLLABORATION_V2 and is_client_argument_parse_error(value):
-                return
-            # Codex CLI 0.153.4 reports duplicate agent paths as plain text.
-            # Preserve this failed spawn, not a fabricated success result.
-            if (
-                version == COLLABORATION_V2
-                and name == "spawn_agent"
-                and re.fullmatch(r"agent path `[^`\r\n]+` already exists", value)
+            if version == COLLABORATION_V2 and (
+                is_client_argument_parse_error(value) or _is_client_execution_error(name, value)
             ):
                 return
             # Codex CLI serializes a failed V2 interrupt as the tool's plain
