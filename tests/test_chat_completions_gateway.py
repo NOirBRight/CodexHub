@@ -1160,6 +1160,59 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(handler._fake.status, 400)
         self.assertIn(b"prompt_cache_options", b"".join(handler.wfile.writes))
 
+    def test_post_chat_completions_expands_official_collaboration_v2_namespace(self):
+        from collaboration_runtime_contract import COLLABORATION_V2, EXPECTED_PARAMETER_SCHEMAS, V2_TOOLS
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": name,
+                    "parameters": schema,
+                    "strict": False,
+                },
+            }
+            for name, schema in EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2].items()
+        ]
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "delegate"}],
+            "tools": tools,
+            "tool_choice": "auto",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        call = {
+            "type": "function_call",
+            "id": "fc_spawn",
+            "call_id": "call_spawn",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+            "arguments": '{"task_name":"worker","message":"inspect"}',
+            "encrypted_function_args": [],
+        }
+        upstream_body = json.dumps({
+            "id": "resp_v2",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [call],
+        }).encode("utf-8")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
+            CodexProxyHandler.do_POST(handler)
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["tools"][0]["type"], "namespace")
+        self.assertEqual(sent_payload["tools"][0]["name"], "collaboration")
+        self.assertEqual({child["name"] for child in sent_payload["tools"][0]["tools"]}, set(V2_TOOLS))
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 200)
+        tool_call = result["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(tool_call["id"], "call_spawn")
+        self.assertEqual(tool_call["function"]["name"], "spawn_agent")
+
     def test_post_chat_completions_maps_official_reasoning_summary_with_message(self):
         body = json.dumps({
             "model": "gpt-5.5",

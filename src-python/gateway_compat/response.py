@@ -42,6 +42,9 @@ from runtime_tool_compatibility import (
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
     build_tool_compatibility_plan,
 )
+from tool_compatibility.collab_v2 import (
+    collapse_official_v2_names_for_chat as _collapse_official_v2_names_for_chat,
+)
 from tool_surface_adapter import (
     APPLY_PATCH_FUNCTION_NAME,
     INTERNAL_INPUT_ITEM_TYPES,
@@ -506,7 +509,18 @@ def compatible_response_body(
 ) -> bytes:
     if upstream_name == "official":
         from . import collaboration_delivery
-        return collaboration_delivery.decode_body(body, event_context)
+        body = collaboration_delivery.decode_body(body, event_context)
+        try:
+            payload = json.loads(body.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return body
+        if isinstance(payload, dict):
+            try:
+                if _collapse_official_v2_names_for_chat(payload, event_context):
+                    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+            except RuntimeToolCompatibilityError as exc:
+                _official_passthrough._raise_runtime_tool_compatibility_error(exc)
+        return body
     if _official_passthrough._is_raw_provider_probe_context(event_context):
         return body
 

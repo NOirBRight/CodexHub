@@ -337,6 +337,8 @@ def _runtime_tool_protocol_capabilities(
             baseline_protocol = tool_protocol
         if facts is not None:
             return RuntimeProtocolCapabilities.for_protocol(baseline_protocol, facts)
+        if str(upstream.get("name") or "").strip() == "official":
+            return RuntimeProtocolCapabilities.responses_structured()
         if baseline_protocol in {"chat_tools", "chat", "chat_completions"}:
             return RuntimeProtocolCapabilities.chat_tools()
         return RuntimeProtocolCapabilities()
