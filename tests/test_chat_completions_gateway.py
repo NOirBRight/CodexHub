@@ -614,6 +614,16 @@ class ChatToolsToResponsesTests(unittest.TestCase):
                 {"type": "other"},
             ])
 
+    def test_passes_known_native_hosted_and_custom_types(self):
+        tools = chat_tools_to_responses_tools([
+            {"type": "web_search", "search_context_size": "low"},
+            {"type": "custom", "name": "apply_patch", "format": {"type": "text"}},
+            {"type": "tool_search", "execution": "client"},
+        ])
+        self.assertEqual(tools[0], {"type": "web_search", "search_context_size": "low"})
+        self.assertEqual(tools[1]["type"], "custom")
+        self.assertEqual(tools[2], {"type": "tool_search", "execution": "client"})
+
 
 class ResponseBodyToChatTests(unittest.TestCase):
     def test_text_response(self):
@@ -1212,6 +1222,67 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         tool_call = result["choices"][0]["message"]["tool_calls"][0]
         self.assertEqual(tool_call["id"], "call_spawn")
         self.assertEqual(tool_call["function"]["name"], "spawn_agent")
+
+    def test_post_chat_completions_maps_official_hosted_and_custom_tools(self):
+        from tool_compatibility.contracts import CUSTOM_INPUT_KEY
+
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "search then patch"}],
+            "tools": [
+                {"type": "web_search"},
+                {"type": "custom", "name": "apply_patch", "format": {"type": "text"}},
+                {"type": "tool_search", "execution": "client"},
+            ],
+            "tool_choice": "auto",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_body = json.dumps({
+            "id": "resp_native",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "ws_1",
+                    "call_id": "call_ws",
+                    "status": "completed",
+                    "action": {"query": "codex"},
+                },
+                {
+                    "type": "custom_tool_call",
+                    "id": "ct_1",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch",
+                },
+                {
+                    "type": "tool_search_call",
+                    "id": "ts_1",
+                    "call_id": "call_search",
+                    "execution": "client",
+                    "arguments": {"query": "patch"},
+                },
+            ],
+        }).encode("utf-8")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
+            CodexProxyHandler.do_POST(handler)
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(
+            [tool["type"] for tool in sent_payload["tools"]],
+            ["web_search", "custom", "tool_search"],
+        )
+        self.assertEqual(sent_payload["tools"][1]["name"], "apply_patch")
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 200)
+        names = [call["function"]["name"] for call in result["choices"][0]["message"]["tool_calls"]]
+        self.assertEqual(names, ["web_search", "apply_patch", "tool_search"])
+        patch_args = json.loads(result["choices"][0]["message"]["tool_calls"][1]["function"]["arguments"])
+        self.assertEqual(patch_args, {CUSTOM_INPUT_KEY: "*** Begin Patch"})
 
     def test_post_chat_completions_maps_official_reasoning_summary_with_message(self):
         body = json.dumps({

@@ -10,11 +10,13 @@ from typing import Any, Iterable, Mapping
 
 from .collab_v2 import AGENT_MESSAGE_ENVELOPE_PREFIX
 from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, copy_mapping as _copy_mapping
-from .dispositions import CUSTOM_FREEFORM, NAMESPACE, TOOL_SEARCH
+from .dispositions import CUSTOM_FREEFORM, NAMESPACE, SELECTED_PROVIDER_HOSTED, TOOL_SEARCH
 
 _NAMESPACE_ALIAS_PREFIX = "__codexhub_ns_"
 _CUSTOM_ALIAS_PREFIX = "__codexhub_custom_"
 _TOOL_SEARCH_ALIAS_PREFIX = "__codexhub_search_"
+_HOSTED_ALIAS_PREFIX = "__codexhub_hosted_"
+
 
 @dataclass(frozen=True, slots=True)
 class CompatibilityDiagnostics:
@@ -98,6 +100,7 @@ class RequestScopedToolAliasRegistry:
                 NAMESPACE: _NAMESPACE_ALIAS_PREFIX,
                 CUSTOM_FREEFORM: _CUSTOM_ALIAS_PREFIX,
                 TOOL_SEARCH: _TOOL_SEARCH_ALIAS_PREFIX,
+                SELECTED_PROVIDER_HOSTED: _HOSTED_ALIAS_PREFIX,
             }.get(record.family, _CUSTOM_ALIAS_PREFIX)
             replacement = self._allocate(record, prefix)
             remapped[alias] = replacement
@@ -110,7 +113,7 @@ class RequestScopedToolAliasRegistry:
     @staticmethod
     def looks_like_alias(value: Any) -> bool:
         return isinstance(value, str) and value.startswith(
-            (_NAMESPACE_ALIAS_PREFIX, _CUSTOM_ALIAS_PREFIX, _TOOL_SEARCH_ALIAS_PREFIX)
+            (_NAMESPACE_ALIAS_PREFIX, _CUSTOM_ALIAS_PREFIX, _TOOL_SEARCH_ALIAS_PREFIX, _HOSTED_ALIAS_PREFIX)
         )
 
     def _allocate(self, record_without_alias: AliasRecord, prefix: str) -> str:
@@ -202,6 +205,21 @@ class RequestScopedToolAliasRegistry:
                 version=None,
             ),
             _TOOL_SEARCH_ALIAS_PREFIX,
+        )
+
+    def allocate_hosted(self, *, declaration_index: int, kind: str) -> str:
+        return self._allocate(
+            AliasRecord(
+                alias="",
+                family=SELECTED_PROVIDER_HOSTED,
+                declaration_index=declaration_index,
+                child_index=None,
+                namespace=None,
+                child_name=kind,
+                original_name=kind,
+                version=None,
+            ),
+            _HOSTED_ALIAS_PREFIX,
         )
 
     def record_for_alias(self, alias: Any) -> AliasRecord | None:

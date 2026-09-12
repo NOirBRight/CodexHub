@@ -42,6 +42,9 @@ from runtime_tool_compatibility import (
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
     build_tool_compatibility_plan,
 )
+from tool_compatibility.chat_official_native import (
+    collapse_official_native_tools_for_chat as _collapse_official_native_tools_for_chat,
+)
 from tool_compatibility.collab_v2 import (
     collapse_official_v2_names_for_chat as _collapse_official_v2_names_for_chat,
 )
@@ -516,10 +519,15 @@ def compatible_response_body(
             return body
         if isinstance(payload, dict):
             try:
+                changed = False
                 if _collapse_official_v2_names_for_chat(payload, event_context):
-                    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+                    changed = True
+                if _collapse_official_native_tools_for_chat(payload, event_context):
+                    changed = True
             except RuntimeToolCompatibilityError as exc:
                 _official_passthrough._raise_runtime_tool_compatibility_error(exc)
+            if changed:
+                return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         return body
     if _official_passthrough._is_raw_provider_probe_context(event_context):
         return body

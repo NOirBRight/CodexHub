@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from prompt_cache_policy import PromptCacheKeyPolicy
+from tool_compatibility.dispositions import CHAT_NATIVE_TOOL_TYPES, CHAT_OFFICIAL_HOSTED_KINDS
 import uuid
 
 from gateway_errors import (
@@ -1274,6 +1275,64 @@ def chat_messages_to_responses_input(
     return instructions, input_items
 
 
+_CHAT_NATIVE_TOOL_FIELDS = {
+    "web_search": {"type", "search_context_size", "user_location", "filters"},
+    "web_search_preview": {"type", "search_context_size", "user_location"},
+    "file_search": {"type", "vector_store_ids", "max_num_results", "ranking_options", "filters"},
+    "code_interpreter": {"type", "container"},
+    "custom": {"type", "name", "description", "format"},
+    "tool_search": {"type", "execution", "description", "parameters"},
+    "namespace": {"type", "name", "description", "tools"},
+}
+
+
+def _chat_native_tool_to_responses(item: Mapping[str, Any]) -> dict[str, Any]:
+    tool_type = item.get("type")
+    if tool_type not in CHAT_NATIVE_TOOL_TYPES:
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            f"Cannot translate Chat Completions tool type {tool_type!r} to Responses.",
+        )
+    for key, child in item.items():
+        if isinstance(key, str) and "encrypted" in key and child not in (None, "", [], False):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate encrypted Chat Completions native-tool fields to Responses.",
+            )
+    allowed = _CHAT_NATIVE_TOOL_FIELDS[str(tool_type)]
+    _require_supported_fields(item, allowed, f"Chat Completions {tool_type} tool")
+    if tool_type == "custom":
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a Chat Completions custom tool without a non-empty name.",
+            )
+        if not isinstance(item.get("format"), Mapping):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a Chat Completions custom tool without a format object.",
+            )
+    if tool_type == "tool_search" and item.get("execution") != "client":
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate a non-client Chat Completions tool_search declaration to Responses.",
+        )
+    if tool_type == "namespace":
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a Chat Completions namespace tool without a non-empty name.",
+            )
+        if "tools" in item and not isinstance(item.get("tools"), list):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a Chat Completions namespace tool without a tools list.",
+            )
+    return {key: item[key] for key in allowed if key in item}
+
+
 def chat_tools_to_responses_tools(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -1284,6 +1343,9 @@ def chat_tools_to_responses_tools(value: Any) -> list[dict[str, Any]]:
         )
     tools: list[dict[str, Any]] = []
     for item in value:
+        if isinstance(item, dict) and item.get("type") in CHAT_NATIVE_TOOL_TYPES:
+            tools.append(_chat_native_tool_to_responses(item))
+            continue
         if not isinstance(item, dict) or item.get("type") != "function":
             tool_type = item.get("type") if isinstance(item, Mapping) else type(item).__name__
             raise UnsupportedProtocolTranslationError(
@@ -1327,6 +1389,21 @@ def chat_tool_choice_to_responses_tool_choice(value: Any) -> Any:
         return value
     if value is None:
         return value
+    if isinstance(value, dict) and value.get("type") in CHAT_OFFICIAL_HOSTED_KINDS:
+        _require_supported_fields(value, {"type"}, "Chat Completions hosted tool_choice")
+        return {"type": value["type"]}
+    if isinstance(value, dict) and value.get("type") == "custom":
+        _require_supported_fields(value, {"type", "name"}, "Chat Completions custom tool_choice")
+        name = value.get("name")
+        if not isinstance(name, str) or not name:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a Chat Completions custom tool_choice without a non-empty name.",
+            )
+        return {"type": "custom", "name": name}
+    if isinstance(value, dict) and value.get("type") == "tool_search":
+        _require_supported_fields(value, {"type"}, "Chat Completions tool_search tool_choice")
+        return {"type": "tool_search"}
     if not isinstance(value, dict) or value.get("type") != "function":
         choice_type = value.get("type") if isinstance(value, Mapping) else type(value).__name__
         raise UnsupportedProtocolTranslationError(

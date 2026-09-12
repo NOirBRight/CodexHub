@@ -43,6 +43,9 @@ from runtime_tool_compatibility import (
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
     build_tool_compatibility_plan,
 )
+from tool_compatibility.chat_official_native import (
+    expand_chat_native_tools_for_official as _expand_chat_native_tools_for_official,
+)
 from tool_compatibility.collab_v2 import (
     collapse_official_v2_names_for_chat as _collapse_official_v2_names_for_chat,
     expand_chat_v2_for_official as _expand_chat_v2_for_official,
@@ -209,6 +212,10 @@ def compatible_request_body(
                     event_context,
                     surface="request",
                 )
+            if _expand_chat_native_tools_for_official(
+                payload, event_context if isinstance(event_context, dict) else None
+            ):
+                changed = True
         except RuntimeToolCompatibilityError as exc:
             _official_passthrough._raise_runtime_tool_compatibility_error(exc)
 

@@ -42,6 +42,7 @@ from runtime_tool_compatibility import (
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
     build_tool_compatibility_plan,
 )
+from tool_compatibility.dispositions import CHAT_OFFICIAL_HOSTED_KINDS
 from tool_surface_adapter import (
     APPLY_PATCH_FUNCTION_NAME,
     INTERNAL_INPUT_ITEM_TYPES,
@@ -338,7 +339,9 @@ def _runtime_tool_protocol_capabilities(
         if facts is not None:
             return RuntimeProtocolCapabilities.for_protocol(baseline_protocol, facts)
         if str(upstream.get("name") or "").strip() == "official":
-            return RuntimeProtocolCapabilities.responses_structured()
+            return RuntimeProtocolCapabilities.responses_structured(
+                hosted_lifecycles=CHAT_OFFICIAL_HOSTED_KINDS,
+            )
         if baseline_protocol in {"chat_tools", "chat", "chat_completions"}:
             return RuntimeProtocolCapabilities.chat_tools()
         return RuntimeProtocolCapabilities()
@@ -414,6 +417,8 @@ def _prepare_runtime_tool_compatibility(
     ]
     try:
         provider_hosted_capabilities = upstream.get("hosted_tool_capabilities")
+        if str(upstream.get("name") or "").strip() == "official" and provider_hosted_capabilities is None:
+            provider_hosted_capabilities = {kind: True for kind in CHAT_OFFICIAL_HOSTED_KINDS}
         protocol_capabilities = _runtime_tool_protocol_capabilities(tool_protocol, upstream)
         plan = build_tool_compatibility_plan(
             planned_declarations,

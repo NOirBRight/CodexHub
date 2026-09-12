@@ -55,6 +55,8 @@ _HOSTED_EVENT_STAGES = {
     "file_search": ("file_search_call", ("in_progress", "searching", "completed")),
     "code_interpreter": ("code_interpreter_call", ("in_progress", "interpreting", "completed")),
 }
+CHAT_OFFICIAL_HOSTED_KINDS = frozenset(_HOSTED_EVENT_STAGES)
+CHAT_NATIVE_TOOL_TYPES = CHAT_OFFICIAL_HOSTED_KINDS | {"custom", "tool_search", "namespace"}
 
 
 def name_of(value: Mapping[str, Any]) -> str | None:

@@ -11,7 +11,7 @@
     },
     "protocol_translation": {
       "file": "src-python/protocol_translation.py",
-      "sha256": "cb3a68a0d3c62d3b57843e568a7cd680c810e570a28a972a79a07cc7d44ca0fd"
+      "sha256": "4026746ce3da0a3682eecafea24c53d579db0c9e0d8c6cea70105c29ab937938"
     },
     "source_contract": {
       "file": "collaboration-runtime-contract.json",
@@ -103,22 +103,22 @@
       "id": "request.tools.namespace",
       "implementation": "runtime_tool_compatibility",
       "key": "tools[type=namespace]",
-      "notes": "Chat has no namespace tool; Gateway adapter must wrap children injectively.",
+      "notes": "Chat\u2194official expands a complete Collaboration V2 six-pack (or aliases) into the native namespace. Third-party Chat still uses injective function aliases.",
       "responses": "namespace + child functions",
       "when": "Collaboration V2 namespace collaboration"
     },
     {
       "category": "tool_declaration",
-      "chat": "function tool with injective alias and exact input/output envelopes",
+      "chat": "function alias with exact input/output envelopes, or type=custom on Chat\u2194official",
       "disposition": "reversibly_adapted",
       "execution_owner": "codex_client",
       "fail_closed": true,
       "id": "request.tools.custom",
       "implementation": "runtime_tool_compatibility",
       "key": "tools[type=custom|freeform]",
-      "notes": "Request-scoped and not implied by Collaboration V2 support.",
+      "notes": "Chat\u2194official restores known custom aliases (apply_patch) to native custom. Unknown custom aliases fail closed. Third-party Chat uses the function envelope adapter.",
       "responses": "custom/freeform tool",
-      "when": "exact text-format declaration and accepts_custom_adapter capability"
+      "when": "exact text-format declaration, or Chat\u2194official apply_patch alias/type=custom"
     },
     {
       "category": "tool_declaration",
@@ -131,7 +131,33 @@
       "key": "tools[type=custom|freeform] without an approved adapter",
       "notes": "Required custom semantics reject before sampling; optional declarations may be omitted.",
       "responses": "custom/freeform tool",
-      "when": "adapter capability absent or declaration/envelope is malformed"
+      "when": "adapter capability absent, unknown custom alias, or declaration/envelope is malformed"
+    },
+    {
+      "category": "tool_declaration",
+      "chat": "function alias or type=tool_search execution=client",
+      "disposition": "reversibly_adapted",
+      "execution_owner": "codex_client",
+      "fail_closed": true,
+      "id": "request.tools.tool_search",
+      "implementation": "runtime_tool_compatibility",
+      "key": "tools[type=tool_search]",
+      "notes": "A user function merely named tool_search is not client-owned. Hosted search (execution!=client) stays unavailable.",
+      "responses": "client tool_search",
+      "when": "Chat\u2194official client-owned search, or third-party Chat with accepts_tool_search_adapter"
+    },
+    {
+      "category": "tool_declaration",
+      "chat": "function alias __codexhub_hosted_* or native hosted type",
+      "disposition": "reversibly_adapted",
+      "execution_owner": "upstream_provider",
+      "fail_closed": true,
+      "id": "request.tools.hosted",
+      "implementation": "runtime_tool_compatibility",
+      "key": "tools[hosted web_search|web_search_preview|file_search|code_interpreter]",
+      "notes": "A user function named web_search is not hosted. Official restores alias/type declarations to native hosted tools and collapses hosted calls back to Chat function_call.",
+      "responses": "hosted tool",
+      "when": "Chat\u2194official known hosted kinds with a complete lifecycle"
     },
     {
       "category": "tool_declaration",
@@ -139,12 +165,12 @@
       "disposition": "unavailable",
       "execution_owner": "upstream_provider",
       "fail_closed": true,
-      "id": "request.tools.hosted",
-      "implementation": "protocol_translation",
-      "key": "tools[hosted web|image|mcp]",
-      "notes": "Gateway cannot synthesize a provider-hosted capability.",
+      "id": "request.tools.hosted.unavailable",
+      "implementation": "runtime_tool_compatibility",
+      "key": "tools[hosted unknown|incomplete lifecycle]",
+      "notes": "computer_use_preview and local_shell have no bounded lifecycle. Gateway never synthesizes undeclared Desktop hosted tools.",
       "responses": "hosted tool",
-      "when": "any hosted/server-executed declaration"
+      "when": "unknown hosted kind, incomplete lifecycle, encrypted fields, or third-party Chat without provider hosted facts"
     },
     {
       "category": "request_field",
@@ -642,16 +668,16 @@
     },
     {
       "category": "collaboration_v2",
-      "chat": "none native; plaintext history only via reversible adapter",
-      "disposition": "unavailable",
+      "chat": "plaintext envelope __codexhub_agent_message_v2__:",
+      "disposition": "reversibly_adapted",
       "execution_owner": "codex_client",
       "fail_closed": true,
       "id": "v2.agent_message",
       "implementation": "runtime_tool_compatibility",
       "key": "input[type=agent_message]",
-      "notes": "Plaintext author/recipient preservation is required before any adapt path is approved.",
+      "notes": "Encrypted agent_message stays unavailable. Third-party Chat still has no native agent_message item.",
       "responses": "agent_message with author/recipient",
-      "when": "encrypted agent_message or missing author/recipient"
+      "when": "Chat\u2194official plaintext author/recipient history"
     },
     {
       "category": "collaboration_v2",

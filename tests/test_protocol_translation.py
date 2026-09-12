@@ -1345,10 +1345,6 @@ class ProtocolTranslationTests(unittest.TestCase):
             "refusal": {
                 "messages": [{"role": "assistant", "content": None, "refusal": "I cannot help with that."}],
             },
-            "search": {
-                "messages": [{"role": "user", "content": "Search the web."}],
-                "tools": [{"type": "web_search"}],
-            },
             "custom_tool": {
                 "messages": [{"role": "user", "content": "Apply a patch."}],
                 "tools": [{"type": "custom", "name": "apply_patch"}],
@@ -1392,6 +1388,28 @@ class ProtocolTranslationTests(unittest.TestCase):
                 )
 
             self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_chat_known_native_tools_translate_to_responses(self):
+        payload = protocol_translation.chat_completions_request_to_responses_body(
+            json.dumps(
+                {
+                    "model": "example-model",
+                    "messages": [{"role": "user", "content": "Search then patch."}],
+                    "tools": [
+                        {"type": "web_search"},
+                        {"type": "custom", "name": "apply_patch", "format": {"type": "text"}},
+                        {"type": "tool_search", "execution": "client"},
+                    ],
+                    "tool_choice": {"type": "web_search"},
+                }
+            ).encode("utf-8")
+        )
+        decoded = json.loads(payload)
+        self.assertEqual(
+            [tool["type"] for tool in decoded["tools"]],
+            ["web_search", "custom", "tool_search"],
+        )
+        self.assertEqual(decoded["tool_choice"], {"type": "web_search"})
 
     def test_chat_request_translates_to_responses(self):
         body = json.dumps(
@@ -1535,24 +1553,20 @@ class ProtocolTranslationTests(unittest.TestCase):
         responses_body = json.dumps(
             {"model": "example-model", "input": "Hello", "tool_choice": {"type": "custom", "name": "apply_patch"}}
         ).encode("utf-8")
-        chat_body = json.dumps(
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.responses_request_to_chat_completion_body(responses_body)
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+        unknown_chat_body = json.dumps(
             {
                 "model": "example-model",
                 "messages": [{"role": "user", "content": "Hello"}],
-                "tool_choice": {"type": "custom", "name": "apply_patch"},
+                "tool_choice": {"type": "computer_use_preview"},
             }
         ).encode("utf-8")
-
-        for convert, body in (
-            (protocol_translation.responses_request_to_chat_completion_body, responses_body),
-            (protocol_translation.chat_completions_request_to_responses_body, chat_body),
-        ):
-            with self.subTest(convert=convert.__name__), self.assertRaises(
-                protocol_translation.UnsupportedProtocolTranslationError
-            ) as raised:
-                convert(body)
-
-            self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.chat_completions_request_to_responses_body(unknown_chat_body)
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
 
     def test_responses_reasoning_controls_fail_closed(self):
         with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:

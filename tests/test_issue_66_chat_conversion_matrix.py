@@ -66,7 +66,10 @@ def test_matrix_covers_required_chat_and_v2_surface() -> None:
         assert rows[f"v2.tool.{name}"]["fail_closed"] is True
     assert rows["request.tools.custom"]["disposition"] == "reversibly_adapted"
     assert rows["request.tools.custom.unavailable"]["disposition"] == "unavailable"
-    assert rows["request.tools.hosted"]["disposition"] == "unavailable"
+    assert rows["request.tools.hosted"]["disposition"] == "reversibly_adapted"
+    assert rows["request.tools.hosted.unavailable"]["disposition"] == "unavailable"
+    assert rows["request.tools.tool_search"]["disposition"] == "reversibly_adapted"
+    assert rows["v2.agent_message"]["disposition"] == "reversibly_adapted"
     assert rows["request.reasoning.controls"]["disposition"] == "consumed_locally"
     assert rows["request.prompt_cache_key"]["chat"] == "string or null"
     assert "first-class" in rows["request.prompt_cache_key"]["notes"]
