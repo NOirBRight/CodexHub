@@ -1742,9 +1742,9 @@ def route_plan_for_request(
                     else "none"
                 ),
                 preserve_reasoning_history=(
-                    _external_requires_reasoning_content_history(attempt_upstream)
-                    if upstream_name != "official"
-                    else False
+                    inbound_format == RouteProtocol.CHAT_COMPLETIONS.value
+                    if upstream_name == "official"
+                    else _external_requires_reasoning_content_history(attempt_upstream)
                 ),
                 named_mutations=frozenset(attempt_mutations),
                 fallback_http_statuses=(

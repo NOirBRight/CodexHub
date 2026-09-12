@@ -41,6 +41,20 @@ class RoutePlanSeamTests(unittest.TestCase):
             route_primitives.BEHAVIOR_OFFICIAL_GATEWAY_COMPAT,
         )
 
+    def test_official_chat_inbound_preserves_reasoning_history(self):
+        chat_plan = route_plan.route_plan_for_request(
+            {"name": "official", "upstream_format": "responses"},
+            {"client_id": "zcode"},
+            inbound_format="chat_completions",
+        )
+        responses_plan = route_plan.route_plan_for_request(
+            {"name": "official", "upstream_format": "responses"},
+            {"client_id": "unknown"},
+            inbound_format="responses",
+        )
+        self.assertTrue(chat_plan.attempts[0].preserve_reasoning_history)
+        self.assertFalse(responses_plan.attempts[0].preserve_reasoning_history)
+
     def test_official_unknown_client_uses_gateway_compat_profile(self):
         upstream = {"name": "official"}
         context = {"client_id": "unknown"}

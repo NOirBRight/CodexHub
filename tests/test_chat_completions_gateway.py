@@ -1118,7 +1118,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["choices"][0]["finish_reason"], "stop")
         self.assertEqual(handler._fake.status, 200)
 
-    def test_post_chat_completions_rejects_unsupported_upstream_response_semantics(self):
+    def test_post_chat_completions_maps_official_reasoning_summary_with_message(self):
         body = json.dumps({
             "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "Hello"}],
@@ -1130,7 +1130,69 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "object": "response",
             "status": "completed",
             "model": "gpt-5.5",
-            "output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "private"}]}],
+            "output": [
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "think first"}]},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hi there!", "annotations": []}],
+                },
+            ],
+        }).encode("utf-8")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+            CodexProxyHandler.do_POST(handler)
+
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 200)
+        message = result["choices"][0]["message"]
+        self.assertEqual(message["content"], "Hi there!")
+        self.assertEqual(message["reasoning_content"], "think first")
+
+    def test_post_chat_completions_drops_official_encrypted_reasoning_when_message_present(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_body = json.dumps({
+            "id": "resp_encrypted",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [
+                {"type": "reasoning", "summary": [], "encrypted_content": "gAAAA ciphertext"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hi there!", "annotations": []}],
+                },
+            ],
+        }).encode("utf-8")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+            CodexProxyHandler.do_POST(handler)
+
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 200)
+        message = result["choices"][0]["message"]
+        self.assertEqual(message["content"], "Hi there!")
+        self.assertNotIn("reasoning_content", message)
+
+    def test_post_chat_completions_rejects_ciphertext_only_official_reasoning(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_body = json.dumps({
+            "id": "resp_reasoning",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [{"type": "reasoning", "summary": [], "encrypted_content": "gAAAA ciphertext"}],
         }).encode("utf-8")
 
         with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
@@ -1144,6 +1206,48 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             route_primitives.RETRY_FAILURE_PERMANENT,
         )
         self.assertFalse(result["codexhub_error"]["retryable"])
+
+    def test_post_chat_completions_streams_official_reasoning_summary_deltas(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        reasoning_item = {"id": "rs_1", "type": "reasoning", "status": "completed", "summary": []}
+        message = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Hi there!", "annotations": []}],
+        }
+        events = [
+            {"type": "response.created", "response": {"id": "resp_stream", "model": "gpt-5.5"}},
+            {"type": "response.output_item.added", "item": reasoning_item},
+            {"type": "response.reasoning_summary_text.delta", "delta": "think "},
+            {"type": "response.reasoning_summary_text.delta", "delta": "first"},
+            {"type": "response.output_text.delta", "delta": "Hi there!"},
+            {"type": "response.completed", "response": {
+                "id": "resp_stream",
+                "status": "completed",
+                "model": "gpt-5.5",
+                "output": [reasoning_item, message],
+            }},
+        ]
+        stream = []
+        for event in events:
+            stream.extend([f"data: {json.dumps(event)}\n".encode(), b"\n"])
+        stream.append(b"")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeSseResponse(stream)):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertEqual(handler._fake.status, 200)
+        self.assertIn(b"reasoning_content", written)
+        self.assertIn(b"think first", written)
+        self.assertIn(b"Hi there!", written)
+        self.assertIn(b"data: [DONE]", written)
 
     def test_post_chat_completions_events_use_proxy_request_kind(self):
         body = json.dumps({
