@@ -929,6 +929,57 @@ def test_v2_wait_argument_parse_error_history_round_trips(native: bool) -> None:
     assert decoded["input"][1] == history[1]
 
 
+@pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
+@pytest.mark.parametrize("task_name", ["standards_review", "spec_review"])
+def test_v2_spawn_existing_agent_error_history_round_trips(native: bool, task_name: str) -> None:
+    history = _v2_history()[8:10]
+    history[0]["arguments"] = json.dumps({"task_name": task_name, "message": "review", "fork_turns": "none"})
+    history[1]["output"] = f"agent path `/root/{task_name}` already exists"
+    plan = _v2_plan(native=native)
+    encoded = plan.encode_payload({
+        "tool_choice": "auto",
+        "tools": [_declaration(COLLABORATION_V2)],
+        "input": history,
+    })
+    assert encoded["input"][1] == history[1]
+    expected_call = history[0] if native else {**history[0], "encrypted_function_args": []}
+    assert plan.decode_payload({"input": encoded["input"]})["input"] == [expected_call, history[1]]
+
+
+@pytest.mark.parametrize("output", [
+    "unrecognized result text",
+    "agent path `` already exists",
+    "agent path `/root/worker` already exists\nextra",
+    "agent path `/root/worker\nother` already exists",
+    '"agent path `/root/worker` already exists"',
+    '{"task_name":"/root/worker","task_name":"/root/other"}',
+    '{"task_name":false}',
+])
+def test_v2_spawn_error_replay_keeps_invalid_results_closed(output: str) -> None:
+    history = _v2_history()[8:10]
+    history[1]["output"] = output
+    with pytest.raises(ToolCompatibilityError):
+        _v2_plan().encode_payload({
+            "tool_choice": "auto",
+            "tools": [_declaration(COLLABORATION_V2)],
+            "input": history,
+        })
+
+
+@pytest.mark.parametrize("version,name", [
+    (COLLABORATION_V1, "spawn_agent"),
+    (COLLABORATION_V2, "wait_agent"),
+    (COLLABORATION_V2, "send_message"),
+    (COLLABORATION_V2, "followup_task"),
+    (COLLABORATION_V2, "list_agents"),
+])
+def test_spawn_existing_agent_error_is_scoped_to_v2_spawn(version: str, name: str) -> None:
+    from collaboration_runtime_contract import CollaborationContractError, validate_collaboration_result
+
+    with pytest.raises(CollaborationContractError):
+        validate_collaboration_result(version, name, "agent path `/root/worker` already exists")
+
+
 @pytest.mark.parametrize("output", [
     "unrecognized result text",
     "failed to parse function arguments: ",
