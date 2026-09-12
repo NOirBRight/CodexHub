@@ -55,6 +55,18 @@ class RoutePlanSeamTests(unittest.TestCase):
         self.assertTrue(chat_plan.attempts[0].preserve_reasoning_history)
         self.assertFalse(responses_plan.attempts[0].preserve_reasoning_history)
 
+    def test_external_chat_inbound_preserves_reasoning_history(self):
+        chat_plan = route_plan.route_plan_for_request(
+            {
+                "name": "opencode_go",
+                "id": "opencode-go",
+                "upstream_format": "responses",
+            },
+            {"client_id": "unknown"},
+            inbound_format="chat_completions",
+        )
+        self.assertTrue(chat_plan.attempts[0].preserve_reasoning_history)
+
     def test_official_unknown_client_uses_gateway_compat_profile(self):
         upstream = {"name": "official"}
         context = {"client_id": "unknown"}

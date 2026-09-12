@@ -579,6 +579,12 @@ def compatible_response_body(
     changed = changed or bounded_tool_search_changed
     payload, invalid_tool_changed = _official_passthrough._downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
     changed = changed or invalid_tool_changed
+    if isinstance(payload, dict) and (event_context or {}).get("_caller_wire_format") == "chat_completions":
+        try:
+            if _chat_official_native.collapse_official_native_tools_for_chat(payload, event_context):
+                changed = True
+        except RuntimeToolCompatibilityError as exc:
+            _official_passthrough._raise_runtime_tool_compatibility_error(exc)
     payload, requested_binding_changed = _multi_agent._apply_external_worker_response_contract(
         payload,
         event_context,

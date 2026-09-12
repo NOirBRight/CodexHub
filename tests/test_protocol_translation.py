@@ -727,7 +727,7 @@ class ProtocolTranslationTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "unpaired_tool_call")
 
-    def test_responses_content_with_annotations_fails_closed(self):
+    def test_responses_text_annotations_drop_and_keep_portable_text(self):
         body = json.dumps(
             {
                 "model": "example-model",
@@ -747,10 +747,9 @@ class ProtocolTranslationTests(unittest.TestCase):
             }
         ).encode("utf-8")
 
-        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
-            protocol_translation.responses_request_to_chat_completion_body(body)
-
-        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+        translated = json.loads(protocol_translation.responses_request_to_chat_completion_body(body))
+        self.assertEqual(translated["messages"][0]["content"], "See the citation.")
+        self.assertNotIn("annotations", json.dumps(translated))
 
     def test_unknown_content_fields_fail_closed_in_both_request_directions(self):
         responses_body = json.dumps(
@@ -1737,7 +1736,6 @@ class ProtocolTranslationTests(unittest.TestCase):
                 "role": "assistant",
                 "content": [{"type": "refusal", "refusal": "I cannot help with that."}],
             },
-            "search": {"type": "web_search_call", "status": "completed", "action": {"query": "Codex"}},
             "custom_tool": {"type": "custom_tool_call", "call_id": "call_patch", "name": "apply_patch", "input": "*** Begin Patch"},
             "file": {
                 "type": "message",
@@ -1748,17 +1746,6 @@ class ProtocolTranslationTests(unittest.TestCase):
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_audio", "audio": {"data": "abc", "format": "wav"}}],
-            },
-            "annotations": {
-                "type": "message",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": "See this.",
-                        "annotations": [{"type": "url_citation", "url": "https://example.test"}],
-                    }
-                ],
             },
             "unknown": {"type": "future_output", "value": "must not disappear"},
         }
@@ -1774,6 +1761,69 @@ class ProtocolTranslationTests(unittest.TestCase):
                 )
 
             self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_response_output_collapses_hosted_web_search_call_to_chat_tool(self):
+        translated = json.loads(
+            protocol_translation.response_body_to_chat_completion_body(
+                json.dumps(
+                    {
+                        "id": "resp_123",
+                        "model": "example-model",
+                        "status": "completed",
+                        "output": [
+                            {
+                                "id": "ws_1",
+                                "type": "web_search_call",
+                                "call_id": "call_ws",
+                                "status": "completed",
+                                "action": {"query": "Codex"},
+                            }
+                        ],
+                    }
+                ).encode("utf-8")
+            )
+        )
+        tool = translated["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(tool["id"], "call_ws")
+        self.assertEqual(tool["function"]["name"], "web_search")
+        self.assertIn("Codex", tool["function"]["arguments"])
+
+    def test_response_output_drops_text_annotations_and_keeps_answer(self):
+        translated = json.loads(
+            protocol_translation.response_body_to_chat_completion_body(
+                json.dumps(
+                    {
+                        "id": "resp_123",
+                        "model": "example-model",
+                        "status": "completed",
+                        "output": [
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Codex CLI is the terminal client.",
+                                        "annotations": [
+                                            {
+                                                "type": "url_citation",
+                                                "url": "https://example.test/codex",
+                                                "title": "Codex",
+                                            }
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ).encode("utf-8")
+            )
+        )
+        self.assertEqual(
+            translated["choices"][0]["message"]["content"],
+            "Codex CLI is the terminal client.",
+        )
+        self.assertNotIn("annotations", json.dumps(translated))
 
     def test_chat_response_preserves_text_and_function_call_together(self):
         translated = json.loads(
@@ -2361,6 +2411,43 @@ class ProtocolTranslationTests(unittest.TestCase):
         with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
             converter.chunks_for_event(late_delta)
         self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_responses_stream_ignores_bookkeeping_after_terminal(self):
+        created = {"type": "response.created", "response": {"id": "resp_123", "model": "example-model"}}
+        terminal = {
+            "type": "response.completed",
+            "response": {"id": "resp_123", "status": "completed", "output": []},
+        }
+        trailers = (
+            {"type": "response.output_text.done", "item_id": "msg_123", "text": "Hello"},
+            {
+                "type": "response.content_part.done",
+                "item_id": "msg_123",
+                "part": {"type": "output_text", "text": "Hello"},
+            },
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "id": "msg_123",
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hello"}],
+                },
+            },
+            {"type": "response.in_progress", "response": {"id": "resp_123"}},
+        )
+
+        chunks = protocol_translation.response_events_to_chat_stream_chunks(
+            [created, terminal, *trailers, "[DONE]"]
+        )
+        self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
+
+        converter = protocol_translation.ResponsesToChatStreamConverter()
+        converter.chunks_for_event(created)
+        converter.chunks_for_event(terminal)
+        for trailer in trailers:
+            self.assertEqual(converter.chunks_for_event(trailer), [])
 
     def test_responses_stream_rejects_invalid_terminal_output_container(self):
         terminal = {

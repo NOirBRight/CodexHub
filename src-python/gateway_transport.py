@@ -892,7 +892,20 @@ def build_upstream_headers(
             continue
         outgoing[key] = value
 
-    if not any(key.lower() == "user-agent" for key in outgoing):
+    # Official passthrough keeps the Codex CLI User-Agent. Chat clients and
+    # urllib/curl fingerprints 403 on some third-party WAFs (OpenCode Go).
+    keep_caller_user_agent = (
+        request_mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH
+    )
+    if keep_caller_user_agent:
+        if not any(key.lower() == "user-agent" for key in outgoing):
+            outgoing["User-Agent"] = UPSTREAM_USER_AGENT
+    else:
+        outgoing = {
+            key: value
+            for key, value in outgoing.items()
+            if key.lower() != "user-agent"
+        }
         outgoing["User-Agent"] = UPSTREAM_USER_AGENT
 
     if adapter is not None:

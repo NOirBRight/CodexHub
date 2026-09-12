@@ -95,6 +95,23 @@ def _prepared_official(*, tools: list | None = None, input_items: object | None 
     return json.loads(prepared), context
 
 
+def test_official_v2_emission_matches_current_reserved_schema() -> None:
+    prepared, _ = _prepared_official()
+    children = {child["name"]: child["parameters"] for child in prepared["tools"][0]["tools"]}
+    assert "required" not in children["list_agents"]
+    assert "required" not in children["wait_agent"]
+    assert children["interrupt_agent"]["required"] == ["target"]
+    assert "agent_type" not in children["spawn_agent"]["properties"]
+    assert set(children["list_agents"]["properties"]) == {"path_prefix"}
+    assert set(children["spawn_agent"]["properties"]) == {
+        "fork_turns",
+        "message",
+        "model",
+        "reasoning_effort",
+        "task_name",
+    }
+
+
 def test_chat_v2_functions_expand_to_official_namespace() -> None:
     first, _ = _prepared_official()
     second, _ = _prepared_official()

@@ -86,23 +86,41 @@ def _canonical_v2_name(name: str | None, alias_to_name: Mapping[str, str]) -> st
     return alias_to_name.get(name)
 
 
+def official_v2_parameter_schema(name: str) -> dict[str, Any]:
+    """Emit the reserved Official V2 child schema, not the validation copy.
+
+    The frozen contract keeps empty ``required`` arrays and optional
+    ``spawn_agent.agent_type`` for classification. Official reserved-function
+    matching does not: CLI 0.153.4 and chatgpt.com omit both. Sending
+    ``required: []`` is rejected as
+    ``collaboration.list_agents`` / configured-schema mismatch.
+    """
+
+    parameters = copy.deepcopy(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2][name])
+    if name == "spawn_agent":
+        properties = parameters.get("properties")
+        if isinstance(properties, dict):
+            properties.pop("agent_type", None)
+    if not parameters.get("required"):
+        parameters.pop("required", None)
+    return parameters
+
+
 def _official_v2_namespace(source_by_name: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     children: list[dict[str, Any]] = []
-    schemas = EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]
     for name in V2_TOOLS:
         source = source_by_name[name]
         description = source.get("description")
         nested = source.get("function")
         if not isinstance(description, str) and isinstance(nested, Mapping):
             description = nested.get("description")
-        parameters = copy.deepcopy(schemas[name])
         children.append(
             {
                 "type": "function",
                 "name": name,
                 "description": description if isinstance(description, str) else name,
                 "strict": False,
-                "parameters": parameters,
+                "parameters": official_v2_parameter_schema(name),
             }
         )
     return {

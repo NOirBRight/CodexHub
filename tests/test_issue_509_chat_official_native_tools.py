@@ -185,6 +185,24 @@ def test_encrypted_hosted_declaration_fails_closed() -> None:
         )
 
 
+def test_encrypted_hosted_history_fails_closed() -> None:
+    from tool_compatibility.contracts import ToolCompatibilityError
+
+    with pytest.raises((gateway_errors.UpstreamProtocolTranslationError, ToolCompatibilityError)):
+        _prepared_official(
+            tools=[{"type": "web_search"}],
+            input_items=[
+                {
+                    "type": "function_call",
+                    "call_id": "call_ws",
+                    "name": "web_search",
+                    "arguments": json.dumps({"action": {"query": "hi"}}),
+                    "encrypted_content": "secret",
+                }
+            ],
+        )
+
+
 def test_hosted_history_and_custom_envelope_expand() -> None:
     alias = _custom_alias("apply_patch")
     prepared, _ = _prepared_official(
@@ -289,6 +307,44 @@ def test_collapse_official_native_output_for_chat() -> None:
     assert TOOL_SEARCH_OUTPUT_KEY in json.loads(result_payload["output"][1]["output"])
 
 
+def test_collapse_official_web_search_drops_response_ciphertext() -> None:
+    context = {
+        CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY: {
+            "hosted": {"web_search": "web_search"},
+            "hosted_event": {"web_search_call": "web_search"},
+            "custom": {},
+            "tool_search": "",
+        }
+    }
+    payload = {
+        "output": [
+            {
+                "type": "web_search_call",
+                "id": "ws_1",
+                "call_id": "call_ws",
+                "status": "completed",
+                "action": {"type": "search", "query": "Codex CLI"},
+                "encrypted_content": "gAAAA-official-search",
+                "encrypted_output": "gAAAA-search-result",
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Codex CLI is the terminal client."}],
+            },
+        ]
+    }
+    assert collapse_official_native_tools_for_chat(payload, context) is True
+    call = payload["output"][0]
+    assert call["type"] == "function_call"
+    assert call["name"] == "web_search"
+    assert json.loads(call["arguments"]) == {"action": {"type": "search", "query": "Codex CLI"}}
+    dumped = json.dumps(payload)
+    assert "encrypted_content" not in dumped
+    assert "encrypted_output" not in dumped
+    assert payload["output"][1]["type"] == "message"
+
+
 def test_incomplete_hosted_output_fails_closed() -> None:
     from tool_compatibility.contracts import ToolCompatibilityError
 
@@ -304,3 +360,183 @@ def test_incomplete_hosted_output_fails_closed() -> None:
                 }
             },
         )
+
+
+def _third_party_responses() -> dict:
+    return {
+        "name": "opencode_go",
+        "upstream_format": "responses",
+        "tool_protocol": "responses_structured",
+        "tool_surface_strategy": "eager",
+    }
+
+
+def _third_party_chat_tools() -> dict:
+    return {
+        "name": "opencode_go",
+        "upstream_format": "chat_completions",
+        "tool_protocol": "chat_tools",
+        "tool_surface_strategy": "eager",
+    }
+
+
+def test_third_party_responses_keeps_caller_hosted_web_search() -> None:
+    context: dict = {}
+    prepared = json.loads(
+        gateway_compat.compatible_request_body(
+            json.dumps(
+                {
+                    "model": "muse",
+                    "input": [{"role": "user", "content": "search"}],
+                    "tools": [{"type": "web_search"}],
+                    "tool_choice": "auto",
+                }
+            ).encode(),
+            _third_party_responses(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+    assert prepared["tools"] == [{"type": "web_search"}]
+    assert context["_runtime_tool_compatibility_plan"].entries[0].disposition == "native"
+
+
+def test_third_party_chat_tools_still_omits_hosted_web_search() -> None:
+    context: dict = {}
+    prepared = json.loads(
+        gateway_compat.compatible_request_body(
+            json.dumps(
+                {
+                    "model": "muse",
+                    "input": [{"role": "user", "content": "search"}],
+                    "tools": [{"type": "web_search"}],
+                    "tool_choice": "auto",
+                }
+            ).encode(),
+            _third_party_chat_tools(),
+            event_context=context,
+            inject_codex_tools=False,
+        )
+    )
+    assert prepared.get("tools") in ([], None)
+    assert context["_runtime_tool_compatibility_plan"].entries[0].disposition == "omit"
+
+
+def test_collapse_third_party_hosted_search_for_chat_inbound() -> None:
+    payload = {
+        "output": [
+            {
+                "type": "web_search_call",
+                "id": "ws_1",
+                "call_id": "call_ws",
+                "status": "completed",
+                "action": {"query": "Codex CLI"},
+                "encrypted_content": "gAAAA-third-party",
+            }
+        ]
+    }
+    assert collapse_official_native_tools_for_chat(
+        payload,
+        {"_caller_wire_format": "chat_completions"},
+    )
+    call = payload["output"][0]
+    assert call["type"] == "function_call"
+    assert call["name"] == "web_search"
+    assert json.loads(call["arguments"]) == {"action": {"query": "Codex CLI"}}
+    assert "encrypted_content" not in json.dumps(payload)
+
+
+def test_third_party_chat_collapse_leaves_custom_and_tool_search() -> None:
+    payload = {
+        "output": [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_patch",
+                "name": "apply_patch",
+                "input": "*** Begin Patch",
+            },
+            {
+                "type": "tool_search_call",
+                "call_id": "call_search",
+                "arguments": {},
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_patch",
+                "output": "ok",
+            },
+            {
+                "type": "tool_search_output",
+                "call_id": "call_search",
+                "output": [],
+            },
+        ]
+    }
+    assert (
+        collapse_official_native_tools_for_chat(
+            payload,
+            {"_caller_wire_format": "chat_completions"},
+        )
+        is False
+    )
+    assert [item["type"] for item in payload["output"]] == [
+        "custom_tool_call",
+        "tool_search_call",
+        "custom_tool_call_output",
+        "tool_search_output",
+    ]
+
+
+def test_collapse_skips_third_party_hosted_search_on_responses_inbound() -> None:
+    payload = {
+        "output": [
+            {
+                "type": "web_search_call",
+                "id": "ws_1",
+                "call_id": "call_ws",
+                "status": "completed",
+                "action": {"query": "Codex CLI"},
+            }
+        ]
+    }
+    assert collapse_official_native_tools_for_chat(payload, {"_caller_wire_format": "responses"}) is False
+    assert payload["output"][0]["type"] == "web_search_call"
+
+
+def test_third_party_chat_response_body_collapses_hosted_search() -> None:
+    context: dict = {"_caller_wire_format": "chat_completions"}
+    gateway_compat.compatible_request_body(
+        json.dumps(
+            {
+                "model": "muse",
+                "input": [{"role": "user", "content": "search"}],
+                "tools": [{"type": "web_search"}],
+                "tool_choice": "auto",
+            }
+        ).encode(),
+        _third_party_responses(),
+        event_context=context,
+        inject_codex_tools=False,
+    )
+    body = gateway_compat.compatible_response_body(
+        json.dumps(
+            {
+                "id": "resp_muse",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "web_search_call",
+                        "id": "ws_1",
+                        "call_id": "call_ws",
+                        "status": "completed",
+                        "action": {"query": "Codex CLI"},
+                    }
+                ],
+            }
+        ).encode(),
+        "opencode_go",
+        event_context=context,
+    )
+    payload = json.loads(body)
+    assert payload["output"][0]["type"] == "function_call"
+    assert payload["output"][0]["name"] == "web_search"

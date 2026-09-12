@@ -342,6 +342,14 @@ def _runtime_tool_protocol_capabilities(
             return RuntimeProtocolCapabilities.responses_structured(
                 hosted_lifecycles=CHAT_OFFICIAL_HOSTED_KINDS,
             )
+        if tool_protocol == "responses_structured":
+            # Responses wire can carry caller-declared hosted kinds that have a
+            # bounded lifecycle. Keep the chat_tools adapter baseline so
+            # namespace/custom/tool_search stay adapted. Chat-tool attempts
+            # still omit hosted kinds (no function name on that wire).
+            return RuntimeProtocolCapabilities.chat_tools(
+                hosted_lifecycles=CHAT_OFFICIAL_HOSTED_KINDS,
+            )
         if baseline_protocol in {"chat_tools", "chat", "chat_completions"}:
             return RuntimeProtocolCapabilities.chat_tools()
         return RuntimeProtocolCapabilities()
@@ -417,7 +425,10 @@ def _prepare_runtime_tool_compatibility(
     ]
     try:
         provider_hosted_capabilities = upstream.get("hosted_tool_capabilities")
-        if str(upstream.get("name") or "").strip() == "official" and provider_hosted_capabilities is None:
+        if provider_hosted_capabilities is None and (
+            str(upstream.get("name") or "").strip() == "official"
+            or tool_protocol == "responses_structured"
+        ):
             provider_hosted_capabilities = {kind: True for kind in CHAT_OFFICIAL_HOSTED_KINDS}
         protocol_capabilities = _runtime_tool_protocol_capabilities(tool_protocol, upstream)
         plan = build_tool_compatibility_plan(

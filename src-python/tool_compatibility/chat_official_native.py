@@ -1,9 +1,12 @@
-"""Chat → official native-tool expand/collapse for hosted, custom, and tool_search.
+"""Chat native-tool expand/collapse for hosted, custom, and tool_search.
 
 Chat clients declare either a function alias (``__codexhub_hosted_*`` /
 ``__codexhub_custom_*`` / ``__codexhub_search_*``) or a known non-function
 Responses shape.  A user function that merely shares a hosted kind name stays a
-plain function.  Encrypted fields and unknown aliases fail closed.
+plain function.  Unknown aliases fail closed. Encrypted fields on the Chat request or
+history fail closed. Response ciphertext is dropped so the portable hosted
+action and assistant text can still reach Chat. Official also expands custom
+and tool_search aliases; third-party Chat only collapses known hosted calls.
 """
 
 from __future__ import annotations
@@ -23,13 +26,46 @@ from .contracts import (
     dump_envelope as _dump_envelope,
     json_object_with_key as _json_object_with_key,
 )
-from .dispositions import CHAT_OFFICIAL_HOSTED_KINDS, hosted_event_spec_for_declaration_kind, name_of
+from .dispositions import (
+    CHAT_OFFICIAL_HOSTED_KINDS,
+    hosted_event_chat_names,
+    hosted_event_spec_for_declaration_kind,
+    name_of,
+)
 from .registry import RequestScopedToolAliasRegistry
 
 CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY = "_chat_official_native_name_map"
 KNOWN_CUSTOM_NAMES = (APPLY_PATCH_FUNCTION_NAME,)
-_HOSTED_CALL_META = frozenset({"id", "type", "status", "call_id", "name"})
+_ENCRYPTED_PAYLOAD_KEYS = frozenset(
+    {
+        "encrypted_content",
+        "encrypted_function_args",
+        "encrypted_input",
+        "encrypted_output",
+    }
+)
+_HOSTED_CALL_META = frozenset({"id", "type", "status", "call_id", "name"}) | _ENCRYPTED_PAYLOAD_KEYS
 _INCOMPLETE_HOSTED_CALLS = frozenset({"computer_use_preview_call", "local_shell_call"})
+
+
+def collapse_hosted_item_for_chat(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Rewrite one hosted call item into a Chat-visible function_call.
+
+    Returns ``None`` when the item is not a known hosted call. Incomplete
+    hosted kinds still fail closed.
+    """
+
+    item_type = item.get("type")
+    if item_type in _INCOMPLETE_HOSTED_CALLS:
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "incomplete_hosted_lifecycle",
+            surface="response",
+        )
+    chat_name = hosted_event_chat_names().get(item_type)
+    if not isinstance(chat_name, str) or not chat_name:
+        return None
+    return _collapse_hosted_call(item, chat_name)
 
 
 def _hosted_alias_to_kind() -> dict[str, str]:
@@ -59,16 +95,6 @@ def _tool_search_alias() -> str:
     return registry.allocate_tool_search(declaration_index=0)
 
 
-_ENCRYPTED_PAYLOAD_KEYS = frozenset(
-    {
-        "encrypted_content",
-        "encrypted_function_args",
-        "encrypted_input",
-        "encrypted_output",
-    }
-)
-
-
 def _reject_encrypted_fields(value: Mapping[str, Any], *, surface: str) -> None:
     for key in _ENCRYPTED_PAYLOAD_KEYS:
         child = value.get(key)
@@ -78,6 +104,15 @@ def _reject_encrypted_fields(value: Mapping[str, Any], *, surface: str) -> None:
                 "encrypted_native_tool_unavailable",
                 surface=surface,
             )
+
+
+def _strip_encrypted_fields(value: dict[str, Any]) -> bool:
+    changed = False
+    for key in _ENCRYPTED_PAYLOAD_KEYS:
+        if key in value:
+            value.pop(key, None)
+            changed = True
+    return changed
 
 
 def _parse_object(value: Any, *, surface: str) -> dict[str, Any]:
@@ -578,11 +613,20 @@ def collapse_official_native_tools_for_chat(
     payload: dict[str, Any],
     event_context: Mapping[str, Any] | None,
 ) -> bool:
-    """Rewrite official hosted/custom/tool_search items into Chat function calls."""
+    """Rewrite hosted/custom/tool_search items into Chat function calls.
+
+    Official Chat records a name map while expanding aliases. Third-party Chat
+    inbound has no alias map; collapse known hosted calls by their static
+    item type so ``web_search_call`` can become a Chat ``function_call``.
+    Custom and tool_search stay official-only unless a name map is present.
+    """
 
     name_map = (event_context or {}).get(CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY)
-    if not isinstance(name_map, Mapping) or not name_map:
-        return False
+    official_name_map = isinstance(name_map, Mapping) and bool(name_map)
+    if not official_name_map:
+        if (event_context or {}).get("_caller_wire_format") != "chat_completions":
+            return False
+        name_map = {"hosted_event": hosted_event_chat_names()}
     output = payload.get("output")
     if not isinstance(output, list):
         return False
@@ -595,7 +639,8 @@ def collapse_official_native_tools_for_chat(
     for index, item in enumerate(list(output)):
         if not isinstance(item, dict):
             continue
-        _reject_encrypted_fields(item, surface="response")
+        if _strip_encrypted_fields(item):
+            changed = True
         item_type = item.get("type")
         if item_type in _INCOMPLETE_HOSTED_CALLS:
             raise ToolCompatibilityError(
@@ -624,6 +669,8 @@ def collapse_official_native_tools_for_chat(
                 "unknown_hosted_kind",
                 surface="response",
             )
+        if not official_name_map:
+            continue
         if item_type == "custom_tool_call":
             native_name = item.get("name")
             chat_name = custom_names.get(native_name, native_name)
