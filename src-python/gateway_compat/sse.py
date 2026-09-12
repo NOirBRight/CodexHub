@@ -269,7 +269,14 @@ def compatible_sse_line(
         runtime_tool_changed = False
 
     if runtime_tool_inverse_only:
-        if not runtime_tool_changed:
+        import multimodal_tool_result as _multimodal_tool_result
+
+        notice_changed = False
+        if isinstance(payload, dict) and _multimodal_tool_result.annotate_compact_response_payload(
+            payload, event_context
+        ):
+            notice_changed = True
+        if not runtime_tool_changed and not notice_changed:
             return line
         return host._sse_json_line(payload, line_ending) + line_ending
 
@@ -306,6 +313,12 @@ def compatible_sse_line(
         capture_stream_event=False,
     )
     changed = changed or requested_binding_changed
+    import multimodal_tool_result as _multimodal_tool_result
+
+    if isinstance(payload, dict) and _multimodal_tool_result.annotate_compact_response_payload(
+        payload, event_context
+    ):
+        changed = True
     if not changed:
         return line
     return host._sse_json_line(payload, line_ending)

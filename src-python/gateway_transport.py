@@ -892,12 +892,14 @@ def build_upstream_headers(
             continue
         outgoing[key] = value
 
-    # Official passthrough keeps the Codex CLI User-Agent. Chat clients and
+    # Official passthrough keeps the caller User-Agent. Chat clients and
     # urllib/curl fingerprints 403 on some third-party WAFs (OpenCode Go).
-    keep_caller_user_agent = (
+    strict_official_passthrough = (
         request_mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH
+        if request_mutation_policy is not None
+        else behavior_profile == resolved_facts.official_passthrough_behavior
     )
-    if keep_caller_user_agent:
+    if strict_official_passthrough:
         if not any(key.lower() == "user-agent" for key in outgoing):
             outgoing["User-Agent"] = UPSTREAM_USER_AGENT
     else:
@@ -926,11 +928,6 @@ def build_upstream_headers(
                 outgoing[header_name] = header_value
         apply_identity_headers = getattr(adapter, "apply_identity_headers", None)
         if apply_identity_headers is not None:
-            strict_official_passthrough = (
-                request_mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH
-                if request_mutation_policy is not None
-                else behavior_profile == resolved_facts.official_passthrough_behavior
-            )
             apply_identity_headers(
                 outgoing,
                 strict_official_passthrough=strict_official_passthrough,

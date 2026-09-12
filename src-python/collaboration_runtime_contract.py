@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 import math
+import re
 from protocol_json import strict_json_loads
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -580,6 +581,14 @@ def validate_collaboration_result(version: str, name: str, value: Any) -> None:
             # a number-schema timeout emitted as 180000.0 but parsed as i64).
             # Replay it unchanged so the model can correct the failed call.
             if version == COLLABORATION_V2 and is_client_argument_parse_error(value):
+                return
+            # Codex CLI 0.153.4 reports duplicate agent paths as plain text.
+            # Preserve this failed spawn, not a fabricated success result.
+            if (
+                version == COLLABORATION_V2
+                and name == "spawn_agent"
+                and re.fullmatch(r"agent path `[^`\r\n]+` already exists", value)
+            ):
                 return
             # Codex CLI serializes a failed V2 interrupt as the tool's plain
             # error text rather than a JSON result object.  Preserve that
