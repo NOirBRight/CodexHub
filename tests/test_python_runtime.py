@@ -50,6 +50,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/e2e_codex_catalog_roundtrip.py",
     "scripts/e2e_gateway_client_matrix.py",
     "scripts/e2e_history_online_sync.py",
+    "scripts/e2e_image_tool_compact.py",
     "scripts/e2e_linux_cli_clients.py",
     "scripts/e2e_linux_dock_icon.py",
     "scripts/e2e_linux_gui_clients.py",
