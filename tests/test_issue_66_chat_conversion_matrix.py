@@ -68,6 +68,9 @@ def test_matrix_covers_required_chat_and_v2_surface() -> None:
     assert rows["request.tools.custom.unavailable"]["disposition"] == "unavailable"
     assert rows["request.tools.hosted"]["disposition"] == "unavailable"
     assert rows["request.reasoning.controls"]["disposition"] == "consumed_locally"
+    assert rows["request.prompt_cache_key"]["chat"] == "string or null"
+    assert "first-class" in rows["request.prompt_cache_key"]["notes"]
+    assert rows["request.prompt_cache_key.verified_endpoint"]["disposition"] == "native"
     assert all(
         key in rows["request.reasoning.controls"]["responses"]
         for key in ("effort", "summary", "generate_summary", "mode", "context")

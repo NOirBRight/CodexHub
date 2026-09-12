@@ -11,7 +11,7 @@
     },
     "protocol_translation": {
       "file": "src-python/protocol_translation.py",
-      "sha256": "173492516bd13f62bd4f67b186206d1e2180264d305f6931696a52a9c4f91145"
+      "sha256": "cb3a68a0d3c62d3b57843e568a7cd680c810e570a28a972a79a07cc7d44ca0fd"
     },
     "source_contract": {
       "file": "collaboration-runtime-contract.json",
@@ -239,15 +239,15 @@
     },
     {
       "category": "request_field",
-      "chat": "absent",
+      "chat": "string or null",
       "disposition": "consumed_locally",
       "execution_owner": "gateway",
       "fail_closed": false,
       "id": "request.prompt_cache_key",
       "implementation": "protocol_translation",
       "key": "prompt_cache_key",
-      "notes": "Cross-protocol conversion records a cache_control_dropped event for supplied keys on unverified endpoints. Cache usage reporting does not imply key support.",
-      "responses": "string",
+      "notes": "Chat inbound treats prompt_cache_key as a first-class field. Cross-protocol conversion records a cache_control_dropped event for supplied keys on unverified endpoints. Cache usage reporting does not imply key support.",
+      "responses": "string or null",
       "when": "destination endpoint cache-key support is unverified; missing, null, or string"
     },
     {
@@ -259,7 +259,7 @@
       "id": "request.prompt_cache_key.verified_endpoint",
       "implementation": "src-python/prompt_cache_policy.py; src-python/protocol_translation.py",
       "key": "prompt_cache_key",
-      "notes": "Preserved in both conversion directions. Same-protocol requests retain original controls and bytes. Invalid key types fail before forwarding.",
+      "notes": "Chat inbound prompt_cache_key is a first-class whitelist field. Preserved in both conversion directions. Same-protocol requests retain original controls and bytes. Invalid key types fail before forwarding.",
       "responses": "string or null",
       "when": "RoutePlan pins a verified destination endpoint capability"
     },

@@ -1422,6 +1422,33 @@ class ProtocolTranslationTests(unittest.TestCase):
         self.assertEqual(translated["tools"][0]["name"], "get_weather")
         self.assertEqual(translated["tool_choice"], {"type": "function", "name": "get_weather"})
 
+    def test_chat_request_preserves_prompt_cache_key(self):
+        for key in ("stable-session", "", None):
+            with self.subTest(key=key):
+                body = json.dumps(
+                    {
+                        "model": "example-model",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "prompt_cache_key": key,
+                    }
+                ).encode("utf-8")
+                translated = json.loads(
+                    protocol_translation.chat_completions_request_to_responses_body(body)
+                )
+                self.assertEqual(translated["prompt_cache_key"], key)
+
+    def test_chat_request_rejects_non_string_prompt_cache_key(self):
+        body = json.dumps(
+            {
+                "model": "example-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "prompt_cache_key": {"not": "a string"},
+            }
+        ).encode("utf-8")
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.chat_completions_request_to_responses_body(body)
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
     def test_function_tool_strictness_is_preserved_between_request_formats(self):
         responses_body = json.dumps(
             {

@@ -1118,6 +1118,48 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["choices"][0]["finish_reason"], "stop")
         self.assertEqual(handler._fake.status, 200)
 
+    def test_post_chat_completions_preserves_official_prompt_cache_key(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "prompt_cache_key": "stable-session",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_body = json.dumps({
+            "id": "resp_cache",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi there!", "annotations": []}],
+            }],
+        }).encode("utf-8")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
+            CodexProxyHandler.do_POST(handler)
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["prompt_cache_key"], "stable-session")
+        self.assertEqual(handler._fake.status, 200)
+
+    def test_post_chat_completions_rejects_prompt_cache_options(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "prompt_cache_key": "stable-session",
+            "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+
+        CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(handler._fake.status, 400)
+        self.assertIn(b"prompt_cache_options", b"".join(handler.wfile.writes))
+
     def test_post_chat_completions_maps_official_reasoning_summary_with_message(self):
         body = json.dumps({
             "model": "gpt-5.5",
@@ -3448,6 +3490,79 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         result = json.loads(b"".join(handler.wfile.writes))
         self.assertEqual(result["object"], "chat.completion")
         self.assertEqual(result["choices"][0]["message"]["content"], "Hi from responses")
+
+    def test_provider_scoped_chat_to_responses_drops_unverified_prompt_cache_key(self):
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
+        external_model = {
+            "alias": "responses-only/glm-5.2",
+            "provider_alias": "responses-only",
+            "upstream_name": "responses_only_provider",
+            "display_prefix": "ResponsesOnly",
+            "base_url": "https://responses-only.example.test/v1",
+            "api_key": "responses-only-token",
+            "upstream_model": "glm-5.2-responses",
+            "upstream_format": "responses",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "prompt_cache_key": "stable-session",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/responses-only/chat/completions")
+        upstream_body = json.dumps({
+            "id": "resp_cache_drop",
+            "object": "response",
+            "status": "completed",
+            "model": "glm-5.2-responses",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi from responses"}],
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "gateway_catalog_runtime.generated_catalog_slugs",
+                return_value={"gpt-5.5", "responses-only/glm-5.2"},
+            ),
+            patch(
+                "gateway_catalog_runtime.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "gateway_catalog_runtime.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2",),
+                ),
+            ),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertNotIn("prompt_cache_key", sent_payload)
+        dropped = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "cache_control_dropped"
+        ]
+        self.assertTrue(dropped)
+        self.assertEqual(dropped[0]["fields"], ["prompt_cache_key"])
+        self.assertEqual(dropped[0]["reason"], "unverified_endpoint_capability")
+        self.assertEqual(handler._fake.status, 200)
 
     def test_provider_scoped_responses_to_chat_non_streaming_fallback_skips_codex_response_repairs(self):
         policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)

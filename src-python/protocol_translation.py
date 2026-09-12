@@ -1373,6 +1373,7 @@ def chat_completions_request_to_responses_body(
             "chat_template_kwargs",
             "stream_options",
             "n",
+            "prompt_cache_key",
         },
         "Chat Completions request",
     )
@@ -1440,6 +1441,14 @@ def chat_completions_request_to_responses_body(
         responses_payload["tool_choice"] = tool_choice
     if effective_reasoning_effort is not None:
         responses_payload["reasoning"] = {"effort": effective_reasoning_effort}
+    if "prompt_cache_key" in payload:
+        cache_key = payload["prompt_cache_key"]
+        if cache_key is not None and not isinstance(cache_key, str):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a non-string Chat Completions prompt_cache_key.",
+            )
+        responses_payload["prompt_cache_key"] = cache_key
 
     return json.dumps(responses_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
