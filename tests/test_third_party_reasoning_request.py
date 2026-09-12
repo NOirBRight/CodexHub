@@ -430,6 +430,21 @@ def test_compatible_request_rejects_third_party_cache_only_web_search():
         )
 
 
+def test_compatible_request_rejects_third_party_cache_only_web_search_preview():
+    from gateway_errors import UpstreamProtocolTranslationError
+
+    body = _third_party_web_search_request("grok-4.6", external_web_access=False)
+    body["tools"][0]["type"] = "web_search_preview"
+    with pytest.raises(UpstreamProtocolTranslationError, match="external_web_access=false"):
+        gateway_compat.compatible_request_body(
+            json.dumps(body).encode(),
+            _xai_upstream(),
+            inject_codex_tools=False,
+            behavior_profile="codex_app_external_adapter",
+            event_context={},
+        )
+
+
 def test_compatible_request_rewrites_xai_root_union_and_keeps_nested_unions():
     transformed = json.loads(
         gateway_compat.compatible_request_body(

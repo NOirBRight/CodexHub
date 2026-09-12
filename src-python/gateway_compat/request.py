@@ -116,8 +116,8 @@ def _drop_third_party_web_search_external_web_access(payload: dict[str, Any]) ->
     it. xAI and other non-OpenAI Responses endpoints 400 with
     "Argument not supported: external_web_access". true is lossless to drop
     (those providers already search live). false is cache-only and must fail
-    closed — dropping it would silently enable live fetches.
-    web_search_preview ignores the flag even on OpenAI, so any value drops.
+    closed — dropping it would silently enable live fetches. Same for
+    web_search_preview: third-parties still execute live search.
     """
 
     tools = payload.get("tools")
@@ -130,7 +130,7 @@ def _drop_third_party_web_search_external_web_access(payload: dict[str, Any]) ->
         if "external_web_access" not in tool:
             continue
         value = tool.get("external_web_access")
-        if tool.get("type") == "web_search" and value is False:
+        if value is False:
             raise UpstreamProtocolTranslationError(
                 UnsupportedProtocolTranslationError(
                     "unsupported_protocol_semantics",

@@ -413,7 +413,7 @@ def test_third_party_chat_tools_still_omits_hosted_web_search() -> None:
                 {
                     "model": "muse",
                     "input": [{"role": "user", "content": "search"}],
-                    "tools": [{"type": "web_search"}],
+                    "tools": [{"type": "web_search", "external_web_access": False}],
                     "tool_choice": "auto",
                 }
             ).encode(),
