@@ -212,12 +212,45 @@ def _sanitizer_suite() -> dict:
     if alias in json.dumps(decoded):
         raise SystemExit("alias leaked to the Codex App response")
 
+    web_search_body = json.loads(
+        gateway_compat.compatible_request_body(
+            json.dumps(
+                {
+                    "model": "xai/grok-4.6",
+                    "input": [{"role": "user", "content": "search"}],
+                    "tools": [
+                        {
+                            "type": "web_search",
+                            "external_web_access": True,
+                            "search_context_size": "low",
+                        }
+                    ],
+                    "tool_choice": "auto",
+                }
+            ).encode("utf-8"),
+            {
+                "name": "xai",
+                "upstream_model": "grok-4.6",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+                "tool_surface_strategy": "eager",
+            },
+            event_context={},
+            inject_codex_tools=False,
+            behavior_profile="codex_app_external_adapter",
+        )
+    )
+    web_search = next(tool for tool in web_search_body["tools"] if tool.get("type") == "web_search")
+    if "external_web_access" in web_search:
+        raise SystemExit(f"external_web_access leaked to xAI: {web_search!r}")
+
     return {
         "sanitizer": "passed",
         "root_union_rewritten": union_count,
         "exclusive_required_rewritten": exclusive_count,
         "nested_untouched": True,
         "inverse_mapped": True,
+        "web_search_external_web_access_dropped": True,
         "alias_prefix": "__codexhub_ns_",
     }
 
@@ -257,6 +290,7 @@ def main() -> int:
     result = _sanitizer_suite()
     if os.environ.get("CODEXHUB_E2E_XAI") == "1":
         tools, _count = _sanitize([ROOT_UNION_WITH_NULL, EXCLUSIVE_REQUIRED, NESTED_ALLOWED, DESKTOP_AUTOMATION])
+        tools.append({"type": "web_search"})
         _live_xai_roundtrip(tools)
         return 0
     print(json.dumps(result))

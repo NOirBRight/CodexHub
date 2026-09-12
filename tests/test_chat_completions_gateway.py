@@ -624,11 +624,11 @@ class ChatToolsToResponsesTests(unittest.TestCase):
 
     def test_passes_known_native_hosted_and_custom_types(self):
         tools = chat_tools_to_responses_tools([
-            {"type": "web_search", "search_context_size": "low"},
+            {"type": "web_search", "search_context_size": "low", "external_web_access": False},
             {"type": "custom", "name": "apply_patch", "format": {"type": "text"}},
             {"type": "tool_search", "execution": "client"},
         ])
-        self.assertEqual(tools[0], {"type": "web_search", "search_context_size": "low"})
+        self.assertEqual(tools[0], {"type": "web_search", "search_context_size": "low", "external_web_access": False})
         self.assertEqual(tools[1]["type"], "custom")
         self.assertEqual(tools[2], {"type": "tool_search", "execution": "client"})
 

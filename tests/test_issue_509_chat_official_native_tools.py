@@ -66,8 +66,12 @@ def _search_alias() -> str:
 
 
 def test_native_hosted_type_stays_native_on_official() -> None:
-    prepared, context = _prepared_official(tools=[{"type": "web_search", "search_context_size": "low"}])
-    assert prepared["tools"] == [{"type": "web_search", "search_context_size": "low"}]
+    prepared, context = _prepared_official(
+        tools=[{"type": "web_search", "search_context_size": "low", "external_web_access": False}]
+    )
+    assert prepared["tools"] == [
+        {"type": "web_search", "search_context_size": "low", "external_web_access": False}
+    ]
     assert context[CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY]["hosted"]["web_search"] == "web_search"
 
 

@@ -106,6 +106,42 @@ def _wrap_chat_function_tools(payload: dict[str, Any]) -> bool:
     return changed
 
 
+_WEB_SEARCH_TOOL_TYPES = frozenset({"web_search", "web_search_preview"})
+
+
+def _drop_third_party_web_search_external_web_access(payload: dict[str, Any]) -> bool:
+    """Drop hosted web_search.external_web_access when the provider cannot honor it.
+
+    Codex Desktop 0.153+ puts this flag on hosted web_search. Official accepts
+    it. xAI and other non-OpenAI Responses endpoints 400 with
+    "Argument not supported: external_web_access". true is lossless to drop
+    (those providers already search live). false is cache-only and must fail
+    closed — dropping it would silently enable live fetches.
+    web_search_preview ignores the flag even on OpenAI, so any value drops.
+    """
+
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+    changed = False
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") not in _WEB_SEARCH_TOOL_TYPES:
+            continue
+        if "external_web_access" not in tool:
+            continue
+        value = tool.get("external_web_access")
+        if tool.get("type") == "web_search" and value is False:
+            raise UpstreamProtocolTranslationError(
+                UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot honor web_search external_web_access=false on a third-party route.",
+                )
+            )
+        tool.pop("external_web_access", None)
+        changed = True
+    return changed
+
+
 def compatible_request_body(
     body: bytes,
     upstream: Mapping[str, Any],
@@ -698,6 +734,8 @@ def compatible_request_body(
                 payload = json.loads(flattened.decode("utf-8"))
                 changed = True
         if isinstance(payload.get("messages"), list) and _wrap_chat_function_tools(payload):
+            changed = True
+        if _drop_third_party_web_search_external_web_access(payload):
             changed = True
 
     if not changed:
