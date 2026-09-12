@@ -51,6 +51,7 @@ PROVIDER_ROUTES = {
         "upstream_host": "api.x.ai",
         "upstream_origin": "https://api.x.ai",
         "extra_source_files": ("proxy/xai_auth.json",),
+        "use_recorder": True,
     },
     "opencode-go/muse-spark-1.3-contributor": {
         "toml_needle": 'id = "opencode-go"\nname = "OpenCode Go"\nbase_url = "https://opencode.ai/zen/go/v1"',
@@ -58,6 +59,8 @@ PROVIDER_ROUTES = {
         "upstream_host": "opencode.ai",
         "upstream_origin": "https://opencode.ai",
         "extra_source_files": (),
+        # Prove Gateway origin TLS/headers, not a local HTTP recorder.
+        "use_recorder": False,
     },
 }
 
@@ -230,7 +233,7 @@ class RecordingProxy:
         captures = self.captures
         upstream_host = self.upstream_host
         upstream_origin = self.upstream_origin
-        opener = _https_opener(self.https_proxy, ssl.create_default_context())
+        https_proxy = self.https_proxy
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -256,15 +259,36 @@ class RecordingProxy:
                         len(payload["input"]) if isinstance(payload.get("input"), list) else None
                     )
                 captures.append(record)
+                allowed = {
+                    "authorization",
+                    "content-type",
+                    "user-agent",
+                    "x-opencode-session",
+                    "x-session-id",
+                    "session-id",
+                    "x-codex-session-id",
+                }
                 headers = {
                     key: value
                     for key, value in self.headers.items()
-                    if key.lower() not in {"host", "content-length", "connection"}
+                    if key.lower() in allowed
                 }
-                headers["Host"] = upstream_host
+                headers["Accept"] = "application/json"
                 request_path = self.path or "/"
                 url = upstream_origin + request_path
+                if upstream_host == "opencode.ai":
+                    import opencode_go_session
+                    if not any(key.lower() == "x-session-id" for key in headers):
+                        headers["x-session-id"] = "e2e-image-compact"
+                    headers = opencode_go_session.bind_session_headers(
+                        headers, "https://opencode.ai" + request_path, None
+                    )
+                record["forward_path"] = self.path
+                record["has_authorization"] = any(key.lower() == "authorization" for key in headers)
+                record["has_opencode_session"] = any(key.lower() == "x-opencode-session" for key in headers)
+                record["forward_header_names"] = sorted(key.lower() for key in headers)
                 try:
+                    opener = _https_opener(https_proxy, ssl.create_default_context())
                     with opener.open(
                         Request(url, data=body, headers=headers, method="POST"),
                         timeout=180,
@@ -285,6 +309,13 @@ class RecordingProxy:
                     self.wfile.write(b'{"error":"recorder_upstream_unavailable"}')
                     return
                 record["upstream_status"] = status
+                record["upstream_content_type"] = content_type
+                record["upstream_error_kind"] = (
+                    "html"
+                    if response_body.lstrip()[:15].lower().startswith(b"<!doctype")
+                    or response_body.lstrip()[:5].lower().startswith(b"<html")
+                    else "json-or-other"
+                )
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(response_body)))
@@ -326,6 +357,7 @@ def _post_gateway(
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
+        "x-session-id": "e2e-image-compact",
     }
     if compact:
         headers["x-codex-turn-metadata"] = json.dumps({"request_kind": "compaction"})
@@ -366,6 +398,15 @@ def _sanitize_error_excerpt(body: bytes) -> dict[str, Any]:
         payload = json.loads(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         excerpt["unreadable"] = True
+        raw = body.lstrip()
+        excerpt["body_kind"] = "html" if raw[:15].lower().startswith(b"<!doctype") or raw[:5].lower().startswith(b"<html") else "non-json"
+        if excerpt["body_kind"] == "html":
+            lower = body.decode("utf-8", errors="replace").lower()
+            if "cloudflare" in lower:
+                excerpt["html_hint"] = "cloudflare"
+            elif "<title>" in lower:
+                start = lower.find("<title>") + 7
+                excerpt["html_hint"] = body.decode("utf-8", errors="replace")[start:start+80].split("<")[0].strip()[:80]
         return excerpt
     if not isinstance(payload, dict):
         return excerpt
@@ -401,6 +442,8 @@ def _classify_upstream_failure(status: int, body: bytes) -> str | None:
         for needle in ("maximum prompt", "prompt length", "context length", "too many tokens")
     ):
         return "context_overflow"
+    if "error code: 1010" in text or "cloudflare" in text:
+        return "cloudflare_blocked"
     if status in {401, 403}:
         return "auth"
     if status == 429 or "rate" in text:
@@ -448,13 +491,15 @@ def run_isolated(*, source_home: Path, model: str, timeout: int, https_proxy: st
             target = server_home / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source / name, target)
-        recorder = RecordingProxy(
-            upstream_host=str(route["upstream_host"]),
-            upstream_origin=str(route["upstream_origin"]),
-            https_proxy=https_proxy,
-        )
-        recorder.start()
-        try:
+        use_recorder = bool(route.get("use_recorder", True))
+        recorder = None
+        if use_recorder:
+            recorder = RecordingProxy(
+                upstream_host=str(route["upstream_host"]),
+                upstream_origin=str(route["upstream_origin"]),
+                https_proxy=https_proxy,
+            )
+            recorder.start()
             providers_path = server_home / "proxy/config/providers.toml"
             providers_path.write_text(
                 rewrite_provider_base_url(
@@ -464,6 +509,7 @@ def run_isolated(*, source_home: Path, model: str, timeout: int, https_proxy: st
                 ),
                 encoding="utf-8",
             )
+        try:
             with socket.socket() as listener:
                 listener.bind(("127.0.0.1", 0))
                 port = int(listener.getsockname()[1])
@@ -503,7 +549,7 @@ def run_isolated(*, source_home: Path, model: str, timeout: int, https_proxy: st
                     compact=True,
                     timeout=timeout,
                 )
-                capture = recorder.captures[-1] if recorder.captures else None
+                capture = recorder.captures[-1] if recorder is not None and recorder.captures else None
                 outbound = capture.get("payload") if isinstance(capture, dict) else None
                 text_blob = collect_non_media_text(outbound) if isinstance(outbound, dict) else ""
                 marker_in_text = any(marker in text_blob for marker in markers)
@@ -512,6 +558,7 @@ def run_isolated(*, source_home: Path, model: str, timeout: int, https_proxy: st
                     dumped = json.dumps(outbound)
                     marker_anywhere = any(marker in dumped for marker in markers)
                 lifted = count_user_input_images(outbound) if isinstance(outbound, dict) else 0
+                time.sleep(0.4)
                 events_path = server_home / "proxy/codex-proxy-events.jsonl"
                 adapted_events = _event_fields(events_path, "tool_result_media_adapted")
                 adapted_counts = None
@@ -539,6 +586,12 @@ def run_isolated(*, source_home: Path, model: str, timeout: int, https_proxy: st
                         "outbound_bytes": None if capture is None else capture.get("bytes"),
                         "outbound_sha256": None if capture is None else capture.get("sha256"),
                         "outbound_input_count": None if capture is None else capture.get("input_count"),
+                        "outbound_path": None if capture is None else capture.get("forward_path"),
+                        "outbound_has_authorization": None if capture is None else capture.get("has_authorization"),
+                        "outbound_has_opencode_session": None if capture is None else capture.get("has_opencode_session"),
+                        "outbound_header_names": None if capture is None else capture.get("forward_header_names"),
+                        "upstream_content_type": None if capture is None else capture.get("upstream_content_type"),
+                        "upstream_error_kind": None if capture is None else capture.get("upstream_error_kind"),
                         "lifted_user_images": lifted,
                         "marker_in_non_media_text": marker_in_text,
                         "marker_present_in_structured_fields": marker_anywhere and not marker_in_text,
@@ -548,7 +601,8 @@ def run_isolated(*, source_home: Path, model: str, timeout: int, https_proxy: st
                         "compact_summary_chars": len(compact_text),
                     }
                 )
-                if capture is None:
+                report["used_outbound_recorder"] = use_recorder
+                if use_recorder and capture is None:
                     report["failure_classification"] = "recorder_missed_outbound"
                     report["status"] = "unverified"
                     return report
@@ -564,7 +618,12 @@ def run_isolated(*, source_home: Path, model: str, timeout: int, https_proxy: st
                     report["failure_classification"] = overflow or "compact_http_error"
                     report["status"] = "unverified"
                     return report
-                if lifted != len(markers):
+                lifted_ok = lifted == len(markers)
+                if not use_recorder:
+                    event_lifted = (adapted_counts or {}).get("lifted_image_count")
+                    lifted_ok = event_lifted == len(markers)
+                    report["lifted_user_images"] = event_lifted
+                if not lifted_ok:
                     report["failure_classification"] = "images_not_lifted"
                     report["status"] = "failed"
                     return report
@@ -619,7 +678,8 @@ def run_isolated(*, source_home: Path, model: str, timeout: int, https_proxy: st
                 except subprocess.TimeoutExpired:
                     server.kill()
         finally:
-            recorder.close()
+            if recorder is not None:
+                recorder.close()
 
 
 def main() -> int:

@@ -30,7 +30,9 @@ from route_primitives import (
     RETRY_FAILURE_PROVIDER_OVERLOADED,
     RETRY_FAILURE_PROVIDER_THROTTLE,
     RETRY_FAILURE_QUICK_TRANSIENT,
+    UPSTREAM_USER_AGENT,
     AuthenticationStrategy,
+    MutationPolicy,
     TransportPolicy,
 )
 
@@ -294,6 +296,37 @@ def test_codex_responses_lite_header_is_dropped_through_adapter_hook() -> None:
     }
     assert headers["Authorization"] == "Bearer tok"
     assert headers["Session-id"] == "id"
+
+
+def test_gateway_compatibility_replaces_inbound_client_user_agent() -> None:
+    headers = build_upstream_headers(
+        {
+            "Content-Type": "application/json",
+            "User-Agent": "Python-urllib/3.14",
+            "x-session-id": "e2e-image-compact",
+        },
+        {"auth": "api_key", "name": "opencode_go", "api_key": "sk-test"},
+        request_mutation_policy=MutationPolicy.GATEWAY_COMPATIBILITY,
+        authentication_strategy=AuthenticationStrategy.API_KEY,
+    )
+    assert headers["User-Agent"] == UPSTREAM_USER_AGENT
+    assert "Python-urllib" not in headers["User-Agent"]
+    assert headers["x-session-id"] == "e2e-image-compact"
+
+
+def test_official_passthrough_keeps_inbound_user_agent() -> None:
+    headers = build_upstream_headers(
+        {
+            "Content-Type": "application/json",
+            "User-Agent": "Codex Desktop/0.153.4",
+        },
+        {"auth": "codex_auth", "name": "official"},
+        request_mutation_policy=MutationPolicy.OFFICIAL_PASSTHROUGH,
+        access_token=lambda: "tok",
+        account_id=lambda: "acct",
+        new_id=lambda: "id",
+    )
+    assert headers["User-Agent"] == "Codex Desktop/0.153.4"
 
 
 def test_module_level_header_helpers_match_injected_adapter() -> None:

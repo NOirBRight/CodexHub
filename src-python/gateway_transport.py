@@ -892,7 +892,23 @@ def build_upstream_headers(
             continue
         outgoing[key] = value
 
-    if not any(key.lower() == "user-agent" for key in outgoing):
+    strict_official_passthrough = (
+        request_mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH
+        if request_mutation_policy is not None
+        else behavior_profile == resolved_facts.official_passthrough_behavior
+    )
+    if strict_official_passthrough:
+        if not any(key.lower() == "user-agent" for key in outgoing):
+            outgoing["User-Agent"] = UPSTREAM_USER_AGENT
+    else:
+        # Inbound Client UA is the Codex/Gateway caller, not a provider
+        # identity. Cloudflare Browser Integrity Check (1010) rejects
+        # Python-urllib and similar signatures on some third-party origins.
+        outgoing = {
+            key: value
+            for key, value in outgoing.items()
+            if key.lower() != "user-agent"
+        }
         outgoing["User-Agent"] = UPSTREAM_USER_AGENT
 
     if adapter is not None:
@@ -913,11 +929,6 @@ def build_upstream_headers(
                 outgoing[header_name] = header_value
         apply_identity_headers = getattr(adapter, "apply_identity_headers", None)
         if apply_identity_headers is not None:
-            strict_official_passthrough = (
-                request_mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH
-                if request_mutation_policy is not None
-                else behavior_profile == resolved_facts.official_passthrough_behavior
-            )
             apply_identity_headers(
                 outgoing,
                 strict_official_passthrough=strict_official_passthrough,
