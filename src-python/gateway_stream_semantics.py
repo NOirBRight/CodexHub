@@ -10,12 +10,16 @@ from __future__ import annotations
 from functools import partial
 import html
 import json
-from protocol_json import AmbiguousJSONError, strict_json_loads
+import logging
 import re
 import time
 import uuid
 from collections.abc import Mapping
 from typing import Any
+
+from protocol_json import AmbiguousJSONError, strict_json_loads
+
+_LOGGER = logging.getLogger(__name__)
 
 from gateway_events import (
     RUNTIME_CODEX_DIR,
@@ -220,6 +224,19 @@ def _validate_verified_converted_sse_payload(
     source_format: str,
 ) -> None:
     def invalid_shape() -> None:
+        event_type = payload.get("type") if isinstance(payload, Mapping) else None
+        keys = sorted(payload.keys()) if isinstance(payload, Mapping) else []
+        response = payload.get("response") if isinstance(payload, Mapping) else None
+        response_keys = (
+            sorted(response.keys()) if isinstance(response, Mapping) else []
+        )
+        _LOGGER.warning(
+            "verified SSE payload failed %s validation type=%s keys=%s response_keys=%s",
+            source_format,
+            event_type,
+            keys,
+            response_keys,
+        )
         raise _verified_converted_sse_semantic_error(source_format)
 
     def validate_usage(
@@ -316,15 +333,18 @@ def _validate_verified_converted_sse_payload(
             if not isinstance(response, Mapping):
                 invalid_shape()
             for field in ("id", "model", "status"):
-                if field in response and not isinstance(response.get(field), str):
+                value = response.get(field)
+                if field in response and value is not None and not isinstance(value, str):
                     invalid_shape()
             if "output" in response:
                 output = response.get("output")
+                if output is None:
+                    output = []
                 if not isinstance(output, list):
                     invalid_shape()
                 for item in output:
                     validate_output_item(item)
-            if "usage" in response:
+            if "usage" in response and response.get("usage") is not None:
                 validate_usage(
                     response.get("usage"),
                     token_fields=("input_tokens", "output_tokens", "total_tokens"),

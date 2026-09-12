@@ -5,11 +5,15 @@ This module must not import the V1 adapter. V2 adaptation cannot execute V1 path
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any, Mapping
 
 from collaboration_runtime_contract import (
     COLLABORATION_V2,
+    EXPECTED_PARAMETER_SCHEMAS,
+    V1_TOOLS,
+    V2_TOOLS,
     failed_argument_call_ids,
     CollaborationContractError,
     normalize_collaboration_arguments,
@@ -19,7 +23,7 @@ from collaboration_runtime_contract import (
 )
 
 from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, copy_mapping as _copy_mapping
-from .dispositions import ADAPT, NAMESPACE
+from .dispositions import ADAPT, NAMESPACE, name_of
 
 
 V2_NAMES = frozenset(
@@ -51,6 +55,295 @@ def strip_encrypted_annotations(value: Any) -> Any:
     if isinstance(value, list):
         return [strip_encrypted_annotations(child) for child in value]
     return value
+
+
+CHAT_OFFICIAL_V2_NAME_MAP_KEY = "_chat_official_v2_name_map"
+_V1_ONLY_TOOLS = frozenset(V1_TOOLS) - V2_NAMES
+
+
+def _v2_alias_to_name() -> dict[str, str]:
+    from .registry import RequestScopedToolAliasRegistry
+
+    registry = RequestScopedToolAliasRegistry(request_token="request")
+    mapping: dict[str, str] = {}
+    for index, name in enumerate(V2_TOOLS):
+        alias = registry.allocate_namespace(
+            declaration_index=0,
+            namespace=V2_NAMESPACE,
+            child_index=index,
+            child_name=name,
+            version="v2",
+        )
+        mapping[alias] = name
+    return mapping
+
+
+def _canonical_v2_name(name: str | None, alias_to_name: Mapping[str, str]) -> str | None:
+    if not isinstance(name, str) or not name:
+        return None
+    if name in V2_NAMES:
+        return name
+    return alias_to_name.get(name)
+
+
+def official_v2_parameter_schema(name: str) -> dict[str, Any]:
+    """Emit the reserved Official V2 child schema, not the validation copy.
+
+    The frozen contract keeps empty ``required`` arrays and optional
+    ``spawn_agent.agent_type`` for classification. Official reserved-function
+    matching does not: CLI 0.153.4 and chatgpt.com omit both. Sending
+    ``required: []`` is rejected as
+    ``collaboration.list_agents`` / configured-schema mismatch.
+    """
+
+    parameters = copy.deepcopy(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2][name])
+    if name == "spawn_agent":
+        properties = parameters.get("properties")
+        if isinstance(properties, dict):
+            properties.pop("agent_type", None)
+    if not parameters.get("required"):
+        parameters.pop("required", None)
+    return parameters
+
+
+def _official_v2_namespace(source_by_name: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    children: list[dict[str, Any]] = []
+    for name in V2_TOOLS:
+        source = source_by_name[name]
+        description = source.get("description")
+        nested = source.get("function")
+        if not isinstance(description, str) and isinstance(nested, Mapping):
+            description = nested.get("description")
+        children.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": description if isinstance(description, str) else name,
+                "strict": False,
+                "parameters": official_v2_parameter_schema(name),
+            }
+        )
+    return {
+        "type": "namespace",
+        "name": V2_NAMESPACE,
+        "description": V2_NAMESPACE,
+        "tools": children,
+    }
+
+
+def _expand_plaintext_agent_message(item: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+    if item.get("type") != "message" or item.get("role") != "user":
+        return _copy_mapping(item), False
+    content = item.get("content")
+    if not isinstance(content, list) or len(content) != 1:
+        return _copy_mapping(item), False
+    part = content[0]
+    if not isinstance(part, Mapping):
+        return _copy_mapping(item), False
+    text = part.get("text")
+    if not isinstance(text, str) or not text.startswith(AGENT_MESSAGE_ENVELOPE_PREFIX):
+        return _copy_mapping(item), False
+    try:
+        original = json.loads(text[len(AGENT_MESSAGE_ENVELOPE_PREFIX) :])
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "unknown_agent_message_envelope",
+            surface="history",
+        ) from exc
+    if not isinstance(original, dict):
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "unknown_agent_message_envelope",
+            surface="history",
+        )
+    try:
+        validate_agent_message(original)
+    except CollaborationContractError as exc:
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            exc.classification,
+            surface="history",
+        ) from exc
+    content_parts = original.get("content")
+    if isinstance(content_parts, list) and any(
+        isinstance(part, Mapping) and part.get("type") == "encrypted_content"
+        for part in content_parts
+    ):
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "encrypted_agent_message_unavailable",
+            surface="history",
+        )
+    return original, True
+
+
+def expand_chat_v2_for_official(
+    payload: dict[str, Any],
+    event_context: Mapping[str, Any] | None = None,
+) -> bool:
+    """Fold a complete Chat V2 six-pack (or aliases) into the native namespace."""
+
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        tools = []
+    alias_to_name = _v2_alias_to_name()
+    v2_sources: dict[str, Mapping[str, Any]] = {}
+    remaining: list[Any] = []
+    saw_v1 = False
+    saw_v2_name = False
+    for tool in tools:
+        if not isinstance(tool, Mapping):
+            remaining.append(tool)
+            continue
+        name = name_of(tool)
+        if name in _V1_ONLY_TOOLS:
+            saw_v1 = True
+            remaining.append(tool)
+            continue
+        canonical = _canonical_v2_name(name, alias_to_name)
+        if canonical is None:
+            remaining.append(tool)
+            continue
+        saw_v2_name = True
+        if canonical in v2_sources:
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "namespace_child_duplicate",
+                surface="request",
+            )
+        v2_sources[canonical] = tool
+    if saw_v1:
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "mixed_v1_v2",
+            surface="request",
+        )
+    if not saw_v2_name and not v2_sources:
+        input_items = payload.get("input")
+        if isinstance(input_items, list):
+            for item in input_items:
+                if not isinstance(item, Mapping):
+                    continue
+                if item.get("type") == "function_call":
+                    name = item.get("name")
+                    if name in _V1_ONLY_TOOLS:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "mixed_v1_v2",
+                            surface="history",
+                        )
+                    if _canonical_v2_name(name if isinstance(name, str) else None, alias_to_name):
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "namespace_child_set_invalid",
+                            surface="history",
+                        )
+        return False
+    if set(v2_sources) != V2_NAMES:
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "namespace_child_set_invalid",
+            surface="request",
+        )
+    if payload.get("tool_choice") not in (None, "auto"):
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary",
+            "tool_choice_invalid",
+            surface="request",
+        )
+    payload["tool_choice"] = "auto"
+    payload["tools"] = [_official_v2_namespace(v2_sources), *remaining]
+    name_map = {
+        canonical: name_of(source) or canonical
+        for canonical, source in v2_sources.items()
+    }
+    if isinstance(event_context, dict):
+        event_context[CHAT_OFFICIAL_V2_NAME_MAP_KEY] = name_map
+
+    input_items = payload.get("input")
+    if isinstance(input_items, list):
+        rewritten: list[Any] = []
+        for item in input_items:
+            if not isinstance(item, Mapping):
+                rewritten.append(item)
+                continue
+            if item.get("type") == "function_call":
+                next_item = _copy_mapping(item)
+                canonical = _canonical_v2_name(
+                    next_item.get("name") if isinstance(next_item.get("name"), str) else None,
+                    alias_to_name,
+                )
+                if canonical is None:
+                    if next_item.get("name") in _V1_ONLY_TOOLS:
+                        raise ToolCompatibilityError(
+                            "tool_compatibility_boundary",
+                            "mixed_v1_v2",
+                            surface="history",
+                        )
+                    rewritten.append(next_item)
+                    continue
+                encrypted_args = next_item.get("encrypted_function_args")
+                if encrypted_args not in (None, []):
+                    raise ToolCompatibilityError(
+                        "tool_compatibility_boundary",
+                        "encrypted_collaboration_arguments_unavailable",
+                        surface="history",
+                    )
+                arguments = next_item.get("arguments")
+                if isinstance(arguments, str) and arguments:
+                    try:
+                        parsed = json.loads(arguments)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        parsed = None
+                    if isinstance(parsed, Mapping):
+                        validate_v2_fields(parsed)
+                next_item["name"] = canonical
+                next_item["namespace"] = V2_NAMESPACE
+                next_item["encrypted_function_args"] = []
+                rewritten.append(next_item)
+                continue
+            decoded, changed_item = _expand_plaintext_agent_message(item)
+            rewritten.append(decoded)
+        payload["input"] = rewritten
+    return True
+
+
+def collapse_official_v2_names_for_chat(
+    payload: dict[str, Any],
+    event_context: Mapping[str, Any] | None,
+) -> bool:
+    """Rewrite Official namespace names back to the Chat-declared spelling."""
+
+    name_map = (event_context or {}).get(CHAT_OFFICIAL_V2_NAME_MAP_KEY)
+    if not isinstance(name_map, Mapping) or not name_map:
+        return False
+    changed = False
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return False
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "function_call":
+            continue
+        original = item.get("name")
+        chat_name = name_map.get(original)
+        if isinstance(chat_name, str) and chat_name and chat_name != original:
+            item["name"] = chat_name
+            changed = True
+        encrypted_args = item.get("encrypted_function_args")
+        if encrypted_args not in (None, []):
+            raise ToolCompatibilityError(
+                "tool_compatibility_boundary",
+                "encrypted_collaboration_arguments_unavailable",
+                surface="response",
+            )
+        if "encrypted_function_args" in item:
+            item.pop("encrypted_function_args")
+            changed = True
+        if item.get("namespace") == V2_NAMESPACE:
+            item.pop("namespace", None)
+            changed = True
+    return changed
 
 
 def apply_v2_namespace_decode(result: dict[str, Any], record: Any) -> None:

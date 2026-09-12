@@ -55,6 +55,24 @@ _HOSTED_EVENT_STAGES = {
     "file_search": ("file_search_call", ("in_progress", "searching", "completed")),
     "code_interpreter": ("code_interpreter_call", ("in_progress", "interpreting", "completed")),
 }
+CHAT_OFFICIAL_HOSTED_KINDS = frozenset(_HOSTED_EVENT_STAGES)
+CHAT_NATIVE_TOOL_TYPES = CHAT_OFFICIAL_HOSTED_KINDS | {"custom", "tool_search", "namespace"}
+
+
+def hosted_event_chat_names() -> dict[str, str]:
+    """Map a hosted call item type to the Chat function name.
+
+    ``web_search`` and ``web_search_preview`` share ``web_search_call``; keep
+    the portable ``web_search`` spelling when collapsing for Chat.
+    """
+
+    names: dict[str, str] = {}
+    for kind, (event_kind, _stages) in _HOSTED_EVENT_STAGES.items():
+        if event_kind in names and kind != "web_search":
+            continue
+        names[event_kind] = kind
+    return names
+_hosted_event_chat_names = hosted_event_chat_names
 
 
 def name_of(value: Mapping[str, Any]) -> str | None:

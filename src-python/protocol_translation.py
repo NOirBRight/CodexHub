@@ -5,8 +5,11 @@ repair.  This module owns only the protocol shapes used at that boundary.
 Optional callbacks keep the few Gateway-owned naming and repair policies out of
 the translation implementation while preserving existing behavior.
 
-Only the documented lossless subset crosses this seam: text without
-annotations, URL-backed images (including detail), and paired function calls.
+Only the documented lossless subset crosses this seam: portable text,
+URL-backed images (including detail), and paired function calls.
+Responses text-part ``annotations`` (official hosted-search citations)
+are dropped so Chat can keep the answer; Chat clients that send
+annotations still fail closed.
 The longstanding developer-to-system/instructions text compatibility mapping
 remains for third-party Chat endpoints. Other semantic items—including new
 content fields—raise ``UnsupportedProtocolTranslationError`` instead of being
@@ -22,6 +25,9 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from prompt_cache_policy import PromptCacheKeyPolicy
+from tool_compatibility.contracts import ToolCompatibilityError
+from tool_compatibility.chat_official_native import collapse_hosted_item_for_chat
+from tool_compatibility.dispositions import CHAT_NATIVE_TOOL_TYPES, CHAT_OFFICIAL_HOSTED_KINDS
 import uuid
 
 from gateway_errors import (
@@ -164,8 +170,26 @@ def _responses_reasoning_text(item: Mapping[str, Any]) -> str:
     request cannot cross the seam losslessly and must fail closed.
     """
 
+    text = _portable_output_reasoning_text(item, drop_encrypted=False)
+    if text is None:
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate an empty Responses reasoning item to Chat Completions.",
+        )
+    return text
+
+
+def _portable_output_reasoning_text(
+    item: Mapping[str, Any],
+    *,
+    drop_encrypted: bool,
+) -> str | None:
+    """Return portable Chat reasoning text, or None when ciphertext-only output may be skipped."""
+
     summary = item.get("summary")
-    if not isinstance(summary, list):
+    if summary is None:
+        summary = []
+    elif not isinstance(summary, list):
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
             "Cannot translate a Responses reasoning item without a summary list.",
@@ -217,17 +241,19 @@ def _responses_reasoning_text(item: Mapping[str, Any]) -> str:
             if text and text not in texts:
                 texts.append(text)
     encrypted = item.get("encrypted_content")
-    if encrypted not in (None, ""):
+    if encrypted not in (None, "") and not drop_encrypted:
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
             "Cannot translate encrypted Responses reasoning content to Chat Completions.",
         )
-    if not texts:
-        raise UnsupportedProtocolTranslationError(
-            "unsupported_protocol_semantics",
-            "Cannot translate an empty Responses reasoning item to Chat Completions.",
-        )
-    return "\n".join(texts)
+    if texts:
+        return "\n".join(texts)
+    if drop_encrypted:
+        return None
+    raise UnsupportedProtocolTranslationError(
+        "unsupported_protocol_semantics",
+        "Cannot translate an empty Responses reasoning item to Chat Completions.",
+    )
 
 
 def _require_supported_chat_message_fields(message: Mapping[str, Any], label: str) -> None:
@@ -479,13 +505,11 @@ def responses_content_to_chat_content(value: Any) -> str | list[dict[str, Any]]:
             )
         part_type = part.get("type")
         if part_type in {"input_text", "output_text", "text"} and isinstance(part.get("text"), str):
-            _require_supported_fields(part, {"type", "text", "annotations"}, "Responses text content part")
-            annotations = part.get("annotations")
-            if annotations not in (None, []):
-                raise UnsupportedProtocolTranslationError(
-                    "unsupported_protocol_semantics",
-                    "Cannot translate Responses text annotations to Chat Completions without losing them.",
-                )
+            _require_supported_fields(
+                part,
+                {"type", "text", "annotations", "logprobs"},
+                "Responses text content part",
+            )
             text = part["text"]
             text_fragments.append(text)
             parts.append({"type": "text", "text": text})
@@ -1254,6 +1278,64 @@ def chat_messages_to_responses_input(
     return instructions, input_items
 
 
+_CHAT_NATIVE_TOOL_FIELDS = {
+    "web_search": {"type", "search_context_size", "user_location", "filters"},
+    "web_search_preview": {"type", "search_context_size", "user_location"},
+    "file_search": {"type", "vector_store_ids", "max_num_results", "ranking_options", "filters"},
+    "code_interpreter": {"type", "container"},
+    "custom": {"type", "name", "description", "format"},
+    "tool_search": {"type", "execution", "description", "parameters"},
+    "namespace": {"type", "name", "description", "tools"},
+}
+
+
+def _chat_native_tool_to_responses(item: Mapping[str, Any]) -> dict[str, Any]:
+    tool_type = item.get("type")
+    if tool_type not in CHAT_NATIVE_TOOL_TYPES:
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            f"Cannot translate Chat Completions tool type {tool_type!r} to Responses.",
+        )
+    for key, child in item.items():
+        if isinstance(key, str) and "encrypted" in key and child not in (None, "", [], False):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate encrypted Chat Completions native-tool fields to Responses.",
+            )
+    allowed = _CHAT_NATIVE_TOOL_FIELDS[str(tool_type)]
+    _require_supported_fields(item, allowed, f"Chat Completions {tool_type} tool")
+    if tool_type == "custom":
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a Chat Completions custom tool without a non-empty name.",
+            )
+        if not isinstance(item.get("format"), Mapping):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a Chat Completions custom tool without a format object.",
+            )
+    if tool_type == "tool_search" and item.get("execution") != "client":
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate a non-client Chat Completions tool_search declaration to Responses.",
+        )
+    if tool_type == "namespace":
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a Chat Completions namespace tool without a non-empty name.",
+            )
+        if "tools" in item and not isinstance(item.get("tools"), list):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a Chat Completions namespace tool without a tools list.",
+            )
+    return {key: item[key] for key in allowed if key in item}
+
+
 def chat_tools_to_responses_tools(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
@@ -1264,6 +1346,9 @@ def chat_tools_to_responses_tools(value: Any) -> list[dict[str, Any]]:
         )
     tools: list[dict[str, Any]] = []
     for item in value:
+        if isinstance(item, dict) and item.get("type") in CHAT_NATIVE_TOOL_TYPES:
+            tools.append(_chat_native_tool_to_responses(item))
+            continue
         if not isinstance(item, dict) or item.get("type") != "function":
             tool_type = item.get("type") if isinstance(item, Mapping) else type(item).__name__
             raise UnsupportedProtocolTranslationError(
@@ -1307,6 +1392,21 @@ def chat_tool_choice_to_responses_tool_choice(value: Any) -> Any:
         return value
     if value is None:
         return value
+    if isinstance(value, dict) and value.get("type") in CHAT_OFFICIAL_HOSTED_KINDS:
+        _require_supported_fields(value, {"type"}, "Chat Completions hosted tool_choice")
+        return {"type": value["type"]}
+    if isinstance(value, dict) and value.get("type") == "custom":
+        _require_supported_fields(value, {"type", "name"}, "Chat Completions custom tool_choice")
+        name = value.get("name")
+        if not isinstance(name, str) or not name:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a Chat Completions custom tool_choice without a non-empty name.",
+            )
+        return {"type": "custom", "name": name}
+    if isinstance(value, dict) and value.get("type") == "tool_search":
+        _require_supported_fields(value, {"type"}, "Chat Completions tool_search tool_choice")
+        return {"type": "tool_search"}
     if not isinstance(value, dict) or value.get("type") != "function":
         choice_type = value.get("type") if isinstance(value, Mapping) else type(value).__name__
         raise UnsupportedProtocolTranslationError(
@@ -1353,6 +1453,7 @@ def chat_completions_request_to_responses_body(
             "chat_template_kwargs",
             "stream_options",
             "n",
+            "prompt_cache_key",
         },
         "Chat Completions request",
     )
@@ -1420,6 +1521,14 @@ def chat_completions_request_to_responses_body(
         responses_payload["tool_choice"] = tool_choice
     if effective_reasoning_effort is not None:
         responses_payload["reasoning"] = {"effort": effective_reasoning_effort}
+    if "prompt_cache_key" in payload:
+        cache_key = payload["prompt_cache_key"]
+        if cache_key is not None and not isinstance(cache_key, str):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate a non-string Chat Completions prompt_cache_key.",
+            )
+        responses_payload["prompt_cache_key"] = cache_key
 
     return json.dumps(responses_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
@@ -1745,6 +1854,7 @@ def response_body_to_chat_completion_body(
                     "unsupported_protocol_semantics",
                     "Cannot translate a non-object Responses output item.",
                 )
+            item = dict(_collapse_hosted_output_item_for_chat(item))
             if item.get("type") == "reasoning":
                 if not preserve_reasoning_history:
                     raise UnsupportedProtocolTranslationError(
@@ -1756,11 +1866,13 @@ def response_body_to_chat_completion_body(
                     {"id", "type", "status", "summary", "content", "encrypted_content"},
                     "Responses output reasoning item",
                 )
-                reasoning_parts.append(_responses_reasoning_text(item))
+                portable = _portable_output_reasoning_text(item, drop_encrypted=True)
+                if portable:
+                    reasoning_parts.append(portable)
             elif item.get("type") == "message":
                 _require_supported_fields(
                     item,
-                    {"id", "type", "status", "role", "content"},
+                    {"id", "type", "status", "role", "content", "phase"},
                     "Responses output message item",
                 )
                 content = item.get("content")
@@ -1818,6 +1930,17 @@ def response_body_to_chat_completion_body(
                     "unsupported_protocol_semantics",
                     f"Cannot translate Responses output item type {item.get('type')!r} to Chat Completions.",
                 )
+
+    if not text_parts and not tool_calls and not reasoning_parts:
+        had_reasoning = any(
+            isinstance(item, dict) and item.get("type") == "reasoning"
+            for item in (output if isinstance(output, list) else [])
+        )
+        if had_reasoning:
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate Responses output to Chat Completions without portable text, tools, or reasoning.",
+            )
 
     message: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts) or None}
     if tool_calls:
@@ -2509,6 +2632,14 @@ def responses_events_have_completed(events: list[Mapping[str, Any]]) -> bool:
     return any(isinstance(event, Mapping) and event.get("type") == "response.completed" for event in events)
 
 
+def _collapse_hosted_output_item_for_chat(item: Mapping[str, Any]) -> Mapping[str, Any]:
+    try:
+        collapsed = collapse_hosted_item_for_chat(item)
+    except ToolCompatibilityError as exc:
+        raise UnsupportedProtocolTranslationError(exc.code, str(exc)) from exc
+    return collapsed if collapsed is not None else item
+
+
 def _validated_responses_stream_output_item(
     item: Any,
     *,
@@ -2519,11 +2650,12 @@ def _validated_responses_stream_output_item(
             "unsupported_protocol_semantics",
             "Cannot translate a non-object Responses stream output item.",
         )
+    item = _collapse_hosted_output_item_for_chat(item)
     item_type = item.get("type")
     if item_type == "message":
         _require_supported_fields(
             item,
-            {"id", "type", "status", "role", "content"},
+            {"id", "type", "status", "role", "content", "phase"},
             "Responses stream message item",
         )
         if item.get("content") is not None:
@@ -2566,6 +2698,19 @@ def _function_argument_suffix(current: str, final: str, label: str) -> str:
     )
 
 
+_POST_TERMINAL_SEMANTIC_EVENT_TYPES = frozenset(
+    {
+        "response.output_text.delta",
+        "response.reasoning_summary_text.delta",
+        "response.function_call_arguments.delta",
+        "response.output_item.added",
+        "response.failed",
+        "response.incomplete",
+        "error",
+    }
+)
+
+
 def _validate_responses_stream_terminal_order(events: list[Mapping[str, Any] | str]) -> None:
     terminal_seen = False
     for event in events:
@@ -2576,10 +2721,12 @@ def _validate_responses_stream_terminal_order(events: list[Mapping[str, Any] | s
             continue
         event_type = event.get("type")
         if terminal_seen:
-            raise UnsupportedProtocolTranslationError(
-                "unsupported_protocol_semantics",
-                "Cannot translate Responses stream semantics after a terminal event.",
-            )
+            if event_type in _POST_TERMINAL_SEMANTIC_EVENT_TYPES:
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate Responses stream semantics after a terminal event.",
+                )
+            continue
         if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
             terminal_seen = True
 
@@ -2983,15 +3130,14 @@ def response_events_to_chat_stream_chunks(
                                     "Cannot translate terminal function-call output with conflicting identity.",
                                 )
                             append_final_arguments(state, arguments or "", "terminal function-call output")
-                    finish_reason = "tool_calls" if any(
-                        isinstance(item, Mapping) and item.get("type") == "function_call"
-                        for item in output
-                    ) else "stop"
+                    finish_reason = "stop"
                 else:
                     finish_reason = "stop"
             else:
                 finish_reason = "stop"
 
+    if any(state.get("emitted_header") for state in tool_states.values()):
+        finish_reason = "tool_calls"
     chunks.append(
         {
             "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
@@ -3014,6 +3160,7 @@ class ResponsesToChatStreamConverter:
         self.completed = False
         self.preserve_reasoning_history = preserve_reasoning_history
         self._reasoning_texts_emitted: set[str] = set()
+        self._visible_output = False
 
     def _tool_state(self, item_id: str) -> dict[str, Any]:
         if item_id not in self.tool_states:
@@ -3028,6 +3175,8 @@ class ResponsesToChatStreamConverter:
         return self.tool_states[item_id]
 
     def _chunk(self, delta: Mapping[str, Any], finish_reason: str | None = None) -> dict[str, Any]:
+        if any(key in delta for key in ("content", "reasoning_content", "tool_calls")):
+            self._visible_output = True
         return {
             "id": self.response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
             "object": "chat.completion.chunk",
@@ -3067,10 +3216,14 @@ class ResponsesToChatStreamConverter:
     def chunks_for_event(self, event: Mapping[str, Any]) -> list[dict[str, Any]]:
         event_type = event.get("type")
         if self.completed:
-            raise UnsupportedProtocolTranslationError(
-                "unsupported_protocol_semantics",
-                "Cannot translate Responses stream semantics after a terminal event.",
-            )
+            # OpenCode and similar providers append bookkeeping after
+            # response.completed. New visible deltas still fail closed.
+            if event_type in _POST_TERMINAL_SEMANTIC_EVENT_TYPES:
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate Responses stream semantics after a terminal event.",
+                )
+            return []
         if event_type in {"response.failed", "response.incomplete", "error"}:
             raise UnsupportedProtocolTranslationError(
                 "upstream_response_failed",
@@ -3336,8 +3489,19 @@ class ResponsesToChatStreamConverter:
                                     "terminal function-call output",
                                 )
                             )
-                    if any(isinstance(item, Mapping) and item.get("type") == "function_call" for item in output):
-                        finish_reason = "tool_calls"
+            if any(state.get("emitted_header") for state in self.tool_states.values()):
+                finish_reason = "tool_calls"
+            had_reasoning = False
+            if isinstance(response_obj, Mapping) and isinstance(response_obj.get("output"), list):
+                had_reasoning = any(
+                    isinstance(item, Mapping) and item.get("type") == "reasoning"
+                    for item in response_obj["output"]
+                )
+            if had_reasoning and not self._visible_output:
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate Responses output to Chat Completions without portable text, tools, or reasoning.",
+                )
             self.completed = True
             chunks.append(self._chunk({}, finish_reason=finish_reason))
             usage = response_obj.get("usage") if isinstance(response_obj, Mapping) else None
@@ -3817,6 +3981,7 @@ def events_to_responses_body(
     response_id = f"resp_{uuid.uuid4().hex[:12]}"
     model: str | None = None
     text_parts: list[str] = []
+    reasoning_summary_parts: list[str] = []
     current_item: dict[str, Any] | None = None
     usage: Mapping[str, Any] | None = None
     response_payload: dict[str, Any] = {}
@@ -3840,6 +4005,14 @@ def events_to_responses_body(
             delta = event.get("delta")
             if isinstance(delta, str):
                 text_parts.append(delta)
+        elif event_type == "response.reasoning_summary_text.delta":
+            delta = event.get("delta")
+            if isinstance(delta, str) and delta:
+                reasoning_summary_parts.append(delta)
+        elif event_type == "response.reasoning_summary_text.done":
+            text = event.get("text")
+            if isinstance(text, str) and text and not reasoning_summary_parts:
+                reasoning_summary_parts.append(text)
         elif event_type == "response.output_item.done":
             item = event.get("item")
             if isinstance(item, dict):
@@ -3868,6 +4041,19 @@ def events_to_responses_body(
                 if event_type == "response.incomplete"
                 else "completed"
             )
+
+    joined_reasoning = "".join(reasoning_summary_parts)
+    if joined_reasoning:
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "reasoning":
+                continue
+            summary = item.get("summary")
+            has_text = isinstance(summary, list) and any(
+                isinstance(part, Mapping) and isinstance(part.get("text"), str) and part["text"]
+                for part in summary
+            )
+            if not has_text:
+                item["summary"] = [{"type": "summary_text", "text": joined_reasoning}]
 
     if text_parts and not any(item.get("type") == "message" for item in output):
         output.append(

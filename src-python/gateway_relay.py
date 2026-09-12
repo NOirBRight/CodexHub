@@ -973,32 +973,17 @@ def relay_upstream_response(
                         preserve_reasoning_history=preserve_reasoning_history,
                     )
                 else:
-                    exchange = relay_context.prepared_exchange
-                    if not isinstance(exchange, PreparedExchange):
-                        exchange = PreparedExchange(
-                            inbound_format,
-                            upstream_format,
-                            b"",
-                            False,
+                    mutated_body = body
+                    if response_mutation_policy != MutationPolicy.TRANSPARENT:
+                        mutated_body = compatible_response_body(
+                            body,
+                            upstream_name,
+                            event_context=compatibility_event_context,
                         )
-                    def decode_to_caller(payload: bytes) -> bytes:
-                        try:
-                            return exchange.decode_response(
-                                payload,
-                                function_name_from_response_item=gateway_stream_semantics._chat_function_name_from_response_item,
-                            )
-                        except NonForwardable as exc:
-                            raise UpstreamProtocolTranslationError(exc) from exc
-                    if response_mutation_policy == MutationPolicy.TRANSPARENT:
-                        body = decode_to_caller(body)
-                    else:
-                        body = decode_to_caller(
-                            compatible_response_body(
-                                body,
-                                upstream_name,
-                                event_context=compatibility_event_context,
-                            )
-                        )
+                    body = _response_body_to_chat_completion_body(
+                        mutated_body,
+                        preserve_reasoning_history=preserve_reasoning_history,
+                    )
             elif upstream_format == "chat_completions":
                 if buffered_chat_sse_to_responses:
                     converted_body = body
@@ -1281,6 +1266,11 @@ def relay_upstream_response(
                         frame.raw,
                         upstream_format=upstream_format,
                     )
+                    if converter.completed:
+                        # Chat already emitted finish_reason. Trailing
+                        # Responses frames must not turn a complete stream
+                        # into a 502.
+                        continue
                     error_type = _responses_stream_error_type(event)
                     if error_type is not None:
                         detail = _redact_identity_in_text(
@@ -1318,9 +1308,9 @@ def relay_upstream_response(
                             )
             except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
                 return finish_converted_sse_semantic_error(exc)
-            except UpstreamProtocolTranslationError:
+            except UpstreamProtocolTranslationError as exc:
                 return finish_converted_sse_semantic_error(
-                    _verified_converted_sse_semantic_error("responses")
+                    gateway_stream_semantics.UpstreamSseSemanticError(str(exc))
                 )
             except UpstreamStreamIncompleteError:
                 incomplete_frame = True
@@ -1782,13 +1772,11 @@ def relay_upstream_response(
                         preserve_reasoning_history=preserve_reasoning_history,
                     )
                 )
-            except UpstreamProtocolTranslationError:
+            except UpstreamProtocolTranslationError as exc:
                 if verified_source_format is None:
                     raise
                 return finish_converted_sse_semantic_error(
-                    _verified_converted_sse_semantic_error(
-                        verified_source_format
-                    )
+                    gateway_stream_semantics.UpstreamSseSemanticError(str(exc))
                 )
 
             if not send_downstream_response_headers_once():

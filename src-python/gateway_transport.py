@@ -892,6 +892,8 @@ def build_upstream_headers(
             continue
         outgoing[key] = value
 
+    # Official passthrough keeps the caller User-Agent. Chat clients and
+    # urllib/curl fingerprints 403 on some third-party WAFs (OpenCode Go).
     strict_official_passthrough = (
         request_mutation_policy == MutationPolicy.OFFICIAL_PASSTHROUGH
         if request_mutation_policy is not None
@@ -901,9 +903,6 @@ def build_upstream_headers(
         if not any(key.lower() == "user-agent" for key in outgoing):
             outgoing["User-Agent"] = UPSTREAM_USER_AGENT
     else:
-        # Inbound Client UA is the Codex/Gateway caller, not a provider
-        # identity. Cloudflare Browser Integrity Check (1010) rejects
-        # Python-urllib and similar signatures on some third-party origins.
         outgoing = {
             key: value
             for key, value in outgoing.items()

@@ -42,6 +42,8 @@ from runtime_tool_compatibility import (
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
     build_tool_compatibility_plan,
 )
+import tool_compatibility.chat_official_native as _chat_official_native
+import tool_compatibility.collab_v2 as _collab_v2
 from tool_surface_adapter import (
     APPLY_PATCH_FUNCTION_NAME,
     INTERNAL_INPUT_ITEM_TYPES,
@@ -506,7 +508,23 @@ def compatible_response_body(
 ) -> bytes:
     if upstream_name == "official":
         from . import collaboration_delivery
-        return collaboration_delivery.decode_body(body, event_context)
+        body = collaboration_delivery.decode_body(body, event_context)
+        try:
+            payload = json.loads(body.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return body
+        if isinstance(payload, dict):
+            try:
+                changed = False
+                if _collab_v2.collapse_official_v2_names_for_chat(payload, event_context):
+                    changed = True
+                if _chat_official_native.collapse_official_native_tools_for_chat(payload, event_context):
+                    changed = True
+            except RuntimeToolCompatibilityError as exc:
+                _official_passthrough._raise_runtime_tool_compatibility_error(exc)
+            if changed:
+                return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        return body
     if _official_passthrough._is_raw_provider_probe_context(event_context):
         return body
 
@@ -561,6 +579,12 @@ def compatible_response_body(
     changed = changed or bounded_tool_search_changed
     payload, invalid_tool_changed = _official_passthrough._downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
     changed = changed or invalid_tool_changed
+    if isinstance(payload, dict) and (event_context or {}).get("_caller_wire_format") == "chat_completions":
+        try:
+            if _chat_official_native.collapse_official_native_tools_for_chat(payload, event_context):
+                changed = True
+        except RuntimeToolCompatibilityError as exc:
+            _official_passthrough._raise_runtime_tool_compatibility_error(exc)
     payload, requested_binding_changed = _multi_agent._apply_external_worker_response_contract(
         payload,
         event_context,

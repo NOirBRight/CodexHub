@@ -33,7 +33,14 @@ def prepare_exchange(request_body, *, inbound_format, outbound_format, prompt_ca
     )
 
 
-def _assert_identity_prepare_exchange(request_body, *, inbound_format, outbound_format, prompt_cache_key_policy=PromptCacheKeyPolicy.DROP_UNVERIFIED):
+def _assert_identity_prepare_exchange(
+    request_body,
+    *,
+    inbound_format,
+    outbound_format,
+    prompt_cache_key_policy=PromptCacheKeyPolicy.DROP_UNVERIFIED,
+    preserve_reasoning_history=False,
+):
     if inbound_format != outbound_format:
         raise AssertionError(f"converted {inbound_format} -> {outbound_format}")
     return _real_prepare_exchange(
@@ -41,6 +48,7 @@ def _assert_identity_prepare_exchange(request_body, *, inbound_format, outbound_
         inbound_format=inbound_format,
         outbound_format=outbound_format,
         prompt_cache_key_policy=prompt_cache_key_policy,
+        preserve_reasoning_history=preserve_reasoning_history,
     )
 
 
@@ -614,6 +622,16 @@ class ChatToolsToResponsesTests(unittest.TestCase):
                 {"type": "other"},
             ])
 
+    def test_passes_known_native_hosted_and_custom_types(self):
+        tools = chat_tools_to_responses_tools([
+            {"type": "web_search", "search_context_size": "low"},
+            {"type": "custom", "name": "apply_patch", "format": {"type": "text"}},
+            {"type": "tool_search", "execution": "client"},
+        ])
+        self.assertEqual(tools[0], {"type": "web_search", "search_context_size": "low"})
+        self.assertEqual(tools[1]["type"], "custom")
+        self.assertEqual(tools[2], {"type": "tool_search", "execution": "client"})
+
 
 class ResponseBodyToChatTests(unittest.TestCase):
     def test_text_response(self):
@@ -1118,7 +1136,163 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["choices"][0]["finish_reason"], "stop")
         self.assertEqual(handler._fake.status, 200)
 
-    def test_post_chat_completions_rejects_unsupported_upstream_response_semantics(self):
+    def test_post_chat_completions_preserves_official_prompt_cache_key(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "prompt_cache_key": "stable-session",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_body = json.dumps({
+            "id": "resp_cache",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi there!", "annotations": []}],
+            }],
+        }).encode("utf-8")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
+            CodexProxyHandler.do_POST(handler)
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["prompt_cache_key"], "stable-session")
+        self.assertEqual(handler._fake.status, 200)
+
+    def test_post_chat_completions_rejects_prompt_cache_options(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "prompt_cache_key": "stable-session",
+            "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+
+        CodexProxyHandler.do_POST(handler)
+
+        self.assertEqual(handler._fake.status, 400)
+        self.assertIn(b"prompt_cache_options", b"".join(handler.wfile.writes))
+
+    def test_post_chat_completions_expands_official_collaboration_v2_namespace(self):
+        from collaboration_runtime_contract import COLLABORATION_V2, EXPECTED_PARAMETER_SCHEMAS, V2_TOOLS
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": name,
+                    "parameters": schema,
+                    "strict": False,
+                },
+            }
+            for name, schema in EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2].items()
+        ]
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "delegate"}],
+            "tools": tools,
+            "tool_choice": "auto",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        call = {
+            "type": "function_call",
+            "id": "fc_spawn",
+            "call_id": "call_spawn",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+            "arguments": '{"task_name":"worker","message":"inspect"}',
+            "encrypted_function_args": [],
+        }
+        upstream_body = json.dumps({
+            "id": "resp_v2",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [call],
+        }).encode("utf-8")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
+            CodexProxyHandler.do_POST(handler)
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent_payload["tools"][0]["type"], "namespace")
+        self.assertEqual(sent_payload["tools"][0]["name"], "collaboration")
+        self.assertEqual({child["name"] for child in sent_payload["tools"][0]["tools"]}, set(V2_TOOLS))
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 200)
+        tool_call = result["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(tool_call["id"], "call_spawn")
+        self.assertEqual(tool_call["function"]["name"], "spawn_agent")
+
+    def test_post_chat_completions_maps_official_hosted_and_custom_tools(self):
+        from tool_compatibility.contracts import CUSTOM_INPUT_KEY
+
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "search then patch"}],
+            "tools": [
+                {"type": "web_search"},
+                {"type": "custom", "name": "apply_patch", "format": {"type": "text"}},
+                {"type": "tool_search", "execution": "client"},
+            ],
+            "tool_choice": "auto",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_body = json.dumps({
+            "id": "resp_native",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "ws_1",
+                    "call_id": "call_ws",
+                    "status": "completed",
+                    "action": {"query": "codex"},
+                },
+                {
+                    "type": "custom_tool_call",
+                    "id": "ct_1",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch",
+                },
+                {
+                    "type": "tool_search_call",
+                    "id": "ts_1",
+                    "call_id": "call_search",
+                    "execution": "client",
+                    "arguments": {"query": "patch"},
+                },
+            ],
+        }).encode("utf-8")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
+            CodexProxyHandler.do_POST(handler)
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(
+            [tool["type"] for tool in sent_payload["tools"]],
+            ["web_search", "custom", "tool_search"],
+        )
+        self.assertEqual(sent_payload["tools"][1]["name"], "apply_patch")
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 200)
+        names = [call["function"]["name"] for call in result["choices"][0]["message"]["tool_calls"]]
+        self.assertEqual(names, ["web_search", "apply_patch", "tool_search"])
+        patch_args = json.loads(result["choices"][0]["message"]["tool_calls"][1]["function"]["arguments"])
+        self.assertEqual(patch_args, {CUSTOM_INPUT_KEY: "*** Begin Patch"})
+
+    def test_post_chat_completions_maps_official_reasoning_summary_with_message(self):
         body = json.dumps({
             "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "Hello"}],
@@ -1130,7 +1304,69 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             "object": "response",
             "status": "completed",
             "model": "gpt-5.5",
-            "output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "private"}]}],
+            "output": [
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "think first"}]},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hi there!", "annotations": []}],
+                },
+            ],
+        }).encode("utf-8")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+            CodexProxyHandler.do_POST(handler)
+
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 200)
+        message = result["choices"][0]["message"]
+        self.assertEqual(message["content"], "Hi there!")
+        self.assertEqual(message["reasoning_content"], "think first")
+
+    def test_post_chat_completions_drops_official_encrypted_reasoning_when_message_present(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_body = json.dumps({
+            "id": "resp_encrypted",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [
+                {"type": "reasoning", "summary": [], "encrypted_content": "gAAAA ciphertext"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hi there!", "annotations": []}],
+                },
+            ],
+        }).encode("utf-8")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
+            CodexProxyHandler.do_POST(handler)
+
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 200)
+        message = result["choices"][0]["message"]
+        self.assertEqual(message["content"], "Hi there!")
+        self.assertNotIn("reasoning_content", message)
+
+    def test_post_chat_completions_rejects_ciphertext_only_official_reasoning(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_body = json.dumps({
+            "id": "resp_reasoning",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [{"type": "reasoning", "summary": [], "encrypted_content": "gAAAA ciphertext"}],
         }).encode("utf-8")
 
         with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)):
@@ -1144,6 +1380,48 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             route_primitives.RETRY_FAILURE_PERMANENT,
         )
         self.assertFalse(result["codexhub_error"]["retryable"])
+
+    def test_post_chat_completions_streams_official_reasoning_summary_deltas(self):
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        reasoning_item = {"id": "rs_1", "type": "reasoning", "status": "completed", "summary": []}
+        message = {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Hi there!", "annotations": []}],
+        }
+        events = [
+            {"type": "response.created", "response": {"id": "resp_stream", "model": "gpt-5.5"}},
+            {"type": "response.output_item.added", "item": reasoning_item},
+            {"type": "response.reasoning_summary_text.delta", "delta": "think "},
+            {"type": "response.reasoning_summary_text.delta", "delta": "first"},
+            {"type": "response.output_text.delta", "delta": "Hi there!"},
+            {"type": "response.completed", "response": {
+                "id": "resp_stream",
+                "status": "completed",
+                "model": "gpt-5.5",
+                "output": [reasoning_item, message],
+            }},
+        ]
+        stream = []
+        for event in events:
+            stream.extend([f"data: {json.dumps(event)}\n".encode(), b"\n"])
+        stream.append(b"")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeSseResponse(stream)):
+            CodexProxyHandler.do_POST(handler)
+
+        written = b"".join(handler.wfile.writes)
+        self.assertEqual(handler._fake.status, 200)
+        self.assertIn(b"reasoning_content", written)
+        self.assertIn(b"think first", written)
+        self.assertIn(b"Hi there!", written)
+        self.assertIn(b"data: [DONE]", written)
 
     def test_post_chat_completions_events_use_proxy_request_kind(self):
         body = json.dumps({
@@ -3345,6 +3623,79 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(result["object"], "chat.completion")
         self.assertEqual(result["choices"][0]["message"]["content"], "Hi from responses")
 
+    def test_provider_scoped_chat_to_responses_drops_unverified_prompt_cache_key(self):
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
+        external_model = {
+            "alias": "responses-only/glm-5.2",
+            "provider_alias": "responses-only",
+            "upstream_name": "responses_only_provider",
+            "display_prefix": "ResponsesOnly",
+            "base_url": "https://responses-only.example.test/v1",
+            "api_key": "responses-only-token",
+            "upstream_model": "glm-5.2-responses",
+            "upstream_format": "responses",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "glm-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "prompt_cache_key": "stable-session",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/responses-only/chat/completions")
+        upstream_body = json.dumps({
+            "id": "resp_cache_drop",
+            "object": "response",
+            "status": "completed",
+            "model": "glm-5.2-responses",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hi from responses"}],
+            }],
+        }).encode("utf-8")
+
+        with (
+            patch(
+                "gateway_catalog_runtime.generated_catalog_slugs",
+                return_value={"gpt-5.5", "responses-only/glm-5.2"},
+            ),
+            patch(
+                "gateway_catalog_runtime.generated_catalog_by_slug",
+                return_value={
+                    "gpt-5.5": {"slug": "gpt-5.5"},
+                    "responses-only/glm-5.2": {"slug": "responses-only/glm-5.2"},
+                },
+            ),
+            patch(
+                "gateway_catalog_runtime.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("responses-only/glm-5.2",),
+                ),
+            ),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertNotIn("prompt_cache_key", sent_payload)
+        dropped = [
+            call.kwargs
+            for call in self.write_proxy_event.call_args_list
+            if call.args and call.args[0] == "cache_control_dropped"
+        ]
+        self.assertTrue(dropped)
+        self.assertEqual(dropped[0]["fields"], ["prompt_cache_key"])
+        self.assertEqual(dropped[0]["reason"], "unverified_endpoint_capability")
+        self.assertEqual(handler._fake.status, 200)
+
     def test_provider_scoped_responses_to_chat_non_streaming_fallback_skips_codex_response_repairs(self):
         policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
         external_model = {
@@ -5269,6 +5620,80 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 route_primitives.RouteMutation.WIRE_CONVERSION.value,
                 event["route_attempt_mutation_summary"],
             )
+
+    def test_auto_chat_inbound_keeps_hosted_web_search_and_collapses_call(self):
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
+        external_model = {
+            "alias": "auto/muse-search",
+            "provider_alias": "auto",
+            "upstream_name": "auto_provider",
+            "display_prefix": "Auto",
+            "base_url": "https://auto.example.test/v1",
+            "api_key": "auto-test-token",
+            "upstream_model": "muse-search",
+            "upstream_format": "auto",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "muse-search",
+            "messages": [{"role": "user", "content": "Search the web for Codex CLI."}],
+            "tools": [{"type": "web_search"}],
+            "tool_choice": "auto",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/auto/chat/completions")
+        upstream_body = json.dumps({
+            "id": "resp_search",
+            "object": "response",
+            "status": "completed",
+            "model": "muse-search",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "ws_1",
+                    "call_id": "call_ws",
+                    "status": "completed",
+                    "action": {"query": "Codex CLI"},
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Codex CLI is the terminal client."}],
+                },
+            ],
+        }).encode("utf-8")
+
+        with (
+            patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
+            patch(
+                "gateway_catalog_runtime.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("auto/muse-search",),
+                ),
+            ),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        sent = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent["tools"], [{"type": "web_search"}])
+        self.assertTrue(mock_urlopen.call_args.args[0].full_url.endswith("/responses"))
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 200)
+        names = [call["function"]["name"] for call in result["choices"][0]["message"]["tool_calls"]]
+        self.assertEqual(names, ["web_search"])
+        self.assertEqual(
+            json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]),
+            {"action": {"query": "Codex CLI"}},
+        )
+        self.assertEqual(result["choices"][0]["message"]["content"], "Codex CLI is the terminal client.")
 
     def test_auto_upstream_format_suppresses_chat_fallback_for_protocol_http_error(self):
         policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)

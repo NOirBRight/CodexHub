@@ -43,6 +43,8 @@ from runtime_tool_compatibility import (
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
     build_tool_compatibility_plan,
 )
+import tool_compatibility.chat_official_native as _chat_official_native
+import tool_compatibility.collab_v2 as _collab_v2
 from tool_surface_adapter import (
     APPLY_PATCH_FUNCTION_NAME,
     INTERNAL_INPUT_ITEM_TYPES,
@@ -147,6 +149,9 @@ def compatible_request_body(
     if not isinstance(payload, dict):
         return body
 
+    if upstream_name == "official":
+        inject_codex_tools = False
+
     upstream_model = upstream.get("upstream_model")
     requested_model = payload.get("model")
     requested_reasoning = _official_passthrough._requested_reasoning_effort(payload)
@@ -194,11 +199,22 @@ def compatible_request_body(
             changed = True
         if _response._sanitize_official_system_messages(payload):
             changed = True
-        if not changed:
-            return body
-        return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        try:
+            if _collab_v2.expand_chat_v2_for_official(payload, event_context if isinstance(event_context, dict) else None):
+                changed = True
+                collaboration_protocol = _collaboration_adapter_module.resolve_boundary(
+                    payload,
+                    event_context,
+                    surface="request",
+                )
+            if _chat_official_native.expand_chat_native_tools_for_official(
+                payload, event_context if isinstance(event_context, dict) else None
+            ):
+                changed = True
+        except RuntimeToolCompatibilityError as exc:
+            _official_passthrough._raise_runtime_tool_compatibility_error(exc)
 
-    if host._strip_reasoning_encrypted_content(payload):
+    if upstream_name != "official" and host._strip_reasoning_encrypted_content(payload):
         changed = True
 
     raw_provider_probe = _official_passthrough._is_raw_provider_probe_context(event_context)
@@ -220,7 +236,7 @@ def compatible_request_body(
     )
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
-    if not raw_provider_probe and not collaboration_v2:
+    if upstream_name != "official" and not raw_provider_probe and not collaboration_v2:
         if _multi_agent._validate_worker_binding_history(payload):
             changed = True
     bounded_tool_search_terminal_calls = (
@@ -274,7 +290,7 @@ def compatible_request_body(
         # direct helper caller does not provide a mutable event context.  If
         # this remains behind the ``dict`` check, a runtime plan can see the
         # original namespace and re-expand every child into aliases (#425).
-        if tool_surface_strategy == "deferred_core" or collaboration_v2:
+        if upstream_name != "official" and (tool_surface_strategy == "deferred_core" or collaboration_v2):
             # ``additional_tools`` is an internal carrier.  Only deferred
             # external routes, or the client-owned V2 adapter, need it
             # promoted so namespace pruning/runtime planning can inspect the
@@ -282,7 +298,7 @@ def compatible_request_body(
             # carrier byte-for-byte (#425).
             if _official_passthrough._hoist_additional_tools_input_items(payload):
                 changed = True
-        if tool_surface_strategy == "deferred_core" and isinstance(payload.get("tools"), list):
+        if upstream_name != "official" and tool_surface_strategy == "deferred_core" and isinstance(payload.get("tools"), list):
             tools = payload["tools"]
             tool_surface_source_tools = list(tools)
             deferred_namespace_tools = [
@@ -376,7 +392,7 @@ def compatible_request_body(
             )
     if raw_provider_probe:
         pass
-    elif collaboration_v2:
+    elif collaboration_v2 and upstream_name != "official":
         # V2 must not run V1 semantic repair, but a third-party structured
         # Responses endpoint still cannot consume Codex's freeform
         # ``apply_patch`` history items. Keep this wire-only inverse adapter
@@ -410,7 +426,7 @@ def compatible_request_body(
             )
         ):
             changed = True
-    else:
+    elif upstream_name != "official":
         # ``additional_tools`` is a legacy Codex input carrier. Preserve it
         # byte-for-byte for eager providers; deferred_core alone promotes it
         # so the selected external surface policy can inspect namespaces.
@@ -653,7 +669,7 @@ def compatible_request_body(
 
     if _response._sanitize_unsupported_compaction_input_items(payload):
         changed = True
-    if host._sanitize_third_party_reasoning_items(
+    if upstream_name != "official" and host._sanitize_third_party_reasoning_items(
         payload,
         preserve_collaboration_agent_message_encryption=(
             collaboration_protocol == _COLLABORATION_V2

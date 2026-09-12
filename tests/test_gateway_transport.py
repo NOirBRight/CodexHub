@@ -314,6 +314,20 @@ def test_gateway_compatibility_replaces_inbound_client_user_agent() -> None:
     assert headers["x-session-id"] == "e2e-image-compact"
 
 
+def test_gateway_compat_replaces_caller_user_agent() -> None:
+    headers = build_upstream_headers(
+        {
+            "Authorization": "Bearer caller",
+            "Content-Type": "application/json",
+            "User-Agent": "Python-urllib/3.13",
+        },
+        {"auth": "incoming", "name": "opencode_go"},
+        request_mutation_policy=MutationPolicy.GATEWAY_COMPATIBILITY,
+    )
+    assert headers["User-Agent"] == UPSTREAM_USER_AGENT
+    assert "Python-urllib" not in headers["User-Agent"]
+
+
 def test_official_passthrough_keeps_inbound_user_agent() -> None:
     headers = build_upstream_headers(
         {
