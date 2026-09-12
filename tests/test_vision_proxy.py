@@ -94,6 +94,57 @@ def test_text_only_image_rejection_is_fail_closed_before_hooks() -> None:
     assert payload["input"][0]["content"][0]["type"] == "input_image"
 
 
+def test_trusted_compact_does_not_reject_tool_result_images_before_adapter() -> None:
+    adapter = _adapter()
+    payload = {
+        "input": [
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [
+                    {"type": "input_text", "text": "screenshot"},
+                    {"type": "input_image", "image_url": _IMAGE_URL},
+                ],
+            }
+        ]
+    }
+    changed = adapter.enforce_text_only_boundary(
+        payload,
+        inbound_protocol=RouteProtocol.RESPONSES,
+        target_model="commandcode/deepseek/deepseek-v4.1-flash",
+        target_upstream={"name": "commandcode"},
+        vision_plan=_reject_plan(),
+        event_context={
+            "request_kind": "compact",
+            "compact_placeholder_authorized": True,
+        },
+    )
+    assert changed is False
+    assert payload["input"][0]["output"][1]["type"] == "input_image"
+
+
+def test_untrusted_compact_text_still_rejects_images_when_vision_proxy_disabled() -> None:
+    adapter = _adapter()
+    payload = {
+        "input": [
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [{"type": "input_image", "image_url": _IMAGE_URL}],
+            }
+        ]
+    }
+    with pytest.raises(ImageProxyError, match="Vision Proxy is disabled"):
+        adapter.enforce_text_only_boundary(
+            payload,
+            inbound_protocol=RouteProtocol.RESPONSES,
+            target_model="text-only",
+            target_upstream={"name": "target"},
+            vision_plan=_reject_plan(),
+            event_context={"request_kind": "compact", "compact_placeholder_authorized": False},
+        )
+
+
 def test_pass_through_rejects_contradictory_text_only_plan() -> None:
     adapter = _adapter()
     plan = VisionPlan(

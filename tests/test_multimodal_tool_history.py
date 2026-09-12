@@ -350,6 +350,36 @@ def test_compact_sse_completed_event_receives_notice():
     assert multimodal_tool_result.VISUAL_CONTENT_OMITTED_NOTICE in text
 
 
+def test_chat_converted_sse_completed_event_receives_notice():
+    context = {
+        "request_kind": "compact",
+        "compact_placeholder_authorized": True,
+        "omitted_tool_result_images": 1,
+    }
+    stats = multimodal_tool_result.ToolResultMediaStats(omitted_image_count=1)
+    context[multimodal_tool_result._EVENT_STATS_KEY] = stats
+    event = {
+        "type": "response.completed",
+        "response": {
+            "output": [
+                {"type": "reasoning", "summary": []},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Summary text."}],
+                },
+            ]
+        },
+    }
+    line = b"data: " + json.dumps(event).encode("utf-8") + b"\n\n"
+    rewritten = gateway_compat.compatible_sse_line(
+        line, "commandcode", event_context=context, runtime_tool_inverse_only=True
+    )
+    payload = json.loads(rewritten.split(b"data:", 1)[1].strip())
+    text = payload["response"]["output"][1]["content"][0]["text"]
+    assert multimodal_tool_result.VISUAL_CONTENT_OMITTED_NOTICE in text
+
+
 def test_trusted_compact_header_does_not_use_natural_language():
     headers = {"x-codex-turn-metadata": json.dumps({"request_kind": "compaction"})}
     assert gateway_stream_semantics.trusted_compact_request(headers) is True

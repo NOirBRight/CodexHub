@@ -636,7 +636,10 @@ def relay_upstream_response(
         )
         self._downstream_stream_commit = seam
     output = RelaySseOutput(self, seam)
-    compatibility_event_context = dict(event_context or {})
+    if isinstance(event_context, dict):
+        compatibility_event_context = event_context
+    else:
+        compatibility_event_context = dict(event_context or {})
     compatibility_event_context["_apply_patch_adapter_enabled"] = not want_chat_output
     # When the caller asked for a non-streaming response but the upstream
     # returns SSE (e.g. chatgpt.com forces stream=true), buffer the entire
@@ -1431,6 +1434,13 @@ def relay_upstream_response(
             incomplete_frame = False
 
             def write_converted_response_event(event: Mapping[str, Any]) -> bool:
+                payload = dict(event)
+                if payload.get("type") in {"response.completed", "response.incomplete"}:
+                    import multimodal_tool_result as _multimodal_tool_result
+                    _multimodal_tool_result.annotate_compact_response_payload(
+                        payload, compatibility_event_context
+                    )
+                event = payload
                 line = _sse_json_line(event, line_ending) + line_ending
                 try:
                     compatible_line = compatible_sse_line(
@@ -2084,7 +2094,12 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
+                import multimodal_tool_result as _multimodal_tool_result
                 for event in events:
+                    if isinstance(event, dict):
+                        _multimodal_tool_result.annotate_compact_response_payload(
+                            event, compatibility_event_context
+                        )
                     if not output.write(
                         _sse_json_line(event, line_ending) + line_ending
                     ):

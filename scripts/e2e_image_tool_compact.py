@@ -52,6 +52,7 @@ PROVIDER_ROUTES = {
         "upstream_origin": "https://api.x.ai",
         "extra_source_files": ("proxy/xai_auth.json",),
         "use_recorder": True,
+        "expected_media_mode": "lift",
     },
     "opencode-go/muse-spark-1.3-contributor": {
         "toml_needle": 'id = "opencode-go"\nname = "OpenCode Go"\nbase_url = "https://opencode.ai/zen/go/v1"',
@@ -61,6 +62,21 @@ PROVIDER_ROUTES = {
         "extra_source_files": (),
         # Prove Gateway origin TLS/headers, not a local HTTP recorder.
         "use_recorder": False,
+        "expected_media_mode": "lift",
+    },
+    "commandcode/deepseek/deepseek-v4.1-flash": {
+        "toml_needle": 'id = "commandcode"\nname = "Command Code"\nbase_url = "https://api.commandcode.ai/provider/v1"',
+        "recorder_base_path": "/provider/v1",
+        "upstream_host": "api.commandcode.ai",
+        "upstream_origin": "https://api.commandcode.ai",
+        "extra_source_files": (),
+        "use_recorder": False,
+        "expected_media_mode": "placeholder",
+        "isolated_model_clone": {
+            "provider_id": "commandcode",
+            "source_model_id": "deepseek/deepseek-v4-flash",
+            "target_model_id": "deepseek/deepseek-v4.1-flash",
+        },
     },
 }
 
@@ -117,6 +133,33 @@ def count_user_input_images(payload: Mapping[str, Any]) -> int:
             if isinstance(part, Mapping) and part.get("type") == "input_image":
                 count += 1
     return count
+
+
+def clone_provider_model(toml_text: str, *, provider_id: str, source_model_id: str, target_model_id: str) -> str:
+    provider_marker = f'id = "{provider_id}"'
+    provider_at = toml_text.find(provider_marker)
+    if provider_at < 0:
+        raise RuntimeError("isolated_provider_missing")
+    next_provider = toml_text.find("\n[[providers]]\n", provider_at + 1)
+    region_end = len(toml_text) if next_provider < 0 else next_provider
+    region = toml_text[provider_at:region_end]
+    model_marker = f'id = "{source_model_id}"'
+    model_at = region.find(model_marker)
+    if model_at < 0:
+        raise RuntimeError("isolated_source_model_missing")
+    block_at = region.rfind("[[providers.models]]", 0, model_at)
+    if block_at < 0:
+        raise RuntimeError("isolated_source_model_block_missing")
+    next_block = region.find("[[providers.models]]", block_at + 1)
+    block = region[block_at:] if next_block < 0 else region[block_at:next_block]
+    if f'id = "{target_model_id}"' in region:
+        return toml_text
+    cloned = block.replace(f'id = "{source_model_id}"', f'id = "{target_model_id}"', 1)
+    cloned = cloned.replace(source_model_id, target_model_id)
+    insertion = toml_text.find(block, provider_at, region_end)
+    if insertion < 0:
+        raise RuntimeError("isolated_model_block_not_found")
+    return toml_text[: insertion + len(block)] + cloned + toml_text[insertion + len(block) :]
 
 
 def rewrite_provider_base_url(toml_text: str, needle: str, new_url: str) -> str:
@@ -210,7 +253,11 @@ def _read_sse_text(body: bytes) -> tuple[str, dict[str, Any] | None]:
             parsed = None
         if isinstance(parsed, dict):
             completed = parsed
-    return "".join(texts), completed
+    compact_text = "".join(texts)
+    completed_blob = json.dumps(completed, ensure_ascii=True) if isinstance(completed, dict) else ""
+    if VISUAL_NOTICE in completed_blob and VISUAL_NOTICE not in compact_text:
+        compact_text = compact_text + "\n" + VISUAL_NOTICE
+    return compact_text, completed
 
 
 def _https_opener(https_proxy: str | None, context: ssl.SSLContext):
@@ -491,6 +538,18 @@ def run_isolated(*, source_home: Path, model: str, timeout: int, https_proxy: st
             target = server_home / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source / name, target)
+        clone = route.get("isolated_model_clone")
+        if isinstance(clone, dict):
+            providers_path = server_home / "proxy/config/providers.toml"
+            providers_path.write_text(
+                clone_provider_model(
+                    providers_path.read_text(encoding="utf-8"),
+                    provider_id=str(clone["provider_id"]),
+                    source_model_id=str(clone["source_model_id"]),
+                    target_model_id=str(clone["target_model_id"]),
+                ),
+                encoding="utf-8",
+            )
         use_recorder = bool(route.get("use_recorder", True))
         recorder = None
         if use_recorder:
@@ -578,7 +637,11 @@ def run_isolated(*, source_home: Path, model: str, timeout: int, https_proxy: st
                         )
                     }
                 compact_text, compact_completed = _read_sse_text(compact_body)
-                overflow = _classify_upstream_failure(compact_status, compact_body)
+                overflow = (
+                    _classify_upstream_failure(compact_status, compact_body)
+                    if compact_status >= 400
+                    else None
+                )
                 report.update(
                     {
                         "compact_http_status": compact_status,
@@ -618,15 +681,30 @@ def run_isolated(*, source_home: Path, model: str, timeout: int, https_proxy: st
                     report["failure_classification"] = overflow or "compact_http_error"
                     report["status"] = "unverified"
                     return report
-                lifted_ok = lifted == len(markers)
+                media_mode = str(route.get("expected_media_mode") or "lift")
+                report["expected_media_mode"] = media_mode
                 if not use_recorder:
                     event_lifted = (adapted_counts or {}).get("lifted_image_count")
-                    lifted_ok = event_lifted == len(markers)
                     report["lifted_user_images"] = event_lifted
-                if not lifted_ok:
-                    report["failure_classification"] = "images_not_lifted"
-                    report["status"] = "failed"
-                    return report
+                    lifted = event_lifted
+                omitted = (adapted_counts or {}).get("omitted_image_count")
+                placeholders = (adapted_counts or {}).get("placeholder_count")
+                report["omitted_image_count"] = omitted
+                report["placeholder_count"] = placeholders
+                if media_mode == "placeholder":
+                    if lifted not in {0, None} or omitted != len(markers) or placeholders != len(markers):
+                        report["failure_classification"] = "images_not_placeholdered"
+                        report["status"] = "failed"
+                        return report
+                    if VISUAL_NOTICE not in compact_text:
+                        report["failure_classification"] = "compact_missing_omission_notice"
+                        report["status"] = "failed"
+                        return report
+                else:
+                    if lifted != len(markers):
+                        report["failure_classification"] = "images_not_lifted"
+                        report["status"] = "failed"
+                        return report
 
                 follow_input: list[dict[str, Any]] = []
                 if compact_text.strip():

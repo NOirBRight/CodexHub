@@ -962,20 +962,21 @@ class GatewayHandlerMixin:
                     _downstream_stream_status_payload(inbound_format, status_payload, model_canonical)
                 )
 
-            if route_plan.vision.action is not VisionAction.REJECT:
-                operational_authentication = materialize_operational_authentication(
-                    self.headers,
-                    upstream,
-                )
-                route_plan = bind_route_plan_operational_authentication(
-                    route_plan,
-                    self.headers,
-                    upstream,
-                    operational_authentication,
-                    drop_content_encoding=content_decoded,
-                    prompt_cache_key=prompt_cache_key,
-                )
-                primary_route_attempt = route_plan.attempts[0]
+            # Compact placeholder adaptation can continue past a Vision REJECT
+            # plan, so auth headers must be materialized before execution.
+            operational_authentication = materialize_operational_authentication(
+                self.headers,
+                upstream,
+            )
+            route_plan = bind_route_plan_operational_authentication(
+                route_plan,
+                self.headers,
+                upstream,
+                operational_authentication,
+                drop_content_encoding=content_decoded,
+                prompt_cache_key=prompt_cache_key,
+            )
+            primary_route_attempt = route_plan.attempts[0]
             usage_capture: dict[str, Any] = {}
             vision_proxy_payload_format = (
                 route_plan.prepared_request_protocol.value

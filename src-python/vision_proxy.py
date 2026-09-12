@@ -948,6 +948,11 @@ def enforce_text_only_boundary(
     if vision_plan.action is VisionAction.REJECT:
         if not contains_image:
             return False
+        context = event_context if isinstance(event_context, Mapping) else {}
+        if context.get("compact_placeholder_authorized") is True:
+            # Trusted compact may omit images later through the shared
+            # tool-result adapter. Ordinary generation still fails closed.
+            return False
         model_label = (
             _canonical_model_id(target_model) if target_model else "the target model"
         )
