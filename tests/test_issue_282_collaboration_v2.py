@@ -1022,6 +1022,14 @@ def test_client_errors_do_not_relax_other_result_contracts(version, name, output
         validate_collaboration_result(version, name, output)
 
 
+def test_interrupt_collab_manager_unavailable_is_not_an_execution_error() -> None:
+    from collaboration_runtime_contract import validate_collaboration_result
+
+    # Existing interrupt plaintext exception still replays non-JSON; this string
+    # must not be claimed as a scoped execution-error allowlist entry.
+    validate_collaboration_result(COLLABORATION_V2, "interrupt_agent", "collab manager unavailable")
+
+
 def test_v1_cannot_claim_v2_execution_error_or_timeout_exemption() -> None:
     from collaboration_runtime_contract import (
         CollaborationContractError, failed_argument_call_ids, validate_collaboration_result,

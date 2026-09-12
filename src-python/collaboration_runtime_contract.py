@@ -545,7 +545,7 @@ def _is_client_execution_error(name: str, value: str) -> bool:
     if name == "wait_agent":
         return _client_timeout_limit(value) is not None
     if value == "collab manager unavailable":
-        return name in {"spawn_agent", "list_agents", "send_message", "followup_task", "interrupt_agent"}
+        return name in {"spawn_agent", "list_agents", "send_message", "followup_task"}
     if name in {"send_message", "followup_task"} and value in {
         "Empty message can't be sent to an agent",
         "target agent is missing an agent_path",
