@@ -55,6 +55,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/e2e_linux_dock_icon.py",
     "scripts/e2e_linux_gui_clients.py",
     "scripts/e2e_linux_window_input.py",
+    "scripts/e2e_official_cli_image_compact.py",
     "scripts/e2e_xai_grok_tools.py",
     "scripts/e2e_third_party_collaboration.py",
     "scripts/generate_wayfinder_final_audit.py",
