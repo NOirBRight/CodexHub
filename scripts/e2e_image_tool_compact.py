@@ -29,7 +29,7 @@ import threading
 import time
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener, urlopen
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,14 +37,29 @@ sys.path.insert(0, str(ROOT / "src-python"))
 
 CONTINUE_SENTINEL = "E2E_IMAGE_COMPACT_CONTINUE_OK"
 VISUAL_NOTICE = "Visual content from tool results was omitted from this compact summary."
-XAI_BASE = "https://api.x.ai/v1"
+DEFAULT_HTTPS_PROXY = "http://127.0.0.1:7890"
 REQUIRED_SOURCE_FILES = (
     "proxy/settings.json",
     "proxy/config/providers.toml",
     "proxy/official-editor-catalog.json",
-    "proxy/xai_auth.json",
     "model-catalogs/codexhub-model-catalog.json",
 )
+PROVIDER_ROUTES = {
+    "xai/grok-4.6": {
+        "toml_needle": 'id = "xai"\nname = "xAI"\nbase_url = "https://api.x.ai/v1"',
+        "recorder_base_path": "/v1",
+        "upstream_host": "api.x.ai",
+        "upstream_origin": "https://api.x.ai",
+        "extra_source_files": ("proxy/xai_auth.json",),
+    },
+    "opencode-go/muse-spark-1.3-contributor": {
+        "toml_needle": 'id = "opencode-go"\nname = "OpenCode Go"\nbase_url = "https://opencode.ai/zen/go/v1"',
+        "recorder_base_path": "/zen/go/v1",
+        "upstream_host": "opencode.ai",
+        "upstream_origin": "https://opencode.ai",
+        "extra_source_files": (),
+    },
+}
 
 
 def png_solid(red: int, green: int, blue: int, size: int = 32) -> bytes:
@@ -101,11 +116,20 @@ def count_user_input_images(payload: Mapping[str, Any]) -> int:
     return count
 
 
-def rewrite_xai_base_url(toml_text: str, new_url: str) -> str:
-    needle = 'id = "xai"\nname = "xAI"\nbase_url = "https://api.x.ai/v1"'
+def rewrite_provider_base_url(toml_text: str, needle: str, new_url: str) -> str:
     if needle not in toml_text:
-        raise RuntimeError("isolated_providers_missing_xai_base_url")
-    return toml_text.replace(needle, f'id = "xai"\nname = "xAI"\nbase_url = "{new_url}"', 1)
+        raise RuntimeError("isolated_providers_missing_base_url")
+    prefix, _, _old_url = needle.rpartition("base_url = ")
+    replacement = prefix + f'base_url = "{new_url}"'
+    return toml_text.replace(needle, replacement, 1)
+
+
+def rewrite_xai_base_url(toml_text: str, new_url: str) -> str:
+    return rewrite_provider_base_url(
+        toml_text,
+        PROVIDER_ROUTES["xai/grok-4.6"]["toml_needle"],
+        new_url,
+    )
 
 
 def _compact_history(image_urls: list[str]) -> list[dict[str, Any]]:
@@ -186,17 +210,27 @@ def _read_sse_text(body: bytes) -> tuple[str, dict[str, Any] | None]:
     return "".join(texts), completed
 
 
+def _https_opener(https_proxy: str | None, context: ssl.SSLContext):
+    handlers = [HTTPSHandler(context=context)]
+    if https_proxy:
+        handlers.insert(0, ProxyHandler({"http": https_proxy, "https": https_proxy}))
+    return build_opener(*handlers)
+
+
 class RecordingProxy:
-    def __init__(self, upstream_base: str):
-        self.upstream_base = upstream_base.rstrip("/")
+    def __init__(self, *, upstream_host: str, upstream_origin: str, https_proxy: str | None):
+        self.upstream_host = upstream_host
+        self.upstream_origin = upstream_origin.rstrip("/")
+        self.https_proxy = https_proxy
         self.captures: list[dict[str, Any]] = []
         self._server: ThreadingHTTPServer | None = None
         self.port = 0
 
     def start(self) -> None:
         captures = self.captures
-        upstream_base = self.upstream_base
-        context = ssl.create_default_context()
+        upstream_host = self.upstream_host
+        upstream_origin = self.upstream_origin
+        opener = _https_opener(self.https_proxy, ssl.create_default_context())
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -227,16 +261,12 @@ class RecordingProxy:
                     for key, value in self.headers.items()
                     if key.lower() not in {"host", "content-length", "connection"}
                 }
-                headers["Host"] = "api.x.ai"
+                headers["Host"] = upstream_host
                 request_path = self.path or "/"
-                if request_path.startswith("/v1/"):
-                    url = "https://api.x.ai" + request_path
-                else:
-                    url = upstream_base + request_path
+                url = upstream_origin + request_path
                 try:
-                    with urlopen(
+                    with opener.open(
                         Request(url, data=body, headers=headers, method="POST"),
-                        context=context,
                         timeout=180,
                     ) as response:
                         response_body = response.read()
@@ -382,15 +412,23 @@ def _classify_upstream_failure(status: int, body: bytes) -> str | None:
     return None
 
 
-def run_isolated(*, source_home: Path, model: str, timeout: int) -> dict[str, Any]:
+def run_isolated(*, source_home: Path, model: str, timeout: int, https_proxy: str | None) -> dict[str, Any]:
     source = source_home.expanduser().resolve()
-    missing = [name for name in REQUIRED_SOURCE_FILES if not (source / name).is_file()]
+    route = PROVIDER_ROUTES.get(model)
+    extra_files = () if route is None else route["extra_source_files"]
+    required = REQUIRED_SOURCE_FILES + extra_files
+    missing = [name for name in required if not (source / name).is_file()]
     report: dict[str, Any] = {
         "report_version": 1,
         "model": model,
+        "https_proxy": https_proxy,
         "passed": False,
         "status": "failed",
     }
+    if route is None:
+        report["status"] = "unverified"
+        report["failure_classification"] = "unsupported_e2e_model"
+        return report
     if missing:
         report["status"] = "unverified"
         report["failure_classification"] = "missing_source_home_inputs"
@@ -406,18 +444,23 @@ def run_isolated(*, source_home: Path, model: str, timeout: int) -> dict[str, An
     with tempfile.TemporaryDirectory(prefix="codexhub-image-compact-e2e-") as directory:
         private = Path(directory)
         server_home = private / "server"
-        for name in REQUIRED_SOURCE_FILES:
+        for name in required:
             target = server_home / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source / name, target)
-        recorder = RecordingProxy(XAI_BASE)
+        recorder = RecordingProxy(
+            upstream_host=str(route["upstream_host"]),
+            upstream_origin=str(route["upstream_origin"]),
+            https_proxy=https_proxy,
+        )
         recorder.start()
         try:
             providers_path = server_home / "proxy/config/providers.toml"
             providers_path.write_text(
-                rewrite_xai_base_url(
+                rewrite_provider_base_url(
                     providers_path.read_text(encoding="utf-8"),
-                    f"http://127.0.0.1:{recorder.port}/v1",
+                    str(route["toml_needle"]),
+                    f"http://127.0.0.1:{recorder.port}{route['recorder_base_path']}",
                 ),
                 encoding="utf-8",
             )
@@ -429,6 +472,12 @@ def run_isolated(*, source_home: Path, model: str, timeout: int) -> dict[str, An
             env["CODEX_HOME"] = str(server_home)
             env["CODEX_PROXY_GATEWAY_CLIENT_KEY"] = key
             env["PYTHONPATH"] = str(ROOT / "src-python")
+            if https_proxy:
+                env["HTTP_PROXY"] = https_proxy
+                env["HTTPS_PROXY"] = https_proxy
+                env["ALL_PROXY"] = https_proxy
+                env["http_proxy"] = https_proxy
+                env["https_proxy"] = https_proxy
             for name in ("CODEXHUB_CODEX_TARGET_HOME", "CODEXHUB_RUNTIME_HOME", "CODEXHUB_HOME", "CODEX_PROXY_HOME"):
                 env.pop(name, None)
             log_path = private / "gateway.log"
@@ -576,11 +625,18 @@ def run_isolated(*, source_home: Path, model: str, timeout: int) -> dict[str, An
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-home", type=Path, required=True)
-    parser.add_argument("--model", default="xai/grok-4.6")
+    parser.add_argument("--model", default="xai/grok-4.6", choices=sorted(PROVIDER_ROUTES))
     parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument("--https-proxy", default=DEFAULT_HTTPS_PROXY)
     parser.add_argument("--output", type=Path, default=Path("test-results/image-tool-compact.json"))
     args = parser.parse_args()
-    report = run_isolated(source_home=args.source_home, model=args.model, timeout=args.timeout)
+    https_proxy = args.https_proxy.strip() or None
+    report = run_isolated(
+        source_home=args.source_home,
+        model=args.model,
+        timeout=args.timeout,
+        https_proxy=https_proxy,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: value for key, value in report.items() if key != "adapted_event"}, indent=2))
