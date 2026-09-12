@@ -43,10 +43,8 @@ from runtime_tool_compatibility import (
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
     build_tool_compatibility_plan,
 )
-from tool_compatibility.collab_v2 import (
-    collapse_official_v2_names_for_chat as _collapse_official_v2_names_for_chat,
-    expand_chat_v2_for_official as _expand_chat_v2_for_official,
-)
+import tool_compatibility.chat_official_native as _chat_official_native
+import tool_compatibility.collab_v2 as _collab_v2
 from tool_surface_adapter import (
     APPLY_PATCH_FUNCTION_NAME,
     INTERNAL_INPUT_ITEM_TYPES,
@@ -202,13 +200,17 @@ def compatible_request_body(
         if _response._sanitize_official_system_messages(payload):
             changed = True
         try:
-            if _expand_chat_v2_for_official(payload, event_context if isinstance(event_context, dict) else None):
+            if _collab_v2.expand_chat_v2_for_official(payload, event_context if isinstance(event_context, dict) else None):
                 changed = True
                 collaboration_protocol = _collaboration_adapter_module.resolve_boundary(
                     payload,
                     event_context,
                     surface="request",
                 )
+            if _chat_official_native.expand_chat_native_tools_for_official(
+                payload, event_context if isinstance(event_context, dict) else None
+            ):
+                changed = True
         except RuntimeToolCompatibilityError as exc:
             _official_passthrough._raise_runtime_tool_compatibility_error(exc)
 

@@ -117,6 +117,15 @@ temporary isolated runtime and are never written to the report. Use `--auth`,
 `--providers`, `--settings`, and `--catalog` to select dedicated inputs. The
 report must contain eight successful apply/readback/live sentinel cases.
 
+Inbound Chat Completions live coverage is a sibling gate, not a ninth CLI
+protocol. Use `scripts/e2e_chat_completions.py` and
+`scripts/real_client_chat_contract.v1.json`. Do not fold those cases into the
+eight-row CLI contract or the CLI summary. Official Chat is
+`POST /v1/chat/completions`; Muse Chat is
+`POST /v1/providers/opencode-go/chat/completions` and requires
+`--opencode-go-credentials`. Windows uses `scripts/Run-ChatCompletionsE2E.ps1`
+against a Debug portable candidate. See `docs/agents/real-client-e2e.md`.
+
 This host's accepted floors are the same numeric floors as Windows: Codex
 Desktop `26.715.8383.0` (Debian package `chatgpt`) and ZCode `3.3.6`.
 `open_codex_app` on Linux launches `/usr/bin/chatgpt` / `codex-launcher`.

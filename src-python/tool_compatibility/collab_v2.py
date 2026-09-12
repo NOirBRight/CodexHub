@@ -23,7 +23,7 @@ from collaboration_runtime_contract import (
 )
 
 from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, copy_mapping as _copy_mapping
-from .dispositions import ADAPT, NAMESPACE
+from .dispositions import ADAPT, NAMESPACE, name_of
 
 
 V2_NAMES = frozenset(
@@ -78,18 +78,6 @@ def _v2_alias_to_name() -> dict[str, str]:
     return mapping
 
 
-def _function_tool_name(declaration: Mapping[str, Any]) -> str | None:
-    name = declaration.get("name")
-    if isinstance(name, str) and name:
-        return name
-    function = declaration.get("function")
-    if isinstance(function, Mapping):
-        nested = function.get("name")
-        if isinstance(nested, str) and nested:
-            return nested
-    return None
-
-
 def _canonical_v2_name(name: str | None, alias_to_name: Mapping[str, str]) -> str | None:
     if not isinstance(name, str) or not name:
         return None
@@ -98,23 +86,41 @@ def _canonical_v2_name(name: str | None, alias_to_name: Mapping[str, str]) -> st
     return alias_to_name.get(name)
 
 
+def official_v2_parameter_schema(name: str) -> dict[str, Any]:
+    """Emit the reserved Official V2 child schema, not the validation copy.
+
+    The frozen contract keeps empty ``required`` arrays and optional
+    ``spawn_agent.agent_type`` for classification. Official reserved-function
+    matching does not: CLI 0.153.4 and chatgpt.com omit both. Sending
+    ``required: []`` is rejected as
+    ``collaboration.list_agents`` / configured-schema mismatch.
+    """
+
+    parameters = copy.deepcopy(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2][name])
+    if name == "spawn_agent":
+        properties = parameters.get("properties")
+        if isinstance(properties, dict):
+            properties.pop("agent_type", None)
+    if not parameters.get("required"):
+        parameters.pop("required", None)
+    return parameters
+
+
 def _official_v2_namespace(source_by_name: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     children: list[dict[str, Any]] = []
-    schemas = EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]
     for name in V2_TOOLS:
         source = source_by_name[name]
         description = source.get("description")
         nested = source.get("function")
         if not isinstance(description, str) and isinstance(nested, Mapping):
             description = nested.get("description")
-        parameters = copy.deepcopy(schemas[name])
         children.append(
             {
                 "type": "function",
                 "name": name,
                 "description": description if isinstance(description, str) else name,
                 "strict": False,
-                "parameters": parameters,
+                "parameters": official_v2_parameter_schema(name),
             }
         )
     return {
@@ -190,7 +196,7 @@ def expand_chat_v2_for_official(
         if not isinstance(tool, Mapping):
             remaining.append(tool)
             continue
-        name = _function_tool_name(tool)
+        name = name_of(tool)
         if name in _V1_ONLY_TOOLS:
             saw_v1 = True
             remaining.append(tool)
@@ -249,7 +255,7 @@ def expand_chat_v2_for_official(
     payload["tool_choice"] = "auto"
     payload["tools"] = [_official_v2_namespace(v2_sources), *remaining]
     name_map = {
-        canonical: _function_tool_name(source) or canonical
+        canonical: name_of(source) or canonical
         for canonical, source in v2_sources.items()
     }
     if isinstance(event_context, dict):

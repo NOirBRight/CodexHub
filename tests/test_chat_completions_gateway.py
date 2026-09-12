@@ -33,7 +33,14 @@ def prepare_exchange(request_body, *, inbound_format, outbound_format, prompt_ca
     )
 
 
-def _assert_identity_prepare_exchange(request_body, *, inbound_format, outbound_format, prompt_cache_key_policy=PromptCacheKeyPolicy.DROP_UNVERIFIED):
+def _assert_identity_prepare_exchange(
+    request_body,
+    *,
+    inbound_format,
+    outbound_format,
+    prompt_cache_key_policy=PromptCacheKeyPolicy.DROP_UNVERIFIED,
+    preserve_reasoning_history=False,
+):
     if inbound_format != outbound_format:
         raise AssertionError(f"converted {inbound_format} -> {outbound_format}")
     return _real_prepare_exchange(
@@ -41,6 +48,7 @@ def _assert_identity_prepare_exchange(request_body, *, inbound_format, outbound_
         inbound_format=inbound_format,
         outbound_format=outbound_format,
         prompt_cache_key_policy=prompt_cache_key_policy,
+        preserve_reasoning_history=preserve_reasoning_history,
     )
 
 
@@ -613,6 +621,16 @@ class ChatToolsToResponsesTests(unittest.TestCase):
                 {"type": "function", "function": {"name": "foo"}},
                 {"type": "other"},
             ])
+
+    def test_passes_known_native_hosted_and_custom_types(self):
+        tools = chat_tools_to_responses_tools([
+            {"type": "web_search", "search_context_size": "low"},
+            {"type": "custom", "name": "apply_patch", "format": {"type": "text"}},
+            {"type": "tool_search", "execution": "client"},
+        ])
+        self.assertEqual(tools[0], {"type": "web_search", "search_context_size": "low"})
+        self.assertEqual(tools[1]["type"], "custom")
+        self.assertEqual(tools[2], {"type": "tool_search", "execution": "client"})
 
 
 class ResponseBodyToChatTests(unittest.TestCase):
@@ -1212,6 +1230,67 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         tool_call = result["choices"][0]["message"]["tool_calls"][0]
         self.assertEqual(tool_call["id"], "call_spawn")
         self.assertEqual(tool_call["function"]["name"], "spawn_agent")
+
+    def test_post_chat_completions_maps_official_hosted_and_custom_tools(self):
+        from tool_compatibility.contracts import CUSTOM_INPUT_KEY
+
+        body = json.dumps({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "search then patch"}],
+            "tools": [
+                {"type": "web_search"},
+                {"type": "custom", "name": "apply_patch", "format": {"type": "text"}},
+                {"type": "tool_search", "execution": "client"},
+            ],
+            "tool_choice": "auto",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body)
+        upstream_body = json.dumps({
+            "id": "resp_native",
+            "object": "response",
+            "status": "completed",
+            "model": "gpt-5.5",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "ws_1",
+                    "call_id": "call_ws",
+                    "status": "completed",
+                    "action": {"query": "codex"},
+                },
+                {
+                    "type": "custom_tool_call",
+                    "id": "ct_1",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch",
+                },
+                {
+                    "type": "tool_search_call",
+                    "id": "ts_1",
+                    "call_id": "call_search",
+                    "execution": "client",
+                    "arguments": {"query": "patch"},
+                },
+            ],
+        }).encode("utf-8")
+
+        with patch("gateway_transport.official_urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen:
+            CodexProxyHandler.do_POST(handler)
+
+        sent_payload = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(
+            [tool["type"] for tool in sent_payload["tools"]],
+            ["web_search", "custom", "tool_search"],
+        )
+        self.assertEqual(sent_payload["tools"][1]["name"], "apply_patch")
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 200)
+        names = [call["function"]["name"] for call in result["choices"][0]["message"]["tool_calls"]]
+        self.assertEqual(names, ["web_search", "apply_patch", "tool_search"])
+        patch_args = json.loads(result["choices"][0]["message"]["tool_calls"][1]["function"]["arguments"])
+        self.assertEqual(patch_args, {CUSTOM_INPUT_KEY: "*** Begin Patch"})
 
     def test_post_chat_completions_maps_official_reasoning_summary_with_message(self):
         body = json.dumps({
@@ -5541,6 +5620,80 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
                 route_primitives.RouteMutation.WIRE_CONVERSION.value,
                 event["route_attempt_mutation_summary"],
             )
+
+    def test_auto_chat_inbound_keeps_hosted_web_search_and_collapses_call(self):
+        policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
+        external_model = {
+            "alias": "auto/muse-search",
+            "provider_alias": "auto",
+            "upstream_name": "auto_provider",
+            "display_prefix": "Auto",
+            "base_url": "https://auto.example.test/v1",
+            "api_key": "auto-test-token",
+            "upstream_model": "muse-search",
+            "upstream_format": "auto",
+            "priority_base": 200,
+            "context_window": 1024000,
+            "max_output_tokens": 4096,
+            "input_modalities": ("text",),
+            "context_source": "providers_toml",
+            "max_output_source": "providers_toml",
+        }
+        body = json.dumps({
+            "model": "muse-search",
+            "messages": [{"role": "user", "content": "Search the web for Codex CLI."}],
+            "tools": [{"type": "web_search"}],
+            "tool_choice": "auto",
+            "stream": False,
+        }).encode("utf-8")
+        handler = self._make_handler(body, path="/v1/providers/auto/chat/completions")
+        upstream_body = json.dumps({
+            "id": "resp_search",
+            "object": "response",
+            "status": "completed",
+            "model": "muse-search",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "ws_1",
+                    "call_id": "call_ws",
+                    "status": "completed",
+                    "action": {"query": "Codex CLI"},
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Codex CLI is the terminal client."}],
+                },
+            ],
+        }).encode("utf-8")
+
+        with (
+            patch.dict("os.environ", {"CODEX_PROXY_AUTO_RETRY_ENABLED": "0"}, clear=False),
+            patch(
+                "gateway_catalog_runtime.load_policy",
+                return_value=replace(
+                    policy,
+                    allowed_provider_models=policy.allowed_provider_models + ("auto/muse-search",),
+                ),
+            ),
+            patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
+            patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)) as mock_urlopen,
+        ):
+            CodexProxyHandler.do_POST(handler)
+
+        sent = json.loads(mock_urlopen.call_args.args[0].data)
+        self.assertEqual(sent["tools"], [{"type": "web_search"}])
+        self.assertTrue(mock_urlopen.call_args.args[0].full_url.endswith("/responses"))
+        result = json.loads(b"".join(handler.wfile.writes))
+        self.assertEqual(handler._fake.status, 200)
+        names = [call["function"]["name"] for call in result["choices"][0]["message"]["tool_calls"]]
+        self.assertEqual(names, ["web_search"])
+        self.assertEqual(
+            json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]),
+            {"action": {"query": "Codex CLI"}},
+        )
+        self.assertEqual(result["choices"][0]["message"]["content"], "Codex CLI is the terminal client.")
 
     def test_auto_upstream_format_suppresses_chat_fallback_for_protocol_http_error(self):
         policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)

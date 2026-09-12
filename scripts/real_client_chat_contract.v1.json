@@ -1,0 +1,41 @@
+{
+  "schema": "codexhub.real-client-chat-contract.v1",
+  "evidence_fields": [
+    "case_id",
+    "provider_id",
+    "model",
+    "endpoint_binding",
+    "protocol",
+    "outcome",
+    "http_status",
+    "saw_sentinel",
+    "saw_reasoning_content",
+    "saw_encrypted_content",
+    "saw_responses_event"
+  ],
+  "cases": [
+    {
+      "provider_id": "official",
+      "model": "gpt-5.6-luna",
+      "endpoint_binding": "/v1/chat/completions",
+      "protocol": "chat_completions",
+      "prompt_cache_key": "codexhub-chat-e2e-official",
+      "case_ids": {
+        "linux": "chat-official",
+        "windows": "chat-official"
+      }
+    },
+    {
+      "provider_id": "opencode-go",
+      "model": "muse-spark-1.3-contributor",
+      "endpoint_binding": "/v1/providers/opencode-go/chat/completions",
+      "protocol": "chat_completions",
+      "prompt_cache_key": "codexhub-chat-e2e-opencode-go",
+      "max_tokens": 1024,
+      "case_ids": {
+        "linux": "chat-opencode-go",
+        "windows": "chat-opencode-go"
+      }
+    }
+  ]
+}

@@ -38,6 +38,58 @@ Optional live probes:
 Do not add xAI to `scripts/real_client_cli_contract.v1.json` without a
 dedicated credential contract and a new Issue.
 
+## Sibling inbound Chat Completions gate
+
+Issue #509 Chat official compatibility is a separate live gate from the eight
+CLI Responses cases. Do not add Chat rows to
+`scripts/real_client_cli_contract.v1.json`, and do not write Chat results into
+the CLI `summary.json`. Keep `Run-RealClientE2E.ps1`
+`gateway_enable_chat_completions = $false`.
+
+The Chat contract is `scripts/real_client_chat_contract.v1.json`
+(`codexhub.real-client-chat-contract.v1`). It owns two cases:
+
+- `chat-official`: Official Luna on `POST /v1/chat/completions`
+- `chat-opencode-go`: OpenCode Go Muse on
+  `POST /v1/providers/opencode-go/chat/completions`
+
+Linux:
+
+```bash
+./scripts/codexhub-python.sh scripts/e2e_chat_completions.py \
+  --bin src-tauri/target/debug/codexhub \
+  --output test-results/chat-completions-e2e.json \
+  --opencode-go-credentials <isolated/credentials/opencode-go.json>
+```
+
+Windows uses the Debug portable candidate and
+`scripts/Run-ChatCompletionsE2E.ps1`, which launches
+`scripts/codexhub-python.cmd`. Pass a new output directory every live run.
+Do not reuse a previous `isolated/work` keep-runtime. OpenCode Go Chat requires
+`-OpenCodeGoCredentials` with schema `codexhub.real-client-opencode-go.v1`.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Run-ChatCompletionsE2E.ps1 `
+  -Bin <portable>/CodexHub.exe `
+  -Output <new-run>/chat-completions-e2e.json `
+  -Auth <inputs>/auth.json `
+  -Providers <inputs>/providers.toml `
+  -Settings <inputs>/settings.json `
+  -Catalog <inputs>/codexhub-model-catalog.json `
+  -OpenCodeGoCredentials <inputs>/opencode-go.json `
+  -KeepRuntime <new-run>/runtime `
+  -Proxy http://127.0.0.1:7890
+```
+
+The Chat runner starts an isolated Gateway with Chat enabled, sets
+`CODEXHUB_RESOURCE_ROOT` to the checkout so debug/portable loads current
+`src-python`, and does not send `X-Codex-Client-Id` (that identity would leave
+the official `#509` `official_gateway_compat` path). Loopback `/health` and
+Chat POST must bypass `HTTP_PROXY`. Windows `codexhub start` waits on
+`/health`, not on the starter process exiting. Muse Chat fail-closes if the
+credential file is missing. A pass requires HTTP 200, Chat `choices`, the
+named sentinel in content, no `encrypted_content`, and no Responses events.
+
 ## Authoritative host and compatibility baselines
 
 Run on the authoritative machine-bound local dedicated Windows host
