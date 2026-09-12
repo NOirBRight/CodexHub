@@ -101,6 +101,107 @@ class ProtocolTranslationTests(unittest.TestCase):
         ]
         assert translated["messages"][1]["tool_call_id"] == "call_123"
 
+    def test_chat_output_maps_portable_reasoning_and_drops_ciphertext(self):
+        body = {
+            "id": "resp_out",
+            "status": "completed",
+            "model": "example-model",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "think first"}],
+                    "encrypted_content": "gAAAA ciphertext",
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hello"}],
+                },
+            ],
+        }
+        translated = json.loads(
+            protocol_translation.response_body_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+        )
+        message = translated["choices"][0]["message"]
+        self.assertEqual(message["content"], "hello")
+        self.assertEqual(message["reasoning_content"], "think first")
+
+    def test_chat_output_skips_ciphertext_only_reasoning_when_message_present(self):
+        body = {
+            "id": "resp_out",
+            "status": "completed",
+            "model": "example-model",
+            "output": [
+                {"type": "reasoning", "summary": [], "encrypted_content": "gAAAA ciphertext"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hello"}],
+                },
+            ],
+        }
+        translated = json.loads(
+            protocol_translation.response_body_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+        )
+        message = translated["choices"][0]["message"]
+        self.assertEqual(message["content"], "hello")
+        self.assertNotIn("reasoning_content", message)
+
+    def test_chat_output_rejects_ciphertext_only_reasoning(self):
+        body = {
+            "id": "resp_out",
+            "status": "completed",
+            "model": "example-model",
+            "output": [{"type": "reasoning", "summary": [], "encrypted_content": "gAAAA ciphertext"}],
+        }
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as raised:
+            protocol_translation.response_body_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+        self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
+
+    def test_chat_stream_emits_reasoning_content_deltas(self):
+        converter = protocol_translation.ResponsesToChatStreamConverter(
+            preserve_reasoning_history=True,
+        )
+        events = [
+            {"type": "response.created", "response": {"id": "resp_1", "model": "example-model"}},
+            {"type": "response.output_item.added", "item": {"id": "rs_1", "type": "reasoning", "summary": []}},
+            {"type": "response.reasoning_summary_text.delta", "delta": "think"},
+            {"type": "response.output_text.delta", "delta": "hi"},
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_1",
+                    "output": [
+                        {"id": "rs_1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "think"}]},
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "hi"}],
+                        },
+                    ],
+                },
+            },
+        ]
+        deltas = []
+        for event in events:
+            for chunk in converter.chunks_for_event(event):
+                delta = chunk["choices"][0]["delta"]
+                if "reasoning_content" in delta or "content" in delta:
+                    deltas.append(delta)
+        self.assertEqual(
+            deltas,
+            [{"reasoning_content": "think"}, {"content": "hi"}],
+        )
+
     def test_responses_reasoning_history_requires_explicit_capability(self):
         body = {
             "model": "example-model",
@@ -2637,6 +2738,46 @@ class ProtocolTranslationTests(unittest.TestCase):
         self.assertEqual(input_done["item_id"], item["id"])
         self.assertEqual(input_done["input"], item["input"])
         self.assertEqual(reconstructed["output"], [item])
+
+    def test_events_to_responses_body_folds_reasoning_summary_deltas(self):
+        reconstructed = json.loads(
+            protocol_translation.events_to_responses_body(
+                [
+                    {
+                        "type": "response.output_item.done",
+                        "item": {"id": "rs_1", "type": "reasoning", "summary": []},
+                    },
+                    {"type": "response.reasoning_summary_text.delta", "delta": "think "},
+                    {"type": "response.reasoning_summary_text.delta", "delta": "first"},
+                    {
+                        "type": "response.output_item.done",
+                        "item": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "hi"}],
+                        },
+                    },
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_1",
+                            "status": "completed",
+                            "output": [
+                                {"id": "rs_1", "type": "reasoning", "summary": []},
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "hi"}],
+                                },
+                            ],
+                        },
+                    },
+                ],
+                require_completed=True,
+            )
+        )
+        reasoning = next(item for item in reconstructed["output"] if item["type"] == "reasoning")
+        self.assertEqual(reasoning["summary"], [{"type": "summary_text", "text": "think first"}])
 
     def test_events_to_responses_body_terminal_type_is_authoritative(self):
         cases = (
