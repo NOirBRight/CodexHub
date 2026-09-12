@@ -23,7 +23,7 @@ _V2_ARGUMENTS = {
     "spawn_agent": {"task_name": "worker", "message": "do work", "fork_turns": "all"},
     "send_message": {"target": "/root/worker", "message": "status"},
     "followup_task": {"target": "/root/worker", "message": "continue"},
-    "wait_agent": {"timeout_ms": 1000},
+    "wait_agent": {"timeout_ms": 10000},
     "list_agents": {},
     "interrupt_agent": {"target": "/root/worker"},
 }
@@ -300,7 +300,7 @@ def test_c1_native_responses_forwards_declarations_unchanged() -> None:
     payload = fixture.request()
 
     assert fixture.event_context["collaboration_protocol"] == COLLABORATION_V2
-    assert fixture.event_context.get("subagent_spawn_allowed") is False
+    assert "subagent_spawn_allowed" not in fixture.event_context
     assert payload["tools"] == [_v2_declaration()]
     assert payload["model"] == "fixture-model"
     assert fixture.cross_provider_requests == 0
@@ -398,7 +398,7 @@ def test_c2_adapted_alias_encoding_is_injective_and_reversible() -> None:
     payload = fixture.request()
 
     assert fixture.event_context["collaboration_protocol"] == COLLABORATION_V2
-    assert fixture.event_context.get("subagent_spawn_allowed") is False
+    assert "subagent_spawn_allowed" not in fixture.event_context
     assert fixture.cross_provider_requests == 0
     assert fixture.fallback_count == 0
 
@@ -733,8 +733,8 @@ def test_gateway_does_not_fabricate_completion_or_output() -> None:
     assert response == {"id": "resp-empty", "output": []}
 
 
-def test_v2_skips_v1_scheduler_and_repair() -> None:
-    """V2 contexts do not initialize V1 scheduler/repair state."""
+def test_v2_has_no_gateway_scheduler_state() -> None:
+    """V2 adaptation retains only request-local protocol state."""
     fixture = _ProtocolFixture(
         _request_body(input_items=_v2_history_without_encrypted_agent_message()),
         _responses_upstream(native_namespace=False),
@@ -745,4 +745,4 @@ def test_v2_skips_v1_scheduler_and_repair() -> None:
     assert fixture.event_context.get("collaboration_protocol") == COLLABORATION_V2
     assert fixture.event_context.get("_subagent_state") is None
     assert fixture.event_context.get("_worker_stream_binding_state") is None
-    assert fixture.event_context.get("subagent_spawn_allowed") is False
+    assert "subagent_spawn_allowed" not in fixture.event_context

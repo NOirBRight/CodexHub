@@ -42,10 +42,6 @@ from runtime_tool_compatibility import (
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
     build_tool_compatibility_plan,
 )
-from subagent_policy import deterministic_required_action
-from gateway_settings import subagent_guidance_enabled, subagent_semantic_repair_enabled
-from subagent_scheduler import bounded_workflow_from_exact_prompts, compute_allowed_actions
-from subagent_state import build_subagent_state, is_worker_subagent_request, state_guidance_message
 from tool_surface_adapter import (
     APPLY_PATCH_FUNCTION_NAME,
     INTERNAL_INPUT_ITEM_TYPES,
@@ -291,6 +287,7 @@ def _validate_runtime_tool_capability_facts(facts: Mapping[str, Any]) -> None:
         "custom_adapter",
         "accepts_tool_search_adapter",
         "tool_search_adapter",
+        "requires_reasoning_content_history",
     }
     for key in boolean_keys:
         if key in facts and type(facts[key]) is not bool:
@@ -1232,16 +1229,10 @@ def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
             lines.append(
                 "available_function_tools: multi_agent_v1__spawn_agent, multi_agent_v1__wait_agent, multi_agent_v1__close_agent, multi_agent_v1__resume_agent, multi_agent_v1__send_input"
             )
-            lines.append(
-                "next_action: call multi_agent_v1__spawn_agent to create the child agent; do not call tool_search again for the same multi-agent query."
-            )
         if item.get("query_classification") == TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION:
             lines.append(f"query_classification: {TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION}")
             lines.append(f"empty_miss_count: {TOOL_SEARCH_EMPTY_MISS_BOUND}")
             lines.append("terminal: true")
-            lines.append(
-                "required_next_action: continue without the unavailable tool; do not call tool_search again for this exact query."
-            )
         _append_internal_field(lines, "tools", item.get("tools"))
     else:
         return None
@@ -1371,7 +1362,8 @@ def _rewrite_internal_input_items(
 
     changed = False
     rewritten_items: list[Any] = []
-    single_step_node_repl_request = _multi_agent._has_single_step_node_repl_request(input_items)
+    # Historical node-repl output is data, not a parent finalization signal.
+    single_step_node_repl_request = False
     multi_agent_search_call_ids: set[str] = set()
     multi_agent_calls_by_call_id: dict[str, tuple[str, dict[str, Any] | None]] = {}
     node_repl_call_ids: set[str] = set()

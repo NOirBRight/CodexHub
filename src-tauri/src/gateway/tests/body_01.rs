@@ -934,6 +934,11 @@ fn version_probe_does_not_execute_powershell_scripts() {
 
 #[test]
 fn gateway_models_export_enabled_gateway_models_ignoring_legacy_hidden() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let settings = Settings::default();
     let providers: Vec<Provider> = serde_json::from_value(json!([{
         "id": "minimax",
@@ -1377,6 +1382,11 @@ fn official_gateway_model_ids_are_bare_and_accept_legacy_aliases() {
 
 #[test]
 fn legacy_official_client_selection_resolves_to_exported_bare_id() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let settings = Settings::default();
 
     let resolved =
@@ -1908,6 +1918,11 @@ fn pi_config_exports_all_active_gateway_models() {
 
 #[test]
 fn pi_models_preserve_unmanaged_codexhub_prefix_provider() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let root = unique_temp_dir("codexhub-pi-unmanaged-prefix");
     let models_path = root.join("models.json");
     fs::create_dir_all(root.as_path()).unwrap();
@@ -1964,6 +1979,11 @@ fn pi_settings_preserve_activation_and_enabled_models() {
 
 #[test]
 fn omp_models_export_all_active_gateway_models() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let settings = Settings::default();
     let providers = client_export_test_providers();
 
@@ -2064,6 +2084,11 @@ fn omp_models_yaml_keeps_implicitly_typed_scalars_as_strings() {
 
 #[test]
 fn omp_models_yaml_official_numeric_display_names_parse_as_strings() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let settings = Settings::default();
     let providers = client_export_test_providers();
 

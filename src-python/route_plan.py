@@ -217,6 +217,24 @@ def external_native_responses_tool_codec(upstream: Mapping[str, Any]) -> str:
 _external_native_responses_tool_codec = external_native_responses_tool_codec
 
 
+def external_requires_reasoning_content_history(upstream: Mapping[str, Any]) -> bool:
+    """Return an explicit, route-scoped requirement for Chat thinking history.
+
+    Chat providers differ in whether a prior thinking trace must be echoed on
+    the next request.  The Gateway must not infer that from a provider/model
+    name; only a model- or route-scoped capability manifest may opt in.
+    """
+
+    capabilities = upstream.get("tool_protocol_capabilities")
+    return (
+        isinstance(capabilities, Mapping)
+        and capabilities.get("requires_reasoning_content_history") is True
+    )
+
+
+_external_requires_reasoning_content_history = external_requires_reasoning_content_history
+
+
 OFFICIAL_PASSTHROUGH_FIRST_EVENT_ATTEMPTS = 2
 
 def _is_codex_app_context(request_context: Mapping[str, str]) -> bool:
@@ -348,10 +366,9 @@ class RetryExecutionPlan:
         self,
         event_context: Mapping[str, Any] | None,
     ) -> int:
-        return int(
-            self.lifecycle_final_retry_eligible
-            and bool((event_context or {}).get("subagent_lifecycle_complete"))
-        )
+        """Retained plan API; Collaboration history cannot buy another retry."""
+        _ = event_context
+        return 0
 
     def retry_delay_seconds(
         self,
@@ -421,6 +438,7 @@ class RelayExecutionPlan:
     sse_mutation_policy: MutationPolicy
     verify_cross_protocol_source: bool
     lifecycle_final_retry_enabled: bool
+    preserve_reasoning_history: bool = False
 
 
 @dataclass(frozen=True)
@@ -448,6 +466,7 @@ class RouteAttemptPlan:
     named_mutations: frozenset[RouteMutation]
     fallback_http_statuses: frozenset[int]
     prompt_cache_key_policy: PromptCacheKeyPolicy = PromptCacheKeyPolicy.DROP_UNVERIFIED
+    preserve_reasoning_history: bool = False
 
     @property
     def mutation_summary(self) -> tuple[RouteMutation, ...]:
@@ -472,6 +491,7 @@ class RouteAttemptPlan:
                 self.verify_cross_protocol_source
             ),
             lifecycle_final_retry_enabled=lifecycle_final_retry_enabled,
+            preserve_reasoning_history=self.preserve_reasoning_history,
         )
 
     def telemetry_snapshot(self) -> dict[str, Any]:
@@ -513,6 +533,7 @@ class RouteAttemptPlan:
             "mutation_summary": [
                 mutation.value for mutation in self.mutation_summary
             ],
+            "preserve_reasoning_history": self.preserve_reasoning_history,
         }
 
     def _exchange_formats(self) -> tuple[str, str]:
@@ -541,11 +562,20 @@ class RouteAttemptPlan:
 
     def prepare_body(self, request_body: bytes) -> PreparedExchange:
         inbound_format, outbound_format = self._exchange_formats()
-        return prepare_exchange(
-            request_body,
+        kwargs = dict(
             inbound_format=inbound_format,
             outbound_format=outbound_format,
             prompt_cache_key_policy=self.prompt_cache_key_policy,
+        )
+        # Keep the established callable seam compatible with integrations and
+        # tests that provide a narrow ``prepare_exchange`` adapter.  The new
+        # capability is opt-in; the default False is already owned by the
+        # converter, so do not pass a redundant keyword on ordinary routes.
+        if self.preserve_reasoning_history:
+            kwargs["preserve_reasoning_history"] = True
+        return prepare_exchange(
+            request_body,
+            **kwargs,
         )
 
     def request_body(self, prepared_body: bytes) -> bytes:
@@ -1711,6 +1741,11 @@ def route_plan_for_request(
                     if upstream_name != "official"
                     else "none"
                 ),
+                preserve_reasoning_history=(
+                    _external_requires_reasoning_content_history(attempt_upstream)
+                    if upstream_name != "official"
+                    else False
+                ),
                 named_mutations=frozenset(attempt_mutations),
                 fallback_http_statuses=(
                     frozenset(AUTO_UPSTREAM_PROTOCOL_FALLBACK_STATUSES)
@@ -2025,4 +2060,3 @@ def route_attempt_event_fields(
         "route_attempt_mutation_summary": snapshot["mutation_summary"],
     }
 _route_attempt_event_fields = route_attempt_event_fields
-

@@ -94,7 +94,7 @@ V2_ARGUMENTS = {
     "list_agents": {},
     "send_message": {"target": "/root/worker", "message": "status"},
     "spawn_agent": {"task_name": "worker", "message": "do work", "fork_turns": "all"},
-    "wait_agent": {"timeout_ms": 1000},
+    "wait_agent": {"timeout_ms": 10000},
 }
 V2_RESULTS = {
     "followup_task": None,
@@ -514,7 +514,6 @@ def test_conservative_responses_adapts_all_six_v2_children_without_v1_behavior()
     assert all(alias.startswith("__codexhub_ns_") for alias in aliases)
     assert not any("multi_agent_v1" in alias for alias in aliases)
     assert context["collaboration_protocol"] == COLLABORATION_V2
-    assert context["subagent_spawn_allowed"] is False
     plan = context["_runtime_tool_compatibility_plan"]
     assert plan.entries[0].disposition == "adapt"
     assert plan.entries[0].child_names == (
@@ -655,31 +654,24 @@ def test_v2_external_plaintext_agent_message_uses_reversible_provider_envelope()
     ],
     ids=["missing-task-name", "legacy-fork-context"],
 )
-def test_v2_external_spawn_response_repairs_known_v1_shape(arguments: dict[str, object]) -> None:
+def test_v2_external_spawn_response_rejects_cross_version_shape(arguments: dict[str, object]) -> None:
     plan = _v2_plan()
     alias = plan.entries[0].aliases[4]
 
-    decoded = plan.decode_payload(
-        {
-            "output": [
-                {
-                    "type": "function_call",
-                    "id": "v2-spawn-item",
-                    "call_id": "v2-spawn-call",
-                    "name": alias,
-                    "arguments": json.dumps(arguments),
-                }
-            ]
-        }
-    )
-
-    repaired = decoded["output"][0]
-    assert repaired["name"] == "spawn_agent"
-    assert json.loads(repaired["arguments"]) == {
-        "agent_type": "worker",
-        "message": "do work",
-        "task_name": "worker",
-    }
+    with pytest.raises(ToolCompatibilityError):
+        plan.decode_payload(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "id": "v2-spawn-item",
+                        "call_id": "v2-spawn-call",
+                        "name": alias,
+                        "arguments": json.dumps(arguments),
+                    }
+                ]
+            }
+        )
 
 
 def test_v2_adapted_response_marks_message_arguments_as_plaintext() -> None:

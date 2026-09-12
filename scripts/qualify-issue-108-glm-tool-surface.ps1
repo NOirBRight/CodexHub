@@ -1890,7 +1890,7 @@ if ($HistoryAdapterReplay) {
 }
 if ($ToolSurfaceEvidenceReplay) {
     $toolSurfaceFixture = if ([string]::IsNullOrWhiteSpace($EvidenceFixture)) {
-        Join-Path $Workspace 'tests\fixtures\issue_108_tool_surface_replay.json'
+        Join-Path $Workspace 'tests\fixtures\issue_108_tool_surface_client_owned_replay.json'
     }
     else {
         $EvidenceFixture

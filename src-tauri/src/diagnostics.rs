@@ -346,6 +346,12 @@ mod tests {
     #[test]
     fn control_round_trip_uses_only_versioned_content_free_fields() {
         let root = temp_root("control-round-trip");
+        // Atomic writers leave non-request entries beside the JSON payload.
+        // The responder must scan past them instead of polling only entry one.
+        let requests = root.join("requests");
+        fs::create_dir_all(&requests).unwrap();
+        fs::write(requests.join("unrelated.lock.guard"), "").unwrap();
+        fs::write(requests.join("unrelated.tmp"), "").unwrap();
         let responder_root = root.clone();
         let responder = thread::spawn(move || {
             let request_dir = responder_root.join("requests");
@@ -412,12 +418,12 @@ mod tests {
     fn wait_for_request(request_dir: &std::path::Path) -> PathBuf {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
-            if let Ok(mut paths) = fs::read_dir(request_dir) {
+            if let Ok(paths) = fs::read_dir(request_dir) {
                 if let Some(path) =
                     paths
-                        .find_map(Result::ok)
+                        .filter_map(Result::ok)
                         .map(|entry| entry.path())
-                        .filter(|path| {
+                        .find(|path| {
                             path.extension().and_then(|value| value.to_str()) == Some("json")
                         })
                 {

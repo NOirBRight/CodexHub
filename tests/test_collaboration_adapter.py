@@ -72,13 +72,14 @@ def _spawn_call(
     arguments,
     call_id="call_worker",
     item_id="item_worker",
-    name="multi_agent_v1__spawn_agent",
+    name="spawn_agent",
 ):
     return {
         "type": "function_call",
         "id": item_id,
         "call_id": call_id,
         "name": name,
+        "namespace": "multi_agent_v1",
         "arguments": arguments,
     }
 
@@ -119,7 +120,7 @@ def test_mixed_history_fails_closed_without_payload_leak(tmp_path):
     adapter, events = _adapter(tmp_path)
     payload = {
         "input": [
-            _spawn_call(arguments={"message": "SECRET_PROMPT", "fork_context": True}),
+            {**_spawn_call(arguments={"message": "SECRET_PROMPT", "fork_context": True}, name="spawn_agent"), "namespace": "multi_agent_v1"},
             {
                 "type": "function_call",
                 "call_id": "call_v2",
@@ -254,6 +255,43 @@ def test_hmac_fail_closed_rejects_tampered_sidecar(tmp_path):
     assert events[-1][1]["classification"] == "unknown_requested_binding_sidecar"
 
 
+def test_native_worker_spawn_history_records_creation_without_claiming_binding_match(tmp_path):
+    """A native spawn confirms a child exists, not its requested model binding."""
+    adapter, events = _adapter(tmp_path)
+    requested = {"agent_type": "worker", "model": "glm-5.2", "reasoning": "high"}
+    sidecar = adapter.requested_binding_sidecar(requested, "call_worker")
+    native_output = {"agent_id": "agent_1", "nickname": "worker"}
+    payload = {
+        "input": [
+            _spawn_call(
+                arguments=json.dumps(
+                    {
+                        "agent_type": "worker",
+                        "message": "do work",
+                        "fork_context": True,
+                        "model": None,
+                        WORKER_REQUESTED_BINDING_FIELD: sidecar,
+                    }
+                )
+            ),
+            {
+                "type": "function_call_output",
+                "call_id": "call_worker",
+                "output": json.dumps(native_output),
+            },
+        ]
+    }
+
+    assert adapter.validate_worker_binding_history(payload) is True
+    assert json.loads(payload["input"][1]["output"]) == native_output
+    assert events == [
+        (
+            "worker_effective_binding_validated",
+            {"outcome": "accepted", "classification": "native_spawn_created"},
+        )
+    ]
+
+
 def test_stream_ledger_rejects_malformed_selector_before_sidecar(tmp_path):
     adapter, events = _adapter(tmp_path)
     context = {
@@ -327,7 +365,7 @@ def test_facade_wrappers_use_live_emit_and_signing_root(tmp_path, monkeypatch):
         gateway_compat.resolve_collaboration_boundary(
             {
                 "input": [
-                    _spawn_call(arguments={"message": "one", "fork_context": True}),
+                    {**_spawn_call(arguments={"message": "one", "fork_context": True}, name="spawn_agent"), "namespace": "multi_agent_v1"},
                     {
                         "type": "function_call",
                         "call_id": "call_v2",

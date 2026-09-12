@@ -22,8 +22,8 @@ class Issue408WorkerBindingRegressionTests(unittest.TestCase):
     poisoning the session.
     """
 
-    def test_compatible_response_body_maps_general_agent_type_to_default(self):
-        """Bug 1: "general" is rewritten to "default" before reaching the native runtime."""
+    def test_compatible_response_body_preserves_unregistered_role_and_alias(self):
+        """A spelling without client declaration provenance grants no authority."""
         body = json.dumps(
             {
                 "model": "glm-5.2",
@@ -45,7 +45,9 @@ class Issue408WorkerBindingRegressionTests(unittest.TestCase):
         )
 
         args = json.loads(transformed["output"][0]["arguments"])
-        self.assertEqual(args["agent_type"], "default")
+        self.assertEqual(args["agent_type"], "general")
+        self.assertEqual(transformed["output"][0]["name"], "multi_agent_v1__spawn_agent")
+        self.assertNotIn("namespace", transformed["output"][0])
 
     def test_compatible_request_body_accepts_native_worker_spawn_history(self):
         """Bug 2: native-style spawn output without effective_binding does not poison history."""
@@ -77,7 +79,8 @@ class Issue408WorkerBindingRegressionTests(unittest.TestCase):
                             {
                                 "type": "function_call",
                                 "call_id": call_id,
-                                "name": "multi_agent_v1__spawn_agent",
+                                "name": "spawn_agent",
+                                "namespace": "multi_agent_v1",
                                 "arguments": json.dumps(
                                     {
                                         "agent_type": "worker",
@@ -128,73 +131,14 @@ class Issue408WorkerBindingRegressionTests(unittest.TestCase):
 
 
 class Issue408SemanticAdapterTests(unittest.TestCase):
-    """Unit-level coverage for the semantic helpers introduced for #408."""
+    """Unit-level coverage for the semantic selector helper from #408."""
 
-    def test_normalize_multi_agent_arguments_maps_general_to_default(self):
+    def test_normalize_multi_agent_arguments_preserves_client_role(self):
         value, tool_name, changed = codex_semantic_adapter.normalize_multi_agent_arguments(
             '{"message":"do work","agent_type":"general"}',
             "spawn_agent",
         )
 
-        self.assertTrue(changed)
+        self.assertFalse(changed)
         self.assertEqual(tool_name, "spawn_agent")
-        self.assertEqual(json.loads(value)["agent_type"], "default")
-
-    def test_synthesize_effective_worker_binding_readback_fills_native_output(self):
-        requested = {
-            "agent_type": "worker",
-            "model": "glm-5.2",
-            "reasoning": "high",
-        }
-        native_output = {"agent_id": "019f-child", "nickname": "child"}
-
-        readback = codex_semantic_adapter.synthesize_effective_worker_binding_readback(
-            requested, native_output
-        )
-
-        self.assertIn("effective_binding", readback)
-        effective = readback["effective_binding"]
-        self.assertEqual(effective["contract_version"], "codexhub.worker-binding.v1")
-        self.assertEqual(effective["support"], "supported")
-        self.assertEqual(effective["status"], "accepted")
-        self.assertEqual(effective["agent_type"], "worker")
-        self.assertEqual(effective["model"], "glm-5.2")
-        self.assertEqual(effective["reasoning"], "high")
-
-    def test_synthesize_effective_worker_binding_readback_accepts_nullable_native_nickname(self):
-        requested = {
-            "agent_type": "worker",
-            "model": "glm-5.2",
-            "reasoning": "high",
-        }
-        native_output = {"agent_id": "019f-child", "nickname": None}
-
-        readback = codex_semantic_adapter.synthesize_effective_worker_binding_readback(
-            requested, native_output
-        )
-
-        self.assertIsNotNone(readback)
-        self.assertIn("effective_binding", readback)
-
-    def test_synthesize_effective_worker_binding_readback_preserves_existing_readback(self):
-        requested = {
-            "agent_type": "worker",
-            "model": "glm-5.2",
-            "reasoning": "high",
-        }
-        existing = {
-            "effective_binding": {
-                "contract_version": "codexhub.worker-binding.v1",
-                "support": "supported",
-                "status": "accepted",
-                "agent_type": "worker",
-                "model": "glm-5.2",
-                "reasoning": "high",
-            }
-        }
-
-        readback = codex_semantic_adapter.synthesize_effective_worker_binding_readback(
-            requested, existing
-        )
-
-        self.assertIs(readback, existing)
+        self.assertEqual(json.loads(value)["agent_type"], "general")

@@ -281,9 +281,9 @@ def test_issue_108_tool_surface_evidence_replay_has_semantic_three_case_ab(tmp_p
         "namespace_200_deferred_core": "within_direct_tool_budget",
     }
     assert summary["direct_tool_counts"] == {
-        "minimal_core": 7,
-        "namespace_200_eager": 207,
-        "namespace_200_deferred_core": 8,
+        "minimal_core": 2,
+        "namespace_200_eager": 202,
+        "namespace_200_deferred_core": 3,
     }
     assert summary["direct_tool_budget"] == 64
     assert summary["same_200_source_payload"] is True

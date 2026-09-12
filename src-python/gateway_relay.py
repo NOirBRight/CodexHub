@@ -35,6 +35,30 @@ from route_primitives import MutationPolicy, StreamingPolicy, UsagePolicy
 RelayResponse = UpstreamResponseLike
 
 
+def _should_suppress_chat_reasoning_extensions(
+    upstream_name: str,
+    *,
+    want_chat_output: bool,
+    preserve_reasoning_history: bool,
+) -> bool:
+    """Decide whether provider-private Chat thinking fields may be removed.
+
+    A normal third-party Chat→Responses conversion hides raw reasoning
+    extensions because Responses has no portable private-thinking field.  An
+    explicitly capability-bound route (for example a thinking-mode provider
+    that requires ``reasoning_content`` on the next tool turn) must retain the
+    fields long enough for the shared converter to emit a portable reasoning
+    history item.  Keeping this predicate pure makes the distinction visible
+    to deterministic tests and avoids provider-name dispatch in the relay.
+    """
+
+    return (
+        upstream_name != "official"
+        and not want_chat_output
+        and not preserve_reasoning_history
+    )
+
+
 class FilteredHeaders(Protocol):
     def __call__(
         self,
@@ -486,15 +510,12 @@ def relay_upstream_response(
     _chat_stream_lifecycle_final_issue = gateway_stream_semantics._chat_stream_lifecycle_final_issue
     _chat_stream_shape_summary = gateway_stream_semantics._chat_stream_shape_summary
     _chat_terminal_observer = gateway_stream_semantics._chat_terminal_observer
-    _coerce_exact_spawn_prompt_tool_calls = gateway_compat.sse._coerce_exact_spawn_prompt_tool_calls
-    _coerce_required_subagent_tool_calls = gateway_compat.sse._coerce_required_subagent_tool_calls
     _compact_response_body_is_empty = gateway_stream_semantics._compact_response_body_is_empty
     _converted_sse_payload = gateway_stream_semantics._converted_sse_payload
     _count_sse_reasoning_event = gateway_stream_semantics._count_sse_reasoning_event
     _downgrade_invalid_third_party_tool_calls = gateway_compat.official_passthrough._downgrade_invalid_third_party_tool_calls
     _events_to_responses_body = gateway_stream_semantics._events_to_responses_body
     _filtered_response_headers = gateway_request._filtered_response_headers
-    _guard_duplicate_multi_agent_spawn_calls = gateway_compat.multi_agent._guard_duplicate_multi_agent_spawn_calls
     _handler_downstream_stream_commit = glue._handler_downstream_stream_commit
     _incomplete_stream_json_error_body = gateway_stream_semantics._incomplete_stream_json_error_body
     _is_event_stream = gateway_request._is_event_stream
@@ -513,9 +534,8 @@ def relay_upstream_response(
     _public_event_context = gateway_events.public_event_context
     _raise_lifecycle_final_issue = gateway_stream_semantics._raise_lifecycle_final_issue
     _raise_runtime_tool_compatibility_error = gateway_compat.official_passthrough._raise_runtime_tool_compatibility_error
-    _reconcile_function_call_argument_events = gateway_compat.sse._reconcile_function_call_argument_events
+    reconcile_function_call_argument_events = gateway_compat.sse.reconcile_function_call_argument_events
     _redact_identity_in_text = gateway_errors._redact_identity_in_text
-    _repair_missing_required_subagent_call_events = gateway_compat.sse._repair_missing_required_subagent_call_events
     _response_body_lifecycle_final_issue = gateway_stream_semantics._response_body_lifecycle_final_issue
     _response_body_to_chat_completion_body = gateway_stream_semantics._response_body_to_chat_completion_body
     _response_body_to_response_sse_events = gateway_stream_semantics._response_body_to_response_sse_events
@@ -542,8 +562,6 @@ def relay_upstream_response(
     _sse_line_ending = gateway_sse._sse_line_ending
     _suppress_bounded_tool_search_calls = gateway_compat.multi_agent._suppress_bounded_tool_search_calls
     _suppress_chat_reasoning_extensions = gateway_stream_semantics._suppress_chat_reasoning_extensions
-    _suppress_coordinator_forbidden_tool_calls = gateway_compat.multi_agent._suppress_coordinator_forbidden_tool_calls
-    _suppress_worker_multi_agent_tool_calls = gateway_compat.multi_agent._suppress_worker_multi_agent_tool_calls
     _synthetic_response_completed_from_tool_items = gateway_stream_semantics._synthetic_response_completed_from_tool_items
     _upstream_failure_class = gateway_transport._upstream_failure_class
     _usage_from_json_body = gateway_events._usage_from_json_body
@@ -570,6 +588,9 @@ def relay_upstream_response(
     )
     lifecycle_final_retry_enabled = (
         relay_execution_plan.lifecycle_final_retry_enabled
+    )
+    preserve_reasoning_history = bool(
+        getattr(relay_execution_plan, "preserve_reasoning_history", False)
     )
     status = getattr(response, "status", None) or getattr(response, "code", 502)
     is_event_stream = _is_event_stream(response.headers)
@@ -946,7 +967,8 @@ def relay_upstream_response(
                             _chat_completion_to_response_body(body),
                             upstream_name,
                             event_context=compatibility_event_context,
-                        )
+                        ),
+                        preserve_reasoning_history=preserve_reasoning_history,
                     )
                 else:
                     exchange = relay_context.prepared_exchange
@@ -1150,7 +1172,6 @@ def relay_upstream_response(
                         if event is None:
                             continue
                         event, _ = _downgrade_invalid_third_party_tool_calls(event)
-                        event, _ = _guard_duplicate_multi_agent_spawn_calls(event, compatibility_event_context)
                     event_type = event.get("type")
                     if isinstance(event_type, str) and event_type:
                         if not output.event(event_type, event):
@@ -1234,7 +1255,9 @@ def relay_upstream_response(
             and upstream_format != "chat_completions"
         ):
             line_ending = b"\n"
-            converter = _ResponsesToChatStreamConverter()
+            converter = _ResponsesToChatStreamConverter(
+                preserve_reasoning_history=preserve_reasoning_history,
+            )
             incomplete_frame = False
             try:
                 for frame in iter_upstream_sse_events(
@@ -1745,7 +1768,10 @@ def relay_upstream_response(
 
             try:
                 converted_chat_chunks = _chat_completion_body_to_stream_chunks(
-                    _response_body_to_chat_completion_body(response_body)
+                    _response_body_to_chat_completion_body(
+                        response_body,
+                        preserve_reasoning_history=preserve_reasoning_history,
+                    )
                 )
             except UpstreamProtocolTranslationError:
                 if verified_source_format is None:
@@ -1900,7 +1926,20 @@ def relay_upstream_response(
                     )
                 _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
-            if upstream_name != "official" and not want_chat_output:
+            # Most third-party Chat providers do not expose a portable
+            # Responses reasoning history, so their provider-private thinking
+            # fields are suppressed before conversion.  A route that has
+            # explicitly proved it requires ``reasoning_content`` on the next
+            # Chat request is different: dropping those fields would make the
+            # very next tool-call turn invalid (for example DeepSeek thinking
+            # mode returns 400 when the prior reasoning is not echoed).  Keep
+            # the provider-neutral reasoning item for that opt-in route and
+            # let the shared converter preserve it in the Responses history.
+            if _should_suppress_chat_reasoning_extensions(
+                upstream_name,
+                want_chat_output=want_chat_output,
+                preserve_reasoning_history=preserve_reasoning_history,
+            ):
                 chunks, _ = _suppress_chat_reasoning_extensions(
                     chunks,
                     event_context=event_context,
@@ -1946,7 +1985,10 @@ def relay_upstream_response(
                         seam.last_write_error() or OSError("downstream closed")
                     )
                 for chunk in _chat_completion_body_to_stream_chunks(
-                    _response_body_to_chat_completion_body(response_body)
+                    _response_body_to_chat_completion_body(
+                        response_body,
+                        preserve_reasoning_history=preserve_reasoning_history,
+                    )
                 ):
                     if not output.data(chunk):
                         return finish_downstream_stream_closed(
@@ -1985,7 +2027,6 @@ def relay_upstream_response(
                     stage="converted",
                     **_response_events_shape_summary(events),
                 )
-                events, _ = _repair_missing_required_subagent_call_events(events, event_context)
                 events, _ = _adapt_third_party_apply_patch_stream_events(
                     events,
                     event_context=compatibility_event_context,
@@ -2004,8 +2045,6 @@ def relay_upstream_response(
                     stage="normalized",
                     **_response_events_shape_summary(events),
                 )
-                events, _ = _suppress_worker_multi_agent_tool_calls(events, event_context)
-                events, _ = _suppress_coordinator_forbidden_tool_calls(events, event_context)
                 events, _ = _downgrade_invalid_third_party_tool_calls(events)
                 _write_adapter_event(
                     event_context,
@@ -2016,21 +2055,16 @@ def relay_upstream_response(
                     stage="downgraded",
                     **_response_events_shape_summary(events),
                 )
-                events, _ = _guard_duplicate_multi_agent_spawn_calls(events, event_context)
                 events, _ = _apply_external_worker_response_contract(
                     events,
                     compatibility_event_context,
                     surface="sse",
                     attach_sidecars=False,
                 )
-                events, _ = _coerce_exact_spawn_prompt_tool_calls(events, event_context)
-                events, _ = _coerce_required_subagent_tool_calls(
+                events, _ = reconcile_function_call_argument_events(
                     events,
-                    event_context,
-                    surface="sse",
+                    runtime_tool_plan=runtime_tool_plan,
                 )
-                events, _ = _reconcile_function_call_argument_events(events)
-                events, _ = _repair_missing_required_subagent_call_events(events, event_context)
                 events, _ = _apply_external_worker_response_contract(
                     events,
                     compatibility_event_context,

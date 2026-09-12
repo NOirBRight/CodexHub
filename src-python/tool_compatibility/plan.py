@@ -11,21 +11,25 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 from typing import Any, Iterable, Mapping
-
 from .collab_v1 import (
     CollaborationV1PlanMixin,
     is_opaque_v1_history_item,
     validate_plain_native_item,
-    validate_v1_fields,
+    validate_v1_arguments,
 )
 from .collab_v2 import (
     CollaborationV2PlanMixin,
     apply_v2_namespace_decode,
     is_opaque_v2_history_item,
-    repair_external_v2_spawn_agent_response_arguments,
     strip_encrypted_annotations as strip_v2_encrypted_annotations,
-    validate_v2_fields,
-    validate_v2_native_arguments,
+)
+from collaboration_runtime_contract import failed_argument_call_ids
+
+from .argument_contract import (
+    child_name_for_entry,
+    normalize_namespace_arguments,
+    validate_versioned_item,
+    validate_version_fields as _validate_version_fields,
 )
 from .contracts import (
     CUSTOM_INPUT_KEY,
@@ -96,33 +100,6 @@ def is_opaque_collaboration_history_item(item: Mapping[str, Any]) -> bool:
 
 
 _is_opaque_collaboration_history_item = is_opaque_collaboration_history_item
-
-
-def _validate_version_fields(item: Mapping[str, Any], record: AliasRecord) -> None:
-    if record.version == "v1":
-        validate_v1_fields(item)
-    elif record.version == "v2":
-        validate_v2_fields(item)
-    arguments = item.get("arguments")
-    if arguments in (None, ""):
-        return
-    if isinstance(arguments, Mapping):
-        parsed = _copy_mapping(arguments)
-    elif isinstance(arguments, str):
-        try:
-            parsed = json.loads(arguments)
-        except (TypeError, ValueError):
-            raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_arguments") from None
-    else:
-        raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_arguments")
-    if not isinstance(parsed, Mapping):
-        raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_arguments")
-    if record.version == "v1":
-        validate_v1_fields(parsed)
-    elif record.version == "v2":
-        validate_v2_fields(parsed)
-
-
 @dataclass(frozen=True, slots=True)
 class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
     selected_protocol: str
@@ -269,8 +246,8 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                     ) if family == NAMESPACE else (),
                 )
             )
-        # ``_set_required_subagent_tool_choice`` may already have translated a
-        # namespace child to this request's generated alias.  That alias is a
+        # A caller may already have translated a namespace child to this
+        # request's generated alias. That alias is a
         # valid choice even though it is not the original declaration spelling
         # present in ``final``.  Unknown aliases remain fail-closed.
         choice_name = (
@@ -482,6 +459,19 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             return True
         return self.registry.record_for_call(value.get("call_id")) is not None
 
+    @staticmethod
+    def _encode_timeout_contract(child: dict[str, Any]) -> None:
+        # The client declaration uses JSON Schema number, but its handler
+        # deserializes an integer. Narrow only a registered native wait tool.
+        if child.get("name") != "wait_agent":
+            return
+        fields = child.get("parameters", {}).get("properties", {})
+        if isinstance(fields.get("timeout_ms"), dict):
+            fields["timeout_ms"] = {
+                **fields["timeout_ms"], "type": "integer",
+                "description": "Timeout in milliseconds. Emit a JSON integer, e.g. 300000, not 300000.0.",
+            }
+
     def _encode_tool_declarations(self, tools: Any) -> tuple[Any, bool]:
         if not isinstance(tools, list):
             return tools, False
@@ -512,6 +502,9 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                         if namespace == "collaboration"
                         else child
                     )
+                    child = _copy_mapping(child)
+                    if entry.version in {"v1", "v2"}:
+                        self._encode_timeout_contract(child)
                     encoded.append(
                         _provider_function_declaration(child, entry.aliases[child_index])
                     )
@@ -636,8 +629,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             result.pop("namespace", None)
             return result, True
         return result, False
-
-    def _encode_item(self, raw_item: Any, call_aliases: dict[str, str]) -> tuple[Any, bool]:
+    def _encode_item(self, raw_item: Any, call_aliases: dict[str, str], *, preserve_failed_arguments: bool = False) -> tuple[Any, bool]:
         if not isinstance(raw_item, Mapping):
             return raw_item, False
         item = _copy_mapping(raw_item)
@@ -657,11 +649,18 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             candidates = [candidate for candidate in self.entries if candidate.family == TOOL_SEARCH]
             if len(candidates) == 1:
                 entry = candidates[0]
+        normalized_changed = False
+        if item_type == "function_call" and entry is not None and entry.family == NAMESPACE and entry.disposition == ADAPT:
+            item["arguments"], normalized_changed = normalize_namespace_arguments(
+                item.get("arguments"), name=child_name_for_entry(entry, name),
+                version=entry.version, namespace=entry.namespace, surface="history",
+                preserve_failed=preserve_failed_arguments,
+            )
         if item_type == "function_call" and entry is not None and entry.disposition == ADAPT:
             alias = self._alias_for(entry, child_name=name)
             if alias is None:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias")
-            _validate_version_fields(item, self.registry.record_for_alias(alias))  # type: ignore[arg-type]
+            _validate_version_fields(item, self.registry.record_for_alias(alias), skip_arguments=preserve_failed_arguments)  # type: ignore[arg-type]
             call_id = item.get("call_id")
             self.registry.bind_call(call_id, alias)
             call_aliases[str(call_id)] = alias
@@ -739,8 +738,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                 item.pop("execution", None)
                 return item, True
             return item, False
-        return item, False
-
+        return item, normalized_changed
     def _hosted_history_item_key(self, item_type: Any) -> tuple[str, bool] | None:
         # Standard Responses tool lifecycles are resolved by their declaration
         # family (and, for adapted calls, the request-scoped alias registry).
@@ -1170,6 +1168,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             self._validate_collaboration_v2_items(raw_input, surface="history")
             encoded_input: list[Any] = []
             changed = tools_changed or choice_changed
+            failed_calls = failed_argument_call_ids(raw_input)
             history_call_owners: dict[str, ToolCompatibilityEntry] = {}
             history_call_positions: dict[str, int] = {}
             seen_history_call_ids: dict[str, ToolCompatibilityEntry | None] = {}
@@ -1408,14 +1407,14 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                     ):
                         changed = True
                         continue
-                encoded, item_changed = self._encode_item(item, call_aliases)
+                failed = isinstance(item, Mapping) and item.get("type") == "function_call" and item.get("call_id") in failed_calls
+                encoded, item_changed = self._encode_item(item, call_aliases, preserve_failed_arguments=failed)
                 encoded_input.append(encoded)
                 changed = changed or item_changed
             if changed:
                 result["input"] = encoded_input
         return result
-
-    def _decode_call(self, item: Mapping[str, Any], *, allow_incomplete: bool = False) -> tuple[dict[str, Any], AliasRecord | None, bool]:
+    def _decode_call(self, item: Mapping[str, Any], *, allow_incomplete: bool = False, preserve_failed_arguments: bool = False) -> tuple[dict[str, Any], AliasRecord | None, bool]:
         result = _copy_mapping(item)
         name = result.get("name")
         record = self.registry.record_for_alias(name)
@@ -1423,7 +1422,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             if self.registry.looks_like_alias(name):
                 raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="response")
             return result, None, False
-        _validate_version_fields(result, record)
+        _validate_version_fields(result, record, skip_arguments=preserve_failed_arguments)
         if record.family == NAMESPACE and result.get("namespace") not in {None, record.namespace}:
             raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="response")
         if record.family == CUSTOM_FREEFORM and result.get("namespace") is not None:
@@ -1442,9 +1441,15 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
         elif not allow_incomplete:
             raise ToolCompatibilityError("tool_compatibility_boundary", "missing_call_identity", surface="response")
         result["name"] = record.child_name if record.family == NAMESPACE else record.original_name
+        normalized_changed = False
         if record.family == NAMESPACE:
             result["namespace"] = record.namespace
             apply_v2_namespace_decode(result, record)
+            result["arguments"], normalized_changed = normalize_namespace_arguments(
+                result.get("arguments"), name=record.child_name,
+                version=record.version, namespace=record.namespace,
+                surface="response", preserve_failed=preserve_failed_arguments,
+            )
         elif record.family == CUSTOM_FREEFORM:
             if "arguments" in result:
                 envelope = _json_object_exact(result["arguments"])
@@ -1502,10 +1507,15 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
         item: Mapping[str, Any],
         *,
         allow_incomplete: bool = False,
+        preserve_failed_arguments: bool = False,
     ) -> tuple[dict[str, Any], AliasRecord | None, bool]:
         legacy_record = self._legacy_tool_search_record(item)
         if legacy_record is None:
-            return self._decode_call(item, allow_incomplete=allow_incomplete)
+            return self._decode_call(
+                item,
+                allow_incomplete=allow_incomplete,
+                preserve_failed_arguments=preserve_failed_arguments,
+            )
         transformed = _copy_mapping(item)
         transformed["name"] = legacy_record.aliases[0]
         arguments = transformed.get("arguments")
@@ -1532,8 +1542,11 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                 ensure_ascii=True,
                 separators=(",", ":"),
             )
-        return self._decode_call(transformed, allow_incomplete=allow_incomplete)
-
+        return self._decode_call(
+            transformed,
+            allow_incomplete=allow_incomplete,
+            preserve_failed_arguments=preserve_failed_arguments,
+        )
     def _validate_registered_item_identity(self, item: Mapping[str, Any], *, surface: str) -> None:
         """Ensure a bound adapter call keeps its wire family and alias."""
         call_id = item.get("call_id")
@@ -1651,28 +1664,21 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
         *,
         require_completed: bool = False,
         surface: str = "history",
+        skip_arguments_validation: bool = False,
     ) -> None:
         if entry.version is not None:
-            _validate_version_fields(
+            validate_versioned_item(
                 item,
                 AliasRecord(
-                    alias="",
-                    family=entry.family,
-                    declaration_index=entry.declaration_index,
-                    child_index=None,
+                    alias="", family=entry.family,
+                    declaration_index=entry.declaration_index, child_index=None,
                     namespace=entry.namespace,
                     child_name=item.get("name") if isinstance(item.get("name"), str) else None,
-                    original_name=entry.original_name,
-                    version=entry.version,
+                    original_name=entry.original_name, version=entry.version,
                 ),
+                surface=surface,
+                skip_arguments=skip_arguments_validation,
             )
-        if (
-            entry.version == "v2"
-            and entry.family == NAMESPACE
-            and item.get("arguments") is not None
-            and item.get("arguments") != ""
-        ):
-            validate_v2_native_arguments(item, surface=surface)
         item_type = item.get("type")
         if entry.family == PLAIN_FUNCTION:
             validate_plain_native_item(item, entry, surface=surface)
@@ -1717,6 +1723,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
         response_call_owners: dict[str, ToolCompatibilityEntry] = {}
         response_call_positions: dict[str, int] = {}
         surface = "response" if reject_omitted_response else "history"
+        failed_calls = failed_argument_call_ids(items)
         for item_index, raw_item in enumerate(items):
             if not isinstance(raw_item, Mapping):
                 continue
@@ -1799,11 +1806,18 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                 record = self.registry.record_for_alias(item.get("name"))
                 legacy_record = self._legacy_tool_search_record(item)
                 if record is not None or legacy_record is not None:
-                    decoded, _record, item_changed = self._decode_call_compat(item)
+                    decoded, _record, item_changed = self._decode_call_compat(
+                        item,
+                        preserve_failed_arguments=call_id in failed_calls,
+                    )
                 else:
                     native_entry = self._native_entry_for_item(item)
                     if native_entry is not None:
-                        self._validate_native_item(item, native_entry)
+                        self._validate_native_item(
+                            item,
+                            native_entry,
+                            skip_arguments_validation=call_id in failed_calls,
+                        )
                         decoded, item_changed = item, False
                     elif self.registry.looks_like_alias(item.get("name")):
                         raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
@@ -1893,51 +1907,24 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                 decoded, item_changed = item, False
                 if self.registry.looks_like_alias(item.get("name")):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_alias", surface="history")
+            if surface == "response" and decoded.get("type") == "function_call" and decoded.get("namespace") == "multi_agent_v1":
+                validate_v1_arguments(decoded, surface=surface)
             result.append(decoded)
             changed = changed or item_changed
         self._validate_collaboration_v2_items(result, surface=surface)
         return result, changed
-
-    def _repair_external_v2_spawn_response_items(self, items: Any) -> tuple[Any, bool]:
-        """Repair only aliased V2 spawn calls received in a provider response."""
-
-        if not isinstance(items, list):
-            return items, False
-        repaired_items: list[Any] = []
-        changed = False
-        for item in items:
-            if not isinstance(item, Mapping) or item.get("type") != "function_call":
-                repaired_items.append(item)
-                continue
-            record = self.registry.record_for_alias(item.get("name"))
-            if not (
-                record is not None
-                and record.family == NAMESPACE
-                and record.version == "v2"
-                and record.namespace == "collaboration"
-                and record.child_name == "spawn_agent"
-            ):
-                repaired_items.append(item)
-                continue
-            repaired, item_changed = repair_external_v2_spawn_agent_response_arguments(item)
-            repaired_items.append(repaired)
-            changed = changed or item_changed
-        return (repaired_items if changed else items), changed
 
     def decode_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result = _copy_mapping(payload)
         for key in ("output", "input", "history"):
             if key in result:
                 encoded_items = result[key]
-                repair_changed = False
-                if key == "output":
-                    encoded_items, repair_changed = self._repair_external_v2_spawn_response_items(encoded_items)
                 decoded, item_changed = self._decode_items(
                     encoded_items,
                     reject_omitted_response=key == "output",
                     decode_agent_messages=key != "output",
                 )
-                if item_changed or repair_changed:
+                if item_changed:
                     result[key] = decoded
         return result
 
@@ -1996,4 +1983,3 @@ def __getattr__(name: str):
 
         return CompatibilityStreamState
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-

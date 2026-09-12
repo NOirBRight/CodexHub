@@ -1,5 +1,10 @@
 #[test]
 fn omp_models_merge_preserves_foreign_providers_through_apply() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     // #435: surgical merge — user-owned providers survive apply.
     let root = unique_temp_dir("codexhub-omp-merge");
     let config_path = root.join("config.yml");
@@ -83,6 +88,11 @@ fn omp_models_omit_unknown_context_window_instead_of_inventing_a_default() {
 
 #[test]
 fn zcode_catalog_exports_all_active_gateway_models() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let settings = Settings::default();
     let providers = client_export_test_providers();
 
@@ -891,6 +901,11 @@ fn usage_pricing_snapshot_uses_official_rates_and_preserves_unknowns() {
 
 #[test]
 fn plan_opencode_apply_does_not_write_or_backup() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let root = unique_temp_dir("codexhub-opencode-plan");
     let config_path = root.join("opencode.json");
     let original = r#"{"model":"anthropic/claude-sonnet-4"}"#;
@@ -912,6 +927,11 @@ fn plan_opencode_apply_does_not_write_or_backup() {
 
 #[test]
 fn opencode_apply_creates_backup_before_managed_overwrite() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let root = unique_temp_dir("codexhub-opencode");
     let config_path = root.join("opencode.json");
     let backup_root = root.join("backups");
@@ -1004,6 +1024,11 @@ fn opencode_apply_rejects_invalid_model_before_backup_side_effects() {
 
 #[test]
 fn opencode_apply_backs_up_unmanaged_codexhub_prefix_provider() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let root = unique_temp_dir("codexhub-opencode-unmanaged-prefix");
     let config_path = root.join("opencode.json");
     let backup_root = root.join("backups");
@@ -1121,6 +1146,7 @@ fn opencode_stable_takeover_adopts_beta_legacy_baseline() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-opencode-stable-adopts-beta");
     let config_path = root.join("opencode.json");
@@ -1184,6 +1210,7 @@ fn opencode_beta_takeover_adopts_stable_legacy_baseline() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-opencode-beta-adopts-stable");
     let config_path = root.join("opencode.json");
@@ -1247,6 +1274,11 @@ fn opencode_beta_takeover_adopts_stable_legacy_baseline() {
 
 #[test]
 fn plan_pi_apply_does_not_write_or_backup() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let root = unique_temp_dir("codexhub-pi-plan");
     let settings_path = root.join("settings.json");
     let models_path = root.join("models.json");
@@ -1274,6 +1306,11 @@ fn plan_pi_apply_does_not_write_or_backup() {
 
 #[test]
 fn pi_apply_writes_models_and_settings_with_backup() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let root = unique_temp_dir("codexhub-pi");
     let settings_path = root.join("settings.json");
     let models_path = root.join("models.json");
@@ -1368,6 +1405,7 @@ fn pi_apply_and_detach_preserve_foreign_providers_and_activation() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    let _official_home = isolated_official_models_home();
     let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-pi-apply-detach-cycle");
     let settings_path = root.join("settings.json");
@@ -1443,6 +1481,11 @@ fn pi_apply_and_detach_preserve_foreign_providers_and_activation() {
 
 #[test]
 fn pi_apply_on_takeover_state_leaves_user_owned_activation() {
+    let _env_guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let root = unique_temp_dir("codexhub-pi-takeover-upgrade");
     let settings_path = root.join("settings.json");
     let models_path = root.join("models.json");
@@ -2148,6 +2191,7 @@ fn pi_beta_takeover_adopts_stable_legacy_baseline() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-pi-beta-adopts-stable");
     let settings_path = root.join("settings.json");
@@ -2238,6 +2282,7 @@ fn opencode_equal_mtime_adoption_is_independent_of_caller() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-opencode-equal-mtime");
     let config_path = root.join("opencode.json");
@@ -2320,6 +2365,7 @@ fn pi_equal_mtime_adoption_is_independent_of_caller() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-pi-equal-mtime");
     let settings_path = root.join("settings.json");
@@ -2423,6 +2469,7 @@ fn opencode_equal_mtime_adoption_ignores_parent_path_channel_names() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-opencode-misleading-parent");
     let config_path = root.join("opencode.json");
@@ -2504,6 +2551,7 @@ fn pi_equal_mtime_adoption_ignores_parent_path_channel_names() {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
     let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
     let root = unique_temp_dir("codexhub-pi-misleading-parent");
     let settings_path = root.join("settings.json");

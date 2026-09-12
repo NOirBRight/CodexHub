@@ -33,7 +33,8 @@ list regions scroll independently of their actions.
 - Generic API providers have no common balance-query backend. Their overview rows
   explicitly say balance querying is unavailable; no example dollar amounts are shown.
 - Gateway events provide response duration, not time-to-first-token. The overview
-  uses the accurate label “Mean response time”. Missing token usage stays unknown.
+  uses the accurate label “Mean response time” and shows the mean in seconds.
+  Missing token usage stays unknown.
 - Unknown clients receive connection parameters only; their configuration files
   are not guessed or rewritten. Supported clients retain their actual adapters.
 - Long-context cost protection is retired: its controls, persisted setting, IPC

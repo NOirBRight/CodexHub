@@ -1,6 +1,8 @@
 import json
 import unittest
 
+import pytest
+
 import protocol_translation
 
 
@@ -66,6 +68,429 @@ class ProtocolTranslationTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
         self.assertIn("input_image", str(raised.exception))
+
+    def test_responses_to_chat_defers_intervening_message_until_tool_result(self):
+        body = {
+            "model": "example-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "fixture_tool",
+                    "arguments": "{}",
+                },
+                {"type": "message", "role": "assistant", "content": []},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "ok",
+                },
+            ],
+        }
+
+        translated = _exchange_payload(
+            json.dumps(body).encode("utf-8"),
+            inbound="responses",
+            outbound="chat_completions",
+        )
+
+        assert [message["role"] for message in translated["messages"]] == [
+            "assistant",
+            "tool",
+            "assistant",
+        ]
+        assert translated["messages"][1]["tool_call_id"] == "call_123"
+
+    def test_responses_reasoning_history_requires_explicit_capability(self):
+        body = {
+            "model": "example-model",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": "think first"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "fixture_tool",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "ok",
+                },
+            ],
+        }
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8")
+            )
+
+    def test_responses_reasoning_history_maps_to_reasoning_content_before_tool_call(self):
+        body = {
+            "model": "example-model",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": "think first"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "fixture_tool",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "ok",
+                },
+            ],
+        }
+        translated = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+        )
+        self.assertEqual(
+            translated["messages"],
+            [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": "think first",
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {"name": "fixture_tool", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_123", "content": "ok"},
+            ],
+        )
+
+    def test_capability_bound_responses_reasoning_effort_is_forwarded_to_chat(self):
+        body = {
+            "model": "example-model",
+            "reasoning": {"effort": "max"},
+            "input": [{"type": "message", "role": "user", "content": "go"}],
+        }
+        translated = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+        )
+        self.assertEqual(translated["reasoning_effort"], "max")
+
+        prepared = protocol_translation.prepare_exchange(
+            json.dumps(body).encode("utf-8"),
+            inbound_format="responses",
+            outbound_format="chat_completions",
+            preserve_reasoning_history=True,
+        )
+        prepared_payload = json.loads(prepared.upstream_body)
+        self.assertEqual(prepared_payload["reasoning_effort"], "max")
+
+    def test_capability_bound_responses_reasoning_auto_summary_is_consumed(self):
+        """Codex's default ``summary=auto`` has no Chat wire equivalent."""
+        body = {
+            "model": "example-model",
+            "reasoning": {"effort": "max", "summary": "auto"},
+            "input": [{"type": "message", "role": "user", "content": "go"}],
+        }
+        translated = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+        )
+        self.assertEqual(translated["reasoning_effort"], "max")
+        self.assertNotIn("summary", translated)
+
+        prepared = protocol_translation.prepare_exchange(
+            json.dumps(body).encode("utf-8"),
+            inbound_format="responses",
+            outbound_format="chat_completions",
+            preserve_reasoning_history=True,
+        )
+        prepared_payload = json.loads(prepared.upstream_body)
+        self.assertEqual(prepared_payload["reasoning_effort"], "max")
+        self.assertNotIn("summary", prepared_payload)
+
+    def test_capability_bound_responses_non_auto_reasoning_summary_fails_closed(self):
+        body = {
+            "model": "example-model",
+            "reasoning": {"effort": "max", "summary": "detailed"},
+            "input": [{"type": "message", "role": "user", "content": "go"}],
+        }
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+
+    def test_unproven_responses_reasoning_controls_still_fail_closed(self):
+        body = {
+            "model": "example-model",
+            "reasoning": {"effort": "max"},
+            "input": [{"type": "message", "role": "user", "content": "go"}],
+        }
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8")
+            )
+
+    def test_responses_trailing_reasoning_history_attaches_to_prior_tool_call(self):
+        """A client may replay the reasoning item after the tool result.
+
+        Thinking-mode Chat providers require the reasoning text on the same
+        assistant turn that issued the tool call; emitting a new assistant
+        turn at the end loses that association and is rejected upstream.
+        """
+        body = {
+            "model": "example-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "fixture_tool",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "ok",
+                },
+                {"type": "message", "role": "user", "content": "continue"},
+                {
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": "think before tool"}],
+                },
+            ],
+        }
+        translated = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+        )
+        self.assertEqual(translated["messages"][0]["reasoning_content"], "think before tool")
+        self.assertNotIn("reasoning_content", translated["messages"][-1])
+        self.assertEqual(
+            [message["role"] for message in translated["messages"]],
+            ["assistant", "tool", "user"],
+        )
+
+    def test_responses_trailing_reasoning_prefers_tool_call_over_newer_assistant_message(self):
+        body = {
+            "model": "example-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "fixture_tool",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "ok",
+                },
+                {"type": "message", "role": "assistant", "content": "intermediate"},
+                {
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": "think before tool"}],
+                },
+            ],
+        }
+        translated = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+        )
+        self.assertEqual(translated["messages"][0]["reasoning_content"], "think before tool")
+        # The trailing reasoning item belongs to the earlier tool-call turn;
+        # a newer plain assistant message must not inherit it by position.
+        self.assertNotIn("reasoning_content", translated["messages"][2])
+
+    def test_responses_intervening_assistant_gets_observed_reasoning_for_thinking_chat(self):
+        body = {
+            "model": "example-model",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": "think before tool"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "fixture_tool",
+                    "arguments": "{}",
+                },
+                {"type": "message", "role": "assistant", "content": "metadata"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "ok",
+                },
+            ],
+        }
+        translated = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+        )
+        self.assertEqual(translated["messages"][0]["reasoning_content"], "think before tool")
+        self.assertEqual(translated["messages"][2]["reasoning_content"], "think before tool")
+
+    def test_responses_trailing_reasoning_fills_deferred_assistant_after_tool_output(self):
+        """A late reasoning item still covers a message deferred around output."""
+        body = {
+            "model": "example-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "fixture_tool",
+                    "arguments": "{}",
+                },
+                {"type": "message", "role": "assistant", "content": "metadata"},
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "ok",
+                },
+                {
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": "think after tool"}],
+                },
+            ],
+        }
+        translated = json.loads(
+            protocol_translation.responses_request_to_chat_completion_body(
+                json.dumps(body).encode("utf-8"),
+                preserve_reasoning_history=True,
+            )
+        )
+        self.assertEqual(translated["messages"][0]["reasoning_content"], "think after tool")
+        self.assertEqual(translated["messages"][2]["reasoning_content"], "think after tool")
+
+    def test_chat_stream_reasoning_is_represented_in_responses_history(self):
+        chunks = [
+            {
+                "id": "chat_1",
+                "model": "example-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "reasoning_content": "think"},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": "chat_1",
+                "model": "example-model",
+                "choices": [
+                    {"index": 0, "delta": {"content": "done"}, "finish_reason": "stop"}
+                ],
+            },
+        ]
+        events = protocol_translation.chat_stream_chunks_to_response_events(chunks)
+        body = json.loads(protocol_translation.events_to_responses_body(events, require_completed=True))
+        self.assertEqual(body["output"][0]["type"], "reasoning")
+        self.assertEqual(body["output"][0]["summary"][0]["text"], "think")
+
+    def test_chat_stream_reasoning_after_tool_delta_still_precedes_tool_in_response_output(self):
+        chunks = [
+            {
+                "model": "example-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_weather",
+                                    "function": {"name": "get_weather", "arguments": "{}"},
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"reasoning_content": "think after tool"},
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            },
+        ]
+        events = protocol_translation.chat_stream_chunks_to_response_events(chunks)
+        body = json.loads(protocol_translation.events_to_responses_body(events, require_completed=True))
+        self.assertEqual(
+            [item["type"] for item in body["output"]],
+            ["reasoning", "function_call"],
+        )
+        self.assertEqual(body["output"][0]["summary"][0]["text"], "think after tool")
+        self.assertEqual(
+            [item["type"] for item in events[-1]["response"]["output"]],
+            ["reasoning", "function_call"],
+        )
+
+    def test_responses_reasoning_body_round_trips_to_chat_and_stream(self):
+        body = json.dumps(
+            {
+                "id": "resp_1",
+                "object": "response",
+                "status": "completed",
+                "model": "example-model",
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "status": "completed",
+                        "summary": [{"type": "summary_text", "text": "think"}],
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    },
+                ],
+            }
+        ).encode()
+        chat = json.loads(
+            protocol_translation.response_body_to_chat_completion_body(
+                body,
+                preserve_reasoning_history=True,
+            )
+        )
+        self.assertEqual(chat["choices"][0]["message"]["reasoning_content"], "think")
+        chunks = protocol_translation.chat_completion_body_to_stream_chunks(
+            protocol_translation.response_body_to_chat_completion_body(
+                body,
+                preserve_reasoning_history=True,
+            )
+        )
+        self.assertEqual(chunks[1]["choices"][0]["delta"]["reasoning_content"], "think")
 
     def test_responses_client_tool_search_output_loads_chat_tools(self):
         body = {
@@ -2016,6 +2441,86 @@ class ProtocolTranslationTests(unittest.TestCase):
         streamed = chat_to_responses.events_for_chunk(chat_chunk)
         self.assertTrue(any(event.get("type") == "response.completed" or event.get("type", "").startswith("response.") for event in streamed))
 
+    def test_stateful_chat_stream_preserves_reasoning_history(self):
+        converter = protocol_translation.ChatToResponsesStreamConverter()
+        events = converter.events_for_chunk(
+            {
+                "model": "example-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"reasoning_content": "think first"},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+        )
+        events.extend(
+            converter.events_for_chunk(
+                {
+                    "choices": [{"index": 0, "delta": {"content": "done"}, "finish_reason": "stop"}]
+                }
+            )
+        )
+        events.extend(converter.events_for_done())
+        body = json.loads(protocol_translation.events_to_responses_body(events, require_completed=True))
+        self.assertEqual([item["type"] for item in body["output"]], ["reasoning", "message"])
+        self.assertEqual(body["output"][0]["summary"][0]["text"], "think first")
+
+    def test_stateful_chat_stream_preserves_reasoning_from_message_source(self):
+        converter = protocol_translation.ChatToResponsesStreamConverter()
+        events = converter.events_for_chunk(
+            {
+                "model": "example-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "done",
+                            "reasoning_content": "think in final message",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+        events.extend(converter.events_for_done())
+        body = json.loads(protocol_translation.events_to_responses_body(events, require_completed=True))
+        self.assertEqual([item["type"] for item in body["output"]], ["reasoning", "message"])
+        self.assertEqual(body["output"][0]["summary"][0]["text"], "think in final message")
+
+    def test_chat_stream_prefers_nonempty_message_reasoning_when_delta_is_empty(self):
+        """Providers may send an empty delta alongside a full message object."""
+        chunks = [
+            {
+                "model": "example-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "message": {
+                            "role": "assistant",
+                            "reasoning_content": "think from message",
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            }
+        ]
+        events = protocol_translation.chat_stream_chunks_to_response_events(chunks)
+        body = json.loads(protocol_translation.events_to_responses_body(events, require_completed=True))
+        self.assertEqual(body["output"][0]["type"], "reasoning")
+        self.assertEqual(body["output"][0]["summary"][0]["text"], "think from message")
+
+        converter = protocol_translation.ChatToResponsesStreamConverter()
+        converter.events_for_chunk(chunks[0])
+        terminal = converter.events_for_done()
+        terminal_body = json.loads(
+            protocol_translation.events_to_responses_body(terminal, require_completed=True)
+        )
+        self.assertEqual(terminal_body["output"][0]["summary"][0]["text"], "think from message")
+
     def test_stream_refusal_content_part_fails_closed_for_chat(self):
         events = [
             {"type": "response.created", "response": {"id": "resp_123", "model": "example-model"}},
@@ -2192,6 +2697,30 @@ class ProtocolTranslationTests(unittest.TestCase):
             }
         )
         self.assertEqual(chunks[0]["choices"][0]["finish_reason"], "stop")
+
+
+
+
+@pytest.mark.parametrize("body", [b'{"id":"a","id":"b"}', b'{"value":NaN}', b'{"value":1e999}', b'{"value":' + b'9' * 5000 + b'}'])
+def test_public_conversion_seams_reject_ambiguous_json_envelopes(body):
+    for convert in (
+        protocol_translation.responses_request_to_chat_completion_body,
+        protocol_translation.chat_completions_request_to_responses_body,
+        protocol_translation.chat_completion_to_response_body,
+    ):
+        with pytest.raises(protocol_translation.UnsupportedProtocolTranslationError) as caught:
+            convert(body)
+        assert caught.value.code == "invalid_json_envelope"
+
+
+
+
+@pytest.mark.parametrize("field", ['"model":"m","model":"evil"', '"stream":false,"stream":true', '"temperature":NaN'])
+def test_prepare_exchange_rejects_ambiguous_envelope_before_reshaping(field):
+    body = ('{"input":[],' + field + '}').encode()
+    with pytest.raises(protocol_translation.NonForwardable) as caught:
+        protocol_translation.prepare_exchange(body, inbound_format="responses", outbound_format="chat_completions")
+    assert caught.value.code == "invalid_json_envelope"
 
 
 if __name__ == "__main__":

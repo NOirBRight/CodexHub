@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from protocol_json import strict_json_loads
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -114,9 +115,6 @@ def _classify_collaboration_item(
         namespace = inherited_namespace
 
     if namespace is None:
-        alias_protocol = _collaboration_alias_protocol(name)
-        if alias_protocol is not None:
-            return alias_protocol
         if (
             request_protocol is not None
             and item_type == "function_call"
@@ -168,8 +166,6 @@ def _classify_collaboration_item(
     # the exact frozen Collaboration namespace (or the wire name is one of our
     # generated aliases).  Do not reject ordinary provider namespaces merely
     # because one child happens to be called ``send_message`` or ``spawn_agent``.
-    if _collaboration_alias_protocol(name):
-        return _collaboration_alias_protocol(name)
     return None
 
 
@@ -190,6 +186,10 @@ def collaboration_protocols(value: Any) -> frozenset[str]:
     protocols: set[str] = set()
     exact_request_root: Mapping[str, Any] | None = None
     exact_protocol: str | None = None
+    ordinary_names = {
+        tool.get("name") for tool in value.get("tools", [])
+        if isinstance(tool, Mapping) and tool.get("type") == "function"
+    } if isinstance(value, Mapping) and isinstance(value.get("tools"), list) else set()
     if isinstance(value, Mapping):
         try:
             exact_protocol = classify_collaboration_request(value)
@@ -207,7 +207,7 @@ def collaboration_protocols(value: Any) -> frozenset[str]:
             protocol = _classify_collaboration_item(
                 item,
                 inherited_namespace,
-                exact_protocol,
+                None if item.get("namespace") is None and item.get("name") in ordinary_names else exact_protocol,
             )
             if protocol is not None:
                 protocols.add(protocol)
@@ -286,12 +286,12 @@ class BindingValidation:
 
 
 def strict_json_object(value: Any) -> dict[str, Any] | None:
-    if isinstance(value, Mapping):
-        return dict(value)
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, (str, Mapping)):
         return None
     try:
-        parsed = json.loads(value)
+        parsed = strict_json_loads(value) if isinstance(value, str) else dict(value)
+        # Also reject exponent overflow and non-finite values in dict inputs.
+        json.dumps(parsed, allow_nan=False)
     except (TypeError, ValueError):
         return None
     return dict(parsed) if isinstance(parsed, Mapping) else None
@@ -385,41 +385,6 @@ def validate_effective_worker_binding(
     if effective_reasoning != requested_reasoning:
         return BindingValidation(BINDING_REJECTED, "contradictory_reasoning")
     return BindingValidation(BINDING_ACCEPTED, "matched")
-
-
-def synthesize_effective_worker_binding_readback(
-    requested: Mapping[str, Any],
-    readback: Mapping[str, Any] | None,
-) -> Mapping[str, Any] | None:
-    """Return a readback that includes an effective_binding for a successful native CLI spawn.
-
-    The native Codex CLI runtime does not emit the CodexHub-internal
-    ``effective_binding`` readback; it only returns ``{"agent_id", "nickname"}``
-    on success. When the historical output matches that successful native shape
-    and we already have a verified requested-binding sidecar, synthesize the
-    matching effective binding so the fail-closed history validator can succeed
-    without weakening its real safety boundary.
-    """
-    if readback is None:
-        return None
-    if "effective_binding" in readback:
-        return readback
-    # Require the minimum fields that identify a successful native spawn.
-    if not isinstance(readback.get("agent_id"), str) or not (
-        readback.get("nickname") is None or isinstance(readback.get("nickname"), str)
-    ):
-        return readback
-    return {
-        **readback,
-        "effective_binding": {
-            "contract_version": WORKER_BINDING_CONTRACT_VERSION,
-            "support": "supported",
-            "status": "accepted",
-            "agent_type": requested.get("agent_type"),
-            "model": requested.get("model"),
-            "reasoning": requested.get("reasoning"),
-        },
-    }
 
 
 def json_object_from_arguments(value: Any) -> dict[str, Any] | None:
@@ -544,89 +509,9 @@ def normalize_multi_agent_arguments(
     value: Any,
     tool_name: str | None,
 ) -> tuple[Any, str | None, bool]:
-    arguments = json_object_from_arguments(value)
-    if arguments is None:
-        return value, tool_name, False
+    """Preserve client-owned V1 arguments; schema validation owns rejection.
 
-    changed = False
-    resolved_tool_name = tool_name
-    if resolved_tool_name is None:
-        for key in ("", "tool", "function", "name", "action", "ns_tool", "operation", "method", "tool_name"):
-            candidate = arguments.get(key)
-            if isinstance(candidate, str) and candidate in MULTI_AGENT_TOOL_NAMES:
-                resolved_tool_name = candidate
-                arguments.pop(key, None)
-                changed = True
-                break
-    if resolved_tool_name is None:
-        resolved_tool_name = infer_multi_agent_tool_name(arguments)
-
-    changed = changed or json_argument_string_needs_repair(value)
-
-    if resolved_tool_name == "spawn_agent":
-        # The model-facing contract exposes "general" as the non-worker selector,
-        # but the native Codex runtime only accepts "default" (along with
-        # "worker" and "explorer"). Map at the semantic boundary before the
-        # call reaches the native runtime.
-        if arguments.get("agent_type") == "general":
-            arguments["agent_type"] = "default"
-            changed = True
-        if "message" not in arguments:
-            for alias in ("prompt", "input"):
-                alias_value = arguments.get(alias)
-                if isinstance(alias_value, str) and alias_value.strip():
-                    arguments["message"] = alias_value
-                    changed = True
-                    break
-        if "message" in arguments:
-            for alias in ("prompt", "input"):
-                if alias in arguments:
-                    arguments.pop(alias, None)
-                    changed = True
-        if "name" in arguments:
-            name_value = arguments.get("name")
-            if "nickname" not in arguments and isinstance(name_value, str) and name_value.strip() and name_value not in MULTI_AGENT_TOOL_NAMES:
-                arguments["nickname"] = name_value
-                changed = True
-            arguments.pop("name", None)
-            changed = True
-        if "fork_context" not in arguments:
-            arguments["fork_context"] = False
-            changed = True
-
-    for key in ("fork_context", "interrupt"):
-        item = arguments.get(key)
-        if isinstance(item, str) and item.lower() in {"true", "false"}:
-            arguments[key] = item.lower() == "true"
-            changed = True
-
-    if "targets" in arguments:
-        coerced, item_changed = coerce_targets(arguments["targets"])
-        if item_changed:
-            arguments["targets"] = coerced
-            changed = True
-    if "target" in arguments:
-        coerced, item_changed = coerce_target(arguments["target"])
-        if item_changed:
-            arguments["target"] = coerced
-            changed = True
-    if resolved_tool_name == "close_agent" and "target" not in arguments and "targets" in arguments:
-        target_value = arguments.get("targets")
-        if isinstance(target_value, list) and target_value:
-            arguments["target"] = target_value[0]
-            arguments.pop("targets", None)
-            changed = True
-    if resolved_tool_name == "wait_agent" and "targets" not in arguments and "target" in arguments:
-        target_value = arguments.get("target")
-        arguments["targets"] = target_value if isinstance(target_value, list) else [target_value]
-        arguments.pop("target", None)
-        changed = True
-    if "timeout_ms" in arguments:
-        coerced, item_changed = coerce_number(arguments["timeout_ms"])
-        if item_changed:
-            arguments["timeout_ms"] = coerced
-            changed = True
-
-    if not changed:
-        return value, resolved_tool_name, False
-    return dump_arguments_like(value, arguments), resolved_tool_name, True
+    Kept as a compatibility entry point, not a semantic repair hook. Tool
+    identity must come from the request plan rather than argument guesses.
+    """
+    return value, tool_name, False

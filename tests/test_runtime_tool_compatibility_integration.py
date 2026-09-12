@@ -452,7 +452,7 @@ def test_deferred_core_runtime_plan_does_not_restore_namespace_children():
     eager_baseline, _ = prepare(core_tools, "eager")
     eager, eager_context = prepare([*core_tools, namespace], "eager")
 
-    assert len(bounded["tools"]) == 8
+    assert len(bounded["tools"]) == 3  # Two client core tools + discovery, no invented V1 tools.
     assert len(deferred["tools"]) == len(bounded["tools"])
     assert not any(tool.get("type") == "namespace" for tool in deferred["tools"])
     assert not any(
@@ -782,7 +782,7 @@ def test_retry_attempt_generation_rebinds_partial_call_identity_for_second_strea
     assert terminal
 
 
-def test_required_tool_restriction_diagnostics_keep_generated_aliases_private(monkeypatch):
+def test_subagent_workflow_text_does_not_restrict_the_parent_tool_surface(monkeypatch):
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(
         gateway_events,
@@ -798,9 +798,6 @@ Execution constraints:
 """
     context = {"request_id": "req-diagnostics", "repair_policy": route_primitives.REPAIR_CODEX_SUBAGENT}
     with monkeypatch.context() as patches:
-        # Keep both declarations on the synthetic surface so the required-tool
-        # restriction itself (rather than coordinator filtering) is exercised.
-        patches.setattr(gateway_compat_multi_agent, "_filter_tools_for_subagent_coordinator", lambda *args, **kwargs: False)
         patches.setattr(gateway_compat_official, "_inject_explicit_codex_tools", lambda *args, **kwargs: False)
         patches.setattr(
             gateway_compat_official,
@@ -830,18 +827,11 @@ Execution constraints:
             event_context=context,
         )
 
-    restricted = [fields for name, fields in events if name == "required_tool_tools_restricted"]
-    assert restricted
-    fields = restricted[-1]
-    assert set(fields) == {
-        "tool_choice_required",
-        "required_tool_family",
-        "required_tool_disposition",
+    assert not [fields for name, fields in events if name == "required_tool_tools_restricted"]
+    assert {tool["name"] for tool in json.loads(transformed)["tools"]} >= {
+        "__codexhub_ns_generated_1",
+        "other",
     }
-    assert fields["tool_choice_required"] is True
-    assert fields["required_tool_family"] in {"namespace", "plain_function", "unknown"}
-    assert "__codexhub_" not in json.dumps(fields)
-    assert json.loads(transformed)["tool_choice"] == "auto"
 
 
 def test_changing_only_model_slug_does_not_change_compatibility_dispositions():
@@ -1232,7 +1222,7 @@ def test_deferred_core_v1_telemetry_uses_removed_surface_without_request_context
         for call in write_proxy_event.call_args_list
         if call.args and call.args[0] == "external_tool_surface_prepared"
     )
-    assert surface_event["namespace_declaration_count"] == 2
+    assert surface_event["namespace_declaration_count"] == 1
     assert surface_event["deferred_tool_count"] == 249
 
 

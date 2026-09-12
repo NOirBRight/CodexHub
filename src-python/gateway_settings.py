@@ -425,11 +425,13 @@ def lifecycle_empty_final_resample_enabled(
     event_context: Mapping[str, Any] | None,
     request_kind: str,
 ) -> bool:
-    if request_kind != RETRY_REQUEST_MAIN_GENERATION:
-        return False
-    if not subagent_semantic_repair_enabled(event_context):
-        return False
-    return bool((event_context or {}).get("subagent_lifecycle_complete"))
+    """Retired lifecycle-final resampling hook.
+
+    A child result cannot establish that its parent should emit a final answer,
+    so no legacy assist setting or historical state may enable this retry.
+    """
+    _ = (event_context, request_kind)
+    return False
 
 
 def gateway_retry_delay_seconds(

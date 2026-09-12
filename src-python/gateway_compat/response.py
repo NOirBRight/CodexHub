@@ -42,10 +42,6 @@ from runtime_tool_compatibility import (
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
     build_tool_compatibility_plan,
 )
-from subagent_policy import deterministic_required_action
-from gateway_settings import subagent_guidance_enabled, subagent_semantic_repair_enabled
-from subagent_scheduler import bounded_workflow_from_exact_prompts, compute_allowed_actions
-from subagent_state import build_subagent_state, is_worker_subagent_request, state_guidance_message
 from tool_surface_adapter import (
     APPLY_PATCH_FUNCTION_NAME,
     INTERNAL_INPUT_ITEM_TYPES,
@@ -515,7 +511,7 @@ def compatible_response_body(
         return body
 
     try:
-        payload = json.loads(body.decode("utf-8-sig"))
+        payload = _collaboration_adapter_module.decode_adapted_json(body.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return body
 
@@ -563,29 +559,8 @@ def compatible_response_body(
     changed = changed or alias_changed
     payload, bounded_tool_search_changed = _multi_agent._suppress_bounded_tool_search_calls(payload, event_context)
     changed = changed or bounded_tool_search_changed
-    payload, post_final_multi_agent_changed = _multi_agent._suppress_multi_agent_calls_after_lifecycle_final(
-        payload,
-        event_context,
-    )
-    changed = changed or post_final_multi_agent_changed
-    payload, worker_multi_agent_changed = _multi_agent._suppress_worker_multi_agent_tool_calls(payload, event_context)
-    changed = changed or worker_multi_agent_changed
-    payload, coordinator_forbidden_changed = _multi_agent._suppress_coordinator_forbidden_tool_calls(payload, event_context)
-    changed = changed or coordinator_forbidden_changed
     payload, invalid_tool_changed = _official_passthrough._downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
     changed = changed or invalid_tool_changed
-    payload, duplicate_spawn_changed = _multi_agent._guard_duplicate_multi_agent_spawn_calls(payload, event_context)
-    changed = changed or duplicate_spawn_changed
-    payload, exact_spawn_changed = _sse._coerce_exact_spawn_prompt_tool_calls(payload, event_context)
-    changed = changed or exact_spawn_changed
-    payload, required_tool_changed = _sse._coerce_required_subagent_tool_calls(
-        payload,
-        event_context,
-        surface="body",
-    )
-    changed = changed or required_tool_changed
-    payload, required_call_changed = _sse._repair_missing_required_subagent_call_payload(payload, event_context)
-    changed = changed or required_call_changed
     payload, requested_binding_changed = _multi_agent._apply_external_worker_response_contract(
         payload,
         event_context,

@@ -71,6 +71,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/validate_issue_278_evidence.py",
     "scripts/validate_issue_369_matrix.py",
     "scripts/validate_issue_63_evidence.py",
+    "scripts/verify_rollout_recovery_copy.py",
     "scripts/xai_device_login.py",
     "tests/validate_issue_108_evidence.py",
     "tests/validate_issue_251_evidence.py",
@@ -332,7 +333,7 @@ def test_relative_windows_entrypoints_keep_the_repository_runtime_contract() -> 
         "-DryRun",
     )
     assert portable_plan.returncode == 0, portable_plan.stdout + portable_plan.stderr
-    assert '"version":"0.2.3"' in portable_plan.stdout
+    assert '"version":"0.2.4"' in portable_plan.stdout
 
     runtime_check = _run_relative_powershell_script(
         r".\scripts\Prepare-PythonRuntime.ps1", "-CheckOnly"

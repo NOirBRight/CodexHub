@@ -123,7 +123,7 @@ def test_xai_responses_route_converts_compacted_history_and_preserves_mixed_inpu
     assert "call-1" in tool_history
 
 
-def test_worker_guidance_with_compacted_history_uses_same_public_text_collector():
+def test_worker_history_with_compaction_does_not_inject_a_finalization_prompt():
     request = json.loads(_compacted_request())
     request["input"].append(
         {
@@ -148,7 +148,7 @@ def test_worker_guidance_with_compacted_history_uses_same_public_text_collector(
         )
     )
 
-    assert any(
+    assert not any(
         item.get("role") == "developer"
         and "worker_subagent_finalization_required" in item.get("content", "")
         for item in transformed["input"]

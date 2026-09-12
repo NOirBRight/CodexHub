@@ -3410,7 +3410,6 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             patch("gateway_compat.response.compatible_response_body", side_effect=AssertionError("codex response adapter ran")),
             patch("gateway_compat.official_passthrough._normalize_third_party_tool_call", side_effect=AssertionError("tool alias repair ran")),
             patch("gateway_compat.official_passthrough._downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool downgrade repair ran")),
-            patch("gateway_compat.multi_agent._guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent repair ran")),
             patch("gateway_transport.urlopen", return_value=_FakeJsonResponse(upstream_body)),
         ):
             CodexProxyHandler.do_POST(handler)
@@ -3728,7 +3727,6 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
             patch("gateway_catalog_runtime.resolve_external_model_alias", return_value=external_model),
             patch("gateway_compat.official_passthrough._normalize_third_party_tool_call", side_effect=AssertionError("tool repair ran")),
             patch("gateway_compat.official_passthrough._downgrade_invalid_third_party_tool_calls", side_effect=AssertionError("tool repair ran")),
-            patch("gateway_compat.multi_agent._guard_duplicate_multi_agent_spawn_calls", side_effect=AssertionError("subagent guard ran")),
             patch("gateway_transport.urlopen", return_value=_FakeSseResponse(chat_stream)),
         ):
             CodexProxyHandler.do_POST(handler)

@@ -1,0 +1,291 @@
+{
+  "thread_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620",
+  "captured_at_utc": "2026-09-09T12:03:55.039219+00:00",
+  "source_bytes_read": 122287733,
+  "lines_read": 24290,
+  "bad_lines": [
+    {
+      "line": 4164,
+      "start_byte": 41305234,
+      "end_byte": 41308161,
+      "nul_bytes": 2926,
+      "bytes": 2927,
+      "preceding_event": {
+        "line": 4163,
+        "utc": "2026-09-05T14:51:47.711Z",
+        "type": "event_msg",
+        "subtype": "token_count"
+      }
+    }
+  ],
+  "raw_turn_count": 43,
+  "raw_terminal_counts": {
+    "task_complete": 37,
+    "turn_aborted": 3
+  },
+  "unterminated_turns": [
+    {
+      "turn_id": "01a07205-bb38-7dc2-ab61-d74721a479d3",
+      "start_line": 4094,
+      "start_utc": "2026-09-05T14:42:53.382Z",
+      "terminal": null,
+      "last_activity": {
+        "line": 4163,
+        "utc": "2026-09-05T14:51:47.711Z",
+        "type": "event_msg",
+        "subtype": "token_count"
+      }
+    },
+    {
+      "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "start_line": 5171,
+      "start_utc": "2026-09-06T14:42:08.399Z",
+      "terminal": null,
+      "last_activity": {
+        "line": 15434,
+        "utc": "2026-09-07T01:20:27.920Z",
+        "type": "event_msg",
+        "subtype": "item_completed"
+      }
+    },
+    {
+      "turn_id": "01a085fa-c076-7320-a9b4-7b197c801402",
+      "start_line": 24106,
+      "start_utc": "2026-09-09T11:43:18.268Z",
+      "terminal": null,
+      "last_activity": {
+        "line": 24290,
+        "utc": "2026-09-09T12:03:25.030Z",
+        "type": "event_msg",
+        "subtype": "token_count"
+      }
+    }
+  ],
+  "projected_turn_count": 8,
+  "projection": {
+    "next_rollout_byte_offset": 41305234,
+    "next_rollout_ordinal": 4163
+  },
+  "compactions": [
+    {
+      "line": 445,
+      "utc": "2026-09-05T00:20:26.572Z",
+      "next_tool_line": 455,
+      "next_tool_utc": "2026-09-05T00:20:34.741Z",
+      "resume_seconds": 8.169
+    },
+    {
+      "line": 936,
+      "utc": "2026-09-05T00:38:18.539Z",
+      "next_tool_line": 946,
+      "next_tool_utc": "2026-09-05T00:38:29.493Z",
+      "resume_seconds": 10.954
+    },
+    {
+      "line": 1471,
+      "utc": "2026-09-05T00:55:56.468Z",
+      "next_tool_line": 1481,
+      "next_tool_utc": "2026-09-05T00:56:08.628Z",
+      "resume_seconds": 12.16
+    },
+    {
+      "line": 1779,
+      "utc": "2026-09-05T01:07:33.986Z",
+      "next_tool_line": 1785,
+      "next_tool_utc": "2026-09-05T01:07:39.785Z",
+      "resume_seconds": 5.799
+    },
+    {
+      "line": 2613,
+      "utc": "2026-09-05T01:33:20.837Z",
+      "next_tool_line": 2623,
+      "next_tool_utc": "2026-09-05T01:33:29.304Z",
+      "resume_seconds": 8.467
+    },
+    {
+      "line": 3372,
+      "utc": "2026-09-05T01:58:30.921Z",
+      "next_tool_line": 3378,
+      "next_tool_utc": "2026-09-05T01:58:38.499Z",
+      "resume_seconds": 7.578
+    },
+    {
+      "line": 4096,
+      "utc": "2026-09-05T14:48:03.880Z",
+      "next_tool_line": 4110,
+      "next_tool_utc": "2026-09-05T14:48:58.696Z",
+      "resume_seconds": 54.816
+    },
+    {
+      "line": 5173,
+      "utc": "2026-09-06T14:45:43.175Z",
+      "next_tool_line": 5187,
+      "next_tool_utc": "2026-09-06T14:45:56.141Z",
+      "resume_seconds": 12.966
+    },
+    {
+      "line": 6191,
+      "utc": "2026-09-06T16:17:54.304Z",
+      "next_tool_line": 6197,
+      "next_tool_utc": "2026-09-06T16:18:27.567Z",
+      "resume_seconds": 33.263
+    },
+    {
+      "line": 7372,
+      "utc": "2026-09-06T17:38:46.534Z",
+      "next_tool_line": 7378,
+      "next_tool_utc": "2026-09-06T17:38:53.014Z",
+      "resume_seconds": 6.48
+    },
+    {
+      "line": 8529,
+      "utc": "2026-09-06T18:41:13.573Z",
+      "next_tool_line": 8535,
+      "next_tool_utc": "2026-09-06T18:41:22.973Z",
+      "resume_seconds": 9.4
+    },
+    {
+      "line": 9716,
+      "utc": "2026-09-06T19:42:30.075Z",
+      "next_tool_line": 9724,
+      "next_tool_utc": "2026-09-06T19:42:38.046Z",
+      "resume_seconds": 7.971
+    },
+    {
+      "line": 10866,
+      "utc": "2026-09-06T20:56:50.792Z",
+      "next_tool_line": 10872,
+      "next_tool_utc": "2026-09-06T20:57:02.405Z",
+      "resume_seconds": 11.613
+    },
+    {
+      "line": 12021,
+      "utc": "2026-09-06T21:59:33.062Z",
+      "next_tool_line": 12038,
+      "next_tool_utc": "2026-09-06T21:59:49.249Z",
+      "resume_seconds": 16.187
+    },
+    {
+      "line": 12787,
+      "utc": "2026-09-06T22:46:25.728Z",
+      "next_tool_line": 12806,
+      "next_tool_utc": "2026-09-06T22:46:41.671Z",
+      "resume_seconds": 15.943
+    },
+    {
+      "line": 13852,
+      "utc": "2026-09-06T23:49:07.019Z",
+      "next_tool_line": 13867,
+      "next_tool_utc": "2026-09-06T23:49:23.586Z",
+      "resume_seconds": 16.567
+    },
+    {
+      "line": 14852,
+      "utc": "2026-09-07T00:47:31.166Z",
+      "next_tool_line": 14858,
+      "next_tool_utc": "2026-09-07T00:47:41.359Z",
+      "resume_seconds": 10.193
+    },
+    {
+      "line": 15783,
+      "utc": "2026-09-07T02:00:59.286Z",
+      "next_tool_line": 15796,
+      "next_tool_utc": "2026-09-07T02:01:35.186Z",
+      "resume_seconds": 35.9
+    },
+    {
+      "line": 17003,
+      "utc": "2026-09-07T06:44:21.658Z",
+      "next_tool_line": 17026,
+      "next_tool_utc": "2026-09-07T06:44:43.380Z",
+      "resume_seconds": 21.722
+    },
+    {
+      "line": 18407,
+      "utc": "2026-09-07T14:53:48.301Z",
+      "next_tool_line": 18415,
+      "next_tool_utc": "2026-09-07T14:53:59.481Z",
+      "resume_seconds": 11.18
+    },
+    {
+      "line": 19679,
+      "utc": "2026-09-07T23:09:32.658Z",
+      "next_tool_line": 19691,
+      "next_tool_utc": "2026-09-07T23:09:44.878Z",
+      "resume_seconds": 12.22
+    },
+    {
+      "line": 20557,
+      "utc": "2026-09-08T01:27:20.677Z",
+      "next_tool_line": 20569,
+      "next_tool_utc": "2026-09-08T01:27:51.743Z",
+      "resume_seconds": 31.066
+    },
+    {
+      "line": 21510,
+      "utc": "2026-09-08T13:03:10.468Z",
+      "next_tool_line": 21524,
+      "next_tool_utc": "2026-09-08T13:03:29.049Z",
+      "resume_seconds": 18.581
+    },
+    {
+      "line": 21778,
+      "utc": "2026-09-09T03:12:20.179Z",
+      "next_tool_line": 21792,
+      "next_tool_utc": "2026-09-09T03:12:48.713Z",
+      "resume_seconds": 28.534
+    }
+  ],
+  "source_rollout": "/home/noirbright/.codex/sessions/2026/09/05/rollout-2026-09-05T07-40-40-01a06ecb-ba14-7e83-bd30-ef9c18738620.jsonl",
+  "source_history_db": "/home/noirbright/.codex/thread_history_1.sqlite",
+  "history_recovery_applied": false,
+  "system_interruptions": [
+    {
+      "last_boot_log_bj": "2026-09-05T22:51:50+08:00",
+      "next_boot_first_log_bj": "2026-09-05T22:52:33+08:00",
+      "filesystem_recovery_bj": "2026-09-05T22:53:35+08:00",
+      "filesystem_recovery_message": "recovering journal",
+      "reboot_initiator": "unconfirmed"
+    },
+    {
+      "last_boot_log_bj": "2026-09-07T09:21:30+08:00",
+      "next_boot_first_log_bj": "2026-09-07T09:24:32+08:00",
+      "memory_pressure_bj": [
+        "2026-09-07T09:21:17+08:00",
+        "2026-09-07T09:21:26+08:00",
+        "2026-09-07T09:21:30+08:00"
+      ],
+      "journal_recovery_bj": "2026-09-07T09:25:36+08:00",
+      "journal_recovery_message": "corrupted or uncleanly shut down, renaming and replacing",
+      "reboot_initiator": "unconfirmed",
+      "oom_kill_proven": false
+    }
+  ],
+  "gateway_recovery_examples": [
+    {
+      "failed_request_id": "9dbb4a039317",
+      "request_kind": "compact",
+      "failed_at_bj": "2026-09-08T07:06:49+08:00",
+      "error": "IncompleteRead",
+      "status": 502,
+      "following_request_id": "9ce9297be675",
+      "following_status": 200,
+      "following_completed_at_bj": "2026-09-08T07:09:32+08:00",
+      "normal_generation_completed_at_bj": "2026-09-08T07:09:45+08:00"
+    },
+    {
+      "failed_request_id": "4ed219ce67df",
+      "request_kind": "main_generation",
+      "failed_at_bj": "2026-09-09T12:24:38+08:00",
+      "error": "IncompleteRead",
+      "status": 502,
+      "following_request_id": "e61adaacb33a",
+      "following_status": 200,
+      "following_completed_at_bj": "2026-09-09T12:24:50+08:00"
+    }
+  ],
+  "native_error_signals": [
+    "deferring rejected rollout line until a later ordinal resolves it",
+    "thread history projection expected ordinal 4163, got 4162"
+  ]
+}

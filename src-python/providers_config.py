@@ -141,7 +141,14 @@ class ProviderConfig:
 
 
 def discover_official_models(api_key: str, timeout_seconds: int = 20) -> list[dict[str, Any]]:
-    headers = {"Accept": "application/json"}
+    # A few OpenAI-compatible gateways reject Python's default
+    # ``urllib`` user-agent (CommandCode currently answers that request with
+    # 403). Keep discovery identifiable without carrying credentials or
+    # provider-specific behavior into the request.
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "CodexHub-model-discovery/1",
+    }
     stripped_api_key = api_key.strip()
     if stripped_api_key:
         headers["Authorization"] = f"Bearer {stripped_api_key}"
@@ -172,8 +179,26 @@ def discover_official_models(api_key: str, timeout_seconds: int = 20) -> list[di
     return [models_by_id[model_id] for model_id in sorted(models_by_id)]
 
 
-def discover_provider_models(base_url: str, api_key: str, timeout_seconds: int = 20) -> list[dict[str, Any]]:
-    headers = {"Accept": "application/json"}
+def discover_provider_models(
+    base_url: str,
+    api_key: str,
+    timeout_seconds: int = 20,
+    *,
+    deduplicate: bool = True,
+) -> list[dict[str, Any]]:
+    """Read a provider model list without inventing model capabilities.
+
+    Normal catalog callers keep the historical de-duplicating behavior.  The
+    strict model-confirmation gate can disable it so a provider returning the
+    same exact identifier twice is treated as ambiguous rather than silently
+    converted into a unique fact.
+    """
+    # Some provider gateways reject the Python urllib default user agent with
+    # a bare 403 even though the same authenticated request is accepted by a
+    # normal client.  Keep the identity stable and deliberately generic; it
+    # carries no credentials and is not used for routing or capability
+    # inference.
+    headers = {"Accept": "application/json", "User-Agent": "CodexHub/1.0"}
     stripped_api_key = api_key.strip()
     if stripped_api_key:
         headers["Authorization"] = f"Bearer {stripped_api_key}"
@@ -187,24 +212,33 @@ def discover_provider_models(base_url: str, api_key: str, timeout_seconds: int =
     seen_ids: set[str] = set()
     for raw_model in raw_models:
         model_id = _discovered_model_id(raw_model)
-        if not model_id or model_id in seen_ids:
+        if not model_id or (deduplicate and model_id in seen_ids):
             continue
         seen_ids.add(model_id)
-        models.append(
-            {
-                "id": model_id,
-                "context_window": _discovered_numeric_limit(
-                    raw_model,
-                    ("context_window", "max_context_window", "context_length"),
-                    "context",
-                ),
-                "max_output_tokens": _discovered_numeric_limit(
-                    raw_model,
-                    ("max_output_tokens", "output_tokens", "max_tokens"),
-                    "output",
-                ),
-            }
-        )
+        discovered = {
+            "id": model_id,
+            "context_window": _discovered_numeric_limit(
+                raw_model,
+                ("context_window", "max_context_window", "context_length"),
+                "context",
+            ),
+            "max_output_tokens": _discovered_numeric_limit(
+                raw_model,
+                ("max_output_tokens", "output_tokens", "max_tokens"),
+                "output",
+            ),
+        }
+        # Model-list endpoints are not required to expose reasoning support,
+        # but a few providers do publish it.  Preserve only the small,
+        # structural capability fields needed by the isolated E2E gate.  Do
+        # not infer ``max`` from a model name or from a provider default.
+        reasoning_levels = _discovered_reasoning_levels(raw_model)
+        if reasoning_levels:
+            discovered["supported_reasoning_levels"] = reasoning_levels
+        default_reasoning = _discovered_default_reasoning(raw_model)
+        if default_reasoning is not None:
+            discovered["default_reasoning_level"] = default_reasoning
+        models.append(discovered)
     return models
 
 
@@ -906,6 +940,53 @@ def _discovered_model_id(value: Any) -> str:
         if model_id:
             return model_id
     return ""
+
+
+def _discovered_reasoning_levels(value: Any) -> tuple[str, ...]:
+    """Read explicitly advertised reasoning levels from a model record.
+
+    Provider model-list schemas are not uniform.  Keep this intentionally
+    conservative: only a list/tuple of strings (or a documented singular
+    ``reasoning_effort`` string) is accepted.  In particular, a model name or
+    an absent field must never be treated as proof that ``max`` is supported.
+    """
+
+    if not isinstance(value, dict):
+        return ()
+    candidates: Any = None
+    for key in (
+        "supported_reasoning_levels",
+        "reasoning_levels",
+        "supported_efforts",
+        "reasoning_efforts",
+    ):
+        if key in value:
+            candidates = value[key]
+            break
+    if candidates is None:
+        singular = value.get("reasoning_effort")
+        if isinstance(singular, str) and singular.strip():
+            candidates = [singular]
+    if not isinstance(candidates, (list, tuple)):
+        return ()
+    result: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        item = candidate.strip().lower()
+        if item and item not in result:
+            result.append(item)
+    return tuple(result)
+
+
+def _discovered_default_reasoning(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    for key in ("default_reasoning_level", "default_effort", "reasoning_effort"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip().lower()
+    return None
 
 
 def _official_model_id(value: Any) -> str:

@@ -10,6 +10,7 @@ from __future__ import annotations
 from functools import partial
 import html
 import json
+from protocol_json import AmbiguousJSONError, strict_json_loads
 import re
 import time
 import uuid
@@ -442,8 +443,8 @@ def _converted_sse_payload(
     if event.data == b"[DONE]":
         return "[DONE]"
     try:
-        payload = json.loads(event.data.decode("utf-8-sig"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = strict_json_loads(event.data.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError, AmbiguousJSONError) as exc:
         raise UpstreamSseSemanticError(
             "Upstream returned a malformed complete SSE event."
         ) from exc
@@ -1035,12 +1036,14 @@ def _responses_request_to_chat_completion_body(
     drop_client_metadata: bool = False,
     drop_client_transport_fields: bool = False,
     drop_reasoning: bool = False,
+    preserve_reasoning_history: bool = False,
 ) -> bytes:
     return responses_request_to_chat_completion_body(
         body,
         drop_client_metadata=drop_client_metadata,
         drop_client_transport_fields=drop_client_transport_fields,
         drop_reasoning=drop_reasoning,
+        preserve_reasoning_history=preserve_reasoning_history,
     )
 
 
@@ -1633,12 +1636,17 @@ def _chat_function_name_from_response_item(item: Mapping[str, Any]) -> str | Non
     return name
 
 
-def _response_body_to_chat_completion_body(body: bytes) -> bytes:
+def _response_body_to_chat_completion_body(
+    body: bytes,
+    *,
+    preserve_reasoning_history: bool = False,
+) -> bytes:
     try:
         return response_body_to_chat_completion_body(
             body,
             function_name_from_response_item=_chat_function_name_from_response_item,
             error_body=_chat_completion_error_body,
+            preserve_reasoning_history=preserve_reasoning_history,
         )
     except UnsupportedProtocolTranslationError as exc:
         raise UpstreamProtocolTranslationError(exc) from exc
@@ -1708,12 +1716,14 @@ def _response_events_to_chat_stream_chunks(
     events: list[Mapping[str, Any]],
     *,
     require_completed: bool = False,
+    preserve_reasoning_history: bool = False,
 ) -> list[dict[str, Any]]:
     try:
         return response_events_to_chat_stream_chunks(
             events,
             require_completed=require_completed,
             function_name_from_response_item=_chat_function_name_from_response_item,
+            preserve_reasoning_history=preserve_reasoning_history,
         )
     except UnsupportedProtocolTranslationError as exc:
         raise UpstreamProtocolTranslationError(exc) from exc

@@ -179,6 +179,14 @@ def enrich_request_observability(
         "request_prefix_hmac": telemetry_hmac(codex_home, b"prefix", prefix),
         "prefix_bytes": len(prefix),
     }
+    # Keep a redacted structural view of the executed wire body.  This is
+    # deliberately limited to protocol shape (roles and presence/counts of
+    # reasoning/tool fields), never values, so a cross-protocol failure such
+    # as a missing ``reasoning_content`` can be diagnosed without retaining
+    # prompts, tool arguments, or provider credentials.
+    shape = _request_body_shape(body)
+    if shape is not None:
+        fields["body_shape"] = shape
     if include_body_hmac:
         fields["request_body_hmac"] = telemetry_hmac(codex_home, b"body", body)
     else:
@@ -200,6 +208,65 @@ def enrich_request_observability(
             json.dumps(provider_config, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8"),
         )
     return fields
+
+
+def _request_body_shape(body: bytes) -> dict[str, Any] | None:
+    """Return bounded, value-free protocol structure for one request body."""
+
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    shape: dict[str, Any] = {
+        "top_level_keys": sorted(str(key) for key in payload if isinstance(key, str)),
+    }
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        assistant: list[dict[str, Any]] = []
+        roles: list[str] = []
+        for message in messages:
+            if not isinstance(message, Mapping):
+                continue
+            role = message.get("role")
+            if isinstance(role, str):
+                roles.append(role)
+            if role == "assistant":
+                tool_calls = message.get("tool_calls")
+                assistant.append({
+                    "has_reasoning_content": isinstance(message.get("reasoning_content"), str)
+                    and bool(message.get("reasoning_content")),
+                    "has_reasoning": isinstance(message.get("reasoning"), str)
+                    and bool(message.get("reasoning")),
+                    "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
+                })
+        shape.update({
+            "wire_format": "chat_completions",
+            "message_count": len(messages),
+            "message_roles": roles,
+            "assistant_messages": assistant,
+            "assistant_reasoning_content_count": sum(
+                bool(item["has_reasoning_content"]) for item in assistant
+            ),
+            "assistant_tool_call_count": sum(int(item["tool_call_count"]) for item in assistant),
+        })
+    input_items = payload.get("input")
+    if isinstance(input_items, list):
+        shape.update({
+            "wire_format": "responses",
+            "input_count": len(input_items),
+            "input_types": sorted(
+                str(item.get("type"))
+                for item in input_items
+                if isinstance(item, Mapping) and isinstance(item.get("type"), str)
+            ),
+            "reasoning_item_count": sum(
+                1 for item in input_items
+                if isinstance(item, Mapping) and item.get("type") == "reasoning"
+            ),
+        })
+    return shape
 
 
 def telemetry_hmac(codex_home: Path, label: bytes, data: bytes) -> str:

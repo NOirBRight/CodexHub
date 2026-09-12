@@ -6,6 +6,12 @@ This module must not import the V2 adapter. V1 repair cannot execute V2 paths.
 from __future__ import annotations
 
 from typing import Any, Mapping
+from collaboration_runtime_contract import (
+    COLLABORATION_V1,
+    CollaborationContractError,
+    normalize_collaboration_arguments,
+    validate_collaboration_arguments,
+)
 
 from .contracts import ToolCompatibilityEntry, ToolCompatibilityError
 from .dispositions import NATIVE, NAMESPACE, PLAIN_FUNCTION
@@ -17,6 +23,27 @@ V1_NAMES = frozenset(
 V1_FORBIDDEN = frozenset({"task_path", "continuation_id", "task_name", "fork_turns"})
 V1_NAMESPACE = "multi_agent_v1"
 V1_FLAT_PREFIX = "multi_agent_v1__"
+
+
+def validate_v1_arguments(item: Mapping[str, Any], *, surface: str) -> None:
+    try:
+        # Native passthrough must remain byte-for-byte stable.  Adapted
+        # request/response/SSE paths call ``normalize_v1_arguments``
+        # explicitly; this helper is validation-only for native items.
+        validate_collaboration_arguments(
+            COLLABORATION_V1, str(item.get("name")), item.get("arguments")
+        )
+    except CollaborationContractError as exc:
+        raise ToolCompatibilityError("tool_compatibility_boundary", exc.classification, surface=surface) from exc
+
+
+def normalize_v1_arguments(item: Mapping[str, Any], *, surface: str) -> tuple[str, bool]:
+    try:
+        return normalize_collaboration_arguments(
+            COLLABORATION_V1, str(item.get("name")), item.get("arguments")
+        )
+    except CollaborationContractError as exc:
+        raise ToolCompatibilityError("tool_compatibility_boundary", exc.classification, surface=surface) from exc
 
 
 def validate_v1_fields(fields: Mapping[str, Any]) -> None:

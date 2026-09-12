@@ -137,6 +137,7 @@ class RelayExecutionPlanLike(Protocol):
     sse_mutation_policy: Any
     verify_cross_protocol_source: bool
     lifecycle_final_retry_enabled: bool
+    preserve_reasoning_history: bool
 
 
 class RouteAttemptLike(Protocol):
@@ -679,19 +680,11 @@ def execute_exchange(request: ExchangeRequest, ports: ExchangePorts, *, progress
         state.relay_execution_plan = attempt.relay_execution_plan(lifecycle_final_retry_enabled=lifecycle_extra > 0)
         max_relay_attempts = relay_attempts + lifecycle_extra
         relay_attempt = 1
-        lifecycle_reason: str | None = None
         try:
             while relay_attempt <= max_relay_attempts:
                 generation += 1
                 request.event_context[_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY] = generation
                 attempt_body = body_for(attempt)
-                if lifecycle_reason and attempt.upstream_protocol is RouteProtocol.RESPONSES:
-                    attempt_body = _passthrough._responses_body_with_lifecycle_final_retry_guidance(attempt_body, lifecycle_reason)
-                    observer.record(ExchangeEvent("lifecycle_guidance", {
-                        "upstream": request.upstream_name,
-                        "upstream_format": "responses",
-                        "reason": lifecycle_reason,
-                    }))
                 upstream_request = _gateway_transport.build_request_url(
                     attempt.endpoint_url,
                     data=attempt_body,
@@ -745,7 +738,6 @@ def execute_exchange(request: ExchangeRequest, ports: ExchangePorts, *, progress
                     if lifecycle_retry:
                         stream_failure, retry_exc = True, exc
                         failure_class = RETRY_FAILURE_QUICK_TRANSIENT
-                        lifecycle_reason = "empty" if isinstance(exc, _gateway_errors.LifecycleEmptyFinalResponseError) else "format"
                         retry_limit, delay = max_relay_attempts, 0
                     else:
                         stream_failure = isinstance(exc, (_gateway_stream_semantics.UpstreamStreamInterruptedError, _gateway_errors.UpstreamStreamIdleTimeoutError, _protocol_translation.UpstreamStreamIncompleteError, _gateway_stream_semantics.UpstreamStreamErrorEvent))

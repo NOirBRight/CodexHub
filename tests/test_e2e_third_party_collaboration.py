@@ -1,0 +1,973 @@
+from __future__ import annotations
+
+import copy
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import textwrap
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "e2e_third_party_collaboration.py"
+
+
+def _runner_module():
+    spec = importlib.util.spec_from_file_location("third_party_collaboration_e2e", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _row(item: dict[str, object]) -> str:
+    return json.dumps({"type": "response_item", "payload": item})
+
+
+def test_e2e_muse_default_reasoning_matches_the_maintained_provider_capability() -> None:
+    """The real-provider matrix must not advertise an unsupported effort."""
+    runner = _runner_module()
+    from maintained_catalog import resolve_model
+
+    muse = resolve_model("opencode-go", "muse-spark-1.3-contributor")
+
+    assert runner.DEFAULT_REASONING["opencode-go/muse-spark-1.3-contributor"] == (
+        muse.default_reasoning_level
+    )
+
+
+def test_commandcode_deepseek_matrix_uses_the_confirmed_v41_identifier() -> None:
+    runner = _runner_module()
+    assert runner.DEFAULT_REASONING["commandcode/deepseek/deepseek-v4.1-flash"] == "max"
+    assert runner.COMMANDCODE_DEEPSEEK_41_RE.search("deepseek/deepseek-v4.1-flash")
+    assert not runner.COMMANDCODE_DEEPSEEK_41_RE.search("deepseek/deepseek-v4-flash")
+
+
+def test_trusted_matrix_has_thirteen_candidate_runs_and_four_baseline_runs() -> None:
+    runner = _runner_module()
+    candidate = runner.build_trusted_matrix_cases()
+    baseline = runner.build_trusted_baseline_cases()
+    assert len(baseline) == 4
+    assert sum(case.repeats for case in candidate) == 13
+    assert [(case.parent_model, case.collaboration_version) for case in candidate] == [
+        ("xai/grok-4.6", "v1"),
+        ("xai/grok-4.6", "v2"),
+        ("opencode-go/muse-spark-1.3-contributor", "v1"),
+        ("opencode-go/muse-spark-1.3-contributor", "v2"),
+        ("commandcode/deepseek/deepseek-v4.1-flash", "v2"),
+    ]
+
+
+def test_git_revision_state_marks_untracked_source_dirty_but_allows_evidence(tmp_path):
+    runner = _runner_module()
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    tracked = tmp_path / "tracked.py"
+    tracked.write_text("SOURCE = 1\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.py"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(tmp_path),
+            "-c", "user.name=CodexHub Test", "-c", "user.email=test@example.invalid",
+            "commit", "-qm", "fixture",
+        ],
+        check=True,
+    )
+    (tmp_path / "docs" / "evidence").mkdir(parents=True)
+    (tmp_path / "docs" / "evidence" / "run.json").write_text("{}\n")
+    state = runner._git_revision_state(tmp_path)
+    assert state["gateway_dirty"] is False
+    assert state["gateway_source_untracked_count"] == 0
+    (tmp_path / "untracked.py").write_text("SOURCE = 2\n")
+    state = runner._git_revision_state(tmp_path)
+    assert state["gateway_dirty"] is True
+    assert state["gateway_source_untracked_count"] == 1
+
+
+def test_provider_http_status_is_classified_without_attributing_gateway_failure() -> None:
+    runner = _runner_module()
+    assert runner.classify_request_trace([{"upstream_status": 400}]) == "provider_request_permanent"
+    assert runner.classify_request_trace([{"upstream_status": 429}]) == "provider_request_permanent"
+    assert runner.classify_request_trace([{"upstream_status": 503}]) == "provider_request_transient"
+    assert runner.classify_request_trace([{"upstream_status": 200}]) is None
+
+
+def test_commandcode_confirmation_requires_exact_selected_id_and_max(monkeypatch, tmp_path) -> None:
+    runner = _runner_module()
+    providers = tmp_path / "providers.toml"
+    providers.write_text(
+        textwrap.dedent(
+            """
+            [[providers]]
+            id = "commandcode"
+            name = "CommandCode"
+            base_url = "https://commandcode.invalid/v1"
+            api_key = "test-key"
+            [[providers.models]]
+            id = "deepseek/deepseek-v4-flash"
+            supported_reasoning_levels = ["high", "max"]
+            """
+        ).strip()
+        + "\n"
+    )
+
+    monkeypatch.setattr(
+        "providers_config.discover_provider_models",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "deepseek/deepseek-v4.1-flash",
+                "supported_reasoning_levels": ["high", "max"],
+                "context_window": 100,
+                "max_output_tokens": 50,
+            }
+        ],
+    )
+    confirmation = runner.confirm_commandcode_deepseek_41(
+        providers,
+        selected_model="commandcode/deepseek/deepseek-v4.1-flash",
+        requested_effort="max",
+    )
+    assert confirmation["confirmed"] is True
+    assert confirmation["configuration_model_present"] is False
+    assert confirmation["isolated_model_config_required"] is True
+
+    mismatch = runner.confirm_commandcode_deepseek_41(
+        providers,
+        selected_model="commandcode/deepseek/deepseek-v4-flash",
+        requested_effort="max",
+    )
+    assert mismatch["confirmed"] is False
+    assert mismatch["classification"] == "selected_model_not_v41_flash"
+
+    monkeypatch.setattr(
+        "providers_config.discover_provider_models",
+        lambda *_args, **_kwargs: [{"id": "deepseek/deepseek-v4.1-flash"}],
+    )
+    no_effort = runner.confirm_commandcode_deepseek_41(
+        providers,
+        selected_model="commandcode/deepseek/deepseek-v4.1-flash",
+        requested_effort="max",
+    )
+    assert no_effort["confirmed"] is False
+    assert no_effort["classification"] == "requested_effort_unconfirmed"
+
+
+def test_commandcode_confirmation_rejects_duplicate_live_model_ids(monkeypatch, tmp_path) -> None:
+    runner = _runner_module()
+    providers = tmp_path / "providers.toml"
+    providers.write_text(
+        textwrap.dedent(
+            """
+            [[providers]]
+            id = "commandcode"
+            name = "CommandCode"
+            base_url = "https://commandcode.invalid/v1"
+            api_key = "test-key"
+            [[providers.models]]
+            id = "deepseek/deepseek-v4-flash"
+            supported_reasoning_levels = ["high", "max"]
+            """
+        ).strip()
+        + "\n"
+    )
+    monkeypatch.setattr(
+        "providers_config.discover_provider_models",
+        lambda *_args, **_kwargs: [
+            {
+                "id": "deepseek/deepseek-v4.1-flash",
+                "supported_reasoning_levels": ["high", "max"],
+            },
+            {
+                "id": "deepseek/deepseek-v4.1-flash",
+                "supported_reasoning_levels": ["high", "max"],
+            },
+        ],
+    )
+
+    confirmation = runner.confirm_commandcode_deepseek_41(
+        providers,
+        selected_model="commandcode/deepseek/deepseek-v4.1-flash",
+        requested_effort="max",
+    )
+
+    assert confirmation["confirmed"] is False
+    assert confirmation["classification"] == "model_id_not_unique"
+    assert confirmation["model_ids"] == [
+        "deepseek/deepseek-v4.1-flash",
+        "deepseek/deepseek-v4.1-flash",
+    ]
+
+
+def test_commandcode_confirmation_uses_exact_model_capability_probe(monkeypatch, tmp_path) -> None:
+    runner = _runner_module()
+    providers = tmp_path / "providers.toml"
+    providers.write_text(
+        textwrap.dedent(
+            """
+            [[providers]]
+            id = "commandcode"
+            name = "CommandCode"
+            base_url = "https://commandcode.invalid/v1"
+            api_key = "test-key"
+            [[providers.models]]
+            id = "deepseek/deepseek-v4-flash"
+            supported_reasoning_levels = ["high", "max"]
+            """
+        ).strip()
+        + "\n"
+    )
+    monkeypatch.setattr(
+        "providers_config.discover_provider_models",
+        lambda *_args, **_kwargs: [{"id": "deepseek/deepseek-v4.1-flash"}],
+    )
+    calls = []
+
+    def probe(base_url, api_key, model, effort, **kwargs):
+        calls.append((base_url, api_key, model, effort))
+        return {"route": "chat_completions", "status": 200, "accepted": True}
+
+    monkeypatch.setattr(runner, "probe_provider_chat_reasoning_effort", probe)
+    confirmation = runner.confirm_commandcode_deepseek_41(
+        providers,
+        selected_model="commandcode/deepseek/deepseek-v4.1-flash",
+        requested_effort="max",
+        probe_reasoning=True,
+    )
+    assert confirmation["confirmed"] is True
+    assert confirmation["reasoning_levels"] == ["max"]
+    assert calls == [("https://commandcode.invalid/v1", "test-key", "deepseek/deepseek-v4.1-flash", "max")]
+
+
+def test_commandcode_confirmation_rejects_unaccepted_capability_probe(monkeypatch, tmp_path) -> None:
+    runner = _runner_module()
+    providers = tmp_path / "providers.toml"
+    providers.write_text(
+        textwrap.dedent(
+            """
+            [[providers]]
+            id = "commandcode"
+            name = "CommandCode"
+            base_url = "https://commandcode.invalid/v1"
+            api_key = "test-key"
+            """
+        ).strip()
+        + "\n"
+    )
+    monkeypatch.setattr(
+        "providers_config.discover_provider_models",
+        lambda *_args, **_kwargs: [{"id": "deepseek/deepseek-v4.1-flash"}],
+    )
+    monkeypatch.setattr(
+        runner,
+        "probe_provider_chat_reasoning_effort",
+        lambda *_args, **_kwargs: {"route": "chat_completions", "status": 400, "accepted": False},
+    )
+    confirmation = runner.confirm_commandcode_deepseek_41(
+        providers,
+        selected_model="commandcode/deepseek/deepseek-v4.1-flash",
+        requested_effort="max",
+        probe_reasoning=True,
+    )
+    assert confirmation["confirmed"] is False
+    assert confirmation["classification"] == "requested_effort_unconfirmed"
+
+
+def test_confirmed_commandcode_model_is_added_only_to_isolated_config(monkeypatch, tmp_path) -> None:
+    runner = _runner_module()
+    source = tmp_path / "source.toml"
+    target = tmp_path / "target.toml"
+    source.write_text(
+        textwrap.dedent(
+            """
+            [[providers]]
+            id = "commandcode"
+            name = "CommandCode"
+            base_url = "https://commandcode.invalid/v1"
+            api_key = "test-key"
+            [[providers.models]]
+            id = "deepseek/deepseek-v4-flash"
+            supported_reasoning_levels = ["high", "max"]
+            """
+        ).strip()
+        + "\n"
+    )
+    confirmation = {
+        "confirmed": True,
+        "selected_model": "commandcode/deepseek/deepseek-v4.1-flash",
+        "selected_upstream_model": "deepseek/deepseek-v4.1-flash",
+        "reasoning_levels": ["high", "max"],
+        "metadata": {"context_window": 100, "max_output_tokens": 50},
+    }
+    result = runner.install_confirmed_commandcode_model(
+        source,
+        target,
+        confirmation,
+        collaboration_version="v2",
+    )
+    assert result["added"] is True
+    assert "deepseek/deepseek-v4.1-flash" not in source.read_text()
+    assert "deepseek/deepseek-v4.1-flash" in target.read_text()
+
+    payload = {"models": []}
+    assert runner.inject_confirmed_model_into_catalog(
+        payload, confirmation, collaboration_version="v2"
+    ) is True
+    assert payload["models"][0]["slug"] == "commandcode/deepseek/deepseek-v4.1-flash"
+    assert payload["models"][0]["multi_agent_version"] == "v2"
+    assert payload["models"][0]["supported_reasoning_levels"] == [
+        {"effort": "high", "description": "Reasoning effort: high"},
+        {"effort": "max", "description": "Reasoning effort: max"},
+    ]
+    assert payload["models"][0]["base_instructions"].startswith("You are Codex")
+    assert payload["models"][0]["truncation_policy"] == {"mode": "tokens", "limit": 10000}
+
+
+def test_initial_fixture_is_a_real_failing_test_not_a_missing_module(tmp_path) -> None:
+    runner = _runner_module()
+    runner._write_parent_fixture(tmp_path)
+    assert (tmp_path / "parent_task.py").is_file()
+    assert (tmp_path / "test_parent_task.py").is_file()
+    checked = runner._verify_parent_fixture(tmp_path)
+    assert checked["host_test_exit_code"] == 1
+    assert checked["parent_fixture_fixed"] is False
+
+
+def test_resume_fixture_preserves_the_parent_implementation(tmp_path) -> None:
+    runner = _runner_module()
+    runner._write_parent_fixture(tmp_path)
+    fixed = "def normalize(value):\n    return 'FIXED'\n"
+    (tmp_path / "parent_task.py").write_text(fixed)
+    runner._write_resume_fixture(tmp_path)
+    assert (tmp_path / "parent_task.py").read_text() == fixed
+
+
+def test_fixture_verdict_uses_behavior_not_quote_style_or_mutable_tests(tmp_path) -> None:
+    runner = _runner_module()
+    runner._write_parent_fixture(tmp_path)
+    (tmp_path / "parent_task.py").write_text("def normalize(value):\n    return 'FIXED'\n")
+    assert runner._verify_parent_fixture(tmp_path)["parent_fixture_fixed"] is True
+    (tmp_path / "parent_task.py").write_text('def normalize(value):\n    return "BROKEN"\n')
+    (tmp_path / "test_parent_task.py").write_text("# empty test must not pass acceptance\n")
+    assert runner._verify_parent_fixture(tmp_path)["host_test_exit_code"] != 0
+
+
+def test_user_prompts_cannot_supply_completed_results() -> None:
+    runner = _runner_module()
+    rows = [json.loads(_row({"type": "message", "role": "user", "content": runner.PARENT_SENTINEL}))]
+    assert runner._sentinels_in_records([{"rows": rows}]) == set()
+
+
+def test_spawn_prompt_mentioning_unittest_is_not_parent_test_execution() -> None:
+    runner = _runner_module()
+    rows = [json.loads(_row({"type": "function_call", "namespace": "collaboration", "name": "spawn_agent",
+                            "arguments": '{"message":"run python -m unittest -q test_parent_task.py"}'}))]
+    assert runner._parent_test_tool_call_count([{"rows": rows}]) == 0
+
+
+@pytest.mark.parametrize(
+    ("version", "namespace", "followup_name"),
+    [
+        ("v1", "multi_agent_v1", "resume_agent"),
+        ("v2", "collaboration", "followup_task"),
+    ],
+)
+def test_e2e_evidence_uses_parent_child_relationship_not_model_name(
+    tmp_path, version: str, namespace: str, followup_name: str
+) -> None:
+    runner = _runner_module()
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    model = "xai/grok-4.6"
+
+    parent = [
+        json.dumps({"type": "session_meta", "payload": {"id": "parent"}}),
+        json.dumps({"type": "turn_context", "payload": {"model": model}}),
+        _row({"type": "function_call", "namespace": namespace, "name": "spawn_agent", "encrypted_function_args": []}),
+        _row({"type": "function_call", "namespace": namespace, "name": "wait_agent", "encrypted_function_args": []}),
+        _row({"type": "function_call", "namespace": namespace, "name": followup_name, "encrypted_function_args": []}),
+        _row({"type": "custom_tool_call", "input": "python -m unittest -q test_resume_turn.py"}),
+        _row({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "E2E_CHILD_OK 323\nE2E_FOLLOWUP_OK 667\nE2E_NO_SUBAGENT_TURN_OK 818"}]}),
+    ]
+    if version == "v1":
+        parent.insert(
+            -1,
+            _row({"type": "function_call", "namespace": namespace, "name": "close_agent"}),
+        )
+    child = [
+        json.dumps({"type": "session_meta", "payload": {"id": "child", "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}}}}),
+        json.dumps({"type": "turn_context", "payload": {"model": model}}),
+        _row({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "E2E_CHILD_OK 323\nE2E_FOLLOWUP_OK 667"}]}),
+    ]
+    if version == "v2":
+        child[2:2] = [
+            _row({"type": "agent_message", "content": [{"type": "input_text", "text": "E2E_CHILD_OK 323"}]}),
+            _row({"type": "agent_message", "content": [{"type": "input_text", "text": "E2E_FOLLOWUP_OK 667"}]}),
+        ]
+    (sessions / "parent.jsonl").write_text("\n".join(parent) + "\n")
+    (sessions / "child.jsonl").write_text("\n".join(child) + "\n")
+
+    # This old fixture contains only names and sentinel text: no call IDs,
+    # execution results, or terminal events. It must no longer qualify.
+    with pytest.raises(RuntimeError, match="ambiguous_collaboration_call"):
+        runner.collect_evidence(tmp_path, model, version)
+
+
+def test_e2e_resume_selects_the_related_parent_not_the_last_session(tmp_path) -> None:
+    runner = _runner_module()
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    model = "xai/grok-4.6"
+    (sessions / "parent.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "parent"}}),
+                json.dumps({"type": "turn_context", "payload": {"model": model}}),
+            ]
+        )
+        + "\n"
+    )
+    (sessions / "child.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "child", "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}}}}),
+                json.dumps({"type": "turn_context", "payload": {"model": model}}),
+            ]
+        )
+        + "\n"
+    )
+    (sessions / "unrelated.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "unrelated"}}),
+                json.dumps({"type": "turn_context", "payload": {"model": model}}),
+            ]
+        )
+        + "\n"
+    )
+
+    assert runner._parent_session_id(tmp_path, "parent") == "parent"
+
+
+def test_e2e_client_turn_keeps_the_resume_in_the_isolated_working_directory(
+    tmp_path, monkeypatch
+) -> None:
+    runner = _runner_module()
+    observed: dict[str, object] = {}
+
+    class _Client:
+        def wait(self, *, timeout: int) -> int:
+            assert timeout == 1
+            return 0
+
+    def fake_popen(command, **kwargs):
+        observed["command"] = command
+        observed.update(kwargs)
+        return _Client()
+
+    monkeypatch.setattr(runner.subprocess, "Popen", fake_popen)
+    output = tmp_path / "client.jsonl"
+
+    assert runner.run_client(
+        ["codex", "exec", "resume", "parent"],
+        environment={"CODEX_HOME": str(tmp_path / "client")},
+        output=output,
+        working_directory=tmp_path,
+        timeout=1,
+    ) == 0
+    assert observed["cwd"] == tmp_path
+
+
+def test_e2e_evidence_requires_the_actual_parent_model(tmp_path) -> None:
+    """A catalog label cannot claim parent-model coverage without a parent record."""
+    runner = _runner_module()
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    parent_model = "xai/grok-4.6"
+
+    (sessions / "parent.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "parent"}}),
+                json.dumps({"type": "turn_context", "payload": {"model": parent_model}}),
+                _row({"type": "function_call", "namespace": "collaboration", "name": "spawn_agent", "encrypted_function_args": []}),
+                _row({"type": "function_call", "namespace": "collaboration", "name": "wait_agent", "encrypted_function_args": []}),
+                _row({"type": "function_call", "namespace": "collaboration", "name": "followup_task", "encrypted_function_args": []}),
+                _row({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "E2E_CHILD_OK 323\nE2E_FOLLOWUP_OK 667\nE2E_PARENT_IMPLEMENTED_OK 941"}]}),
+            ]
+        )
+        + "\n"
+    )
+    (sessions / "child.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "child", "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}}}}),
+                json.dumps({"type": "turn_context", "payload": {"model": parent_model}}),
+                _row({"type": "agent_message", "content": [{"type": "input_text", "text": "E2E_CHILD_OK 323"}]}),
+                _row({"type": "agent_message", "content": [{"type": "input_text", "text": "E2E_FOLLOWUP_OK 667"}]}),
+                _row({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "E2E_CHILD_OK 323\nE2E_FOLLOWUP_OK 667"}]}),
+            ]
+        )
+        + "\n"
+    )
+
+    with pytest.raises(RuntimeError, match="ambiguous_collaboration_call"):
+        runner.collect_evidence(tmp_path, parent_model="opencode-go/muse-spark-1.3-contributor", child_model=parent_model)
+
+
+def _complete_fixture(home, version="v2"):
+    model = "xai/grok-4.6"
+    namespace = "collaboration" if version == "v2" else "multi_agent_v1"
+    def row(kind, payload):
+        return {"type": kind, "timestamp": "2026-09-10T00:00:00Z", "payload": payload}
+    def turn(identity):
+        return [row("event_msg", {"type": "task_started", "turn_id": identity}),
+                row("turn_context", {"turn_id": identity, "model": model, "effort": "high", "multi_agent_version": version, "sandbox_policy": {"type": "read-only"}})]
+    parent = [row("session_meta", {"id": "parent"})] + turn("parent-turn")
+    names = ["spawn_agent", "followup_task"] if version == "v2" else [
+        "spawn_agent", "wait_agent", "close_agent", "resume_agent", "send_input", "wait_agent", "close_agent"]
+    for index, name in enumerate(names):
+        args = ({"task_name": "reviewer", "message": "inspect"} if name == "spawn_agent" else {"target": "reviewer", "message": "inspect again"}) if version == "v2" else (
+            {"message": "inspect"} if name == "spawn_agent" else {"targets": ["child"]} if name == "wait_agent" else {"id": "child"} if name == "resume_agent" else {"target": "child", "message": "inspect again"} if name == "send_input" else {"target": "child"})
+        output = ({"task_name": "/root/reviewer"} if version == "v2" else {"agent_id": "child"}) if name == "spawn_agent" else (
+            {"status": {"child": {"completed": "fixture review result"}}} if name == "wait_agent" else {"previous_status": {"completed": "fixture review result"}} if version == "v1" else "")
+        parent.extend([row("response_item", {"type": "function_call", "namespace": namespace, "name": name, "call_id": str(index), "arguments": json.dumps(args)}),
+                       row("response_item", {"type": "function_call_output", "call_id": str(index), "output": json.dumps(output)})])
+    if version == "v2":
+        parent.append(row("response_item", {"type": "agent_message", "author": "/root/reviewer", "recipient": "/root", "content": [{"type": "input_text", "text": "fixture review result"}]}))
+    parent.extend([row("response_item", {"type": "custom_tool_call", "name": "apply_patch", "call_id": "patch-call", "input": "fixture source update"}),
+                   row("response_item", {"type": "custom_tool_call_output", "call_id": "patch-call", "output": "Success"}),
+                   row("event_msg", {"type": "task_complete", "turn_id": "parent-turn"})])
+    child = [row("session_meta", {"id": "child", "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent", "agent_path": "/root/reviewer"}}}})]
+    for identity in ("review", "followup"):
+        child += turn(identity) + [
+            row("response_item", {"type": "function_call", "name": "exec_command", "call_id": identity + "-read", "arguments": '{"cmd":"cat parent_task.py child_review.txt"}'}),
+            row("response_item", {"type": "function_call_output", "call_id": identity + "-read", "output": "Process exited with code 0\nfixture source"}),
+            row("event_msg", {"type": "task_complete", "turn_id": identity, "last_agent_message": "fixture review result"})]
+    sessions = home / "sessions"
+    sessions.mkdir()
+    for name, rows in (("parent", parent), ("child", child)):
+        (sessions / f"{name}.jsonl").write_text("\n".join(map(json.dumps, rows)) + "\n")
+    output = home / "cli.jsonl"
+    command = {"id": "command", "type": "command_execution", "command": '"$CODEXHUB_E2E_PYTHON" -m unittest -q test_parent_task.py'}
+    events = [
+        {"type": "thread.started", "thread_id": "parent"},
+        {"type": "item.completed", "item": {"id": "patch", "type": "file_change", "status": "completed", "changes": [{"path": "parent_task.py", "kind": "update"}]}},
+        {"type": "item.started", "item": command},
+        {"type": "item.completed", "item": {**command, "status": "completed", "exit_code": 0}},
+        {"type": "turn.completed"},
+    ]
+    output.write_text("\n".join(map(json.dumps, events)) + "\n")
+    return output
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_complete_correlated_evidence_accepts_same_model_parent_and_child(tmp_path, version):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, version)
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", version, parent_effort="high", child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is True
+
+
+def test_v2_delivery_accepts_identity_bearing_replay_without_optional_metadata(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v2")
+    parent_path = tmp_path / "sessions" / "parent.jsonl"
+    rows = [json.loads(line) for line in parent_path.read_text().splitlines()]
+    identity_replays = []
+    for row in rows:
+        payload = row.get("payload", {})
+        if row.get("type") == "response_item" and payload.get("type") == "agent_message":
+            for part in payload.get("content", []):
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    part["text"] = "/root/reviewer " + part["text"]
+            payload.pop("author", None)
+            payload.pop("recipient", None)
+            # The child has two completed turns.  A replay without optional
+            # author/recipient fields must still provide one identity-bearing
+            # delivery item per completion; otherwise accepting one item for
+            # both turns would make the correlation ambiguous.
+            identity_replays.append(copy.deepcopy(row))
+    assert len(identity_replays) == 1
+    rows.insert(rows.index(identity_replays[0]) + 1, copy.deepcopy(identity_replays[0]))
+    parent_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    evidence = runner.collect_evidence(
+        tmp_path,
+        "xai/grok-4.6",
+        "v2",
+        parent_model="xai/grok-4.6",
+        parent_effort="high",
+        child_effort="high",
+        client_outputs=(output,),
+        fixture_directory=tmp_path,
+    )
+    assert evidence["passed"] is True
+    assert evidence["parent_test_tool_call_count"] == 1
+    assert evidence["parent_child_relationships"] == [{"child": "child", "parent": "parent"}]
+
+
+@pytest.mark.parametrize("spoof_type", ["message", "agent_message"])
+def test_v2_delivery_does_not_accept_identity_text_in_user_messages(tmp_path, spoof_type):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v2")
+    parent_path = tmp_path / "sessions" / "parent.jsonl"
+    rows = [json.loads(line) for line in parent_path.read_text().splitlines()]
+    spoofed = []
+    for row in rows:
+        payload = row.get("payload", {})
+        if row.get("type") == "response_item" and payload.get("type") == "agent_message":
+            payload["type"] = spoof_type
+            payload["role"] = "user"
+            for part in payload.get("content", []):
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    part["text"] = "/root/reviewer " + part["text"]
+            payload.pop("author", None)
+            payload.pop("recipient", None)
+            spoofed.append(copy.deepcopy(row))
+    assert len(spoofed) == 1
+    rows.insert(rows.index(spoofed[0]) + 1, copy.deepcopy(spoofed[0]))
+    parent_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    evidence = runner.collect_evidence(
+        tmp_path,
+        "xai/grok-4.6",
+        "v2",
+        parent_model="xai/grok-4.6",
+        parent_effort="high",
+        child_effort="high",
+        client_outputs=(output,),
+        fixture_directory=tmp_path,
+    )
+    assert evidence["passed"] is False
+    assert evidence["lifecycle_diagnostics"]["failure"] == "child_result_delivery_not_correlated"
+
+
+@pytest.mark.parametrize("fault", ["exit_code", "missing_start", "duplicate_item", "missing_terminal", "wrong_thread", "no_parent_edit", "echo_only"])
+def test_execution_evidence_rejects_false_success(tmp_path, fault):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path)
+    events = [json.loads(line) for line in output.read_text().splitlines()]
+    if fault == "exit_code":
+        events[3]["item"].pop("exit_code")
+    elif fault == "missing_start":
+        events.pop(2)
+    elif fault == "duplicate_item":
+        events.insert(4, events[3])
+    elif fault == "missing_terminal":
+        events.pop()
+    elif fault == "wrong_thread":
+        events[0]["thread_id"] = "child"
+    elif fault == "no_parent_edit":
+        events.pop(1)
+    else:
+        events[3]["item"]["command"] = 'echo "$CODEXHUB_E2E_PYTHON -m unittest -q test_parent_task.py"'
+    output.write_text("\n".join(map(json.dumps, events)))
+    try:
+        evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", parent_effort="high", child_effort="high", client_outputs=(output,))
+    except RuntimeError:
+        return
+    assert evidence["passed"] is False
+
+
+@pytest.mark.parametrize("fault", ["missing_result", "duplicate_id", "effort_drift", "second_turn_delegation", "bad_line"])
+def test_history_evidence_rejects_gaps_and_cross_turn_delegation(tmp_path, fault):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path)
+    path = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    if fault == "missing_result":
+        rows.pop(4)
+    elif fault == "duplicate_id":
+        rows.insert(4, rows[3])
+    elif fault == "effort_drift":
+        rows[2]["payload"]["effort"] = "low"
+    elif fault == "second_turn_delegation":
+        rows.extend([{"type": "event_msg", "payload": {"type": "task_started", "turn_id": "second"}},
+                     {"type": "response_item", "payload": {"type": "function_call", "namespace": "collaboration", "name": "list_agents", "call_id": "second", "arguments": "{}"}},
+                     {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "second", "output": "{}"}}])
+    path.write_text("\n".join(map(json.dumps, rows)) + ("\n\0\n" if fault == "bad_line" else "\n"))
+    try:
+        evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", parent_effort="high", child_effort="high", client_outputs=(output,))
+    except RuntimeError:
+        return
+    assert evidence["passed"] is False
+
+
+def test_read_only_label_does_not_replace_child_execution_evidence(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path)
+    path = tmp_path / "sessions/child.jsonl"
+    with path.open("a") as stream:
+        stream.write(_row({"type": "custom_tool_call", "name": "apply_patch", "call_id": "child-write", "input": "update parent_task.py"}) + "\n")
+        stream.write(_row({"type": "custom_tool_call_output", "call_id": "child-write", "output": "Success"}) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", parent_effort="high", child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is False
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_second_parent_turn_can_complete_without_any_new_collaboration(tmp_path, version):
+    runner = _runner_module()
+    first = _complete_fixture(tmp_path, version)
+    parent = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in parent.read_text().splitlines()]
+    second = json.loads(json.dumps([rows[1], rows[2], rows[-3], rows[-2], rows[-1]]))
+    for row in second:
+        if "turn_id" in row["payload"]:
+            row["payload"]["turn_id"] = "second-turn"
+        if "call_id" in row["payload"]:
+            row["payload"]["call_id"] = "second-patch"
+    parent.write_text("\n".join(map(json.dumps, rows + second)) + "\n")
+    output = tmp_path / "cli-second.jsonl"
+    output.write_text(first.read_text().replace("test_parent_task.py", "test_resume_turn.py"))
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", version, parent_effort="high", child_effort="high", client_outputs=(first, output))
+    assert evidence["passed"] is True
+    assert evidence["parent_turn_ids"] == ["parent-turn", "second-turn"]
+    assert evidence["parent_resume_test_tool_call_count"] == 1
+
+
+def test_no_child_is_a_recorded_lifecycle_failure_not_a_missing_parent(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path)
+    (tmp_path / "sessions/child.jsonl").unlink()
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", parent_effort="high", child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is False
+    assert evidence["parent_models"] == ["xai/grok-4.6"]
+    assert evidence["client_trace"][0]["terminal"] == "turn.completed"
+
+
+def test_missing_parent_edit_provenance_is_unverified_not_model_failure(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path)
+    events = [json.loads(line) for line in output.read_text().splitlines()]
+    events = [event for event in events if event.get("item", {}).get("type") != "file_change"]
+    output.write_text("\n".join(map(json.dumps, events)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", parent_effort="high", child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is False
+    assert evidence["status"] == "unverified"
+    assert evidence["missing_evidence"] == ["parent_source_edit_attribution"]
+
+
+def test_fixture_cannot_fake_success_by_exiting_the_trusted_validator(tmp_path):
+    runner = _runner_module()
+    runner._write_parent_fixture(tmp_path)
+    (tmp_path / "parent_task.py").write_text("import os\nos._exit(0)\ndef normalize(value):\n    return 'BROKEN'\n")
+    checked = runner._verify_parent_fixture(tmp_path)
+    assert checked["parent_fixture_fixed"] is False
+
+
+def test_gateway_worker_rejection_is_not_attributed_to_the_provider():
+    runner = _runner_module()
+    signals = [{"code": "upstream.error", "source": "xai", "failure_class": "permanent", "type": "external_worker_binding_rejected"}]
+    assert runner.classify_failure_signals(signals) == "gateway_collaboration_boundary"
+
+
+def test_shell_edit_evidence_gap_does_not_erase_completed_child_lifecycle(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path)
+    path = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows = [row for row in rows if row.get("payload", {}).get("call_id") != "patch-call"]
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n")
+    events = [json.loads(line) for line in output.read_text().splitlines()]
+    events = [event for event in events if event.get("item", {}).get("type") != "file_change"]
+    output.write_text("\n".join(map(json.dumps, events)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", parent_effort="high", child_effort="high", client_outputs=(output,))
+    assert evidence["lifecycle_passed"] is True
+    assert evidence["passed"] is False
+    assert evidence["status"] == "unverified"
+
+
+def test_failed_native_spawn_without_child_identity_does_not_count_as_creation(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path)
+    path = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    failed = json.loads(json.dumps(rows[3:5]))
+    for row in failed:
+        row["payload"]["call_id"] = "failed-client-spawn"
+    failed[1]["payload"]["output"] = "agent type is currently unavailable"
+    rows[3:3] = failed
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", parent_effort="high", child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is True
+    assert evidence["successful_child_creation_count"] == 1
+
+
+def test_reviewer_uses_standalone_custom_agent_file(tmp_path):
+    import tomllib
+    runner = _runner_module()
+    path = runner.write_reviewer_config(tmp_path, "xai/grok-4.6", "high")
+    assert path == tmp_path / "agents/reviewer.toml"
+    config = tomllib.loads(path.read_text())
+    assert config["name"] == "reviewer"
+    assert config["description"]
+    assert config["developer_instructions"]
+    assert config["sandbox_mode"] == "read-only"
+    assert config["model"] == "xai/grok-4.6"
+    assert config["model_reasoning_effort"] == "high"
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_success_fixture_uses_frozen_native_argument_schemas(tmp_path, version):
+    from collaboration_runtime_contract import validate_collaboration_arguments
+    _complete_fixture(tmp_path, version)
+    for line in (tmp_path / "sessions/parent.jsonl").read_text().splitlines():
+        item = json.loads(line).get("payload", {})
+        if item.get("type") == "function_call":
+            validate_collaboration_arguments("collaboration_" + version, item["name"], item["arguments"])
+
+
+def test_lifecycle_failure_reports_exact_failed_predicate(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v1")
+    path = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        item = row.get("payload", {})
+        if item.get("name") == "resume_agent":
+            item["arguments"] = json.dumps({"id": "unrelated-child"})
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v1", parent_effort="high", child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is False
+    assert evidence["lifecycle_diagnostics"]["failure"] == "native_sequence_incomplete"
+    assert evidence["lifecycle_diagnostics"]["next_expected_step"] == "resume_agent"
+    assert evidence["lifecycle_diagnostics"]["rejected_steps"][0]["reason"] == "target_identity_mismatch"
+
+
+def test_both_fixture_turns_allow_available_editing_tools():
+    runner = _runner_module()
+    for prompt in (runner._scenario_prompt(collaboration_version="v1", child_model="xai/grok-4.6", child_effort="high"), runner._no_subagent_turn_prompt()):
+        assert "Use any available editing tool" in prompt
+        assert "not an exec_command shell command" not in prompt
+
+
+def test_test_command_diagnostics_preserve_reason_without_secrets():
+    runner = _runner_module()
+    item = {"id": "item_7", "type": "command_execution", "status": "completed", "exit_code": 0,
+            "command": 'cd /private/secret && "$CODEXHUB_E2E_PYTHON" -m unittest -q test_parent_task.py'}
+    detail = runner._test_command_diagnostic(item, "test_parent_task.py")
+    assert detail["accepted"] is False
+    assert detail["reason"] == "argument_count_mismatch"
+    assert "secret" not in json.dumps(detail)
+    assert "&&" in detail["argv_shape"]
+    item["command"] = '"$CODEXHUB_E2E_PYTHON" -m unittest -q test_parent_task.py'
+    assert runner._test_command_diagnostic(item, "test_parent_task.py")["accepted"] is True
+
+
+def test_collected_test_diagnostics_are_linked_to_client_items(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v2")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v2", parent_effort="high", child_effort="high", client_outputs=(output,))
+    details = evidence["execution_diagnostics"]["test_commands"]
+    assert any(d["accepted"] for d in details)
+    assert all(d["thread_id"] and d["item_id"] is not None and d["turn_index"] == 0 for d in details)
+
+
+@pytest.mark.parametrize("prefix,tail,accepted", [
+    ("cd /tmp/fixture && ", "", True),
+    ('cd "/tmp/fixture" && ', "", True),
+    ("cd /tmp/other && ", "", False),
+    ("echo /tmp/fixture && ", "", False),
+    ("cd /tmp/fixture ; ", "", False),
+    ("cd /tmp/fixture && ", " || true", False),
+    ("cd /tmp/fixture && ", " ; echo ok", False),
+])
+def test_fixture_cd_test_command_is_narrowly_validated(prefix, tail, accepted):
+    runner = _runner_module()
+    item = {"type": "command_execution", "status": "completed", "exit_code": 0,
+            "_fixture_directory": "/tmp/fixture",
+            "command": prefix + '"$CODEXHUB_E2E_PYTHON" -m unittest -q test_parent_task.py' + tail}
+    assert runner._successful_test_item(item, "test_parent_task.py") is accepted
+
+
+def test_kernel_observation_accepts_test_without_prescribed_shell_spelling(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v2")
+    events = [json.loads(line) for line in output.read_text().splitlines()]
+    for event in events:
+        if event.get("item", {}).get("type") == "command_execution":
+            event["item"]["command"] = 'export EXAMPLE=1 && "$CODEXHUB_E2E_PYTHON" -m unittest test_parent_task.py -q'
+    output.write_text("\n".join(map(json.dumps, events)) + "\n")
+    Path(str(output) + ".process.json").write_text(json.dumps({
+        "available": True, "tests": [{"pid": 123, "test": "test_parent_task.py", "exit_code": 0,
+            "interpreter_verified": True, "fixture_open_verified": True}], "writes": []}))
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v2", parent_effort="high",
+                                      child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is True
+    assert evidence["parent_test_tool_call_count"] == 1
+
+
+@pytest.mark.parametrize("write_time,changed,accepted", [(4102444800, True, True), (1, True, False), (4102444800, False, False)])
+def test_observed_shell_edit_requires_change_after_child_result(tmp_path, write_time, changed, accepted):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v2")
+    events = [json.loads(line) for line in output.read_text().splitlines()]
+    for event in events:
+        if event.get("item", {}).get("type") == "file_change":
+            event["item"]["type"] = "agent_message"
+    output.write_text("\n".join(map(json.dumps, events)) + "\n")
+    Path(str(output) + ".process.json").write_text(json.dumps({
+        "available": True, "source_changed": changed, "tests": [],
+        "writes": [{"pid": 123, "file": "parent_task.py", "timestamp": write_time}]}))
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v2", parent_effort="high",
+                                      child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is accepted
+
+
+def test_failed_sequence_still_retains_completion_and_delivery_diagnostics(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v1")
+    path = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        item = row.get("payload", {})
+        if item.get("type") == "function_call_output" and item.get("call_id") in {"1", "5"}:
+            item["output"] = '{"status": {}, "timed_out": true}'
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v1", parent_effort="high",
+                                      child_effort="high", client_outputs=(output,))
+    diagnostic = evidence["lifecycle_diagnostics"]
+    assert len(diagnostic["completion_records"]) == 2
+    assert diagnostic["native_results"][1]["timed_out"] is True
+
+
+def test_native_argument_parse_error_is_a_failed_call(tmp_path):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v1")
+    path = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        item = row.get("payload", {})
+        if item.get("type") == "function_call_output" and item.get("call_id") == "1":
+            item["output"] = "failed to parse function arguments: invalid type: floating point"
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v1", parent_effort="high",
+                                      child_effort="high", client_outputs=(output,))
+    assert next(c for c in evidence["call_trace"] if c["id"] == "1")["failed"] is True
+
+
+@pytest.mark.parametrize("message,passed", [("fixture review result", True), ("unrelated result", False)])
+def test_v1_close_can_deliver_real_completed_result_without_wait(tmp_path, message, passed):
+    runner = _runner_module()
+    output = _complete_fixture(tmp_path, "v1")
+    path = tmp_path / "sessions/parent.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows = [row for row in rows if row.get("payload", {}).get("call_id") not in {"1", "5"}]
+    for row in rows:
+        item = row.get("payload", {})
+        if item.get("type") == "function_call_output" and item.get("call_id") in {"2", "6"}:
+            item["output"] = json.dumps({"previous_status": {"completed": message}})
+    path.write_text("\n".join(map(json.dumps, rows)) + "\n")
+    evidence = runner.collect_evidence(tmp_path, "xai/grok-4.6", "v1", parent_effort="high",
+                                      child_effort="high", client_outputs=(output,))
+    assert evidence["passed"] is passed
+
+
+def test_observed_client_requires_exact_python_binding_before_start(tmp_path):
+    runner = _runner_module()
+    output = tmp_path / "must-not-exist.jsonl"
+    with pytest.raises(RuntimeError, match="fixture_python_binding_missing"):
+        runner.run_client(
+            ["must-not-execute"], environment={}, output=output,
+            working_directory=tmp_path, timeout=1, observe_processes=True,
+        )
+    assert not output.exists()

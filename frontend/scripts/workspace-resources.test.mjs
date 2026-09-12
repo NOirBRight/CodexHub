@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  formatMeanResponseDuration,
+  meanResponseDurationLabel,
   quotaPercent,
   quotaResetDate,
   resourceQuotaLayout,
@@ -52,4 +54,15 @@ test("quota windows keep chronological order with monthly after weekly", () => {
     resourceQuotaLayout(limits).ordered.map((item) => item.key),
     ["rolling", "weekly", "monthly"],
   );
+});
+
+test("mean response time is displayed in seconds, not milliseconds", () => {
+  assert.equal(formatMeanResponseDuration(12773), "12.77 s");
+  assert.equal(formatMeanResponseDuration(1000), "1 s");
+  assert.equal(formatMeanResponseDuration(480), "0.48 s");
+  assert.equal(formatMeanResponseDuration(0), "0 s");
+  assert.equal(formatMeanResponseDuration(Number.NaN), "—");
+  assert.equal(formatMeanResponseDuration(-1), "—");
+  assert.equal(meanResponseDurationLabel([]), "—");
+  assert.equal(meanResponseDurationLabel([12000, 13546]), "12.77 s");
 });

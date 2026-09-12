@@ -326,9 +326,9 @@ def test_normalize_third_party_tool_call_rewrites_aliases():
             "arguments": {"agent_type": "worker", "message": "hi"},
         }
     )
-    assert spawn_changed is True
-    assert spawn["namespace"] == "multi_agent_v1"
-    assert spawn["name"] == "spawn_agent"
+    assert spawn_changed is False
+    assert "namespace" not in spawn
+    assert spawn["name"] == "multi_agent_v1__spawn_agent"
 
 
 def test_v2_context_skips_third_party_normalization():

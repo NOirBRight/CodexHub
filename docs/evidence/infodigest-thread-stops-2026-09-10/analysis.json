@@ -1,0 +1,2311 @@
+{
+  "generated_at": "2026-09-10T00:39:19.941365+00:00",
+  "read_only_original": true,
+  "thread_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620",
+  "source": "/home/noirbright/.codex/sessions/2026/09/05/rollout-2026-09-05T07-40-40-01a06ecb-ba14-7e83-bd30-ef9c18738620.jsonl",
+  "source_bytes": 133082978,
+  "source_sha256": "bcea26c875f25292c691536cc6a15a86907e41e3018cc32c1ed5e4d54c73546e",
+  "top_level_record_counts": {
+    "session_meta": 1,
+    "event_msg": 12670,
+    "response_item": 11863,
+    "world_state": 53,
+    "turn_context": 72,
+    "token_usage_record": 3641,
+    "compacted": 26,
+    "inter_agent_communication_metadata": 269
+  },
+  "context_versions": {
+    "v2": 72
+  },
+  "context_models": {
+    "gpt-6-astra": 56,
+    "gpt-5.6-terra": 6,
+    "xai/grok-4.6": 10
+  },
+  "collaboration_call_counts": {
+    "collaboration.spawn_agent": 8,
+    "collaboration.send_message": 75,
+    "collaboration.followup_task": 31,
+    "collaboration.list_agents": 7,
+    "collaboration.interrupt_agent": 2
+  },
+  "collaboration_calls_by_model": {
+    "gpt-6-astra": 123
+  },
+  "collaboration_results": {
+    "calls": 123,
+    "unpaired": 0,
+    "explicit_failures": 0,
+    "note": "Top-level result structure only; no claim about business correctness or nested tool failures."
+  },
+  "raw_turn_counts": {
+    "task_complete": 49,
+    "unclosed": 2,
+    "turn_aborted": 3
+  },
+  "turns": [
+    {
+      "id": "01a06ecb-bc5d-7012-8a8f-70965474ff7e",
+      "start": "2026-09-04T23:40:40.946Z",
+      "start_line": 2,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 17,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-04T23:48:02.805Z",
+      "last_activity_line": 156,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-04T23:48:02.805Z",
+      "terminal_line": 156
+    },
+    {
+      "id": "01a06ed5-3279-7833-acf4-4996f77bfe2d",
+      "start": "2026-09-04T23:51:01.005Z",
+      "start_line": 159,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 12,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-05T00:01:46.592Z",
+      "last_activity_line": 256,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-05T00:01:46.592Z",
+      "terminal_line": 256
+    },
+    {
+      "id": "01a06ee9-8370-7a20-99ad-6ab173f9b505",
+      "start": "2026-09-05T00:13:12.483Z",
+      "start_line": 261,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 374,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-05T01:52:57.597Z",
+      "last_activity_line": 3310,
+      "last_model": "gpt-5.6-terra",
+      "version": "v2",
+      "terminal_at": "2026-09-05T01:52:57.597Z",
+      "terminal_line": 3310
+    },
+    {
+      "id": "01a06f46-7591-7de0-b6a0-b5ebf77a682f",
+      "start": "2026-09-05T01:54:43.737Z",
+      "start_line": 3314,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 16,
+      "collaboration_call_count": 2,
+      "last_activity": "2026-09-05T02:04:09.368Z",
+      "last_activity_line": 3470,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-05T02:04:09.368Z",
+      "terminal_line": 3470
+    },
+    {
+      "id": "01a06f55-b417-71d3-ac59-84af2ddf8bd5",
+      "start": "2026-09-05T02:11:22.802Z",
+      "start_line": 3472,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 3,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-05T02:12:33.652Z",
+      "last_activity_line": 3507,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-05T02:12:33.652Z",
+      "terminal_line": 3507
+    },
+    {
+      "id": "01a06f5b-81c3-7181-8cd3-55cafc7a9bdc",
+      "start": "2026-09-05T02:17:43.119Z",
+      "start_line": 3509,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        3511
+      ],
+      "call_count": 77,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-05T02:49:03.963Z",
+      "last_activity_line": 4080,
+      "terminal_at": "2026-09-05T02:49:03.963Z",
+      "terminal_line": 4080
+    },
+    {
+      "id": "01a07203-a9d1-7b10-b5cb-e2054f3a1674",
+      "start": "2026-09-05T14:40:37.885Z",
+      "start_line": 4082,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 0,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-05T14:42:28.312Z",
+      "last_activity_line": 4092,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-05T14:42:28.312Z",
+      "terminal_line": 4092
+    },
+    {
+      "id": "01a07205-bb38-7dc2-ab61-d74721a479d3",
+      "start": "2026-09-05T14:42:53.382Z",
+      "start_line": 4094,
+      "terminal": null,
+      "continuation_lines": [
+        4106
+      ],
+      "call_count": 7,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-05T14:51:47.711Z",
+      "last_activity_line": 4163,
+      "last_model": "gpt-6-astra",
+      "version": "v2"
+    },
+    {
+      "id": "01a07224-8cb0-7291-ac30-a14c363022bd",
+      "start": "2026-09-05T15:16:33.107Z",
+      "start_line": 4166,
+      "terminal": "turn_aborted",
+      "continuation_lines": [
+        4172
+      ],
+      "call_count": 2,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-05T15:17:52.423Z",
+      "last_activity_line": 4189,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-05T15:17:47.565Z",
+      "terminal_line": 4188,
+      "reason": "interrupted"
+    },
+    {
+      "id": "01a0758a-02f5-7632-b6fd-47bf8e6c2551",
+      "start": "2026-09-06T07:06:14.176Z",
+      "start_line": 4191,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        4198
+      ],
+      "call_count": 35,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-06T07:21:33.128Z",
+      "last_activity_line": 4471,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-06T07:21:33.128Z",
+      "terminal_line": 4471
+    },
+    {
+      "id": "01a075aa-36c1-7311-beb1-957fbdc7e881",
+      "start": "2026-09-06T07:41:24.570Z",
+      "start_line": 4473,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        4475
+      ],
+      "call_count": 21,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-06T07:52:53.836Z",
+      "last_activity_line": 4644,
+      "terminal_at": "2026-09-06T07:52:53.836Z",
+      "terminal_line": 4644
+    },
+    {
+      "id": "01a075b5-d75a-7572-b06f-c5a65e192601",
+      "start": "2026-09-06T07:54:06.570Z",
+      "start_line": 4646,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        4648
+      ],
+      "call_count": 20,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-06T08:02:00.798Z",
+      "last_activity_line": 4807,
+      "terminal_at": "2026-09-06T08:02:00.798Z",
+      "terminal_line": 4807
+    },
+    {
+      "id": "01a075be-4464-70b0-bc62-5a409faefebf",
+      "start": "2026-09-06T08:03:18.768Z",
+      "start_line": 4809,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 0,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-06T08:03:55.546Z",
+      "last_activity_line": 4817,
+      "terminal_at": "2026-09-06T08:03:55.546Z",
+      "terminal_line": 4817
+    },
+    {
+      "id": "01a07639-7b51-7760-a861-6b6c0807d58c",
+      "start": "2026-09-06T10:17:53.767Z",
+      "start_line": 4819,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 0,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-06T10:18:10.556Z",
+      "last_activity_line": 4827,
+      "terminal_at": "2026-09-06T10:18:10.556Z",
+      "terminal_line": 4827
+    },
+    {
+      "id": "01a07713-613c-7a61-b839-81a7347d719f",
+      "start": "2026-09-06T14:15:53.969Z",
+      "start_line": 4829,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 1,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-06T14:16:42.418Z",
+      "last_activity_line": 4846,
+      "terminal_at": "2026-09-06T14:16:42.418Z",
+      "terminal_line": 4846
+    },
+    {
+      "id": "01a07715-0c01-7df2-a3a0-8c723856aa06",
+      "start": "2026-09-06T14:17:43.185Z",
+      "start_line": 4848,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        4850
+      ],
+      "call_count": 38,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-06T14:41:05.150Z",
+      "last_activity_line": 5159,
+      "terminal_at": "2026-09-06T14:41:05.150Z",
+      "terminal_line": 5159
+    },
+    {
+      "id": "01a0772a-ca12-7180-9346-fd2bf0b924d4",
+      "start": "2026-09-06T14:41:28.115Z",
+      "start_line": 5161,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 0,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-06T14:41:48.086Z",
+      "last_activity_line": 5169,
+      "terminal_at": "2026-09-06T14:41:48.086Z",
+      "terminal_line": 5169
+    },
+    {
+      "id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "start": "2026-09-06T14:42:08.399Z",
+      "start_line": 5171,
+      "terminal": null,
+      "continuation_lines": [],
+      "call_count": 1240,
+      "collaboration_call_count": 85,
+      "last_activity": "2026-09-07T01:20:27.920Z",
+      "last_activity_line": 15434,
+      "last_model": "gpt-6-astra",
+      "version": "v2"
+    },
+    {
+      "id": "01a0797d-0dcd-7ea0-b407-7092dcc25bc0",
+      "start": "2026-09-07T01:30:33.867Z",
+      "start_line": 15437,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        15441
+      ],
+      "call_count": 152,
+      "collaboration_call_count": 13,
+      "last_activity": "2026-09-07T02:35:52.913Z",
+      "last_activity_line": 16634,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-07T02:35:52.913Z",
+      "terminal_line": 16634
+    },
+    {
+      "id": "01a07a74-8d3f-7661-a392-8d6b09c71b3e",
+      "start": "2026-09-07T06:00:53.899Z",
+      "start_line": 16636,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 26,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-07T06:10:31.646Z",
+      "last_activity_line": 16838,
+      "terminal_at": "2026-09-07T06:10:31.646Z",
+      "terminal_line": 16838
+    },
+    {
+      "id": "01a07a8c-b52c-7370-8796-28895deb5e47",
+      "start": "2026-09-07T06:27:16.963Z",
+      "start_line": 16840,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        16842
+      ],
+      "call_count": 57,
+      "collaboration_call_count": 5,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-07T06:57:39.523Z",
+      "last_activity_line": 17310,
+      "terminal_at": "2026-09-07T06:54:59.957Z",
+      "terminal_line": 17309
+    },
+    {
+      "id": "01a07aac-7013-72c3-9124-8a6a52591b93",
+      "start": "2026-09-07T07:01:56.428Z",
+      "start_line": 17312,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 76,
+      "collaboration_call_count": 9,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-07T07:33:29.398Z",
+      "last_activity_line": 17900,
+      "terminal_at": "2026-09-07T07:26:15.651Z",
+      "terminal_line": 17899
+    },
+    {
+      "id": "01a07c19-f31d-7c21-8fa5-cfc95175e3bd",
+      "start": "2026-09-07T13:41:10.639Z",
+      "start_line": 17902,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 3,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-07T13:48:36.173Z",
+      "last_activity_line": 17928,
+      "terminal_at": "2026-09-07T13:48:36.173Z",
+      "terminal_line": 17928
+    },
+    {
+      "id": "01a07c35-5ab3-7ed3-a4bc-2c14cc3eba6c",
+      "start": "2026-09-07T14:11:06.673Z",
+      "start_line": 17930,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 2,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-07T14:13:48.761Z",
+      "last_activity_line": 17954,
+      "terminal_at": "2026-09-07T14:13:48.761Z",
+      "terminal_line": 17954
+    },
+    {
+      "id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+      "start": "2026-09-07T14:17:25.965Z",
+      "start_line": 17956,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        17958
+      ],
+      "call_count": 36,
+      "collaboration_call_count": 7,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-07T14:41:27.563Z",
+      "last_activity_line": 18277,
+      "terminal_at": "2026-09-07T14:41:27.563Z",
+      "terminal_line": 18277
+    },
+    {
+      "id": "01a07c51-fc78-7c11-b55c-dd92ba39e4a6",
+      "start": "2026-09-07T14:42:23.024Z",
+      "start_line": 18279,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 0,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-07T14:42:52.313Z",
+      "last_activity_line": 18289,
+      "terminal_at": "2026-09-07T14:42:52.313Z",
+      "terminal_line": 18289
+    },
+    {
+      "id": "01a07c55-9940-7141-9140-fa0bc5eaa7c7",
+      "start": "2026-09-07T14:46:19.782Z",
+      "start_line": 18291,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 50,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-07T15:05:59.034Z",
+      "last_activity_line": 18695,
+      "terminal_at": "2026-09-07T15:05:59.034Z",
+      "terminal_line": 18695
+    },
+    {
+      "id": "01a07c69-b901-7ed1-b86d-515b9981f54f",
+      "start": "2026-09-07T15:08:18.623Z",
+      "start_line": 18697,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 5,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-07T15:09:39.748Z",
+      "last_activity_line": 18743,
+      "terminal_at": "2026-09-07T15:09:39.748Z",
+      "terminal_line": 18743
+    },
+    {
+      "id": "01a07c6e-7d5d-75c3-a38d-08be8ca45b68",
+      "start": "2026-09-07T15:13:31.122Z",
+      "start_line": 18745,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        18747
+      ],
+      "call_count": 28,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-07T15:25:37.339Z",
+      "last_activity_line": 18948,
+      "terminal_at": "2026-09-07T15:25:37.339Z",
+      "terminal_line": 18948
+    },
+    {
+      "id": "01a07c7b-0bde-7102-8c5d-4b3ea10961c6",
+      "start": "2026-09-07T15:27:13.950Z",
+      "start_line": 18950,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        18952
+      ],
+      "call_count": 80,
+      "collaboration_call_count": 1,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-07T16:07:43.367Z",
+      "last_activity_line": 19553,
+      "terminal_at": "2026-09-07T16:07:43.367Z",
+      "terminal_line": 19553
+    },
+    {
+      "id": "01a07e1b-c872-7820-bcf6-5514d149182a",
+      "start": "2026-09-07T23:02:25.274Z",
+      "start_line": 19555,
+      "terminal": "turn_aborted",
+      "continuation_lines": [
+        19557
+      ],
+      "call_count": 2,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-07T23:05:29.247Z",
+      "last_activity_line": 19668,
+      "terminal_at": "2026-09-07T23:05:29.247Z",
+      "terminal_line": 19668,
+      "reason": "interrupted"
+    },
+    {
+      "id": "01a07e1e-b628-7e13-b13e-81142608b114",
+      "start": "2026-09-07T23:05:37.120Z",
+      "start_line": 19671,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 54,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-07T23:26:16.641Z",
+      "last_activity_line": 20091,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-07T23:26:16.641Z",
+      "terminal_line": 20091
+    },
+    {
+      "id": "01a07e39-a5d3-7ad2-8f2a-735fdec74a7c",
+      "start": "2026-09-07T23:35:02.418Z",
+      "start_line": 20094,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        20099
+      ],
+      "call_count": 60,
+      "collaboration_call_count": 1,
+      "last_activity": "2026-09-08T00:07:50.179Z",
+      "last_activity_line": 20538,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-08T00:07:50.179Z",
+      "terminal_line": 20538
+    },
+    {
+      "id": "01a07e9c-9cc1-7473-8030-79cd4183007c",
+      "start": "2026-09-08T01:23:08.155Z",
+      "start_line": 20540,
+      "terminal": "turn_aborted",
+      "continuation_lines": [
+        20542
+      ],
+      "call_count": 0,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-08T01:23:26.289Z",
+      "last_activity_line": 20548,
+      "terminal_at": "2026-09-08T01:23:26.289Z",
+      "terminal_line": 20548,
+      "reason": "interrupted"
+    },
+    {
+      "id": "01a07e9d-d0eb-7c33-904d-d103b9bedf26",
+      "start": "2026-09-08T01:24:27.052Z",
+      "start_line": 20551,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 61,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-08T01:44:41.754Z",
+      "last_activity_line": 20962,
+      "last_model": "xai/grok-4.6",
+      "version": "v2",
+      "terminal_at": "2026-09-08T01:44:41.754Z",
+      "terminal_line": 20962
+    },
+    {
+      "id": "01a07eb1-0859-79d2-b73e-4fbb6f337463",
+      "start": "2026-09-08T01:45:26.437Z",
+      "start_line": 20964,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        20966
+      ],
+      "call_count": 42,
+      "collaboration_call_count": 0,
+      "last_model": "xai/grok-4.6",
+      "version": "v2",
+      "last_activity": "2026-09-08T02:09:29.685Z",
+      "last_activity_line": 21265,
+      "terminal_at": "2026-09-08T02:09:29.685Z",
+      "terminal_line": 21265
+    },
+    {
+      "id": "01a07ed7-f07f-7533-a1b5-a04df523acfd",
+      "start": "2026-09-08T02:27:56.305Z",
+      "start_line": 21267,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 8,
+      "collaboration_call_count": 0,
+      "last_model": "xai/grok-4.6",
+      "version": "v2",
+      "last_activity": "2026-09-08T02:36:08.211Z",
+      "last_activity_line": 21335,
+      "terminal_at": "2026-09-08T02:36:08.211Z",
+      "terminal_line": 21335
+    },
+    {
+      "id": "01a07fed-ed24-7672-9b3a-6ee5838087c3",
+      "start": "2026-09-08T07:31:34.387Z",
+      "start_line": 21337,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 23,
+      "collaboration_call_count": 0,
+      "last_model": "xai/grok-4.6",
+      "version": "v2",
+      "last_activity": "2026-09-08T07:41:35.777Z",
+      "last_activity_line": 21500,
+      "terminal_at": "2026-09-08T07:41:35.777Z",
+      "terminal_line": 21500
+    },
+    {
+      "id": "01a0811b-7855-77d0-b041-2a74f41bc401",
+      "start": "2026-09-08T13:00:56.394Z",
+      "start_line": 21504,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 18,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-08T13:10:46.377Z",
+      "last_activity_line": 21661,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-08T13:10:46.377Z",
+      "terminal_line": 21661
+    },
+    {
+      "id": "01a083f4-4450-7c23-990c-23031994dcfc",
+      "start": "2026-09-09T02:16:58.819Z",
+      "start_line": 21664,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 13,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-09T02:21:03.806Z",
+      "last_activity_line": 21767,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-09T02:21:03.806Z",
+      "terminal_line": 21767
+    },
+    {
+      "id": "01a08425-5666-7f40-9fed-11b85b0f17b6",
+      "start": "2026-09-09T03:10:34.669Z",
+      "start_line": 21771,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 168,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-09T04:38:16.131Z",
+      "last_activity_line": 22949,
+      "last_model": "xai/grok-4.6",
+      "version": "v2",
+      "terminal_at": "2026-09-09T04:38:16.131Z",
+      "terminal_line": 22949
+    },
+    {
+      "id": "01a08516-912e-7663-82c3-6a46b9f82864",
+      "start": "2026-09-09T07:34:03.896Z",
+      "start_line": 22951,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 163,
+      "collaboration_call_count": 0,
+      "last_model": "xai/grok-4.6",
+      "version": "v2",
+      "last_activity": "2026-09-09T08:57:32.345Z",
+      "last_activity_line": 24104,
+      "terminal_at": "2026-09-09T08:57:32.345Z",
+      "terminal_line": 24104
+    },
+    {
+      "id": "01a085fa-c076-7320-a9b4-7b197c801402",
+      "start": "2026-09-09T11:43:18.268Z",
+      "start_line": 24106,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 81,
+      "collaboration_call_count": 0,
+      "last_model": "xai/grok-4.6",
+      "version": "v2",
+      "last_activity": "2026-09-09T12:58:36.318Z",
+      "last_activity_line": 24688,
+      "terminal_at": "2026-09-09T12:58:36.318Z",
+      "terminal_line": 24688
+    },
+    {
+      "id": "01a08652-b3be-70c1-9238-3980287f66d4",
+      "start": "2026-09-09T13:19:22.126Z",
+      "start_line": 24690,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 2,
+      "collaboration_call_count": 0,
+      "last_model": "xai/grok-4.6",
+      "version": "v2",
+      "last_activity": "2026-09-09T13:21:10.723Z",
+      "last_activity_line": 24716,
+      "terminal_at": "2026-09-09T13:21:10.723Z",
+      "terminal_line": 24716
+    },
+    {
+      "id": "01a08657-953b-7271-9659-8382ab8fb6f9",
+      "start": "2026-09-09T13:24:41.992Z",
+      "start_line": 24721,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 2,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-09T13:28:37.537Z",
+      "last_activity_line": 24760,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "terminal_at": "2026-09-09T13:28:37.537Z",
+      "terminal_line": 24760
+    },
+    {
+      "id": "01a08660-afbf-7ef0-b483-e5c5539978d5",
+      "start": "2026-09-09T13:34:38.612Z",
+      "start_line": 24762,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 0,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-09T13:34:54.848Z",
+      "last_activity_line": 24770,
+      "terminal_at": "2026-09-09T13:34:54.848Z",
+      "terminal_line": 24770
+    },
+    {
+      "id": "01a08661-7ed6-78d1-94ce-f7eb94e2d956",
+      "start": "2026-09-09T13:35:31.610Z",
+      "start_line": 24772,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 11,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-09T13:39:33.357Z",
+      "last_activity_line": 24844,
+      "terminal_at": "2026-09-09T13:39:33.357Z",
+      "terminal_line": 24844
+    },
+    {
+      "id": "01a08668-bc69-73b3-a24b-44f39e9d8ef5",
+      "start": "2026-09-09T13:43:26.132Z",
+      "start_line": 24846,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 0,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-09T13:43:48.106Z",
+      "last_activity_line": 24854,
+      "terminal_at": "2026-09-09T13:43:48.106Z",
+      "terminal_line": 24854
+    },
+    {
+      "id": "01a0866c-01a4-7700-bff8-53cdafed71ab",
+      "start": "2026-09-09T13:47:00.462Z",
+      "start_line": 24856,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 4,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-09T13:48:30.422Z",
+      "last_activity_line": 24893,
+      "terminal_at": "2026-09-09T13:48:30.422Z",
+      "terminal_line": 24893
+    },
+    {
+      "id": "01a08676-b84d-7f93-8794-9331154459d5",
+      "start": "2026-09-09T13:58:42.595Z",
+      "start_line": 24895,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 6,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-09T14:01:10.503Z",
+      "last_activity_line": 24945,
+      "terminal_at": "2026-09-09T14:01:10.503Z",
+      "terminal_line": 24945
+    },
+    {
+      "id": "01a0867b-b483-7b23-8415-69c215895e29",
+      "start": "2026-09-09T14:04:09.291Z",
+      "start_line": 24947,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        24949
+      ],
+      "call_count": 19,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-09T14:08:30.827Z",
+      "last_activity_line": 25086,
+      "terminal_at": "2026-09-09T14:08:30.827Z",
+      "terminal_line": 25086
+    },
+    {
+      "id": "01a08687-39d4-7992-9784-ac61c3641bdd",
+      "start": "2026-09-09T14:16:44.312Z",
+      "start_line": 25088,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 13,
+      "collaboration_call_count": 0,
+      "last_model": "gpt-6-astra",
+      "version": "v2",
+      "last_activity": "2026-09-09T14:20:16.658Z",
+      "last_activity_line": 25188,
+      "terminal_at": "2026-09-09T14:20:16.658Z",
+      "terminal_line": 25188
+    },
+    {
+      "id": "01a0868c-aef5-7690-b422-aae499e8f370",
+      "start": "2026-09-09T14:22:41.981Z",
+      "start_line": 25192,
+      "terminal": "task_complete",
+      "continuation_lines": [],
+      "call_count": 315,
+      "collaboration_call_count": 0,
+      "last_activity": "2026-09-09T15:48:46.750Z",
+      "last_activity_line": 27418,
+      "last_model": "xai/grok-4.6",
+      "version": "v2",
+      "terminal_at": "2026-09-09T15:48:46.750Z",
+      "terminal_line": 27418
+    },
+    {
+      "id": "01a086db-f4b2-7090-be88-d7663249b767",
+      "start": "2026-09-09T15:49:17.224Z",
+      "start_line": 27420,
+      "terminal": "task_complete",
+      "continuation_lines": [
+        27422
+      ],
+      "call_count": 173,
+      "collaboration_call_count": 0,
+      "last_model": "xai/grok-4.6",
+      "version": "v2",
+      "last_activity": "2026-09-09T16:22:57.664Z",
+      "last_activity_line": 28596,
+      "terminal_at": "2026-09-09T16:22:57.664Z",
+      "terminal_line": 28596
+    }
+  ],
+  "short_continue_sample": [
+    {
+      "user_lines": [
+        3511
+      ],
+      "turn_id": "01a06f5b-81c3-7181-8cd3-55cafc7a9bdc",
+      "previous_turn_id": "01a06f55-b417-71d3-ac59-84af2ddf8bd5",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        4106
+      ],
+      "turn_id": "01a07205-bb38-7dc2-ab61-d74721a479d3",
+      "previous_turn_id": "01a07203-a9d1-7b10-b5cb-e2054f3a1674",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        4172
+      ],
+      "turn_id": "01a07224-8cb0-7291-ac30-a14c363022bd",
+      "previous_turn_id": "01a07205-bb38-7dc2-ab61-d74721a479d3",
+      "previous_terminal": null
+    },
+    {
+      "user_lines": [
+        4198
+      ],
+      "turn_id": "01a0758a-02f5-7632-b6fd-47bf8e6c2551",
+      "previous_turn_id": "01a07224-8cb0-7291-ac30-a14c363022bd",
+      "previous_terminal": "turn_aborted"
+    },
+    {
+      "user_lines": [
+        4475
+      ],
+      "turn_id": "01a075aa-36c1-7311-beb1-957fbdc7e881",
+      "previous_turn_id": "01a0758a-02f5-7632-b6fd-47bf8e6c2551",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        4648
+      ],
+      "turn_id": "01a075b5-d75a-7572-b06f-c5a65e192601",
+      "previous_turn_id": "01a075aa-36c1-7311-beb1-957fbdc7e881",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        4850
+      ],
+      "turn_id": "01a07715-0c01-7df2-a3a0-8c723856aa06",
+      "previous_turn_id": "01a07713-613c-7a61-b839-81a7347d719f",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        15441
+      ],
+      "turn_id": "01a0797d-0dcd-7ea0-b407-7092dcc25bc0",
+      "previous_turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "previous_terminal": null
+    },
+    {
+      "user_lines": [
+        16842
+      ],
+      "turn_id": "01a07a8c-b52c-7370-8796-28895deb5e47",
+      "previous_turn_id": "01a07a74-8d3f-7661-a392-8d6b09c71b3e",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        17958
+      ],
+      "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+      "previous_turn_id": "01a07c35-5ab3-7ed3-a4bc-2c14cc3eba6c",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        18747
+      ],
+      "turn_id": "01a07c6e-7d5d-75c3-a38d-08be8ca45b68",
+      "previous_turn_id": "01a07c69-b901-7ed1-b86d-515b9981f54f",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        18952
+      ],
+      "turn_id": "01a07c7b-0bde-7102-8c5d-4b3ea10961c6",
+      "previous_turn_id": "01a07c6e-7d5d-75c3-a38d-08be8ca45b68",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        19557
+      ],
+      "turn_id": "01a07e1b-c872-7820-bcf6-5514d149182a",
+      "previous_turn_id": "01a07c7b-0bde-7102-8c5d-4b3ea10961c6",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        20099
+      ],
+      "turn_id": "01a07e39-a5d3-7ad2-8f2a-735fdec74a7c",
+      "previous_turn_id": "01a07e1e-b628-7e13-b13e-81142608b114",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        20542
+      ],
+      "turn_id": "01a07e9c-9cc1-7473-8030-79cd4183007c",
+      "previous_turn_id": "01a07e39-a5d3-7ad2-8f2a-735fdec74a7c",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        20966
+      ],
+      "turn_id": "01a07eb1-0859-79d2-b73e-4fbb6f337463",
+      "previous_turn_id": "01a07e9d-d0eb-7c33-904d-d103b9bedf26",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        24949
+      ],
+      "turn_id": "01a0867b-b483-7b23-8415-69c215895e29",
+      "previous_turn_id": "01a08676-b84d-7f93-8794-9331154459d5",
+      "previous_terminal": "task_complete"
+    },
+    {
+      "user_lines": [
+        27422
+      ],
+      "turn_id": "01a086db-f4b2-7090-be88-d7663249b767",
+      "previous_turn_id": "01a0868c-aef5-7690-b422-aae499e8f370",
+      "previous_terminal": "task_complete"
+    }
+  ],
+  "short_continue_previous_status_counts": {
+    "task_complete": 15,
+    "unclosed": 2,
+    "turn_aborted": 1
+  },
+  "bad_lines": [
+    {
+      "line": 4164,
+      "byte_offset": 41305234,
+      "length": 2927,
+      "nul_count": 2926,
+      "parser_error": "UnicodeDecodeError"
+    }
+  ],
+  "projection": {
+    "next_rollout_byte_offset": 41305234,
+    "next_rollout_ordinal": 4163
+  },
+  "projected_turn_count": 8,
+  "latest_projected_turn": {
+    "turn_id": "01a07205-bb38-7dc2-ab61-d74721a479d3",
+    "status": "inProgress",
+    "rollout_ordinal": 4093,
+    "started_at": 1788619373,
+    "completed_at": null
+  },
+  "app_readback": {
+    "latest_turn_id": "01a07205-bb38-7dc2-ab61-d74721a479d3",
+    "latest_turn_status": "interrupted",
+    "note": "App overlay differs from persisted inProgress; both read back the old Sept 5 turn."
+  },
+  "successful_compactions": [
+    {
+      "line": 445,
+      "ts": "2026-09-05T00:20:26.572Z",
+      "turn_id": "01a06ee9-8370-7a20-99ad-6ab173f9b505",
+      "next_call": {
+        "line": 455,
+        "ts": "2026-09-05T00:20:34.741Z",
+        "turn_id": "01a06ee9-8370-7a20-99ad-6ab173f9b505",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 8.169
+    },
+    {
+      "line": 936,
+      "ts": "2026-09-05T00:38:18.539Z",
+      "turn_id": "01a06ee9-8370-7a20-99ad-6ab173f9b505",
+      "next_call": {
+        "line": 946,
+        "ts": "2026-09-05T00:38:29.493Z",
+        "turn_id": "01a06ee9-8370-7a20-99ad-6ab173f9b505",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 10.954
+    },
+    {
+      "line": 1471,
+      "ts": "2026-09-05T00:55:56.468Z",
+      "turn_id": "01a06ee9-8370-7a20-99ad-6ab173f9b505",
+      "next_call": {
+        "line": 1481,
+        "ts": "2026-09-05T00:56:08.628Z",
+        "turn_id": "01a06ee9-8370-7a20-99ad-6ab173f9b505",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 12.16
+    },
+    {
+      "line": 1779,
+      "ts": "2026-09-05T01:07:33.986Z",
+      "turn_id": "01a06ee9-8370-7a20-99ad-6ab173f9b505",
+      "next_call": {
+        "line": 1785,
+        "ts": "2026-09-05T01:07:39.785Z",
+        "turn_id": "01a06ee9-8370-7a20-99ad-6ab173f9b505",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 5.799
+    },
+    {
+      "line": 2613,
+      "ts": "2026-09-05T01:33:20.837Z",
+      "turn_id": "01a06ee9-8370-7a20-99ad-6ab173f9b505",
+      "next_call": {
+        "line": 2623,
+        "ts": "2026-09-05T01:33:29.304Z",
+        "turn_id": "01a06ee9-8370-7a20-99ad-6ab173f9b505",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 8.467
+    },
+    {
+      "line": 3372,
+      "ts": "2026-09-05T01:58:30.921Z",
+      "turn_id": "01a06f46-7591-7de0-b6a0-b5ebf77a682f",
+      "next_call": {
+        "line": 3378,
+        "ts": "2026-09-05T01:58:38.499Z",
+        "turn_id": "01a06f46-7591-7de0-b6a0-b5ebf77a682f",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 7.578
+    },
+    {
+      "line": 4096,
+      "ts": "2026-09-05T14:48:03.880Z",
+      "turn_id": "01a07205-bb38-7dc2-ab61-d74721a479d3",
+      "next_call": {
+        "line": 4110,
+        "ts": "2026-09-05T14:48:58.696Z",
+        "turn_id": "01a07205-bb38-7dc2-ab61-d74721a479d3",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 54.816
+    },
+    {
+      "line": 5173,
+      "ts": "2026-09-06T14:45:43.175Z",
+      "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "next_call": {
+        "line": 5187,
+        "ts": "2026-09-06T14:45:56.141Z",
+        "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 12.966
+    },
+    {
+      "line": 6191,
+      "ts": "2026-09-06T16:17:54.304Z",
+      "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "next_call": {
+        "line": 6197,
+        "ts": "2026-09-06T16:18:27.567Z",
+        "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 33.263
+    },
+    {
+      "line": 7372,
+      "ts": "2026-09-06T17:38:46.534Z",
+      "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "next_call": {
+        "line": 7378,
+        "ts": "2026-09-06T17:38:53.014Z",
+        "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 6.48
+    },
+    {
+      "line": 8529,
+      "ts": "2026-09-06T18:41:13.573Z",
+      "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "next_call": {
+        "line": 8535,
+        "ts": "2026-09-06T18:41:22.973Z",
+        "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 9.4
+    },
+    {
+      "line": 9716,
+      "ts": "2026-09-06T19:42:30.075Z",
+      "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "next_call": {
+        "line": 9724,
+        "ts": "2026-09-06T19:42:38.046Z",
+        "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 7.971
+    },
+    {
+      "line": 10866,
+      "ts": "2026-09-06T20:56:50.792Z",
+      "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "next_call": {
+        "line": 10872,
+        "ts": "2026-09-06T20:57:02.405Z",
+        "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 11.613
+    },
+    {
+      "line": 12021,
+      "ts": "2026-09-06T21:59:33.062Z",
+      "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "next_call": {
+        "line": 12038,
+        "ts": "2026-09-06T21:59:49.249Z",
+        "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 16.187
+    },
+    {
+      "line": 12787,
+      "ts": "2026-09-06T22:46:25.728Z",
+      "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "next_call": {
+        "line": 12806,
+        "ts": "2026-09-06T22:46:41.671Z",
+        "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 15.943
+    },
+    {
+      "line": 13852,
+      "ts": "2026-09-06T23:49:07.019Z",
+      "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "next_call": {
+        "line": 13867,
+        "ts": "2026-09-06T23:49:23.586Z",
+        "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 16.567
+    },
+    {
+      "line": 14852,
+      "ts": "2026-09-07T00:47:31.166Z",
+      "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+      "next_call": {
+        "line": 14858,
+        "ts": "2026-09-07T00:47:41.359Z",
+        "turn_id": "01a0772b-6786-73a3-8cd6-8cd798f9b696",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 10.193
+    },
+    {
+      "line": 15783,
+      "ts": "2026-09-07T02:00:59.286Z",
+      "turn_id": "01a0797d-0dcd-7ea0-b407-7092dcc25bc0",
+      "next_call": {
+        "line": 15796,
+        "ts": "2026-09-07T02:01:35.186Z",
+        "turn_id": "01a0797d-0dcd-7ea0-b407-7092dcc25bc0",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 35.9
+    },
+    {
+      "line": 17003,
+      "ts": "2026-09-07T06:44:21.658Z",
+      "turn_id": "01a07a8c-b52c-7370-8796-28895deb5e47",
+      "next_call": {
+        "line": 17026,
+        "ts": "2026-09-07T06:44:43.380Z",
+        "turn_id": "01a07a8c-b52c-7370-8796-28895deb5e47",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 21.722
+    },
+    {
+      "line": 18407,
+      "ts": "2026-09-07T14:53:48.301Z",
+      "turn_id": "01a07c55-9940-7141-9140-fa0bc5eaa7c7",
+      "next_call": {
+        "line": 18415,
+        "ts": "2026-09-07T14:53:59.481Z",
+        "turn_id": "01a07c55-9940-7141-9140-fa0bc5eaa7c7",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 11.18
+    },
+    {
+      "line": 19679,
+      "ts": "2026-09-07T23:09:32.658Z",
+      "turn_id": "01a07e1e-b628-7e13-b13e-81142608b114",
+      "next_call": {
+        "line": 19691,
+        "ts": "2026-09-07T23:09:44.878Z",
+        "turn_id": "01a07e1e-b628-7e13-b13e-81142608b114",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 12.22
+    },
+    {
+      "line": 20557,
+      "ts": "2026-09-08T01:27:20.677Z",
+      "turn_id": "01a07e9d-d0eb-7c33-904d-d103b9bedf26",
+      "next_call": {
+        "line": 20569,
+        "ts": "2026-09-08T01:27:51.743Z",
+        "turn_id": "01a07e9d-d0eb-7c33-904d-d103b9bedf26",
+        "type": "function_call"
+      },
+      "delay_seconds": 31.066
+    },
+    {
+      "line": 21510,
+      "ts": "2026-09-08T13:03:10.468Z",
+      "turn_id": "01a0811b-7855-77d0-b041-2a74f41bc401",
+      "next_call": {
+        "line": 21524,
+        "ts": "2026-09-08T13:03:29.049Z",
+        "turn_id": "01a0811b-7855-77d0-b041-2a74f41bc401",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 18.581
+    },
+    {
+      "line": 21778,
+      "ts": "2026-09-09T03:12:20.179Z",
+      "turn_id": "01a08425-5666-7f40-9fed-11b85b0f17b6",
+      "next_call": {
+        "line": 21792,
+        "ts": "2026-09-09T03:12:48.713Z",
+        "turn_id": "01a08425-5666-7f40-9fed-11b85b0f17b6",
+        "type": "function_call"
+      },
+      "delay_seconds": 28.534
+    },
+    {
+      "line": 24727,
+      "ts": "2026-09-09T13:27:32.296Z",
+      "turn_id": "01a08657-953b-7271-9659-8382ab8fb6f9",
+      "next_call": {
+        "line": 24741,
+        "ts": "2026-09-09T13:27:50.286Z",
+        "turn_id": "01a08657-953b-7271-9659-8382ab8fb6f9",
+        "type": "custom_tool_call"
+      },
+      "delay_seconds": 17.99
+    },
+    {
+      "line": 25198,
+      "ts": "2026-09-09T14:24:23.935Z",
+      "turn_id": "01a0868c-aef5-7690-b422-aae499e8f370",
+      "next_call": {
+        "line": 25214,
+        "ts": "2026-09-09T14:24:44.334Z",
+        "turn_id": "01a0868c-aef5-7690-b422-aae499e8f370",
+        "type": "function_call"
+      },
+      "delay_seconds": 20.399
+    }
+  ],
+  "gateway": {
+    "source": "/home/noirbright/.codex/proxy/codex-proxy-events.jsonl",
+    "window_match_rule": "window_id.split(\":\",1)[0] == thread_id",
+    "first_correlated_event": "2026-09-07T13:41:12Z",
+    "last_correlated_event": "2026-09-09T16:22:57Z",
+    "unique_requests": 1449,
+    "request_complete_status_counts": {
+      "200": 1430,
+      "499": 11,
+      "502": 1
+    },
+    "request_error_count": 5,
+    "errors": [
+      {
+        "ts": "2026-09-07T14:32:07Z",
+        "event": "request_complete",
+        "request_id": "c483cf376be6",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:19",
+        "status": 499,
+        "request_kind": "main_generation",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+        "next_same_turn_call": {
+          "line": 18158,
+          "ts": "2026-09-07T14:33:00.308Z",
+          "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+          "type": "function_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-07T14:41:27.563Z",
+        "next_window_success": {
+          "ts": "2026-09-07T14:33:01Z",
+          "request_id": "d622df3f304b"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-07T14:32:07Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "c483cf376be6",
+            "status": 499,
+            "route_model_requested": "gpt-6-astra",
+            "route_provider_id": "openai",
+            "sse_completed_event_seen": false,
+            "sse_terminal_event_seen": false,
+            "sse_last_event_type": "response.custom_tool_call_input.delta",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "client_disconnected": true,
+            "synthetic_terminal_event_sent": false,
+            "synthetic_terminal_event_type": null,
+            "error_type": "OSError"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-07T14:33:27Z",
+        "event": "request_complete",
+        "request_id": "166171ab11a7",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:19",
+        "status": 499,
+        "request_kind": "main_generation",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+        "next_same_turn_call": {
+          "line": 18170,
+          "ts": "2026-09-07T14:33:53.204Z",
+          "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+          "type": "custom_tool_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-07T14:41:27.563Z",
+        "next_window_success": {
+          "ts": "2026-09-07T14:33:53Z",
+          "request_id": "ae7c012cb7ae"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-07T14:33:27Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "166171ab11a7",
+            "status": 499,
+            "route_model_requested": "gpt-6-astra",
+            "route_provider_id": "openai",
+            "sse_completed_event_seen": false,
+            "sse_terminal_event_seen": false,
+            "sse_last_event_type": "response.custom_tool_call_input.delta",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "client_disconnected": true,
+            "synthetic_terminal_event_sent": false,
+            "synthetic_terminal_event_type": null,
+            "error_type": "OSError"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-07T14:37:07Z",
+        "event": "request_complete",
+        "request_id": "8bbdda280aed",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:19",
+        "status": 499,
+        "request_kind": "main_generation",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+        "next_same_turn_call": {
+          "line": 18226,
+          "ts": "2026-09-07T14:37:18.710Z",
+          "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+          "type": "custom_tool_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-07T14:41:27.563Z",
+        "next_window_success": {
+          "ts": "2026-09-07T14:37:19Z",
+          "request_id": "97e154437404"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-07T14:37:07Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "8bbdda280aed",
+            "status": 499,
+            "route_model_requested": "gpt-6-astra",
+            "route_provider_id": "openai",
+            "sse_completed_event_seen": false,
+            "sse_terminal_event_seen": false,
+            "sse_last_event_type": "response.reasoning_summary_text.delta",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "client_disconnected": true,
+            "synthetic_terminal_event_sent": false,
+            "synthetic_terminal_event_type": null,
+            "error_type": "OSError"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-07T14:37:43Z",
+        "event": "request_complete",
+        "request_id": "f1fe127b5c16",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:19",
+        "status": 499,
+        "request_kind": "main_generation",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+        "next_same_turn_call": {
+          "line": 18243,
+          "ts": "2026-09-07T14:38:22.437Z",
+          "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+          "type": "function_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-07T14:41:27.563Z",
+        "next_window_success": {
+          "ts": "2026-09-07T14:38:22Z",
+          "request_id": "7f282cf055d0"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-07T14:37:43Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "f1fe127b5c16",
+            "status": 499,
+            "route_model_requested": "gpt-6-astra",
+            "route_provider_id": "openai",
+            "sse_completed_event_seen": false,
+            "sse_terminal_event_seen": false,
+            "sse_last_event_type": "response.output_text.delta",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "client_disconnected": true,
+            "synthetic_terminal_event_sent": false,
+            "synthetic_terminal_event_type": null,
+            "error_type": "OSError"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-07T14:38:00Z",
+        "event": "request_complete",
+        "request_id": "3a7f5f76fd13",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:19",
+        "status": 499,
+        "request_kind": "main_generation",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+        "next_same_turn_call": {
+          "line": 18243,
+          "ts": "2026-09-07T14:38:22.437Z",
+          "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+          "type": "function_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-07T14:41:27.563Z",
+        "next_window_success": {
+          "ts": "2026-09-07T14:38:22Z",
+          "request_id": "7f282cf055d0"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-07T14:38:00Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "3a7f5f76fd13",
+            "status": 499,
+            "route_model_requested": "gpt-6-astra",
+            "route_provider_id": "openai",
+            "sse_completed_event_seen": false,
+            "sse_terminal_event_seen": false,
+            "sse_last_event_type": "response.output_item.done",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "client_disconnected": true,
+            "synthetic_terminal_event_sent": false,
+            "synthetic_terminal_event_type": null,
+            "error_type": "OSError"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-07T14:40:32Z",
+        "event": "request_complete",
+        "request_id": "c7c4eaa6ba6c",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:19",
+        "status": 499,
+        "request_kind": "main_generation",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+        "next_same_turn_call": {
+          "line": 18268,
+          "ts": "2026-09-07T14:41:14.474Z",
+          "turn_id": "01a07c3b-24a1-7540-ac9c-edfa3d406f04",
+          "type": "custom_tool_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-07T14:41:27.563Z",
+        "next_window_success": {
+          "ts": "2026-09-07T14:41:14Z",
+          "request_id": "7c4eb03fc2d0"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-07T14:40:32Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "c7c4eaa6ba6c",
+            "status": 499,
+            "route_model_requested": "gpt-6-astra",
+            "route_provider_id": "openai",
+            "sse_completed_event_seen": false,
+            "sse_terminal_event_seen": false,
+            "sse_last_event_type": "response.custom_tool_call_input.delta",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "client_disconnected": true,
+            "synthetic_terminal_event_sent": false,
+            "synthetic_terminal_event_type": null,
+            "error_type": "OSError"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-07T14:46:30Z",
+        "event": "request_complete",
+        "request_id": "59dc8aa6f9b9",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:19",
+        "status": 499,
+        "request_kind": "main_generation",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "turn_id": "01a07c55-9940-7141-9140-fa0bc5eaa7c7",
+        "next_same_turn_call": {
+          "line": 18306,
+          "ts": "2026-09-07T14:46:44.521Z",
+          "turn_id": "01a07c55-9940-7141-9140-fa0bc5eaa7c7",
+          "type": "custom_tool_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-07T15:05:59.034Z",
+        "next_window_success": {
+          "ts": "2026-09-07T14:46:45Z",
+          "request_id": "b5720a4ee8b6"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-07T14:46:30Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "59dc8aa6f9b9",
+            "status": 499,
+            "route_model_requested": "gpt-6-astra",
+            "route_provider_id": "openai",
+            "sse_completed_event_seen": false,
+            "sse_terminal_event_seen": false,
+            "sse_last_event_type": "response.custom_tool_call_input.delta",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "client_disconnected": true,
+            "synthetic_terminal_event_sent": false,
+            "synthetic_terminal_event_type": null,
+            "error_type": "OSError"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-07T16:07:11Z",
+        "event": "request_complete",
+        "request_id": "5876caa82a66",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:20",
+        "status": 499,
+        "request_kind": "main_generation",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "turn_id": "01a07c7b-0bde-7102-8c5d-4b3ea10961c6",
+        "next_same_turn_call": null,
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-07T16:07:43.367Z",
+        "next_window_success": {
+          "ts": "2026-09-07T16:07:43Z",
+          "request_id": "087600cf56cc"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-07T16:07:11Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "5876caa82a66",
+            "status": 499,
+            "route_model_requested": "gpt-6-astra",
+            "route_provider_id": "openai",
+            "sse_completed_event_seen": false,
+            "sse_terminal_event_seen": false,
+            "sse_last_event_type": "response.output_text.delta",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "client_disconnected": true,
+            "synthetic_terminal_event_sent": false,
+            "synthetic_terminal_event_type": null,
+            "error_type": "OSError"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-07T16:07:31Z",
+        "event": "request_complete",
+        "request_id": "4a42cb2bf0e3",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:20",
+        "status": 499,
+        "request_kind": "main_generation",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "turn_id": "01a07c7b-0bde-7102-8c5d-4b3ea10961c6",
+        "next_same_turn_call": null,
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-07T16:07:43.367Z",
+        "next_window_success": {
+          "ts": "2026-09-07T16:07:43Z",
+          "request_id": "087600cf56cc"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-07T16:07:31Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "4a42cb2bf0e3",
+            "status": 499,
+            "route_model_requested": "gpt-6-astra",
+            "route_provider_id": "openai",
+            "sse_completed_event_seen": false,
+            "sse_terminal_event_seen": false,
+            "sse_last_event_type": "response.output_text.delta",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "client_disconnected": true,
+            "synthetic_terminal_event_sent": false,
+            "synthetic_terminal_event_type": null,
+            "error_type": "OSError"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-07T23:05:29Z",
+        "event": "request_complete",
+        "request_id": "a91157e35259",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:20",
+        "status": 499,
+        "request_kind": "compact",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "turn_id": "01a07e1b-c872-7820-bcf6-5514d149182a",
+        "next_same_turn_call": null,
+        "turn_terminal": "turn_aborted",
+        "turn_terminal_at": "2026-09-07T23:05:29.247Z",
+        "next_window_success": {
+          "ts": "2026-09-07T23:09:32Z",
+          "request_id": "9ce9297be675"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-07T23:05:29Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "a91157e35259",
+            "status": 499,
+            "route_model_requested": "gpt-6-astra",
+            "route_provider_id": "openai",
+            "sse_completed_event_seen": false,
+            "sse_terminal_event_seen": false,
+            "sse_last_event_type": "response.output_text.delta",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "client_disconnected": true,
+            "synthetic_terminal_event_sent": false,
+            "synthetic_terminal_event_type": null,
+            "error_type": "OSError"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-07T23:06:49Z",
+        "event": "request_complete",
+        "request_id": "9dbb4a039317",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:20",
+        "status": 502,
+        "request_kind": "compact",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "sse_completed_event_seen": false,
+        "sse_terminal_event_seen": true,
+        "sse_last_event_type": "response.failed",
+        "synthetic_terminal_event_sent": true,
+        "synthetic_terminal_event_type": "response.failed",
+        "turn_id": "01a07e1e-b628-7e13-b13e-81142608b114",
+        "next_same_turn_call": {
+          "line": 19691,
+          "ts": "2026-09-07T23:09:44.878Z",
+          "turn_id": "01a07e1e-b628-7e13-b13e-81142608b114",
+          "type": "custom_tool_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-07T23:26:16.641Z",
+        "next_window_success": {
+          "ts": "2026-09-07T23:09:32Z",
+          "request_id": "9ce9297be675"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-07T23:06:49Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "9dbb4a039317",
+            "status": 502,
+            "route_model_requested": "gpt-6-astra",
+            "route_provider_id": "openai",
+            "sse_completed_event_seen": false,
+            "sse_terminal_event_seen": true,
+            "sse_last_event_type": "response.failed",
+            "failure_phase": "stream_body",
+            "failure_side": "upstream_read",
+            "client_disconnected": false,
+            "synthetic_terminal_event_sent": true,
+            "synthetic_terminal_event_type": "response.failed",
+            "error_type": "IncompleteRead"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-08T01:23:26Z",
+        "event": "request_complete",
+        "request_id": "464a50ff2c4c",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:21",
+        "status": 499,
+        "request_kind": "main_generation",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "turn_id": "01a07e9c-9cc1-7473-8030-79cd4183007c",
+        "next_same_turn_call": null,
+        "turn_terminal": "turn_aborted",
+        "turn_terminal_at": "2026-09-08T01:23:26.289Z",
+        "next_window_success": {
+          "ts": "2026-09-08T01:27:20Z",
+          "request_id": "06380c13bb22"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-08T01:23:26Z",
+            "event": "official_passthrough_stream_closed",
+            "request_id": "464a50ff2c4c",
+            "status": 499,
+            "route_model_requested": "gpt-6-astra",
+            "route_provider_id": "openai",
+            "sse_completed_event_seen": false,
+            "sse_terminal_event_seen": false,
+            "sse_last_event_type": "response.custom_tool_call_input.delta",
+            "failure_phase": "downstream_write",
+            "failure_side": "downstream_write",
+            "client_disconnected": true,
+            "synthetic_terminal_event_sent": false,
+            "synthetic_terminal_event_type": null,
+            "error_type": "OSError"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-09T04:24:38Z",
+        "event": "request_error",
+        "request_id": "4ed219ce67df",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:24",
+        "status": 502,
+        "request_kind": "main_generation",
+        "route_model_requested": "xai/grok-4.6",
+        "route_provider_id": "xai",
+        "collaboration_backend": "gateway_compatibility",
+        "execution_owner": "codex_client",
+        "repair_policy": "codex_subagent_repair",
+        "failure_phase": "stream_body",
+        "turn_id": "01a08425-5666-7f40-9fed-11b85b0f17b6",
+        "next_same_turn_call": {
+          "line": 22726,
+          "ts": "2026-09-09T04:24:49.588Z",
+          "turn_id": "01a08425-5666-7f40-9fed-11b85b0f17b6",
+          "type": "function_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-09T04:38:16.131Z",
+        "next_window_success": {
+          "ts": "2026-09-09T04:24:50Z",
+          "request_id": "e61adaacb33a"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-09T04:24:38Z",
+            "event": "upstream_retry_suppressed",
+            "request_id": "4ed219ce67df",
+            "status": null,
+            "request_kind": "main_generation",
+            "route_model_requested": "xai/grok-4.6",
+            "route_provider_id": "xai",
+            "failure_phase": "stream_body",
+            "error_type": "IncompleteRead"
+          },
+          {
+            "ts": "2026-09-09T04:24:38Z",
+            "event": "request_error",
+            "request_id": "4ed219ce67df",
+            "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:24",
+            "status": 502,
+            "request_kind": "main_generation",
+            "route_model_requested": "xai/grok-4.6",
+            "route_provider_id": "xai",
+            "collaboration_backend": "gateway_compatibility",
+            "execution_owner": "codex_client",
+            "repair_policy": "codex_subagent_repair",
+            "failure_phase": "stream_body",
+            "error_type": "IncompleteRead"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-09T12:12:31Z",
+        "event": "request_error",
+        "request_id": "9cc85cc1e40a",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:24",
+        "status": 502,
+        "request_kind": "main_generation",
+        "route_model_requested": "xai/grok-4.6",
+        "route_provider_id": "xai",
+        "collaboration_backend": "gateway_compatibility",
+        "execution_owner": "codex_client",
+        "repair_policy": "codex_subagent_repair",
+        "failure_phase": "response_headers",
+        "turn_id": "01a085fa-c076-7320-a9b4-7b197c801402",
+        "next_same_turn_call": {
+          "line": 24335,
+          "ts": "2026-09-09T12:13:30.085Z",
+          "turn_id": "01a085fa-c076-7320-a9b4-7b197c801402",
+          "type": "function_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-09T12:58:36.318Z",
+        "next_window_success": {
+          "ts": "2026-09-09T12:13:30Z",
+          "request_id": "59b746ee9b12"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-09T12:12:31Z",
+            "event": "upstream_retry_suppressed",
+            "request_id": "9cc85cc1e40a",
+            "status": null,
+            "request_kind": "main_generation",
+            "route_model_requested": "xai/grok-4.6",
+            "route_provider_id": "xai",
+            "failure_phase": "response_headers",
+            "error_type": "RemoteDisconnected"
+          },
+          {
+            "ts": "2026-09-09T12:12:31Z",
+            "event": "request_error",
+            "request_id": "9cc85cc1e40a",
+            "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:24",
+            "status": 502,
+            "request_kind": "main_generation",
+            "route_model_requested": "xai/grok-4.6",
+            "route_provider_id": "xai",
+            "collaboration_backend": "gateway_compatibility",
+            "execution_owner": "codex_client",
+            "repair_policy": "codex_subagent_repair",
+            "failure_phase": "response_headers",
+            "error_type": "RemoteDisconnected"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-09T15:06:00Z",
+        "event": "request_error",
+        "request_id": "e65abbd1e18f",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:26",
+        "status": 502,
+        "request_kind": "main_generation",
+        "route_model_requested": "xai/grok-4.6",
+        "route_provider_id": "xai",
+        "collaboration_backend": "gateway_compatibility",
+        "execution_owner": "codex_client",
+        "repair_policy": "codex_subagent_repair",
+        "failure_phase": "response_headers",
+        "turn_id": "01a0868c-aef5-7690-b422-aae499e8f370",
+        "next_same_turn_call": {
+          "line": 26319,
+          "ts": "2026-09-09T15:06:10.733Z",
+          "turn_id": "01a0868c-aef5-7690-b422-aae499e8f370",
+          "type": "function_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-09T15:48:46.750Z",
+        "next_window_success": {
+          "ts": "2026-09-09T15:06:11Z",
+          "request_id": "35c383870254"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-09T15:06:00Z",
+            "event": "upstream_retry_suppressed",
+            "request_id": "e65abbd1e18f",
+            "status": null,
+            "request_kind": "main_generation",
+            "route_model_requested": "xai/grok-4.6",
+            "route_provider_id": "xai",
+            "failure_phase": "response_headers",
+            "error_type": "RemoteDisconnected"
+          },
+          {
+            "ts": "2026-09-09T15:06:00Z",
+            "event": "request_error",
+            "request_id": "e65abbd1e18f",
+            "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:26",
+            "status": 502,
+            "request_kind": "main_generation",
+            "route_model_requested": "xai/grok-4.6",
+            "route_provider_id": "xai",
+            "collaboration_backend": "gateway_compatibility",
+            "execution_owner": "codex_client",
+            "repair_policy": "codex_subagent_repair",
+            "failure_phase": "response_headers",
+            "error_type": "RemoteDisconnected"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-09T15:08:34Z",
+        "event": "request_error",
+        "request_id": "88772035a0db",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:26",
+        "status": 502,
+        "request_kind": "main_generation",
+        "route_model_requested": "xai/grok-4.6",
+        "route_provider_id": "xai",
+        "collaboration_backend": "gateway_compatibility",
+        "execution_owner": "codex_client",
+        "repair_policy": "codex_subagent_repair",
+        "failure_phase": "stream_body",
+        "turn_id": "01a0868c-aef5-7690-b422-aae499e8f370",
+        "next_same_turn_call": {
+          "line": 26339,
+          "ts": "2026-09-09T15:09:05.218Z",
+          "turn_id": "01a0868c-aef5-7690-b422-aae499e8f370",
+          "type": "function_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-09T15:48:46.750Z",
+        "next_window_success": {
+          "ts": "2026-09-09T15:09:07Z",
+          "request_id": "3414099e71b7"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-09T15:08:34Z",
+            "event": "upstream_retry_suppressed",
+            "request_id": "88772035a0db",
+            "status": null,
+            "request_kind": "main_generation",
+            "route_model_requested": "xai/grok-4.6",
+            "route_provider_id": "xai",
+            "failure_phase": "stream_body",
+            "error_type": "IncompleteRead"
+          },
+          {
+            "ts": "2026-09-09T15:08:34Z",
+            "event": "request_error",
+            "request_id": "88772035a0db",
+            "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:26",
+            "status": 502,
+            "request_kind": "main_generation",
+            "route_model_requested": "xai/grok-4.6",
+            "route_provider_id": "xai",
+            "collaboration_backend": "gateway_compatibility",
+            "execution_owner": "codex_client",
+            "repair_policy": "codex_subagent_repair",
+            "failure_phase": "stream_body",
+            "error_type": "IncompleteRead"
+          }
+        ]
+      },
+      {
+        "ts": "2026-09-09T15:55:58Z",
+        "event": "request_error",
+        "request_id": "2bbbf09af3fb",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:26",
+        "status": 502,
+        "request_kind": "main_generation",
+        "route_model_requested": "xai/grok-4.6",
+        "route_provider_id": "xai",
+        "collaboration_backend": "gateway_compatibility",
+        "execution_owner": "codex_client",
+        "repair_policy": "codex_subagent_repair",
+        "failure_phase": "stream_body",
+        "turn_id": "01a086db-f4b2-7090-be88-d7663249b767",
+        "next_same_turn_call": {
+          "line": 27643,
+          "ts": "2026-09-09T15:56:08.377Z",
+          "turn_id": "01a086db-f4b2-7090-be88-d7663249b767",
+          "type": "function_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-09T16:22:57.664Z",
+        "next_window_success": {
+          "ts": "2026-09-09T15:56:09Z",
+          "request_id": "ca6613972927"
+        },
+        "related_failure_events": [
+          {
+            "ts": "2026-09-09T15:55:58Z",
+            "event": "upstream_retry_suppressed",
+            "request_id": "2bbbf09af3fb",
+            "status": null,
+            "request_kind": "main_generation",
+            "route_model_requested": "xai/grok-4.6",
+            "route_provider_id": "xai",
+            "failure_phase": "stream_body",
+            "error_type": "IncompleteRead"
+          },
+          {
+            "ts": "2026-09-09T15:55:58Z",
+            "event": "request_error",
+            "request_id": "2bbbf09af3fb",
+            "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:26",
+            "status": 502,
+            "request_kind": "main_generation",
+            "route_model_requested": "xai/grok-4.6",
+            "route_provider_id": "xai",
+            "collaboration_backend": "gateway_compatibility",
+            "execution_owner": "codex_client",
+            "repair_policy": "codex_subagent_repair",
+            "failure_phase": "stream_body",
+            "error_type": "IncompleteRead"
+          }
+        ]
+      }
+    ],
+    "requests_without_logged_terminal": [
+      {
+        "ts": "2026-09-07T13:46:24Z",
+        "event": "request_start",
+        "request_id": "104b9c497498",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:19",
+        "request_kind": "main_generation",
+        "route_model_requested": "gpt-6-astra",
+        "route_provider_id": "openai",
+        "collaboration_backend": "codex_runtime",
+        "execution_owner": "codex_client",
+        "repair_policy": "none",
+        "turn_id": "01a07c19-f31d-7c21-8fa5-cfc95175e3bd",
+        "next_same_turn_call": null,
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-07T13:48:36.173Z"
+      },
+      {
+        "ts": "2026-09-08T07:31:39Z",
+        "event": "request_start",
+        "request_id": "ec64e6c0e71d",
+        "window_id": "01a06ecb-ba14-7e83-bd30-ef9c18738620:22",
+        "request_kind": "main_generation",
+        "route_model_requested": "xai/grok-4.6",
+        "route_provider_id": "xai",
+        "collaboration_backend": "gateway_compatibility",
+        "execution_owner": "codex_client",
+        "repair_policy": "codex_subagent_repair",
+        "turn_id": "01a07fed-ed24-7672-9b3a-6ee5838087c3",
+        "next_same_turn_call": {
+          "line": 21345,
+          "ts": "2026-09-08T07:33:14.457Z",
+          "turn_id": "01a07fed-ed24-7672-9b3a-6ee5838087c3",
+          "type": "function_call"
+        },
+        "turn_terminal": "task_complete",
+        "turn_terminal_at": "2026-09-08T07:41:35.777Z"
+      }
+    ],
+    "note": "Window association and raw turn timing, not a per-request turn ID or proof of identical retry payloads."
+  },
+  "candidate": {
+    "HEAD": "d069caf5156c62194fa4861a6cd538973eac3a1a",
+    "dirty_worktree": true,
+    "production_entry": "/tmp/.mount_CodexHpHGelB/usr/lib/CodexHub/src-python/codex_proxy.py",
+    "production_core_comparison": [
+      {
+        "module": "gateway_compat/multi_agent.py",
+        "production_present": true,
+        "production_sha256": "21376c5b84e70e379cd51c5a3fbd9701b1c7b7bc0cfff1aaa186fc755c55cefa",
+        "working_tree_sha256": "d7a9d559a70455376c848020a26565d1cbdc9075ddb43c7b6ddaf23aec5f178c",
+        "production_matches_HEAD": true,
+        "production_matches_working_tree": false
+      },
+      {
+        "module": "gateway_compat/request.py",
+        "production_present": true,
+        "production_sha256": "aec79a3678db68a5809302026ee68608232e3e8cab943636d217ba9a6906c2b3",
+        "working_tree_sha256": "b1ddb848382b080314729c83eb8c494c535ee89ad04cd69a60935f703cd943af",
+        "production_matches_HEAD": true,
+        "production_matches_working_tree": false
+      },
+      {
+        "module": "gateway_compat/sse.py",
+        "production_present": true,
+        "production_sha256": "29eae7f999f3606f929907e7334af4a722a7a3fffe506e10bb7c40caf998ada0",
+        "working_tree_sha256": "c3e26cb3786c627cf8234a06a7f7703e572dc2ad9cf8fb12dbd38534e78723b4",
+        "production_matches_HEAD": true,
+        "production_matches_working_tree": false
+      },
+      {
+        "module": "tool_compatibility/collab_v2.py",
+        "production_present": true,
+        "production_sha256": "8cec3cc0ed14e3d2301a44b44a95c5b7620cb2559640f2bd21d067da2559ddfd",
+        "working_tree_sha256": "1c3b93afc584636dcd95d4134c753939c9edb240e3d5dbef811d2ed754a1275b",
+        "production_matches_HEAD": true,
+        "production_matches_working_tree": false
+      },
+      {
+        "module": "collaboration_runtime_contract.py",
+        "production_present": true,
+        "production_sha256": "ebf5289b23f5f2bac1eef4715a683eaa21b391a1b139e8bea84ec31885aaae30",
+        "working_tree_sha256": "c147c08dc25ce49233e6d4b93b13f0968edc09ac3bbd1a6a74fc6631f878e9d4",
+        "production_matches_HEAD": true,
+        "production_matches_working_tree": false
+      },
+      {
+        "module": "subagent_state.py",
+        "production_present": true,
+        "production_sha256": "911fe2a0334f8850a4da19a9637488b34542529e9e5ba62523d5e1f65ebd75f8",
+        "working_tree_sha256": null,
+        "production_matches_HEAD": true,
+        "production_matches_working_tree": false
+      }
+    ]
+  },
+  "checks": {
+    "core_before_additional_13_gateway_cases": {
+      "failed": 5,
+      "passed": 2191,
+      "skipped": 170,
+      "subtests_passed": 269,
+      "seconds": 59.3
+    },
+    "focused_after_all_reaudit_cases": {
+      "failed": 18,
+      "passed": 29,
+      "seconds": 0.38
+    },
+    "real_provider_AB_rerun": false,
+    "production_history_repair_performed": false
+  }
+}

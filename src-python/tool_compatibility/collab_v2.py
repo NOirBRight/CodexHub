@@ -10,14 +10,15 @@ from typing import Any, Mapping
 
 from collaboration_runtime_contract import (
     COLLABORATION_V2,
-    EXPECTED_PARAMETER_SCHEMAS,
+    failed_argument_call_ids,
     CollaborationContractError,
+    normalize_collaboration_arguments,
     validate_agent_message,
     validate_collaboration_arguments,
     validate_collaboration_result,
 )
 
-from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, copy_mapping as _copy_mapping, freeze as _freeze
+from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, copy_mapping as _copy_mapping
 from .dispositions import ADAPT, NAMESPACE
 
 
@@ -61,6 +62,9 @@ def apply_v2_namespace_decode(result: dict[str, Any], record: Any) -> None:
 
 def validate_v2_native_arguments(item: Mapping[str, Any], *, surface: str) -> None:
     try:
+        # Native passthrough is validation-only.  Adapted paths normalize the
+        # known CLI integer representation explicitly and must not leak that
+        # rewrite into a provider's native namespace lifecycle.
         validate_collaboration_arguments(
             COLLABORATION_V2,
             str(item.get("name")),
@@ -74,66 +78,15 @@ def validate_v2_native_arguments(item: Mapping[str, Any], *, surface: str) -> No
         ) from exc
 
 
-def repair_external_v2_spawn_agent_response_arguments(
-    item: Mapping[str, Any],
-) -> tuple[Mapping[str, Any], bool]:
-    """Project a known cross-version spawn shape onto the frozen V2 contract.
-
-    This is deliberately response-only at the caller: completed third-party
-    calls may carry the V1 ``fork_context`` field or use ``agent_type`` as the
-    task label.  History remains an exact, fail-closed contract boundary.
-    """
-
-    arguments = item.get("arguments")
-    if not isinstance(arguments, str):
-        return item, False
-
-    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError
-            result[key] = value
-        return result
-
-    def reject_non_json_constant(_value: str) -> None:
-        raise ValueError
-
+def normalize_v2_native_arguments(item: Mapping[str, Any], *, surface: str) -> tuple[str, bool]:
     try:
-        parsed = json.loads(
-            arguments,
-            object_pairs_hook=unique_object,
-            parse_constant=reject_non_json_constant,
+        return normalize_collaboration_arguments(
+            COLLABORATION_V2, str(item.get("name")), item.get("arguments")
         )
-    except (TypeError, ValueError):
-        return item, False
-    if not isinstance(parsed, Mapping):
-        return item, False
-
-    schema = EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2]["spawn_agent"]
-    properties = schema.get("properties")
-    if not isinstance(properties, Mapping):
-        return item, False
-    projected = {key: value for key, value in parsed.items() if key in properties}
-    task_name = projected.get("task_name")
-    agent_type = projected.get("agent_type")
-    if task_name is None and isinstance(agent_type, str) and agent_type:
-        projected["task_name"] = agent_type
-    if projected == parsed:
-        return item, False
-
-    repaired_arguments = json.dumps(projected, ensure_ascii=True, separators=(",", ":"))
-    try:
-        validate_collaboration_arguments(
-            COLLABORATION_V2,
-            "spawn_agent",
-            repaired_arguments,
-        )
-    except CollaborationContractError:
-        return item, False
-    repaired = dict(item)
-    repaired["arguments"] = repaired_arguments
-    return repaired, True
+    except CollaborationContractError as exc:
+        raise ToolCompatibilityError(
+            "tool_compatibility_boundary", exc.classification, surface=surface
+        ) from exc
 
 
 class CollaborationV2PlanMixin:
@@ -175,6 +128,7 @@ class CollaborationV2PlanMixin:
         *,
         surface: str,
         allow_incomplete_arguments: bool = False,
+        allow_failed_arguments: bool = False,
     ) -> tuple[str, str]:
         if (
             item.get("type") != "function_call"
@@ -240,7 +194,9 @@ class CollaborationV2PlanMixin:
                 surface=surface,
             )
         arguments = item.get("arguments")
-        if allow_incomplete_arguments and arguments in {None, ""}:
+        if allow_incomplete_arguments and (arguments is None or arguments == ""):
+            return item_id, call_id
+        if allow_failed_arguments:
             return item_id, call_id
         try:
             validate_collaboration_arguments(
@@ -302,6 +258,7 @@ class CollaborationV2PlanMixin:
             target.add(call_id)
 
         calls: dict[str, str] = {}
+        failed_calls = failed_argument_call_ids(items)
         seen_result_call_ids: set[str] = set()
         seen_item_ids: set[str] = set()
         for item in items:
@@ -315,9 +272,13 @@ class CollaborationV2PlanMixin:
                     self._raise_collaboration_contract(exc, surface=surface)
                 item_id = item.get("id")
             elif item_type == "function_call" and claims_collaboration_v2_identity(item):
+                item_call_id = item.get("call_id")
                 item_id, call_id = self._validate_collaboration_v2_call_item(
                     item,
                     surface=surface,
+                    allow_failed_arguments=(
+                        surface == "history" and item_call_id in failed_calls
+                    ),
                 )
                 if call_id in calls:
                     raise ToolCompatibilityError(
@@ -562,6 +523,15 @@ class CollaborationV2StreamMixin:
             canonical,
             surface=surface,
         )
+        # Body and SSE must expose the same lossless timeout normalization.
+        # The validator above establishes identity and schema; this second
+        # step only canonicalizes the one CLI integer mismatch and leaves all
+        # other argument bytes untouched.
+        if record is not None and isinstance(canonical.get("arguments"), str) and canonical.get("arguments") != "":
+            canonical["arguments"], _ = normalize_v2_native_arguments(
+                {"name": canonical.get("name"), "arguments": canonical["arguments"]},
+                surface=surface,
+            )
         expected = self._collaboration_v2_calls.get(item_id)
         if expected is None:
             raise ToolCompatibilityError(
@@ -578,6 +548,16 @@ class CollaborationV2StreamMixin:
                 )
         return canonical
 
+    def _canonicalize_collaboration_v2_stream_arguments(
+        self, item_id: str, arguments: str
+    ) -> str:
+        complete_item = _copy_mapping(self._collaboration_v2_calls.get(item_id, {}))
+        record = self.plan.registry.record_for_call(complete_item.get("call_id"))
+        if record is not None:
+            complete_item["name"] = record.alias
+        complete_item["arguments"] = arguments
+        return self._validate_collaboration_v2_stream_call(item_id, complete_item)["arguments"]
+
     def _validate_collaboration_v2_event_index(
         self,
         item_id: str,
@@ -591,4 +571,3 @@ class CollaborationV2StreamMixin:
                 "ambiguous_native_identity",
                 surface="stream",
             )
-
