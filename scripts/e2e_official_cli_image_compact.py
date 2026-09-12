@@ -274,23 +274,36 @@ compaction_image_budget = true
             report["structured_tool_images"] = structured
             report["stringified_tool_images"] = stringified
 
-            # Follow-up compact attempt via CLI resume with compact-like instruction.
+            # Follow-up via CLI resume. Exec-level flags must precede the
+            # resume subcommand; --last/--all belong to resume itself.
             if sessions:
+                session_id = None
+                stem = sessions[-1].stem
+                marker = stem.rfind("-01")
+                if marker >= 0:
+                    session_id = stem[marker + 1 :]
+                resume_cmd = [
+                    cli,
+                    "exec",
+                    "--skip-git-repo-check",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "-C",
+                    str(workspace),
+                    "-m",
+                    MODEL,
+                    "--json",
+                    "resume",
+                    "--all",
+                ]
+                if session_id:
+                    resume_cmd.append(session_id)
+                else:
+                    resume_cmd.append("--last")
+                resume_cmd.append(
+                    f"Do not call tools. Reply with exactly {CONTINUE} and nothing else."
+                )
                 resume = subprocess.run(
-                    [
-                        cli,
-                        "exec",
-                        "resume",
-                        "--last",
-                        "--skip-git-repo-check",
-                        "--dangerously-bypass-approvals-and-sandbox",
-                        "-C",
-                        str(workspace),
-                        "-m",
-                        MODEL,
-                        "--json",
-                        f"Do not call tools. Reply with exactly {CONTINUE} and nothing else.",
-                    ],
+                    resume_cmd,
                     env=cli_env,
                     cwd=str(workspace),
                     capture_output=True,
@@ -298,7 +311,10 @@ compaction_image_budget = true
                     timeout=240,
                 )
                 report["resume_returncode"] = resume.returncode
+                report["resume_session_id"] = session_id
                 report["resume_has_sentinel"] = CONTINUE in ((resume.stdout or "") + (resume.stderr or ""))
+                if resume.returncode != 0:
+                    report["resume_excerpt"] = ((resume.stderr or resume.stdout or "")[-400:])
                 sessions = find_sessions(cli_home)
                 inspections = [inspect_rollout(path) for path in sessions]
                 report["sessions_after_resume"] = inspections
@@ -361,6 +377,11 @@ compaction_image_budget = true
                 report["failure_classification"] = "not_official_upstream"
                 print(json.dumps(report, indent=2))
                 return 2
+            if not report.get("resume_has_sentinel"):
+                report["status"] = "unverified" if report.get("resume_returncode") not in {0, None} else "failed"
+                report["failure_classification"] = "official_cli_resume_unverified"
+                print(json.dumps(report, indent=2))
+                return 2 if report["status"] == "unverified" else 1
             report["passed"] = True
             report["status"] = "passed"
             print(json.dumps(report, indent=2))
