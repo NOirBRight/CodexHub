@@ -930,6 +930,113 @@ def test_v2_wait_argument_parse_error_history_round_trips(native: bool) -> None:
 
 
 @pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
+@pytest.mark.parametrize("name,arguments,output", [
+    ("spawn_agent", {"task_name": "worker", "message": "review", "fork_turns": "0"},
+     "fork_turns must be `none`, `all`, or a positive integer string"),
+    ("send_message", {"target": "/root/worker", "message": ""}, "Empty message can't be sent to an agent"),
+    ("followup_task", {"target": "/root/worker", "message": " "}, "Empty message can't be sent to an agent"),
+    ("followup_task", {"target": "/root", "message": "review"}, "Follow-up tasks can't target the root agent"),
+    ("send_message", V2_ARGUMENTS["send_message"], "target agent is missing an agent_path"),
+    ("followup_task", V2_ARGUMENTS["followup_task"], "target agent is missing an agent_path"),
+    *[(name, V2_ARGUMENTS[name], "collab manager unavailable")
+      for name in ("spawn_agent", "list_agents", "send_message", "followup_task")],
+    ("wait_agent", {"timeout_ms": 3600001}, "timeout_ms must be at most 3600000"),
+    ("wait_agent", {"timeout_ms": 180001}, "timeout_ms must be at most 180000"),
+])
+def test_v2_client_execution_error_history_round_trips(native, name, arguments, output) -> None:
+    index = list(V2_ARGUMENTS).index(name) * 2
+    history = _v2_history()[index:index + 2]
+    history[0]["arguments"] = json.dumps(arguments)
+    history[1]["output"] = output
+    plan = _v2_plan(native=native)
+    encoded = plan.encode_payload({
+        "tool_choice": "auto", "tools": [_declaration(COLLABORATION_V2)], "input": history,
+    })
+    expected_call = history[0] if native else {**history[0], "encrypted_function_args": []}
+    assert encoded["input"][1] == history[1]
+    assert plan.decode_payload({"input": encoded["input"]})["input"] == [expected_call, history[1]]
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
+@pytest.mark.parametrize("arguments", [
+    '{"timeout_ms":3600001.0}', '{"timeout_ms":"3600001"}',
+    '{"timeout_ms":true}', '{"timeout_ms":null}',
+    '{"timeout_ms":NaN}', '{"timeout_ms":9223372036854775808}',
+    '{"timeout_ms":3600001,"timeout_ms":3600002}',
+    '{"timeout_ms":3600001,"extra":1}', '{"timeout_ms":-1}',
+])
+def test_v2_timeout_error_cannot_waive_argument_structure(native, arguments) -> None:
+    history = _v2_history()[10:12]
+    history[0]["arguments"] = arguments
+    history[1]["output"] = "timeout_ms must be at most 3600000"
+    with pytest.raises(ToolCompatibilityError):
+        _v2_plan(native=native).encode_payload({"input": history})
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
+@pytest.mark.parametrize("mutation", ["missing", "before", "orphan", "duplicate", "wrong_tool", "response", "empty_error", "wrong_bound"])
+def test_v2_timeout_exemption_requires_paired_history(native, mutation) -> None:
+    history = _v2_history()[10:12]
+    history[0]["arguments"] = '{"timeout_ms":3600001}'
+    history[1]["output"] = "timeout_ms must be at most 3600000"
+    if mutation == "missing":
+        history.pop()
+    elif mutation == "before":
+        history.reverse()
+    elif mutation == "orphan":
+        history[1]["call_id"] = "another-call"
+    elif mutation == "duplicate":
+        history.append(copy.deepcopy(history[1]))
+    elif mutation == "wrong_tool":
+        history[0]["name"] = "spawn_agent"
+    elif mutation == "empty_error":
+        history[1]["output"] = "timeout_ms must be at most "
+    elif mutation == "wrong_bound":
+        history[1]["output"] = "timeout_ms must be at most 9999999"
+    plan = _v2_plan(native=native)
+    with pytest.raises(ToolCompatibilityError):
+        if mutation == "response":
+            if not native:
+                history[0]["name"] = plan.entries[0].aliases[5]
+                history[0].pop("namespace")
+            plan.decode_payload({"output": history})
+        else:
+            plan.encode_payload({"input": history})
+
+
+@pytest.mark.parametrize("version", [COLLABORATION_V1, COLLABORATION_V2])
+@pytest.mark.parametrize("name,output", [
+    ("spawn_agent", "Empty message can't be sent to an agent"),
+    ("send_message", "Follow-up tasks can't target the root agent"),
+    ("wait_agent", "collab manager unavailable"),
+    ("followup_task", "Follow-up tasks can't target the root agent\nextra"),
+    ("spawn_agent", '"collab manager unavailable"'),
+    ("send_message", '{"error":"collab manager unavailable"}'),
+    ("spawn_agent", '{"task_name":"worker","task_name":"other"}'),
+    ("spawn_agent", '{"task_name":false}'),
+])
+def test_client_errors_do_not_relax_other_result_contracts(version, name, output) -> None:
+    from collaboration_runtime_contract import CollaborationContractError, validate_collaboration_result
+
+    with pytest.raises(CollaborationContractError):
+        validate_collaboration_result(version, name, output)
+
+
+def test_v1_cannot_claim_v2_execution_error_or_timeout_exemption() -> None:
+    from collaboration_runtime_contract import (
+        CollaborationContractError, failed_argument_call_ids, validate_collaboration_result,
+    )
+
+    history = _v2_history()[10:12]
+    history[0].update(namespace="multi_agent_v1", arguments='{"timeout_ms":3600001}')
+    history[1]["output"] = "timeout_ms must be at most 3600000"
+    assert failed_argument_call_ids(history) == set()
+    for name, output in [("spawn_agent", "collab manager unavailable"), ("wait_agent", history[1]["output"])]:
+        with pytest.raises(CollaborationContractError):
+            validate_collaboration_result(COLLABORATION_V1, name, output)
+
+
+@pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
 @pytest.mark.parametrize("task_name", ["standards_review", "spec_review"])
 def test_v2_spawn_existing_agent_error_history_round_trips(native: bool, task_name: str) -> None:
     history = _v2_history()[8:10]
