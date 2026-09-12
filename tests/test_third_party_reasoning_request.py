@@ -367,6 +367,84 @@ def _xai_root_union_tools_request() -> dict:
     }
 
 
+def _third_party_web_search_request(model: str, *, external_web_access: bool) -> dict:
+    return {
+        "model": model,
+        "input": [{"role": "user", "content": "search"}],
+        "tools": [
+            {
+                "type": "web_search",
+                "external_web_access": external_web_access,
+                "search_context_size": "low",
+                "filters": {"allowed_domains": ["example.com"]},
+            }
+        ],
+        "tool_choice": "auto",
+    }
+
+
+def test_compatible_request_drops_third_party_web_search_live_access_flag():
+    # One non-official path: compatible_request_body gates on upstream_name != "official"
+    # (xAI, Ollama Cloud, Volc, OpenCode Go Responses all share it).
+    transformed = json.loads(
+        gateway_compat.compatible_request_body(
+            json.dumps(_third_party_web_search_request("grok-4.6", external_web_access=True)).encode(),
+            _xai_upstream(),
+            inject_codex_tools=False,
+            behavior_profile="codex_app_external_adapter",
+            event_context={},
+        )
+    )
+    web_search = next(tool for tool in transformed["tools"] if tool.get("type") == "web_search")
+    assert "external_web_access" not in web_search
+    assert web_search["search_context_size"] == "low"
+    assert web_search["filters"] == {"allowed_domains": ["example.com"]}
+
+
+def test_official_passthrough_keeps_web_search_external_web_access():
+    import route_primitives
+
+    transformed = json.loads(
+        gateway_compat.compatible_request_body(
+            json.dumps(_third_party_web_search_request("gpt-5.6-luna", external_web_access=False)).encode(),
+            {"name": "official", "upstream_model": "gpt-5.6-luna", "upstream_format": "responses"},
+            inject_codex_tools=False,
+            behavior_profile=route_primitives.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            event_context={},
+        )
+    )
+    web_search = next(tool for tool in transformed["tools"] if tool.get("type") == "web_search")
+    assert web_search["external_web_access"] is False
+
+
+def test_compatible_request_rejects_third_party_cache_only_web_search():
+    from gateway_errors import UpstreamProtocolTranslationError
+
+    with pytest.raises(UpstreamProtocolTranslationError, match="external_web_access=false"):
+        gateway_compat.compatible_request_body(
+            json.dumps(_third_party_web_search_request("grok-4.6", external_web_access=False)).encode(),
+            _xai_upstream(),
+            inject_codex_tools=False,
+            behavior_profile="codex_app_external_adapter",
+            event_context={},
+        )
+
+
+def test_compatible_request_rejects_third_party_cache_only_web_search_preview():
+    from gateway_errors import UpstreamProtocolTranslationError
+
+    body = _third_party_web_search_request("grok-4.6", external_web_access=False)
+    body["tools"][0]["type"] = "web_search_preview"
+    with pytest.raises(UpstreamProtocolTranslationError, match="external_web_access=false"):
+        gateway_compat.compatible_request_body(
+            json.dumps(body).encode(),
+            _xai_upstream(),
+            inject_codex_tools=False,
+            behavior_profile="codex_app_external_adapter",
+            event_context={},
+        )
+
+
 def test_compatible_request_rewrites_xai_root_union_and_keeps_nested_unions():
     transformed = json.loads(
         gateway_compat.compatible_request_body(

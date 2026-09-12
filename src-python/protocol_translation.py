@@ -1279,7 +1279,7 @@ def chat_messages_to_responses_input(
 
 
 _CHAT_NATIVE_TOOL_FIELDS = {
-    "web_search": {"type", "search_context_size", "user_location", "filters"},
+    "web_search": {"type", "search_context_size", "user_location", "filters", "external_web_access"},
     "web_search_preview": {"type", "search_context_size", "user_location"},
     "file_search": {"type", "vector_store_ids", "max_num_results", "ranking_options", "filters"},
     "code_interpreter": {"type", "container"},
