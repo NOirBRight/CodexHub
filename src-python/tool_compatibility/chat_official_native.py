@@ -23,7 +23,7 @@ from .contracts import (
     dump_envelope as _dump_envelope,
     json_object_with_key as _json_object_with_key,
 )
-from .dispositions import CHAT_OFFICIAL_HOSTED_KINDS, hosted_event_spec_for_declaration_kind
+from .dispositions import CHAT_OFFICIAL_HOSTED_KINDS, hosted_event_spec_for_declaration_kind, name_of
 from .registry import RequestScopedToolAliasRegistry
 
 CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY = "_chat_official_native_name_map"
@@ -57,18 +57,6 @@ def _custom_alias_to_name() -> dict[str, str]:
 def _tool_search_alias() -> str:
     registry = RequestScopedToolAliasRegistry(request_token="request")
     return registry.allocate_tool_search(declaration_index=0)
-
-
-def _function_tool_name(declaration: Mapping[str, Any]) -> str | None:
-    name = declaration.get("name")
-    if isinstance(name, str) and name:
-        return name
-    function = declaration.get("function")
-    if isinstance(function, Mapping):
-        nested = function.get("name")
-        if isinstance(nested, str) and nested:
-            return nested
-    return None
 
 
 _ENCRYPTED_PAYLOAD_KEYS = frozenset(
@@ -261,7 +249,7 @@ def expand_chat_native_tools_for_official(
             saw_native = True
             continue
         if tool_type == "custom":
-            name = _function_tool_name(tool)
+            name = name_of(tool)
             if not isinstance(name, str) or not name:
                 raise ToolCompatibilityError(
                     "tool_compatibility_boundary",
@@ -295,7 +283,7 @@ def expand_chat_native_tools_for_official(
             chat_names["tool_search"] = "tool_search"
             saw_native = True
             continue
-        name = _function_tool_name(tool)
+        name = name_of(tool)
         if isinstance(name, str) and name in hosted_aliases:
             kind = hosted_aliases[name]
             if kind in hosted_sources:

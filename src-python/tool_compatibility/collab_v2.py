@@ -23,7 +23,7 @@ from collaboration_runtime_contract import (
 )
 
 from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, copy_mapping as _copy_mapping
-from .dispositions import ADAPT, NAMESPACE
+from .dispositions import ADAPT, NAMESPACE, name_of
 
 
 V2_NAMES = frozenset(
@@ -76,18 +76,6 @@ def _v2_alias_to_name() -> dict[str, str]:
         )
         mapping[alias] = name
     return mapping
-
-
-def _function_tool_name(declaration: Mapping[str, Any]) -> str | None:
-    name = declaration.get("name")
-    if isinstance(name, str) and name:
-        return name
-    function = declaration.get("function")
-    if isinstance(function, Mapping):
-        nested = function.get("name")
-        if isinstance(nested, str) and nested:
-            return nested
-    return None
 
 
 def _canonical_v2_name(name: str | None, alias_to_name: Mapping[str, str]) -> str | None:
@@ -190,7 +178,7 @@ def expand_chat_v2_for_official(
         if not isinstance(tool, Mapping):
             remaining.append(tool)
             continue
-        name = _function_tool_name(tool)
+        name = name_of(tool)
         if name in _V1_ONLY_TOOLS:
             saw_v1 = True
             remaining.append(tool)
@@ -249,7 +237,7 @@ def expand_chat_v2_for_official(
     payload["tool_choice"] = "auto"
     payload["tools"] = [_official_v2_namespace(v2_sources), *remaining]
     name_map = {
-        canonical: _function_tool_name(source) or canonical
+        canonical: name_of(source) or canonical
         for canonical, source in v2_sources.items()
     }
     if isinstance(event_context, dict):

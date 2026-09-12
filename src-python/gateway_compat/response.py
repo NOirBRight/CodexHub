@@ -42,12 +42,8 @@ from runtime_tool_compatibility import (
     ToolCompatibilityPlan as RuntimeToolCompatibilityPlan,
     build_tool_compatibility_plan,
 )
-from tool_compatibility.chat_official_native import (
-    collapse_official_native_tools_for_chat as _collapse_official_native_tools_for_chat,
-)
-from tool_compatibility.collab_v2 import (
-    collapse_official_v2_names_for_chat as _collapse_official_v2_names_for_chat,
-)
+import tool_compatibility.chat_official_native as _chat_official_native
+import tool_compatibility.collab_v2 as _collab_v2
 from tool_surface_adapter import (
     APPLY_PATCH_FUNCTION_NAME,
     INTERNAL_INPUT_ITEM_TYPES,
@@ -520,9 +516,9 @@ def compatible_response_body(
         if isinstance(payload, dict):
             try:
                 changed = False
-                if _collapse_official_v2_names_for_chat(payload, event_context):
+                if _collab_v2.collapse_official_v2_names_for_chat(payload, event_context):
                     changed = True
-                if _collapse_official_native_tools_for_chat(payload, event_context):
+                if _chat_official_native.collapse_official_native_tools_for_chat(payload, event_context):
                     changed = True
             except RuntimeToolCompatibilityError as exc:
                 _official_passthrough._raise_runtime_tool_compatibility_error(exc)
