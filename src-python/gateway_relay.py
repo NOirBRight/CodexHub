@@ -636,10 +636,9 @@ def relay_upstream_response(
         )
         self._downstream_stream_commit = seam
     output = RelaySseOutput(self, seam)
-    if isinstance(event_context, dict):
-        compatibility_event_context = event_context
-    else:
-        compatibility_event_context = dict(event_context or {})
+    # Copy after request adaptation so compact omission stats are present,
+    # without mutating the caller's event_context.
+    compatibility_event_context = dict(event_context or {})
     compatibility_event_context["_apply_patch_adapter_enabled"] = not want_chat_output
     # When the caller asked for a non-streaming response but the upstream
     # returns SSE (e.g. chatgpt.com forces stream=true), buffer the entire
