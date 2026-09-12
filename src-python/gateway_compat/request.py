@@ -353,6 +353,27 @@ def compatible_request_body(
             ):
                 changed = True
             runtime_tool_plan = _official_passthrough._runtime_tool_compatibility_plan(runtime_plan_context)
+    if upstream_name != "official" and not raw_provider_probe:
+        import multimodal_tool_result as _multimodal_tool_result
+
+        media_policy = _multimodal_tool_result.policy_from_request(
+            upstream, payload, event_context
+        )
+        try:
+            media_changed, media_stats = _multimodal_tool_result.adapt_request_payload(
+                payload, media_policy, event_context
+            )
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
+        if media_changed:
+            changed = True
+            _gateway_events.write_adapter_event(
+                event_context,
+                "tool_result_media_adapted",
+                upstream=upstream_name,
+                request_kind=media_policy.request_kind,
+                **media_stats.as_event_fields(),
+            )
     if raw_provider_probe:
         pass
     elif collaboration_v2:

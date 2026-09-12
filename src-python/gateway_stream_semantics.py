@@ -875,6 +875,27 @@ def _is_compact_summary_payload(payload: Mapping[str, Any], inbound_format: str)
     return summary_prompt and text_only_instruction and summary_shape
 
 
+def trusted_compact_request(headers: Mapping[str, str] | Any) -> bool:
+    """True only for explicit client compact markers, not prompt heuristics."""
+
+    turn_metadata = _get_header(headers, "x-codex-turn-metadata")
+    if isinstance(turn_metadata, str):
+        try:
+            parsed_turn_metadata = json.loads(turn_metadata)
+        except json.JSONDecodeError:
+            parsed_turn_metadata = None
+        if (
+            isinstance(parsed_turn_metadata, Mapping)
+            and parsed_turn_metadata.get("request_kind") == "compaction"
+        ):
+            return True
+    for header_name in ("x-request-kind", "x-query-source"):
+        header_value = _get_header(headers, header_name)
+        if isinstance(header_value, str) and header_value.strip().lower() == RETRY_REQUEST_COMPACT:
+            return True
+    return False
+
+
 def request_kind_from_headers_and_payload(
     headers: Mapping[str, str] | Any,
     payload: Mapping[str, Any] | None,

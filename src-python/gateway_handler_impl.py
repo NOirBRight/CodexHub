@@ -817,8 +817,16 @@ class GatewayHandlerMixin:
             behavior_profile = route_plan.behavior_profile
             upstream_format = route_plan.selected_upstream_format
             if request_kind != route_plan.request_kind:
+                previous_placeholder_authorized = bool(
+                    isinstance(proxy_request_context, dict)
+                    and proxy_request_context.get("compact_placeholder_authorized")
+                )
                 request_kind = route_plan.request_kind
                 proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
+                proxy_request_context["compact_placeholder_authorized"] = bool(
+                    previous_placeholder_authorized
+                    and request_kind == RETRY_REQUEST_COMPACT
+                )
             self._pre_response_deadline = (
                 primary_route_attempt.retry.pre_response_deadline(started_at)
                 if primary_route_attempt is not None

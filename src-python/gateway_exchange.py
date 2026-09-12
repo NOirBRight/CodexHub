@@ -232,6 +232,10 @@ def parse_inbound_request(request: InboundRequest, hooks: InboundRequestHooks) -
         proxy_context = hooks.event_context_for_kind(request.request_context, request_kind)
         if request.raw_provider_probe:
             proxy_context["raw_provider_probe"] = True
+    import gateway_stream_semantics as _stream_semantics
+    proxy_context["compact_placeholder_authorized"] = _stream_semantics.trusted_compact_request(
+        request.headers
+    )
     if isinstance(payload, Mapping) and isinstance(payload.get("model"), str):
         requested = payload["model"]
     else:
