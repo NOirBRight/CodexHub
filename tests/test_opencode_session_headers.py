@@ -3,6 +3,7 @@ import pytest
 
 from gateway_transport import bind_route_plan_operational_authentication, materialize_operational_authentication
 from route_plan import route_plan_for_request
+from route_primitives import UPSTREAM_USER_AGENT
 
 
 def bound_headers(key='omp-session', incoming=None, endpoint='https://opencode.ai/zen/go/v1', api_key='test-provider-key'):
@@ -44,3 +45,11 @@ def test_other_endpoints_do_not_receive_synthetic_opencode_identity(endpoint):
 @pytest.mark.parametrize('key', [None, '', 42])
 def test_missing_identity_does_not_create_random_or_shared_session(key):
     assert 'x-opencode-session' not in bound_headers(key)
+
+
+def test_opencode_outbound_user_agent_is_gateway_identity_not_client_urllib():
+    headers = bound_headers(incoming={"User-Agent": "Python-urllib/3.14", "x-session-id": "native-stable"})
+    lowered = {k.lower(): v for k, v in headers.items()}
+    assert lowered["user-agent"] == UPSTREAM_USER_AGENT
+    assert "python-urllib" not in lowered["user-agent"].lower()
+    assert "x-opencode-session" in lowered

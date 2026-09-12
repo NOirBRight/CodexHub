@@ -592,6 +592,12 @@ def compatible_response_body(
         validate_selectors=False,
     )
     changed = changed or requested_binding_changed
+    import multimodal_tool_result as _multimodal_tool_result
+
+    if isinstance(payload, dict) and _multimodal_tool_result.annotate_compact_response_payload(
+        payload, event_context
+    ):
+        changed = True
     if not changed:
         return body
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")

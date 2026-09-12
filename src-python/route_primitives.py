@@ -506,6 +506,8 @@ PERMANENT_UPSTREAM_ERROR_NEEDLES = (
     "invalid argument",
     "invalid parameter",
     "maximum context",
+    "maximum prompt",
+    "prompt length",
     "moderation",
     "payment required",
     "permission denied",

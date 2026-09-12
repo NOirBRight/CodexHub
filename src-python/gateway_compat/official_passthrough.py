@@ -1203,6 +1203,13 @@ def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
                 lines.append(f"{label}: {value}")
         _append_internal_field(lines, "input", item.get("input"))
     elif item_type == "custom_tool_call_output":
+        import multimodal_tool_result as _multimodal_tool_result
+
+        if _multimodal_tool_result.output_contains_structured_media(item.get("output")):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Structured tool-result media cannot be stringified into transcript text.",
+            )
         lines = ["Read-only Codex tool result transcript"]
         value = _stringify_internal_field(item.get("call_id"))
         if value:
@@ -1216,6 +1223,13 @@ def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
                 lines.append(f"{label}: {value}")
         _append_internal_field(lines, "arguments", item.get("arguments"))
     elif item_type == "function_call_output":
+        import multimodal_tool_result as _multimodal_tool_result
+
+        if _multimodal_tool_result.output_contains_structured_media(item.get("output")):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Structured tool-result media cannot be stringified into transcript text.",
+            )
         lines = ["Read-only Codex function result transcript"]
         value = _stringify_internal_field(item.get("call_id"))
         if value:
