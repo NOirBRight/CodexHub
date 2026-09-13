@@ -80,7 +80,8 @@ def test_user_catalog_removal_survives_disconnect_and_reconnect(tmp_path, reconn
     assert restored["model"] == "official-test"
 
 
-def test_missing_config_still_restores_saved_catalog(tmp_path):
+@pytest.mark.parametrize("reconnect", [False, True])
+def test_missing_config_still_restores_saved_catalog(tmp_path, reconnect):
     config = tmp_path / "config.toml"
     backup = tmp_path / "backup.toml"
     managed = tmp_path / "catalog.json"
@@ -88,6 +89,8 @@ def test_missing_config_still_restores_saved_catalog(tmp_path):
     config.write_text(original)
     apply_overlay(config, backup, managed, "http://127.0.0.1:19099", use_managed_catalog=True)
     config.unlink()
+    if reconnect:
+        apply_overlay(config, backup, managed, "http://127.0.0.1:19099", use_managed_catalog=True)
     restore_overlay(config, backup)
     assert config.read_text() == original
 

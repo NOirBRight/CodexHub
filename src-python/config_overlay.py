@@ -898,7 +898,9 @@ def apply_overlay(
     cleaned = strip_marked_overlay(original)
     active_owner = overlay_owner(original)
     cross_owner_takeover = takeover and active_owner != owner
-    if active_owner != owner or not backup_path.exists():
+    # Reconnecting after the config disappeared must not replace the only
+    # recovery baseline with an empty file.
+    if not backup_path.exists() or (active_owner != owner and config_path.exists()):
         backup = original if cross_owner_takeover else (cleaned if cleaned != original else original)
         atomic_write_text(backup_path, backup, encoding="utf-8")
         metadata_path = takeover_metadata_path(backup_path)
