@@ -73,6 +73,19 @@ def test_native_collaboration_continuation_preserves_call_and_result(version, na
     assert "_chat_official_v2_name_map" not in context
 
 
+def test_flat_chat_declarations_expand_even_when_history_already_has_namespace():
+    declaration = namespace()
+    call = {"type": "function_call", "namespace": "collaboration", "name": "send_message",
+            "id": "item-chat-history", "call_id": "call-chat-history",
+            "arguments": json.dumps(ARGUMENTS["send_message"])}
+    result = {"type": "function_call_output", "id": "result-chat-history",
+              "call_id": "call-chat-history", "output": ""}
+    prepared, _ = prepare(declaration["tools"], [call, result])
+    assert prepared["tools"][0]["type"] == "namespace"
+    assert prepared["tools"][0]["name"] == "collaboration"
+    assert prepared["input"] == [call, result]
+
+
 @pytest.mark.parametrize("with_declaration", [False, True])
 def test_child_continuation_with_opaque_call_and_other_native_tool(with_declaration):
     history = [

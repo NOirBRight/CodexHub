@@ -187,6 +187,16 @@ def expand_chat_v2_for_official(
     tools = payload.get("tools")
     if not isinstance(tools, list):
         tools = []
+    # The request boundary validates native declarations before this adapter.
+    # Their children and any same-named ordinary functions are separate
+    # identities; only a flat Chat declaration surface needs expansion.
+    if any(
+        isinstance(tool, Mapping)
+        and tool.get("type") == "namespace"
+        and tool.get("name") in {"multi_agent_v1", V2_NAMESPACE}
+        for tool in tools
+    ):
+        return False
     alias_to_name = _v2_alias_to_name()
     v2_sources: dict[str, Mapping[str, Any]] = {}
     remaining: list[Any] = []
