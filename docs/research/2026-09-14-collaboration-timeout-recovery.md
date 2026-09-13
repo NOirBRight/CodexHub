@@ -92,3 +92,10 @@ status, malformed SSE warnings use fixed format categories, and provider error
 exceptions carry a marker that suppresses their payload in diagnostic details.
 Direct provider error payload forwarding remains intact. Public HTTP, SSE and
 telemetry seams cover these regressions; 51 focused checks pass.
+
+A final SSE summary audit found dynamic event names used as dictionary keys and
+wire item identifiers inside shape summaries. The telemetry boundary now groups
+unknown event names into one fixed category, preserves known event counters,
+and records only event/item categories and argument-presence booleans in item
+summaries. Last-event metadata follows the same fixed category rule. This does
+not rewrite provider events sent to clients.

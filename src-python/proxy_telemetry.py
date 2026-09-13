@@ -234,6 +234,43 @@ _SHAPE_INPUT_TYPES = frozenset({
     "mcp_list_tools", "mcp_approval_request", "mcp_approval_response",
     "item_reference", "local_shell_call", "local_shell_call_output", "compaction",
 })
+_SHAPE_EVENT_TYPES = frozenset({
+    "error", "response.created", "response.in_progress", "response.completed",
+    "response.failed", "response.incomplete", "response.queued",
+}) | frozenset(
+    f"response.{part}.{phase}"
+    for part in ("output_text", "refusal", "reasoning_text", "reasoning_summary_text",
+                 "function_call_arguments", "custom_tool_call_input")
+    for phase in ("delta", "done")
+) | frozenset(
+    f"response.{part}.{phase}"
+    for part in ("output_item", "content_part", "reasoning_summary_part")
+    for phase in ("added", "done")
+)
+
+
+def _event_type_category(value: Any) -> str:
+    return value if isinstance(value, str) and value in _SHAPE_EVENT_TYPES else "unknown"
+
+
+def _event_count_categories(value: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if isinstance(value, Mapping):
+        for event_type, count in value.items():
+            if type(count) is int and count >= 0:
+                category = _event_type_category(event_type)
+                counts[category] = counts.get(category, 0) + count
+    return counts
+
+
+def _event_item_shapes(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [{
+        "event_type": _event_type_category(item.get("event_type")),
+        "type": item.get("type") if isinstance(item.get("type"), str) and item["type"] in _SHAPE_INPUT_TYPES else "unknown",
+        "has_arguments": bool(item.get("has_arguments")),
+    } for item in value[:12] if isinstance(item, Mapping)]
 
 
 def protocol_field_names(keys: Iterable[str]) -> list[str]:
@@ -310,6 +347,15 @@ def sanitize_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, item in value.items():
         if _is_sensitive_key(key):
+            continue
+        if key in {"original_event_counts", "rewritten_event_counts", "event_type_counts"}:
+            result[key] = _event_count_categories(item)
+            continue
+        if key == "last_event_type":
+            result[key] = _event_type_category(item)
+            continue
+        if key in {"output_items", "tool_items"}:
+            result[key] = _event_item_shapes(item)
             continue
         if key == "path":
             path = item.split("?", 1)[0] if isinstance(item, str) else None

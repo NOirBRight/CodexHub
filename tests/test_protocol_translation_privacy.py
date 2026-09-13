@@ -208,3 +208,25 @@ def test_request_path_diagnostics_are_private_in_sqlite(tmp_path, path, expected
     with sqlite3.connect(database) as connection:
         rows = connection.execute("SELECT payload_json FROM gateway_events").fetchall()
     assert rows and SENTINEL not in json.dumps(rows)
+
+
+@pytest.mark.parametrize("field", ["original_event_counts", "rewritten_event_counts", "event_type_counts"])
+def test_sse_summary_diagnostics_do_not_persist_dynamic_event_keys(tmp_path, field):
+    from proxy_telemetry import prepare_event_payload
+
+    event = prepare_event_payload("sse_reasoning_summary", {field: {
+        "response.reasoning_text.delta": 2, "response.reasoning_" + SENTINEL: 3,
+        "response." + SENTINEL: 4}}, tmp_path)
+    assert SENTINEL not in json.dumps(event)
+    assert event[field] == {"response.reasoning_text.delta": 2, "unknown": 7}
+
+
+def test_sse_shape_diagnostics_remove_wire_item_identifiers(tmp_path):
+    from proxy_telemetry import prepare_event_payload
+
+    item = {"event_type": SENTINEL, "type": SENTINEL, "name": SENTINEL,
+            "namespace": SENTINEL, "call_id": SENTINEL, "has_arguments": True}
+    event = prepare_event_payload("lifecycle_final_format", {
+        "last_event_type": "response." + SENTINEL, "output_items": [item], "tool_items": [item]}, tmp_path)
+    assert SENTINEL not in json.dumps(event)
+    assert event["output_items"][0]["has_arguments"] is True
