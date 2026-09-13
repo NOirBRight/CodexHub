@@ -179,6 +179,20 @@ def _drop_third_party_function_strict(payload: dict[str, Any]) -> bool:
     return changed
 
 
+def sanitize_opencode_go_responses_fields(
+    payload: dict[str, Any], upstream: Mapping[str, Any]
+) -> bool:
+    """Apply Console Go's Responses restrictions only to that route.
+
+    Other providers accept strict schemas and cache/output controls. Removing
+    those fields globally changes their caller's contract.
+    """
+    if upstream.get("name") != "opencode_go" or upstream.get("upstream_format") == "chat_completions":
+        return False
+    changed = _drop_third_party_responses_transport_fields(payload)
+    return _drop_third_party_function_strict(payload) or changed
+
+
 def compatible_request_body(
     body: bytes,
     upstream: Mapping[str, Any],
@@ -774,9 +788,7 @@ def compatible_request_body(
             changed = True
         if _drop_third_party_web_search_external_web_access(payload):
             changed = True
-        if _drop_third_party_responses_transport_fields(payload):
-            changed = True
-        if _drop_third_party_function_strict(payload):
+        if sanitize_opencode_go_responses_fields(payload, upstream):
             changed = True
 
     if not changed:

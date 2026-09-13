@@ -70,6 +70,7 @@ from route_primitives import (
 
 from . import multi_agent as _multi_agent
 from . import response as _response
+from . import request as _request
 from . import host
 from . import collaboration_delivery as _collaboration_delivery
 from . import tool_parameter_root as _tool_parameter_root
@@ -1655,6 +1656,8 @@ def transparent_request_body(
                 changed = True
             if upstream_name == "ollama_cloud" and _apply_ollama_reasoning_effort_alias(next_payload):
                 changed = True
+            if _request.sanitize_opencode_go_responses_fields(next_payload, upstream):
+                changed = True
             if changed:
                 return json.dumps(next_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         return body
@@ -1669,14 +1672,7 @@ def transparent_request_body(
         next_payload["model"] = upstream_model
         changed = True
     if upstream_is_third_party:
-        from gateway_compat.request import (
-            _drop_third_party_function_strict,
-            _drop_third_party_responses_transport_fields,
-        )
-
-        if _drop_third_party_responses_transport_fields(next_payload):
-            changed = True
-        if _drop_third_party_function_strict(next_payload):
+        if _request.sanitize_opencode_go_responses_fields(next_payload, upstream):
             changed = True
         import gateway_request as _gateway_request
 

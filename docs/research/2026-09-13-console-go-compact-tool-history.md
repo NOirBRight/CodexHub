@@ -82,3 +82,28 @@ The installed Gateway is running from the mounted 0.2.7 AppImage. Source edits
 are not loaded by that process. This work has not replaced the AppImage,
 restarted the Gateway, or modified the user's session history. The installed
 runtime needs a rebuilt package and a Gateway restart to pick up the fix.
+
+## Review-cycle follow-ups
+
+The user requested a review/fix loop with no remaining findings before commit
+and merge. The first independent Standards and Spec reviews of `6d6d3ef`
+reported no findings. The existing Python failures were then addressed as
+merge prerequisites, rather than suppressed or excluded:
+
+- The earlier Console Go fix removed `strict`, `prompt_cache_key`, and output
+  controls on every third-party route. Scope those restrictions to the
+  `opencode_go` Responses route, including transparent calls without a model
+  alias. Preserve other providers' existing contracts and Console Go Chat
+  controls. Existing identity/cache assertions remain unchanged; add explicit
+  provider/surface/alias regression coverage.
+- Expose the route-specific sanitizer on the owning request module and read it
+  through a module attribute, removing cross-module private imports (ADR-0007).
+- The #66 matrix differed only in the `protocol_translation.py` SHA-256. The
+  source changed in accepted commit `1f3e7ae` to preserve official Chat
+  `web_search.external_web_access`. Refresh that evidence binding after the
+  existing behavior tests pass. No matrix rows, invariants, or expectations
+  change.
+
+Focused verification after these follow-ups: 189 original tests passed with
+2 live tests skipped; the new provider-scope and compaction checks plus existing
+matrix/third-party checks passed (67 passed, 2 skipped).
