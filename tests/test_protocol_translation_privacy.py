@@ -104,3 +104,69 @@ def test_websocket_metadata_does_not_echo_unknown_wire_names():
     metadata = redacted_handshake_metadata('/'+SENTINEL+'?'+SENTINEL+'=private',
         {SENTINEL: "private", "Sec-WebSocket-Protocol": SENTINEL})
     assert SENTINEL not in json.dumps(metadata)
+
+
+def test_invalid_verified_sse_does_not_log_wire_discriminators(caplog):
+    import logging
+    from gateway_stream_semantics import UpstreamSseSemanticError, validate_verified_converted_sse_payload
+
+    with caplog.at_level(logging.WARNING), pytest.raises(UpstreamSseSemanticError):
+        validate_verified_converted_sse_payload(
+            {"type": SENTINEL, SENTINEL: "private", "choices": "invalid"}, "chat_completions")
+    assert caplog.records
+    assert SENTINEL not in caplog.text
+
+
+def test_http_access_log_does_not_record_request_path_or_query(caplog):
+    import logging
+    import threading
+    from http.client import HTTPConnection
+    from http.server import ThreadingHTTPServer
+    from codex_proxy import CodexProxyHandler
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CodexProxyHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with caplog.at_level(logging.INFO):
+            client = HTTPConnection(*server.server_address, timeout=5)
+            try:
+                client.request("GET", "/" + SENTINEL + "?" + SENTINEL + "=private")
+                response = client.getresponse()
+                assert response.status == 404
+                response.read()
+            finally:
+                client.close()
+        assert caplog.records
+        assert SENTINEL not in caplog.text
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_provider_sse_error_details_are_not_persisted_as_diagnostics(tmp_path):
+    from gateway_stream_semantics import UpstreamStreamErrorEvent
+    from proxy_telemetry import prepare_event_payload
+
+    error = UpstreamStreamErrorEvent({"type": "error", "error": {"message": SENTINEL}})
+    # Keep the provider's error available to its caller; telemetry is a separate boundary.
+    assert SENTINEL in str(error)
+    detail = gateway_errors.safe_upstream_error_detail(error)
+    event = prepare_event_payload("upstream_stream_error_event", {"detail": detail}, tmp_path)
+    assert SENTINEL not in json.dumps(event)
+
+
+@pytest.mark.parametrize("path,expected", [("/v1/responses?" + SENTINEL, "/v1/responses"), ("/" + SENTINEL, "unknown")])
+def test_request_path_diagnostics_are_private_in_sqlite(tmp_path, path, expected):
+    import sqlite3
+    from proxy_telemetry import prepare_event_payload, write_event_to_sqlite
+
+    event = prepare_event_payload("request_start", {"request_id": "fixture", "path": path}, tmp_path)
+    assert event["path"] == expected
+    assert SENTINEL not in json.dumps(event)
+    database = tmp_path / "telemetry.sqlite"
+    write_event_to_sqlite(database, event)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute("SELECT payload_json FROM gateway_events").fetchall()
+    assert rows and SENTINEL not in json.dumps(rows)

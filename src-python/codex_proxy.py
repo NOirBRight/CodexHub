@@ -216,7 +216,8 @@ class CodexProxyHandler(GatewayHandlerMixin, BaseHTTPRequestHandler):
         self._send_json_and_close(404, {"error": "not found"})
 
     def log_message(self, format: str, *args: Any) -> None:
-        logger.info("%s - %s", self.address_string(), format % args)
+        status = args[1] if format == '"%s" %s %s' and len(args) == 3 and type(args[1]) is int else None
+        logger.info("HTTP server event status=%s", status)
 
     @classmethod
     def unbound(cls) -> "CodexProxyHandler":

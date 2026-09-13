@@ -84,3 +84,11 @@ Unknown path, query/header names and subprotocols are now fixed categories;
 only known protocol names remain visible. Network forwarding/negotiation is
 unchanged. Known fixed prompt-cache control names remain actionable in error
 messages while arbitrary field names remain absent.
+
+The final audit also reproduced three text/persistent diagnostic leaks with
+synthetic sentinels: HTTP access paths/query strings, malformed converted SSE
+field/type names, and provider SSE error text. HTTP access logs now record only
+status, malformed SSE warnings use fixed format categories, and provider error
+exceptions carry a marker that suppresses their payload in diagnostic details.
+Direct provider error payload forwarding remains intact. Public HTTP, SSE and
+telemetry seams cover these regressions; 51 focused checks pass.

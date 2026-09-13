@@ -30,6 +30,7 @@ from gateway_events import (
 from gateway_errors import (
     LifecycleEmptyFinalResponseError,
     LifecycleFinalFormatResponseError,
+    UpstreamPayloadError,
     UpstreamProtocolTranslationError,
 )
 from gateway_settings import lifecycle_empty_final_resample_enabled
@@ -219,23 +220,15 @@ def _verified_converted_sse_semantic_error(
     )
 
 
-def _validate_verified_converted_sse_payload(
+def validate_verified_converted_sse_payload(
     payload: Mapping[str, Any],
     source_format: str,
 ) -> None:
+    """Validate complete converted SSE events without logging wire values."""
     def invalid_shape() -> None:
-        event_type = payload.get("type") if isinstance(payload, Mapping) else None
-        keys = sorted(payload.keys()) if isinstance(payload, Mapping) else []
-        response = payload.get("response") if isinstance(payload, Mapping) else None
-        response_keys = (
-            sorted(response.keys()) if isinstance(response, Mapping) else []
-        )
         _LOGGER.warning(
-            "verified SSE payload failed %s validation type=%s keys=%s response_keys=%s",
-            source_format,
-            event_type,
-            keys,
-            response_keys,
+            "verified SSE payload failed %s validation",
+            "responses" if source_format == "responses" else "chat_completions",
         )
         raise _verified_converted_sse_semantic_error(source_format)
 
@@ -473,7 +466,7 @@ def _converted_sse_payload(
             "Upstream returned a structurally invalid complete SSE event."
         )
     if verified_source_format is not None:
-        _validate_verified_converted_sse_payload(payload, verified_source_format)
+        validate_verified_converted_sse_payload(payload, verified_source_format)
     return payload
 
 
@@ -1729,7 +1722,7 @@ class UpstreamEmptyCompletedResponseError(UpstreamStreamIncompleteError):
     """Raised when a third-party Responses stream completes with no visible output."""
 
 
-class UpstreamStreamErrorEvent(RuntimeError):
+class UpstreamStreamErrorEvent(UpstreamPayloadError):
     """Raised when an upstream Responses SSE stream emits an error event."""
 
     def __init__(self, payload: Mapping[str, Any]):

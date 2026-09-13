@@ -311,6 +311,13 @@ def sanitize_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     for key, item in value.items():
         if _is_sensitive_key(key):
             continue
+        if key == "path":
+            path = item.split("?", 1)[0] if isinstance(item, str) else None
+            result[key] = path if path in {
+                "/responses", "/v1/responses", "/chat/completions",
+                "/v1/chat/completions", "/models", "/v1/models", "/health",
+            } else "unknown"
+            continue
         result[key] = _sanitize_value(item)
     return result
 

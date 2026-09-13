@@ -21,6 +21,10 @@ class UpstreamStreamIncompleteError(RuntimeError):
     """Raised when an upstream stream ends without a terminal event."""
 
 
+class UpstreamPayloadError(RuntimeError):
+    """Provider error text may reach its caller, but not persistent diagnostics."""
+
+
 class ImageProxyError(Exception):
     """Raised when a Vision Proxy request cannot be prepared safely."""
 
@@ -178,6 +182,8 @@ _redact_identity_in_text = redact_identity_in_text
 def safe_upstream_error_detail(exc: BaseException, *, redact_identity: str | None = None) -> str:
     reason = getattr(exc, "reason", None)
     source = reason if reason is not None else exc
+    if isinstance(source, UpstreamPayloadError) or isinstance(getattr(source, "cause", None), UpstreamPayloadError):
+        return "Upstream reported an error; provider details omitted from diagnostics."
     detail = f"{type(source).__name__}: {source}"
     detail = detail.replace("\r", " ").replace("\n", " ")
     if "Bearer " in detail:
