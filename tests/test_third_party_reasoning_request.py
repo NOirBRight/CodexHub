@@ -401,6 +401,118 @@ def test_compatible_request_drops_third_party_web_search_live_access_flag():
     assert web_search["filters"] == {"allowed_domains": ["example.com"]}
 
 
+def test_compatible_request_drops_third_party_responses_transport_fields():
+    payload = {
+        "model": "muse-spark-1.3-contributor",
+        "input": [{"role": "user", "content": "hi"}],
+        "stream": True,
+        "include": ["reasoning.encrypted_content"],
+        "prompt_cache_key": "opencode-session",
+        "store": False,
+        "max_output_tokens": 128,
+        "reasoning": {"effort": "low"},
+        "tool_choice": "auto",
+    }
+    transformed = json.loads(
+        gateway_compat.compatible_request_body(
+            json.dumps(payload).encode(),
+            {
+                "name": "opencode_go",
+                "upstream_model": "muse-spark-1.3-contributor",
+                "upstream_format": "responses",
+                "tool_protocol": "responses_structured",
+                "tool_surface_strategy": "eager",
+            },
+            inject_codex_tools=False,
+            behavior_profile="codex_app_external_adapter",
+            event_context={},
+        )
+    )
+    assert "include" not in transformed
+    assert "prompt_cache_key" not in transformed
+    assert "store" not in transformed
+    assert transformed["reasoning"] == {"effort": "low"}
+    assert transformed["stream"] is True
+    assert "max_output_tokens" not in transformed
+
+
+def test_transparent_request_drops_third_party_function_strict():
+    payload = {
+        "model": "codexhub-opencode-go/muse-spark-1.3-contributor",
+        "input": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {
+                "type": "function",
+                "name": "read",
+                "strict": True,
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+    }
+    transformed = json.loads(
+        gateway_compat.transparent_request_body(
+            json.dumps(payload).encode(),
+            payload,
+            {
+                "name": "opencode_go",
+                "upstream_model": "muse-spark-1.3-contributor",
+                "upstream_format": "responses",
+            },
+        )
+    )
+    assert "strict" not in transformed["tools"][0]
+
+
+def test_transparent_request_clamps_unsupported_reasoning_effort():
+    payload = {
+        "model": "muse-spark-1.3-contributor",
+        "input": [{"role": "user", "content": "hi"}],
+        "reasoning": {"effort": "max"},
+    }
+    transformed = json.loads(
+        gateway_compat.transparent_request_body(
+            json.dumps(payload).encode(),
+            payload,
+            {
+                "name": "opencode_go",
+                "upstream_model": "muse-spark-1.3-contributor",
+                "upstream_format": "responses",
+            },
+        )
+    )
+    assert transformed["reasoning"]["effort"] == "xhigh"
+
+
+def test_transparent_request_drops_third_party_responses_transport_fields():
+    payload = {
+        "model": "codexhub-opencode-go/muse-spark-1.3-contributor",
+        "input": [{"role": "user", "content": "hi"}],
+        "stream": True,
+        "include": ["reasoning.encrypted_content"],
+        "prompt_cache_key": "opencode-session",
+        "store": False,
+        "max_output_tokens": 128,
+        "reasoning": {"effort": "low"},
+    }
+    transformed = json.loads(
+        gateway_compat.transparent_request_body(
+            json.dumps(payload).encode(),
+            payload,
+            {
+                "name": "opencode_go",
+                "upstream_model": "muse-spark-1.3-contributor",
+                "upstream_format": "responses",
+            },
+        )
+    )
+    assert transformed["model"] == "muse-spark-1.3-contributor"
+    assert "include" not in transformed
+    assert "prompt_cache_key" not in transformed
+    assert "store" not in transformed
+    assert "max_output_tokens" not in transformed
+    assert transformed["reasoning"] == {"effort": "low"}
+
+
 def test_official_passthrough_keeps_web_search_external_web_access():
     import route_primitives
 

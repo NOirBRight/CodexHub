@@ -1668,6 +1668,25 @@ def transparent_request_body(
     if next_payload.get("model") != upstream_model:
         next_payload["model"] = upstream_model
         changed = True
+    if upstream_is_third_party:
+        from gateway_compat.request import (
+            _drop_third_party_function_strict,
+            _drop_third_party_responses_transport_fields,
+        )
+
+        if _drop_third_party_responses_transport_fields(next_payload):
+            changed = True
+        if _drop_third_party_function_strict(next_payload):
+            changed = True
+        import gateway_request as _gateway_request
+
+        if _gateway_request.apply_maintained_thinking_controls(
+            next_payload,
+            upstream_name,
+            next_payload.get("model"),
+            upstream_model,
+        ):
+            changed = True
     if official_responses_backend and "max_output_tokens" in next_payload:
         del next_payload["max_output_tokens"]
         changed = True

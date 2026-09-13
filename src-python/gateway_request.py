@@ -417,7 +417,11 @@ def reasoning_param_is_unsupported(upstream_name: Any, requested_model: Any, ups
 
 
 def _thinking_controls_for(
-    upstream_name: Any, requested_model: Any, upstream_model: Any
+    upstream_name: Any,
+    requested_model: Any,
+    upstream_model: Any,
+    *,
+    effort: str | None = None,
 ) -> maintained_catalog.ThinkingPayload | None:
     provider_id = _UPSTREAM_TO_PROVIDER.get(str(upstream_name or ""))
     if not provider_id:
@@ -429,7 +433,7 @@ def _thinking_controls_for(
             break
     if not wire:
         return None
-    return maintained_catalog.thinking_payload(provider_id, wire)
+    return maintained_catalog.thinking_payload(provider_id, wire, effort=effort)
 
 
 def apply_maintained_thinking_controls(
@@ -439,7 +443,15 @@ def apply_maintained_thinking_controls(
     upstream_model: Any,
 ) -> bool:
     """Strip unsupported effort grades and attach vendor thinking JSON."""
-    controls = _thinking_controls_for(upstream_name, requested_model, upstream_model)
+    inbound_effort = None
+    inbound_reasoning = payload.get("reasoning")
+    if isinstance(inbound_reasoning, dict) and isinstance(inbound_reasoning.get("effort"), str):
+        inbound_effort = inbound_reasoning["effort"]
+    elif isinstance(inbound_reasoning, str):
+        inbound_effort = inbound_reasoning
+    controls = _thinking_controls_for(
+        upstream_name, requested_model, upstream_model, effort=inbound_effort
+    )
     if controls is None:
         return False
     changed = False
@@ -471,6 +483,14 @@ def apply_maintained_thinking_controls(
             changed = True
     if controls.thinking is not None and not isinstance(inbound_thinking, dict):
         payload["thinking"] = dict(controls.thinking)
+        changed = True
+    if (
+        controls.reasoning_effort
+        and not controls.drop_reasoning_effort
+        and isinstance(payload.get("reasoning"), dict)
+        and payload["reasoning"].get("effort") != controls.reasoning_effort
+    ):
+        payload["reasoning"]["effort"] = controls.reasoning_effort
         changed = True
     return changed
 _reasoning_param_is_unsupported = reasoning_param_is_unsupported

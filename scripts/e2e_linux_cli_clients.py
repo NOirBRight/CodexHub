@@ -100,16 +100,22 @@ def _run(
     timeout: int = 180,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        check=False,
-        cwd=cwd,
-        env=env,
-        input=input_text,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    kwargs: dict[str, object] = {
+        "check": False,
+        "cwd": cwd,
+        "env": env,
+        "input": input_text,
+        "text": True,
+        "timeout": timeout,
+    }
+    # Windows: start keeps the Gateway child on inherited stdout, so
+    # capture_output waits forever for that pipe even after timeout.
+    if os.name == "nt" and len(command) >= 2 and command[1] == "start":
+        kwargs["stdout"] = subprocess.DEVNULL
+        kwargs["stderr"] = subprocess.DEVNULL
+    else:
+        kwargs["capture_output"] = True
+    return subprocess.run(command, **kwargs)
 
 
 def build_candidate() -> Path:
@@ -242,6 +248,15 @@ def _managed(
     }
 
 
+def _cli(name: str) -> str:
+    if os.name != "nt":
+        return name
+    found = shutil.which(f"{name}.cmd") or shutil.which(f"{name}.exe") or shutil.which(name)
+    if not found:
+        raise FileNotFoundError(name)
+    return found
+
+
 def _copy_tree(source: Path, target: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
     for item in source.iterdir():
@@ -267,6 +282,14 @@ def _client_launch(
     home.mkdir()
     env["HOME"] = str(home)
     env["XDG_CONFIG_HOME"] = str(home / ".config")
+    if os.name == "nt":
+        roaming = home / "AppData" / "Roaming"
+        local = home / "AppData" / "Local"
+        roaming.mkdir(parents=True)
+        local.mkdir(parents=True)
+        env["USERPROFILE"] = str(home)
+        env["APPDATA"] = str(roaming)
+        env["LOCALAPPDATA"] = str(local)
     if case.client == "codex":
         env["CODEX_HOME"] = str(managed_root / "codex-target")
         command = [
@@ -348,6 +371,7 @@ def _client_launch(
         ]
         input_text = None
     try:
+        command[0] = _cli(command[0])
         result = _run(
             command, env=env, cwd=case_root, timeout=timeout, input_text=input_text
         )
@@ -357,6 +381,13 @@ def _client_launch(
             "returncode": result.returncode,
             "saw_sentinel": sentinel in output,
             "output_tail": output[-1600:],
+        }
+    except FileNotFoundError as error:
+        return {
+            "ok": False,
+            "returncode": 127,
+            "saw_sentinel": False,
+            "output_tail": str(error),
         }
     except subprocess.TimeoutExpired as error:
         stdout = (
@@ -425,7 +456,10 @@ def main(argv: list[str]) -> int:
         "cases": [],
     }
     failures: list[str] = []
-    with tempfile.TemporaryDirectory(prefix="codexhub-linux-cli-e2e-") as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix="codexhub-linux-cli-e2e-",
+        ignore_cleanup_errors=True,
+    ) as temporary:
         work = Path(temporary)
         env, settings, providers, catalog, port = _prepare_runtime(
             work, args.settings, args.providers, args.auth, args.catalog

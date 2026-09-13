@@ -1,0 +1,45 @@
+{
+  "thread": "ayaspace-screencap-turn",
+  "upstream": "xai",
+  "events": [
+    {
+      "type": "response.created",
+      "response": {
+        "id": "resp_repro"
+      }
+    },
+    {
+      "type": "response.reasoning_summary_text.delta",
+      "delta": "Let me view the screenshot."
+    },
+    {
+      "type": "response.output_item.done",
+      "item": {
+        "type": "reasoning",
+        "summary": [
+          {
+            "type": "summary_text",
+            "text": "view screenshot"
+          }
+        ]
+      }
+    },
+    {
+      "type": "response.completed",
+      "response": {
+        "id": "resp_repro",
+        "output": [
+          {
+            "type": "reasoning",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "view screenshot"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

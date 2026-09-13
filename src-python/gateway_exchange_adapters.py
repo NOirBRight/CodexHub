@@ -168,7 +168,27 @@ def live_finish_downstream_failure(handler: Any) -> None:
 
 
 def live_handle_empty_completed(handler: Any, exc: BaseException) -> bool:
-    return True
+    seam = _gateway_exchange_bindings.handler_downstream_stream_commit(handler)
+    if seam is not None:
+        sent, write_error_name, _detail = seam.commit_terminal_failure(exc, status=502)
+        if sent or seam.terminal_committed:
+            return True
+        if write_error_name:
+            return False
+    if not _gateway_exchange_bindings.downstream_has_been_exposed(handler):
+        if not handler._send_sse_headers(502, ""):
+            return False
+    return handler._write_sse_event(
+        "response.failed",
+        _gateway_errors.responses_failed_event_for_stream_error(
+            upstream_name="",
+            model=None,
+            status=502,
+            exc=exc,
+            error="upstream_empty_completed_response",
+            detail=str(exc) or "Upstream Responses stream completed without visible output or tool calls.",
+        ),
+    )
 
 
 class LiveControl:

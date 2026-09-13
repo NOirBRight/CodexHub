@@ -519,7 +519,7 @@ def relay_upstream_response(
     _handler_downstream_stream_commit = glue._handler_downstream_stream_commit
     _incomplete_stream_json_error_body = gateway_stream_semantics._incomplete_stream_json_error_body
     _is_event_stream = gateway_request._is_event_stream
-    _is_reasoning_summary_stream_event = gateway_stream_semantics._is_reasoning_summary_stream_event
+    _is_raw_reasoning_stream_event = gateway_stream_semantics.is_raw_reasoning_stream_event
     _is_sse_blank_line = gateway_sse._is_sse_blank_line
     _is_sse_event_metadata_line = gateway_sse._is_sse_event_metadata_line
     _json_error_payload_for_inbound_format = gateway_errors._json_error_payload_for_inbound_format
@@ -2348,6 +2348,18 @@ def relay_upstream_response(
         created_response: dict[str, Any] | None = None
         completed_tool_output_items: list[dict[str, Any]] = []
         last_response_event_type: str | None = None
+        raw_reasoning_keepalive_sent = False
+        _third_party_empty_completed_is_disconnect = (
+            gateway_stream_semantics.third_party_empty_completed_is_disconnect
+        )
+
+        def third_party_empty_completed() -> bool:
+            return _third_party_empty_completed_is_disconnect(
+                upstream_name=upstream_name,
+                downstream_output_started=downstream_output_started,
+                visible_or_tool_output_seen=visible_or_tool_output_seen,
+            )
+
         apply_patch_stream_adapter = (
             _ThirdPartyApplyPatchStreamAdapter(compatibility_event_context)
             if (
@@ -2527,9 +2539,7 @@ def relay_upstream_response(
                         if seam is not None:
                             seam.mark_downstream_content_exposed()
                     empty_completed_candidate = (
-                        upstream_name != "official"
-                        and event_type == "response.completed"
-                        and not visible_or_tool_output_seen
+                        event_type == "response.completed" and third_party_empty_completed()
                     )
                     is_tool_construction = _responses_event_is_tool_call_construction(usage_payload)
                     if (
@@ -2538,18 +2548,8 @@ def relay_upstream_response(
                         and not saw_terminal_event
                     ):
                         buffer_current_line = True
-                    else:
-                        item = usage_payload.get("item") if event_type == "response.output_item.done" else None
-                        is_reasoning_done = isinstance(item, Mapping) and item.get("type") == "reasoning"
-                        if (
-                            _responses_event_commits_downstream_output(usage_payload, upstream_name)
-                            and (
-                                upstream_name == "official"
-                                or is_reasoning_done
-                                or _is_reasoning_summary_stream_event(usage_payload)
-                            )
-                        ):
-                            downstream_output_started = True
+                    elif _responses_event_starts_downstream_output(usage_payload):
+                        downstream_output_started = True
                     buffer_current_line = (
                         buffer_current_line
                         or empty_completed_candidate
@@ -2591,6 +2591,15 @@ def relay_upstream_response(
                 if not line and upstream_name != "official":
                     pending_sse_event_metadata = []
                     drop_next_sse_separator = True
+                    if isinstance(original_payload, Mapping) and _is_raw_reasoning_stream_event(
+                        original_payload
+                    ):
+                        downstream_output_started = True
+                        if not raw_reasoning_keepalive_sent:
+                            flush_pending_downstream_lines()
+                            if not self._write_sse_keepalive():
+                                raise DownstreamWriteFailedError()
+                            raw_reasoning_keepalive_sent = True
                     continue
 
                 if pending_sse_event_metadata:
@@ -2602,10 +2611,9 @@ def relay_upstream_response(
                     separator = _sse_event_separator_after_line(line)
                     if separator:
                         flush_terminal = not (
-                            upstream_name != "official"
-                            and isinstance(usage_payload, Mapping)
+                            isinstance(usage_payload, Mapping)
                             and usage_payload.get("type") == "response.completed"
-                            and not visible_or_tool_output_seen
+                            and third_party_empty_completed()
                         )
                         write_or_queue_downstream_line(
                             separator,
@@ -2746,12 +2754,7 @@ def relay_upstream_response(
             return 502
         if apply_patch_stream_adapter is not None:
             apply_patch_stream_adapter.finish()
-        if (
-            status < 400
-            and upstream_name != "official"
-            and saw_completed_event
-            and not visible_or_tool_output_seen
-        ):
+        if status < 400 and saw_completed_event and third_party_empty_completed():
             pending_line_count = len(pending_downstream_lines)
             pending_byte_count = sum(len(pending_line) for pending_line in pending_downstream_lines)
             pending_downstream_lines.clear()
@@ -2777,14 +2780,16 @@ def relay_upstream_response(
                 pending_downstream_bytes=pending_byte_count,
                 last_event_type=last_response_event_type,
             )
-            if not self._write_downstream_sse_error(
-                inbound_format=inbound_format,
-                upstream_name=upstream_name,
-                status=502,
-                error="upstream_empty_completed_response",
-                detail=detail,
-                redact_identity=relay_redact_identity,
-            ):
+            try:
+                write_response_failed_event(
+                    {
+                        "error": {
+                            "code": "upstream_empty_completed_response",
+                            "message": detail,
+                        }
+                    }
+                )
+            except DownstreamWriteFailedError:
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
