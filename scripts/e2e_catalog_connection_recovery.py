@@ -38,6 +38,7 @@ def run(codex: Path) -> dict:
                     model.update(copy.deepcopy(seeds[0]))
                     model.update(slug=slug, id=slug, model=slug, display_name=slug)
                     path.write_text(json.dumps({"models": [model]}), encoding="utf-8")
+                original_catalog = old.read_bytes()
                 original = "model_catalog_json = " + json.dumps(str(old)) + "\n"
                 config.write_text(original, encoding="utf-8")
                 env = os.environ.copy()
@@ -75,7 +76,7 @@ def run(codex: Path) -> dict:
                 restored = tomllib.loads(config.read_text(encoding="utf-8"))
                 if restored.get("model_catalog_json") != expected:
                     raise AssertionError(f"catalog recovery lost user intent in {scenario}")
-                if old.read_text(encoding="utf-8").find("catalog-original") < 0:
+                if old.read_bytes() != original_catalog:
                     raise AssertionError("user catalog file was modified")
                 if scenario in ("restore", "missing_config"):
                     ids = {item.get("model") or item.get("id") for item in request_model_list(codex, home)}
