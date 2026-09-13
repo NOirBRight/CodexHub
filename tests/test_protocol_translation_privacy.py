@@ -157,6 +157,44 @@ def test_provider_sse_error_details_are_not_persisted_as_diagnostics(tmp_path):
     assert SENTINEL not in json.dumps(event)
 
 
+def test_dispatch_error_logger_does_not_emit_provider_payload_traceback(caplog):
+    import logging
+    import time
+    from types import SimpleNamespace
+
+    from gateway_error_dispatch import PostRequestLiveState, dispatch_proxy_post_exception
+    from gateway_stream_semantics import UpstreamStreamErrorEvent
+
+    class _Handler:
+        def _safe_send_downstream_json_error(self, *_args, **_kwargs):
+            return None
+
+    error = UpstreamStreamErrorEvent(
+        {"type": "error", "error": {"message": SENTINEL}}
+    )
+    live = PostRequestLiveState(
+        handler=_Handler(),
+        inbound_format="responses",
+        request_id="request-fixture",
+        started_at=time.monotonic(),
+        admission=SimpleNamespace(cancelled=False),
+        adapter_event_context={},
+        proxy_request_context={},
+        upstream_name="fixture",
+        upstream_format="responses",
+        downstream_sse_started=False,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="codex_proxy"):
+        try:
+            raise error
+        except UpstreamStreamErrorEvent as caught:
+            dispatch_proxy_post_exception(caught, live)
+
+    assert caplog.records
+    assert SENTINEL not in caplog.text
+
+
 @pytest.mark.parametrize("path,expected", [("/v1/responses?" + SENTINEL, "/v1/responses"), ("/" + SENTINEL, "unknown")])
 def test_request_path_diagnostics_are_private_in_sqlite(tmp_path, path, expected):
     import sqlite3
