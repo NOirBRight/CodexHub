@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import shutil
@@ -337,7 +338,8 @@ def test_relative_windows_entrypoints_keep_the_repository_runtime_contract() -> 
         "-DryRun",
     )
     assert portable_plan.returncode == 0, portable_plan.stdout + portable_plan.stderr
-    assert '"version":"0.2.7"' in portable_plan.stdout
+    expected_version = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))["version"]
+    assert json.loads(portable_plan.stdout)["version"] == expected_version
 
     runtime_check = _run_relative_powershell_script(
         r".\scripts\Prepare-PythonRuntime.ps1", "-CheckOnly"
