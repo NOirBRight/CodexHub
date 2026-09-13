@@ -1613,6 +1613,43 @@ api_key = "sk-foreign"
     }
 
     #[test]
+    fn grok_conflict_does_not_treat_live_xai_proxy_as_leftover_xai() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = fresh_root("grok-conflict-xai-proxy");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let grok_path = isolated.root().join("grok").join("config.toml");
+        fs::create_dir_all(grok_path.parent().unwrap()).unwrap();
+        let original = r#"
+[model_providers.codexhub-xai-proxy]
+base_url = "https://example.invalid/v1"
+api_key = "sk-foreign"
+"#;
+        fs::write(&grok_path, original).unwrap();
+        let settings = Settings {
+            include_official_models: false,
+            ..settings_with_port(9099)
+        };
+        let inp = IsolatedClientApplyInput {
+            client_id: "grok".to_string(),
+            model: Some("openai/gpt-5.5".to_string()),
+            settings,
+            providers: grok_mixed_providers(),
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        let error = apply_gateway_client_config_isolated(&isolated, &inp).unwrap_err();
+        assert!(
+            error.to_ascii_lowercase().contains("refusing")
+                || error.to_ascii_lowercase().contains("conflict"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(fs::read_to_string(&grok_path).unwrap(), original);
+    }
+
+    #[test]
     fn list_gateway_clients_reports_grok_from_fixture_home() {
         let _guard = TEST_ENV_LOCK
             .get_or_init(|| Mutex::new(()))

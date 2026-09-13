@@ -87,7 +87,20 @@ fn grok_skips_group(group: &GatewayClientProviderGroup, providers: &[Provider]) 
     })
 }
 
-fn is_leftover_codexhub_xai_key(key: &str) -> bool {
+fn owning_kept_provider_id<'a>(key: &str, kept_ids: &'a [String]) -> Option<&'a str> {
+    kept_ids
+        .iter()
+        .filter(|id| key == id.as_str() || key.starts_with(&format!("{id}-")))
+        .max_by_key(|id| id.len())
+        .map(String::as_str)
+}
+
+fn is_leftover_codexhub_xai_key(key: &str, kept_ids: &[String]) -> bool {
+    // Longest kept id wins so a live `codexhub-xai-proxy` group is not treated
+    // as leftover `codexhub-xai*` from an older adapter.
+    if owning_kept_provider_id(key, kept_ids).is_some() {
+        return false;
+    }
     key == "codexhub-xai" || key.starts_with("codexhub-xai-")
 }
 
@@ -139,10 +152,10 @@ fn table_base_url(table: &Table) -> Option<&str> {
     table.get("base_url").and_then(Value::as_str)
 }
 
-fn grok_owned_table_conflict(root: &Table) -> Result<(), String> {
+fn grok_owned_table_conflict(root: &Table, kept_ids: &[String]) -> Result<(), String> {
     if let Some(providers) = root.get("model_providers").and_then(Value::as_table) {
         for (key, value) in providers {
-            if !is_codexhub_client_provider_id(key) || is_leftover_codexhub_xai_key(key) {
+            if !is_codexhub_client_provider_id(key) || is_leftover_codexhub_xai_key(key, kept_ids) {
                 continue;
             }
             let Some(table) = value.as_table() else {
@@ -159,7 +172,7 @@ fn grok_owned_table_conflict(root: &Table) -> Result<(), String> {
     }
     if let Some(models) = root.get("model").and_then(Value::as_table) {
         for (key, value) in models {
-            if !is_codexhub_client_provider_id(key) || is_leftover_codexhub_xai_key(key) {
+            if !is_codexhub_client_provider_id(key) || is_leftover_codexhub_xai_key(key, kept_ids) {
                 continue;
             }
             let Some(table) = value.as_table() else {
@@ -199,7 +212,7 @@ fn repair_leftover_xai_default(root: &mut Table) {
     let should_clear = models
         .get("default")
         .and_then(Value::as_str)
-        .is_some_and(is_leftover_codexhub_xai_key);
+        .is_some_and(|value| is_leftover_codexhub_xai_key(value, &[]));
     if should_clear {
         models.remove("default");
     }
@@ -268,15 +281,18 @@ pub(in crate::gateway) fn grok_config_text(
     // [endpoints], extra_headers, or Grok auth.json. Skip CodexHub's xAI
     // subscription so native grok login stays the only Grok catalog.
     let groups = gateway_client_provider_groups(settings, providers, model)?;
-    let mut root = parse_grok_table(current.unwrap_or(""))?;
-    grok_owned_table_conflict(&root)?;
-    strip_owned_grok_tables(&mut root);
-
     let kept: Vec<&GatewayClientProviderGroup> = groups
         .providers
         .iter()
         .filter(|group| !grok_skips_group(group, providers))
         .collect();
+    let kept_ids: Vec<String> = kept
+        .iter()
+        .map(|group| group.client_provider_id.clone())
+        .collect();
+    let mut root = parse_grok_table(current.unwrap_or(""))?;
+    grok_owned_table_conflict(&root, &kept_ids)?;
+    strip_owned_grok_tables(&mut root);
 
     if kept.is_empty() {
         insert_owned_provider(
