@@ -856,6 +856,7 @@ fn switch_mode_custom_applies_config_overlay_without_history_sync() {
         paths.config_overlay_script().to_string_lossy()
     );
     assert_contains_sequence(&commands[0].args, &["apply"]);
+    assert_contains_sequence(&commands[0].args, &["--use-managed-catalog"]);
     assert_arg_value(&commands[0].args, "--config", &paths.codex_config_path());
     assert_arg_value(&commands[0].args, "--backup", &paths.config_backup_path());
     assert_arg_value(

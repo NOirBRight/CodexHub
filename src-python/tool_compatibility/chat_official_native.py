@@ -475,7 +475,11 @@ def _reject_undeclared_native_history(
     if not isinstance(input_items, list):
         return
     for item in input_items:
-        if not isinstance(item, Mapping) or item.get("type") != "function_call":
+        if (
+            not isinstance(item, Mapping)
+            or item.get("type") != "function_call"
+            or item.get("namespace") is not None
+        ):
             continue
         name = item.get("name")
         if name in hosted_aliases or name in custom_aliases or name == search_alias:
@@ -516,6 +520,11 @@ def _expand_native_history(
     for item in input_items:
         if not isinstance(item, Mapping):
             rewritten.append(item)
+            continue
+        # A namespaced call is already a native Responses identity, including
+        # opaque Collaboration arguments. It is not a Chat function alias.
+        if item.get("type") == "function_call" and item.get("namespace") is not None:
+            rewritten.append(_copy_mapping(item))
             continue
         _reject_encrypted_fields(item, surface="history")
         item_type = item.get("type")

@@ -287,7 +287,12 @@ def compatible_request_body(
         if _response._sanitize_official_system_messages(payload):
             changed = True
         try:
-            if _collab_v2.expand_chat_v2_for_official(payload, event_context if isinstance(event_context, dict) else None):
+            # Native declarations and child handoffs already select their
+            # protocol above. Chat expansion must not reinterpret their history
+            # as an undeclared flat six-pack (or rewrite opaque native calls).
+            if collaboration_protocol is None and _collab_v2.expand_chat_v2_for_official(
+                payload, event_context if isinstance(event_context, dict) else None
+            ):
                 changed = True
                 collaboration_protocol = _collaboration_adapter_module.resolve_boundary(
                     payload,

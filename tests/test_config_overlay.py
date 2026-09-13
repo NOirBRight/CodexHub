@@ -803,7 +803,10 @@ class ConfigOverlayTests(unittest.TestCase):
             apply_overlay(config_path, backup_path, None, "http://127.0.0.1:9099")
 
             active = config_path.read_text(encoding="utf-8")
-            self.assertIn("model_catalog_json = 'C:/user/#catalog''s/custom.json'", active)
+            self.assertEqual(
+                tomllib.loads(active)["model_catalog_json"],
+                "C:/user/#catalog's/custom.json",
+            )
 
     def test_overlay_projects_safe_catalog_budget_across_restart_and_missing_catalog_fallback(self):
         original = "\n".join(

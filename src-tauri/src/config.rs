@@ -1041,6 +1041,7 @@ fn switch_mode_with_paths_takeover_as_owner_and_catalog(
             args.extend([
                 "--catalog".to_string(),
                 catalog_path.to_string_lossy().into_owned(),
+                "--use-managed-catalog".to_string(),
             ]);
         }
         args.extend([
@@ -1511,7 +1512,11 @@ fn build_codex_overlay_args_relative(
             .and_then(|name| name.to_str())
             .unwrap_or("codexhub-model-catalog.json")
             .to_string();
-        args.extend(["--catalog".to_string(), catalog_name]);
+        args.extend([
+            "--catalog".to_string(),
+            catalog_name,
+            "--use-managed-catalog".to_string(),
+        ]);
     }
     args
 }
