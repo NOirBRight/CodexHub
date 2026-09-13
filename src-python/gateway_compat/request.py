@@ -142,6 +142,43 @@ def _drop_third_party_web_search_external_web_access(payload: dict[str, Any]) ->
     return changed
 
 
+_THIRD_PARTY_RESPONSES_TRANSPORT_KEYS = ("include", "prompt_cache_key", "store", "max_output_tokens")
+
+
+def _drop_third_party_responses_transport_fields(payload: dict[str, Any]) -> bool:
+    """Drop Official-only Responses transport controls on third-party routes.
+
+    OpenCode 1.18+ forwards include/prompt_cache_key/store on /responses. Console
+    Go 400s those as invalid parameters. The Chat converter already pops the
+    same keys; transparent Responses was passing them through.
+    """
+    changed = False
+    for key in _THIRD_PARTY_RESPONSES_TRANSPORT_KEYS:
+        if key in payload:
+            payload.pop(key, None)
+            changed = True
+    return changed
+
+
+def _drop_third_party_function_strict(payload: dict[str, Any]) -> bool:
+    """OpenCode 1.18+ sets function.strict; Console Go 400s that Official field."""
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+    changed = False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        if "strict" in tool:
+            tool.pop("strict", None)
+            changed = True
+        function = tool.get("function")
+        if isinstance(function, dict) and "strict" in function:
+            function.pop("strict", None)
+            changed = True
+    return changed
+
+
 def compatible_request_body(
     body: bytes,
     upstream: Mapping[str, Any],
@@ -736,6 +773,10 @@ def compatible_request_body(
         if isinstance(payload.get("messages"), list) and _wrap_chat_function_tools(payload):
             changed = True
         if _drop_third_party_web_search_external_web_access(payload):
+            changed = True
+        if _drop_third_party_responses_transport_fields(payload):
+            changed = True
+        if _drop_third_party_function_strict(payload):
             changed = True
 
     if not changed:

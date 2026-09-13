@@ -567,6 +567,20 @@ def _responses_event_starts_downstream_output(event: Mapping[str, Any]) -> bool:
     return False
 
 
+def third_party_empty_completed_is_disconnect(
+    *,
+    upstream_name: str,
+    downstream_output_started: bool,
+    visible_or_tool_output_seen: bool,
+) -> bool:
+    """True when a third-party Responses completed event should be treated as empty."""
+    return (
+        upstream_name != "official"
+        and not visible_or_tool_output_seen
+        and not downstream_output_started
+    )
+
+
 def _responses_event_commits_downstream_output(event: Mapping[str, Any], upstream_name: str) -> bool:
     event_type = event.get("type")
     if event_type in {"response.output_text.delta", "response.refusal.delta"}:
@@ -1828,6 +1842,10 @@ def _count_sse_reasoning_event(
 
 chat_stream_chunks_have_terminal = _chat_stream_chunks_have_terminal
 responses_events_have_terminal = _responses_events_have_terminal
+responses_event_starts_downstream_output = _responses_event_starts_downstream_output
+responses_event_commits_downstream_output = _responses_event_commits_downstream_output
+responses_event_has_visible_or_tool_output = _responses_event_has_visible_or_tool_output
+responses_completed_event_has_visible_or_tool_output = _responses_completed_event_has_visible_or_tool_output
 request_kind_from_headers_and_payload = _request_kind_from_headers_and_payload
 is_compact_summary_payload = _is_compact_summary_payload
 strip_tools_for_compact_payload = _strip_tools_for_compact_payload
