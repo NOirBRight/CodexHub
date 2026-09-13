@@ -67,8 +67,21 @@
 
 ## 代码检查与当前状态
 
-定向协议、目录、发现和名称冲突检查：326 passed，51 subtests passed。新增脚本运行时登记及模块行数检查修正后：37 passed，101 skipped（主机不适用的运行时/平台检查）。最终完整 Python 检查：2623 passed，16 failed，177 skipped，267 subtests passed；耗时 63.96 秒。16 项失败与原工作区基线一致。
+定向协议、目录、发现和名称冲突检查：326 passed，51 subtests passed。新增脚本运行时登记及模块行数检查修正后：37 passed，101 skipped（主机不适用的运行时/平台检查）。诊断工作区的完整 Python 检查：2623 passed，16 failed，177 skipped，267 subtests passed；耗时 63.96 秒。16 项失败与原工作区基线一致。干净合并候选的结果如下，取代该诊断工作区结果作为合并依据。
 
 完整检查首次有 18 项失败：本次引入的脚本登记和模块行数限制已修正；其余 16 项均在未加入本次修改的原工作区复现，分别涉及现有 strict 字段移除断言、prompt_cache_key 断言、跨模块私有导入和 Issue 66 矩阵漂移。没有更新快照或放宽测试来掩盖这些问题。report-only 质量报告执行成功，parse_errors=0；保留仓库既有报告项。
 
 本次实现未发布、未重启生产 Gateway，也未声称原线程已在生产恢复。运行中的进程和现有客户端仍使用旧版本及旧目录；候选代码生效需要正常发布并重新生成模型目录，客户端加载新目录后建立新的模型会话。
+
+## 干净合并候选验证
+
+从最新 main (`b538499`) 建立隔离分支 `codex/xai-discovery-merge`，只移入本任务增量，未引入其他任务的架构重构。代码提交 `0495f1c26fdc9a062389f63b1c7acc0eb1d47a68` 经 Standards/Spec 范围审查通过。测试适配为 main 现有的请求上下文接口，没有引入未合并的架构依赖。
+
+- 完整 Python core：**2637 passed，177 skipped，267 subtests passed**，66.29 秒。1 条既有 SyntaxWarning 来自 `capture_issue_62_live_evidence.py` 的 finally/return。
+- 发现、xAI 名称映射与模块边界定向检查：32 passed。
+- 当前提交的真实 Codex + 受控 Responses/Chat E2E：均完成三轮搜索、MCP 实际执行及结果回传。
+- 当前提交的真实 Codex + xAI E2E：三轮通过。
+- 当前提交的真实 Gateway + xAI 原生搜索/图片调用：上游内部别名、下游 `view_image`，HTTP 200，映射通过。
+- report-only 质量报告 exit 0，parse_errors=0；diff hygiene 通过。
+
+[绑定当前代码指纹的合并验证记录](../evidence/client-tool-discovery/merge-validation.json)。该次验证后续提交仅增加文档和证据，不改变已验证源码。合并不包含生产部署或 Gateway 重启。
