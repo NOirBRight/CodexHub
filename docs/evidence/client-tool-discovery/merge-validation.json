@@ -1,0 +1,112 @@
+{
+  "source_commit": "0495f1c26fdc9a062389f63b1c7acc0eb1d47a68",
+  "base_commit": "b538499ee5b689cff52cc7131ce8622578c6ff11",
+  "review": {
+    "standards": "passed",
+    "spec": "passed",
+    "scope": "Only task-owned delta; pre-existing architecture changes excluded. Native routes and client-owned execution preserved."
+  },
+  "python_core": {
+    "passed": 2637,
+    "skipped": 177,
+    "warnings": 1,
+    "subtests": 267,
+    "duration_seconds": 66.29
+  },
+  "targeted": {
+    "passed": 32
+  },
+  "discovery_synthetic": [
+    {
+      "model": "xai/grok-4.6",
+      "strategy": "eager",
+      "live": false,
+      "exit": 0,
+      "requests": 3,
+      "tool_counts": [
+        18,
+        19,
+        19
+      ],
+      "tool_executed": true,
+      "tool_result_observed": true,
+      "failures": [],
+      "completed": true,
+      "passed": true
+    },
+    {
+      "model": "volc/glm-5.2",
+      "strategy": "eager",
+      "live": false,
+      "exit": 0,
+      "requests": 3,
+      "tool_counts": [
+        18,
+        19,
+        19
+      ],
+      "tool_executed": true,
+      "tool_result_observed": true,
+      "failures": [],
+      "completed": true,
+      "passed": true
+    }
+  ],
+  "discovery_live": [
+    {
+      "model": "xai/grok-4.6",
+      "strategy": "eager",
+      "live": true,
+      "exit": 0,
+      "requests": 3,
+      "tool_counts": [
+        18,
+        26,
+        26
+      ],
+      "tool_executed": true,
+      "tool_result_observed": true,
+      "failures": [],
+      "completed": true,
+      "passed": true
+    }
+  ],
+  "xai_name_mapping": {
+    "http_status": 200,
+    "upstream_calls": [
+      {
+        "name": "__codexhub_fn_428bc15cd6_1",
+        "arguments_chars": 40
+      }
+    ],
+    "downstream_calls": [
+      {
+        "name": "view_image",
+        "arguments_chars": 40
+      }
+    ],
+    "request_sha256": "8e1aa83fd5788fca12ce1c6f6b3b30803451ba6ef9c86abe1276d65a82a677e4",
+    "upstream_sha256": "f6d7e13a4e389a6570d166332f24d7150b5321c580fc5268d34a5d5b5cef5898",
+    "downstream_sha256": "a2ce0662d248f4224114161438ce8727641e6d23a73b58ccc085d3242125afea"
+  },
+  "source_files": {
+    "src-python/catalog_sync.py": "c59f8b2fcbd159d5cb85a794a2529c7dae522cf8ba7a07ec5c4472ab00d8d140",
+    "src-python/gateway_compat/request.py": "c57552af9c2ca1eea8bc4e36b07bf7037ba50e57f3d885028e0528fff55bb658",
+    "src-python/gateway_compat/official_passthrough.py": "1c27561a224b6d076a380a38fe4c6452da302264e39c71b6f54ade2f15b5d7d7",
+    "src-python/tool_compatibility/contracts.py": "1d61fee7da14fcbe5c9bf5e52017da0a2d51211cf5aa6f1548c06a53bdf0462f",
+    "src-python/tool_compatibility/dispositions.py": "6aea8389955a7f6c256e0cf016a8b2192a1aa6fabf46f346e859b344debe9cdd",
+    "src-python/tool_compatibility/registry.py": "1bed82cc396c6accf9595e1af487a522e5d6a5b20bd951ce90b3bfb7fd23bc87",
+    "src-python/tool_compatibility/plan.py": "3cf78c307184a6f509a5a77a6de692849e3f18d4e919c7f52f90c066e2b6a348",
+    "src-python/tool_compatibility/argument_contract.py": "c0c3e43f0f7b900632a2844232db2b6e1afb5f757637d3a255b871a99706a7ea",
+    "tests/test_python_runtime.py": "7f01ef714e2d66f142d7ee9d6b399a30f1159d235f1853af2d06b74737bfdaf0",
+    "src-python/tool_discovery.py": "e60f06156a15e9bd7359b0fd36662e251b54ad5db80edd2ddb0d1a7de37e789f",
+    "tests/test_xai_tool_name_collision.py": "838ab3b97432005eddd3b40ac98ce667ab22fc1293e24c0fe3d3960feff7f2dd",
+    "tests/test_client_tool_discovery.py": "1e6d7d50b7d47460cb734ccdd3d0a03f7e2458a29dc5f44f1678ee8dab059dc9",
+    "scripts/e2e_client_tool_discovery.py": "237ffe3e033c03ae04b0f50134d7a8561d4f196d1cc9ca0fb19088c78d352685"
+  },
+  "report_only_quality": {
+    "exit_code": 0,
+    "parse_errors": 0
+  },
+  "production_deployed": false
+}
