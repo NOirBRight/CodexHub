@@ -952,7 +952,13 @@ def _repair_codex_desktop_global_state(config_path: Path, backup_path: Path) -> 
 
 def _preserve_user_catalog_path(current: str, restored: str) -> str:
     current_value = top_level_value(current, "model_catalog_json")
-    if not current_value or is_managed_catalog_path(current_value) or _overlay_marks_managed_catalog(current):
+    if current_value is None:
+        # An intact connection with its catalog line removed is a user edit.
+        # A missing config/overlay is instead a recovery from the backup.
+        if overlay_owner(current) is not None:
+            return strip_top_level_keys(restored, {"model_catalog_json"})
+        return restored
+    if is_managed_catalog_path(current_value) or _overlay_marks_managed_catalog(current):
         return restored
     if current_value == top_level_value(restored, "model_catalog_json"):
         return restored
