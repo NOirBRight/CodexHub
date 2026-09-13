@@ -39,6 +39,7 @@ const enUS = {
     latestVersion: "Latest version",
     configPath: "Configuration path",
     ownership: "Configuration owner",
+    note: "Note",
     notChecked: "Not checked yet",
     connectionState: "Connection state",
     editorTabs: {"models":"Models","connection":"Connection","account":"Account & usage"},
@@ -292,7 +293,10 @@ const enUS = {
       zcode: "IDE extension",
       pi: "Compact CLI",
       omp: "Prompt runtime",
+      grok: "Terminal client",
     },
+    grokAllowedModelsMayHide:
+      "Injected picker keys may be hidden by allowed_models.",
     connected: "Connected",
     connectionDisconnected: "Disconnected",
     connectionRepair: "Repair",

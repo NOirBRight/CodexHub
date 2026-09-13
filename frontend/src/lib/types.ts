@@ -572,7 +572,7 @@ export interface AutostartStatus {
 
 export type TabId = "codexhub" | "gateway";
 
-export type GatewayClientId = "opencode" | "dsh" | "zcode" | "pi" | "omp";
+export type GatewayClientId = "opencode" | "dsh" | "zcode" | "pi" | "omp" | "grok";
 
 export interface DshLifecycleReport {
   client_id: string;

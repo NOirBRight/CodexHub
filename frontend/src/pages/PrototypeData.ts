@@ -24,6 +24,7 @@ export const clientFixtures = [
   {id:'pi',name:'Pi',icon:pi,kind:'轻量 CLI',path:'~/.pi/agent/config.json',on:false},
   {id:'zcode',name:'ZCode',icon:zcode,kind:'IDE 扩展',path:'~/.zcode/v2/config.json',on:true},
   {id:'omp',name:'OMP',icon:omp,kind:'提示词运行时',path:'~/.omp/agent/config.yml',on:false},
+  {id:'grok',name:'Grok CLI',icon:xai,kind:'终端客户端',path:'~/.grok/config.toml',on:false},
 ];
 export const codexIcon=codex;
 export const chartProviders:Provider[]=providerFixtures.map(p=>({id:p.id,name:p.name,base_url:p.base,enabled:true,models:[],reports_cached_input_tokens:true}));

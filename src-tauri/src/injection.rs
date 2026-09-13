@@ -79,6 +79,11 @@ pub(crate) const ISOLATED_MANAGED_CLIENTS: &[IsolatedManagedClient] = &[
         ],
     },
     IsolatedManagedClient {
+        id: "grok",
+        shape: InjectionShape::SingleBlock,
+        files: &["grok/config.toml"],
+    },
+    IsolatedManagedClient {
         id: "codex",
         shape: InjectionShape::SingleBlock,
         files: &["codex-target/config.toml"],
@@ -246,9 +251,10 @@ pub(crate) fn dsh_descriptor() -> InjectionDescriptor {
     }
 }
 
-/// Descriptor registry. Only clients migrated to Provider Injection appear
-/// here; takeover-era clients (codex, opencode, pi, omp, zcode) keep their
-/// legacy predicates in `gateway.rs` until their campaign phase.
+/// Descriptor registry. Only DSH uses InjectionDescriptor (YAML). Native
+/// Provider Injection clients (opencode, pi, omp, zcode, grok) and Codex keep
+/// their file-format adapters in `gateway` until a descriptor strategy exists
+/// for JSON/TOML.
 pub(crate) fn descriptor_for(client_id: &str) -> Option<InjectionDescriptor> {
     match client_id {
         "dsh" => Some(dsh_descriptor()),
@@ -1219,11 +1225,11 @@ mod tests {
     #[test]
     fn registry_returns_only_injection_migrated_clients() {
         assert!(descriptor_for("dsh").is_some());
-        // Takeover-era clients stay on legacy predicates until migration.
-        for legacy in ["codex", "opencode", "pi", "omp", "zcode"] {
+        // Native adapters (including Grok CLI) are not DSH YAML descriptors.
+        for native in ["codex", "opencode", "pi", "omp", "zcode", "grok"] {
             assert!(
-                descriptor_for(legacy).is_none(),
-                "{legacy} must not migrate implicitly"
+                descriptor_for(native).is_none(),
+                "{native} must not use the DSH YAML descriptor"
             );
         }
         assert!(descriptor_for("unknown").is_none());

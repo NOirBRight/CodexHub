@@ -41,6 +41,12 @@ pub use readback::verify_apply_readback;
 
 use clients::codex::read_codex_auth_status;
 #[cfg(test)]
+use clients::grok::restore_grok_config_with_backup_roots;
+use clients::grok::{
+    detect_grok_config_path, detect_grok_route_details, detect_grok_version, grok_home,
+    grok_injected_keys_may_be_hidden, grok_installed,
+};
+#[cfg(test)]
 use clients::omp::{
     apply_omp_config_with_paths, omp_config_text, omp_models_yml_text, omp_route_mode,
     plan_omp_apply, publish_omp_apply, restore_omp_config_with_paths, OmpConfigPaths,
@@ -764,6 +770,41 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
             .then(|| npm_latest_version("@oh-my-pi/pi-coding-agent"))
             .flatten(),
     });
+    let grok_path = detect_grok_config_path();
+    let grok_installed = grok_installed();
+    let grok_text = fs::read_to_string(&grok_path).ok();
+    let grok_route_details = detect_grok_route_details(current_owner, settings.proxy_port);
+    let grok_route_mode = route_mode_for_owner(
+        grok_route_details.0,
+        current_owner,
+        pending_sync_is_stale(
+            pending_client_ids.contains("grok"),
+            grok_route_details.0,
+            current_owner,
+        ),
+    );
+    let mut grok_status = gateway_client_status(grok_installed, grok_route_mode).to_string();
+    if grok_injected_keys_may_be_hidden(&grok_home(), grok_text.as_deref()) {
+        grok_status.push_str(" Injected picker keys may be hidden by allowed_models.");
+    }
+    clients.push(GatewayClientInfo {
+        id: "grok".to_string(),
+        name: "Grok CLI".to_string(),
+        kind: "Terminal client".to_string(),
+        installed: grok_installed,
+        auto_apply_supported: grok_installed,
+        config_path: Some(grok_path),
+        route_owner: grok_route_details.0,
+        route_endpoint: grok_route_details.1,
+        managed_by_current_app: grok_route_details.0 == current_owner,
+        route_mode: grok_route_mode.to_string(),
+        status: grok_status,
+        versions_checked: include_versions && grok_installed,
+        current_version: include_versions.then(detect_grok_version).flatten(),
+        latest_version: (include_versions && grok_installed)
+            .then(|| npm_latest_version("@xai-official/grok"))
+            .flatten(),
+    });
     let dsh = detect_dsh_client();
     let dsh_report = if dsh.installed {
         dsh_client_readback().ok()
@@ -1264,7 +1305,7 @@ fn gateway_client_sync_skip_reason(client: &GatewayClientInfo) -> Option<String>
 }
 
 fn gateway_client_supports_native_apply(client_id: &str) -> bool {
-    matches!(client_id, "opencode" | "pi" | "omp" | "zcode")
+    matches!(client_id, "opencode" | "pi" | "omp" | "zcode" | "grok")
 }
 
 fn with_gateway_client_mutation_owner_gate<F>(

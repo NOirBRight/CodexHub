@@ -103,6 +103,14 @@ impl GatewayClientEndpointSelection {
         }
     }
 
+    pub(in crate::gateway) fn grok_api_backend(self) -> &'static str {
+        match self.openai_compatible_selection() {
+            GatewayClientEndpointSelection::Responses => "responses",
+            GatewayClientEndpointSelection::ChatCompletions => "chat_completions",
+            GatewayClientEndpointSelection::AnthropicMessages => "chat_completions",
+        }
+    }
+
     pub(in crate::gateway) fn openai_compatible_selection(self) -> Self {
         match self {
             GatewayClientEndpointSelection::AnthropicMessages => {

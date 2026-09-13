@@ -14,6 +14,7 @@ import piIcon from "../assets/pi-icon.png";
 import dshIcon from "../assets/dsh-icon.svg";
 import zcodeIcon from "../assets/zcode-icon.png";
 import codexIcon from "../assets/codex-logo.svg";
+import grokIcon from "../assets/providers/xai.svg";
 import { cx } from "../lib/format";
 import type { GatewayClientContract, GatewayClientInfo } from "../lib/types";
 import { SwitchControl } from "./SettingsDrawer";
@@ -183,6 +184,12 @@ export function GatewayClientCard({
             <dt>{t("workspace.ownership")}</dt>
             <dd>{info?.route_owner || "—"}</dd>
           </div>
+          {info?.status?.includes("allowed_models") ? (
+            <div>
+              <dt>{t("workspace.note")}</dt>
+              <dd>{t("gateway.grokAllowedModelsMayHide")}</dd>
+            </div>
+          ) : null}
         </dl>
         <div className="ws-actions">
           {onRefresh && (
@@ -362,6 +369,8 @@ function clientIcon(id: string) {
       return piIcon;
     case "omp":
       return ompIcon;
+    case "grok":
+      return grokIcon;
     default:
       return null;
   }

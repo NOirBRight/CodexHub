@@ -251,9 +251,9 @@ mod isolated_managed_client_config {
             reports_cached_input_tokens: None,
             supports_developer_role: None,
             display_prefix: Some("openai/".to_string()),
-        auth_capabilities: None,
-        onboarding_hint: None,
-        discovery_policy: None,
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
             sort_order: Some(0),
             enabled: true,
             locked: false,
@@ -266,6 +266,126 @@ mod isolated_managed_client_config {
             }],
         });
         providers
+    }
+
+    fn xai_provider() -> Provider {
+        Provider {
+            id: "xai".to_string(),
+            name: "xAI".to_string(),
+            base_url: "https://api.x.ai/v1".to_string(),
+            api_key: None,
+            upstream_format: Some(UpstreamFormat::Responses),
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: Some("xai/".to_string()),
+            auth_capabilities: Some(vec!["subscription:xai_oauth".to_string()]),
+            onboarding_hint: None,
+            discovery_policy: None,
+            sort_order: Some(3),
+            enabled: true,
+            locked: false,
+            models: vec![Model {
+                id: "grok-4.6".to_string(),
+                display_name: Some("Grok 4.6".to_string()),
+                context_window: Some(256_000),
+                gateway_exported: true,
+                ..Model::default()
+            }],
+        }
+    }
+
+    fn grok_mixed_providers() -> Vec<Provider> {
+        let mut providers = volc_provider(UpstreamFormat::Responses);
+        providers.push(xai_provider());
+        providers.push(Provider {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: None,
+            upstream_format: Some(UpstreamFormat::Responses),
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: Some("openai/".to_string()),
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
+            sort_order: Some(0),
+            enabled: true,
+            locked: false,
+            models: vec![Model {
+                id: "gpt-5.5".to_string(),
+                display_name: Some("5.5".to_string()),
+                context_window: Some(258_400),
+                gateway_exported: true,
+                ..Model::default()
+            }],
+        });
+        providers.push(Provider {
+            id: "xai-proxy".to_string(),
+            name: "xAI proxy".to_string(),
+            base_url: "https://example.invalid/v1".to_string(),
+            api_key: None,
+            upstream_format: Some(UpstreamFormat::ChatCompletions),
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: Some("xai-proxy/".to_string()),
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
+            sort_order: Some(9),
+            enabled: true,
+            locked: false,
+            models: vec![Model {
+                id: "custom-1".to_string(),
+                display_name: Some("Custom 1".to_string()),
+                context_window: Some(32_000),
+                gateway_exported: true,
+                ..Model::default()
+            }],
+        });
+        providers
+    }
+
+    fn grok_seed_toml() -> &'static str {
+        r#"
+[models]
+default = "grok-4.6"
+
+[model.local-llama]
+model = "llama3"
+name = "Local Llama"
+base_url = "http://localhost:8080/v1"
+api_key = "user-owned"
+
+[model_providers.codexhub-xai]
+base_url = "http://127.0.0.1:9099/v1/providers/xai"
+api_key = "old-xai"
+api_backend = "responses"
+
+[model."codexhub-xai-grok-4.6"]
+model = "grok-4.6"
+name = "CodexHub Grok 4.6"
+model_provider = "codexhub-xai"
+
+[mcp_servers.demo]
+command = "echo"
+
+[ui]
+theme = "dark"
+"#
+    }
+
+    fn parse_grok_toml(path: &std::path::Path) -> toml::Table {
+        toml::from_str(&fs::read_to_string(path).unwrap()).unwrap()
     }
 
     fn input(
@@ -291,11 +411,12 @@ mod isolated_managed_client_config {
     }
 
     #[test]
-    fn managed_client_ids_cover_all_five_supported_clients() {
+    fn managed_client_ids_cover_all_six_supported_clients() {
         assert_eq!(
             managed_client_ids_sorted(),
             vec![
                 "codex".to_string(),
+                "grok".to_string(),
                 "omp".to_string(),
                 "opencode".to_string(),
                 "pi".to_string(),
@@ -349,10 +470,10 @@ mod isolated_managed_client_config {
     }
 
     #[test]
-    fn isolated_client_apply_targets_stay_beneath_root_for_all_four_native_clients() {
+    fn isolated_client_apply_targets_stay_beneath_root_for_all_native_clients() {
         let root = fresh_root("targets");
         let isolated = validate_isolated_root(&root).unwrap();
-        for client_id in ["opencode", "pi", "omp", "zcode"] {
+        for client_id in ["opencode", "pi", "omp", "zcode", "grok"] {
             let targets = isolated_client_apply_targets(&isolated, client_id).unwrap();
             for target in targets.writable_paths() {
                 assert!(
@@ -700,7 +821,7 @@ mod isolated_managed_client_config {
     }
 
     // F6: table-driven all-client CLI/parity coverage. Every native
-    // client (opencode, pi, omp, zcode) must produce a preview, apply,
+    // client (opencode, pi, omp, zcode, grok) must produce a preview, apply,
     // and readback that round-trip and never leak secrets or absolute
     // paths, across both Responses and ChatCompletions route selections.
     #[test]
@@ -718,6 +839,8 @@ mod isolated_managed_client_config {
             ("omp", UpstreamFormat::ChatCompletions, "chat_completions"),
             ("zcode", UpstreamFormat::Responses, "responses"),
             ("zcode", UpstreamFormat::ChatCompletions, "chat_completions"),
+            ("grok", UpstreamFormat::Responses, "responses"),
+            ("grok", UpstreamFormat::ChatCompletions, "chat_completions"),
         ];
         for (client_id, upstream, expected_protocol) in cases {
             let label = format!("table-{client_id}-{expected_protocol}");
@@ -1034,7 +1157,8 @@ mod isolated_managed_client_config {
 
         // Correct production output round-trips.
         let expected =
-            super::super::opencode_config_text(None, &settings, &providers, "volc/glm-5.2").unwrap();
+            super::super::opencode_config_text(None, &settings, &providers, "volc/glm-5.2")
+                .unwrap();
         fs::write(&missing, &expected).unwrap();
         verify_apply_readback(
             "opencode",
@@ -1262,5 +1386,279 @@ mod isolated_managed_client_config {
         // Sanity: the hard link fixture exists; the directory-root guard
         // is covered by the symlink/junction tests above.
         assert!(link_file.exists());
+    }
+
+    #[test]
+    fn grok_apply_skips_xai_preserves_foreign_tables_and_redacts_preview() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = fresh_root("grok-mixed");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let grok_path = isolated.root().join("grok").join("config.toml");
+        fs::create_dir_all(grok_path.parent().unwrap()).unwrap();
+        fs::write(&grok_path, grok_seed_toml()).unwrap();
+
+        let settings = Settings {
+            include_official_models: false,
+            ..settings_with_port(9099)
+        };
+        let grok_input = IsolatedClientApplyInput {
+            client_id: "grok".to_string(),
+            model: Some("openai/gpt-5.5".to_string()),
+            settings: settings.clone(),
+            providers: grok_mixed_providers(),
+            catalog_path: None,
+            backup_subdir: None,
+        };
+
+        let preview = isolated_client_preview(&isolated, &grok_input).unwrap();
+        assert_eq!(preview.client_id, "grok");
+        assert!(!preview.next_redacted.contains("isolated-key"));
+        assert!(!preview.next_redacted.contains("old-xai"));
+        for target in &preview.target_names {
+            assert_eq!(target, "grok/config.toml");
+        }
+
+        let apply = apply_gateway_client_config_isolated(&isolated, &grok_input).unwrap();
+        assert!(apply.applied);
+        assert!(!root.join("grok").join("auth.json").exists());
+        let written = fs::read_to_string(&grok_path).unwrap();
+        assert!(!written.contains("api.x.ai"));
+        assert!(!written.contains("GROK_MODELS_BASE_URL"));
+        assert!(!written.contains("models_base_url"));
+        let table = parse_grok_toml(&grok_path);
+        let models = table["models"].as_table().unwrap();
+        assert_eq!(models["default"].as_str(), Some("grok-4.6"));
+        assert!(table["model"]["local-llama"].as_table().is_some());
+        assert_eq!(
+            table["mcp_servers"]["demo"]["command"].as_str(),
+            Some("echo")
+        );
+        assert_eq!(table["ui"]["theme"].as_str(), Some("dark"));
+        let providers = table["model_providers"].as_table().unwrap();
+        assert!(providers.contains_key("codexhub-openai"));
+        assert!(providers.contains_key("codexhub-volc"));
+        assert!(
+            providers.contains_key("codexhub-xai-proxy"),
+            "custom xai-proxy upstream must not be skipped by leftover xAI prefix"
+        );
+        assert!(!providers.contains_key("codexhub-xai"));
+        let openai = providers["codexhub-openai"].as_table().unwrap();
+        assert_eq!(
+            openai["base_url"].as_str(),
+            Some("http://127.0.0.1:9099/v1/providers/openai")
+        );
+        assert_eq!(openai["api_backend"].as_str(), Some("responses"));
+        let picker = table["model"]["codexhub-openai-gpt-5.5"]
+            .as_table()
+            .unwrap();
+        assert_eq!(picker["model"].as_str(), Some("gpt-5.5"));
+        assert_eq!(picker["model_provider"].as_str(), Some("codexhub-openai"));
+        assert_eq!(picker["supports_backend_search"].as_bool(), Some(false));
+
+        let opencode_input = IsolatedClientApplyInput {
+            client_id: "opencode".to_string(),
+            model: Some("openai/gpt-5.5".to_string()),
+            settings,
+            providers: grok_mixed_providers(),
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        let opencode_apply =
+            apply_gateway_client_config_isolated(&isolated, &opencode_input).unwrap();
+        assert!(opencode_apply.applied);
+        let opencode_text =
+            fs::read_to_string(isolated.root().join("opencode").join("opencode.json")).unwrap();
+        assert!(
+            opencode_text.contains("codexhub-xai"),
+            "OpenCode must still project the xAI Maintained Provider"
+        );
+    }
+
+    #[test]
+    fn grok_xai_only_apply_records_sentinel_without_native_duplicates() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = fresh_root("grok-xai-only");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let grok_path = isolated.root().join("grok").join("config.toml");
+        fs::create_dir_all(grok_path.parent().unwrap()).unwrap();
+        fs::write(&grok_path, "[models]\ndefault = \"grok-4.6\"\n").unwrap();
+        let settings = Settings {
+            include_official_models: false,
+            ..settings_with_port(9099)
+        };
+        let inp = IsolatedClientApplyInput {
+            client_id: "grok".to_string(),
+            model: Some("xai/grok-4.6".to_string()),
+            settings,
+            providers: vec![xai_provider()],
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        let apply = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        assert!(apply.applied);
+        let table = parse_grok_toml(&grok_path);
+        assert_eq!(table["models"]["default"].as_str(), Some("grok-4.6"));
+        let providers = table["model_providers"].as_table().unwrap();
+        assert!(providers.contains_key("codexhub"));
+        assert!(!providers.contains_key("codexhub-xai"));
+        assert_eq!(
+            providers["codexhub"]["base_url"].as_str(),
+            Some("http://127.0.0.1:9099/v1")
+        );
+        assert!(!providers["codexhub"]["base_url"]
+            .as_str()
+            .unwrap()
+            .contains("api.x.ai"));
+        assert!(
+            table.get("model").is_none()
+                || table["model"].as_table().is_some_and(|models| !models
+                    .keys()
+                    .any(|key| key.contains("grok-4.6") || key.contains("grok-build")))
+        );
+        readback_gateway_client_config_isolated(&isolated, &inp).unwrap();
+    }
+
+    #[test]
+    fn grok_detach_removes_owned_tables_including_leftover_xai() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = fresh_root("grok-detach");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let grok_path = isolated.root().join("grok").join("config.toml");
+        fs::create_dir_all(grok_path.parent().unwrap()).unwrap();
+        fs::write(&grok_path, grok_seed_toml()).unwrap();
+        let settings = Settings {
+            include_official_models: false,
+            ..settings_with_port(9099)
+        };
+        let inp = IsolatedClientApplyInput {
+            client_id: "grok".to_string(),
+            model: Some("openai/gpt-5.5".to_string()),
+            settings,
+            providers: grok_mixed_providers(),
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        assert!(
+            apply_gateway_client_config_isolated(&isolated, &inp)
+                .unwrap()
+                .applied
+        );
+        let targets = isolated_client_apply_targets(&isolated, "grok").unwrap();
+        let backup_roots = [super::stable_root(targets.backup_path().to_path_buf())];
+        let restored = super::super::with_rollback_provenance_dir_override(
+            Some(root.join("rollback-provenance")),
+            || {
+                super::super::restore_grok_config_with_backup_roots(
+                    &targets.writable_paths()[0],
+                    &backup_roots,
+                )
+            },
+        )
+        .unwrap();
+        assert!(restored.applied);
+        let text = fs::read_to_string(&grok_path).unwrap_or_default();
+        assert!(
+            !text.to_ascii_lowercase().contains("codexhub"),
+            "detach left owned Grok tables: {text}"
+        );
+        let table = parse_grok_toml(&grok_path);
+        assert_eq!(table["models"]["default"].as_str(), Some("grok-4.6"));
+        assert!(table["model"]["local-llama"].as_table().is_some());
+    }
+
+    #[test]
+    fn grok_conflict_does_not_overwrite_foreign_owned_table() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = fresh_root("grok-conflict");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let grok_path = isolated.root().join("grok").join("config.toml");
+        fs::create_dir_all(grok_path.parent().unwrap()).unwrap();
+        let original = r#"
+[model_providers.codexhub-openai]
+base_url = "https://api.openai.com/v1"
+api_key = "sk-foreign"
+"#;
+        fs::write(&grok_path, original).unwrap();
+        let settings = Settings {
+            include_official_models: false,
+            ..settings_with_port(9099)
+        };
+        let inp = IsolatedClientApplyInput {
+            client_id: "grok".to_string(),
+            model: Some("openai/gpt-5.5".to_string()),
+            settings,
+            providers: grok_mixed_providers(),
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        let error = apply_gateway_client_config_isolated(&isolated, &inp).unwrap_err();
+        assert!(
+            error.to_ascii_lowercase().contains("refusing")
+                || error.to_ascii_lowercase().contains("conflict"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(fs::read_to_string(&grok_path).unwrap(), original);
+    }
+
+    #[test]
+    fn list_gateway_clients_reports_grok_from_fixture_home() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = unique_temp_dir("grok-roster");
+        let grok_home = root.join("home");
+        fs::create_dir_all(&grok_home).unwrap();
+        fs::write(
+            grok_home.join("config.toml"),
+            r#"
+[models]
+allowed_models = ["grok-4.6"]
+
+[model_providers.codexhub]
+base_url = "http://127.0.0.1:9099/v1"
+api_key = "fixture-key"
+api_backend = "responses"
+"#,
+        )
+        .unwrap();
+        let previous = std::env::var_os("CODEXHUB_GROK_HOME");
+        std::env::set_var("CODEXHUB_GROK_HOME", &grok_home);
+        let clients = super::super::list_gateway_clients(false).unwrap();
+        super::restore_env("CODEXHUB_GROK_HOME", previous);
+        let grok = clients
+            .iter()
+            .find(|client| client.id == "grok")
+            .expect("grok roster row");
+        assert_eq!(grok.name, "Grok CLI");
+        assert_eq!(grok.kind, "Terminal client");
+        assert!(grok.installed);
+        assert!(grok.auto_apply_supported);
+        assert!(
+            matches!(grok.route_mode.as_str(), "hub" | "stale" | "official"),
+            "unexpected grok route_mode {}",
+            grok.route_mode
+        );
+        assert!(
+            grok.status.contains("allowed_models"),
+            "fleet pin disclosure missing from status: {}",
+            grok.status
+        );
+        assert_eq!(
+            grok.config_path.as_deref(),
+            Some(grok_home.join("config.toml").as_path())
+        );
     }
 }

@@ -28,6 +28,11 @@
       "id": "omp",
       "name": "OMP",
       "config_path": "~/.omp/agent/config.yml"
+    },
+    {
+      "id": "grok",
+      "name": "Grok CLI",
+      "config_path": "~/.grok/config.toml"
     }
   ]
 }
