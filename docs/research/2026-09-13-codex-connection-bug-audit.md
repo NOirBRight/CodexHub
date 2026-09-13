@@ -2,6 +2,8 @@
 
 ## 修复进展（后续授权实现）
 
+后续统一接手已在 `codex/collaboration-catalog-recovery` 完成目录删除/清空的恢复补测与修复，并与协作历史兼容修复共同验证；最新记录见 [协作历史兼容修复与目录连接接手](2026-09-13-collaboration-catalog-recovery.md)。下文验证数字保留为原工作区阶段记录。
+
 已在分支 `fix/codex-connected-model-catalog` 实现修复，尚未提交或替换已安装版本。下方原始诊断记录保留，用于解释修复前行为。
 
 - 软件的显式连接操作和对应配置预览传递 `--use-managed-catalog`，选择当前生成的 CodexHub 目录。原目录文件不修改，原目录引用保存在现有恢复备份中；断开恢复。后台重发布及未显式选择托管目录的 Python 调用仍采用保守策略。
