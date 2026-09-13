@@ -24,20 +24,20 @@ def test_explicit_connection_selects_catalog_and_restores_original(tmp_path, old
     config = tmp_path / "config.toml"
     backup = tmp_path / "backup.toml"
     original = 'model = "official-test"\nmodel_catalog_json = ' + json.dumps(str(old)) + "\n"
-    config.write_text(original)
+    config.write_text(original, encoding="utf-8")
     args = ["apply", "--config", str(config), "--backup", str(backup),
             "--catalog", str(managed), "--use-managed-catalog",
             "--base-url", "http://127.0.0.1:19099"]
     for _ in range(2):
         assert main(args) == 0
-        selected = tomllib.loads(config.read_text())["model_catalog_json"]
+        selected = tomllib.loads(config.read_text(encoding="utf-8"))["model_catalog_json"]
         assert selected == str(managed)
-        assert backup.read_text() == original
+        assert backup.read_text(encoding="utf-8") == original
     assert old.exists() == old_exists
     if old_exists:
-        assert old.read_text() == '{"models": []}'
+        assert old.read_text(encoding="utf-8") == '{"models": []}'
     restore_overlay(config, backup)
-    assert config.read_text() == original
+    assert config.read_text(encoding="utf-8") == original
 
 
 @pytest.mark.parametrize("reconnect", [False, True])
@@ -49,12 +49,12 @@ def test_user_catalog_edit_survives_disconnect_even_after_reconnect(tmp_path, re
     config.write_text('model = "official-test"\n')
     apply_overlay(config, backup, managed, "http://127.0.0.1:19099", use_managed_catalog=True)
     edited = tmp_path / "edited.json"
-    text = config.read_text().replace(str(managed), str(edited))
-    config.write_text(text)
+    text = config.read_text(encoding="utf-8").replace(str(managed), str(edited))
+    config.write_text(text, encoding="utf-8")
     if reconnect:
         apply_overlay(config, backup, managed, "http://127.0.0.1:19099", use_managed_catalog=True)
     restore_overlay(config, backup)
-    assert tomllib.loads(config.read_text())["model_catalog_json"] == str(edited)
+    assert tomllib.loads(config.read_text(encoding="utf-8"))["model_catalog_json"] == str(edited)
 
 
 @pytest.mark.parametrize("reconnect", [False, True])
@@ -69,13 +69,13 @@ def test_user_catalog_removal_survives_disconnect_and_reconnect(tmp_path, reconn
     edited = "".join(
         ('model_catalog_json = ""\n' if replacement == "" else "")
         if line.startswith("model_catalog_json =") else line
-        for line in config.read_text().splitlines(keepends=True)
+        for line in config.read_text(encoding="utf-8").splitlines(keepends=True)
     )
-    config.write_text(edited)
+    config.write_text(edited, encoding="utf-8")
     if reconnect:
         apply_overlay(config, backup, managed, "http://127.0.0.1:19099", use_managed_catalog=True)
     restore_overlay(config, backup)
-    restored = tomllib.loads(config.read_text())
+    restored = tomllib.loads(config.read_text(encoding="utf-8"))
     assert restored.get("model_catalog_json") == replacement
     assert restored["model"] == "official-test"
 
@@ -86,13 +86,13 @@ def test_missing_config_still_restores_saved_catalog(tmp_path, reconnect):
     backup = tmp_path / "backup.toml"
     managed = tmp_path / "catalog.json"
     original = 'model_catalog_json = "user.json"\n'
-    config.write_text(original)
+    config.write_text(original, encoding="utf-8")
     apply_overlay(config, backup, managed, "http://127.0.0.1:19099", use_managed_catalog=True)
     config.unlink()
     if reconnect:
         apply_overlay(config, backup, managed, "http://127.0.0.1:19099", use_managed_catalog=True)
     restore_overlay(config, backup)
-    assert config.read_text() == original
+    assert config.read_text(encoding="utf-8") == original
 
 
 @pytest.mark.parametrize("name", ["team's.json", 'team"s.json', "团队#目录.json", "back\\slash.json", "del\x7f.json", "line\nfeed.json"])
@@ -101,21 +101,21 @@ def test_catalog_paths_roundtrip_through_real_toml_parser(tmp_path, name):
     backup = tmp_path / "backup.toml"
     catalog = tmp_path / name
     original = "model_catalog_json = " + json.dumps(str(catalog)) + "\n"
-    config.write_text(original)
+    config.write_text(original, encoding="utf-8")
     apply_overlay(config, backup, None, "http://127.0.0.1:19099")
-    assert tomllib.loads(config.read_text())["model_catalog_json"] == str(catalog)
+    assert tomllib.loads(config.read_text(encoding="utf-8"))["model_catalog_json"] == str(catalog)
     restore_overlay(config, backup)
-    assert config.read_text() == original
+    assert config.read_text(encoding="utf-8") == original
 
 
 def test_missing_catalog_argument_fails_before_writing(tmp_path):
     config = tmp_path / "config.toml"
     backup = tmp_path / "backup.toml"
     original = 'model = "official-test"\n'
-    config.write_text(original)
+    config.write_text(original, encoding="utf-8")
     with pytest.raises(ValueError, match="requires --catalog"):
         apply_overlay(config, backup, None, "http://127.0.0.1:19099", use_managed_catalog=True)
-    assert config.read_text() == original
+    assert config.read_text(encoding="utf-8") == original
     assert not backup.exists()
 
 
@@ -127,9 +127,9 @@ def test_cross_channel_catalog_takeover_restores_previous_connection(tmp_path):
     beta.write_text('{"models": []}')
     apply_overlay(config, tmp_path / "stable.backup", stable, "http://127.0.0.1:19099",
                   use_managed_catalog=True)
-    previous = config.read_text()
+    previous = config.read_text(encoding="utf-8")
     for _ in range(2):
         apply_overlay(config, tmp_path / "beta.backup", beta, "http://127.0.0.1:19100",
                       owner="beta", takeover=True, use_managed_catalog=True)
     restore_overlay(config, tmp_path / "beta.backup")
-    assert config.read_text() == previous
+    assert config.read_text(encoding="utf-8") == previous
