@@ -338,6 +338,8 @@ def collapse_official_v2_names_for_chat(
     for item in output:
         if not isinstance(item, dict) or item.get("type") != "function_call":
             continue
+        if item.get("namespace") not in (None, V2_NAMESPACE):
+            continue
         original = item.get("name")
         chat_name = name_map.get(original)
         if isinstance(chat_name, str) and chat_name and chat_name != original:

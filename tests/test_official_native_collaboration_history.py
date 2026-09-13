@@ -86,6 +86,18 @@ def test_flat_chat_declarations_expand_even_when_history_already_has_namespace()
     assert prepared["input"] == [call, result]
 
 
+@pytest.mark.parametrize("encrypted_fields", [[], ["message"]])
+def test_chat_collaboration_inverse_does_not_touch_other_namespace(encrypted_fields):
+    _, context = prepare(namespace()["tools"], [])
+    call = {"type": "function_call", "namespace": "user_tools", "name": "send_message",
+            "id": "item-other", "call_id": "call-other", "arguments": "{}",
+            "encrypted_function_args": encrypted_fields}
+    body = json.dumps({"output": [call]}).encode()
+    assert json.loads(gateway_compat.compatible_response_body(body, "official", context)) == {
+        "output": [call]
+    }
+
+
 @pytest.mark.parametrize("with_declaration", [False, True])
 def test_child_continuation_with_opaque_call_and_other_native_tool(with_declaration):
     history = [
