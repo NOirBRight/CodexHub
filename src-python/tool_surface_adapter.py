@@ -1066,9 +1066,25 @@ def rewrite_structured_tool_input_items(
     preserved_structured_call_ids: set[str] = set(adapted_apply_patch_call_ids)
     available_function_names = function_tool_names(payload.get("tools"))
     apply_patch_name = _facts().apply_patch_function_name
+    compact_history = (
+        isinstance(event_context, Mapping)
+        and event_context.get("request_kind") == "compact"
+    )
     for item in input_items:
         if not isinstance(item, dict):
             rewritten_items.append(item)
+            continue
+        if compact_history and item.get("type") in {
+            "function_call", "function_call_output"
+        }:
+            # Compaction has no executable tools. Render every function family
+            # consistently: preserving only collaboration/node calls leaves
+            # ordinary tool transcripts between a parallel call and its result,
+            # which Responses-to-Chat providers reject as a missing result.
+            replacement = _compatible_internal_message(item)
+            if replacement is not None:
+                rewritten_items.append(replacement)
+            changed = True
             continue
         if (
             compatibility_plan is not None
