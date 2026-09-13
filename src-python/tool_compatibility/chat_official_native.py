@@ -690,7 +690,14 @@ def collapse_official_native_tools_for_chat(
         if not isinstance(item, dict):
             continue
         if item.get("type") == "function_call" and item.get("namespace") is not None:
-            continue
+            if (event_context or {}).get("_caller_wire_format") != "chat_completions":
+                continue
+            if item.get("encrypted_function_args") not in (None, []):
+                raise ToolCompatibilityError(
+                    "tool_compatibility_boundary",
+                    "encrypted_collaboration_arguments_unavailable",
+                    surface="response",
+                )
         if _strip_encrypted_fields(item):
             changed = True
         item_type = item.get("type")

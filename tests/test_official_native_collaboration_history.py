@@ -7,6 +7,7 @@ import pytest
 import gateway_compat
 import gateway_errors
 import gateway_events
+import gateway_stream_semantics
 from collaboration_runtime_contract import (
     COLLABORATION_V1, COLLABORATION_V2, EXPECTED_PARAMETER_SCHEMAS,
 )
@@ -99,6 +100,25 @@ def test_native_collaboration_response_retains_encryption_marker_with_custom_too
     assert json.loads(gateway_compat.compatible_response_body(body, "official", context)) == {
         "output": [call]
     }
+
+
+@pytest.mark.parametrize("encrypted", [False, True])
+def test_chat_response_conversion_handles_native_collaboration_marker(encrypted):
+    _, context = prepare([namespace(), {"type": "custom", "name": "exec"}], [])
+    context["_caller_wire_format"] = "chat_completions"
+    call = {"type": "function_call", "namespace": "collaboration", "name": "send_message",
+            "id": "item-response", "call_id": "call-response",
+            "arguments": json.dumps(ARGUMENTS["send_message"]),
+            "encrypted_function_args": ["message"] if encrypted else []}
+    body = json.dumps({"id": "response-chat", "model": "placeholder", "output": [call]}).encode()
+    if encrypted:
+        with pytest.raises(gateway_errors.UpstreamProtocolTranslationError,
+                           match="encrypted_collaboration_arguments_unavailable"):
+            gateway_compat.compatible_response_body(body, "official", context)
+    else:
+        prepared = gateway_compat.compatible_response_body(body, "official", context)
+        converted = json.loads(gateway_stream_semantics.response_body_to_chat_completion_body(prepared))
+        assert converted["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "send_message"
 
 
 @pytest.mark.parametrize("name", ["spawn_agent", "send_message", "close_agent"])
