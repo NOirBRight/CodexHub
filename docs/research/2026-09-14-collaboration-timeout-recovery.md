@@ -27,7 +27,9 @@ Codex CLI rust-v0.153.4 source:
 - https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
 - https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs
 
-Both deserialize Option<i64>. V1 rejects nonpositive integers and clamps positive
+Both deserialize Option<i64>. The wire domain is the full signed i64 range;
+semantic execution errors are client-owned outcomes, not malformed JSON.
+V1 rejects nonpositive integers and clamps positive
 integers at both duration limits. V2 clamps all integers below its configured
 minimum (including negative values), and reports a configured maximum violation
 to the model. Null means the default timeout. Fixed 10000..3600000 validation
@@ -38,7 +40,21 @@ fraction/type/duplicate-key rejection, namespace isolation and encryption rules.
 V2 range-error replay no longer needs a special argument-validation exemption:
 its integer input is already valid, and the client owns its configured maximum.
 
+## Adjacent audit fixes
+
+- Preserve explicit null only for handler-proven Option fields on spawn_agent,
+  send_input, list_agents and wait_agent. Required fields and defaulted bools
+  still reject null. Keep original null fields even when another field is
+  numerically normalized.
+- Replay V1 argument-deserialization errors and the exact nonpositive wait
+  execution error; do not convert them into success results.
+- Replay the exact empty-message execution error for V2 spawn_agent as well
+  as the existing send_message/followup_task paths.
+
 ## Verification status
 
-Focused regression and broader audit are in progress. No production process or
+Linux (CLI 0.154.0) and Windows real parent/child two-turn E2E pass on
+7041f64, including two mandatory 1280 ms waits, client clamp evidence, encrypted
+message delivery and completed status. Adjacent audit delta verification and
+full suites are in progress. No production process or
 user session has been modified.

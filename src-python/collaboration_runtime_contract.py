@@ -372,10 +372,26 @@ def classify_collaboration_request(request: Mapping[str, Any]) -> str | None:
 # the client: V1 clamps positive values at both ends, while V2 clamps even
 # negative values to its configured minimum and reports its configured maximum.
 # A recorded request must keep the requested value, not the effective duration.
-COLLABORATION_V1_TIMEOUT_MIN = 1
+COLLABORATION_V1_TIMEOUT_MIN = -(2**63)
 COLLABORATION_V1_TIMEOUT_MAX = 2**63 - 1
 COLLABORATION_V2_TIMEOUT_MIN = -(2**63)
 COLLABORATION_V2_TIMEOUT_MAX = 2**63 - 1
+
+# Option fields in the rust-v0.153.4 handlers accept explicit null, even
+# though the advertised optional property schemas omit a null alternative.
+# Do not infer this from optionality: defaulted bool fields still reject null.
+_CLIENT_NULLABLE_FIELDS = {
+    COLLABORATION_V1: {
+        "spawn_agent": frozenset({"message", "items", "agent_type", "model", "reasoning_effort"}),
+        "send_input": frozenset({"message", "items"}),
+        "wait_agent": frozenset({"timeout_ms"}),
+    },
+    COLLABORATION_V2: {
+        "spawn_agent": frozenset({"agent_type", "model", "reasoning_effort", "fork_turns"}),
+        "list_agents": frozenset({"path_prefix"}),
+        "wait_agent": frozenset({"timeout_ms"}),
+    },
+}
 
 
 def _json_object_or_value(value: Any, malformed: str) -> Any:
@@ -439,16 +455,16 @@ def normalize_collaboration_arguments(version: str, name: str, value: Any) -> tu
         raise CollaborationContractError("collaboration_arguments_wire_type_invalid")
     parsed = _parse_collaboration_arguments(value, "malformed_collaboration_arguments")
     changed = False
-    if name == "wait_agent" and isinstance(parsed, dict) and "timeout_ms" in parsed:
-        if parsed["timeout_ms"] is None:
-            # Option<i64> treats explicit null like omission. Validate that
-            # shape without changing the original wire representation.
-            parsed.pop("timeout_ms")
-        else:
-            timeout, timeout_changed = _normalize_timeout_value(parsed["timeout_ms"], version=version)
-            parsed["timeout_ms"] = timeout
-            changed = timeout_changed
-    if not _matches_schema(parsed, schemas[name]):
+    if name == "wait_agent" and isinstance(parsed, dict) and parsed.get("timeout_ms") is not None:
+        timeout, timeout_changed = _normalize_timeout_value(parsed["timeout_ms"], version=version)
+        parsed["timeout_ms"] = timeout
+        changed = timeout_changed
+    nullable = _CLIENT_NULLABLE_FIELDS.get(version, {}).get(name, frozenset())
+    schema_value = (
+        {key: value for key, value in parsed.items() if not (value is None and key in nullable)}
+        if isinstance(parsed, dict) else parsed
+    )
+    if not _matches_schema(schema_value, schemas[name]):
         raise CollaborationContractError("collaboration_arguments_schema_mismatch")
     # Preserve the caller's exact JSON spelling for every argument except the
     # one known CLI mismatch (wait_agent.timeout_ms).  Message payloads and
@@ -552,11 +568,10 @@ def _is_client_execution_error(name: str, value: str) -> bool:
         return _client_timeout_limit(value) is not None
     if value == "collab manager unavailable":
         return name in {"spawn_agent", "list_agents", "send_message", "followup_task"}
-    if name in {"send_message", "followup_task"} and value in {
-        "Empty message can't be sent to an agent",
-        "target agent is missing an agent_path",
-    }:
-        return True
+    if value == "Empty message can't be sent to an agent":
+        return name in {"spawn_agent", "send_message", "followup_task"}
+    if value == "target agent is missing an agent_path":
+        return name in {"send_message", "followup_task"}
     if name == "followup_task" and value == "Follow-up tasks can't target the root agent":
         return True
     if name == "spawn_agent":
@@ -623,9 +638,11 @@ def validate_collaboration_result(version: str, name: str, value: Any) -> None:
             # The client records this shared error as plain text (for example
             # a number-schema timeout emitted as 180000.0 but parsed as i64).
             # Replay it unchanged so the model can correct the failed call.
-            if version == COLLABORATION_V2 and (
-                is_client_argument_parse_error(value) or _is_client_execution_error(name, value)
-            ):
+            if is_client_argument_parse_error(value):
+                return
+            if version == COLLABORATION_V1 and name == "wait_agent" and value == "timeout_ms must be greater than zero":
+                return
+            if version == COLLABORATION_V2 and _is_client_execution_error(name, value):
                 return
             # Codex CLI serializes a failed V2 interrupt as the tool's plain
             # error text rather than a JSON result object.  Preserve that

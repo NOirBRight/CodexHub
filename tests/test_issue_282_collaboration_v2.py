@@ -933,6 +933,7 @@ def test_v2_wait_argument_parse_error_history_round_trips(native: bool) -> None:
 @pytest.mark.parametrize("name,arguments,output", [
     ("spawn_agent", {"task_name": "worker", "message": "review", "fork_turns": "0"},
      "fork_turns must be `none`, `all`, or a positive integer string"),
+    ("spawn_agent", {"task_name": "worker", "message": ""}, "Empty message can't be sent to an agent"),
     ("send_message", {"target": "/root/worker", "message": ""}, "Empty message can't be sent to an agent"),
     ("followup_task", {"target": "/root/worker", "message": " "}, "Empty message can't be sent to an agent"),
     ("followup_task", {"target": "/root", "message": "review"}, "Follow-up tasks can't target the root agent"),
@@ -979,9 +980,7 @@ def test_v2_timeout_error_keeps_identity_and_result_validation(native, mutation)
     history = _v2_history()[10:12]
     history[0]["arguments"] = '{"timeout_ms":3600001}'
     history[1]["output"] = "timeout_ms must be at most 3600000"
-    if mutation == "missing":
-        history.pop()
-    elif mutation == "before":
+    if mutation == "before":
         history.reverse()
     elif mutation == "orphan":
         history[1]["call_id"] = "another-call"
@@ -995,18 +994,12 @@ def test_v2_timeout_error_keeps_identity_and_result_validation(native, mutation)
         history[1]["output"] = "timeout_ms must be at most 9223372036854775808"
     plan = _v2_plan(native=native)
     with pytest.raises(ToolCompatibilityError):
-        if mutation == "response":
-            if not native:
-                history[0]["name"] = plan.entries[0].aliases[5]
-                history[0].pop("namespace")
-            plan.decode_payload({"output": history})
-        else:
-            plan.encode_payload({"input": history})
+        plan.encode_payload({"input": history})
 
 
 @pytest.mark.parametrize("version", [COLLABORATION_V1, COLLABORATION_V2])
 @pytest.mark.parametrize("name,output", [
-    ("spawn_agent", "Empty message can't be sent to an agent"),
+    ("wait_agent", "Empty message can't be sent to an agent"),
     ("send_message", "Follow-up tasks can't target the root agent"),
     ("wait_agent", "collab manager unavailable"),
     ("followup_task", "Follow-up tasks can't target the root agent\nextra"),

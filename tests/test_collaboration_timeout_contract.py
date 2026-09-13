@@ -39,8 +39,8 @@ def test_timeout_normalization_is_exact_and_lossless(wire, expected):
 
 
 @pytest.mark.parametrize("wire", [
-    '{"targets":["child"],"timeout_ms":0}',
-    '{"targets":["child"],"timeout_ms":-1}',
+    '{"targets":["child"],"timeout_ms":"1280"}',
+    '{"targets":["child"],"timeout_ms":-9223372036854775809}',
     '{"targets":["child"],"timeout_ms":0.5}',
     '{"targets":["child"],"timeout_ms":true}',
     '{"targets":["child"],"timeout_ms":1e400}',
@@ -332,7 +332,7 @@ def test_reconcile_adapted_argument_events_preserves_deltas_and_validates_snapsh
     for value in (1280, 0, -1, -(2**63), None, 3600001, 2**63 - 1)
 ] + [
     ("collaboration_v1", "multi_agent_v1", value)
-    for value in (1, 1280, 9999, 3600001, 2**63 - 1, None)
+    for value in (-(2**63), -1, 0, 1, 1280, 9999, 3600001, 2**63 - 1, None)
 ])
 @pytest.mark.parametrize("native", [True, False])
 def test_client_wait_input_range_is_not_the_effective_wait_duration(version, namespace, value, native):
@@ -354,11 +354,16 @@ def test_client_wait_input_range_is_not_the_effective_wait_duration(version, nam
     history = [{"type": "function_call", "id": "fc_wait", "call_id": "call_wait",
                 "namespace": namespace, "name": "wait_agent", "arguments": wire}]
     if version == "collaboration_v2":
-        output = json.dumps({"message": "Wait timed out.\n\nRequested timeout of 1280ms was clamped to the minimum of 10000ms.", "timed_out": True})
+        message = "Wait timed out."
+        if value is not None and value < 10000:
+            message += f"\n\nRequested timeout of {value}ms was clamped to the minimum of 10000ms."
+        output = json.dumps({"message": message, "timed_out": True})
         if value is not None and value > 3600000:
             output = "timeout_ms must be at most 3600000"
     else:
         output = json.dumps({"status": {}, "timed_out": True})
+        if value is not None and value <= 0:
+            output = "timeout_ms must be greater than zero"
     history.append({"type": "function_call_output", "id": "out_wait", "call_id": "call_wait", "output": output})
     encoded = plan.encode_payload({"tools": tools, "tool_choice": "auto", "input": history})
     restored = plan.decode_payload({"input": encoded["input"]})["input"]
@@ -374,3 +379,69 @@ def test_client_wait_input_range_is_not_the_effective_wait_duration(version, nam
     events = stream.decode_events_for_event({"type": "response.function_call_arguments.done",
         "item_id": "fc_wait", "output_index": 0, "arguments": wire})
     assert events[0]["arguments"] == wire
+
+
+@pytest.mark.parametrize("version,name,arguments", [
+    ("collaboration_v2", "spawn_agent", {"task_name": "worker", "message": "review", field: None})
+    for field in ("agent_type", "model", "reasoning_effort", "fork_turns")
+] + [("collaboration_v2", "list_agents", {"path_prefix": None})] + [
+    ("collaboration_v1", "spawn_agent", {field: None})
+    for field in ("message", "items", "agent_type", "model", "reasoning_effort")
+] + [
+    ("collaboration_v1", "send_input", {"target": "child", field: None})
+    for field in ("message", "items")
+])
+@pytest.mark.parametrize("native", [True, False])
+def test_client_optional_null_arguments_preserve_wire_values(version, name, arguments, native):
+    wire = json.dumps(arguments)
+    assert normalize_collaboration_arguments(version, name, wire) == (wire, False)
+    plan, namespace = _client_plan(version, native)
+    call = {"type": "function_call", "id": "fc_nullable", "call_id": "call_nullable",
+            "namespace": namespace, "name": name, "arguments": wire}
+    encoded = plan.encode_payload({"input": [call]})
+    assert plan.decode_payload({"input": encoded["input"]})["input"][0]["arguments"] == wire
+
+
+@pytest.mark.parametrize("version,name,arguments", [
+    ("collaboration_v1", "spawn_agent", {"fork_context": None}),
+    ("collaboration_v1", "send_input", {"target": "child", "interrupt": None}),
+    ("collaboration_v2", "send_message", {"target": "child", "message": None}),
+    ("collaboration_v2", "spawn_agent", {"task_name": None, "message": "review"}),
+])
+def test_nullable_options_do_not_relax_required_values_or_plain_booleans(version, name, arguments):
+    with pytest.raises(CollaborationContractError):
+        normalize_collaboration_arguments(version, name, json.dumps(arguments))
+
+
+def _client_plan(version, native):
+    namespace = "multi_agent_v1" if version == "collaboration_v1" else "collaboration"
+    tools = [{"type": "namespace", "name": namespace, "description": "runtime", "tools": [
+        {"type": "function", "name": name, "description": "runtime", "strict": False,
+         "parameters": copy.deepcopy(schema)}
+        for name, schema in EXPECTED_PARAMETER_SCHEMAS[version].items()
+    ]}]
+    return build_tool_compatibility_plan(
+        tools, selected_protocol="responses_structured", tool_choice="auto",
+        protocol_capabilities=ProtocolCapabilities(
+            function_lifecycle=True, namespace_lifecycle=native, accepts_namespace_adapter=True,
+        ),
+    ), namespace
+
+
+@pytest.mark.parametrize("native", [True, False])
+@pytest.mark.parametrize("version", ["collaboration_v1", "collaboration_v2"])
+def test_client_parse_error_can_resume_without_reinterpreting_failed_arguments(version, native):
+    plan, namespace = _client_plan(version, native)
+    wire = '{"timeout_ms":true}'
+    if version == "collaboration_v1":
+        wire = '{"targets":["child"],"timeout_ms":true}'
+    history = [
+        {"type": "function_call", "id": "fc_error", "call_id": "call_error",
+         "namespace": namespace, "name": "wait_agent", "arguments": wire},
+        {"type": "function_call_output", "id": "out_error", "call_id": "call_error",
+         "output": "failed to parse function arguments: invalid type: boolean `true`, expected i64"},
+    ]
+    encoded = plan.encode_payload({"input": history})
+    restored = plan.decode_payload({"input": encoded["input"]})["input"]
+    assert restored[0]["arguments"] == wire
+    assert restored[1] == history[1]
