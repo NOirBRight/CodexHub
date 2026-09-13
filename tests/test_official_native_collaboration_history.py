@@ -6,6 +6,7 @@ import pytest
 
 import gateway_compat
 import gateway_errors
+import gateway_events
 from collaboration_runtime_contract import (
     COLLABORATION_V1, COLLABORATION_V2, EXPECTED_PARAMETER_SCHEMAS,
 )
@@ -88,6 +89,18 @@ def test_child_continuation_with_opaque_call_and_other_native_tool(with_declarat
     assert prepared["input"] == history
 
 
+def test_native_collaboration_response_retains_encryption_marker_with_custom_tool():
+    _, context = prepare([namespace(), {"type": "custom", "name": "exec"}], [])
+    call = {"type": "function_call", "namespace": "collaboration", "name": "send_message",
+            "id": "item-response", "call_id": "call-response",
+            "arguments": json.dumps(ARGUMENTS["send_message"]),
+            "encrypted_function_args": ["message"]}
+    body = json.dumps({"output": [call]}).encode()
+    assert json.loads(gateway_compat.compatible_response_body(body, "official", context)) == {
+        "output": [call]
+    }
+
+
 @pytest.mark.parametrize("name", ["spawn_agent", "send_message", "close_agent"])
 def test_unrelated_namespace_can_reuse_collaboration_names(name):
     declaration = {"type": "namespace", "name": "user_tools", "tools": [
@@ -111,3 +124,21 @@ def test_malformed_native_collaboration_still_fails_closed(mutation):
         call.pop("namespace")
     with pytest.raises(gateway_errors.UpstreamProtocolTranslationError):
         prepare([declaration], [call])
+
+
+def test_rejected_collaboration_diagnostics_do_not_expose_payload(monkeypatch):
+    sentinel = "private-task-content-and-credential-sentinel"
+    events = []
+    monkeypatch.setattr(gateway_events, "write_proxy_event",
+                        lambda event, **fields: events.append((event, fields)))
+    declaration = namespace()
+    declaration["description"] = sentinel
+    declaration["tools"].pop()
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as error:
+        prepare([declaration], [{"type": "message", "role": "user", "content": sentinel}])
+    downstream = gateway_errors.downstream_json_error_payload(gateway_errors.DownstreamErrorSpec(
+        inbound_format="responses", upstream_name="official", status=400,
+        exc=error.value, error="tool_compatibility_boundary",
+    ))
+    assert sentinel not in json.dumps(downstream)
+    assert sentinel not in json.dumps(events)

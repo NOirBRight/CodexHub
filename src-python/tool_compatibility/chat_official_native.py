@@ -689,6 +689,8 @@ def collapse_official_native_tools_for_chat(
     for index, item in enumerate(list(output)):
         if not isinstance(item, dict):
             continue
+        if item.get("type") == "function_call" and item.get("namespace") is not None:
+            continue
         if _strip_encrypted_fields(item):
             changed = True
         item_type = item.get("type")
