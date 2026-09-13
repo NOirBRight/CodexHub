@@ -368,13 +368,14 @@ def classify_collaboration_request(request: Mapping[str, Any]) -> str | None:
     return classify_collaboration_tools(tools)  # type: ignore[arg-type]
 
 
-# CLI 0.153.4 exposes these bounds in the native V1/V2 wait handlers.  Keep
-# versioned names even though the currently shipped values coincide; a future
-# client change must update one contract without silently changing the other.
-COLLABORATION_V1_TIMEOUT_MIN = 10_000
-COLLABORATION_V1_TIMEOUT_MAX = 3_600_000
-COLLABORATION_V2_TIMEOUT_MIN = 10_000
-COLLABORATION_V2_TIMEOUT_MAX = 3_600_000
+# CLI 0.153.4 deserializes Option<i64>. Effective duration limits belong to
+# the client: V1 clamps positive values at both ends, while V2 clamps even
+# negative values to its configured minimum and reports its configured maximum.
+# A recorded request must keep the requested value, not the effective duration.
+COLLABORATION_V1_TIMEOUT_MIN = 1
+COLLABORATION_V1_TIMEOUT_MAX = 2**63 - 1
+COLLABORATION_V2_TIMEOUT_MIN = -(2**63)
+COLLABORATION_V2_TIMEOUT_MAX = 2**63 - 1
 
 
 def _json_object_or_value(value: Any, malformed: str) -> Any:
@@ -439,9 +440,14 @@ def normalize_collaboration_arguments(version: str, name: str, value: Any) -> tu
     parsed = _parse_collaboration_arguments(value, "malformed_collaboration_arguments")
     changed = False
     if name == "wait_agent" and isinstance(parsed, dict) and "timeout_ms" in parsed:
-        timeout, timeout_changed = _normalize_timeout_value(parsed["timeout_ms"], version=version)
-        parsed["timeout_ms"] = timeout
-        changed = timeout_changed
+        if parsed["timeout_ms"] is None:
+            # Option<i64> treats explicit null like omission. Validate that
+            # shape without changing the original wire representation.
+            parsed.pop("timeout_ms")
+        else:
+            timeout, timeout_changed = _normalize_timeout_value(parsed["timeout_ms"], version=version)
+            parsed["timeout_ms"] = timeout
+            changed = timeout_changed
     if not _matches_schema(parsed, schemas[name]):
         raise CollaborationContractError("collaboration_arguments_schema_mismatch")
     # Preserve the caller's exact JSON spelling for every argument except the
@@ -530,8 +536,8 @@ def is_client_argument_parse_error(value: Any) -> bool:
 def _client_timeout_limit(value: Any) -> int | None:
     if not isinstance(value, str):
         return None
-    match = re.fullmatch(r"timeout_ms must be at most ([0-9]{1,7})", value)
-    if match is not None and int(match[1]) <= COLLABORATION_V2_TIMEOUT_MAX:
+    match = re.fullmatch(r"timeout_ms must be at most ([0-9]{1,19})", value)
+    if match is not None and 0 < int(match[1]) <= COLLABORATION_V2_TIMEOUT_MAX:
         return int(match[1])
     return None
 
@@ -561,7 +567,7 @@ def _is_client_execution_error(name: str, value: str) -> bool:
 
 
 def failed_argument_call_ids(
-    items: Iterable[Any], *, v2_wait_aliases: Iterable[str] = (),
+    items: Iterable[Any],
 ) -> set[str]:
     """Return only call IDs backed by an earlier, real failed call.
 
@@ -573,7 +579,6 @@ def failed_argument_call_ids(
     if items is None:
         return set()
     seen_calls: dict[str, Mapping[str, Any]] = {}
-    wait_aliases = frozenset(v2_wait_aliases)
     failed: set[str] = set()
     for item in items:
         if not isinstance(item, Mapping):
@@ -593,27 +598,6 @@ def failed_argument_call_ids(
             if is_client_argument_parse_error(output):
                 failed.add(call_id)
                 continue
-            call = seen_calls[call_id]
-            limit = _client_timeout_limit(output)
-            is_v2_wait = call.get("type") == "function_call" and item_type == "function_call_output" and (
-                (call.get("namespace") == V2_NAMESPACE and call.get("name") == "wait_agent")
-                or (call.get("namespace") is None and isinstance(call.get("name"), str)
-                    and call["name"] in wait_aliases)
-            )
-            if limit is None or not is_v2_wait or not isinstance(call.get("arguments"), str):
-                continue
-            try:
-                arguments = _parse_collaboration_arguments(call["arguments"], "malformed_collaboration_arguments")
-            except CollaborationContractError:
-                continue
-            # A handler range error proves integer deserialization succeeded.
-            # Never use it to waive JSON, field, type, or i64 validation.
-            if (
-                isinstance(arguments, dict) and set(arguments) == {"timeout_ms"}
-                and type(arguments["timeout_ms"]) is int
-                and limit < arguments["timeout_ms"] <= 2**63 - 1
-            ):
-                failed.add(call_id)
     return failed
 
 

@@ -959,11 +959,11 @@ def test_v2_client_execution_error_history_round_trips(native, name, arguments, 
 
 @pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
 @pytest.mark.parametrize("arguments", [
-    '{"timeout_ms":3600001.0}', '{"timeout_ms":"3600001"}',
-    '{"timeout_ms":true}', '{"timeout_ms":null}',
+    '{"timeout_ms":3600001.5}', '{"timeout_ms":"3600001"}',
+    '{"timeout_ms":true}', '{"timeout_ms":[]}',
     '{"timeout_ms":NaN}', '{"timeout_ms":9223372036854775808}',
     '{"timeout_ms":3600001,"timeout_ms":3600002}',
-    '{"timeout_ms":3600001,"extra":1}', '{"timeout_ms":-1}',
+    '{"timeout_ms":3600001,"extra":1}', '{"timeout_ms":-9223372036854775809}',
 ])
 def test_v2_timeout_error_cannot_waive_argument_structure(native, arguments) -> None:
     history = _v2_history()[10:12]
@@ -974,8 +974,8 @@ def test_v2_timeout_error_cannot_waive_argument_structure(native, arguments) -> 
 
 
 @pytest.mark.parametrize("native", [False, True], ids=["adapted", "native"])
-@pytest.mark.parametrize("mutation", ["missing", "before", "orphan", "duplicate", "wrong_tool", "response", "empty_error", "wrong_bound"])
-def test_v2_timeout_exemption_requires_paired_history(native, mutation) -> None:
+@pytest.mark.parametrize("mutation", ["before", "orphan", "duplicate", "wrong_tool", "empty_error", "wrong_bound"])
+def test_v2_timeout_error_keeps_identity_and_result_validation(native, mutation) -> None:
     history = _v2_history()[10:12]
     history[0]["arguments"] = '{"timeout_ms":3600001}'
     history[1]["output"] = "timeout_ms must be at most 3600000"
@@ -992,7 +992,7 @@ def test_v2_timeout_exemption_requires_paired_history(native, mutation) -> None:
     elif mutation == "empty_error":
         history[1]["output"] = "timeout_ms must be at most "
     elif mutation == "wrong_bound":
-        history[1]["output"] = "timeout_ms must be at most 9999999"
+        history[1]["output"] = "timeout_ms must be at most 9223372036854775808"
     plan = _v2_plan(native=native)
     with pytest.raises(ToolCompatibilityError):
         if mutation == "response":

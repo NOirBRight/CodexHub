@@ -39,8 +39,8 @@ def test_timeout_normalization_is_exact_and_lossless(wire, expected):
 
 
 @pytest.mark.parametrize("wire", [
-    '{"targets":["child"],"timeout_ms":9999}',
-    '{"targets":["child"],"timeout_ms":3600001}',
+    '{"targets":["child"],"timeout_ms":0}',
+    '{"targets":["child"],"timeout_ms":-1}',
     '{"targets":["child"],"timeout_ms":0.5}',
     '{"targets":["child"],"timeout_ms":true}',
     '{"targets":["child"],"timeout_ms":1e400}',
@@ -325,3 +325,52 @@ def test_reconcile_adapted_argument_events_preserves_deltas_and_validates_snapsh
     assert not changed
     assert [event["type"] for event in rewritten] == [event["type"] for event in events]
     assert [event["delta"] for event in rewritten[1:3]] == ['{"timeout_ms":', "300000}"]
+
+
+@pytest.mark.parametrize("version,namespace,value", [
+    ("collaboration_v2", "collaboration", value)
+    for value in (1280, 0, -1, -(2**63), None, 3600001, 2**63 - 1)
+] + [
+    ("collaboration_v1", "multi_agent_v1", value)
+    for value in (1, 1280, 9999, 3600001, 2**63 - 1, None)
+])
+@pytest.mark.parametrize("native", [True, False])
+def test_client_wait_input_range_is_not_the_effective_wait_duration(version, namespace, value, native):
+    tools = [{"type": "namespace", "name": namespace, "description": "runtime", "tools": [
+        {"type": "function", "name": name, "description": "runtime", "strict": False,
+         "parameters": copy.deepcopy(schema)}
+        for name, schema in EXPECTED_PARAMETER_SCHEMAS[version].items()
+    ]}]
+    plan = build_tool_compatibility_plan(
+        tools, selected_protocol="responses_structured", tool_choice="auto",
+        protocol_capabilities=ProtocolCapabilities(
+            function_lifecycle=True, namespace_lifecycle=native, accepts_namespace_adapter=True,
+        ),
+    )
+    arguments = {"timeout_ms": value}
+    if version == "collaboration_v1":
+        arguments["targets"] = ["child"]
+    wire = json.dumps(arguments)
+    history = [{"type": "function_call", "id": "fc_wait", "call_id": "call_wait",
+                "namespace": namespace, "name": "wait_agent", "arguments": wire}]
+    if version == "collaboration_v2":
+        output = json.dumps({"message": "Wait timed out.\n\nRequested timeout of 1280ms was clamped to the minimum of 10000ms.", "timed_out": True})
+        if value is not None and value > 3600000:
+            output = "timeout_ms must be at most 3600000"
+    else:
+        output = json.dumps({"status": {}, "timed_out": True})
+    history.append({"type": "function_call_output", "id": "out_wait", "call_id": "call_wait", "output": output})
+    encoded = plan.encode_payload({"tools": tools, "tool_choice": "auto", "input": history})
+    restored = plan.decode_payload({"input": encoded["input"]})["input"]
+    assert restored[0]["arguments"] == wire
+    assert restored[1] == history[1]
+    # Newly generated calls must use the same client integer domain. The client
+    # owns clamping/range errors, so body and stream cannot impose a duration floor.
+    call = encoded["input"][0]
+    assert plan.decode_payload({"output": [call]})["output"][0]["arguments"] == wire
+    stream = plan.new_stream()
+    stream.decode_events_for_event({"type": "response.output_item.added", "output_index": 0,
+        "item": {**call, "arguments": "", "status": "in_progress"}})
+    events = stream.decode_events_for_event({"type": "response.function_call_arguments.done",
+        "item_id": "fc_wait", "output_index": 0, "arguments": wire})
+    assert events[0]["arguments"] == wire

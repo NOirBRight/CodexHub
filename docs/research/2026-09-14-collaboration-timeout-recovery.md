@@ -1,0 +1,44 @@
+# Collaboration wait continuation recovery
+
+## Acceptance
+
+The user reports another subagent continuation failure on 0.2.9 and asks to
+fix it and audit related omissions and payload/privacy leaks. Preserve user
+history and original requested values, and keep tool execution owned by Codex.
+Run Linux and Windows relevant regression/E2E checks before a follow-up release.
+
+## Reproduction
+
+The affected local parent rollout records a V2 `wait_agent` call with
+`{"timeout_ms":1280}` followed by a successful JSON result explaining that
+1280 ms was clamped to the minimum of 10000 ms. Gateway then rejects continuation
+with `Tool compatibility failed at history: collaboration_timeout_out_of_range.`
+No task IDs, task content, credentials or raw rollout are copied here.
+
+The public ToolCompatibilityPlan regression is
+`tests/test_collaboration_timeout_contract.py::test_client_wait_input_range_is_not_the_effective_wait_duration`.
+It failed on 0.2.9 with the exact classification and now covers native/adapted
+history plus response-body and SSE continuations.
+
+## Runtime authority
+
+Codex CLI rust-v0.153.4 source:
+
+- https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
+- https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs
+
+Both deserialize Option<i64>. V1 rejects nonpositive integers and clamps positive
+integers at both duration limits. V2 clamps all integers below its configured
+minimum (including negative values), and reports a configured maximum violation
+to the model. Null means the default timeout. Fixed 10000..3600000 validation
+incorrectly confused execution duration with valid serialized arguments.
+
+Preserve these values; retain exact-number handling, i64 overflow checks,
+fraction/type/duplicate-key rejection, namespace isolation and encryption rules.
+V2 range-error replay no longer needs a special argument-validation exemption:
+its integer input is already valid, and the client owns its configured maximum.
+
+## Verification status
+
+Focused regression and broader audit are in progress. No production process or
+user session has been modified.
