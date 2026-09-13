@@ -368,6 +368,12 @@ def compatible_request_body(
                 status=TOOL_SEARCH_UNAVAILABLE_STATUS,
             )
         changed = True
+    discovered_namespaces: set[str] = set()
+    if upstream_name != "official" and not raw_provider_probe:
+        import tool_discovery
+
+        discovered_namespaces, discovery_changed = tool_discovery.promote_client_search_results(payload)
+        changed |= discovery_changed
     runtime_tool_plan: RuntimeToolCompatibilityPlan | None = None
     pending_tool_surface_event: dict[str, Any] | None = None
     tool_surface_source_tools: list[Any] | None = None
@@ -394,7 +400,7 @@ def compatible_request_body(
                 if _official_passthrough._is_raw_namespace_schema(tool)
                 and not (
                     isinstance(tool, Mapping)
-                    and tool.get("name") in {"multi_agent_v1", _COLLABORATION_V2_NAMESPACE}
+                    and tool.get("name") in {"multi_agent_v1", _COLLABORATION_V2_NAMESPACE} | discovered_namespaces
                 )
             ]
             retained_tools = [
@@ -404,7 +410,7 @@ def compatible_request_body(
                     _official_passthrough._is_raw_namespace_schema(tool)
                     and not (
                         isinstance(tool, Mapping)
-                        and tool.get("name") in {"multi_agent_v1", _COLLABORATION_V2_NAMESPACE}
+                        and tool.get("name") in {"multi_agent_v1", _COLLABORATION_V2_NAMESPACE} | discovered_namespaces
                     )
                 )
             ]

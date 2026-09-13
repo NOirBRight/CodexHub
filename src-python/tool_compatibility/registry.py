@@ -10,12 +10,13 @@ from typing import Any, Iterable, Mapping
 
 from .collab_v2 import AGENT_MESSAGE_ENVELOPE_PREFIX
 from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, copy_mapping as _copy_mapping
-from .dispositions import CUSTOM_FREEFORM, NAMESPACE, SELECTED_PROVIDER_HOSTED, TOOL_SEARCH
+from .dispositions import CUSTOM_FREEFORM, NAMESPACE, PLAIN_FUNCTION, SELECTED_PROVIDER_HOSTED, TOOL_SEARCH
 
 _NAMESPACE_ALIAS_PREFIX = "__codexhub_ns_"
 _CUSTOM_ALIAS_PREFIX = "__codexhub_custom_"
 _TOOL_SEARCH_ALIAS_PREFIX = "__codexhub_search_"
 _HOSTED_ALIAS_PREFIX = "__codexhub_hosted_"
+_FUNCTION_ALIAS_PREFIX = "__codexhub_fn_"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +102,7 @@ class RequestScopedToolAliasRegistry:
                 CUSTOM_FREEFORM: _CUSTOM_ALIAS_PREFIX,
                 TOOL_SEARCH: _TOOL_SEARCH_ALIAS_PREFIX,
                 SELECTED_PROVIDER_HOSTED: _HOSTED_ALIAS_PREFIX,
+                PLAIN_FUNCTION: _FUNCTION_ALIAS_PREFIX,
             }.get(record.family, _CUSTOM_ALIAS_PREFIX)
             replacement = self._allocate(record, prefix)
             remapped[alias] = replacement
@@ -113,7 +115,7 @@ class RequestScopedToolAliasRegistry:
     @staticmethod
     def looks_like_alias(value: Any) -> bool:
         return isinstance(value, str) and value.startswith(
-            (_NAMESPACE_ALIAS_PREFIX, _CUSTOM_ALIAS_PREFIX, _TOOL_SEARCH_ALIAS_PREFIX, _HOSTED_ALIAS_PREFIX)
+            (_NAMESPACE_ALIAS_PREFIX, _CUSTOM_ALIAS_PREFIX, _TOOL_SEARCH_ALIAS_PREFIX, _HOSTED_ALIAS_PREFIX, _FUNCTION_ALIAS_PREFIX)
         )
 
     def _allocate(self, record_without_alias: AliasRecord, prefix: str) -> str:
@@ -175,6 +177,14 @@ class RequestScopedToolAliasRegistry:
                 version=version,
             ),
             _NAMESPACE_ALIAS_PREFIX,
+        )
+
+    def allocate_function(self, *, declaration_index: int, original_name: str) -> str:
+        return self._allocate(
+            AliasRecord(alias="", family=PLAIN_FUNCTION, declaration_index=declaration_index,
+                        child_index=None, namespace=None, child_name=None,
+                        original_name=original_name, version=None),
+            _FUNCTION_ALIAS_PREFIX,
         )
 
     def allocate_custom(self, *, declaration_index: int, original_name: str, version: str | None) -> str:

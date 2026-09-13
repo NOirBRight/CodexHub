@@ -263,7 +263,7 @@ DEFAULT_OLLAMA_MODEL: dict[str, Any] = {
     "effective_context_window_percent": 95,
     "experimental_supported_tools": [],
     "input_modalities": ["text", "image"],
-    "supports_search_tool": False,
+    "supports_search_tool": True,
     "use_responses_lite": False,
     "base_instructions": "You are Codex, a coding agent. Follow the current session instructions and use tools when needed.",
     "instructions_variables": {},
@@ -2332,6 +2332,9 @@ def build_ollama_model(
         model.pop(key, None)
     model["use_responses_lite"] = False
     model["slug"] = slug
+    # Discovery runs in Codex; Gateway adapts its call/result lifecycle to
+    # ordinary function tools. Do not inherit the old eager-only fallback.
+    model["supports_search_tool"] = True
     model["display_name"] = display_name_for(slug, policy)
     model.setdefault("description", DEFAULT_OLLAMA_MODEL["description"])
     model.setdefault("visibility", "list")
@@ -2455,6 +2458,7 @@ def build_external_provider_model(
     for key in PINNED_OFFICIAL_PLANNER_FIELD_SET:
         model.pop(key, None)
     model["use_responses_lite"] = False
+    model["supports_search_tool"] = external_model.get("tool_protocol") != "none"
     multi_agent_version = external_model.get("multi_agent_version")
     if multi_agent_version in {"v1", "v2"}:
         model["multi_agent_version"] = multi_agent_version

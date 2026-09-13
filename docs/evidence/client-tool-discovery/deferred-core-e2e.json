@@ -1,0 +1,36 @@
+[
+  {
+    "model": "xai/grok-4.6",
+    "strategy": "deferred_core",
+    "live": false,
+    "exit": 0,
+    "requests": 3,
+    "tool_counts": [
+      18,
+      19,
+      19
+    ],
+    "tool_executed": true,
+    "tool_result_observed": true,
+    "failures": [],
+    "completed": true,
+    "passed": true
+  },
+  {
+    "model": "volc/glm-5.2",
+    "strategy": "deferred_core",
+    "live": false,
+    "exit": 0,
+    "requests": 3,
+    "tool_counts": [
+      18,
+      19,
+      19
+    ],
+    "tool_executed": true,
+    "tool_result_observed": true,
+    "failures": [],
+    "completed": true,
+    "passed": true
+  }
+]

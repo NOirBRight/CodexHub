@@ -1,0 +1,31 @@
+{
+  "source_files": {
+    "src-python/catalog_sync.py": "c59f8b2fcbd159d5cb85a794a2529c7dae522cf8ba7a07ec5c4472ab00d8d140",
+    "src-python/gateway_compat/request.py": "845c96eebbd6cb25d5aa9b87a44eeacfb7aece2c00a42c41d2ede3cd2b889e69",
+    "src-python/gateway_compat/official_passthrough.py": "4e8bf9917a410f17825bd60d58e995301e6d7381114aa7dbcb218252b097dadb",
+    "src-python/tool_compatibility/contracts.py": "1d61fee7da14fcbe5c9bf5e52017da0a2d51211cf5aa6f1548c06a53bdf0462f",
+    "src-python/tool_compatibility/dispositions.py": "6aea8389955a7f6c256e0cf016a8b2192a1aa6fabf46f346e859b344debe9cdd",
+    "src-python/tool_compatibility/registry.py": "1bed82cc396c6accf9595e1af487a522e5d6a5b20bd951ce90b3bfb7fd23bc87",
+    "src-python/tool_compatibility/plan.py": "3cf78c307184a6f509a5a77a6de692849e3f18d4e919c7f52f90c066e2b6a348",
+    "src-python/tool_compatibility/argument_contract.py": "c0c3e43f0f7b900632a2844232db2b6e1afb5f757637d3a255b871a99706a7ea",
+    "tests/test_python_runtime.py": "7f01ef714e2d66f142d7ee9d6b399a30f1159d235f1853af2d06b74737bfdaf0",
+    "src-python/tool_discovery.py": "e60f06156a15e9bd7359b0fd36662e251b54ad5db80edd2ddb0d1a7de37e789f",
+    "tests/test_xai_tool_name_collision.py": "d03d3a47ad0c0d0ce604696774bd749bc4e1aa20540629adb59f79109e74d9b1",
+    "tests/test_client_tool_discovery.py": "6dc43061d9794e00da6b71e068bdd8a8a55e91a45bb48d8faefdc8d941a98df5",
+    "scripts/e2e_client_tool_discovery.py": "237ffe3e033c03ae04b0f50134d7a8561d4f196d1cc9ca0fb19088c78d352685"
+  },
+  "validation": {
+    "python_core": {
+      "passed": 2623,
+      "failed_baseline": 16,
+      "skipped": 177,
+      "subtests": 267
+    },
+    "targeted": {
+      "passed": 326,
+      "subtests": 51
+    },
+    "production_deployed": false
+  },
+  "scope": "Pre-integration diagnostic workspace, including pre-existing unrelated changes. Not the merge candidate."
+}
