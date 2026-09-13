@@ -20,6 +20,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import tool_history
+
 from codex_semantic_adapter import (
     COLLABORATION_V1,
     COLLABORATION_V1_ALIAS_PREFIXES,
@@ -1081,7 +1083,7 @@ def rewrite_structured_tool_input_items(
             # consistently: preserving only collaboration/node calls leaves
             # ordinary tool transcripts between a parallel call and its result,
             # which Responses-to-Chat providers reject as a missing result.
-            replacement = _compatible_internal_message(item)
+            replacement = tool_history.internal_message(item)
             if replacement is not None:
                 rewritten_items.append(replacement)
             changed = True
@@ -1121,7 +1123,7 @@ def rewrite_structured_tool_input_items(
                 rewritten_items.append(rewritten if rewritten is not None else item)
                 changed = changed or rewritten != item
             else:
-                replacement = _compatible_internal_message(item)
+                replacement = tool_history.internal_message(item)
                 if replacement is not None:
                     rewritten_items.append(replacement)
                 changed = True
@@ -1131,13 +1133,13 @@ def rewrite_structured_tool_input_items(
             if isinstance(call_id, str) and call_id in preserved_structured_call_ids:
                 rewritten_items.append(dict(item))
             else:
-                replacement = _compatible_internal_message(item)
+                replacement = tool_history.internal_message(item)
                 if replacement is not None:
                     rewritten_items.append(replacement)
                 changed = True
             continue
         item_type = item.get("type")
-        replacement = _compatible_internal_message(item)
+        replacement = tool_history.internal_message(item)
         if replacement is not None:
             rewritten_items.append(replacement)
             changed = True
@@ -1642,7 +1644,7 @@ def downgrade_invalid_third_party_tool_calls(
             if value.get("type") == "custom_tool_call"
             else "Invalid third-party function call transcript"
         )
-        return (_transcript_message(title, value), True)
+        return (tool_history.transcript_message(title, value), True)
     changed = False
     rewritten = dict(value)
     for key, item in value.items():
@@ -1663,15 +1665,3 @@ def _adapt_apply_patch_history(*args: Any, **kwargs: Any) -> Any:
     import gateway_compat.response as response
 
     return response._adapt_apply_patch_custom_tool_history(*args, **kwargs)
-
-
-def _compatible_internal_message(*args: Any, **kwargs: Any) -> Any:
-    import gateway_compat.official_passthrough as official_passthrough
-
-    return official_passthrough._compatible_internal_message(*args, **kwargs)
-
-
-def _transcript_message(*args: Any, **kwargs: Any) -> Any:
-    import gateway_compat.official_passthrough as official_passthrough
-
-    return official_passthrough._assistant_transcript_message(*args, **kwargs)

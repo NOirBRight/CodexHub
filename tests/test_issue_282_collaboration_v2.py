@@ -429,7 +429,7 @@ def test_invalid_request_is_rejected_before_runtime_planning() -> None:
     body = _request(COLLABORATION_V2)
     body["tools"][0]["tools"].pop()
 
-    with patch.object(gateway_compat_official, "_prepare_runtime_tool_compatibility") as prepare:
+    with patch.object(gateway_compat_official, "prepare_tool_plan") as prepare:
         with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
             gateway_compat.compatible_request_body(
                 json.dumps(body).encode(),
@@ -487,7 +487,7 @@ def test_native_responses_namespace_is_validated_and_preserved_unchanged() -> No
 
     assert transformed == raw
     assert context["collaboration_protocol"] == COLLABORATION_V2
-    plan = context["_runtime_tool_compatibility_plan"]
+    plan = gateway_compat.official_passthrough.request_tool_plan(context)
     assert plan.entries[0].disposition == "native"
     assert plan.entries[0].version == "v2"
 
@@ -514,7 +514,7 @@ def test_conservative_responses_adapts_all_six_v2_children_without_v1_behavior()
     assert all(alias.startswith("__codexhub_ns_") for alias in aliases)
     assert not any("multi_agent_v1" in alias for alias in aliases)
     assert context["collaboration_protocol"] == COLLABORATION_V2
-    plan = context["_runtime_tool_compatibility_plan"]
+    plan = gateway_compat.official_passthrough.request_tool_plan(context)
     assert plan.entries[0].disposition == "adapt"
     assert plan.entries[0].child_names == (
         "followup_task",
@@ -568,7 +568,7 @@ def test_v2_chat_surface_uses_capability_driven_namespace_adapter() -> None:
     assert len(transformed["tools"]) == 6
     assert all(tool["type"] == "function" for tool in transformed["tools"])
     assert all(tool["name"].startswith("__codexhub_ns_") for tool in transformed["tools"])
-    assert context["_runtime_tool_compatibility_plan"].capabilities.accepts_namespace_adapter is True
+    assert gateway_compat.official_passthrough.request_tool_plan(context).capabilities.accepts_namespace_adapter is True
 
 
 def test_v2_unrepresentable_responses_surface_fails_instead_of_omitting_lifecycle() -> None:
@@ -1262,7 +1262,7 @@ def test_mixed_collaboration_history_fails_before_runtime_planning() -> None:
         _v2_history()[0],
     ]
 
-    with patch.object(gateway_compat_official, "_prepare_runtime_tool_compatibility") as prepare:
+    with patch.object(gateway_compat_official, "prepare_tool_plan") as prepare:
         with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
             gateway_compat.compatible_request_body(
                 json.dumps(body).encode(),
@@ -1816,7 +1816,7 @@ def test_v2_stream_does_not_create_v1_worker_binding_state() -> None:
         event_context=context,
         inject_codex_tools=False,
     )
-    alias = context["_runtime_tool_compatibility_plan"].entries[0].aliases[0]
+    alias = gateway_compat.official_passthrough.request_tool_plan(context).entries[0].aliases[0]
     added = {
         "type": "response.output_item.added",
         "output_index": 0,

@@ -35,9 +35,11 @@ Top-level `from owner import name` is still forbidden across that SCC
 because it would recreate an import cycle. Attribute reads at call time keep
 test patches on the owning submodule live without a lookup table.
 
-`RelaySymbols` is gone. Relay entrypoints import owning modules at function
-entry. Exchange-owned glue is a small `RelayGlue` on `RelayContext`, not a
-128-field bag.
+`RelaySymbols` is gone. Relay entrypoints read owning-module attributes at
+the call site and keep only the small `RelayGlue` on `RelayContext` plus
+values with genuine one-read semantics (policies, `self`, `glue`); there is
+no per-request symbol block. Exchange-owned glue is a small `RelayGlue`, not
+a 128-field bag.
 
 Cross-module imports use the owning module's public name. An AST gate in
 `tests/test_module_boundaries.py` keeps the underscore-import allowlist empty.

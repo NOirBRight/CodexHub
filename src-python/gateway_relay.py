@@ -14,6 +14,7 @@ from gateway_interfaces import RequestAdmission, RelayWriter, UpstreamResponseLi
 import http.client
 import urllib.error
 
+import collaboration_adapter
 import gateway_compat
 import gateway_errors
 import gateway_events
@@ -23,8 +24,8 @@ import gateway_stream_semantics
 import gateway_transport
 import protocol_translation
 import route_primitives
-import runtime_tool_compatibility
 import sse_events
+import tool_surface_adapter
 
 from sse_events import SseEvent, SseEventAssembler, SseAssemblerClosedError, SseFrameTooLargeError
 from protocol_translation import UpstreamStreamIncompleteError
@@ -471,7 +472,6 @@ def relay_upstream_response(
     DownstreamKeepaliveFailedError = gateway_stream_semantics.DownstreamKeepaliveFailedError
     IncompleteRead = http.client.IncompleteRead
     NonForwardable = protocol_translation.NonForwardable
-    RuntimeToolCompatibilityError = runtime_tool_compatibility.ToolCompatibilityError
     SseFrameTooLargeError = sse_events.SseFrameTooLargeError
     URLError = urllib.error.URLError
     UpstreamEmptyCompletedResponseError = gateway_stream_semantics.UpstreamEmptyCompletedResponseError
@@ -494,87 +494,11 @@ def relay_upstream_response(
     RETRY_REQUEST_COMPACT = route_primitives.RETRY_REQUEST_COMPACT
     RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE = route_primitives.RETRY_SAFETY_SUPPRESSED_POST_EXPOSURE
     RETRY_SAFETY_SUPPRESSED_POST_WRITE = route_primitives.RETRY_SAFETY_SUPPRESSED_POST_WRITE
-    _adapt_third_party_apply_patch_stream_events = gateway_compat.response._adapt_third_party_apply_patch_stream_events
-    _apply_external_worker_response_contract = gateway_compat.multi_agent._apply_external_worker_response_contract
-    _apply_patch_adapter_enabled = gateway_compat.response._apply_patch_adapter_enabled
     _bind_downstream_stream_commit = glue._bind_downstream_stream_commit
-    _bounded_failure_event_context = gateway_events.bounded_failure_event_context
-    _capture_usage = gateway_events.capture_usage
-    _chat_completion_body_is_empty = gateway_stream_semantics._chat_completion_body_is_empty
-    _chat_completion_body_to_stream_chunks = gateway_stream_semantics._chat_completion_body_to_stream_chunks
-    _chat_completion_to_response_body = gateway_stream_semantics._chat_completion_to_response_body
-    _chat_sse_event_resets_idle_timeout = gateway_stream_semantics._chat_sse_event_resets_idle_timeout
-    _chat_stream_chunks_have_terminal = gateway_stream_semantics._chat_stream_chunks_have_terminal
-    _chat_stream_chunks_to_response_events = gateway_stream_semantics._chat_stream_chunks_to_response_events
-    _chat_stream_error_detail = gateway_stream_semantics._chat_stream_error_detail
-    _chat_stream_lifecycle_final_issue = gateway_stream_semantics._chat_stream_lifecycle_final_issue
-    _chat_stream_shape_summary = gateway_stream_semantics._chat_stream_shape_summary
-    _chat_terminal_observer = gateway_stream_semantics._chat_terminal_observer
-    _compact_response_body_is_empty = gateway_stream_semantics._compact_response_body_is_empty
-    _converted_sse_payload = gateway_stream_semantics._converted_sse_payload
-    _count_sse_reasoning_event = gateway_stream_semantics._count_sse_reasoning_event
-    _downgrade_invalid_third_party_tool_calls = gateway_compat.official_passthrough._downgrade_invalid_third_party_tool_calls
-    _events_to_responses_body = gateway_stream_semantics._events_to_responses_body
-    _filtered_response_headers = gateway_request._filtered_response_headers
     _handler_downstream_stream_commit = glue._handler_downstream_stream_commit
-    _incomplete_stream_json_error_body = gateway_stream_semantics._incomplete_stream_json_error_body
-    _is_event_stream = gateway_request._is_event_stream
-    _is_raw_reasoning_stream_event = gateway_stream_semantics.is_raw_reasoning_stream_event
-    _is_sse_blank_line = gateway_sse._is_sse_blank_line
-    _is_sse_event_metadata_line = gateway_sse._is_sse_event_metadata_line
-    _json_error_payload_for_inbound_format = gateway_errors._json_error_payload_for_inbound_format
-    _lifecycle_final_issue_event_name = gateway_stream_semantics._lifecycle_final_issue_event_name
-    _lifecycle_final_issue_missing_reason = gateway_stream_semantics._lifecycle_final_issue_missing_reason
-    _normalize_third_party_tool_call = gateway_compat.official_passthrough._normalize_third_party_tool_call
     _observe_gateway_diagnostic = glue._observe_gateway_diagnostic
-    _offer_usage_observed_body = gateway_events.offer_usage_observed_body
-    _offer_usage_observed_sse_line = gateway_events.offer_usage_observed_sse_line
-    _parse_sse_json_payload = gateway_sse._parse_sse_json_payload
-    _parse_sse_json_payloads = gateway_sse._parse_sse_json_payloads
-    _public_event_context = gateway_events.public_event_context
-    _raise_lifecycle_final_issue = gateway_stream_semantics._raise_lifecycle_final_issue
-    _raise_runtime_tool_compatibility_error = gateway_compat.official_passthrough._raise_runtime_tool_compatibility_error
-    reconcile_function_call_argument_events = gateway_compat.sse.reconcile_function_call_argument_events
-    _redact_identity_in_text = gateway_errors._redact_identity_in_text
-    _response_body_lifecycle_final_issue = gateway_stream_semantics._response_body_lifecycle_final_issue
-    _response_body_to_chat_completion_body = gateway_stream_semantics._response_body_to_chat_completion_body
-    _response_body_to_response_sse_events = gateway_stream_semantics._response_body_to_response_sse_events
-    _response_events_shape_summary = gateway_stream_semantics._response_events_shape_summary
-    _responses_body_is_empty = gateway_stream_semantics._responses_body_is_empty
-    _responses_completed_tool_item = gateway_stream_semantics._responses_completed_tool_item
-    _responses_event_commits_downstream_output = gateway_stream_semantics._responses_event_commits_downstream_output
-    _responses_event_has_visible_or_tool_output = gateway_stream_semantics._responses_event_has_visible_or_tool_output
-    _responses_event_is_tool_call_construction = gateway_stream_semantics._responses_event_is_tool_call_construction
-    _responses_event_starts_downstream_output = gateway_stream_semantics._responses_event_starts_downstream_output
-    _responses_events_have_terminal = gateway_stream_semantics._responses_events_have_terminal
-    _responses_events_lifecycle_final_issue = gateway_stream_semantics._responses_events_lifecycle_final_issue
-    _responses_failed_event_for_stream_error = gateway_errors._responses_failed_event_for_stream_error
-    _responses_sse_event_resets_idle_timeout = gateway_stream_semantics._responses_sse_event_resets_idle_timeout
-    _responses_sse_line_resets_idle_timeout = gateway_stream_semantics._responses_sse_line_resets_idle_timeout
-    _responses_stream_error_detail = gateway_stream_semantics._responses_stream_error_detail
-    _responses_stream_error_type = gateway_stream_semantics._responses_stream_error_type
-    _responses_terminal_observer = gateway_stream_semantics._responses_terminal_observer
-    _retry_identity_from_context = gateway_transport._retry_identity_from_context
-    _route_failure_event_fields = gateway_events.route_failure_event_fields
-    _runtime_tool_compatibility_stream_for_attempt = gateway_compat.official_passthrough._runtime_tool_compatibility_stream_for_attempt
-    _sse_event_separator_after_line = gateway_sse._sse_event_separator_after_line
-    _sse_json_line = gateway_stream_semantics._sse_json_line
-    _sse_line_ending = gateway_sse._sse_line_ending
-    _suppress_bounded_tool_search_calls = gateway_compat.multi_agent._suppress_bounded_tool_search_calls
-    _suppress_chat_reasoning_extensions = gateway_stream_semantics._suppress_chat_reasoning_extensions
-    _synthetic_response_completed_from_tool_items = gateway_stream_semantics._synthetic_response_completed_from_tool_items
-    _upstream_failure_class = gateway_transport._upstream_failure_class
-    _usage_from_json_body = gateway_events._usage_from_json_body
-    _usage_from_payload = gateway_events._usage_from_payload
-    _usage_from_response_event = gateway_events._usage_from_response_event
-    _usage_observed_context = gateway_events._usage_observed_context
-    _verified_converted_sse_semantic_error = gateway_stream_semantics._verified_converted_sse_semantic_error
-    _with_codexhub_http_error = gateway_errors._with_codexhub_http_error
     _write_adapter_event = glue._write_adapter_event
-    _write_runtime_tool_adapter_response_evidence = gateway_compat.official_passthrough._write_runtime_tool_adapter_response_evidence
-    compatible_response_body = gateway_compat.compatible_response_body
     compatible_sse_line = glue.compatible_sse_line
-    safe_upstream_error_detail = gateway_errors.safe_upstream_error_detail
     upstream_format = relay_execution_plan.selected_upstream_format
     request_kind = relay_execution_plan.request_kind
     streaming_policy = relay_execution_plan.streaming_policy
@@ -593,7 +517,7 @@ def relay_upstream_response(
         getattr(relay_execution_plan, "preserve_reasoning_history", False)
     )
     status = getattr(response, "status", None) or getattr(response, "code", 502)
-    is_event_stream = _is_event_stream(response.headers)
+    is_event_stream = gateway_request._is_event_stream(response.headers)
     # When the caller spoke Chat Completions, the response must be converted
     # back to Chat Completions format regardless of the upstream wire format.
     want_chat_output = inbound_format == "chat_completions"
@@ -601,15 +525,17 @@ def relay_upstream_response(
     seam: DownstreamStreamCommit | None = request_scoped_seam
     if request_scoped_seam is not None:
         request_scoped_seam.set_terminal_observer(
-            _chat_terminal_observer if want_chat_output else _responses_terminal_observer
+            gateway_stream_semantics._chat_terminal_observer
+            if want_chat_output
+            else gateway_stream_semantics._responses_terminal_observer
         )
         request_scoped_seam.set_output_observer(
             None
             if want_chat_output
-            else (lambda event: _responses_event_commits_downstream_output(event, ""))
+            else (lambda event: gateway_stream_semantics._responses_event_commits_downstream_output(event, ""))
         )
         request_scoped_seam.set_usage_line_callback(
-            lambda context, line: _offer_usage_observed_sse_line(
+            lambda context, line: gateway_events.offer_usage_observed_sse_line(
                 context, line, upstream_format=upstream_format
             )
         )
@@ -623,14 +549,16 @@ def relay_upstream_response(
             inbound_format=inbound_format,
             upstream_format=upstream_format,
             terminal_observer=(
-                _chat_terminal_observer if want_chat_output else _responses_terminal_observer
+                gateway_stream_semantics._chat_terminal_observer
+                if want_chat_output
+                else gateway_stream_semantics._responses_terminal_observer
             ),
             output_observer=(
                 None
                 if want_chat_output
-                else (lambda event: _responses_event_commits_downstream_output(event, ""))
+                else (lambda event: gateway_stream_semantics._responses_event_commits_downstream_output(event, ""))
             ),
-            usage_line_callback=lambda context, line: _offer_usage_observed_sse_line(
+            usage_line_callback=lambda context, line: gateway_events.offer_usage_observed_sse_line(
                 context, line, upstream_format=upstream_format
             ),
         )
@@ -654,7 +582,7 @@ def relay_upstream_response(
         )
         else None
     )
-    usage_context = _usage_observed_context(
+    usage_context = gateway_events._usage_observed_context(
         event_context,
         request_id=request_id,
         model=model,
@@ -662,8 +590,8 @@ def relay_upstream_response(
         upstream_format=upstream_format,
         inbound_format=inbound_format,
     )
-    relay_redact_identity = _retry_identity_from_context(event_context)
-    route_failure_event_fields = _route_failure_event_fields(event_context)
+    relay_redact_identity = gateway_transport._retry_identity_from_context(event_context)
+    route_failure_event_fields = gateway_events.route_failure_event_fields(event_context)
     _write_proxy_event = glue.write_proxy_event
 
     def write_proxy_event(event: str, **fields: Any) -> None:
@@ -730,7 +658,7 @@ def relay_upstream_response(
 
     def finish_downstream_stream_closed(exc: OSError) -> int:
         self.close_connection = True
-        event_fields = _bounded_failure_event_context(event_context)
+        event_fields = gateway_events.bounded_failure_event_context(event_context)
         for key in ("request_id", "model", "upstream", "status", "error", "detail"):
             event_fields.pop(key, None)
         write_proxy_event(
@@ -742,7 +670,7 @@ def relay_upstream_response(
             upstream_format=upstream_format,
             inbound_format=inbound_format,
             error=type(exc).__name__,
-            detail=safe_upstream_error_detail(exc),
+            detail=gateway_errors.safe_upstream_error_detail(exc),
             failure_phase="downstream_write",
             failure_side="downstream_write",
             failure_class="downstream_client_closed",
@@ -758,7 +686,7 @@ def relay_upstream_response(
             ),
             **event_fields,
         )
-        _capture_usage(
+        gateway_events.capture_usage(
             usage_capture,
             None,
             missing_reason="async_usage_pending"
@@ -775,7 +703,7 @@ def relay_upstream_response(
     ) -> int:
         if seam.terminal_committed:
             self.close_connection = True
-            _capture_usage(
+            gateway_events.capture_usage(
                 usage_capture,
                 None,
                 missing_reason="async_usage_pending",
@@ -799,7 +727,7 @@ def relay_upstream_response(
                 seam.last_write_error() or OSError("downstream closed")
             )
         if inbound_format == "responses" and standard_responses_failure:
-            failed_event = _responses_failed_event_for_stream_error(
+            failed_event = gateway_errors._responses_failed_event_for_stream_error(
                 upstream_name=upstream_name,
                 model=model,
                 status=502,
@@ -809,7 +737,7 @@ def relay_upstream_response(
                 redact_identity=relay_redact_identity,
             )
             wrote_error = output.write(
-                _sse_json_line(failed_event, b"\n") + b"\n"
+                gateway_stream_semantics._sse_json_line(failed_event, b"\n") + b"\n"
             )
         else:
             wrote_error = self._write_downstream_sse_error(
@@ -824,7 +752,7 @@ def relay_upstream_response(
             return finish_downstream_stream_closed(
                 seam.last_write_error() or OSError("downstream closed")
             )
-        _capture_usage(usage_capture, None, missing_reason="stream_protocol_error")
+        gateway_events.capture_usage(usage_capture, None, missing_reason="stream_protocol_error")
         return 502
 
     def buffered_protocol_error_body(
@@ -842,7 +770,7 @@ def relay_upstream_response(
             detail=str(exc),
         )
         return json.dumps(
-            _json_error_payload_for_inbound_format(
+            gateway_errors._json_error_payload_for_inbound_format(
                 inbound_format=inbound_format,
                 upstream_name=upstream_name,
                 status=502,
@@ -869,13 +797,13 @@ def relay_upstream_response(
                     response,
                     read_lines=self._iter_upstream_sse_lines,
                     event_resets_idle_timeout=(
-                        _chat_sse_event_resets_idle_timeout
+                        gateway_stream_semantics._chat_sse_event_resets_idle_timeout
                         if upstream_format == "chat_completions"
-                        else _responses_sse_event_resets_idle_timeout
+                        else gateway_stream_semantics._responses_sse_event_resets_idle_timeout
                     ),
                     on_chunk=observe_diagnostic_sse_line,
                 ):
-                    payload = _converted_sse_payload(
+                    payload = gateway_stream_semantics._converted_sse_payload(
                         frame,
                         verified_source_format=verified_source_format,
                     )
@@ -906,16 +834,16 @@ def relay_upstream_response(
                         upstream_format == "chat_completions"
                         and not want_chat_output
                     ):
-                        response_events = _chat_stream_chunks_to_response_events(
+                        response_events = gateway_stream_semantics._chat_stream_chunks_to_response_events(
                             chat_chunks
                         )
-                        body = _events_to_responses_body(
+                        body = gateway_stream_semantics._events_to_responses_body(
                             response_events,
                             require_completed=True,
                         )
                         buffered_chat_sse_to_responses = True
                     else:
-                        body = _events_to_responses_body(
+                        body = gateway_stream_semantics._events_to_responses_body(
                             events,
                             require_completed=True,
                         )
@@ -924,7 +852,7 @@ def relay_upstream_response(
                         raise
                     status = 502
                     converted_stream_failure = True
-                    body = _incomplete_stream_json_error_body(upstream_name)
+                    body = gateway_stream_semantics._incomplete_stream_json_error_body(upstream_name)
                     write_proxy_event(
                         "upstream_stream_incomplete",
                         request_id=request_id,
@@ -940,7 +868,7 @@ def relay_upstream_response(
                     status = 502
                     converted_stream_failure = True
                     body = buffered_protocol_error_body(
-                        _verified_converted_sse_semantic_error(
+                        gateway_stream_semantics._verified_converted_sse_semantic_error(
                             verified_source_format
                         )
                     )
@@ -964,9 +892,9 @@ def relay_upstream_response(
                 pass
             elif want_chat_output:
                 if upstream_format == "chat_completions":
-                    body = _response_body_to_chat_completion_body(
-                        compatible_response_body(
-                            _chat_completion_to_response_body(body),
+                    body = gateway_stream_semantics.response_body_to_chat_completion_body(
+                        gateway_compat.compatible_response_body(
+                            gateway_stream_semantics._chat_completion_to_response_body(body),
                             upstream_name,
                             event_context=compatibility_event_context,
                         ),
@@ -975,12 +903,12 @@ def relay_upstream_response(
                 else:
                     mutated_body = body
                     if response_mutation_policy != MutationPolicy.TRANSPARENT:
-                        mutated_body = compatible_response_body(
+                        mutated_body = gateway_compat.compatible_response_body(
                             body,
                             upstream_name,
                             event_context=compatibility_event_context,
                         )
-                    body = _response_body_to_chat_completion_body(
+                    body = gateway_stream_semantics.response_body_to_chat_completion_body(
                         mutated_body,
                         preserve_reasoning_history=preserve_reasoning_history,
                     )
@@ -988,7 +916,7 @@ def relay_upstream_response(
                 if buffered_chat_sse_to_responses:
                     converted_body = body
                 else:
-                    converted_body = _chat_completion_to_response_body(
+                    converted_body = gateway_stream_semantics._chat_completion_to_response_body(
                         body,
                         repair=(
                             response_mutation_policy
@@ -1001,13 +929,13 @@ def relay_upstream_response(
                 ):
                     body = converted_body
                 else:
-                    body = compatible_response_body(
+                    body = gateway_compat.compatible_response_body(
                         converted_body,
                         upstream_name,
                         event_context=compatibility_event_context,
                     )
             else:
-                body = compatible_response_body(
+                body = gateway_compat.compatible_response_body(
                     body,
                     upstream_name,
                     event_context=compatibility_event_context,
@@ -1018,53 +946,55 @@ def relay_upstream_response(
             status = 502
             converted_stream_failure = True
             body = buffered_protocol_error_body(
-                _verified_converted_sse_semantic_error(
+                gateway_stream_semantics._verified_converted_sse_semantic_error(
                     verified_source_format
                 )
             )
         if status >= 400:
-            body = _with_codexhub_http_error(
+            body = gateway_errors._with_codexhub_http_error(
                 body,
                 upstream_name=upstream_name,
                 status=status,
                 exc=response if isinstance(response, BaseException) else None,
             )
         if usage_policy == UsagePolicy.ASYNC_TAP:
-            _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
-            _offer_usage_observed_body(usage_context, upstream_body_for_usage)
+            gateway_events.capture_usage(usage_capture, None, missing_reason="async_usage_pending")
+            gateway_events.offer_usage_observed_body(usage_context, upstream_body_for_usage)
         else:
-            _capture_usage(usage_capture, _usage_from_json_body(body))
+            gateway_events.capture_usage(usage_capture, gateway_events._usage_from_json_body(body))
             if status < 400:
-                lifecycle_issue = _response_body_lifecycle_final_issue(body, event_context, request_kind)
+                lifecycle_issue = gateway_stream_semantics._response_body_lifecycle_final_issue(
+                    body, event_context, request_kind
+                )
                 if lifecycle_issue is not None:
                     _write_adapter_event(
                         event_context,
-                        _lifecycle_final_issue_event_name(lifecycle_issue),
+                        gateway_stream_semantics._lifecycle_final_issue_event_name(lifecycle_issue),
                         upstream=upstream_name,
                         inbound_format=inbound_format,
                         want_chat_output=want_chat_output,
                         body_format="chat_completions" if want_chat_output else "responses",
                     )
-                    _capture_usage(
+                    gateway_events.capture_usage(
                         usage_capture,
                         None,
-                        missing_reason=_lifecycle_final_issue_missing_reason(lifecycle_issue),
+                        missing_reason=gateway_stream_semantics._lifecycle_final_issue_missing_reason(lifecycle_issue),
                     )
                     if not headers_already_sent:
-                        _raise_lifecycle_final_issue(upstream_name, lifecycle_issue)
+                        gateway_stream_semantics._raise_lifecycle_final_issue(upstream_name, lifecycle_issue)
                     status = 502
                     body = json.dumps(
-                        _json_error_payload_for_inbound_format(
+                        gateway_errors._json_error_payload_for_inbound_format(
                             inbound_format=inbound_format,
                             upstream_name=upstream_name,
                             status=status,
-                            error=_lifecycle_final_issue_missing_reason(lifecycle_issue),
+                            error=gateway_stream_semantics._lifecycle_final_issue_missing_reason(lifecycle_issue),
                             detail=(
                                 "Upstream returned an empty final response after completed subagent lifecycle."
                                 if lifecycle_issue == "empty"
                                 else "Upstream returned a final response with extra text outside the requested report format."
                             ),
-                            error_type=_lifecycle_final_issue_missing_reason(lifecycle_issue),
+                            error_type=gateway_stream_semantics._lifecycle_final_issue_missing_reason(lifecycle_issue),
                             redact_identity=relay_redact_identity,
                         ),
                         ensure_ascii=True,
@@ -1073,14 +1003,14 @@ def relay_upstream_response(
         if (
             status < 400
             and request_kind == RETRY_REQUEST_COMPACT
-            and _compact_response_body_is_empty(body, inbound_format)
+            and gateway_stream_semantics._compact_response_body_is_empty(body, inbound_format)
         ):
             if not headers_already_sent:
-                _capture_usage(usage_capture, None, missing_reason="compact_empty_response")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="compact_empty_response")
                 raise CompactEmptyResponseError(upstream_name)
             status = 502
             body = json.dumps(
-                _json_error_payload_for_inbound_format(
+                gateway_errors._json_error_payload_for_inbound_format(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name,
                     status=status,
@@ -1092,7 +1022,7 @@ def relay_upstream_response(
                 ensure_ascii=True,
                 separators=(",", ":"),
             ).encode("utf-8")
-            event_fields = _public_event_context(event_context)
+            event_fields = gateway_events.public_event_context(event_context)
             event_fields.pop("request_id", None)
             event_fields.pop("model", None)
             event_fields.pop("upstream", None)
@@ -1107,15 +1037,15 @@ def relay_upstream_response(
                 inbound_format=inbound_format,
                 **event_fields,
             )
-            _capture_usage(usage_capture, None, missing_reason="compact_empty_response")
+            gateway_events.capture_usage(usage_capture, None, missing_reason="compact_empty_response")
         else:
             empty_non_compact = (
-                _chat_completion_body_is_empty(body)
+                gateway_stream_semantics._chat_completion_body_is_empty(body)
                 if inbound_format == "chat_completions"
-                else _responses_body_is_empty(body)
+                else gateway_stream_semantics._responses_body_is_empty(body)
             )
             if status < 400 and request_kind != RETRY_REQUEST_COMPACT and empty_non_compact:
-                event_fields = _public_event_context(event_context)
+                event_fields = gateway_events.public_event_context(event_context)
                 event_fields.pop("request_id", None)
                 event_fields.pop("model", None)
                 event_fields.pop("upstream", None)
@@ -1134,7 +1064,7 @@ def relay_upstream_response(
         )
         if downstream_expects_sse and not want_chat_output and status < 400:
             try:
-                response_events = _response_body_to_response_sse_events(body)
+                response_events = gateway_stream_semantics._response_body_to_response_sse_events(body)
             except (UnicodeDecodeError, json.JSONDecodeError):
                 response_events = []
             if response_events:
@@ -1151,14 +1081,18 @@ def relay_upstream_response(
                         sse_mutation_policy
                         != MutationPolicy.TRANSPARENT
                     ):
-                        event, _ = _normalize_third_party_tool_call(event, compatibility_event_context)
-                        event, _ = _suppress_bounded_tool_search_calls(
+                        event, _ = (
+                            gateway_compat.official_passthrough._normalize_third_party_tool_call(
+                                event, compatibility_event_context
+                            )
+                        )
+                        event, _ = tool_surface_adapter.suppress_bounded_tool_search_calls(
                             event,
                             compatibility_event_context,
                         )
                         if event is None:
                             continue
-                        event, _ = _downgrade_invalid_third_party_tool_calls(event)
+                        event, _ = gateway_compat.official_passthrough._downgrade_invalid_third_party_tool_calls(event)
                     event_type = event.get("type")
                     if isinstance(event_type, str) and event_type:
                         if not output.event(event_type, event):
@@ -1175,7 +1109,7 @@ def relay_upstream_response(
                         sse_seam.last_write_error() or OSError("downstream closed")
                     )
                 self.close_connection = True
-                _capture_usage(
+                gateway_events.capture_usage(
                     usage_capture,
                     None,
                     missing_reason="async_usage_pending"
@@ -1196,7 +1130,7 @@ def relay_upstream_response(
                     seam.last_write_error() or OSError("downstream closed")
                 )
             self.close_connection = True
-            _capture_usage(usage_capture, None, missing_reason="stream_protocol_error")
+            gateway_events.capture_usage(usage_capture, None, missing_reason="stream_protocol_error")
             return status
 
     def send_downstream_response_headers_once() -> bool:
@@ -1208,7 +1142,7 @@ def relay_upstream_response(
 
         def _send() -> None:
             self.send_response(status)
-            for key, value in _filtered_response_headers(
+            for key, value in gateway_request._filtered_response_headers(
                 response.headers,
                 is_event_stream,
                 content_length,
@@ -1250,18 +1184,18 @@ def relay_upstream_response(
                 for frame in iter_upstream_sse_events(
                     response,
                     read_lines=self._iter_upstream_sse_lines,
-                    event_resets_idle_timeout=_responses_sse_event_resets_idle_timeout,
+                    event_resets_idle_timeout=gateway_stream_semantics._responses_sse_event_resets_idle_timeout,
                     on_chunk=observe_diagnostic_sse_line,
                 ):
-                    line_ending = _sse_line_ending(frame.raw)
-                    payload = _converted_sse_payload(
+                    line_ending = gateway_sse._sse_line_ending(frame.raw)
+                    payload = gateway_stream_semantics._converted_sse_payload(
                         frame,
                         verified_source_format=verified_source_format,
                     )
                     if payload is None or payload == "[DONE]":
                         continue
                     event = payload
-                    _offer_usage_observed_sse_line(
+                    gateway_events.offer_usage_observed_sse_line(
                         usage_context,
                         frame.raw,
                         upstream_format=upstream_format,
@@ -1271,10 +1205,10 @@ def relay_upstream_response(
                         # Responses frames must not turn a complete stream
                         # into a 502.
                         continue
-                    error_type = _responses_stream_error_type(event)
+                    error_type = gateway_stream_semantics._responses_stream_error_type(event)
                     if error_type is not None:
-                        detail = _redact_identity_in_text(
-                            _responses_stream_error_detail(event),
+                        detail = gateway_errors._redact_identity_in_text(
+                            gateway_stream_semantics._responses_stream_error_detail(event),
                             relay_redact_identity,
                         )
                         write_proxy_event(
@@ -1299,7 +1233,7 @@ def relay_upstream_response(
                             return finish_downstream_stream_closed(
                                 seam.last_write_error() or OSError("downstream closed")
                             )
-                        _capture_usage(usage_capture, None, missing_reason="stream_error_event")
+                        gateway_events.capture_usage(usage_capture, None, missing_reason="stream_error_event")
                         return 502
                     for chunk in converter.chunks_for_event(event):
                         if not output.data(chunk):
@@ -1316,7 +1250,7 @@ def relay_upstream_response(
                 incomplete_frame = True
             except UpstreamStreamIdleTimeoutError as exc:
                 self.close_connection = True
-                idle_detail = safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
+                idle_detail = gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
                 write_proxy_event(
                     "upstream_stream_idle_timeout",
                     request_id=request_id,
@@ -1344,7 +1278,7 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
                 return 502
             except DownstreamKeepaliveFailedError:
                 return finish_downstream_stream_closed(
@@ -1352,7 +1286,7 @@ def relay_upstream_response(
                 )
             except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
                 self.close_connection = True
-                stream_detail = safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
+                stream_detail = gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
                 write_proxy_event(
                     "upstream_stream_interrupted",
                     request_id=request_id,
@@ -1375,7 +1309,7 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                 return 502
             if incomplete_frame or not converter.completed:
                 self.close_connection = True
@@ -1403,14 +1337,14 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
             if not output.done():
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
             self.close_connection = True
-            _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
+            gateway_events.capture_usage(usage_capture, None, missing_reason="async_usage_pending")
             return status
 
         if (
@@ -1430,7 +1364,7 @@ def relay_upstream_response(
                         payload, compatibility_event_context
                     )
                 event = payload
-                line = _sse_json_line(event, line_ending) + line_ending
+                line = gateway_stream_semantics._sse_json_line(event, line_ending) + line_ending
                 try:
                     compatible_line = compatible_sse_line(
                         line,
@@ -1448,10 +1382,10 @@ def relay_upstream_response(
                 for frame in iter_upstream_sse_events(
                     response,
                     read_lines=self._iter_upstream_sse_lines,
-                    event_resets_idle_timeout=_chat_sse_event_resets_idle_timeout,
+                    event_resets_idle_timeout=gateway_stream_semantics._chat_sse_event_resets_idle_timeout,
                     on_chunk=observe_diagnostic_sse_line,
                 ):
-                    payload = _converted_sse_payload(
+                    payload = gateway_stream_semantics._converted_sse_payload(
                         frame,
                         verified_source_format=verified_source_format,
                     )
@@ -1461,8 +1395,8 @@ def relay_upstream_response(
                     if payload == "[DONE]":
                         events = converter.events_for_done()
                     else:
-                        chat_error_detail = _redact_identity_in_text(
-                            _chat_stream_error_detail(payload) or "",
+                        chat_error_detail = gateway_errors._redact_identity_in_text(
+                            gateway_stream_semantics._chat_stream_error_detail(payload) or "",
                             relay_redact_identity,
                         )
                         if chat_error_detail:
@@ -1488,9 +1422,9 @@ def relay_upstream_response(
                                 return finish_downstream_stream_closed(
                                     seam.last_write_error() or OSError("downstream closed")
                                 )
-                            _capture_usage(usage_capture, None, missing_reason="stream_error_event")
+                            gateway_events.capture_usage(usage_capture, None, missing_reason="stream_error_event")
                             return 502
-                        _offer_usage_observed_sse_line(
+                        gateway_events.offer_usage_observed_sse_line(
                             usage_context,
                             frame.raw,
                             upstream_format=upstream_format,
@@ -1520,7 +1454,7 @@ def relay_upstream_response(
                 )
             except UpstreamProtocolTranslationError:
                 return finish_converted_sse_semantic_error(
-                    _verified_converted_sse_semantic_error(
+                    gateway_stream_semantics._verified_converted_sse_semantic_error(
                         "chat_completions"
                     ),
                     response_id=converter.response_id,
@@ -1529,7 +1463,7 @@ def relay_upstream_response(
                 incomplete_frame = True
             except UpstreamStreamIdleTimeoutError as exc:
                 self.close_connection = True
-                idle_detail = safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
+                idle_detail = gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
                 write_proxy_event(
                     "upstream_stream_idle_timeout",
                     request_id=request_id,
@@ -1553,7 +1487,7 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
                 return 502
             except DownstreamKeepaliveFailedError:
                 return finish_downstream_stream_closed(
@@ -1563,7 +1497,7 @@ def relay_upstream_response(
                 if defer_stream_errors:
                     raise UpstreamStreamInterruptedError(exc) from exc
                 self.close_connection = True
-                stream_detail = safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
+                stream_detail = gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
                 write_proxy_event(
                     "upstream_stream_interrupted",
                     request_id=request_id,
@@ -1582,7 +1516,7 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                 return 502
             if (
                 not incomplete_frame
@@ -1619,10 +1553,10 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
             self.close_connection = True
-            _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
+            gateway_events.capture_usage(usage_capture, None, missing_reason="async_usage_pending")
             return status
 
         if want_chat_output and upstream_format != "chat_completions":
@@ -1634,11 +1568,11 @@ def relay_upstream_response(
                 for frame in iter_upstream_sse_events(
                     response,
                     read_lines=self._iter_upstream_sse_lines,
-                    event_resets_idle_timeout=_responses_sse_event_resets_idle_timeout,
+                    event_resets_idle_timeout=gateway_stream_semantics._responses_sse_event_resets_idle_timeout,
                     on_chunk=observe_diagnostic_sse_line,
                 ):
-                    line_ending = _sse_line_ending(frame.raw)
-                    event = _converted_sse_payload(
+                    line_ending = gateway_sse._sse_line_ending(frame.raw)
+                    event = gateway_stream_semantics._converted_sse_payload(
                         frame,
                         verified_source_format=verified_source_format,
                     )
@@ -1646,13 +1580,13 @@ def relay_upstream_response(
                         continue
                     events.append(event)
                     if usage_policy == UsagePolicy.ASYNC_TAP:
-                        _offer_usage_observed_sse_line(
+                        gateway_events.offer_usage_observed_sse_line(
                             usage_context,
                             frame.raw,
                             upstream_format=upstream_format,
                         )
                     else:
-                        _capture_usage(usage_capture, _usage_from_response_event(event))
+                        gateway_events.capture_usage(usage_capture, gateway_events._usage_from_response_event(event))
             except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
                 return finish_converted_sse_semantic_error(exc)
             except UpstreamStreamIncompleteError:
@@ -1661,7 +1595,7 @@ def relay_upstream_response(
                 if defer_stream_errors:
                     raise
                 self.close_connection = True
-                idle_detail = safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
+                idle_detail = gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
                 write_proxy_event(
                     "upstream_stream_idle_timeout",
                     request_id=request_id,
@@ -1689,7 +1623,7 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
                 return 502
             except DownstreamKeepaliveFailedError:
                 return finish_downstream_stream_closed(
@@ -1699,7 +1633,7 @@ def relay_upstream_response(
                 if defer_stream_errors:
                     raise UpstreamStreamInterruptedError(exc) from exc
                 self.close_connection = True
-                stream_detail = safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
+                stream_detail = gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
                 write_proxy_event(
                     "upstream_stream_interrupted",
                     request_id=request_id,
@@ -1722,15 +1656,15 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                 return 502
             try:
                 if incomplete_frame:
                     raise UpstreamStreamIncompleteError(
                         "Upstream SSE stream ended with an incomplete pending frame"
                     )
-                response_body = compatible_response_body(
-                    _events_to_responses_body(events, require_completed=True),
+                response_body = gateway_compat.compatible_response_body(
+                    gateway_stream_semantics._events_to_responses_body(events, require_completed=True),
                     upstream_name,
                     event_context=compatibility_event_context,
                 )
@@ -1762,12 +1696,12 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
 
             try:
-                converted_chat_chunks = _chat_completion_body_to_stream_chunks(
-                    _response_body_to_chat_completion_body(
+                converted_chat_chunks = gateway_stream_semantics._chat_completion_body_to_stream_chunks(
+                    gateway_stream_semantics.response_body_to_chat_completion_body(
                         response_body,
                         preserve_reasoning_history=preserve_reasoning_history,
                     )
@@ -1793,7 +1727,7 @@ def relay_upstream_response(
                     seam.last_write_error() or OSError("downstream closed")
                 )
             self.close_connection = True
-            _capture_usage(
+            gateway_events.capture_usage(
                 usage_capture,
                 None,
                 missing_reason="async_usage_pending"
@@ -1810,11 +1744,11 @@ def relay_upstream_response(
                 for frame in iter_upstream_sse_events(
                     response,
                     read_lines=self._iter_upstream_sse_lines,
-                    event_resets_idle_timeout=_chat_sse_event_resets_idle_timeout,
+                    event_resets_idle_timeout=gateway_stream_semantics._chat_sse_event_resets_idle_timeout,
                     on_chunk=observe_diagnostic_sse_line,
                 ):
-                    line_ending = _sse_line_ending(frame.raw)
-                    payload = _converted_sse_payload(
+                    line_ending = gateway_sse._sse_line_ending(frame.raw)
+                    payload = gateway_stream_semantics._converted_sse_payload(
                         frame,
                         verified_source_format=verified_source_format,
                     )
@@ -1825,13 +1759,13 @@ def relay_upstream_response(
                         continue
                     chunks.append(payload)
                     if usage_policy == UsagePolicy.ASYNC_TAP:
-                        _offer_usage_observed_sse_line(
+                        gateway_events.offer_usage_observed_sse_line(
                             usage_context,
                             frame.raw,
                             upstream_format=upstream_format,
                         )
                     else:
-                        _capture_usage(usage_capture, _usage_from_payload(payload))
+                        gateway_events.capture_usage(usage_capture, gateway_events._usage_from_payload(payload))
             except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
                 return finish_converted_sse_semantic_error(exc)
             except UpstreamStreamIncompleteError:
@@ -1840,7 +1774,7 @@ def relay_upstream_response(
                 if defer_stream_errors:
                     raise
                 self.close_connection = True
-                idle_detail = safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
+                idle_detail = gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
                 write_proxy_event(
                     "upstream_stream_idle_timeout",
                     request_id=request_id,
@@ -1864,7 +1798,7 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
                 return 502
             except DownstreamKeepaliveFailedError:
                 return finish_downstream_stream_closed(
@@ -1874,7 +1808,7 @@ def relay_upstream_response(
                 if defer_stream_errors:
                     raise UpstreamStreamInterruptedError(exc) from exc
                 self.close_connection = True
-                stream_detail = safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
+                stream_detail = gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
                 write_proxy_event(
                     "upstream_stream_interrupted",
                     request_id=request_id,
@@ -1893,9 +1827,9 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                 return 502
-            if incomplete_frame or not _chat_stream_chunks_have_terminal(chunks):
+            if incomplete_frame or not gateway_stream_semantics._chat_stream_chunks_have_terminal(chunks):
                 if defer_stream_errors:
                     raise UpstreamStreamIncompleteError(
                         "Chat Completions stream ended without finish_reason or [DONE]"
@@ -1921,7 +1855,7 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
             # Most third-party Chat providers do not expose a portable
             # Responses reasoning history, so their provider-private thinking
@@ -1937,12 +1871,12 @@ def relay_upstream_response(
                 want_chat_output=want_chat_output,
                 preserve_reasoning_history=preserve_reasoning_history,
             ):
-                chunks, _ = _suppress_chat_reasoning_extensions(
+                chunks, _ = gateway_stream_semantics._suppress_chat_reasoning_extensions(
                     chunks,
                     event_context=event_context,
                     upstream_name=upstream_name,
                 )
-            chat_summary = _chat_stream_shape_summary(chunks)
+            chat_summary = gateway_stream_semantics._chat_stream_shape_summary(chunks)
             _write_adapter_event(
                 event_context,
                 "chat_stream_shape_summary",
@@ -1952,28 +1886,30 @@ def relay_upstream_response(
                 **chat_summary,
             )
             lifecycle_issue = (
-                _chat_stream_lifecycle_final_issue(chunks, chat_summary, event_context, request_kind)
+                gateway_stream_semantics._chat_stream_lifecycle_final_issue(chunks, chat_summary, event_context, request_kind)
                 if status < 400
                 else None
             )
             if lifecycle_issue is not None:
                 _write_adapter_event(
                     event_context,
-                    _lifecycle_final_issue_event_name(lifecycle_issue),
+                    gateway_stream_semantics._lifecycle_final_issue_event_name(lifecycle_issue),
                     upstream=upstream_name,
                     inbound_format=inbound_format,
                     want_chat_output=want_chat_output,
                     **chat_summary,
                 )
-                _capture_usage(
+                gateway_events.capture_usage(
                     usage_capture,
                     None,
-                    missing_reason=_lifecycle_final_issue_missing_reason(lifecycle_issue),
+                    missing_reason=gateway_stream_semantics._lifecycle_final_issue_missing_reason(lifecycle_issue),
                 )
-                _raise_lifecycle_final_issue(upstream_name, lifecycle_issue)
+                gateway_stream_semantics._raise_lifecycle_final_issue(upstream_name, lifecycle_issue)
             if want_chat_output:
-                response_body = compatible_response_body(
-                    _events_to_responses_body(_chat_stream_chunks_to_response_events(chunks)),
+                response_body = gateway_compat.compatible_response_body(
+                    gateway_stream_semantics._events_to_responses_body(
+                        gateway_stream_semantics._chat_stream_chunks_to_response_events(chunks)
+                    ),
                     upstream_name,
                     event_context=compatibility_event_context,
                 )
@@ -1981,8 +1917,8 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                for chunk in _chat_completion_body_to_stream_chunks(
-                    _response_body_to_chat_completion_body(
+                for chunk in gateway_stream_semantics._chat_completion_body_to_stream_chunks(
+                    gateway_stream_semantics.response_body_to_chat_completion_body(
                         response_body,
                         preserve_reasoning_history=preserve_reasoning_history,
                     )
@@ -1992,28 +1928,15 @@ def relay_upstream_response(
                             seam.last_write_error() or OSError("downstream closed")
                         )
             else:
-                events = _chat_stream_chunks_to_response_events(chunks)
-                runtime_tool_plan, runtime_tool_stream = (
-                    _runtime_tool_compatibility_stream_for_attempt(
-                        compatibility_event_context
+                events = gateway_stream_semantics._chat_stream_chunks_to_response_events(chunks)
+                decoded_events, runtime_tool_plan = (
+                    gateway_compat.official_passthrough.decode_tool_events(
+                        compatibility_event_context,
+                        events,
+                        evidence_context=event_context,
                     )
                 )
-                if runtime_tool_plan is not None and runtime_tool_stream is not None:
-                    decoded_events: list[Mapping[str, Any]] = []
-                    try:
-                        for event in events:
-                            decoded_events.extend(
-                                runtime_tool_stream.decode_events_for_event(event)
-                            )
-                    except RuntimeToolCompatibilityError as exc:
-                        _raise_runtime_tool_compatibility_error(exc)
-                    _write_runtime_tool_adapter_response_evidence(
-                        runtime_tool_plan,
-                        events,
-                        decoded_events,
-                        event_context,
-                        surface="sse",
-                    )
+                if decoded_events is not None:
                     events = decoded_events
                 _write_adapter_event(
                     event_context,
@@ -2022,14 +1945,16 @@ def relay_upstream_response(
                     inbound_format=inbound_format,
                     want_chat_output=want_chat_output,
                     stage="converted",
-                    **_response_events_shape_summary(events),
+                    **gateway_stream_semantics._response_events_shape_summary(events),
                 )
-                events, _ = _adapt_third_party_apply_patch_stream_events(
+                events, _ = gateway_compat.response._adapt_third_party_apply_patch_stream_events(
                     events,
                     event_context=compatibility_event_context,
                 )
-                events, _ = _normalize_third_party_tool_call(events, compatibility_event_context)
-                events, _ = _suppress_bounded_tool_search_calls(
+                events, _ = gateway_compat.official_passthrough._normalize_third_party_tool_call(
+                    events, compatibility_event_context
+                )
+                events, _ = tool_surface_adapter.suppress_bounded_tool_search_calls(
                     events,
                     compatibility_event_context,
                 )
@@ -2040,9 +1965,9 @@ def relay_upstream_response(
                     inbound_format=inbound_format,
                     want_chat_output=want_chat_output,
                     stage="normalized",
-                    **_response_events_shape_summary(events),
+                    **gateway_stream_semantics._response_events_shape_summary(events),
                 )
-                events, _ = _downgrade_invalid_third_party_tool_calls(events)
+                events, _ = gateway_compat.official_passthrough._downgrade_invalid_third_party_tool_calls(events)
                 _write_adapter_event(
                     event_context,
                     "chat_to_responses_event_summary",
@@ -2050,19 +1975,19 @@ def relay_upstream_response(
                     inbound_format=inbound_format,
                     want_chat_output=want_chat_output,
                     stage="downgraded",
-                    **_response_events_shape_summary(events),
+                    **gateway_stream_semantics._response_events_shape_summary(events),
                 )
-                events, _ = _apply_external_worker_response_contract(
+                events, _ = collaboration_adapter.apply_external_worker_response_contract(
                     events,
                     compatibility_event_context,
                     surface="sse",
                     attach_sidecars=False,
                 )
-                events, _ = reconcile_function_call_argument_events(
+                events, _ = gateway_compat.sse.reconcile_function_call_argument_events(
                     events,
                     runtime_tool_plan=runtime_tool_plan,
                 )
-                events, _ = _apply_external_worker_response_contract(
+                events, _ = collaboration_adapter.apply_external_worker_response_contract(
                     events,
                     compatibility_event_context,
                     surface="sse",
@@ -2075,7 +2000,7 @@ def relay_upstream_response(
                     inbound_format=inbound_format,
                     want_chat_output=want_chat_output,
                     stage="final",
-                    **_response_events_shape_summary(events),
+                    **gateway_stream_semantics._response_events_shape_summary(events),
                 )
                 if not send_downstream_response_headers_once():
                     return finish_downstream_stream_closed(
@@ -2088,7 +2013,7 @@ def relay_upstream_response(
                             event, compatibility_event_context
                         )
                     if not output.write(
-                        _sse_json_line(event, line_ending) + line_ending
+                        gateway_stream_semantics._sse_json_line(event, line_ending) + line_ending
                     ):
                         return finish_downstream_stream_closed(
                             seam.last_write_error() or OSError("downstream closed")
@@ -2098,7 +2023,7 @@ def relay_upstream_response(
                     seam.last_write_error() or OSError("downstream closed")
                 )
             self.close_connection = True
-            _capture_usage(
+            gateway_events.capture_usage(
                 usage_capture,
                 None,
                 missing_reason="async_usage_pending"
@@ -2125,32 +2050,32 @@ def relay_upstream_response(
                 if (
                     upstream_name != "official"
                     and not want_chat_output
-                    and _apply_patch_adapter_enabled(compatibility_event_context)
+                    and gateway_compat.response._apply_patch_adapter_enabled(compatibility_event_context)
                 )
                 else None
             )
             try:
                 for line in self._iter_upstream_sse_lines(
                     response,
-                    line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                    line_resets_idle_timeout=gateway_stream_semantics._responses_sse_line_resets_idle_timeout,
                     on_line=observe_diagnostic_sse_line,
                 ):
                     if not line:
                         break
-                    original_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
-                    usage_payload = _parse_sse_json_payload(line)
+                    original_payload = gateway_sse._parse_sse_json_payload(line) if upstream_name != "official" else None
+                    usage_payload = gateway_sse._parse_sse_json_payload(line)
                     if isinstance(usage_payload, Mapping):
                         remember_response_id(usage_payload)
                         event_type = usage_payload.get("type")
                         if isinstance(event_type, str) and (event_type.startswith("response.") or event_type == "error"):
                             saw_response_event = True
-                        if _responses_events_have_terminal([usage_payload]):
+                        if gateway_stream_semantics._responses_events_have_terminal([usage_payload]):
                             saw_terminal_event = True
-                        if _responses_event_starts_downstream_output(usage_payload):
+                        if gateway_stream_semantics._responses_event_starts_downstream_output(usage_payload):
                             downstream_output_started = True
                             if seam is not None:
                                 seam.mark_downstream_content_exposed()
-                        _capture_usage(usage_capture, _usage_from_response_event(usage_payload))
+                        gateway_events.capture_usage(usage_capture, gateway_events._usage_from_response_event(usage_payload))
                     rewritten_line = line
                     if apply_patch_stream_adapter is not None and isinstance(usage_payload, Mapping):
                         replacement_events, apply_patch_changed = apply_patch_stream_adapter.events_for_event(
@@ -2158,7 +2083,9 @@ def relay_upstream_response(
                         )
                         if apply_patch_changed:
                             rewritten_line = (
-                                _sse_json_line(replacement_events[0], _sse_line_ending(line))
+                                gateway_stream_semantics._sse_json_line(
+                                    replacement_events[0], gateway_sse._sse_line_ending(line)
+                                )
                                 if replacement_events
                                 else b""
                             )
@@ -2168,18 +2095,20 @@ def relay_upstream_response(
                         event_context=compatibility_event_context,
                     )
                     rewritten_payloads = (
-                        _parse_sse_json_payloads(rewritten_line)
+                        gateway_sse._parse_sse_json_payloads(rewritten_line)
                         if upstream_name != "official"
                         else ([usage_payload] if isinstance(usage_payload, Mapping) else [])
                     )
                     if rewritten_payloads:
-                        _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payloads[0])
+                        gateway_stream_semantics._count_sse_reasoning_event(
+                            reasoning_stats, original_payload, rewritten_payloads[0]
+                        )
                         for emitted_payload in rewritten_payloads[1:]:
-                            _count_sse_reasoning_event(reasoning_stats, None, emitted_payload)
+                            gateway_stream_semantics._count_sse_reasoning_event(reasoning_stats, None, emitted_payload)
                         rewritten_events.extend(rewritten_payloads)
                     else:
-                        _count_sse_reasoning_event(reasoning_stats, original_payload, None)
-                    terminal = _responses_events_have_terminal(rewritten_payloads)
+                        gateway_stream_semantics._count_sse_reasoning_event(reasoning_stats, original_payload, None)
+                    terminal = gateway_stream_semantics._responses_events_have_terminal(rewritten_payloads)
                     buffered_lines.append((rewritten_line, terminal))
                     if saw_terminal_event:
                         break
@@ -2197,13 +2126,13 @@ def relay_upstream_response(
                     stream_idle_phase=exc.phase,
                     terminal_seen=saw_terminal_event,
                     downstream_output_started=downstream_output_started,
-                    detail=safe_upstream_error_detail(exc, redact_identity=relay_redact_identity),
+                    detail=gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity),
                 )
                 if not send_downstream_response_headers_once():
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                idle_detail = safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
+                idle_detail = gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
                 if not self._write_downstream_sse_error(
                     inbound_format=inbound_format,
                     upstream_name=upstream_name,
@@ -2215,7 +2144,7 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
                 return 502
             except DownstreamKeepaliveFailedError:
                 return finish_downstream_stream_closed(
@@ -2223,7 +2152,7 @@ def relay_upstream_response(
                 )
             except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
                 self.close_connection = True
-                stream_detail = safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
+                stream_detail = gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
                 write_proxy_event(
                     "upstream_stream_interrupted",
                     request_id=request_id,
@@ -2246,7 +2175,7 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_interrupted")
                 return 502
             if apply_patch_stream_adapter is not None and saw_terminal_event:
                 apply_patch_stream_adapter.finish()
@@ -2276,28 +2205,30 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="stream_incomplete")
                 return 502
             lifecycle_issue = (
-                _responses_events_lifecycle_final_issue(rewritten_events, event_context, request_kind)
+                gateway_stream_semantics._responses_events_lifecycle_final_issue(
+                    rewritten_events, event_context, request_kind
+                )
                 if status < 400
                 else None
             )
             if lifecycle_issue is not None:
                 _write_adapter_event(
                     event_context,
-                    _lifecycle_final_issue_event_name(lifecycle_issue),
+                    gateway_stream_semantics._lifecycle_final_issue_event_name(lifecycle_issue),
                     upstream=upstream_name,
                     inbound_format=inbound_format,
                     want_chat_output=want_chat_output,
-                    **_response_events_shape_summary(list(rewritten_events)),
+                    **gateway_stream_semantics._response_events_shape_summary(list(rewritten_events)),
                 )
-                _capture_usage(
+                gateway_events.capture_usage(
                     usage_capture,
                     None,
-                    missing_reason=_lifecycle_final_issue_missing_reason(lifecycle_issue),
+                    missing_reason=gateway_stream_semantics._lifecycle_final_issue_missing_reason(lifecycle_issue),
                 )
-                _raise_lifecycle_final_issue(upstream_name, lifecycle_issue)
+                gateway_stream_semantics._raise_lifecycle_final_issue(upstream_name, lifecycle_issue)
             if upstream_name != "official" and reasoning_stats["seen"]:
                 write_proxy_event(
                     "sse_reasoning_summary",
@@ -2319,7 +2250,7 @@ def relay_upstream_response(
                         seam.last_write_error() or OSError("downstream closed")
                     )
                 if terminal:
-                    separator = _sse_event_separator_after_line(buffered_line)
+                    separator = gateway_sse._sse_event_separator_after_line(buffered_line)
                     if separator:
                         if not output.write(separator):
                             return finish_downstream_stream_closed(
@@ -2328,7 +2259,7 @@ def relay_upstream_response(
                 if terminal:
                     break
             self.close_connection = True
-            _capture_usage(usage_capture, None)
+            gateway_events.capture_usage(usage_capture, None)
             return status
 
         reasoning_stats: dict[str, Any] = {
@@ -2365,7 +2296,7 @@ def relay_upstream_response(
             if (
                 upstream_name != "official"
                 and not want_chat_output
-                and _apply_patch_adapter_enabled(compatibility_event_context)
+                and gateway_compat.response._apply_patch_adapter_enabled(compatibility_event_context)
             )
             else None
         )
@@ -2400,12 +2331,12 @@ def relay_upstream_response(
             error_value = error_payload.get("error")
             if isinstance(error_value, Mapping):
                 sanitized_error: dict[str, Any] = {
-                    key: _redact_identity_in_text(str(value), relay_redact_identity)
+                    key: gateway_errors._redact_identity_in_text(str(value), relay_redact_identity)
                     for key, value in error_value.items()
                 }
             else:
                 sanitized_error = {
-                    "message": _redact_identity_in_text(
+                    "message": gateway_errors._redact_identity_in_text(
                         str(error_value or "Upstream stream error"),
                         relay_redact_identity,
                     )
@@ -2437,14 +2368,14 @@ def relay_upstream_response(
             item = payload.get("item")
             if not isinstance(item, Mapping):
                 return
-            completed = _responses_completed_tool_item(item)
+            completed = gateway_stream_semantics._responses_completed_tool_item(item)
             if completed is not None:
                 completed_tool_output_items.append(completed)
 
         def synthesize_completed_tool_response() -> bool:
             if upstream_name == "official" or downstream_output_started or not completed_tool_output_items:
                 return False
-            event = _synthetic_response_completed_from_tool_items(
+            event = gateway_stream_semantics._synthetic_response_completed_from_tool_items(
                 created_response=created_response,
                 model=model,
                 output_items=completed_tool_output_items,
@@ -2474,12 +2405,12 @@ def relay_upstream_response(
         try:
             for line in self._iter_upstream_sse_lines(
                 response,
-                line_resets_idle_timeout=_responses_sse_line_resets_idle_timeout,
+                line_resets_idle_timeout=gateway_stream_semantics._responses_sse_line_resets_idle_timeout,
                 on_line=observe_diagnostic_sse_line,
             ):
                 if not line:
                     break
-                if upstream_name != "official" and _is_sse_blank_line(line):
+                if upstream_name != "official" and gateway_sse._is_sse_blank_line(line):
                     if drop_next_sse_separator:
                         drop_next_sse_separator = False
                         pending_sse_event_metadata = []
@@ -2489,11 +2420,11 @@ def relay_upstream_response(
                         continue
                     write_or_queue_downstream_line(line, buffer=bool(pending_downstream_lines))
                     continue
-                if upstream_name != "official" and _is_sse_event_metadata_line(line):
+                if upstream_name != "official" and gateway_sse._is_sse_event_metadata_line(line):
                     pending_sse_event_metadata.append(line)
                     continue
-                original_payload = _parse_sse_json_payload(line) if upstream_name != "official" else None
-                usage_payload = _parse_sse_json_payload(line)
+                original_payload = gateway_sse._parse_sse_json_payload(line) if upstream_name != "official" else None
+                usage_payload = gateway_sse._parse_sse_json_payload(line)
                 buffer_current_line = False
                 if isinstance(usage_payload, Mapping):
                     remember_response_id(usage_payload)
@@ -2507,7 +2438,7 @@ def relay_upstream_response(
                             pending_sse_event_metadata = []
                             raise exc
                         self.close_connection = True
-                        stream_error_detail = safe_upstream_error_detail(
+                        stream_error_detail = gateway_errors.safe_upstream_error_detail(
                             exc, redact_identity=relay_redact_identity
                         )
                         write_proxy_event(
@@ -2518,13 +2449,13 @@ def relay_upstream_response(
                             status=502,
                             upstream_format=upstream_format,
                             inbound_format=inbound_format,
-                            failure_class=_upstream_failure_class(exc),
+                            failure_class=gateway_transport._upstream_failure_class(exc),
                             detail=stream_error_detail,
                         )
                         write_response_failed_event(usage_payload)
-                        _capture_usage(usage_capture, None, missing_reason="stream_error_event")
+                        gateway_events.capture_usage(usage_capture, None, missing_reason="stream_error_event")
                         return 502
-                    if _responses_events_have_terminal([usage_payload]):
+                    if gateway_stream_semantics._responses_events_have_terminal([usage_payload]):
                         if not saw_terminal_event:
                             _observe_gateway_diagnostic(
                                 "observe_terminal",
@@ -2534,21 +2465,21 @@ def relay_upstream_response(
                         saw_terminal_event = True
                     if event_type == "response.completed":
                         saw_completed_event = True
-                    if _responses_event_has_visible_or_tool_output(usage_payload, upstream_name):
+                    if gateway_stream_semantics._responses_event_has_visible_or_tool_output(usage_payload, upstream_name):
                         visible_or_tool_output_seen = True
                         if seam is not None:
                             seam.mark_downstream_content_exposed()
                     empty_completed_candidate = (
                         event_type == "response.completed" and third_party_empty_completed()
                     )
-                    is_tool_construction = _responses_event_is_tool_call_construction(usage_payload)
+                    is_tool_construction = gateway_stream_semantics._responses_event_is_tool_call_construction(usage_payload)
                     if (
                         is_tool_construction
                         and not downstream_output_started
                         and not saw_terminal_event
                     ):
                         buffer_current_line = True
-                    elif _responses_event_starts_downstream_output(usage_payload):
+                    elif gateway_stream_semantics._responses_event_starts_downstream_output(usage_payload):
                         downstream_output_started = True
                     buffer_current_line = (
                         buffer_current_line
@@ -2556,7 +2487,7 @@ def relay_upstream_response(
                         or not downstream_output_started
                         and not saw_terminal_event
                     )
-                    _capture_usage(usage_capture, _usage_from_response_event(usage_payload))
+                    gateway_events.capture_usage(usage_capture, gateway_events._usage_from_response_event(usage_payload))
                 elif (
                     pending_downstream_lines
                     and not downstream_output_started
@@ -2569,29 +2500,33 @@ def relay_upstream_response(
                         if not replacement_events:
                             line = b""
                         else:
-                            line = _sse_json_line(replacement_events[0], _sse_line_ending(line))
+                            line = gateway_stream_semantics._sse_json_line(
+                                replacement_events[0], gateway_sse._sse_line_ending(line)
+                            )
                 line = compatible_sse_line(line, upstream_name, event_context=compatibility_event_context)
                 rewritten_payloads = (
-                    _parse_sse_json_payloads(line)
+                    gateway_sse._parse_sse_json_payloads(line)
                     if upstream_name != "official"
                     else []
                 )
                 if rewritten_payloads:
                     for emitted_payload in rewritten_payloads:
                         remember_completed_tool_event(emitted_payload)
-                    _count_sse_reasoning_event(reasoning_stats, original_payload, rewritten_payloads[0])
+                    gateway_stream_semantics._count_sse_reasoning_event(
+                        reasoning_stats, original_payload, rewritten_payloads[0]
+                    )
                     for emitted_payload in rewritten_payloads[1:]:
-                        _count_sse_reasoning_event(reasoning_stats, None, emitted_payload)
+                        gateway_stream_semantics._count_sse_reasoning_event(reasoning_stats, None, emitted_payload)
                 elif isinstance(usage_payload, Mapping):
                     remember_completed_tool_event(usage_payload)
-                    _count_sse_reasoning_event(reasoning_stats, original_payload, None)
+                    gateway_stream_semantics._count_sse_reasoning_event(reasoning_stats, original_payload, None)
                 else:
-                    _count_sse_reasoning_event(reasoning_stats, original_payload, None)
+                    gateway_stream_semantics._count_sse_reasoning_event(reasoning_stats, original_payload, None)
 
                 if not line and upstream_name != "official":
                     pending_sse_event_metadata = []
                     drop_next_sse_separator = True
-                    if isinstance(original_payload, Mapping) and _is_raw_reasoning_stream_event(
+                    if isinstance(original_payload, Mapping) and gateway_stream_semantics.is_raw_reasoning_stream_event(
                         original_payload
                     ):
                         downstream_output_started = True
@@ -2608,7 +2543,7 @@ def relay_upstream_response(
                     pending_sse_event_metadata = []
                 write_or_queue_downstream_line(line, buffer=buffer_current_line)
                 if saw_terminal_event:
-                    separator = _sse_event_separator_after_line(line)
+                    separator = gateway_sse._sse_event_separator_after_line(line)
                     if separator:
                         flush_terminal = not (
                             isinstance(usage_payload, Mapping)
@@ -2632,7 +2567,7 @@ def relay_upstream_response(
             if defer_stream_errors and not downstream_output_started:
                 raise
             self.close_connection = True
-            idle_detail = safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
+            idle_detail = gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
             write_proxy_event(
                 "upstream_stream_idle_timeout",
                 request_id=request_id,
@@ -2658,7 +2593,7 @@ def relay_upstream_response(
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
-            _capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
+            gateway_events.capture_usage(usage_capture, None, missing_reason="stream_idle_timeout")
             return 502
         except DownstreamKeepaliveFailedError:
             return finish_downstream_stream_closed(
@@ -2668,7 +2603,7 @@ def relay_upstream_response(
             if defer_stream_errors and not downstream_output_started:
                 raise UpstreamStreamInterruptedError(exc) from exc
             self.close_connection = True
-            stream_detail = safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
+            stream_detail = gateway_errors.safe_upstream_error_detail(exc, redact_identity=relay_redact_identity)
             write_proxy_event(
                 "upstream_stream_interrupted",
                 request_id=request_id,
@@ -2687,7 +2622,7 @@ def relay_upstream_response(
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
-            _capture_usage(usage_capture, None, missing_reason="stream_interrupted")
+            gateway_events.capture_usage(usage_capture, None, missing_reason="stream_interrupted")
             return 502
         except DownstreamWriteFailedError:
             return finish_downstream_stream_closed(
@@ -2704,7 +2639,7 @@ def relay_upstream_response(
                 if apply_patch_stream_adapter is not None:
                     apply_patch_stream_adapter.finish(allow_missing_terminal=True)
                 self.close_connection = True
-                _capture_usage(usage_capture, None, missing_reason="synthetic_tool_terminal")
+                gateway_events.capture_usage(usage_capture, None, missing_reason="synthetic_tool_terminal")
                 return status
             if defer_stream_errors and not downstream_output_started:
                 raise UpstreamStreamIncompleteError("Responses stream ended before response.completed")
@@ -2750,7 +2685,7 @@ def relay_upstream_response(
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
-            _capture_usage(usage_capture, None, missing_reason="stream_incomplete")
+            gateway_events.capture_usage(usage_capture, None, missing_reason="stream_incomplete")
             return 502
         if apply_patch_stream_adapter is not None:
             apply_patch_stream_adapter.finish()
@@ -2793,7 +2728,7 @@ def relay_upstream_response(
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
-            _capture_usage(usage_capture, None, missing_reason="empty_completed_response")
+            gateway_events.capture_usage(usage_capture, None, missing_reason="empty_completed_response")
             return 502
         if upstream_name != "official" and reasoning_stats["seen"]:
             write_proxy_event(
@@ -2807,7 +2742,7 @@ def relay_upstream_response(
                 delta_chars=reasoning_stats["delta_chars"],
             )
         self.close_connection = True
-        _capture_usage(
+        gateway_events.capture_usage(
             usage_capture,
             None,
             missing_reason="async_usage_pending"
@@ -2821,7 +2756,7 @@ def relay_upstream_response(
             seam.last_write_error() or OSError("downstream closed")
         )
     self.close_connection = True
-    _capture_usage(
+    gateway_events.capture_usage(
         usage_capture,
         None,
         missing_reason="async_usage_pending"
@@ -2829,7 +2764,6 @@ def relay_upstream_response(
         else "upstream_missing_usage",
     )
     return status
-
 
 
 from gateway_relay_passthrough import (

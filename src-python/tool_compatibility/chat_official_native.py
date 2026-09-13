@@ -7,11 +7,14 @@ plain function.  Unknown aliases fail closed. Encrypted fields on the Chat reque
 history fail closed. Response ciphertext is dropped so the portable hosted
 action and assistant text can still reach Chat. Official also expands custom
 and tool_search aliases; third-party Chat only collapses known hosted calls.
+The expand pass records one request-scoped name state on the event context;
+collapse reads that state back. Callers only preserve and pass the context.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from route_primitives import APPLY_PATCH_FUNCTION_NAME
@@ -34,7 +37,7 @@ from .dispositions import (
 )
 from .registry import RequestScopedToolAliasRegistry
 
-CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY = "_chat_official_native_name_map"
+_NATIVE_STATE_KEY = "_chat_official_native_state"
 KNOWN_CUSTOM_NAMES = (APPLY_PATCH_FUNCTION_NAME,)
 _ENCRYPTED_PAYLOAD_KEYS = frozenset(
     {
@@ -46,6 +49,33 @@ _ENCRYPTED_PAYLOAD_KEYS = frozenset(
 )
 _HOSTED_CALL_META = frozenset({"id", "type", "status", "call_id", "name"}) | _ENCRYPTED_PAYLOAD_KEYS
 _INCOMPLETE_HOSTED_CALLS = frozenset({"computer_use_preview_call", "local_shell_call"})
+
+
+@dataclass(frozen=True)
+class _ChatNativeNameState:
+    """Request-scoped Chat/Official names recorded by the expand pass.
+
+    One instance lives under a single private context key. Only this module
+    constructs or reads it; callers just carry the event context they already
+    pass between request preparation, response, SSE, and Relay.
+    """
+
+    hosted: Mapping[str, str]
+    custom: Mapping[str, str]
+    tool_search: str
+    hosted_event: Mapping[str, str]
+
+
+def _state_from_context(event_context: Mapping[str, Any] | None) -> _ChatNativeNameState | None:
+    if not isinstance(event_context, Mapping):
+        return None
+    state = event_context.get(_NATIVE_STATE_KEY)
+    return state if isinstance(state, _ChatNativeNameState) else None
+
+
+def _store_state(event_context: Mapping[str, Any] | None, state: _ChatNativeNameState) -> None:
+    if isinstance(event_context, dict):
+        event_context[_NATIVE_STATE_KEY] = state
 
 
 def collapse_hosted_item_for_chat(item: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -407,10 +437,9 @@ def expand_chat_native_tools_for_official(
         custom_aliases=custom_aliases,
         search_alias=search_alias,
     )
-    if isinstance(event_context, dict):
-        event_context[CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY] = chat_names
+    _store_state(event_context, _state_from_chat_names(chat_names))
 
-    owners = _expand_native_history(
+    _expand_native_history(
         payload,
         hosted_aliases=hosted_aliases,
         custom_aliases=custom_aliases,
@@ -419,9 +448,20 @@ def expand_chat_native_tools_for_official(
         custom_chat_names=chat_names["custom"],
         search_chat_name=chat_names["tool_search"] if isinstance(chat_names["tool_search"], str) else "",
     )
-    if isinstance(event_context, dict) and owners:
-        event_context["_chat_official_native_call_owners"] = owners
     return True
+
+
+def _state_from_chat_names(chat_names: Mapping[str, Any]) -> _ChatNativeNameState:
+    hosted = chat_names.get("hosted")
+    custom = chat_names.get("custom")
+    hosted_event = chat_names.get("hosted_event")
+    tool_search = chat_names.get("tool_search")
+    return _ChatNativeNameState(
+        hosted=dict(hosted) if isinstance(hosted, Mapping) else {},
+        custom=dict(custom) if isinstance(custom, Mapping) else {},
+        tool_search=tool_search if isinstance(tool_search, str) else "",
+        hosted_event=dict(hosted_event) if isinstance(hosted_event, Mapping) else {},
+    )
 
 
 def _reject_undeclared_native_history(
@@ -461,10 +501,10 @@ def _expand_native_history(
     hosted_chat_names: Mapping[str, str],
     custom_chat_names: Mapping[str, str],
     search_chat_name: str,
-) -> dict[str, tuple[str, str]]:
+) -> None:
     input_items = payload.get("input")
     if not isinstance(input_items, list):
-        return {}
+        return
     hosted_name_to_kind = {kind: kind for kind in hosted_chat_names}
     hosted_name_to_kind.update({chat_name: kind for kind, chat_name in hosted_chat_names.items()})
     hosted_name_to_kind.update(hosted_aliases)
@@ -497,7 +537,6 @@ def _expand_native_history(
             continue
         rewritten.append(_copy_mapping(item))
     payload["input"] = rewritten
-    return owners
 
 
 def _expand_native_call(
@@ -615,26 +654,28 @@ def collapse_official_native_tools_for_chat(
 ) -> bool:
     """Rewrite hosted/custom/tool_search items into Chat function calls.
 
-    Official Chat records a name map while expanding aliases. Third-party Chat
-    inbound has no alias map; collapse known hosted calls by their static
+    Official Chat records a name state while expanding aliases. Third-party
+    Chat inbound has no state; collapse known hosted calls by their static
     item type so ``web_search_call`` can become a Chat ``function_call``.
-    Custom and tool_search stay official-only unless a name map is present.
+    Custom and tool_search stay official-only unless the official state is
+    present.
     """
 
-    name_map = (event_context or {}).get(CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY)
-    official_name_map = isinstance(name_map, Mapping) and bool(name_map)
-    if not official_name_map:
+    state = _state_from_context(event_context)
+    official_state = state is not None
+    if state is None:
         if (event_context or {}).get("_caller_wire_format") != "chat_completions":
             return False
-        name_map = {"hosted_event": hosted_event_chat_names()}
+        state = _ChatNativeNameState(
+            hosted={},
+            custom={},
+            tool_search="",
+            hosted_event=hosted_event_chat_names(),
+        )
     output = payload.get("output")
     if not isinstance(output, list):
         return False
-    hosted_event = name_map.get("hosted_event")
-    hosted_event = hosted_event if isinstance(hosted_event, Mapping) else {}
-    custom_names = name_map.get("custom")
-    custom_names = custom_names if isinstance(custom_names, Mapping) else {}
-    search_name = name_map.get("tool_search")
+    hosted_event = state.hosted_event
     changed = False
     for index, item in enumerate(list(output)):
         if not isinstance(item, dict):
@@ -669,11 +710,11 @@ def collapse_official_native_tools_for_chat(
                 "unknown_hosted_kind",
                 surface="response",
             )
-        if not official_name_map:
+        if not official_state:
             continue
         if item_type == "custom_tool_call":
             native_name = item.get("name")
-            chat_name = custom_names.get(native_name, native_name)
+            chat_name = state.custom.get(native_name, native_name)
             if not isinstance(chat_name, str) or not chat_name:
                 raise ToolCompatibilityError(
                     "tool_compatibility_boundary",
@@ -684,7 +725,7 @@ def collapse_official_native_tools_for_chat(
             changed = True
             continue
         if item_type == "tool_search_call":
-            chat_name = search_name if isinstance(search_name, str) and search_name else "tool_search"
+            chat_name = state.tool_search or "tool_search"
             output[index] = _collapse_tool_search_call(item, chat_name)
             changed = True
             continue

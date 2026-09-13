@@ -235,7 +235,9 @@ class _ProtocolFixture:
 
     @property
     def plan(self) -> Any:
-        return self.event_context.get("_runtime_tool_compatibility_plan")
+        return gateway_compat.official_passthrough.request_tool_plan(
+            self.event_context
+        )
 
 
 def _native_v2_sse_event(name: str, call_id: str, item_id: str, output_index: int) -> list[bytes]:

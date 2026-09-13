@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import gateway_compat
+import tool_history
 import tool_surface_adapter
 from tool_surface_adapter import (
     NODE_REPL_NAMESPACE,
@@ -236,7 +237,7 @@ def test_bounded_tool_search_terminalizes_and_suppresses_identical_query():
     assert "tool_search_unavailable" in rewritten["content"][0]["text"]
 
 
-def test_rewrite_structured_tool_input_uses_scripted_hooks():
+def test_rewrite_structured_tool_input_uses_scripted_hooks(monkeypatch):
     seen = []
 
     def adapt_history(input_items, *, event_context=None):
@@ -250,10 +251,8 @@ def test_rewrite_structured_tool_input_uses_scripted_hooks():
             "content": f"internal:{item.get('name')}",
         }
 
-    adapter = _adapter(
-        adapt_apply_patch_history=adapt_history,
-        compatible_internal_message=internal,
-    )
+    monkeypatch.setattr(tool_history, "internal_message", internal)
+    adapter = _adapter(adapt_apply_patch_history=adapt_history)
     payload = {
         "tools": [{"type": "function", "name": "shell"}],
         "input": [
@@ -346,7 +345,7 @@ def test_v2_context_skips_third_party_normalization():
     assert rewritten is item
 
 
-def test_downgrade_invalid_tool_calls_uses_scripted_transcript():
+def test_downgrade_invalid_tool_calls_uses_scripted_transcript(monkeypatch):
     def transcript(title, item):
         return {
             "type": "message",
@@ -356,7 +355,8 @@ def test_downgrade_invalid_tool_calls_uses_scripted_transcript():
             ],
         }
 
-    adapter = _adapter(transcript_message=transcript)
+    monkeypatch.setattr(tool_history, "transcript_message", transcript)
+    adapter = _adapter()
     rewritten, changed = adapter.downgrade_invalid_third_party_tool_calls(
         {"type": "function_call", "name": "bad name!", "arguments": "{}"}
     )

@@ -15,6 +15,7 @@ import collaboration_adapter as _collaboration_adapter_module
 import gateway_catalog_runtime as _gateway_catalog_runtime
 import gateway_events as _gateway_events
 import gateway_request as _gateway_request
+import tool_surface_adapter as _tool_surface_adapter_module
 
 from apply_patch_adapter import (
     ApplyPatchFacts,
@@ -71,7 +72,6 @@ from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
 )
 
-from . import multi_agent as _multi_agent
 from . import official_passthrough as _official_passthrough
 from . import response as _response
 from . import host
@@ -324,12 +324,14 @@ def compatible_request_body(
     if isinstance(event_context, dict):
         event_context["tool_protocol"] = tool_protocol
     if upstream_name != "official" and not raw_provider_probe and not collaboration_v2:
-        if _multi_agent._validate_worker_binding_history(payload):
+        if _collaboration_adapter_module.validate_worker_binding_history(payload):
             changed = True
     bounded_tool_search_terminal_calls = (
         {}
         if raw_provider_probe
-        else _multi_agent._bounded_empty_tool_search_terminal_calls(payload.get("input"))
+        else _tool_surface_adapter_module.bounded_empty_tool_search_terminal_calls(
+            payload.get("input")
+        )
     )
     bounded_tool_search_queries = {
         query for query, _count in bounded_tool_search_terminal_calls.values()
@@ -355,11 +357,14 @@ def compatible_request_body(
             event_context["_tool_search_client_owned"] = True
         if bounded_tool_search_queries:
             event_context["_bounded_tool_search_query_digests"] = frozenset(
-                _multi_agent._tool_search_query_digest(query) for query in bounded_tool_search_queries
+                _tool_surface_adapter_module.tool_search_query_digest(query)
+                for query in bounded_tool_search_queries
             )
         else:
             event_context.pop("_bounded_tool_search_query_digests", None)
-    if _multi_agent._terminalize_bounded_empty_tool_search_misses(payload, bounded_tool_search_terminal_calls):
+    if _tool_surface_adapter_module.terminalize_bounded_empty_tool_search_misses(
+        payload, bounded_tool_search_terminal_calls
+    ):
         for _query, count in bounded_tool_search_terminal_calls.values():
             _gateway_events.write_proxy_event(
                 "tool_search_empty_miss_bound",
@@ -447,7 +452,7 @@ def compatible_request_body(
             runtime_plan_context = (
                 event_context if isinstance(event_context, dict) else {}
             )
-            if _official_passthrough._prepare_runtime_tool_compatibility(
+            if _official_passthrough.prepare_tool_plan(
                 payload,
                 upstream,
                 tool_protocol,
@@ -455,7 +460,7 @@ def compatible_request_body(
                 native_responses_tool_codec=native_responses_tool_codec_override,
             ):
                 changed = True
-            runtime_tool_plan = _official_passthrough._runtime_tool_compatibility_plan(runtime_plan_context)
+            runtime_tool_plan = _official_passthrough.request_tool_plan(runtime_plan_context)
     if upstream_name != "official" and not raw_provider_probe:
         import multimodal_tool_result as _multimodal_tool_result
 
@@ -530,7 +535,11 @@ def compatible_request_body(
         elif tool_protocol == "none":
             tools = payload.get("tools")
             if isinstance(tools, list):
-                filtered_tools = [tool for tool in tools if not _multi_agent._is_multi_agent_tool_schema(tool)]
+                filtered_tools = [
+                    tool
+                    for tool in tools
+                    if not _tool_surface_adapter_module.is_multi_agent_tool_schema(tool)
+                ]
                 if len(filtered_tools) != len(tools):
                     payload["tools"] = filtered_tools
                     changed = True
@@ -602,7 +611,9 @@ def compatible_request_body(
         )
         tool_names_before = _official_passthrough._function_tool_names(payload.get("tools"))
         tool_surface_counts: dict[str, int] = {}
-        worker_caller_carrier_supported = _multi_agent._worker_caller_carrier_supported(event_context)
+        worker_caller_carrier_supported = (
+            _collaboration_adapter_module.worker_caller_carrier_supported(event_context)
+        )
         if isinstance(event_context, dict):
             event_context.pop("_spawn_selector_required", None)
             if worker_caller_carrier_supported:
@@ -645,7 +656,9 @@ def compatible_request_body(
                 ("worker", "default") if worker_caller_carrier_supported else ("default",)
             ),
         )
-        if _multi_agent._restrict_bounded_tool_search_queries(payload, bounded_tool_search_queries):
+        if _tool_surface_adapter_module.restrict_bounded_tool_search_queries(
+            payload, bounded_tool_search_queries
+        ):
             changed = True
         if tool_surface_counts:
             if runtime_tool_plan is not None and tool_surface_strategy == "eager":
@@ -683,14 +696,14 @@ def compatible_request_body(
                 and tool.get("name") == APPLY_PATCH_FUNCTION_NAME
             )
         ]
-        finalized_plan = runtime_tool_plan.with_final_declarations(
+        finalized_plan = _official_passthrough.finalize_tool_plan(
+            event_context,
             final_declarations,
             tool_choice=payload.get("tool_choice"),
         )
-        if finalized_plan is not runtime_tool_plan and isinstance(event_context, dict):
+        if finalized_plan is not None:
             runtime_tool_plan = finalized_plan
-            event_context[_official_passthrough._RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = finalized_plan
-    if runtime_tool_plan is not None and _official_passthrough._apply_runtime_tool_compatibility_plan(
+    if runtime_tool_plan is not None and _official_passthrough.encode_tool_plan(
         payload,
         runtime_tool_plan,
     ):

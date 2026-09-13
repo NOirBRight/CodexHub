@@ -54,9 +54,6 @@ from gateway_stream_semantics import (
 )
 from protocol_translation import UpstreamStreamIncompleteError
 
-_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY = (
-    _passthrough._RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY
-)
 _RELAY_RETRYABLE = (
     IncompleteRead,
     CompactEmptyResponseError,
@@ -90,9 +87,6 @@ from gateway_stream_semantics import (
 )
 from protocol_translation import UpstreamStreamIncompleteError
 
-_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY = (
-    _passthrough._RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY
-)
 _RELAY_RETRYABLE = (
     IncompleteRead,
     CompactEmptyResponseError,
@@ -672,7 +666,6 @@ def execute_exchange(request: ExchangeRequest, ports: ExchangePorts, *, progress
     observer.record(ExchangeEvent("request_start", dict(state.request_observability)))
     emit_notice = primary.retry.emit_downstream_retry_notice
     open_budget = primary.retry.new_open_attempt_budget()
-    generation = 0
 
     for attempt in request.route_plan.attempts:
         attempt_request_kind = getattr(attempt.retry, "request_kind", request.inbound.request_kind)
@@ -686,8 +679,7 @@ def execute_exchange(request: ExchangeRequest, ports: ExchangePorts, *, progress
         relay_attempt = 1
         try:
             while relay_attempt <= max_relay_attempts:
-                generation += 1
-                request.event_context[_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY] = generation
+                _passthrough.begin_tool_attempt(request.event_context)
                 attempt_body = body_for(attempt)
                 upstream_request = _gateway_transport.build_request_url(
                     attempt.endpoint_url,

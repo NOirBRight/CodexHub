@@ -62,7 +62,7 @@ from gateway_stream_semantics import (
     _chat_tool_choice_to_responses_tool_choice as chat_tool_choice_to_responses_tool_choice,
     _chat_tools_to_responses_tools as chat_tools_to_responses_tools,
     _events_to_responses_body as events_to_responses_body,
-    _response_body_to_chat_completion_body as response_body_to_chat_completion_body,
+    response_body_to_chat_completion_body,
     _response_events_to_chat_stream_chunks as response_events_to_chat_stream_chunks,
 )
 from protocol_translation import UpstreamStreamIncompleteError

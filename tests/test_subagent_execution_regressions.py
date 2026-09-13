@@ -359,7 +359,7 @@ def test_v1_new_calls_reject_noncanonical_json_at_public_response_boundary(argum
     if native:
         call["namespace"] = "multi_agent_v1"
     else:
-        entry = context["_runtime_tool_compatibility_plan"].entries[0]
+        entry = gateway_compat.official_passthrough.request_tool_plan(context).entries[0]
         call["name"] = entry.aliases[entry.child_names.index("spawn_agent")]
     if surface == "body":
         with pytest.raises(gateway_errors.UpstreamProtocolTranslationError):
@@ -383,7 +383,7 @@ def test_v1_registered_alias_is_restored_to_a_client_executable_namespace_call(m
             event_context=context,
         )
     )
-    plan = context["_runtime_tool_compatibility_plan"]
+    plan = gateway_compat.official_passthrough.request_tool_plan(context)
     entry = next(entry for entry in plan.entries if entry.namespace == "multi_agent_v1")
     alias = entry.aliases[entry.child_names.index("spawn_agent")]
     response = json.loads(
@@ -469,7 +469,7 @@ def test_v2_invalid_stream_call_fails_before_a_completed_event_can_be_emitted(mo
             event_context=context,
         )
     )
-    plan = context["_runtime_tool_compatibility_plan"]
+    plan = gateway_compat.official_passthrough.request_tool_plan(context)
     alias = next(
         entry.aliases[4]
         for entry in plan.entries

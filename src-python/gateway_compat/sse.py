@@ -13,6 +13,7 @@ import uuid
 
 import collaboration_adapter as _collaboration_adapter_module
 import gateway_events as _gateway_events
+import tool_surface_adapter as _tool_surface_adapter_module
 
 from apply_patch_adapter import (
     ApplyPatchFacts,
@@ -66,7 +67,6 @@ from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
 )
 
-from . import multi_agent as _multi_agent
 from . import official_passthrough as _official_passthrough
 from . import host
 
@@ -239,22 +239,10 @@ def compatible_sse_line(
             surface="sse",
         )
 
-    runtime_tool_plan, stream_state = _official_passthrough._runtime_tool_compatibility_stream_for_attempt(
-        event_context
+    decoded_events, runtime_tool_plan = _official_passthrough.decode_tool_events(
+        event_context, payload
     )
-    if runtime_tool_plan is not None and stream_state is not None:
-        wire_event = payload
-        try:
-            decoded_events = stream_state.decode_events_for_event(payload)
-        except RuntimeToolCompatibilityError as exc:
-            _official_passthrough._raise_runtime_tool_compatibility_error(exc)
-        _official_passthrough._write_runtime_tool_adapter_response_evidence(
-            runtime_tool_plan,
-            wire_event,
-            decoded_events,
-            event_context,
-            surface="sse",
-        )
+    if decoded_events is not None:
         if not decoded_events:
             return b""
         if len(decoded_events) > 1:
@@ -284,7 +272,7 @@ def compatible_sse_line(
         return b""
 
     changed = host._hide_reasoning_text(payload) or runtime_tool_changed
-    payload, _ = _multi_agent._apply_external_worker_response_contract(
+    payload, _ = _collaboration_adapter_module.apply_external_worker_response_contract(
         payload,
         event_context,
         surface="sse",
@@ -299,18 +287,22 @@ def compatible_sse_line(
             surface="sse",
         )
     changed = changed or alias_changed
-    payload, bounded_tool_search_changed = _multi_agent._suppress_bounded_tool_search_calls(payload, event_context)
+    payload, bounded_tool_search_changed = (
+        _tool_surface_adapter_module.suppress_bounded_tool_search_calls(payload, event_context)
+    )
     if payload is None:
         return b""
     changed = changed or bounded_tool_search_changed
     payload, invalid_tool_changed = _official_passthrough._downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
     changed = changed or invalid_tool_changed
-    payload, requested_binding_changed = _multi_agent._apply_external_worker_response_contract(
-        payload,
-        event_context,
-        surface="sse",
-        validate_selectors=False,
-        capture_stream_event=False,
+    payload, requested_binding_changed = (
+        _collaboration_adapter_module.apply_external_worker_response_contract(
+            payload,
+            event_context,
+            surface="sse",
+            validate_selectors=False,
+            capture_stream_event=False,
+        )
     )
     changed = changed or requested_binding_changed
     import multimodal_tool_result as _multimodal_tool_result
