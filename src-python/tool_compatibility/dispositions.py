@@ -589,6 +589,11 @@ def build_tool_compatibility_plan(
         if family == PLAIN_FUNCTION:
             if valid and capabilities.function_lifecycle:
                 disposition, reason = NATIVE, "native_function_lifecycle"
+                if _name_of(declaration) in capabilities.reserved_function_names:
+                    disposition, reason = ADAPT, "selected_provider_function_name_collision"
+                    aliases.append(registry.allocate_function(
+                        declaration_index=index, original_name=str(_name_of(declaration)),
+                    ))
             else:
                 reason = "function_lifecycle_unavailable"
         elif family == NAMESPACE:
@@ -692,4 +697,3 @@ def build_tool_compatibility_plan(
         tool_choice=_freeze(tool_choice),
         provider_hosted_kinds=hosted.supported_kinds,
     )
-

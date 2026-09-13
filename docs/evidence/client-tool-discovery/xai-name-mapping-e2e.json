@@ -1,0 +1,54 @@
+[
+  {
+    "case": "fixed-gateway",
+    "request_bytes": 996,
+    "request_sha256": "2b2cf3549e649d45cd77b9c863fb326da7387a36e002377462fb8325fdb92fba",
+    "upstream_calls": [
+      {
+        "name": "__codexhub_fn_428bc15cd6_1",
+        "arguments_chars": 56
+      }
+    ],
+    "downstream_calls": [
+      {
+        "name": "view_image",
+        "arguments_chars": 56
+      }
+    ],
+    "http_status": 200,
+    "input_tokens": 1682,
+    "upstream_sha256": "083f549ed267bc7a7fab6fb73293c8bb882ae90b0a5afaa625ca614e0217f70c",
+    "downstream_sha256": "ce4c6e8d1205aa11354c20776ace5069cf41bdff2fd05f289ff68dce67c21830",
+    "passed": true
+  },
+  {
+    "case": "fixed-full-history",
+    "request_bytes": 424468,
+    "request_sha256": "6dede4b62b0187b592da8826821069869b24fd26faabd19064d8dd6417fe42f0",
+    "upstream_calls": [
+      {
+        "name": "__codexhub_fn_428bc15cd6_1",
+        "arguments_chars": 53
+      },
+      {
+        "name": "exec_command",
+        "arguments_chars": 182
+      }
+    ],
+    "downstream_calls": [
+      {
+        "name": "view_image",
+        "arguments_chars": 53
+      },
+      {
+        "name": "exec_command",
+        "arguments_chars": 182
+      }
+    ],
+    "http_status": 200,
+    "input_tokens": 94699,
+    "upstream_sha256": "b04b15165c95d3498cd30b5b41f3f01000b57c582dea6c7efebc19e92f9f93bf",
+    "downstream_sha256": "776e8da0bfe7908f7eef6c75d298534eeb539f4891ba2985681078fbd03d1889",
+    "passed": true
+  }
+]

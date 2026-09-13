@@ -362,24 +362,27 @@ def test_transcript_rendering_is_owned_by_tool_history() -> None:
 def test_runtime_tool_compatibility_state_is_owned_by_its_module() -> None:
     """Runtime tool lifecycle state must stay inside official_passthrough."""
 
+    import ast
+
     root = Path(__file__).resolve().parent.parent
     owner = root / "src-python" / "gateway_compat" / "official_passthrough.py"
     markers = (
-        '"_runtime_tool_compatibility_state"',
-        '"request_tool_plan"',
-        '"_runtime_tool_compatibility_stream"',
-        '"_runtime_tool_compatibility_attempt_plan"',
-        '"_runtime_tool_compatibility_attempt_generation"',
+        "_runtime_tool_compatibility_state",
+        "_runtime_tool_compatibility_plan",
+        "_runtime_tool_compatibility_stream",
+        "_runtime_tool_compatibility_attempt_plan",
+        "_runtime_tool_compatibility_attempt_generation",
+        "_runtime_tool_compatibility_attempt_plan_generation",
     )
     gate_file = Path(__file__).resolve()
     offenders: list[str] = []
     for source in sorted((root / "src-python").rglob("*.py")) + sorted((root / "tests").rglob("*.py")):
         if source in (owner, gate_file):
             continue
-        source_text = source.read_text(encoding="utf-8")
-        for marker in markers:
-            if marker in source_text:
-                offenders.append(f"{source.relative_to(root)}: {marker}")
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and node.value in markers:
+                offenders.append(f"{source.relative_to(root)}:{node.lineno}: {node.value}")
     assert offenders == []
 
 

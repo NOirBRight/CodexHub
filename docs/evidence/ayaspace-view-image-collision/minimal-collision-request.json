@@ -1,0 +1,48 @@
+{
+  "model": "grok-4.6",
+  "stream": true,
+  "reasoning": {
+    "effort": "xhigh",
+    "summary": "auto"
+  },
+  "instructions": "You are an assistant with client-side tools. Use the local image tool to inspect the requested file. Emit its tool call now and wait for the tool result.",
+  "input": [
+    {
+      "role": "user",
+      "content": "Inspect the local file /tmp/codexhub-image-probe.png with the local image tool."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "view_image",
+      "description": "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "Image detail level. Defaults to `high`; use `original` to preserve exact resolution.",
+            "enum": [
+              "high",
+              "original"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "description": "Local filesystem path to an image file."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "type": "web_search"
+    }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": true
+}

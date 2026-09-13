@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable as IterableABC
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, NoReturn
 
@@ -327,6 +327,18 @@ def prepare_tool_plan(
         ):
             provider_hosted_capabilities = {kind: True for kind in CHAT_OFFICIAL_HOSTED_KINDS}
         protocol_capabilities = _runtime_tool_protocol_capabilities(tool_protocol, upstream)
+        # xAI's hosted image understanding uses view_image internally. A
+        # same-named client function plus web_search can complete without a
+        # call. Keep search and adapt only the conflicting client identity.
+        if (
+            str(upstream.get("provider_id") or upstream.get("name") or "") == "xai"
+            and tool_protocol == "responses_structured"
+            and any(tool.get("type") in {"web_search", "web_search_preview"}
+                    for tool in planned_declarations if isinstance(tool, Mapping))
+        ):
+            protocol_capabilities = replace(
+                protocol_capabilities, reserved_function_names=frozenset({"view_image"}),
+            )
         plan = build_tool_compatibility_plan(
             planned_declarations,
             selected_protocol=tool_protocol,

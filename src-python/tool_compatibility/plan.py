@@ -27,6 +27,7 @@ from collaboration_runtime_contract import failed_argument_call_ids
 
 from .argument_contract import (
     child_name_for_entry,
+    encode_timeout_contract,
     normalize_namespace_arguments,
     validate_versioned_item,
     validate_version_fields as _validate_version_fields,
@@ -180,6 +181,11 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             if family == PLAIN_FUNCTION:
                 if self.capabilities.function_lifecycle:
                     disposition, reason = NATIVE, "native_function_lifecycle"
+                    if _name_of(declaration) in self.capabilities.reserved_function_names:
+                        disposition, reason = ADAPT, "selected_provider_function_name_collision"
+                        aliases = [self.registry.allocate_function(
+                            declaration_index=len(entries), original_name=str(_name_of(declaration)),
+                        )]
             elif family == NAMESPACE:
                 namespace, children, version, _valid = _namespace_details(declaration)
                 if self.capabilities.namespace_lifecycle:
@@ -459,19 +465,6 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             return True
         return self.registry.record_for_call(value.get("call_id")) is not None
 
-    @staticmethod
-    def _encode_timeout_contract(child: dict[str, Any]) -> None:
-        # The client declaration uses JSON Schema number, but its handler
-        # deserializes an integer. Narrow only a registered native wait tool.
-        if child.get("name") != "wait_agent":
-            return
-        fields = child.get("parameters", {}).get("properties", {})
-        if isinstance(fields.get("timeout_ms"), dict):
-            fields["timeout_ms"] = {
-                **fields["timeout_ms"], "type": "integer",
-                "description": "Timeout in milliseconds. Emit a JSON integer, e.g. 300000, not 300000.0.",
-            }
-
     def _encode_tool_declarations(self, tools: Any) -> tuple[Any, bool]:
         if not isinstance(tools, list):
             return tools, False
@@ -492,6 +485,13 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             if entry.disposition != ADAPT:
                 encoded.append(_copy_mapping(raw_tool))
                 continue
+            if entry.family == PLAIN_FUNCTION:
+                function = _copy_mapping(raw_tool)
+                target = function.get("function") if isinstance(function.get("function"), dict) else function
+                target["name"] = entry.aliases[0]
+                encoded.append(function)
+                changed = True
+                continue
             if entry.family == NAMESPACE:
                 namespace, children, _version, valid = _namespace_details(raw_tool)
                 if not valid:
@@ -504,7 +504,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                     )
                     child = _copy_mapping(child)
                     if entry.version in {"v1", "v2"}:
-                        self._encode_timeout_contract(child)
+                        encode_timeout_contract(child)
                     encoded.append(
                         _provider_function_declaration(child, entry.aliases[child_index])
                     )
@@ -537,7 +537,6 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                 function["type"] = "function"
                 function["name"] = alias
                 function.pop("execution", None)
-                function.pop("description", None)
                 source_parameters = function.get("parameters")
                 if not isinstance(source_parameters, Mapping):
                     source_parameters = {"type": "object"}
@@ -556,7 +555,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
     def _encode_tool_choice(self, value: Any) -> tuple[Any, bool]:
         thawed = _thaw(value)
         if isinstance(thawed, str):
-            if self.registry.is_native_name(thawed):
+            if self.registry.is_native_name(thawed) and thawed not in self.capabilities.reserved_function_names:
                 return thawed, False
             remapped = self.registry.remapped_alias(thawed)
             if remapped is not None:
@@ -577,7 +576,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
         result = dict(thawed)
         name = result.get("name")
         choice_type = result.get("type")
-        if self.registry.is_native_name(name) and result.get("namespace") is None:
+        if self.registry.is_native_name(name) and name not in self.capabilities.reserved_function_names and result.get("namespace") is None:
             return result, False
         remapped = self.registry.remapped_alias(name)
         if remapped is not None:

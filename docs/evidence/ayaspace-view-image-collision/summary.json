@@ -1,0 +1,809 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-13",
+  "model": "grok-4.6",
+  "endpoint": "https://api.x.ai/v1/responses",
+  "scope": "Real xAI API inference and installed Gateway HTTP path; function calls captured, never executed.",
+  "reconstruction_limit": "Original request body unavailable. Rebuilt from latest compaction and rollout through line 8560 plus current Desktop tool catalog: 284 tools versus original 292.",
+  "baseline_upstream_downstream_events": {
+    "count": 39,
+    "decoded_events_identical": true
+  },
+  "controlled_full_rename_diff": {
+    "path": "/tools/8/name",
+    "before": "view_image",
+    "after": "codex_view_image"
+  },
+  "controlled_minimal_rename_diff": {
+    "path": "/tools/0/name",
+    "before": "view_image",
+    "after": "codex_view_image"
+  },
+  "original_route": {
+    "tool_surface_strategy": "eager",
+    "upstream_function_tool_count": 292,
+    "catalog_supports_search_tool": false
+  },
+  "reconstructed_route": {
+    "upstream_tool_count": 284,
+    "defer_loading_count": 0,
+    "tool_search_count": 0
+  },
+  "cases": [
+    {
+      "case": "baseline",
+      "duration_s": 16.038,
+      "request_bytes": 424452,
+      "request_sha256": "dfc0b250269ba1092c1cccab37c28ac4bcfa10a481e06cd0a0199f8f7866e6c7",
+      "upstream_response_sha256": "36e1730ffdcffb53536a8552f10162eb7875e319349aa76b776de887768c5662",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 94689,
+      "output_tokens": 62
+    },
+    {
+      "case": "core_bare_web_search",
+      "duration_s": 2.494,
+      "request_bytes": 83938,
+      "request_sha256": "e53cfcd394e92a9719c286b37e1bb53a48f5c73d41362268e597cd425cafacb2",
+      "upstream_response_sha256": "f32dccf518c90e4c58db1e4df79c60ede0f4aa268cb1fdfca21f9f504dd586e3",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 21048,
+      "output_tokens": 66
+    },
+    {
+      "case": "core_renamed_image",
+      "duration_s": 4.106,
+      "request_bytes": 83984,
+      "request_sha256": "1f624d82d23e146b5ed11fd33782b8f24378dc3bf7832c2e3ff8f6c469cadaa2",
+      "upstream_response_sha256": "d9c0491c977efa99839f14c1c3195a4d9f6e3e01d2fe31b8dedc8a4a6f31cf09",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "message",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "codex_view_image"
+      ],
+      "visible_message_count": 1,
+      "input_tokens": 21051,
+      "output_tokens": 77
+    },
+    {
+      "case": "core_renamed_image_repeat1",
+      "duration_s": 4.945,
+      "request_bytes": 83984,
+      "request_sha256": "1f624d82d23e146b5ed11fd33782b8f24378dc3bf7832c2e3ff8f6c469cadaa2",
+      "upstream_response_sha256": "3a26ecfd0e318923b886321199fc7726331644a9e2fb05e99be01d3714d75673",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "codex_view_image"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 21051,
+      "output_tokens": 72
+    },
+    {
+      "case": "core_renamed_image_repeat2",
+      "duration_s": 4.275,
+      "request_bytes": 83984,
+      "request_sha256": "1f624d82d23e146b5ed11fd33782b8f24378dc3bf7832c2e3ff8f6c469cadaa2",
+      "upstream_response_sha256": "27175f0ae9c0dc792c60a02e1f3301ac7e44e73419773780fd1bfd47b023b139",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "codex_view_image"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 21051,
+      "output_tokens": 83
+    },
+    {
+      "case": "core_web_search",
+      "duration_s": 7.346,
+      "request_bytes": 83978,
+      "request_sha256": "61dbbd86a373b0f698b846237fb2c33ec107c6aff845d5993d486c6c12b6d969",
+      "upstream_response_sha256": "a04fa1c32cb744303e1cafc58abca8334f6537e5022813e8bb32b09b02d5502f",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 21048,
+      "output_tokens": 63
+    },
+    {
+      "case": "core_web_search_repeat1",
+      "duration_s": 2.679,
+      "request_bytes": 83978,
+      "request_sha256": "61dbbd86a373b0f698b846237fb2c33ec107c6aff845d5993d486c6c12b6d969",
+      "upstream_response_sha256": "1e3922ad1d69bb456baa93362c0e35d1bffdf12717a1e10694b9e27a830613a2",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 21048,
+      "output_tokens": 95
+    },
+    {
+      "case": "core_web_search_repeat2",
+      "duration_s": 9.541,
+      "request_bytes": 83978,
+      "request_sha256": "61dbbd86a373b0f698b846237fb2c33ec107c6aff845d5993d486c6c12b6d969",
+      "upstream_response_sha256": "25eebfeee3184e15674793d2aecde491e236e0f2c00a9076e71ddcb4b6a2ea38",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 21048,
+      "output_tokens": 63
+    },
+    {
+      "case": "explicit_user",
+      "duration_s": 16.404,
+      "request_bytes": 422767,
+      "request_sha256": "e0426dc29ee631ff251e7385b634adeeaf5ad449c6482353464218174a67b6f0",
+      "upstream_response_sha256": "3bc12ca8e9cbab95676038c5f808dbb32ecb6013a06233cd23043448462441ae",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 94743,
+      "output_tokens": 49
+    },
+    {
+      "case": "full_no_web_search_repeat1",
+      "duration_s": 13.285,
+      "request_bytes": 422547,
+      "request_sha256": "3bf0b3e2d7a3054e2200e3168d750e6da28cd6d8b3bfd593b5e74254cf0c228c",
+      "upstream_response_sha256": "e1d4eacb1f969922f47a50cc93dfe17b05a036849e1598d2b8acbcc1b256b323",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "view_image"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 109414,
+      "output_tokens": 77
+    },
+    {
+      "case": "full_no_web_search_repeat2",
+      "duration_s": 3.682,
+      "request_bytes": 422547,
+      "request_sha256": "3bf0b3e2d7a3054e2200e3168d750e6da28cd6d8b3bfd593b5e74254cf0c228c",
+      "upstream_response_sha256": "b5c99b27dab9927cdfbe18d1dda1f8a61d07bcf3413ebbe91e4c4855b9fd3db7",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "message",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "view_image"
+      ],
+      "visible_message_count": 1,
+      "input_tokens": 109414,
+      "output_tokens": 72
+    },
+    {
+      "case": "full_no_web_search_repeat3",
+      "duration_s": 3.164,
+      "request_bytes": 422547,
+      "request_sha256": "3bf0b3e2d7a3054e2200e3168d750e6da28cd6d8b3bfd593b5e74254cf0c228c",
+      "upstream_response_sha256": "24a97c0da6ee7e890aa6a97878316d3df46c87dc8fb939ef196995e84b5f5ed1",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "view_image"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 109414,
+      "output_tokens": 78
+    },
+    {
+      "case": "full_renamed_image_repeat1",
+      "duration_s": 14.012,
+      "request_bytes": 422615,
+      "request_sha256": "fcf7a602e5e94f3eb97fdcdfdb0560320062e4e09521c4374ebd4bd672a682ae",
+      "upstream_response_sha256": "9efe8d91620826cc8fd770cdfcd0f36e14084d5dbc92b10dd55b9c70522233d0",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "message",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "codex_view_image"
+      ],
+      "visible_message_count": 1,
+      "input_tokens": 94692,
+      "output_tokens": 95
+    },
+    {
+      "case": "full_renamed_image_repeat2",
+      "duration_s": 5.616,
+      "request_bytes": 422615,
+      "request_sha256": "fcf7a602e5e94f3eb97fdcdfdb0560320062e4e09521c4374ebd4bd672a682ae",
+      "upstream_response_sha256": "aadbab0582da64ddf22f75b7944f260a970801724bb32b57b3ba8b0539c1dded",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "codex_view_image"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 94692,
+      "output_tokens": 65
+    },
+    {
+      "case": "full_renamed_image_repeat3",
+      "duration_s": 6.983,
+      "request_bytes": 422615,
+      "request_sha256": "fcf7a602e5e94f3eb97fdcdfdb0560320062e4e09521c4374ebd4bd672a682ae",
+      "upstream_response_sha256": "25692df8acb46898c37cb950fbd9e1da15914e7463a0a5c0972e4d3a46efcd65",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "codex_view_image",
+        "exec_command"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 94692,
+      "output_tokens": 159
+    },
+    {
+      "case": "minimal_tools",
+      "duration_s": 3.045,
+      "request_bytes": 83916,
+      "request_sha256": "6b1e748c8f33305a15e4d9c92bee7b3adc54d5135f0438a69b6c432673cf6fd0",
+      "upstream_response_sha256": "7c3c974231e7f116a870dfe2839fbe4499e7a51878496824725e4bec883ad4e7",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "view_image"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 20228,
+      "output_tokens": 61
+    },
+    {
+      "case": "minimal_tools_repeat1",
+      "duration_s": 11.594,
+      "request_bytes": 83916,
+      "request_sha256": "6b1e748c8f33305a15e4d9c92bee7b3adc54d5135f0438a69b6c432673cf6fd0",
+      "upstream_response_sha256": "fc9275616103d29494a678689935f65c194af2d4f9f09e40fdc57bb8aa7ba2a3",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "view_image"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 20228,
+      "output_tokens": 110
+    },
+    {
+      "case": "minimal_tools_repeat2",
+      "duration_s": 2.704,
+      "request_bytes": 83916,
+      "request_sha256": "6b1e748c8f33305a15e4d9c92bee7b3adc54d5135f0438a69b6c432673cf6fd0",
+      "upstream_response_sha256": "a7ff3fed084ce611d7e418bac8a9b5b8ed3c410c6d1d9ec04903acdbf3160012",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "view_image"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 20228,
+      "output_tokens": 75
+    },
+    {
+      "case": "no_large_schema",
+      "duration_s": 19.851,
+      "request_bytes": 388360,
+      "request_sha256": "cdcebc8d7f35e592e264e2c73a824ab5cd3a7d24d4e35900a4a3f459e0797151",
+      "upstream_response_sha256": "12e637f95aadcaea0e3727339770bfc087cfe31ae40691dc46e3cd69fc46dbc0",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 94342,
+      "output_tokens": 71
+    },
+    {
+      "case": "no_plan_messages",
+      "duration_s": 16.456,
+      "request_bytes": 421796,
+      "request_sha256": "bdaa3c9b6f4ba90fc5c806d0eb926097a1d0a20c1f1c2b86ecf1fa7dcc7dab21",
+      "upstream_response_sha256": "f43252d578de9126805ddb34dd23899baf90ca78b20731f2fc9c87abbabe97e4",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "message"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 1,
+      "input_tokens": 94579,
+      "output_tokens": 129
+    },
+    {
+      "case": "no_reasoning_history",
+      "duration_s": 9.087,
+      "request_bytes": 419798,
+      "request_sha256": "01bb701888c60c7954e5dc166d4e6e742014abfa5c238d0e9de0cae54038d4c8",
+      "upstream_response_sha256": "39a043503ed7ce6b3ada373995d982ffc89d4dd799f0c1f8f233702d7596c883",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "message"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 1,
+      "input_tokens": 94680,
+      "output_tokens": 99
+    },
+    {
+      "case": "required_tool",
+      "duration_s": 9.171,
+      "request_bytes": 422613,
+      "request_sha256": "4e234313c2449a9c38bd2f62b9ff2d96ca674f6ab938ecbca0a0d72024ce3e70",
+      "upstream_response_sha256": "adcb83c71e2a55ffd95ce0ffb7d646b6f5ebe1ad0be5b1069eb6fc363008e886",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "message"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 1,
+      "input_tokens": 94699,
+      "output_tokens": 89
+    },
+    {
+      "case": "same_prepared_direct_repeat1",
+      "duration_s": 2.8,
+      "request_bytes": 422609,
+      "request_sha256": "c6eb75e3e3e1bd74b30bc4c5bb81b6b4abb8e8f82674c2f7e20ec1b631340e01",
+      "upstream_response_sha256": "873df622c1053e29d1be0e9478d93c45565fd0398f7a1e5fc707e6ea1564a51d",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 94689,
+      "output_tokens": 65
+    },
+    {
+      "case": "same_prepared_direct_repeat2",
+      "duration_s": 8.62,
+      "request_bytes": 422609,
+      "request_sha256": "c6eb75e3e3e1bd74b30bc4c5bb81b6b4abb8e8f82674c2f7e20ec1b631340e01",
+      "upstream_response_sha256": "a0f1a1ccbb4487bcddbfdbd3daf5895f14348620180a0d85ab85f04ebfabff17",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "message"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 1,
+      "input_tokens": 94689,
+      "output_tokens": 110
+    },
+    {
+      "case": "short_history",
+      "duration_s": 13.138,
+      "request_bytes": 363457,
+      "request_sha256": "f2a347730934f8c9fc4040f21246d7d6c69d2e54ac5e0c9e06f74840bdb263bd",
+      "upstream_response_sha256": "814266189bc00686539d669e79f8607c49465fe76f18a3a2f8aa434c5df8a853",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "message",
+        "function_call",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "get_goal",
+        "exec_command"
+      ],
+      "visible_message_count": 1,
+      "input_tokens": 80042,
+      "output_tokens": 191
+    },
+    {
+      "case": "tiny_collision",
+      "duration_s": 1.937,
+      "request_bytes": 963,
+      "request_sha256": "de39cb953a01e388f0abae4e467dca6ef304ee45023fd9dc951ecdfc0e6225a0",
+      "upstream_response_sha256": "50c7c01e24902cd701097cea888c70c94bd49527204366c7af8c6809a45ba7a0",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 1672,
+      "output_tokens": 72
+    },
+    {
+      "case": "tiny_collision_repeat1",
+      "duration_s": 1.63,
+      "request_bytes": 963,
+      "request_sha256": "de39cb953a01e388f0abae4e467dca6ef304ee45023fd9dc951ecdfc0e6225a0",
+      "upstream_response_sha256": "79eb6b71f463a8bd2900310d26f3775e039fa33f16e1700e3fd00c1920a0411f",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 1672,
+      "output_tokens": 72
+    },
+    {
+      "case": "tiny_collision_repeat2",
+      "duration_s": 1.753,
+      "request_bytes": 963,
+      "request_sha256": "de39cb953a01e388f0abae4e467dca6ef304ee45023fd9dc951ecdfc0e6225a0",
+      "upstream_response_sha256": "d9bcf2e50aa1a472d77b1d28354bc410d1c7d297ee9962a60693ba38dbc9fe92",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 1672,
+      "output_tokens": 49
+    },
+    {
+      "case": "tiny_renamed",
+      "duration_s": 2.765,
+      "request_bytes": 969,
+      "request_sha256": "161df39cd5d7b58fbc77f14c289bf9a347e1f4db5644e33e8b1761d1d7b893c1",
+      "upstream_response_sha256": "f6f19f0a705110843037de9870d23721f9fa7c0d9c523183fcdb93e2cfeb57ef",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "message",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "codex_view_image"
+      ],
+      "visible_message_count": 1,
+      "input_tokens": 1675,
+      "output_tokens": 98
+    },
+    {
+      "case": "tiny_renamed_repeat1",
+      "duration_s": 2.35,
+      "request_bytes": 969,
+      "request_sha256": "161df39cd5d7b58fbc77f14c289bf9a347e1f4db5644e33e8b1761d1d7b893c1",
+      "upstream_response_sha256": "865c0eef5e8b4850f3074408b9bc2bde4a558935da4358821856b2ae2e2fc849",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "codex_view_image"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 1675,
+      "output_tokens": 55
+    },
+    {
+      "case": "tiny_renamed_repeat2",
+      "duration_s": 6.394,
+      "request_bytes": 969,
+      "request_sha256": "161df39cd5d7b58fbc77f14c289bf9a347e1f4db5644e33e8b1761d1d7b893c1",
+      "upstream_response_sha256": "32e9324078a72af7a479d0156e63f0af75cd0db3fa3b7091374119b905568b81",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "codex_view_image"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 1675,
+      "output_tokens": 90
+    },
+    {
+      "case": "tools_ba",
+      "duration_s": 5.72,
+      "request_bytes": 190974,
+      "request_sha256": "bc1c86a7ef55cac0327d9e48a4deb391ecd0f4a07d3298ba2e4515b15bbaea4f",
+      "upstream_response_sha256": "c6a25e10330734afb55b39ca57c5c14ebc223af228be591492d39c6a6b54fc13",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "message",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "view_image"
+      ],
+      "visible_message_count": 1,
+      "input_tokens": 48408,
+      "output_tokens": 98
+    },
+    {
+      "case": "tools_bb",
+      "duration_s": 7.743,
+      "request_bytes": 196987,
+      "request_sha256": "1dad457bddc69a6e63aed71fa6387c3feeab3d794073ca3f3b15a6a3061a4a4d",
+      "upstream_response_sha256": "f4b3dc7d89d802a8954a648d08d5fec157a96a7f8286795a0e7e25e550e67d85",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "message"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 1,
+      "input_tokens": 39774,
+      "output_tokens": 94
+    },
+    {
+      "case": "tools_bba",
+      "duration_s": 5.905,
+      "request_bytes": 125412,
+      "request_sha256": "0d646e22c81f4e2a286c54a0ce5dedf2387d4e740c113e6ba43a35342d2352ce",
+      "upstream_response_sha256": "ffd136f9cd664e49ee00a81a5ab6fb07444173003e50ae5b31f9fa73160dc350",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "view_image"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 30149,
+      "output_tokens": 66
+    },
+    {
+      "case": "tools_bbb",
+      "duration_s": 5.584,
+      "request_bytes": 155491,
+      "request_sha256": "65558ab0e9207f5555676c9fd0cf7ca37d5be5604c3df88e51d7479813374e9b",
+      "upstream_response_sha256": "5ba0a361ab5a22bdecf4e8cda858af9b43880682a52b9df6c4888c0b0ce5c10a",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 30111,
+      "output_tokens": 72
+    },
+    {
+      "case": "tools_half_a",
+      "duration_s": 7.154,
+      "request_bytes": 202480,
+      "request_sha256": "753b563696971ffea4cc942672d3c58ceaa45c34c87a8173c89f48b90d430ba6",
+      "upstream_response_sha256": "ecc8ff7b61e336e67b7de1ba36d796ea1855804cfcc7378d9b07dd915bec75d3",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning",
+        "function_call"
+      ],
+      "client_tool_names": [
+        "view_image"
+      ],
+      "visible_message_count": 0,
+      "input_tokens": 53312,
+      "output_tokens": 61
+    },
+    {
+      "case": "tools_half_b",
+      "duration_s": 7.927,
+      "request_bytes": 304045,
+      "request_sha256": "7414cfd3134d9afd62fcf564519a1abadd06c6deadca9fe25894051a1fe1a8b5",
+      "upstream_response_sha256": "81dbff07d95a5d00168b4b605c316d36468c32b4cc15280aeada6846c6bf8c3f",
+      "terminal_types": [
+        "response.completed"
+      ],
+      "response_status": "completed",
+      "incomplete_details": null,
+      "output_item_types": [
+        "reasoning"
+      ],
+      "client_tool_names": [],
+      "visible_message_count": 0,
+      "input_tokens": 64498,
+      "output_tokens": 58
+    }
+  ]
+}

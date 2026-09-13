@@ -13,6 +13,18 @@ from .collab_v2 import validate_v2_fields
 from .contracts import ToolCompatibilityEntry, ToolCompatibilityError
 
 
+def encode_timeout_contract(child: dict[str, Any]) -> None:
+    """Narrow a registered wait declaration to its client's integer parser."""
+    if child.get("name") != "wait_agent":
+        return
+    fields = child.get("parameters", {}).get("properties", {})
+    if isinstance(fields.get("timeout_ms"), dict):
+        fields["timeout_ms"] = {
+            **fields["timeout_ms"], "type": "integer",
+            "description": "Timeout in milliseconds. Emit a JSON integer, e.g. 300000, not 300000.0.",
+        }
+
+
 def validate_version_fields(
     item: Mapping[str, Any],
     record: Any,
