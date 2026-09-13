@@ -52,7 +52,10 @@ CONTEXT_GUARD_KEYS = {
 }
 
 def toml_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
+    # TOML literal strings cannot escape an apostrophe or control characters.
+    if "'" in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return toml_basic_string(value).replace("\x7f", "\\u007f")
+    return "'" + value + "'"
 
 
 def toml_basic_string(value: str) -> str:
@@ -875,9 +878,12 @@ def apply_overlay(
     takeover: bool = False,
     gateway_key: str = "codexhub-proxy",
     context_guard_state_path: Path | None = None,
+    use_managed_catalog: bool = False,
 ) -> None:
     if owner not in {"release", "beta"}:
         raise ValueError(f"unsupported CodexHub owner: {owner}")
+    if use_managed_catalog and catalog_path is None:
+        raise ValueError("selecting the managed catalog requires --catalog")
     _migrate_legacy_context_guard_values(
         config_path,
         backup_path,
@@ -892,7 +898,9 @@ def apply_overlay(
     cleaned = strip_marked_overlay(original)
     active_owner = overlay_owner(original)
     cross_owner_takeover = takeover and active_owner != owner
-    if active_owner != owner or not backup_path.exists():
+    # Reconnecting after the config disappeared must not replace the only
+    # recovery baseline with an empty file.
+    if not backup_path.exists() or (active_owner != owner and config_path.exists()):
         backup = original if cross_owner_takeover else (cleaned if cleaned != original else original)
         atomic_write_text(backup_path, backup, encoding="utf-8")
         metadata_path = takeover_metadata_path(backup_path)
@@ -901,10 +909,23 @@ def apply_overlay(
         elif metadata_path.exists():
             metadata_path.unlink()
 
+    if use_managed_catalog and active_owner == owner and backup_path.exists():
+        # Reconnecting explicitly selects the Hub catalog again. Preserve a
+        # user-edited path in the restore baseline before replacing it.
+        # Initial cross-channel takeover keeps its complete snapshot above.
+        backup = read_text_preserving_newlines(backup_path)
+        preserved = _preserve_user_catalog_path(original, backup)
+        if preserved != backup:
+            atomic_write_text(backup_path, preserved, encoding="utf-8")
+
     for section in STALE_PROXY_PROVIDER_SECTIONS:
         cleaned = strip_section(cleaned, section)
     existing_catalog_value = top_level_value(original, "model_catalog_json")
-    catalog_value = _overlay_catalog_value(existing_catalog_value, config_path, catalog_path, original)
+    catalog_value = (
+        catalog_config_value(config_path, catalog_path)
+        if use_managed_catalog and catalog_path is not None
+        else _overlay_catalog_value(existing_catalog_value, config_path, catalog_path, original)
+    )
     catalog_owned = catalog_value is not None and is_managed_catalog_path(catalog_value, catalog_path)
     cleaned = strip_top_level_keys(cleaned)
     cleaned = set_feature_flags(cleaned, PROXY_FEATURE_FLAGS)
@@ -933,7 +954,13 @@ def _repair_codex_desktop_global_state(config_path: Path, backup_path: Path) -> 
 
 def _preserve_user_catalog_path(current: str, restored: str) -> str:
     current_value = top_level_value(current, "model_catalog_json")
-    if not current_value or is_managed_catalog_path(current_value) or _overlay_marks_managed_catalog(current):
+    if current_value is None:
+        # An intact connection with its catalog line removed is a user edit.
+        # A missing config/overlay is instead a recovery from the backup.
+        if overlay_owner(current) is not None:
+            return strip_top_level_keys(restored, {"model_catalog_json"})
+        return restored
+    if is_managed_catalog_path(current_value) or _overlay_marks_managed_catalog(current):
         return restored
     if current_value == top_level_value(restored, "model_catalog_json"):
         return restored
@@ -1010,6 +1037,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("--config", required=True, type=Path)
     apply_parser.add_argument("--backup", required=True, type=Path)
     apply_parser.add_argument("--catalog", type=Path)
+    apply_parser.add_argument("--use-managed-catalog", action="store_true")
     apply_parser.add_argument("--base-url", required=True)
     apply_parser.add_argument("--owner", choices=["release", "beta"], default="release")
     apply_parser.add_argument("--takeover", action="store_true")
@@ -1042,6 +1070,7 @@ def main(argv: list[str] | None = None) -> int:
             args.takeover,
             args.gateway_key,
             args.context_guard_state,
+            args.use_managed_catalog,
         )
     elif args.command == "restore":
         status = restore_overlay(

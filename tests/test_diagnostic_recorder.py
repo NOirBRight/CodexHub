@@ -267,7 +267,7 @@ class DiagnosticRecorderTests(TestCase):
     def test_automatic_markers_and_time_retention_stay_bounded(self) -> None:
         clock = FakeClock()
         root = self._root()
-        recorder = self._recorder(
+        recorder = self._deterministic_recorder(
             root,
             clock,
             incident_tail_seconds=1,

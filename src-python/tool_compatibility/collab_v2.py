@@ -187,13 +187,23 @@ def expand_chat_v2_for_official(
     tools = payload.get("tools")
     if not isinstance(tools, list):
         tools = []
+    # The request boundary validates native declarations before this adapter.
+    # Their children and any same-named ordinary functions are separate
+    # identities; only a flat Chat declaration surface needs expansion.
+    if any(
+        isinstance(tool, Mapping)
+        and tool.get("type") == "namespace"
+        and tool.get("name") in {"multi_agent_v1", V2_NAMESPACE}
+        for tool in tools
+    ):
+        return False
     alias_to_name = _v2_alias_to_name()
     v2_sources: dict[str, Mapping[str, Any]] = {}
     remaining: list[Any] = []
     saw_v1 = False
     saw_v2_name = False
     for tool in tools:
-        if not isinstance(tool, Mapping):
+        if not isinstance(tool, Mapping) or tool.get("type") != "function":
             remaining.append(tool)
             continue
         name = name_of(tool)
@@ -225,7 +235,7 @@ def expand_chat_v2_for_official(
             for item in input_items:
                 if not isinstance(item, Mapping):
                     continue
-                if item.get("type") == "function_call":
+                if item.get("type") == "function_call" and item.get("namespace") is None:
                     name = item.get("name")
                     if name in _V1_ONLY_TOOLS:
                         raise ToolCompatibilityError(
@@ -270,6 +280,9 @@ def expand_chat_v2_for_official(
                 continue
             if item.get("type") == "function_call":
                 next_item = _copy_mapping(item)
+                if next_item.get("namespace") is not None:
+                    rewritten.append(next_item)
+                    continue
                 canonical = _canonical_v2_name(
                     next_item.get("name") if isinstance(next_item.get("name"), str) else None,
                     alias_to_name,
@@ -324,6 +337,8 @@ def collapse_official_v2_names_for_chat(
         return False
     for item in output:
         if not isinstance(item, dict) or item.get("type") != "function_call":
+            continue
+        if item.get("namespace") not in (None, V2_NAMESPACE):
             continue
         original = item.get("name")
         chat_name = name_map.get(original)
