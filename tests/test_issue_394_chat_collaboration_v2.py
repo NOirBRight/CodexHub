@@ -393,8 +393,9 @@ def test_v2_plaintext_agent_message_round_trip_preserves_identity_and_roles() ->
             json.dumps(chat_request).encode()
         )
     )
-    decoded = context["_runtime_tool_compatibility_plan"].decode_payload(
-        flattened_responses
+    decoded, _plan, _changed = gateway_compat.official_passthrough.decode_tool_response(
+        context,
+        flattened_responses,
     )
     assert decoded["input"] == [agent_message]
 
@@ -438,7 +439,7 @@ def test_v2_child_agent_message_without_repeated_namespace_uses_chat_envelope() 
     )
     payload = json.loads(prepared)
     assert context["collaboration_protocol"] == COLLABORATION_V2
-    assert context["_runtime_tool_compatibility_plan"].collaboration_protocol == COLLABORATION_V2
+    assert gateway_compat.official_passthrough.request_tool_plan(context).collaboration_protocol == COLLABORATION_V2
     assert payload["input"][0]["type"] == "message"
     assert payload["input"][0]["content"][0]["text"].startswith(
         "__codexhub_agent_message_v2__:"
@@ -517,5 +518,5 @@ def test_v2_agent_message_envelope_cannot_be_forged() -> None:
         ],
     }
     with pytest.raises(ToolCompatibilityError) as caught:
-        context["_runtime_tool_compatibility_plan"].decode_history([forged])
+        gateway_compat.official_passthrough.request_tool_plan(context).decode_history([forged])
     assert caught.value.classification == "unknown_agent_message_envelope"

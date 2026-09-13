@@ -4343,60 +4343,18 @@ def response_body_to_response_sse_events(
 
 @dataclass(frozen=True)
 class PreparedExchange:
+    """Prepared upstream request for one protocol crossing.
+
+    Decoding stays with the production converters in this module and the
+    Gateway stream semantics helpers; this value only carries the prepared
+    body plus the stream/cache facts callers need.
+    """
+
     inbound_format: str
     outbound_format: str
     upstream_body: bytes
     stream: bool
-    function_name_from_response_item: FunctionNameFromResponseItem | None = None
     dropped_cache_controls: tuple[str, ...] = ()
-    preserve_reasoning_history: bool = False
-
-    def decode_stream(self) -> ChatToResponsesStreamConverter | ResponsesToChatStreamConverter:
-        if self.inbound_format == "responses" and self.outbound_format == "chat_completions":
-            return ChatToResponsesStreamConverter()
-        if self.inbound_format == "chat_completions" and self.outbound_format == "responses":
-            return ResponsesToChatStreamConverter(
-                preserve_reasoning_history=self.preserve_reasoning_history,
-            )
-        raise NonForwardable(
-            "unsupported_protocol_semantics",
-            "No stream decoder for %s -> %s." % (self.inbound_format, self.outbound_format),
-        )
-
-    stream_decoder = decode_stream
-
-    def decode_response(
-        self,
-        body: bytes,
-        *,
-        function_name_from_response_item: FunctionNameFromResponseItem | None = None,
-    ) -> bytes:
-        if self.inbound_format == self.outbound_format:
-            return body
-        try:
-            if self.inbound_format == "chat_completions" and self.outbound_format == "responses":
-                return response_body_to_chat_completion_body(
-                    body,
-                    function_name_from_response_item=(
-                        function_name_from_response_item
-                        or self.function_name_from_response_item
-                        or _default_function_name_from_response_item
-                    ),
-                    preserve_reasoning_history=self.preserve_reasoning_history,
-                )
-            if self.inbound_format == "responses" and self.outbound_format == "chat_completions":
-                return chat_completion_to_response_body(body)
-        except UnsupportedProtocolTranslationError as error:
-            raise NonForwardable(error.code, str(error)) from error
-        except (UnicodeError, json.JSONDecodeError) as error:
-            raise NonForwardable(
-                "unsupported_protocol_semantics",
-                "Cannot decode the upstream response as JSON.",
-            ) from error
-        raise NonForwardable(
-            "unsupported_protocol_semantics",
-            "No response decoder for %s -> %s." % (self.inbound_format, self.outbound_format),
-        )
 
 
 class NonForwardable(UnsupportedProtocolTranslationError):
@@ -4446,7 +4404,6 @@ def prepare_exchange(
                 upstream,
                 bool(payload.get("stream")),
                 dropped_cache_controls=dropped_cache_controls,
-                preserve_reasoning_history=preserve_reasoning_history,
             )
 
         if inbound == "responses" and outbound == "chat_completions":
@@ -4472,13 +4429,7 @@ def prepare_exchange(
             stream = bool(
                 re.search(rb'"stream"\s*:\s*true\b', request_body, flags=re.IGNORECASE)
             )
-            return PreparedExchange(
-                inbound,
-                outbound,
-                request_body,
-                stream,
-                preserve_reasoning_history=preserve_reasoning_history,
-            )
+            return PreparedExchange(inbound, outbound, request_body, stream)
     except UnsupportedProtocolTranslationError as error:
         raise NonForwardable(error.code, str(error)) from error
     except (UnicodeError, json.JSONDecodeError) as error:

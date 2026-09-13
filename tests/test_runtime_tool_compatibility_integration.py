@@ -118,7 +118,7 @@ def test_gateway_builds_and_applies_one_runtime_plan_before_external_sampling(mo
     assert payload["tools"][1]["name"].startswith("__codexhub_ns_")
     assert payload["tools"][2]["name"].startswith("__codexhub_custom_")
     assert payload["tools"][3]["name"].startswith("__codexhub_search_")
-    assert {entry.disposition for entry in context["_runtime_tool_compatibility_plan"].entries} == {
+    assert {entry.disposition for entry in gateway_compat.official_passthrough.request_tool_plan(context).entries} == {
         "native",
         "adapt",
         "omit",
@@ -267,7 +267,7 @@ def test_gateway_adapter_evidence_is_emitted_after_encode_and_inverse_decode():
                 _request(tools), upstream, event_context=context, inject_codex_tools=False
             )
         )
-        plan = context["_runtime_tool_compatibility_plan"]
+        plan = gateway_compat.official_passthrough.request_tool_plan(context)
         alias = plan.aliases[0]
         decoded = json.loads(
             gateway_compat.compatible_response_body(
@@ -327,7 +327,7 @@ def test_v2_default_role_namespace_adapter_removes_encrypted_provider_schema_fla
     assert all("encrypted" not in json.dumps(tool) for tool in payload["tools"])
     assert all(
         entry.disposition == "adapt"
-        for entry in context["_runtime_tool_compatibility_plan"].entries
+        for entry in gateway_compat.official_passthrough.request_tool_plan(context).entries
     )
 
 
@@ -457,17 +457,17 @@ def test_deferred_core_runtime_plan_does_not_restore_namespace_children():
     assert not any(tool.get("type") == "namespace" for tool in deferred["tools"])
     assert not any(
         entry.family == "namespace"
-        for entry in deferred_context["_runtime_tool_compatibility_plan"].entries
+        for entry in gateway_compat.official_passthrough.request_tool_plan(deferred_context).entries
     )
     assert len(eager["tools"]) == len(eager_baseline["tools"]) + 249
     eager_namespace_entries = [
         entry
-        for entry in eager_context["_runtime_tool_compatibility_plan"].entries
+        for entry in gateway_compat.official_passthrough.request_tool_plan(eager_context).entries
         if entry.family == "namespace"
     ]
     assert len(eager_namespace_entries) == 1
     assert len(eager_namespace_entries[0].aliases) == 249
-    assert bounded_context["_runtime_tool_compatibility_plan"].entries
+    assert gateway_compat.official_passthrough.request_tool_plan(bounded_context).entries
 
     def canonical_core(payload: dict) -> list[dict]:
         return [
@@ -516,8 +516,14 @@ def test_official_passthrough_does_not_apply_runtime_aliases_or_expand_namespace
     assert payload["prompt_cache_key"] == "stable-official-prefix"
     assert payload["tools"] == [namespace]
     assert "__codexhub_" not in first.decode("utf-8")
-    assert "_runtime_tool_compatibility_plan" not in first_context
-    assert "_runtime_tool_compatibility_plan" not in second_context
+    assert (
+        gateway_compat.official_passthrough.request_tool_plan(first_context)
+        is None
+    )
+    assert (
+        gateway_compat.official_passthrough.request_tool_plan(second_context)
+        is None
+    )
 
 
 def test_required_unsupported_hosted_tool_fails_before_request_is_returned():
@@ -680,7 +686,7 @@ def _send_runtime_sse_event(context: dict, event: dict) -> bytes:
 
 def test_retry_attempt_generation_accepts_a_second_terminal_responses_stream():
     context, _alias = _runtime_attempt_context()
-    context["_runtime_tool_compatibility_attempt_generation"] = 1
+    gateway_compat.official_passthrough.begin_tool_attempt(context)
 
     _send_runtime_sse_event(
         context,
@@ -696,7 +702,7 @@ def test_retry_attempt_generation_accepts_a_second_terminal_responses_stream():
     assert first_terminal
 
     # The first terminal is the lifecycle-final response that permits a retry.
-    context["_runtime_tool_compatibility_attempt_generation"] = 2
+    gateway_compat.official_passthrough.begin_tool_attempt(context)
     _send_runtime_sse_event(
         context,
         {"type": "response.created", "response": {"id": "second"}},
@@ -713,7 +719,7 @@ def test_retry_attempt_generation_accepts_a_second_terminal_responses_stream():
 
 def test_retry_attempt_generation_rebinds_partial_call_identity_for_second_stream():
     context, alias = _runtime_attempt_context()
-    context["_runtime_tool_compatibility_attempt_generation"] = 1
+    gateway_compat.official_passthrough.begin_tool_attempt(context)
     first_item = {
         "type": "function_call",
         "id": "item-reused",
@@ -737,7 +743,7 @@ def test_retry_attempt_generation_rebinds_partial_call_identity_for_second_strea
 
     # Simulate transport failure after a partial added/delta.  A permitted
     # retry reuses the provider's call/item identities from the fresh attempt.
-    context["_runtime_tool_compatibility_attempt_generation"] = 2
+    gateway_compat.official_passthrough.begin_tool_attempt(context)
     second_item = {**first_item, "arguments": ""}
     _send_runtime_sse_event(
         context,
@@ -854,10 +860,10 @@ def test_changing_only_model_slug_does_not_change_compatibility_dispositions():
 
     assert [
         (entry.family, entry.disposition)
-        for entry in contexts[0]["_runtime_tool_compatibility_plan"].entries
+        for entry in gateway_compat.official_passthrough.request_tool_plan(contexts[0]).entries
     ] == [
         (entry.family, entry.disposition)
-        for entry in contexts[1]["_runtime_tool_compatibility_plan"].entries
+        for entry in gateway_compat.official_passthrough.request_tool_plan(contexts[1]).entries
     ]
 
 
@@ -881,7 +887,7 @@ def test_explicit_selected_provider_hosted_capability_preserves_native_declarati
     )
 
     assert payload["tools"] == [{"type": "web_search", "search_context_size": "low"}]
-    assert context["_runtime_tool_compatibility_plan"].entries[0].disposition == "native"
+    assert gateway_compat.official_passthrough.request_tool_plan(context).entries[0].disposition == "native"
 
 
 def test_custom_sse_is_not_forwarded_until_the_complete_envelope_is_valid():
@@ -1117,7 +1123,7 @@ def test_gateway_rejects_foreign_collaboration_history_before_planning(
     }
 
     context: dict = {}
-    with patch.object(gateway_compat_official, "_prepare_runtime_tool_compatibility") as prepare:
+    with patch.object(gateway_compat_official, "prepare_tool_plan") as prepare:
         with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
             gateway_compat.compatible_request_body(
                 json.dumps(body).encode("utf-8"),
@@ -1162,7 +1168,7 @@ def test_responses_structured_without_explicit_facts_uses_conservative_tool_defa
         )
     )
 
-    entries = context["_runtime_tool_compatibility_plan"].entries
+    entries = gateway_compat.official_passthrough.request_tool_plan(context).entries
     assert [entry.disposition for entry in entries] == ["adapt", "adapt", "adapt"]
     assert [tool["type"] for tool in payload["tools"]] == ["function", "function", "function"]
     assert payload["tools"][0]["name"].startswith("__codexhub_ns_")
@@ -1191,7 +1197,7 @@ def test_responses_structured_explicit_lifecycle_facts_preserve_native_shapes():
         )
     )
 
-    entries = context["_runtime_tool_compatibility_plan"].entries
+    entries = gateway_compat.official_passthrough.request_tool_plan(context).entries
     assert [entry.disposition for entry in entries] == ["native", "native", "native"]
     assert payload["tools"] == tools
 
@@ -1247,7 +1253,7 @@ def test_deferred_core_v2_keeps_collaboration_core_without_expanding_other_names
             )
         )
 
-    plan = context["_runtime_tool_compatibility_plan"]
+    plan = gateway_compat.official_passthrough.request_tool_plan(context)
     namespace_entries = [entry for entry in plan.entries if entry.family == "namespace"]
     assert len(namespace_entries) == 1
     assert namespace_entries[0].namespace == "collaboration"
@@ -1284,7 +1290,7 @@ def test_text_compat_without_explicit_facts_omits_plain_tools_and_fails_required
         )
     )
     assert payload["tools"] == []
-    assert context["_runtime_tool_compatibility_plan"].entries[0].disposition == "omit"
+    assert gateway_compat.official_passthrough.request_tool_plan(context).entries[0].disposition == "omit"
 
     with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
         gateway_compat.compatible_request_body(

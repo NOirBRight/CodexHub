@@ -11,7 +11,7 @@
     },
     "protocol_translation": {
       "file": "src-python/protocol_translation.py",
-      "sha256": "e7d6c7bd2652201b67d5d25861a66d9e509e732830340678faca6593c152fd07"
+      "sha256": "1ccccf4bd96245b8f2ad1db95b7c1ba45aecf923c4807250ee508baf9d2322c2"
     },
     "source_contract": {
       "file": "collaboration-runtime-contract.json",

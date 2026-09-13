@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler
 import pytest
 
 import gateway_compat
+from gateway_compat.official_passthrough import request_tool_plan
 from tests.gateway_harness import GatewayHarness, GATEWAY_CLIENT_KEY, request_gateway
 
 
@@ -17,7 +18,7 @@ def prepare(payload, provider="xai"):
     body = gateway_compat.compatible_request_body(
         json.dumps(payload).encode(), upstream, event_context=context, inject_codex_tools=False,
     )
-    return json.loads(body), context["_runtime_tool_compatibility_plan"]
+    return json.loads(body), request_tool_plan(context)
 
 
 def payload():

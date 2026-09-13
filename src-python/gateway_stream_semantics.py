@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
+import protocol_translation
 from protocol_json import AmbiguousJSONError, strict_json_loads
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,7 +48,6 @@ from protocol_translation import (
     chat_tool_choice_to_responses_tool_choice,
     chat_tools_to_responses_tools,
     events_to_responses_body,
-    response_body_to_chat_completion_body,
     response_body_to_response_sse_events,
     response_events_to_chat_stream_chunks,
     responses_content_to_chat_content,
@@ -1691,13 +1691,13 @@ def _chat_function_name_from_response_item(item: Mapping[str, Any]) -> str | Non
     return name
 
 
-def _response_body_to_chat_completion_body(
+def response_body_to_chat_completion_body(
     body: bytes,
     *,
     preserve_reasoning_history: bool = False,
 ) -> bytes:
     try:
-        return response_body_to_chat_completion_body(
+        return protocol_translation.response_body_to_chat_completion_body(
             body,
             function_name_from_response_item=_chat_function_name_from_response_item,
             error_body=_chat_completion_error_body,

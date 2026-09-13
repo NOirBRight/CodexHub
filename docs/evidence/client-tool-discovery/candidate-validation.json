@@ -27,5 +27,6 @@
     },
     "production_deployed": false
   },
-  "scope": "Pre-integration diagnostic workspace, including pre-existing unrelated changes. Not the merge candidate."
+  "scope": "Historical xAI/discovery candidate before architecture integration and review fixes; not a binding to the current source tree.",
+  "validation_phase": "pre_architecture_closeout"
 }

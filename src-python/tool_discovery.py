@@ -23,7 +23,7 @@ def promote_client_search_results(payload: dict[str, Any]) -> tuple[set[str], bo
     for item in history:
         if not isinstance(item, dict) or item.get("type") != "tool_search_output":
             continue
-        if item.get("execution") != "client" or item.get("status") not in {None, "completed"}:
+        if item.get("execution") != "client" or item.get("status") not in (None, "completed"):
             continue
         discovered = item.get("tools")
         if not isinstance(discovered, list):
@@ -31,31 +31,48 @@ def promote_client_search_results(payload: dict[str, Any]) -> tuple[set[str], bo
         for declaration in discovered:
             if not isinstance(declaration, dict):
                 continue
+            kind, name = declaration.get("type"), declaration.get("name")
+            if kind not in ("function", "namespace", "custom") or not isinstance(name, str):
+                continue
+            if kind == "namespace" and not isinstance(declaration.get("tools"), list):
+                continue
             declaration = deepcopy(declaration)
             # Discovery has already happened in Codex. Chat APIs cannot carry
             # its defer_loading marker, and the disclosed tool must be callable.
             declaration.pop("defer_loading", None)
-            for child in declaration.get("tools", []):
+            for child in declaration.get("tools", []) if kind == "namespace" else []:
                 if isinstance(child, dict):
                     child.pop("defer_loading", None)
-            kind, name = declaration.get("type"), declaration.get("name")
-            if kind not in {"function", "namespace", "custom"} or not isinstance(name, str):
-                continue
             existing = next((t for t in tools if isinstance(t, dict)
                              and t.get("type") == kind and t.get("name") == name), None)
             if kind == "namespace":
                 retained.add(name)
                 children = declaration.get("tools")
-                if not isinstance(children, list):
-                    continue
                 if existing is not None:
                     current = existing.get("tools")
                     if isinstance(current, list):
-                        names = {c.get("name") for c in current if isinstance(c, dict)}
-                        additions = [c for c in children if isinstance(c, dict) and c.get("name") not in names]
-                        current.extend(additions)
-                        changed |= bool(additions)
+                        merged = deepcopy(existing)
+                        merged.pop("defer_loading", None)
+                        by_name = {c["name"]: c for c in merged["tools"]
+                                   if isinstance(c, dict) and isinstance(c.get("name"), str)}
+                        for child in children:
+                            if not isinstance(child, dict) or not isinstance(child.get("name"), str):
+                                continue
+                            match = by_name.get(child.get("name"))
+                            if match is not None:
+                                match.pop("defer_loading", None)
+                            else:
+                                merged["tools"].append(child)
+                                by_name[child.get("name")] = child
+                        if merged != existing:
+                            tools[tools.index(existing)] = merged
+                            changed = True
                     continue
+            elif existing is not None and "defer_loading" in existing:
+                promoted = dict(existing)
+                promoted.pop("defer_loading")
+                tools[tools.index(existing)] = promoted
+                changed = True
             if existing is None:
                 tools.append(declaration)
                 changed = True

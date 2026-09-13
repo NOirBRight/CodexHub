@@ -1,9 +1,9 @@
 """HTTP handler methods for the CodexHub Gateway.
 
 `GatewayHandlerMixin` carries the request-handling method bodies; the entry
-module (`codex_proxy`) mixes it into `CodexProxyHandler`. All collaborators are
-imported from their owning modules; forwarder functions below read owning-module
-attributes at call time so test patches on those modules stay live.
+module (`codex_proxy`) mixes it into `CodexProxyHandler`. Request handling
+reads collaborators from their owning modules at call time so test patches on
+those modules stay live.
 """
 
 from __future__ import annotations
@@ -18,15 +18,12 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
-import apply_patch_adapter as _apply_patch_adapter_module
 import collaboration_adapter as _collaboration_adapter_module
 import gateway_admission
 import gateway_catalog_runtime
 import gateway_compat
-import gateway_errors
 import gateway_events
 import gateway_settings
-import gateway_sse
 import gateway_stream_semantics
 import gateway_transport
 import proxy_telemetry
@@ -186,179 +183,6 @@ from websocket_transport import (
 
 logger = logging.getLogger("codex_proxy")
 
-_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY = gateway_compat.official_passthrough._RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY
-
-
-# ---------------------------------------------------------------------------
-# Call-time forwarders. These keep owning-module patches live for handler code.
-# ---------------------------------------------------------------------------
-
-
-def write_proxy_event(event: str, **fields: Any) -> None:
-    gateway_events.write_proxy_event(event, **fields)
-
-
-def _write_adapter_event(event_context: Any, event: str, **fields: Any) -> None:
-    gateway_events.write_adapter_event(event_context, event, **fields)
-
-
-def _capture_usage(*args: Any, **kwargs: Any) -> Any:
-    return gateway_events.capture_usage(*args, **kwargs)
-
-
-def _observe_gateway_diagnostic(method: str, *args: Any, **kwargs: Any) -> None:
-    gateway_events.observe_gateway_diagnostic(method, *args, **kwargs)
-
-
-def _record_user_requested_shutdown() -> None:
-    gateway_events.record_user_requested_shutdown()
-
-
-def _activate_gateway_request(admission: Any) -> Any:
-    return gateway_admission.activate_gateway_request(admission)
-
-
-def _restore_gateway_request(previous: Any) -> None:
-    gateway_admission.restore_gateway_request(previous)
-
-
-def _active_gateway_request() -> Any:
-    return gateway_admission.active_gateway_request()
-
-
-def sleep_for_retry_with_gateway_cancellation(*args: Any, **kwargs: Any) -> Any:
-    return gateway_admission.sleep_for_retry_with_gateway_cancellation(*args, **kwargs)
-
-
-def _open_upstream_response(request: Request, **kwargs: Any) -> Any:
-    return gateway_transport.open_upstream_response(request, **kwargs)
-
-
-def upstream_headers(*args: Any, **kwargs: Any) -> dict[str, str]:
-    return gateway_transport.upstream_headers(*args, **kwargs)
-
-
-def materialize_operational_authentication(*args: Any, **kwargs: Any) -> Any:
-    return gateway_transport.materialize_operational_authentication(*args, **kwargs)
-
-
-def bind_route_plan_operational_authentication(*args: Any, **kwargs: Any) -> Any:
-    return gateway_transport.bind_route_plan_operational_authentication(*args, **kwargs)
-
-
-def _retry_safety_class(*args: Any, **kwargs: Any) -> Any:
-    return gateway_transport._retry_safety_class(*args, **kwargs)
-
-
-def _emit_upstream_retry_event(*args: Any, **kwargs: Any) -> Any:
-    return gateway_transport._emit_upstream_retry_event(*args, **kwargs)
-
-
-def _emit_upstream_retry_suppressed_event(*args: Any, **kwargs: Any) -> Any:
-    return gateway_transport._emit_upstream_retry_suppressed_event(*args, **kwargs)
-
-
-def _downstream_retry_payload(*args: Any, **kwargs: Any) -> Any:
-    return gateway_transport._downstream_retry_payload(*args, **kwargs)
-
-
-def choose_upstream(model_id: str) -> Any:
-    return gateway_catalog_runtime.choose_upstream(model_id)
-
-
-def official_upstream() -> Any:
-    return gateway_catalog_runtime.official_upstream()
-
-
-def model_supports_image(model_id: str | None, upstream: Any = None) -> bool:
-    return gateway_catalog_runtime.model_supports_image(model_id, upstream)
-
-
-def route_plan_for_request(*args: Any, **kwargs: Any) -> Any:
-    return _route_plan_module.route_plan_for_request(*args, **kwargs)
-
-
-def _route_runtime_facts(request_kind: str) -> Any:
-    return _route_plan_module._route_runtime_facts(request_kind)
-
-
-def strip_tools_for_compact_payload(*args: Any, **kwargs: Any) -> Any:
-    return gateway_stream_semantics.strip_tools_for_compact_payload(*args, **kwargs)
-
-
-def _downstream_stream_status_payload(*args: Any, **kwargs: Any) -> Any:
-    return gateway_stream_semantics._downstream_stream_status_payload(*args, **kwargs)
-
-
-def compatible_request_body(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.compatible_request_body(*args, **kwargs)
-
-
-def official_passthrough_request_body(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.official_passthrough_request_body(*args, **kwargs)
-
-
-def transparent_request_body(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.transparent_request_body(*args, **kwargs)
-
-
-def _normalize_transparent_tool_schema_booleans(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.official_passthrough._normalize_transparent_tool_schema_booleans(*args, **kwargs)
-
-
-def _excessive_transparent_chat_tool_loop_count(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.official_passthrough._excessive_transparent_chat_tool_loop_count(*args, **kwargs)
-
-
-def _excessive_transparent_responses_tool_loop_count(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.official_passthrough._excessive_transparent_responses_tool_loop_count(
-        *args, **kwargs
-    )
-
-
-def _rewrite_transparent_developer_role_messages(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.official_passthrough._rewrite_transparent_developer_role_messages(*args, **kwargs)
-
-
-def _safe_json_mapping(*args: Any, **kwargs: Any) -> Any:
-    return gateway_compat.official_passthrough._safe_json_mapping(*args, **kwargs)
-
-
-def gateway_image_proxy_enabled() -> bool:
-    return gateway_settings.gateway_image_proxy_enabled()
-
-
-def gateway_official_http_passthrough_enabled() -> bool:
-    return gateway_settings.gateway_official_http_passthrough_enabled()
-
-
-def gateway_websocket_recorder_idle_timeout_seconds() -> float:
-    return gateway_settings.gateway_websocket_recorder_idle_timeout_seconds()
-
-
-def gateway_websocket_recorder_max_frames() -> int:
-    return gateway_settings.gateway_websocket_recorder_max_frames()
-
-
-def max_request_body_bytes() -> int:
-    return gateway_settings.max_request_body_bytes()
-
-
-def model_event_sse_idle_timeout_seconds() -> float:
-    return gateway_settings.model_event_sse_idle_timeout_seconds()
-
-
-def sse_keepalive_seconds() -> float:
-    return gateway_settings.sse_keepalive_seconds()
-
-
-def transport_sse_idle_timeout_seconds() -> float:
-    return gateway_settings.transport_sse_idle_timeout_seconds()
-
-
-def upstream_timeout_seconds() -> int:
-    return gateway_settings.upstream_timeout_seconds()
-
 
 # ---------------------------------------------------------------------------
 # Inbound-request and event-context glue.
@@ -421,11 +245,11 @@ class GatewayHandlerMixin:
         request_context = request_context_from_headers(self.headers)
 
         def send_user_requested_shutdown() -> None:
-            _record_user_requested_shutdown()
+            gateway_events.record_user_requested_shutdown()
             self._send_json_and_close(503, user_requested_shutdown_payload("responses"))
 
         if not _local_request_authorized(self.headers, request_context):
-            write_proxy_event(
+            gateway_events.write_proxy_event(
                 "request_error",
                 request_id=request_id,
                 path=self.path,
@@ -448,12 +272,12 @@ class GatewayHandlerMixin:
             self._drain_rejected_shutdown_body()
             send_user_requested_shutdown()
             return
-        previous_admission = _activate_gateway_request(admission)
+        previous_admission = gateway_admission.activate_gateway_request(admission)
         upstream_name = "official"
         status = 500
         try:
             admission.raise_if_cancelled()
-            upstream = official_upstream()
+            upstream = gateway_catalog_runtime.official_upstream()
             upstream_name = str(upstream["name"])
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
@@ -463,7 +287,7 @@ class GatewayHandlerMixin:
             if content_length < 0:
                 self._send_json_and_close(400, {"error": "invalid Content-Length"})
                 return
-            max_body_bytes = max_request_body_bytes()
+            max_body_bytes = gateway_settings.max_request_body_bytes()
             if content_length > max_body_bytes:
                 self._send_json_and_close(
                     413,
@@ -476,11 +300,11 @@ class GatewayHandlerMixin:
 
             body = self.rfile.read(content_length)
             admission.raise_if_cancelled()
-            operational_authentication = materialize_operational_authentication(
+            operational_authentication = gateway_transport.materialize_operational_authentication(
                 self.headers,
                 upstream,
             )
-            headers = upstream_headers(
+            headers = gateway_transport.upstream_headers(
                 self.headers,
                 upstream,
                 request_mutation_policy=MutationPolicy.OFFICIAL_PASSTHROUGH,
@@ -501,7 +325,7 @@ class GatewayHandlerMixin:
                     RETRY_REQUEST_MAIN_GENERATION,
                 ),
             }
-            write_proxy_event(
+            gateway_events.write_proxy_event(
                 "request_start",
                 request_id=request_id,
                 path=self.path,
@@ -513,11 +337,11 @@ class GatewayHandlerMixin:
                 **request_context,
             )
             try:
-                with _open_upstream_response(
+                with gateway_transport.open_upstream_response(
                     request,
                     upstream_name=upstream_name,
                     upstream_format="images",
-                    timeout=upstream_timeout_seconds(),
+                    timeout=gateway_settings.upstream_timeout_seconds(),
                     event_context=event_context,
                     request_kind=RETRY_REQUEST_MAIN_GENERATION,
                     max_attempts=1,
@@ -530,7 +354,7 @@ class GatewayHandlerMixin:
                     status = self._relay_raw_upstream_response(exc, upstream_name)
                 finally:
                     exc.close()
-            write_proxy_event(
+            gateway_events.write_proxy_event(
                 "request_complete",
                 request_id=request_id,
                 method="POST",
@@ -548,7 +372,7 @@ class GatewayHandlerMixin:
                 send_user_requested_shutdown()
                 return
             detail = safe_upstream_error_detail(exc)
-            write_proxy_event(
+            gateway_events.write_proxy_event(
                 "request_error",
                 request_id=request_id,
                 method="POST",
@@ -580,7 +404,7 @@ class GatewayHandlerMixin:
                 {"error": type(exc).__name__, "detail": detail},
             )
         finally:
-            _restore_gateway_request(previous_admission)
+            gateway_admission.restore_gateway_request(previous_admission)
             shutdown_controller.complete(admission)
 
     def _proxy_post_request(self, *, inbound_format: str, provider_hint: str | None = None) -> None:
@@ -597,7 +421,7 @@ class GatewayHandlerMixin:
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
         if not _local_request_authorized(self.headers, request_context):
-            write_proxy_event(
+            gateway_events.write_proxy_event(
                 "request_error",
                 request_id=request_id,
                 path=self.path,
@@ -682,7 +506,7 @@ class GatewayHandlerMixin:
 
 
         def send_user_requested_shutdown() -> None:
-            _record_user_requested_shutdown()
+            gateway_events.record_user_requested_shutdown()
             if not self._send_user_requested_shutdown_outcome(
                 inbound_format=inbound_format,
                 downstream_sse_started=downstream_sse_started,
@@ -701,16 +525,16 @@ class GatewayHandlerMixin:
             self._drain_rejected_shutdown_body()
             send_user_requested_shutdown()
             return
-        previous_admission = _activate_gateway_request(admission)
+        previous_admission = gateway_admission.activate_gateway_request(admission)
 
         try:
             admission.raise_if_cancelled()
             content_length = int(self.headers.get("Content-Length", "0"))
             if content_length < 0:
                 raise ValueError("Content-Length must be non-negative")
-            max_body_bytes = max_request_body_bytes()
+            max_body_bytes = gateway_settings.max_request_body_bytes()
             if content_length > max_body_bytes:
-                write_proxy_event(
+                gateway_events.write_proxy_event(
                     "request_error",
                     request_id=request_id,
                     path=self.path,
@@ -758,7 +582,7 @@ class GatewayHandlerMixin:
             model_requested = request_input.model_requested
             model = request_input.model
             route_reason = request_input.route_reason
-            upstream = choose_upstream(model) if model else official_upstream()
+            upstream = gateway_catalog_runtime.choose_upstream(model) if model else gateway_catalog_runtime.official_upstream()
             upstream_name = upstream["name"]
             upstream_format = str(upstream.get("upstream_format", "responses"))
             reports_cached_input_tokens = bool(upstream.get("reports_cached_input_tokens"))
@@ -768,20 +592,20 @@ class GatewayHandlerMixin:
                 and _value_contains_image(inbound_payload)
             )
             target_accepts_images = bool(
-                model and model_supports_image(model, upstream)
+                model and gateway_catalog_runtime.model_supports_image(model, upstream)
             )
-            image_proxy_enabled = gateway_image_proxy_enabled()
+            image_proxy_enabled = gateway_settings.gateway_image_proxy_enabled()
             caller_stream = (
                 inbound_payload.get("stream") is True
                 if isinstance(inbound_payload, Mapping)
                 else True
             )
             route_runtime_facts: dict[str, RouteRuntimeFacts] = {
-                request_kind: _route_runtime_facts(request_kind)
+                request_kind: _route_plan_module._route_runtime_facts(request_kind)
             }
             if request_kind != RETRY_REQUEST_MAIN_GENERATION:
                 route_runtime_facts[RETRY_REQUEST_MAIN_GENERATION] = (
-                    _route_runtime_facts(
+                    _route_plan_module._route_runtime_facts(
                         RETRY_REQUEST_MAIN_GENERATION
                     )
                 )
@@ -794,7 +618,7 @@ class GatewayHandlerMixin:
                 if provider_hint is not None and upstream_name != "official"
                 else None
             )
-            route_plan = route_plan_for_request(
+            route_plan = _route_plan_module.route_plan_for_request(
                 upstream,
                 request_context,
                 inbound_format=inbound_format,
@@ -808,7 +632,7 @@ class GatewayHandlerMixin:
                 target_accepts_images=target_accepts_images,
                 image_proxy_enabled=image_proxy_enabled,
                 official_http_passthrough_enabled=(
-                    gateway_official_http_passthrough_enabled()
+                    gateway_settings.gateway_official_http_passthrough_enabled()
                 ),
                 caller_stream=caller_stream,
                 runtime_facts=route_runtime_facts,
@@ -882,7 +706,7 @@ class GatewayHandlerMixin:
             if (
                 route_plan.tool_exposure.strip_caller_tools
                 and isinstance(inbound_payload, dict)
-                and strip_tools_for_compact_payload(
+                and gateway_stream_semantics.strip_tools_for_compact_payload(
                     inbound_payload,
                     event_context={
                         "request_id": request_id,
@@ -912,7 +736,7 @@ class GatewayHandlerMixin:
                 nonlocal request_start_written
                 if request_start_written:
                     return
-                write_proxy_event(
+                gateway_events.write_proxy_event(
                     "request_start",
                     request_id=request_id,
                     path=self.path,
@@ -959,16 +783,16 @@ class GatewayHandlerMixin:
                         return False
                     downstream_sse_started = True
                 return self._write_sse_data(
-                    _downstream_stream_status_payload(inbound_format, status_payload, model_canonical)
+                    gateway_stream_semantics._downstream_stream_status_payload(inbound_format, status_payload, model_canonical)
                 )
 
             # Compact placeholder adaptation can continue past a Vision REJECT
             # plan, so auth headers must be materialized before execution.
-            operational_authentication = materialize_operational_authentication(
+            operational_authentication = gateway_transport.materialize_operational_authentication(
                 self.headers,
                 upstream,
             )
-            route_plan = bind_route_plan_operational_authentication(
+            route_plan = gateway_transport.bind_route_plan_operational_authentication(
                 route_plan,
                 self.headers,
                 upstream,
@@ -1077,14 +901,14 @@ class GatewayHandlerMixin:
             dispatch_proxy_post_exception(exc, current_live())
         finally:
             self._pre_response_deadline = None
-            _restore_gateway_request(previous_admission)
+            gateway_admission.restore_gateway_request(previous_admission)
             shutdown_controller.complete(admission)
 
     def _send_local_responses_no_content(self) -> None:
         request_id = uuid.uuid4().hex[:12]
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
-        write_proxy_event(
+        gateway_events.write_proxy_event(
             "request_start",
             request_id=request_id,
             path=self.path,
@@ -1101,7 +925,7 @@ class GatewayHandlerMixin:
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
-        write_proxy_event(
+        gateway_events.write_proxy_event(
             "request_complete",
             request_id=request_id,
             method="GET",
@@ -1123,7 +947,7 @@ class GatewayHandlerMixin:
         if not key:
             self._send_json(400, {"error": "missing Sec-WebSocket-Key"})
             self.close_connection = True
-            write_proxy_event(
+            gateway_events.write_proxy_event(
                 "websocket_probe_error",
                 request_id=request_id,
                 error="MissingSecWebSocketKey",
@@ -1133,7 +957,7 @@ class GatewayHandlerMixin:
             )
             return
 
-        write_proxy_event(
+        gateway_events.write_proxy_event(
             "websocket_probe_start",
             request_id=request_id,
             **handshake_metadata,
@@ -1148,8 +972,8 @@ class GatewayHandlerMixin:
         close_code = None
         error_name = None
         stop_reason = "max_frames"
-        max_frames = gateway_websocket_recorder_max_frames()
-        recorder_idle_timeout = gateway_websocket_recorder_idle_timeout_seconds()
+        max_frames = gateway_settings.gateway_websocket_recorder_max_frames()
+        recorder_idle_timeout = gateway_settings.gateway_websocket_recorder_idle_timeout_seconds()
         connection = getattr(self, "connection", None)
         if connection is not None and hasattr(connection, "settimeout"):
             try:
@@ -1168,7 +992,7 @@ class GatewayHandlerMixin:
                     break
                 frames_recorded += 1
                 frame_metadata = _websocket_probe_frame_metadata(frame)
-                write_proxy_event(
+                gateway_events.write_proxy_event(
                     "websocket_probe_frame",
                     request_id=request_id,
                     frame_index=frames_recorded,
@@ -1181,7 +1005,7 @@ class GatewayHandlerMixin:
                     break
         except WebSocketProtocolError as exc:
             error_name = type(exc).__name__
-            write_proxy_event(
+            gateway_events.write_proxy_event(
                 "websocket_probe_error",
                 request_id=request_id,
                 error=error_name,
@@ -1196,7 +1020,7 @@ class GatewayHandlerMixin:
                 self.wfile.flush()
             except OSError as exc:
                 error_name = type(exc).__name__
-                write_proxy_event(
+                gateway_events.write_proxy_event(
                     "websocket_probe_error",
                     request_id=request_id,
                     error=error_name,
@@ -1207,7 +1031,7 @@ class GatewayHandlerMixin:
                 )
             self.close_connection = True
 
-        write_proxy_event(
+        gateway_events.write_proxy_event(
             "websocket_probe_complete",
             request_id=request_id,
             frames_recorded=frames_recorded,
@@ -1223,7 +1047,7 @@ class GatewayHandlerMixin:
         request_id = uuid.uuid4().hex[:12]
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
-        write_proxy_event(
+        gateway_events.write_proxy_event(
             "request_start",
             request_id=request_id,
             path=self.path,
@@ -1246,7 +1070,7 @@ class GatewayHandlerMixin:
         self.wfile.write(body)
         self.wfile.flush()
         self.close_connection = True
-        write_proxy_event(
+        gateway_events.write_proxy_event(
             "request_complete",
             request_id=request_id,
             method="GET",
@@ -1263,7 +1087,7 @@ class GatewayHandlerMixin:
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
         proxy_request_context = _event_context_with_request_kind(request_context, RETRY_REQUEST_OFFICIAL_CONTROL)
-        upstream = official_upstream()
+        upstream = gateway_catalog_runtime.official_upstream()
         upstream_name = upstream["name"]
         relay_execution_plan = RelayExecutionPlan(
             selected_upstream_format=RouteProtocol.RESPONSES.value,
@@ -1277,8 +1101,8 @@ class GatewayHandlerMixin:
         )
 
         try:
-            headers = upstream_headers(self.headers, upstream)
-            write_proxy_event(
+            headers = gateway_transport.upstream_headers(self.headers, upstream)
+            gateway_events.write_proxy_event(
                 "request_start",
                 request_id=request_id,
                 path=self.path,
@@ -1301,11 +1125,11 @@ class GatewayHandlerMixin:
                 "model": None,
                 **proxy_request_context,
             }
-            with _open_upstream_response(
+            with gateway_transport.open_upstream_response(
                 request,
                 upstream_name=upstream_name,
                 upstream_format="responses",
-                timeout=upstream_timeout_seconds(),
+                timeout=gateway_settings.upstream_timeout_seconds(),
                 event_context=adapter_event_context,
                 request_kind=RETRY_REQUEST_OFFICIAL_CONTROL,
             ) as response:
@@ -1316,7 +1140,7 @@ class GatewayHandlerMixin:
                     model=None,
                     relay_execution_plan=relay_execution_plan,
                 )
-            write_proxy_event(
+            gateway_events.write_proxy_event(
                 "request_complete",
                 request_id=request_id,
                 method=method,
@@ -1338,7 +1162,7 @@ class GatewayHandlerMixin:
                 )
             except OSError as relay_exc:
                 self.close_connection = True
-                write_proxy_event(
+                gateway_events.write_proxy_event(
                     "client_write_failed",
                     request_id=request_id,
                     method=method,
@@ -1352,7 +1176,7 @@ class GatewayHandlerMixin:
                     **proxy_request_context,
                 )
                 return
-            write_proxy_event(
+            gateway_events.write_proxy_event(
                 "request_error",
                 request_id=request_id,
                 method=method,
@@ -1367,7 +1191,7 @@ class GatewayHandlerMixin:
             )
         except (OSError, URLError) as exc:
             detail = safe_upstream_error_detail(exc)
-            write_proxy_event(
+            gateway_events.write_proxy_event(
                 "request_error",
                 request_id=request_id,
                 method=method,
@@ -1457,7 +1281,7 @@ class GatewayHandlerMixin:
             upstream_name,
             writer=self,
             filtered_headers=_filtered_response_headers,
-            active_request=_active_gateway_request,
+            active_request=gateway_admission.active_gateway_request,
             write_body=self._write_non_streaming_body_relay,
         )
 
@@ -1523,7 +1347,7 @@ class GatewayHandlerMixin:
         line_resets_idle_timeout: Callable[[bytes], bool] | None = None,
         on_line: Callable[[bytes], None] | None = None,
     ) -> Any:
-        admission = _active_gateway_request()
+        admission = gateway_admission.active_gateway_request()
         seam = _handler_downstream_stream_commit(self)
 
         def attach_upstream(lifecycle: Any) -> None:
@@ -1532,9 +1356,9 @@ class GatewayHandlerMixin:
 
         context = SseLineRelayContext(
             admission=admission,
-            keepalive_interval=sse_keepalive_seconds(),
-            transport_timeout_seconds=transport_sse_idle_timeout_seconds(),
-            model_event_timeout_seconds=model_event_sse_idle_timeout_seconds(),
+            keepalive_interval=gateway_settings.sse_keepalive_seconds(),
+            transport_timeout_seconds=gateway_settings.transport_sse_idle_timeout_seconds(),
+            model_event_timeout_seconds=gateway_settings.model_event_sse_idle_timeout_seconds(),
             lifecycle_factory=lambda upstream_response, current_admission: _UpstreamSseReaderLifecycle(
                 upstream_response,
                 admission=current_admission,
@@ -1676,7 +1500,7 @@ class GatewayHandlerMixin:
             self._send_json(status, payload)
         except OSError as exc:
             self.close_connection = True
-            write_proxy_event(
+            gateway_events.write_proxy_event(
                 "client_write_failed",
                 request_id=request_id,
                 status=status,

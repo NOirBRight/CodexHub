@@ -8,7 +8,6 @@ import gateway_compat
 import gateway_errors
 from protocol_translation import chat_completions_request_to_responses_body
 from tool_compatibility.chat_official_native import (
-    CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY,
     collapse_official_native_tools_for_chat,
 )
 from tool_compatibility.contracts import CUSTOM_INPUT_KEY, TOOL_SEARCH_INPUT_KEY
@@ -65,6 +64,12 @@ def _search_alias() -> str:
     )
 
 
+def _collapse_official_output(context: dict, item: dict) -> dict:
+    payload = {"output": [item]}
+    assert collapse_official_native_tools_for_chat(payload, context) is True
+    return payload
+
+
 def test_native_hosted_type_stays_native_on_official() -> None:
     prepared, context = _prepared_official(
         tools=[{"type": "web_search", "search_context_size": "low", "external_web_access": False}]
@@ -72,7 +77,22 @@ def test_native_hosted_type_stays_native_on_official() -> None:
     assert prepared["tools"] == [
         {"type": "web_search", "search_context_size": "low", "external_web_access": False}
     ]
-    assert context[CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY]["hosted"]["web_search"] == "web_search"
+    payload = _collapse_official_output(
+        context,
+        {
+            "type": "web_search_call",
+            "id": "ws_1",
+            "call_id": "call_ws",
+            "status": "completed",
+            "action": {"query": "codex"},
+        },
+    )
+    call = payload["output"][0]
+    assert call["type"] == "function_call"
+    assert call["name"] == "web_search"
+    assert call["id"] == "ws_1"
+    assert call["status"] == "completed"
+    assert json.loads(call["arguments"]) == {"action": {"query": "codex"}}
 
 
 def test_hosted_alias_expands_to_official_kind() -> None:
@@ -86,7 +106,19 @@ def test_hosted_alias_expands_to_official_kind() -> None:
         ]
     )
     assert prepared["tools"] == [{"type": "file_search"}]
-    assert context[CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY]["hosted"]["file_search"] == alias
+    payload = _collapse_official_output(
+        context,
+        {
+            "type": "file_search_call",
+            "id": "fs_1",
+            "call_id": "call_fs",
+            "status": "completed",
+            "queries": ["codex cli"],
+        },
+    )
+    call = payload["output"][0]
+    assert call["name"] == alias
+    assert json.loads(call["arguments"]) == {"queries": ["codex cli"]}
 
 
 def test_user_function_named_web_search_is_not_hosted() -> None:
@@ -104,7 +136,13 @@ def test_user_function_named_web_search_is_not_hosted() -> None:
     assert prepared["tools"] == [
         {"type": "function", "name": "web_search", "parameters": {"type": "object"}}
     ]
-    assert CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY not in context
+    assert (
+        collapse_official_native_tools_for_chat(
+            {"output": [{"type": "web_search_call", "call_id": "call_ws", "action": {"query": "x"}}]},
+            context,
+        )
+        is False
+    )
 
 
 def test_custom_type_and_apply_patch_alias_expand() -> None:
@@ -131,7 +169,19 @@ def test_custom_type_and_apply_patch_alias_expand() -> None:
     assert native["tools"][0]["name"] == "apply_patch"
     assert aliased["tools"][0]["type"] == "custom"
     assert aliased["tools"][0]["name"] == "apply_patch"
-    assert context[CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY]["custom"]["apply_patch"] == alias
+    payload = _collapse_official_output(
+        context,
+        {
+            "type": "custom_tool_call",
+            "id": "ct_1",
+            "call_id": "call_patch",
+            "name": "apply_patch",
+            "input": "patch",
+        },
+    )
+    call = payload["output"][0]
+    assert call["name"] == alias
+    assert json.loads(call["arguments"]) == {CUSTOM_INPUT_KEY: "patch"}
 
 
 def test_unknown_custom_alias_fails_closed() -> None:
@@ -163,7 +213,18 @@ def test_tool_search_type_and_alias_expand() -> None:
     assert native["tools"][0] == {"type": "tool_search", "execution": "client"}
     assert aliased["tools"][0]["type"] == "tool_search"
     assert aliased["tools"][0]["execution"] == "client"
-    assert context[CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY]["tool_search"] == alias
+    payload = _collapse_official_output(
+        context,
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "execution": "client",
+            "arguments": {"query": "x"},
+        },
+    )
+    call = payload["output"][0]
+    assert call["name"] == alias
+    assert json.loads(call["arguments"]) == {TOOL_SEARCH_INPUT_KEY: {"query": "x"}}
 
 
 def test_computer_use_preview_fails_closed_on_chat_conversion() -> None:
@@ -252,14 +313,13 @@ def test_hosted_history_and_custom_envelope_expand() -> None:
 def test_collapse_official_native_output_for_chat() -> None:
     from tool_compatibility.contracts import CUSTOM_OUTPUT_KEY, TOOL_SEARCH_OUTPUT_KEY
 
-    context = {
-        CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY: {
-            "hosted": {"web_search": "web_search"},
-            "hosted_event": {"web_search_call": "web_search"},
-            "custom": {"apply_patch": "apply_patch"},
-            "tool_search": "tool_search",
-        }
-    }
+    _, context = _prepared_official(
+        tools=[
+            {"type": "web_search"},
+            {"type": "custom", "name": "apply_patch", "format": {"type": "text"}},
+            {"type": "tool_search", "execution": "client"},
+        ]
+    )
     payload = {
         "output": [
             {
@@ -312,14 +372,7 @@ def test_collapse_official_native_output_for_chat() -> None:
 
 
 def test_collapse_official_web_search_drops_response_ciphertext() -> None:
-    context = {
-        CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY: {
-            "hosted": {"web_search": "web_search"},
-            "hosted_event": {"web_search_call": "web_search"},
-            "custom": {},
-            "tool_search": "",
-        }
-    }
+    _, context = _prepared_official(tools=[{"type": "web_search"}])
     payload = {
         "output": [
             {
@@ -352,18 +405,79 @@ def test_collapse_official_web_search_drops_response_ciphertext() -> None:
 def test_incomplete_hosted_output_fails_closed() -> None:
     from tool_compatibility.contracts import ToolCompatibilityError
 
+    _, context = _prepared_official(tools=[{"type": "web_search"}])
     with pytest.raises(ToolCompatibilityError):
         collapse_official_native_tools_for_chat(
             {"output": [{"type": "computer_use_preview_call", "id": "cu_1"}]},
-            {
-                CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY: {
-                    "hosted": {"web_search": "web_search"},
-                    "hosted_event": {"web_search_call": "web_search"},
-                    "custom": {},
-                    "tool_search": "",
-                }
-            },
+            context,
         )
+
+
+def test_native_state_is_request_scoped() -> None:
+    file_search_alias = _hosted_alias("file_search")
+    web_search_alias = _hosted_alias("web_search")
+    _, first_context = _prepared_official(
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": file_search_alias, "parameters": {"type": "object"}},
+            }
+        ]
+    )
+    _, second_context = _prepared_official(
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": web_search_alias, "parameters": {"type": "object"}},
+            }
+        ]
+    )
+    first = _collapse_official_output(
+        first_context,
+        {"type": "file_search_call", "call_id": "call_fs", "queries": ["one"]},
+    )
+    second = _collapse_official_output(
+        second_context,
+        {"type": "web_search_call", "call_id": "call_ws", "action": {"query": "two"}},
+    )
+    assert first["output"][0]["name"] == file_search_alias
+    assert second["output"][0]["name"] == web_search_alias
+
+
+def test_native_state_survives_context_shallow_copy_and_repeat_expand() -> None:
+    alias = _hosted_alias("file_search")
+    body = json.dumps(
+        {
+            "model": "placeholder",
+            "input": [{"role": "user", "content": "use tools"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": alias, "parameters": {"type": "object"}},
+                }
+            ],
+            "tool_choice": "auto",
+        }
+    ).encode()
+    context: dict = {}
+    gateway_compat.compatible_request_body(
+        body,
+        _official(),
+        event_context=context,
+        inject_codex_tools=False,
+    )
+    gateway_compat.compatible_request_body(
+        body,
+        _official(),
+        event_context=context,
+        inject_codex_tools=False,
+    )
+    copied = dict(context)
+    payload = _collapse_official_output(
+        copied,
+        {"type": "file_search_call", "call_id": "call_fs", "queries": ["again"]},
+    )
+    assert payload["output"][0]["name"] == alias
 
 
 def _third_party_responses() -> dict:
@@ -402,7 +516,7 @@ def test_third_party_responses_keeps_caller_hosted_web_search() -> None:
         )
     )
     assert prepared["tools"] == [{"type": "web_search"}]
-    assert context["_runtime_tool_compatibility_plan"].entries[0].disposition == "native"
+    assert gateway_compat.official_passthrough.request_tool_plan(context).entries[0].disposition == "native"
 
 
 def test_third_party_chat_tools_still_omits_hosted_web_search() -> None:
@@ -423,7 +537,7 @@ def test_third_party_chat_tools_still_omits_hosted_web_search() -> None:
         )
     )
     assert prepared.get("tools") in ([], None)
-    assert context["_runtime_tool_compatibility_plan"].entries[0].disposition == "omit"
+    assert gateway_compat.official_passthrough.request_tool_plan(context).entries[0].disposition == "omit"
 
 
 def test_collapse_third_party_hosted_search_for_chat_inbound() -> None:

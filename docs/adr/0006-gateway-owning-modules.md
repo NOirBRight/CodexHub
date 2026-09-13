@@ -35,6 +35,7 @@ Each seam lives in one owning module. Tests patch and import that module:
 | OpenCode Go routing-session header | `opencode_go_session` |
 | Events / diagnostics | `gateway_events` |
 | Compatibility application | `gateway_compat/` |
+| Codex internal item / compaction / tool transcript rendering | `tool_history` |
 | Stream semantics / terminal detection | `gateway_stream_semantics`, `gateway_sse` |
 | Request decode / local auth / Vision Proxy factory | `gateway_request`, `vision_proxy` |
 | Error payloads | `gateway_errors` |
@@ -48,6 +49,12 @@ extracted module imports `codex_proxy` or a deleted `gateway_runtime`.
 File-size gates keep top-level `gateway_*.py` under 3000 lines and
 `tool_compatibility/` / `gateway_compat/` files under 2000 lines.
 `tests/test_entry_discipline.py` and `tests/test_seam_discipline.py` pin this.
+
+`tool_history` renders Codex internal items (compaction context, function,
+custom and tool_search call/result transcripts, assistant transcripts) for
+compatibility surfaces. Collaboration V1 and node_repl wire transcripts stay
+with their wire adapter in `gateway_compat/multi_agent.py`; `tool_history`
+reads that owner when it needs its discovery classification.
 
 ## Consequences
 

@@ -240,7 +240,7 @@ def test_current_v2_tools_reject_completed_mixed_collaboration_history() -> None
     }
     context = {"request_id": "mixed-history-v2-current"}
 
-    with patch.object(gateway_compat_official, "_prepare_runtime_tool_compatibility") as prepare:
+    with patch.object(gateway_compat_official, "prepare_tool_plan") as prepare:
         with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
             gateway_compat.compatible_request_body(
                 json.dumps(body).encode(),

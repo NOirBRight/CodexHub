@@ -4,11 +4,14 @@ import json
 
 import pytest
 
+from gateway_stream_semantics import (
+    response_body_to_chat_completion_body,
+)
 from protocol_translation import (
-    ChatToResponsesStreamConverter,
+    GatewayChatToResponsesStreamConverter,
+    GatewayResponsesToChatStreamConverter,
     NonForwardable,
     PreparedExchange,
-    ResponsesToChatStreamConverter,
     prepare_exchange,
 )
 
@@ -37,8 +40,17 @@ def test_prepare_exchange_responses_to_chat_standard_floor() -> None:
     chat = json.loads(exchange.upstream_body)
     assert chat["model"] == "placeholder"
     assert chat["messages"][0] == {"role": "user", "content": "hi"}
-    assert isinstance(exchange.stream_decoder(), ChatToResponsesStreamConverter)
-    assert isinstance(exchange.decode_stream(), ChatToResponsesStreamConverter)
+    converter = GatewayChatToResponsesStreamConverter()
+    events = converter.events_for_chunk(
+        {
+            "id": "chatcmpl_1",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "placeholder",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}],
+        }
+    )
+    assert any(event.get("type") == "response.output_text.delta" for event in events)
 
 
 def test_prepare_exchange_consumes_real_codex_transport_defaults() -> None:
@@ -177,7 +189,6 @@ def test_prepare_exchange_passthrough_same_protocol() -> None:
     )
     assert exchange.upstream_body is body
     assert exchange.stream is False
-    assert exchange.decode_response(b'{"object":"chat.completion"}') == b'{"object":"chat.completion"}'
 
 
 def test_prepare_exchange_identity_reads_stream_true() -> None:
@@ -226,7 +237,9 @@ def test_prepare_exchange_chat_to_responses_one_hop() -> None:
     assert payload["input"][0]["role"] == "user"
     assert payload["max_output_tokens"] == 32
     assert "messages" not in payload
-    assert isinstance(exchange.decode_stream(), ResponsesToChatStreamConverter)
+    converter = GatewayResponsesToChatStreamConverter()
+    chunks = converter.chunks_for_event({"type": "response.output_text.delta", "delta": "hello"})
+    assert [chunk["choices"][0]["delta"].get("content") for chunk in chunks] == ["hello"]
 
 
 def test_prepare_exchange_rejects_unknown_protocol_pair() -> None:
@@ -239,7 +252,7 @@ def test_prepare_exchange_rejects_unknown_protocol_pair() -> None:
     assert caught.value.code == "unsupported_protocol_semantics"
 
 
-def test_prepare_exchange_decode_response_hides_helper_names() -> None:
+def test_prepare_exchange_chat_upstream_body_translates_to_chat_completion() -> None:
     request = json.dumps(
         {"model": "placeholder", "messages": [{"role": "user", "content": "hi"}]}
     ).encode("utf-8")
@@ -248,6 +261,7 @@ def test_prepare_exchange_decode_response_hides_helper_names() -> None:
         inbound_format="chat_completions",
         outbound_format="responses",
     )
+    assert exchange.inbound_format == "chat_completions"
     upstream = json.dumps(
         {
             "id": "resp_1",
@@ -263,6 +277,56 @@ def test_prepare_exchange_decode_response_hides_helper_names() -> None:
             ],
         }
     ).encode("utf-8")
-    decoded = json.loads(exchange.decode_response(upstream))
+    decoded = json.loads(response_body_to_chat_completion_body(upstream))
     assert decoded["object"] == "chat.completion"
     assert decoded["choices"][0]["message"]["content"] == "hello"
+
+
+def test_gateway_body_conversion_keeps_namespaced_tool_names_and_call_ids() -> None:
+    upstream = json.dumps(
+        {
+            "id": "resp_2",
+            "object": "response",
+            "status": "completed",
+            "model": "placeholder",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_agent_1",
+                    "name": "spawn_agent",
+                    "namespace": "multi_agent_v1",
+                    "arguments": '{"task": "x"}',
+                }
+            ],
+        }
+    ).encode("utf-8")
+    decoded = json.loads(response_body_to_chat_completion_body(upstream))
+    tool_call = decoded["choices"][0]["message"]["tool_calls"][0]
+    assert tool_call["id"] == "call_agent_1"
+    assert tool_call["function"]["name"] == "multi_agent_v1__spawn_agent"
+    assert tool_call["function"]["arguments"] == '{"task": "x"}'
+
+
+def test_gateway_body_conversion_maps_protocol_errors() -> None:
+    from gateway_errors import UpstreamProtocolTranslationError
+
+    with pytest.raises(UpstreamProtocolTranslationError) as caught:
+        response_body_to_chat_completion_body(b'{"output": {}}')
+
+    assert caught.value.classification == "unsupported_protocol_semantics"
+
+
+def test_gateway_body_conversion_reads_translator_at_call_time(monkeypatch) -> None:
+    import protocol_translation
+
+    calls = []
+
+    def translate(body, **options):
+        calls.append((body, options["preserve_reasoning_history"]))
+        return b'{"object":"chat.completion"}'
+
+    monkeypatch.setattr(protocol_translation, "response_body_to_chat_completion_body", translate)
+    result = response_body_to_chat_completion_body(b'{"output":[]}', preserve_reasoning_history=True)
+
+    assert result == b'{"object":"chat.completion"}'
+    assert calls == [(b'{"output":[]}', True)]

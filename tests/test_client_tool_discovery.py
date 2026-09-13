@@ -8,6 +8,7 @@ import pytest
 import catalog_sync
 import gateway_compat
 from catalog import CatalogPolicy
+from gateway_compat.official_passthrough import request_tool_plan
 from tool_discovery import promote_client_search_results
 
 
@@ -40,7 +41,7 @@ def test_search_result_becomes_callable_and_replays(protocol, strategy):
     assert "defer_loading" not in discovered
     assert discovered["name"].startswith("__codexhub_ns_")
     assert next(t for t in wire["tools"] if t["name"].startswith("__codexhub_search_"))["description"] == SEARCH["description"]
-    plan = context["_runtime_tool_compatibility_plan"]
+    plan = request_tool_plan(context)
     call = {"type": "function_call", "call_id": "lookup", "name": discovered["name"], "arguments": "{}"}
     client = plan.decode_payload({"output": [call]})["output"][0]
     assert client["namespace"] == "mcp__probe" and client["name"] == "lookup"
@@ -79,3 +80,88 @@ def test_external_catalog_enables_client_search_independent_of_legacy_seed(provi
 def test_ollama_catalog_enables_client_search_with_old_seed():
     model = catalog_sync.build_ollama_model("probe", CatalogPolicy(set(), set(), {}), {}, {"supports_search_tool": False})
     assert model["supports_search_tool"] is True
+
+
+@pytest.mark.parametrize("protocol", ["responses_structured", "chat_tools"])
+def test_existing_discovered_namespace_becomes_callable_without_defer_loading(protocol):
+    value = discovered_payload()
+    value["tools"].append(copy.deepcopy(NAMESPACE))
+    original_history = copy.deepcopy(value["input"])
+    upstream = {"name": "fixture", "upstream_format": "responses", "tool_protocol": protocol,
+                "tool_surface_strategy": "eager"}
+    wire = json.loads(gateway_compat.compatible_request_body(
+        json.dumps(value).encode(), upstream, event_context={}, inject_codex_tools=False,
+    ))
+    discovered = next(tool for tool in wire["tools"] if tool.get("description") == "Look up a parcel")
+    assert "defer_loading" not in discovered
+    assert value["input"] == original_history
+
+
+@pytest.mark.parametrize("upstream_format,tool_protocol,expected", [
+    ("responses", "auto", True), ("chat_completions", "auto", True),
+    ("auto", "auto", True),
+    ("unknown", "auto", False), ("responses", "text_compat", False),
+    ("chat_completions", "none", False), ("responses", "none", False),
+    ("chat_completions", "chat_tools", True), ("responses", "responses_structured", True),
+])
+def test_catalog_discovery_matches_function_protocol(upstream_format, tool_protocol, expected):
+    value = {"alias": "fixture/model", "provider_alias": "fixture", "upstream_name": "fixture",
+             "upstream_model": "model", "upstream_format": upstream_format, "tool_protocol": tool_protocol}
+    model = catalog_sync.build_external_provider_model(value, CatalogPolicy(set(), set(), {}), None)
+    assert model["supports_search_tool"] is expected
+
+
+@pytest.mark.parametrize("upstream_format,tool_protocol,expected", [
+    ("responses", "auto", True), ("chat_completions", "auto", True),
+    ("auto", "auto", True), ("unknown", "auto", False),
+    ("responses", "text_compat", False), ("responses", "none", False),
+])
+def test_ollama_discovery_respects_provider_protocol_metadata(upstream_format, tool_protocol, expected):
+    metadata = catalog_sync.ollama_provider_model_metadata([{
+        "upstream_model": "probe", "upstream_format": upstream_format, "tool_protocol": tool_protocol,
+    }])
+    model = catalog_sync.build_ollama_model("probe", CatalogPolicy(set(), set(), {}), {}, None, metadata)
+    assert model["supports_search_tool"] is expected
+
+
+def test_malformed_discovered_namespace_is_ignored_without_mutating_history():
+    value = discovered_payload()
+    value["input"][-1]["tools"][0]["tools"] = None
+    original = copy.deepcopy(value)
+    assert promote_client_search_results(value) == (set(), False)
+    assert value == original
+
+
+@pytest.mark.parametrize("kind", ["function", "custom"])
+def test_existing_discovered_function_is_promoted_without_replacing_its_schema(kind):
+    value = discovered_payload()
+    existing = {"type": kind, "name": "lookup", "description": "current", "defer_loading": True}
+    value["tools"].append(existing)
+    value["input"][-1]["tools"] = [{**existing, "description": "historical"}]
+    history = copy.deepcopy(value["input"])
+    assert promote_client_search_results(value) == (set(), True)
+    assert value["tools"][-1] == {"type": kind, "name": "lookup", "description": "current"}
+    assert value["input"] == history
+    assert existing["defer_loading"] is True
+    assert promote_client_search_results(value) == (set(), False)
+
+
+@pytest.mark.parametrize("ollama", [False, True])
+@pytest.mark.parametrize("facts,expected", [
+    ({"function_lifecycle": False}, False),
+    ({"supports_functions": False}, False),
+    ({"accepts_tool_search_adapter": False}, False),
+    ({"tool_search_adapter": False}, False),
+    ({"function_lifecycle": True}, True),
+    ({"tool_search_lifecycle": True, "accepts_tool_search_adapter": False}, True),
+])
+def test_catalog_discovery_respects_explicit_lifecycle_capabilities(ollama, facts, expected):
+    value = {"alias": "fixture/probe", "provider_alias": "fixture", "upstream_name": "fixture",
+             "upstream_model": "probe", "upstream_format": "responses", "tool_protocol_capabilities": facts}
+    policy = CatalogPolicy(set(), set(), {})
+    if ollama:
+        metadata = catalog_sync.ollama_provider_model_metadata([value])
+        model = catalog_sync.build_ollama_model("probe", policy, {}, None, metadata)
+    else:
+        model = catalog_sync.build_external_provider_model(value, policy, None)
+    assert model["supports_search_tool"] is expected

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable as IterableABC
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, NoReturn
 
@@ -13,9 +13,9 @@ import re
 import uuid
 
 import gateway_events as _gateway_events
+import tool_history as _tool_history
 import tool_surface_adapter as _tool_surface_adapter_module
 
-import gateway_stream_semantics as _stream_semantics
 
 from apply_patch_adapter import (
     ApplyPatchFacts,
@@ -50,9 +50,7 @@ from tool_surface_adapter import (
     MULTI_AGENT_DISCOVERY_TOOLS,
     MULTI_AGENT_NAMESPACE_ALIASES,
     NODE_REPL_NAMESPACE,
-    TOOL_SEARCH_EMPTY_MISS_BOUND,
     TOOL_SEARCH_EXPLICIT_FUNCTION_TOOL,
-    TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION,
     TOOL_SEARCH_UNAVAILABLE_STATUS,
     ToolSurfaceFacts,
 )
@@ -76,89 +74,12 @@ from . import host
 from . import collaboration_delivery as _collaboration_delivery
 from . import tool_parameter_root as _tool_parameter_root
 
-def _compatible_compaction_message(item: Mapping[str, Any]) -> dict[str, str] | None:
-    seen: set[str] = set()
-    fragments: list[str] = []
-    for fragment in _stream_semantics.collect_text_fragments(dict(item)):
-        if fragment not in seen:
-            seen.add(fragment)
-            fragments.append(fragment)
-
-    if not fragments:
-        return _developer_text_message(
-            "[Compacted conversation context — opaque, details unavailable]"
-        )
-
-    return _developer_text_message("[Compacted conversation context]\n" + "\n\n".join(fragments))
-
-
-def _developer_text_message(content: str) -> dict[str, str]:
-    return {"type": "message", "role": "developer", "content": content}
-
-
-def _stringify_internal_field(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    try:
-        return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
-    except (TypeError, ValueError):
-        return str(value).strip()
-
-
-def _append_internal_field(lines: list[str], label: str, value: Any) -> None:
-    text = _stringify_internal_field(value)
-    if not text:
-        return
-    lines.append(f"{label}:")
-    lines.append(text)
-
-
-def _single_line_internal_field(value: Any) -> str:
-    text = _stringify_internal_field(value)
-    return " ".join(text.split()) if text else ""
-
-
 def _valid_tool_name(value: Any) -> bool:
     return _tool_surface_adapter_module.valid_tool_name(value)
 
 
-def _is_tool_call_item(item: Mapping[str, Any]) -> bool:
-    return _tool_surface_adapter_module.is_tool_call_item(item)
-
-
 def _has_invalid_tool_name(item: Mapping[str, Any]) -> bool:
     return _tool_surface_adapter_module.has_invalid_tool_name(item)
-
-
-def _transcript_text(title: str, item: Mapping[str, Any]) -> str:
-    lines = [title]
-    for label, key in (
-        ("type", "type"),
-        ("namespace", "namespace"),
-        ("name", "name"),
-        ("call_id", "call_id"),
-        ("status", "status"),
-    ):
-        value = _stringify_internal_field(item.get(key))
-        if value:
-            lines.append(f"{label}: {value}")
-    _append_internal_field(lines, "input", item.get("input"))
-    _append_internal_field(lines, "arguments", item.get("arguments"))
-    _append_internal_field(lines, "output", item.get("output"))
-    _append_internal_field(lines, "action", item.get("action"))
-    _append_internal_field(lines, "execution", item.get("execution"))
-    _append_internal_field(lines, "tools", item.get("tools"))
-    return "\n".join(lines)
-
-
-def _assistant_transcript_message(title: str, item: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "type": "message",
-        "role": "assistant",
-        "content": [{"type": "output_text", "text": _transcript_text(title, item)}],
-    }
 
 
 def _json_object_from_arguments(value: Any) -> dict[str, Any] | None:
@@ -198,28 +119,8 @@ def _tool_schema_name(value: Any) -> str | None:
     return _tool_surface_adapter_module.tool_schema_name(value)
 
 
-def _tool_parameters_schema(value: Mapping[str, Any]) -> dict[str, Any]:
-    return _tool_surface_adapter_module.tool_parameters_schema(value)
-
-
-def _explicit_function_tool(name: str, description: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
-    return _tool_surface_adapter_module.explicit_function_tool(name, description, parameters)
-
-
 def _supports_explicit_namespace_alias(namespace_name: str) -> bool:
     return _tool_surface_adapter_module.supports_explicit_namespace_alias(namespace_name)
-
-
-def _looks_like_response_tool_name_fragment(value: Mapping[str, Any]) -> bool:
-    return _tool_surface_adapter_module.looks_like_response_tool_name_fragment(value)
-
-
-def _is_local_tool_gateway_tool_schema(value: Any) -> bool:
-    return _tool_surface_adapter_module.is_local_tool_gateway_tool_schema(value)
-
-
-def _is_mcp_or_codex_app_tool_schema(value: Any) -> bool:
-    return _tool_surface_adapter_module.is_mcp_or_codex_app_tool_schema(value)
 
 
 def _is_flattened_namespace_schema(value: Any) -> bool:
@@ -230,10 +131,6 @@ def _is_raw_namespace_schema(value: Any) -> bool:
     return _tool_surface_adapter_module.is_raw_namespace_schema(value)
 
 
-def _valid_namespace_function_names(value: Any) -> tuple[str, tuple[str, ...]] | None:
-    return _tool_surface_adapter_module.valid_namespace_function_names(value)
-
-
 def _deferred_namespace_surface_counts(
     source_tools: list[Any],
     final_tools: list[Any],
@@ -241,25 +138,22 @@ def _deferred_namespace_surface_counts(
     return _tool_surface_adapter_module.deferred_namespace_surface_counts(source_tools, final_tools)
 
 
-def _flatten_namespace_function_tools(tools: list[Any]) -> list[dict[str, Any]]:
-    return _tool_surface_adapter_module.flatten_namespace_function_tools(tools)
+_RUNTIME_TOOL_COMPATIBILITY_STATE_KEY = "_runtime_tool_compatibility_state"
 
 
-_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY = "_runtime_tool_compatibility_plan"
+@dataclass
+class _RuntimeToolState:
+    """Owned lifecycle state for one request's runtime tool compatibility.
 
+    The request plan keeps stable declarations and aliases. The attempt plan
+    and stream ledger are rebuilt whenever a relay attempt begins so a retried
+    upstream may reuse call ids. Only this module reads or advances this state.
+    """
 
-_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY = "_runtime_tool_compatibility_stream"
-
-
-_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY = "_runtime_tool_compatibility_attempt_generation"
-
-
-_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY = "_runtime_tool_compatibility_attempt_plan"
-
-
-_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY = (
-    "_runtime_tool_compatibility_attempt_plan_generation"
-)
+    request_plan: RuntimeToolCompatibilityPlan | None = None
+    attempt_serial: int = 0
+    attempt_plan: RuntimeToolCompatibilityPlan | None = None
+    stream: Any | None = None
 
 
 _RUNTIME_TOOL_CAPABILITY_MANIFEST_ERROR_CODE = "tool_compatibility_capability_manifest"
@@ -368,7 +262,7 @@ def _raise_runtime_tool_compatibility_error(error: RuntimeToolCompatibilityError
     ) from error
 
 
-def _prepare_runtime_tool_compatibility(
+def prepare_tool_plan(
     payload: dict[str, Any],
     upstream: Mapping[str, Any],
     tool_protocol: str,
@@ -461,17 +355,18 @@ def _prepare_runtime_tool_compatibility(
             count=1,
         )
         _raise_runtime_tool_compatibility_error(exc)
-    event_context[_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY] = plan
-    event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY, None)
-    event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY, None)
-    event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY, None)
+    state = _runtime_tool_state(event_context, create=True)
+    if state is not None:
+        state.request_plan = plan
+        state.attempt_plan = None
+        state.stream = None
     _gateway_events.write_proxy_event(
         "runtime_tool_compatibility_planned",
         counts=plan.diagnostics.as_dict()["counts"],
     )
     return False
 
-def _apply_runtime_tool_compatibility_plan(
+def encode_tool_plan(
     payload: dict[str, Any],
     plan: RuntimeToolCompatibilityPlan,
 ) -> bool:
@@ -486,56 +381,122 @@ def _apply_runtime_tool_compatibility_plan(
     return True
 
 
-def _runtime_tool_compatibility_plan(
-    event_context: Mapping[str, Any] | None,
-) -> RuntimeToolCompatibilityPlan | None:
-    value = (event_context or {}).get(_RUNTIME_TOOL_COMPATIBILITY_PLAN_KEY)
-    return value if isinstance(value, RuntimeToolCompatibilityPlan) else None
+def _runtime_tool_state(
+    event_context: Mapping[str, Any] | None, *, create: bool = False
+) -> _RuntimeToolState | None:
+    if not isinstance(event_context, dict):
+        return None
+    state = event_context.get(_RUNTIME_TOOL_COMPATIBILITY_STATE_KEY)
+    if isinstance(state, _RuntimeToolState):
+        return state
+    if not create:
+        return None
+    state = _RuntimeToolState()
+    event_context[_RUNTIME_TOOL_COMPATIBILITY_STATE_KEY] = state
+    return state
 
 
-def _runtime_tool_compatibility_plan_for_attempt(
-    event_context: Mapping[str, Any] | None,
-) -> RuntimeToolCompatibilityPlan | None:
-    """Resolve the immutable request plan into the current relay attempt.
+def begin_tool_attempt(event_context: Mapping[str, Any] | None) -> None:
+    """Start a relay attempt: keep the request plan, drop attempt ledgers.
 
-    The request plan owns stable aliases and declaration classification.  Each
-    permitted upstream retry receives a shallow plan copy with a fresh call
-    ownership ledger; no route or provider selection is performed here.
+    Transport-level open retries must not call this.
     """
-    request_plan = _runtime_tool_compatibility_plan(event_context)
-    if request_plan is None or not isinstance(event_context, dict):
-        return request_plan
-    generation = event_context.get(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_KEY)
-    if generation is None:
-        return request_plan
-    attempt_plan = event_context.get(_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY)
-    planned_generation = event_context.get(
-        _RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY
-    )
-    if (
-        not isinstance(attempt_plan, RuntimeToolCompatibilityPlan)
-        or planned_generation != generation
-        or attempt_plan is request_plan
-    ):
-        attempt_plan = request_plan.new_attempt()
-        event_context[_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_KEY] = attempt_plan
-        event_context[_RUNTIME_TOOL_COMPATIBILITY_ATTEMPT_PLAN_GENERATION_KEY] = generation
-        event_context.pop(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY, None)
-    return attempt_plan
+    state = _runtime_tool_state(event_context, create=True)
+    if state is None:
+        return
+    state.attempt_serial += 1
+    state.attempt_plan = None
+    state.stream = None
 
 
-def _runtime_tool_compatibility_stream_for_attempt(
+def request_tool_plan(
     event_context: Mapping[str, Any] | None,
-) -> tuple[RuntimeToolCompatibilityPlan | None, Any | None]:
-    """Return the attempt-local stream ledger shared by both relay surfaces."""
-    plan = _runtime_tool_compatibility_plan_for_attempt(event_context)
-    if plan is None or not isinstance(event_context, dict):
-        return plan, None
-    stream = event_context.get(_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY)
-    if stream is None or getattr(stream, "plan", None) is not plan:
-        stream = plan.new_stream()
-        event_context[_RUNTIME_TOOL_COMPATIBILITY_STREAM_KEY] = stream
-    return plan, stream
+) -> RuntimeToolCompatibilityPlan | None:
+    """Return the stable request plan for classification queries."""
+    state = _runtime_tool_state(event_context)
+    return state.request_plan if state is not None else None
+
+
+def finalize_tool_plan(
+    event_context: Mapping[str, Any] | None,
+    declarations: Iterable[Mapping[str, Any]],
+    *,
+    tool_choice: Any = None,
+) -> RuntimeToolCompatibilityPlan | None:
+    """Apply the request's model-visible final declarations through the owner."""
+    state = _runtime_tool_state(event_context)
+    if state is None or state.request_plan is None:
+        return None
+    finalized = state.request_plan.with_final_declarations(declarations, tool_choice=tool_choice)
+    if finalized is not state.request_plan:
+        state.request_plan = finalized
+    return state.request_plan
+
+
+def _attempt_ledger(
+    event_context: Mapping[str, Any] | None,
+) -> tuple[RuntimeToolCompatibilityPlan | None, _RuntimeToolState | None]:
+    """Resolve the request plan into the current attempt plan and stream."""
+    state = _runtime_tool_state(event_context)
+    if state is None or state.request_plan is None:
+        return None, state
+    if not state.attempt_serial:
+        return state.request_plan, state
+    if state.attempt_plan is None:
+        state.attempt_plan = state.request_plan.new_attempt()
+        state.stream = None
+    return state.attempt_plan, state
+
+
+def decode_tool_response(
+    event_context: Mapping[str, Any] | None, payload: dict[str, Any]
+) -> tuple[dict[str, Any], RuntimeToolCompatibilityPlan | None, bool]:
+    """Decode one full upstream body and record its adapter evidence."""
+    plan, _state = _attempt_ledger(event_context)
+    if plan is None:
+        return payload, None, False
+    wire_output = payload.get("output")
+    try:
+        decoded_payload = plan.decode_payload(payload)
+    except RuntimeToolCompatibilityError as exc:
+        _raise_runtime_tool_compatibility_error(exc)
+    _write_runtime_tool_adapter_response_evidence(
+        plan,
+        wire_output if wire_output is not None else payload,
+        decoded_payload.get("output") if isinstance(decoded_payload, Mapping) else decoded_payload,
+        event_context,
+        surface="body",
+    )
+    changed = decoded_payload != payload
+    return (decoded_payload if changed else payload), plan, changed
+
+
+def decode_tool_events(
+    event_context: Mapping[str, Any] | None,
+    events: Mapping[str, Any] | Iterable[Mapping[str, Any]],
+    *,
+    evidence_context: Mapping[str, Any] | None = None,
+) -> tuple[list[Mapping[str, Any]] | None, RuntimeToolCompatibilityPlan | None]:
+    """Decode upstream SSE event(s) through the shared attempt stream ledger."""
+    plan, state = _attempt_ledger(event_context)
+    if plan is None or state is None:
+        return None, plan
+    if state.stream is None or getattr(state.stream, "plan", None) is not plan:
+        state.stream = plan.new_stream()
+    decoded_events: list[Mapping[str, Any]] = []
+    try:
+        for event in ([events] if isinstance(events, Mapping) else events):
+            decoded_events.extend(state.stream.decode_events_for_event(event))
+    except RuntimeToolCompatibilityError as exc:
+        _raise_runtime_tool_compatibility_error(exc)
+    _write_runtime_tool_adapter_response_evidence(
+        plan,
+        events,
+        decoded_events,
+        evidence_context if evidence_context is not None else event_context,
+        surface="sse",
+    )
+    return decoded_events, plan
 
 
 def _runtime_tool_adapter_alias_hash(aliases: Iterable[str]) -> str:
@@ -782,13 +743,6 @@ def _runtime_alias_for_namespace_child(
     return None
 
 
-def _runtime_plan_has_native_plain_function(
-    plan: RuntimeToolCompatibilityPlan | None,
-    item: Mapping[str, Any],
-) -> bool:
-    return _tool_surface_adapter_module.runtime_plan_has_native_plain_function(plan, item)
-
-
 def _rewrite_generated_guidance_tool_name(value: Any, original: str, alias: str) -> Any:
     if isinstance(value, str):
         return value.replace(original, alias)
@@ -992,10 +946,6 @@ def _adapt_native_responses_tool_declarations(
     return True
 
 
-def _structured_tool_function_call_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
-    return _tool_surface_adapter_module.structured_tool_function_call_item(item)
-
-
 def _hoist_additional_tools_input_items(payload: dict[str, Any]) -> bool:
     return _tool_surface_adapter_module.hoist_additional_tools_input_items(payload)
 
@@ -1081,14 +1031,6 @@ def _restrict_tools_to_required_tool(payload: dict[str, Any], tool_name: str | N
 
 def _function_tool_names(value: Any) -> set[str]:
     return _tool_surface_adapter_module.function_tool_names(value)
-
-
-def _codex_apps_flat_alias_parts(name: Any) -> tuple[str, str] | None:
-    return _tool_surface_adapter_module.codex_apps_flat_alias_parts(name)
-
-
-def _codex_apps_flat_alias_name(name: Any) -> str | None:
-    return _tool_surface_adapter_module.codex_apps_flat_alias_name(name)
 
 
 def _split_namespace_tool_alias(name: Any) -> tuple[str, str] | None:
@@ -1207,95 +1149,6 @@ def _split_agent_id_list(value: str | None) -> list[str]:
     return [item for item in re.split(r"[\s,]+", value.strip()) if item]
 
 
-def _compatible_tool_message(item: Mapping[str, Any]) -> dict[str, str] | None:
-    item_type = item.get("type")
-    if item_type == "custom_tool_call":
-        lines = ["Read-only Codex tool call transcript"]
-        for label, key in (("tool", "name"), ("call_id", "call_id"), ("status", "status")):
-            value = _stringify_internal_field(item.get(key))
-            if value:
-                lines.append(f"{label}: {value}")
-        _append_internal_field(lines, "input", item.get("input"))
-    elif item_type == "custom_tool_call_output":
-        import multimodal_tool_result as _multimodal_tool_result
-
-        if _multimodal_tool_result.output_contains_structured_media(item.get("output")):
-            raise UnsupportedProtocolTranslationError(
-                "unsupported_protocol_semantics",
-                "Structured tool-result media cannot be stringified into transcript text.",
-            )
-        lines = ["Read-only Codex tool result transcript"]
-        value = _stringify_internal_field(item.get("call_id"))
-        if value:
-            lines.append(f"call_id: {value}")
-        _append_internal_field(lines, "output", item.get("output"))
-    elif item_type == "function_call":
-        lines = ["Read-only Codex function call transcript"]
-        for label, key in (("namespace", "namespace"), ("function", "name"), ("call_id", "call_id"), ("status", "status")):
-            value = _stringify_internal_field(item.get(key))
-            if value:
-                lines.append(f"{label}: {value}")
-        _append_internal_field(lines, "arguments", item.get("arguments"))
-    elif item_type == "function_call_output":
-        import multimodal_tool_result as _multimodal_tool_result
-
-        if _multimodal_tool_result.output_contains_structured_media(item.get("output")):
-            raise UnsupportedProtocolTranslationError(
-                "unsupported_protocol_semantics",
-                "Structured tool-result media cannot be stringified into transcript text.",
-            )
-        lines = ["Read-only Codex function result transcript"]
-        value = _stringify_internal_field(item.get("call_id"))
-        if value:
-            lines.append(f"call_id: {value}")
-        _append_internal_field(lines, "output", item.get("output"))
-    elif item_type == "web_search_call":
-        lines = ["Read-only Codex web search call transcript"]
-        value = _stringify_internal_field(item.get("status"))
-        if value:
-            lines.append(f"status: {value}")
-        _append_internal_field(lines, "action", item.get("action"))
-    elif item_type == "tool_search_call":
-        lines = ["Read-only Codex tool search call transcript"]
-        for label, key in (("call_id", "call_id"), ("status", "status")):
-            value = _stringify_internal_field(item.get(key))
-            if value:
-                lines.append(f"{label}: {value}")
-        _append_internal_field(lines, "arguments", item.get("arguments"))
-        _append_internal_field(lines, "execution", item.get("execution"))
-    elif item_type == "tool_search_output":
-        lines = ["Read-only Codex tool search result transcript"]
-        for label, key in (("call_id", "call_id"), ("status", "status")):
-            value = _stringify_internal_field(item.get(key))
-            if value:
-                lines.append(f"{label}: {value}")
-        _append_internal_field(lines, "execution", item.get("execution"))
-        if _multi_agent._has_multi_agent_discovery_tools(item.get("tools")):
-            lines.append("status: discovered_codex_native_multi_agent_tools")
-            lines.append(
-                "available_function_tools: multi_agent_v1__spawn_agent, multi_agent_v1__wait_agent, multi_agent_v1__close_agent, multi_agent_v1__resume_agent, multi_agent_v1__send_input"
-            )
-        if item.get("query_classification") == TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION:
-            lines.append(f"query_classification: {TOOL_SEARCH_UNAVAILABLE_QUERY_CLASSIFICATION}")
-            lines.append(f"empty_miss_count: {TOOL_SEARCH_EMPTY_MISS_BOUND}")
-            lines.append("terminal: true")
-        _append_internal_field(lines, "tools", item.get("tools"))
-    else:
-        return None
-
-    if len(lines) == 1:
-        return None
-    return _developer_text_message("\n".join(lines))
-
-
-def _compatible_internal_message(item: Mapping[str, Any]) -> dict[str, str] | None:
-    if item.get("type") == "compaction":
-        return _compatible_compaction_message(item)
-    if item.get("type") == "reasoning":
-        return None
-    return _compatible_tool_message(item)
-
-
 def _is_standard_responses_function_call(item: Mapping[str, Any]) -> bool:
     return (
         item.get("type") == "function_call"
@@ -1306,8 +1159,8 @@ def _is_standard_responses_function_call(item: Mapping[str, Any]) -> bool:
         and "arguments" in item
         and not item.get("namespace")
         and WORKER_REQUESTED_BINDING_FIELD not in item
-        and _multi_agent._multi_agent_function_call_name(item) is None
-        and _multi_agent._node_repl_function_call_name(item) is None
+        and _tool_surface_adapter_module.multi_agent_function_call_name(item) is None
+        and _tool_surface_adapter_module.node_repl_function_call_name(item) is None
         and not _is_mcp_or_codex_app_function_call(item)
     )
 
@@ -1427,12 +1280,12 @@ def _rewrite_internal_input_items(
                 continue
         if isinstance(item_type, str) and item_type in INTERNAL_INPUT_ITEM_TYPES:
             if item_type == "function_call" and isinstance(call_id, str):
-                if _multi_agent._node_repl_function_call_name(item) is not None:
+                if _tool_surface_adapter_module.node_repl_function_call_name(item) is not None:
                     node_repl_call_ids.add(call_id)
                     rewritten_items.append(_multi_agent._compatible_node_repl_call_message(item))
                     changed = True
                     continue
-                tool_name = _multi_agent._multi_agent_function_call_name(item)
+                tool_name = _tool_surface_adapter_module.multi_agent_function_call_name(item)
                 if tool_name is not None:
                     arguments = _json_object_from_arguments(item.get("arguments"))
                     multi_agent_calls_by_call_id[call_id] = (tool_name, arguments)
@@ -1457,7 +1310,9 @@ def _rewrite_internal_input_items(
             if (
                 item_type == "tool_search_call"
                 and isinstance(call_id, str)
-                and _multi_agent._is_multi_agent_discovery_arguments(_json_object_from_arguments(item.get("arguments")))
+                and _tool_surface_adapter_module.is_multi_agent_discovery_arguments(
+                    _json_object_from_arguments(item.get("arguments"))
+                )
             ):
                 multi_agent_search_call_ids.add(call_id)
             elif (
@@ -1474,7 +1329,7 @@ def _rewrite_internal_input_items(
                     call_id=call_id,
                 )
 
-            replacement = _compatible_internal_message(item)
+            replacement = _tool_history.internal_message(item)
             if replacement is not None:
                 rewritten_items.append(replacement)
             changed = True

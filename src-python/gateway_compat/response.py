@@ -14,6 +14,8 @@ import uuid
 import apply_patch_adapter as _apply_patch_adapter_module
 import collaboration_adapter as _collaboration_adapter_module
 import gateway_events as _gateway_events
+import tool_history as _tool_history
+import tool_surface_adapter as _tool_surface_adapter_module
 
 from apply_patch_adapter import (
     ApplyPatchFacts,
@@ -69,7 +71,6 @@ from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
 )
 
-from . import multi_agent as _multi_agent
 from . import official_passthrough as _official_passthrough
 from . import sse as _sse
 from . import host
@@ -253,7 +254,7 @@ def _rewrite_v2_unsupported_tool_history(
             rewritten_items.append(item)
             continue
         if index in stale_function_pair_indexes:
-            replacement = _official_passthrough._compatible_internal_message(item)
+            replacement = _tool_history.internal_message(item)
             if replacement is not None:
                 rewritten_items.append(replacement)
                 changed = True
@@ -262,7 +263,7 @@ def _rewrite_v2_unsupported_tool_history(
             continue
         item_type = item.get("type")
         if item_type == "custom_tool_call" and not preserve_custom_call(item):
-            replacement = _official_passthrough._compatible_internal_message(item)
+            replacement = _tool_history.internal_message(item)
             if replacement is not None:
                 rewritten_items.append(replacement)
                 changed = True
@@ -274,7 +275,7 @@ def _rewrite_v2_unsupported_tool_history(
             item_type == "custom_tool_call_output"
             and item.get("call_id") not in preserved_call_ids
         ):
-            replacement = _official_passthrough._compatible_internal_message(item)
+            replacement = _tool_history.internal_message(item)
             if replacement is not None:
                 rewritten_items.append(replacement)
                 changed = True
@@ -380,7 +381,7 @@ def _sanitize_unsupported_compaction_input_items(payload: dict[str, Any]) -> boo
 
         item_type = item.get("type")
         if item_type == "compaction":
-            replacement = _official_passthrough._compatible_compaction_message(item)
+            replacement = _tool_history.internal_message(item)
             if replacement is not None:
                 rewritten_items.append(replacement)
             changed = True
@@ -445,17 +446,17 @@ def _sanitize_official_invalid_tool_calls(payload: dict[str, Any]) -> bool:
                 if item_type == "custom_tool_call"
                 else "Invalid Codex function call transcript"
             )
-            rewritten_items.append(_official_passthrough._assistant_transcript_message(title, item))
+            rewritten_items.append(_tool_history.transcript_message(title, item))
             changed = True
             continue
 
         if item_type == "function_call_output" and isinstance(call_id, str) and call_id in bad_function_call_ids:
-            rewritten_items.append(_official_passthrough._assistant_transcript_message("Invalid Codex function result transcript", item))
+            rewritten_items.append(_tool_history.transcript_message("Invalid Codex function result transcript", item))
             changed = True
             continue
 
         if item_type == "custom_tool_call_output" and isinstance(call_id, str) and call_id in bad_custom_call_ids:
-            rewritten_items.append(_official_passthrough._assistant_transcript_message("Invalid Codex tool result transcript", item))
+            rewritten_items.append(_tool_history.transcript_message("Invalid Codex tool result transcript", item))
             changed = True
             continue
 
@@ -540,27 +541,14 @@ def compatible_response_body(
     )
     event_context = _collaboration_adapter_module.context_with_protocol(event_context, collaboration_protocol)
     changed = False
-    runtime_tool_plan = _official_passthrough._runtime_tool_compatibility_plan_for_attempt(event_context)
-    if runtime_tool_plan is not None:
-        wire_output = payload.get("output")
-        try:
-            decoded_payload = runtime_tool_plan.decode_payload(payload)
-        except RuntimeToolCompatibilityError as exc:
-            _official_passthrough._raise_runtime_tool_compatibility_error(exc)
-        _official_passthrough._write_runtime_tool_adapter_response_evidence(
-            runtime_tool_plan,
-            wire_output if wire_output is not None else payload,
-            decoded_payload.get("output") if isinstance(decoded_payload, Mapping) else decoded_payload,
-            event_context,
-            surface="body",
-        )
-        if decoded_payload != payload:
-            payload = decoded_payload
-            changed = True
+    payload, runtime_tool_plan, runtime_tool_changed = (
+        _official_passthrough.decode_tool_response(event_context, payload)
+    )
+    changed = changed or runtime_tool_changed
     changed = host._hide_reasoning_text(payload) or changed
     payload, apply_patch_changed = _adapt_third_party_apply_patch_response_body(payload, event_context)
     changed = changed or apply_patch_changed
-    payload, _ = _multi_agent._apply_external_worker_response_contract(
+    payload, _ = _collaboration_adapter_module.apply_external_worker_response_contract(
         payload,
         event_context,
         surface="body",
@@ -575,7 +563,9 @@ def compatible_response_body(
             surface="body",
         )
     changed = changed or alias_changed
-    payload, bounded_tool_search_changed = _multi_agent._suppress_bounded_tool_search_calls(payload, event_context)
+    payload, bounded_tool_search_changed = (
+        _tool_surface_adapter_module.suppress_bounded_tool_search_calls(payload, event_context)
+    )
     changed = changed or bounded_tool_search_changed
     payload, invalid_tool_changed = _official_passthrough._downgrade_invalid_third_party_tool_calls(payload, runtime_tool_plan)
     changed = changed or invalid_tool_changed
@@ -585,11 +575,13 @@ def compatible_response_body(
                 changed = True
         except RuntimeToolCompatibilityError as exc:
             _official_passthrough._raise_runtime_tool_compatibility_error(exc)
-    payload, requested_binding_changed = _multi_agent._apply_external_worker_response_contract(
-        payload,
-        event_context,
-        surface="body",
-        validate_selectors=False,
+    payload, requested_binding_changed = (
+        _collaboration_adapter_module.apply_external_worker_response_contract(
+            payload,
+            event_context,
+            surface="body",
+            validate_selectors=False,
+        )
     )
     changed = changed or requested_binding_changed
     import multimodal_tool_result as _multimodal_tool_result

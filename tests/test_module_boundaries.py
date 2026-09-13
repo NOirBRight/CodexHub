@@ -314,6 +314,78 @@ def _cross_module_underscore_imports(root: Path) -> list[tuple[str, int, str, st
     return violations
 
 
+def test_chat_native_request_state_is_owned_by_its_codec() -> None:
+    """Chat native expand/collapse state must stay inside its codec module."""
+
+    import tool_compatibility.chat_official_native as codec
+
+    assert not hasattr(codec, "CHAT_OFFICIAL_NATIVE_NAME_MAP_KEY")
+    root = Path(__file__).resolve().parent.parent / "src-python"
+    owner = root / "tool_compatibility" / "chat_official_native.py"
+    markers = (
+        "_chat_official_native_state",
+        "_chat_official_native_name_map",
+        "_chat_official_native_call_owners",
+    )
+    offenders: list[str] = []
+    for source in sorted(root.rglob("*.py")):
+        if source == owner:
+            continue
+        source_text = source.read_text(encoding="utf-8")
+        for marker in markers:
+            if marker in source_text:
+                offenders.append(f"{source.relative_to(root)}: {marker}")
+    assert offenders == []
+
+
+def test_tool_surface_adapter_does_not_import_official_passthrough() -> None:
+    """Transcript rendering must come from its owner, not back through compat."""
+
+    source = Path(tool_surface_adapter.__file__).read_text(encoding="utf-8")
+    assert "official_passthrough" not in source
+
+
+def test_transcript_rendering_is_owned_by_tool_history() -> None:
+    import tool_history
+
+    assert callable(tool_history.internal_message)
+    assert callable(tool_history.transcript_message)
+    compat_source = (
+        Path(tool_surface_adapter.__file__).resolve().parent
+        / "gateway_compat"
+        / "official_passthrough.py"
+    ).read_text(encoding="utf-8")
+    assert "def _compatible_internal_message" not in compat_source
+    assert "def _assistant_transcript_message" not in compat_source
+
+
+def test_runtime_tool_compatibility_state_is_owned_by_its_module() -> None:
+    """Runtime tool lifecycle state must stay inside official_passthrough."""
+
+    import ast
+
+    root = Path(__file__).resolve().parent.parent
+    owner = root / "src-python" / "gateway_compat" / "official_passthrough.py"
+    markers = (
+        "_runtime_tool_compatibility_state",
+        "_runtime_tool_compatibility_plan",
+        "_runtime_tool_compatibility_stream",
+        "_runtime_tool_compatibility_attempt_plan",
+        "_runtime_tool_compatibility_attempt_generation",
+        "_runtime_tool_compatibility_attempt_plan_generation",
+    )
+    gate_file = Path(__file__).resolve()
+    offenders: list[str] = []
+    for source in sorted((root / "src-python").rglob("*.py")) + sorted((root / "tests").rglob("*.py")):
+        if source in (owner, gate_file):
+            continue
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and node.value in markers:
+                offenders.append(f"{source.relative_to(root)}:{node.lineno}: {node.value}")
+    assert offenders == []
+
+
 def test_no_cross_module_underscore_imports() -> None:
     src_root = Path(__file__).resolve().parents[1] / "src-python"
     allowlist: tuple[tuple[str, str, str], ...] = ()
