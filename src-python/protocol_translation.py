@@ -286,9 +286,16 @@ def _require_supported_chat_message_fields(message: Mapping[str, Any], label: st
 
 def _require_supported_fields(value: Mapping[str, Any], allowed: set[str], label: str) -> None:
     if any(key not in allowed for key in value):
+        # These fixed cache-control names explain a known conversion limit.
+        # Never include arbitrary caller-supplied property names in errors.
+        cache_fields = [key for key in ("prompt_cache_options", "prompt_cache_breakpoint")
+                        if key in value and key not in allowed]
+        detail = f"Cannot translate unsupported {label} fields without losing them."
+        if cache_fields:
+            detail += " Unsupported cache controls: " + ", ".join(cache_fields) + "."
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
-            f"Cannot translate unsupported {label} fields without losing them.",
+            detail,
         )
 
 

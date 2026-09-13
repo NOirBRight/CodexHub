@@ -7,7 +7,7 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from atomic_io import atomic_read_or_create_text
 
@@ -223,6 +223,7 @@ _SHAPE_REQUEST_KEYS = frozenset({
     "logprobs", "top_logprobs", "frequency_penalty", "presence_penalty",
     "functions", "function_call", "web_search_options", "verbosity",
     "reasoning_effort", "cache_control",
+    "type", "response", "event_id", "id", "generate",
 })
 _SHAPE_MESSAGE_ROLES = frozenset({"system", "developer", "user", "assistant", "tool", "function"})
 _SHAPE_INPUT_TYPES = frozenset({
@@ -235,6 +236,11 @@ _SHAPE_INPUT_TYPES = frozenset({
 })
 
 
+def protocol_field_names(keys: Iterable[str]) -> list[str]:
+    """Retain only fixed protocol field names for HTTP/WS diagnostics."""
+    return sorted(key for key in keys if key in _SHAPE_REQUEST_KEYS)
+
+
 def _request_body_shape(body: bytes) -> dict[str, Any] | None:
     """Return bounded, value-free protocol structure for one request body."""
 
@@ -245,7 +251,7 @@ def _request_body_shape(body: bytes) -> dict[str, Any] | None:
     if not isinstance(payload, Mapping):
         return None
     shape: dict[str, Any] = {
-        "top_level_keys": sorted(key for key in payload if key in _SHAPE_REQUEST_KEYS),
+        "top_level_keys": protocol_field_names(payload),
         "unknown_top_level_key_count": sum(key not in _SHAPE_REQUEST_KEYS for key in payload),
     }
     messages = payload.get("messages")

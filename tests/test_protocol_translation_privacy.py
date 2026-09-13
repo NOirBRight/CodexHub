@@ -92,3 +92,15 @@ def test_safe_request_shape_categories_remain_observable(tmp_path):
     assert shape["unknown_top_level_key_count"] == 1
     assert shape["message_roles"] == ["assistant", "unknown"]
     assert shape["assistant_reasoning_content_count"] == 1
+
+
+def test_websocket_metadata_does_not_echo_unknown_wire_names():
+    from types import SimpleNamespace
+    from gateway_request import websocket_probe_frame_metadata
+    from websocket_transport import redacted_handshake_metadata
+
+    frame = SimpleNamespace(opcode=1, fin=True, payload=json.dumps({SENTINEL: "private", "type": "response.create"}).encode())
+    assert SENTINEL not in json.dumps(websocket_probe_frame_metadata(frame))
+    metadata = redacted_handshake_metadata('/'+SENTINEL+'?'+SENTINEL+'=private',
+        {SENTINEL: "private", "Sec-WebSocket-Protocol": SENTINEL})
+    assert SENTINEL not in json.dumps(metadata)

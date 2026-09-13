@@ -78,3 +78,9 @@ and the nonempty `collab tool failed: ` / `collab spawn failed: ` framing, scope
 to their owning tools. These remain unchanged tool failure outputs; they do not
 waive argument validation, successful JSON schemas or encryption boundaries.
 Unknown arbitrary text is not universally accepted as a successful result.
+
+The same audit also covered WebSocket probe frame keys and handshake metadata.
+Unknown path, query/header names and subprotocols are now fixed categories;
+only known protocol names remain visible. Network forwarding/negotiation is
+unchanged. Known fixed prompt-cache control names remain actionable in error
+messages while arbitrary field names remain absent.

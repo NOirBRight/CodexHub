@@ -137,13 +137,24 @@ def redacted_handshake_metadata(path: str, headers: Mapping[str, str] | Any) -> 
     query_keys: list[str] = []
     seen_query_keys: set[str] = set()
     for key, _value in parse_qsl(parsed.query, keep_blank_values=True):
+        if key not in {"model", "thread_id", "session_id", "conversation_id", "api-version"}:
+            key = "unknown"
         if key not in seen_query_keys:
             seen_query_keys.add(key)
             query_keys.append(key)
-    header_names = sorted({key.lower() for key, _value in _header_items(headers)})
+    known_headers = {
+        "authorization", "connection", "upgrade", "host", "origin", "user-agent",
+        "content-type", "content-length", "accept", "openai-beta",
+        "sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol",
+        "sec-websocket-extensions", "x-request-id", "x-codex-thread-id",
+        "x-codex-turn-id", "x-codex-session-id", "x-codex-client-id",
+    }
+    header_names = sorted({key.lower() if key.lower() in known_headers else "unknown"
+                           for key, _value in _header_items(headers)})
+    subprotocol = _selected_subprotocol(headers)
     return {
-        "path": parsed.path,
+        "path": parsed.path if parsed.path in {"/responses", "/v1/responses"} else "unknown",
         "query_keys": query_keys,
         "header_names": header_names,
-        "selected_subprotocol": _selected_subprotocol(headers),
+        "selected_subprotocol": subprotocol if subprotocol in {None, "codex", "realtime"} else "unknown",
     }
