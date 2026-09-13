@@ -99,3 +99,7 @@ unknown event names into one fixed category, preserves known event counters,
 and records only event/item categories and argument-presence booleans in item
 summaries. Last-event metadata follows the same fixed category rule. This does
 not rewrite provider events sent to clients.
+The same boundary also covers usage-capture's `sse_`-prefixed event fields and
+Chat finish-reason/source-key counters. Raw tool-name lists are omitted while
+their existing counts remain available. The regression drives the public SSE
+statistics observer through event preparation into SQLite.

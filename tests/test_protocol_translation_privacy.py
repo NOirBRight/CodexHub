@@ -230,3 +230,31 @@ def test_sse_shape_diagnostics_remove_wire_item_identifiers(tmp_path):
         "last_event_type": "response." + SENTINEL, "output_items": [item], "tool_items": [item]}, tmp_path)
     assert SENTINEL not in json.dumps(event)
     assert event["output_items"][0]["has_arguments"] is True
+
+
+def test_sse_usage_capture_and_chat_shape_diagnostics_are_private(tmp_path):
+    import sqlite3
+    from proxy_telemetry import prepare_event_payload, write_event_to_sqlite
+
+    from gateway_sse import PassthroughSseSemanticStats
+
+    stats = PassthroughSseSemanticStats()
+    for event_type in ("response.created", SENTINEL, SENTINEL):
+        stats.observe_bytes(("data: " + json.dumps({"type": event_type}) + "\n\n").encode())
+    stats.finalize_pending()
+    event = prepare_event_payload("request_complete", {
+        **stats.fields(),
+        "finish_reasons": {"stop": 1, SENTINEL: 2},
+        "source_keys": {"content": 1, SENTINEL: 2},
+        "tool_call_names": [SENTINEL], "tool_call_name_count": 1,
+    }, tmp_path)
+    assert SENTINEL not in json.dumps(event)
+    assert event["sse_event_type_counts"] == {"response.created": 1, "unknown": 2}
+    assert event["finish_reasons"] == {"stop": 1, "unknown": 2}
+    assert event["source_keys"] == {"content": 1, "unknown": 2}
+    assert event["tool_call_name_count"] == 1
+    database = tmp_path / "telemetry.sqlite"
+    write_event_to_sqlite(database, event)
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute("SELECT payload_json FROM gateway_events").fetchall()
+    assert rows and SENTINEL not in json.dumps(rows)

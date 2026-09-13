@@ -247,18 +247,23 @@ _SHAPE_EVENT_TYPES = frozenset({
     for part in ("output_item", "content_part", "reasoning_summary_part")
     for phase in ("added", "done")
 )
+_SHAPE_FINISH_REASONS = frozenset({"stop", "length", "tool_calls", "function_call", "content_filter"})
+_SHAPE_SOURCE_KEYS = frozenset({
+    "role", "content", "reasoning", "reasoning_content", "reasoning_details",
+    "tool_calls", "function_call", "refusal", "audio", "annotations",
+})
 
 
 def _event_type_category(value: Any) -> str:
     return value if isinstance(value, str) and value in _SHAPE_EVENT_TYPES else "unknown"
 
 
-def _event_count_categories(value: Any) -> dict[str, int]:
+def _count_categories(value: Any, allowed: frozenset[str]) -> dict[str, int]:
     counts: dict[str, int] = {}
     if isinstance(value, Mapping):
         for event_type, count in value.items():
             if type(count) is int and count >= 0:
-                category = _event_type_category(event_type)
+                category = event_type if isinstance(event_type, str) and event_type in allowed else "unknown"
                 counts[category] = counts.get(category, 0) + count
     return counts
 
@@ -348,10 +353,18 @@ def sanitize_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     for key, item in value.items():
         if _is_sensitive_key(key):
             continue
-        if key in {"original_event_counts", "rewritten_event_counts", "event_type_counts"}:
-            result[key] = _event_count_categories(item)
+        if key == "tool_call_names":
             continue
-        if key == "last_event_type":
+        if key in {"original_event_counts", "rewritten_event_counts", "event_type_counts", "sse_event_type_counts"}:
+            result[key] = _count_categories(item, _SHAPE_EVENT_TYPES)
+            continue
+        if key in {"finish_reasons", "source_keys"}:
+            result[key] = _count_categories(item, _SHAPE_FINISH_REASONS if key == "finish_reasons" else _SHAPE_SOURCE_KEYS)
+            continue
+        if key == "sse_event_types":
+            result[key] = sorted({_event_type_category(value) for value in item}) if isinstance(item, list) else []
+            continue
+        if key in {"last_event_type", "sse_last_event_type"}:
             result[key] = _event_type_category(item)
             continue
         if key in {"output_items", "tool_items"}:
