@@ -1,0 +1,155 @@
+{
+  "date": "2026-09-13",
+  "endpoint": "https://api.x.ai/v1/chat/completions",
+  "model": "grok-4.6",
+  "tools_executed": false,
+  "confirmation_cases": [
+    {
+      "case": "image",
+      "attempt": 1,
+      "http_status": 200,
+      "request_bytes": 940,
+      "duration_s": 1.537,
+      "request_sha256": "c8b029998fd4ad672b4977351c10fce8e6f8f9a545b02567d070f48c37b1cfa1",
+      "response_sha256": "ca6be32ffd008a7ab5860afe6ff0cfdd70ef54a14e46dae7fa6bcf8820a584a7",
+      "event_count": 27,
+      "function_names": [
+        "view_image"
+      ],
+      "finish_reasons": [
+        "tool_calls"
+      ],
+      "text_chars": 0,
+      "done": true,
+      "reasoning_effort": "xhigh"
+    },
+    {
+      "case": "image",
+      "attempt": 2,
+      "http_status": 200,
+      "request_bytes": 940,
+      "duration_s": 1.551,
+      "request_sha256": "c8b029998fd4ad672b4977351c10fce8e6f8f9a545b02567d070f48c37b1cfa1",
+      "response_sha256": "ea0592738baa68c3d7cabe9cef3873f9fb6e6c6770671efedc7ad1c26e6c583e",
+      "event_count": 27,
+      "function_names": [
+        "view_image"
+      ],
+      "finish_reasons": [
+        "tool_calls"
+      ],
+      "text_chars": 0,
+      "done": true,
+      "reasoning_effort": "xhigh"
+    },
+    {
+      "case": "image",
+      "attempt": 3,
+      "http_status": 200,
+      "request_bytes": 940,
+      "duration_s": 1.628,
+      "request_sha256": "c8b029998fd4ad672b4977351c10fce8e6f8f9a545b02567d070f48c37b1cfa1",
+      "response_sha256": "64051d7d5c0706f610510cbdab72437dcca05c75ac6c8fcd371ff5c1e15ffbeb",
+      "event_count": 26,
+      "function_names": [
+        "view_image"
+      ],
+      "finish_reasons": [
+        "tool_calls"
+      ],
+      "text_chars": 0,
+      "done": true,
+      "reasoning_effort": "xhigh"
+    },
+    {
+      "case": "client_search",
+      "attempt": 1,
+      "http_status": 200,
+      "request_bytes": 1216,
+      "duration_s": 1.536,
+      "request_sha256": "e72f12c0adee7c4465afa78ea9eb16e32e74e44f56b46b1865805d95aa0211b6",
+      "response_sha256": "67f4df63a99de8d064f16c05ba7655240060e9aada464ff66f56d77aabf473ea",
+      "event_count": 25,
+      "function_names": [
+        "view_image"
+      ],
+      "finish_reasons": [
+        "tool_calls"
+      ],
+      "text_chars": 0,
+      "done": true,
+      "reasoning_effort": "xhigh"
+    },
+    {
+      "case": "client_search",
+      "attempt": 2,
+      "http_status": 200,
+      "request_bytes": 1216,
+      "duration_s": 2.354,
+      "request_sha256": "e72f12c0adee7c4465afa78ea9eb16e32e74e44f56b46b1865805d95aa0211b6",
+      "response_sha256": "a840b37a4b08b4a8e3c0a5898058a4b44091d8424bcf9c593f69355e6fa87877",
+      "event_count": 25,
+      "function_names": [
+        "view_image"
+      ],
+      "finish_reasons": [
+        "tool_calls"
+      ],
+      "text_chars": 0,
+      "done": true,
+      "reasoning_effort": "xhigh"
+    },
+    {
+      "case": "client_search",
+      "attempt": 3,
+      "http_status": 200,
+      "request_bytes": 1216,
+      "duration_s": 2.444,
+      "request_sha256": "e72f12c0adee7c4465afa78ea9eb16e32e74e44f56b46b1865805d95aa0211b6",
+      "response_sha256": "e02a4a1f1f88bdb50dbba062bf2bfb5863ad24b942ae2656fe8cbb70e40ed0d7",
+      "event_count": 27,
+      "function_names": [
+        "view_image"
+      ],
+      "finish_reasons": [
+        "tool_calls"
+      ],
+      "text_chars": 0,
+      "done": true,
+      "reasoning_effort": "xhigh"
+    },
+    {
+      "case": "hosted_search",
+      "attempt": 1,
+      "http_status": 422,
+      "request_bytes": 935,
+      "duration_s": 0.44,
+      "request_sha256": "49e3c08514d82299fb8d144b6592e41be5cbfc3564564844d65e5926e983a402",
+      "response_sha256": "d6a2289aa61f9422c9fd7514c3173d02172de69f3aca60f196aa138d8bcb9908",
+      "error": "Failed to deserialize the JSON body into the target type: tools[1].type: unknown variant `web_search`, expected `function` or `live_search` at line 1 column 879",
+      "reasoning_effort": "unspecified"
+    },
+    {
+      "case": "legacy_search",
+      "attempt": 1,
+      "http_status": 410,
+      "request_bytes": 976,
+      "duration_s": 0.698,
+      "request_sha256": "2a78f40e96d3d2e915ceac4ce11a5647d7910e3674caee06e05fb8f8d657bee2",
+      "response_sha256": "6e6c89a0d9d73bb98e53ec786f391f20c35b4de995b58d3a8bbb7dffb3593f86",
+      "error": "Live search is deprecated. Please switch to the Agent Tools API: https://docs.x.ai/docs/guides/tools/overview",
+      "reasoning_effort": "xhigh"
+    },
+    {
+      "case": "live_search",
+      "attempt": 1,
+      "http_status": 410,
+      "request_bytes": 990,
+      "duration_s": 0.459,
+      "request_sha256": "3be41d653bc9857d36357667faaf6c05bb3826c2b145f422ee2130064fcbc354",
+      "response_sha256": "6e6c89a0d9d73bb98e53ec786f391f20c35b4de995b58d3a8bbb7dffb3593f86",
+      "error": "Live search is deprecated. Please switch to the Agent Tools API: https://docs.x.ai/docs/guides/tools/overview",
+      "reasoning_effort": "xhigh"
+    }
+  ]
+}

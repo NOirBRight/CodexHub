@@ -1,0 +1,19 @@
+[
+  {
+    "model": "xai/grok-4.6",
+    "strategy": "eager",
+    "live": true,
+    "exit": 0,
+    "requests": 3,
+    "tool_counts": [
+      18,
+      26,
+      26
+    ],
+    "tool_executed": true,
+    "tool_result_observed": true,
+    "failures": [],
+    "completed": true,
+    "passed": true
+  }
+]

@@ -60,9 +60,10 @@ class ProtocolCapabilities:
     accepts_tool_search_adapter: bool = False
     max_tool_name_length: int = 128
     max_alias_attempts: int = 128
+    reserved_function_names: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
-        for field_name in ("hosted_lifecycles", "unknown_lifecycles"):
+        for field_name in ("hosted_lifecycles", "unknown_lifecycles", "reserved_function_names"):
             value = getattr(self, field_name)
             if not isinstance(value, frozenset):
                 object.__setattr__(self, field_name, frozenset(str(item) for item in value))
@@ -325,4 +326,3 @@ def provider_function_declaration(child: Mapping[str, Any], alias: str) -> dict[
     function.pop("namespace", None)
     return function
 _provider_function_declaration = provider_function_declaration
-
