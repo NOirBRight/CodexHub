@@ -210,6 +210,31 @@ def enrich_request_observability(
     return fields
 
 
+# Request keys and discriminator values are untrusted strings, not inherently
+# safe metadata. Unknown values are counted/classified without retaining them.
+_SHAPE_REQUEST_KEYS = frozenset({
+    "model", "input", "messages", "instructions", "tools", "tool_choice",
+    "parallel_tool_calls", "reasoning", "text", "response_format", "max_tokens",
+    "max_completion_tokens", "max_output_tokens", "temperature", "top_p",
+    "stream", "stream_options", "store", "metadata", "include",
+    "previous_response_id", "prompt_cache_key", "prompt_cache_retention",
+    "service_tier", "safety_identifier", "user", "truncation", "conversation",
+    "background", "modalities", "audio", "prediction", "stop", "n", "seed",
+    "logprobs", "top_logprobs", "frequency_penalty", "presence_penalty",
+    "functions", "function_call", "web_search_options", "verbosity",
+    "reasoning_effort", "cache_control",
+})
+_SHAPE_MESSAGE_ROLES = frozenset({"system", "developer", "user", "assistant", "tool", "function"})
+_SHAPE_INPUT_TYPES = frozenset({
+    "message", "reasoning", "function_call", "function_call_output",
+    "custom_tool_call", "custom_tool_call_output", "agent_message",
+    "tool_search_call", "tool_search_output", "web_search_call", "file_search_call",
+    "image_generation_call", "computer_call", "computer_call_output", "mcp_call",
+    "mcp_list_tools", "mcp_approval_request", "mcp_approval_response",
+    "item_reference", "local_shell_call", "local_shell_call_output", "compaction",
+})
+
+
 def _request_body_shape(body: bytes) -> dict[str, Any] | None:
     """Return bounded, value-free protocol structure for one request body."""
 
@@ -220,7 +245,8 @@ def _request_body_shape(body: bytes) -> dict[str, Any] | None:
     if not isinstance(payload, Mapping):
         return None
     shape: dict[str, Any] = {
-        "top_level_keys": sorted(str(key) for key in payload if isinstance(key, str)),
+        "top_level_keys": sorted(key for key in payload if key in _SHAPE_REQUEST_KEYS),
+        "unknown_top_level_key_count": sum(key not in _SHAPE_REQUEST_KEYS for key in payload),
     }
     messages = payload.get("messages")
     if isinstance(messages, list):
@@ -231,7 +257,7 @@ def _request_body_shape(body: bytes) -> dict[str, Any] | None:
                 continue
             role = message.get("role")
             if isinstance(role, str):
-                roles.append(role)
+                roles.append(role if role in _SHAPE_MESSAGE_ROLES else "unknown")
             if role == "assistant":
                 tool_calls = message.get("tool_calls")
                 assistant.append({
@@ -257,7 +283,7 @@ def _request_body_shape(body: bytes) -> dict[str, Any] | None:
             "wire_format": "responses",
             "input_count": len(input_items),
             "input_types": sorted(
-                str(item.get("type"))
+                item["type"] if item["type"] in _SHAPE_INPUT_TYPES else "unknown"
                 for item in input_items
                 if isinstance(item, Mapping) and isinstance(item.get("type"), str)
             ),

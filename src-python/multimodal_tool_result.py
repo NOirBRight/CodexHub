@@ -201,7 +201,7 @@ def _split_output_parts(output: Any) -> tuple[list[str], list[dict[str, Any]]]:
                 "Cannot adapt an ambiguous tool-result output object without a type."
             )
         _translation_error(
-            f"Cannot adapt tool-result output part type {part_type!r}."
+            "Cannot adapt unsupported tool-result output part type."
         )
     return texts, media
 
@@ -389,7 +389,7 @@ def adapt_tool_result_item(
             stats.structured_file_count += 1
         else:
             _translation_error(
-                f"Cannot adapt tool-result media type {kind!r}."
+                "Cannot adapt unsupported tool-result media type."
             )
         payloads.extend(_identified_payloads(part))
 

@@ -67,7 +67,7 @@ class ProtocolTranslationTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
-        self.assertIn("input_image", str(raised.exception))
+        self.assertIn("function-call output part type", str(raised.exception))
 
     def test_responses_to_chat_defers_intervening_message_until_tool_result(self):
         body = {

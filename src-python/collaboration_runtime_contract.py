@@ -572,10 +572,27 @@ def _is_client_execution_error(name: str, value: str) -> bool:
         return name in {"spawn_agent", "send_message", "followup_task"}
     if value == "target agent is missing an agent_path":
         return name in {"send_message", "followup_task"}
+    if name in {"send_message", "followup_task"}:
+        # Shared resolver/agent-control errors have stable framing. Their
+        # payload stays inside the tool result; never add it to diagnostics.
+        if re.fullmatch(r"live agent path `[^`\r\n]+` not found", value):
+            return True
+        if re.fullmatch(r"agent with id [0-9a-fA-F-]{36} (?:not found|is closed)", value):
+            return True
+        prefix = "collab tool failed: "
+        if value.startswith(prefix) and value[len(prefix):].strip():
+            return True
+    if name in {"spawn_agent", "list_agents"}:
+        prefix = "collab spawn failed: "
+        if value.startswith(prefix) and value[len(prefix):].strip():
+            return True
     if name == "followup_task" and value == "Follow-up tasks can't target the root agent":
         return True
     if name == "spawn_agent":
-        return value == "fork_turns must be `none`, `all`, or a positive integer string" or bool(
+        return value in {
+            "fork_turns must be `none`, `all`, or a positive integer string",
+            "spawned agent is missing a canonical task name",
+        } or bool(
             re.fullmatch(r"agent path `[^`\r\n]+` already exists", value)
         )
     return False

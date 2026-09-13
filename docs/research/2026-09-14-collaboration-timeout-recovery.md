@@ -58,3 +58,23 @@ Linux (CLI 0.154.0) and Windows real parent/child two-turn E2E pass on
 message delivery and completed status. Adjacent audit delta verification and
 full suites are in progress. No production process or
 user session has been modified.
+
+
+## Error and diagnostics privacy audit
+
+The public translation seam echoed unsupported user-controlled field names,
+content/tool types, roles, finish reasons, indexes and statuses into exceptions
+and downstream error details. The multimodal result adapter had the same issue.
+Those errors now describe only the fixed failure surface. Request body-shape
+telemetry now keeps known protocol keys/types/roles and unknown counts/categories;
+it no longer persists arbitrary discriminator strings.
+
+`tests/test_protocol_translation_privacy.py` reproduces and verifies both error
+mapping and diagnostics through public seams with synthetic sentinels. No
+actual credential disclosure was established from the user's affected task.
+
+Runtime failure replay additionally covers source-proven resolver path/id errors
+and the nonempty `collab tool failed: ` / `collab spawn failed: ` framing, scoped
+to their owning tools. These remain unchanged tool failure outputs; they do not
+waive argument validation, successful JSON schemas or encryption boundaries.
+Unknown arbitrary text is not universally accepted as a successful result.

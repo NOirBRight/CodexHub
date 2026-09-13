@@ -445,3 +445,48 @@ def test_client_parse_error_can_resume_without_reinterpreting_failed_arguments(v
     restored = plan.decode_payload({"input": encoded["input"]})["input"]
     assert restored[0]["arguments"] == wire
     assert restored[1] == history[1]
+
+
+@pytest.mark.parametrize("version,name,arguments,output", [
+    ("collaboration_v1", "spawn_agent", {}, "Provide one of: message or items"),
+    ("collaboration_v1", "send_input", {"target": "child", "message": "x", "items": []}, "Provide either message or items, but not both"),
+    ("collaboration_v1", "spawn_agent", {"items": []}, "Items can't be empty"),
+    ("collaboration_v1", "send_input", {"target": "child", "message": ""}, "Empty message can't be sent to an agent"),
+    ("collaboration_v2", "send_message", {"target": "/root/missing", "message": "x"}, "live agent path `/root/missing` not found"),
+    ("collaboration_v2", "followup_task", {"target": "/root/missing", "message": "x"}, "agent with id 00000000-0000-4000-8000-000000000001 not found"),
+    ("collaboration_v1", "send_input", {"target": "child", "message": "x"}, "agent with id 00000000-0000-4000-8000-000000000001 is closed"),
+    ("collaboration_v2", "send_message", {"target": "/root/child", "message": "x"}, "collab tool failed: synthetic runtime failure"),
+    ("collaboration_v2", "spawn_agent", {"task_name": "worker", "message": "x"}, "collab spawn failed: synthetic runtime failure"),
+    ("collaboration_v2", "list_agents", {}, "collab spawn failed: synthetic runtime failure"),
+    ("collaboration_v2", "spawn_agent", {"task_name": "worker", "message": "x"}, "spawned agent is missing a canonical task name"),
+])
+@pytest.mark.parametrize("native", [True, False])
+def test_client_runtime_failure_history_remains_an_unchanged_failure(version, name, arguments, output, native):
+    plan, namespace = _client_plan(version, native)
+    wire = json.dumps(arguments)
+    history = [
+        {"type": "function_call", "id": "fc_failure", "call_id": "call_failure",
+         "namespace": namespace, "name": name, "arguments": wire},
+        {"type": "function_call_output", "id": "out_failure", "call_id": "call_failure", "output": output},
+    ]
+    encoded = plan.encode_payload({"input": history})
+    restored = plan.decode_payload({"input": encoded["input"]})["input"]
+    assert restored[0]["arguments"] == wire
+    assert restored[1] == history[1]
+
+
+@pytest.mark.parametrize("name,output", [
+    ("send_message", "collab tool failed: "),
+    ("spawn_agent", "collab spawn failed: \n"),
+    ("list_agents", "collab tool failed: fixture"),
+    ("wait_agent", "live agent path `/root/missing` not found"),
+    ("send_message", "agent with id not-a-uuid not found"),
+    ("send_message", "live agent path `/root/missing` not found\nextra"),
+    ("send_message", '"collab tool failed: fixture"'),
+    ("spawn_agent", '{"error":"collab spawn failed: fixture"}'),
+])
+def test_runtime_failure_framing_does_not_waive_other_result_contracts(name, output):
+    from collaboration_runtime_contract import validate_collaboration_result
+
+    with pytest.raises(CollaborationContractError):
+        validate_collaboration_result("collaboration_v2", name, output)
