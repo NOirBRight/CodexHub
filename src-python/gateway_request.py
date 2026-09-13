@@ -647,7 +647,8 @@ def websocket_probe_frame_metadata(frame: Any) -> dict[str, Any]:
         return metadata
     metadata["appears_json"] = True
     if isinstance(payload, Mapping):
-        metadata["json_top_level_keys"] = sorted(str(key) for key in payload.keys())
+        metadata["json_top_level_keys"] = proxy_telemetry.protocol_field_names(payload)
+        metadata["unknown_json_key_count"] = len(payload) - len(metadata["json_top_level_keys"])
     return metadata
 _websocket_probe_frame_metadata = websocket_probe_frame_metadata
 

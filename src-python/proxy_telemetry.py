@@ -7,7 +7,7 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from atomic_io import atomic_read_or_create_text
 
@@ -210,6 +210,79 @@ def enrich_request_observability(
     return fields
 
 
+# Request keys and discriminator values are untrusted strings, not inherently
+# safe metadata. Unknown values are counted/classified without retaining them.
+_SHAPE_REQUEST_KEYS = frozenset({
+    "model", "input", "messages", "instructions", "tools", "tool_choice",
+    "parallel_tool_calls", "reasoning", "text", "response_format", "max_tokens",
+    "max_completion_tokens", "max_output_tokens", "temperature", "top_p",
+    "stream", "stream_options", "store", "metadata", "include",
+    "previous_response_id", "prompt_cache_key", "prompt_cache_retention",
+    "service_tier", "safety_identifier", "user", "truncation", "conversation",
+    "background", "modalities", "audio", "prediction", "stop", "n", "seed",
+    "logprobs", "top_logprobs", "frequency_penalty", "presence_penalty",
+    "functions", "function_call", "web_search_options", "verbosity",
+    "reasoning_effort", "cache_control",
+    "type", "response", "event_id", "id", "generate",
+})
+_SHAPE_MESSAGE_ROLES = frozenset({"system", "developer", "user", "assistant", "tool", "function"})
+_SHAPE_INPUT_TYPES = frozenset({
+    "message", "reasoning", "function_call", "function_call_output",
+    "custom_tool_call", "custom_tool_call_output", "agent_message",
+    "tool_search_call", "tool_search_output", "web_search_call", "file_search_call",
+    "image_generation_call", "computer_call", "computer_call_output", "mcp_call",
+    "mcp_list_tools", "mcp_approval_request", "mcp_approval_response",
+    "item_reference", "local_shell_call", "local_shell_call_output", "compaction",
+})
+_SHAPE_EVENT_TYPES = frozenset({
+    "error", "response.created", "response.in_progress", "response.completed",
+    "response.failed", "response.incomplete", "response.queued",
+}) | frozenset(
+    f"response.{part}.{phase}"
+    for part in ("output_text", "refusal", "reasoning_text", "reasoning_summary_text",
+                 "function_call_arguments", "custom_tool_call_input")
+    for phase in ("delta", "done")
+) | frozenset(
+    f"response.{part}.{phase}"
+    for part in ("output_item", "content_part", "reasoning_summary_part")
+    for phase in ("added", "done")
+)
+_SHAPE_FINISH_REASONS = frozenset({"stop", "length", "tool_calls", "function_call", "content_filter"})
+_SHAPE_SOURCE_KEYS = frozenset({
+    "role", "content", "reasoning", "reasoning_content", "reasoning_details",
+    "tool_calls", "function_call", "refusal", "audio", "annotations",
+})
+
+
+def _event_type_category(value: Any) -> str:
+    return value if isinstance(value, str) and value in _SHAPE_EVENT_TYPES else "unknown"
+
+
+def _count_categories(value: Any, allowed: frozenset[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if isinstance(value, Mapping):
+        for event_type, count in value.items():
+            if type(count) is int and count >= 0:
+                category = event_type if isinstance(event_type, str) and event_type in allowed else "unknown"
+                counts[category] = counts.get(category, 0) + count
+    return counts
+
+
+def _event_item_shapes(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [{
+        "event_type": _event_type_category(item.get("event_type")),
+        "type": item.get("type") if isinstance(item.get("type"), str) and item["type"] in _SHAPE_INPUT_TYPES else "unknown",
+        "has_arguments": bool(item.get("has_arguments")),
+    } for item in value[:12] if isinstance(item, Mapping)]
+
+
+def protocol_field_names(keys: Iterable[str]) -> list[str]:
+    """Retain only fixed protocol field names for HTTP/WS diagnostics."""
+    return sorted(key for key in keys if key in _SHAPE_REQUEST_KEYS)
+
+
 def _request_body_shape(body: bytes) -> dict[str, Any] | None:
     """Return bounded, value-free protocol structure for one request body."""
 
@@ -220,7 +293,8 @@ def _request_body_shape(body: bytes) -> dict[str, Any] | None:
     if not isinstance(payload, Mapping):
         return None
     shape: dict[str, Any] = {
-        "top_level_keys": sorted(str(key) for key in payload if isinstance(key, str)),
+        "top_level_keys": protocol_field_names(payload),
+        "unknown_top_level_key_count": sum(key not in _SHAPE_REQUEST_KEYS for key in payload),
     }
     messages = payload.get("messages")
     if isinstance(messages, list):
@@ -231,7 +305,7 @@ def _request_body_shape(body: bytes) -> dict[str, Any] | None:
                 continue
             role = message.get("role")
             if isinstance(role, str):
-                roles.append(role)
+                roles.append(role if role in _SHAPE_MESSAGE_ROLES else "unknown")
             if role == "assistant":
                 tool_calls = message.get("tool_calls")
                 assistant.append({
@@ -257,7 +331,7 @@ def _request_body_shape(body: bytes) -> dict[str, Any] | None:
             "wire_format": "responses",
             "input_count": len(input_items),
             "input_types": sorted(
-                str(item.get("type"))
+                item["type"] if item["type"] in _SHAPE_INPUT_TYPES else "unknown"
                 for item in input_items
                 if isinstance(item, Mapping) and isinstance(item.get("type"), str)
             ),
@@ -278,6 +352,30 @@ def sanitize_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, item in value.items():
         if _is_sensitive_key(key):
+            continue
+        if key == "tool_call_names":
+            continue
+        if key in {"original_event_counts", "rewritten_event_counts", "event_type_counts", "sse_event_type_counts"}:
+            result[key] = _count_categories(item, _SHAPE_EVENT_TYPES)
+            continue
+        if key in {"finish_reasons", "source_keys"}:
+            result[key] = _count_categories(item, _SHAPE_FINISH_REASONS if key == "finish_reasons" else _SHAPE_SOURCE_KEYS)
+            continue
+        if key == "sse_event_types":
+            result[key] = sorted({_event_type_category(value) for value in item}) if isinstance(item, list) else []
+            continue
+        if key in {"last_event_type", "sse_last_event_type"}:
+            result[key] = _event_type_category(item)
+            continue
+        if key in {"output_items", "tool_items"}:
+            result[key] = _event_item_shapes(item)
+            continue
+        if key == "path":
+            path = item.split("?", 1)[0] if isinstance(item, str) else None
+            result[key] = path if path in {
+                "/responses", "/v1/responses", "/chat/completions",
+                "/v1/chat/completions", "/models", "/v1/models", "/health",
+            } else "unknown"
             continue
         result[key] = _sanitize_value(item)
     return result

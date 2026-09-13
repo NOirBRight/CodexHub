@@ -1220,7 +1220,7 @@ def relay_upstream_response(
                             upstream_format=upstream_format,
                             inbound_format=inbound_format,
                             error=error_type,
-                            detail=detail,
+                            detail="Upstream Responses stream emitted an error event.",
                         )
                         if not self._write_downstream_sse_error(
                             inbound_format=inbound_format,
@@ -1409,7 +1409,7 @@ def relay_upstream_response(
                                 upstream_format=upstream_format,
                                 inbound_format=inbound_format,
                                 error="chat_completions_error",
-                                detail=chat_error_detail,
+                                detail="Upstream Chat Completions stream emitted an error event.",
                             )
                             if not self._write_downstream_sse_error(
                                 inbound_format=inbound_format,

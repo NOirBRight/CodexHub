@@ -4425,6 +4425,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         ]
 
         with (
+            patch("gateway_events.write_proxy_event") as logged,
             patch(
                 "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "chat-only/glm-5.2"},
@@ -4452,6 +4453,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIn(b"event: error", written)
         self.assertIn(b"provider busy", written)
         self.assertNotIn(b"stream_incomplete", written)
+
+        error_events = [call for call in logged.call_args_list if call.args[0] == "upstream_stream_error_event"]
+        self.assertTrue(error_events)
+        self.assertNotIn("provider busy", repr(error_events))
 
     def test_provider_scoped_chat_to_responses_streaming_fallback_converts_responses_failure(self):
         policy = gateway_catalog_runtime.load_policy(gateway_catalog_runtime.POLICY_PATH)
@@ -4484,6 +4489,7 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         ]
 
         with (
+            patch("gateway_events.write_proxy_event") as logged,
             patch(
                 "gateway_catalog_runtime.generated_catalog_slugs",
                 return_value={"gpt-5.5", "responses-only/glm-5.2"},
@@ -4512,6 +4518,10 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertIn(b"provider busy", written)
         self.assertNotIn(b"stream_incomplete", written)
         self.assertNotIn(b"data: [DONE]", written)
+
+        error_events = [call for call in logged.call_args_list if call.args[0] == "upstream_stream_error_event"]
+        self.assertTrue(error_events)
+        self.assertNotIn("provider busy", repr(error_events))
 
     def test_provider_scoped_chat_completions_requires_model(self):
         body = json.dumps({

@@ -285,11 +285,17 @@ def _require_supported_chat_message_fields(message: Mapping[str, Any], label: st
 
 
 def _require_supported_fields(value: Mapping[str, Any], allowed: set[str], label: str) -> None:
-    unsupported = sorted(str(key) for key in value.keys() if key not in allowed)
-    if unsupported:
+    if any(key not in allowed for key in value):
+        # These fixed cache-control names explain a known conversion limit.
+        # Never include arbitrary caller-supplied property names in errors.
+        cache_fields = [key for key in ("prompt_cache_options", "prompt_cache_breakpoint")
+                        if key in value and key not in allowed]
+        detail = f"Cannot translate unsupported {label} fields without losing them."
+        if cache_fields:
+            detail += " Unsupported cache controls: " + ", ".join(cache_fields) + "."
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
-            f"Cannot translate {label} fields without losing them: {', '.join(unsupported)}.",
+            detail,
         )
 
 
@@ -535,7 +541,7 @@ def responses_content_to_chat_content(value: Any) -> str | list[dict[str, Any]]:
             )
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
-            f"Cannot translate Responses content part type {part_type!r} to Chat Completions.",
+            "Cannot translate unsupported Responses content part type to Chat Completions.",
         )
 
     if has_image:
@@ -562,7 +568,7 @@ def responses_function_call_output_to_chat_content(value: Any) -> str:
         if part.get("type") != "input_text" or not isinstance(part.get("text"), str):
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
-                f"Cannot translate Responses function-call output part type {part.get('type')!r} to Chat Completions.",
+                "Cannot translate unsupported Responses function-call output part type to Chat Completions.",
             )
         _require_supported_fields(part, {"type", "text"}, "Responses function-call output text part")
         text_fragments.append(part["text"])
@@ -644,7 +650,7 @@ def responses_input_to_chat_messages(
             elif role not in {"system", "user", "assistant"}:
                 raise UnsupportedProtocolTranslationError(
                     "unsupported_protocol_semantics",
-                    f"Cannot translate Responses message role {role!r} to Chat Completions.",
+                    "Cannot translate unsupported Responses message role to Chat Completions.",
                 )
             translated_message = {
                 "role": role,
@@ -806,7 +812,7 @@ def responses_input_to_chat_messages(
             continue
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
-            f"Cannot translate Responses input item type {item_type!r} to Chat Completions.",
+            "Cannot translate unsupported Responses input item type to Chat Completions.",
         )
     if deferred_messages:
         messages.extend(deferred_messages)
@@ -862,10 +868,9 @@ def responses_tools_to_chat_tools(value: Any) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
     for item in value:
         if not isinstance(item, dict) or item.get("type") != "function":
-            tool_type = item.get("type") if isinstance(item, Mapping) else type(item).__name__
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
-                f"Cannot translate Responses tool type {tool_type!r} to Chat Completions.",
+                "Cannot translate unsupported Responses tool type to Chat Completions.",
             )
         _validate_function_tool_fields(
             item,
@@ -896,10 +901,9 @@ def responses_tool_choice_to_chat_tool_choice(value: Any) -> Any:
     if value is None or isinstance(value, str):
         return value
     if not isinstance(value, dict) or value.get("type") != "function":
-        choice_type = value.get("type") if isinstance(value, Mapping) else type(value).__name__
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
-            f"Cannot translate Responses tool_choice type {choice_type!r} to Chat Completions.",
+            "Cannot translate unsupported Responses tool_choice type to Chat Completions.",
         )
     _require_supported_fields(value, {"type", "name"}, "Responses function tool_choice")
     name = value.get("name")
@@ -1109,7 +1113,7 @@ def chat_content_to_responses_content(value: Any) -> list[dict[str, Any]]:
         else:
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
-                f"Cannot translate Chat Completions content part type {fragment.get('type')!r} to Responses.",
+                "Cannot translate unsupported Chat Completions content part type to Responses.",
             )
     return parts
 
@@ -1188,7 +1192,7 @@ def chat_messages_to_responses_input(
                 if tool_type not in (None, "function"):
                     raise UnsupportedProtocolTranslationError(
                         "unsupported_protocol_semantics",
-                        f"Cannot translate assistant tool type {tool_type!r} to Responses.",
+                        "Cannot translate unsupported assistant tool type to Responses.",
                     )
                 function = tool_call.get("function")
                 if not isinstance(function, dict):
@@ -1249,7 +1253,7 @@ def chat_messages_to_responses_input(
         if role not in {"user", "assistant"}:
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
-                f"Cannot translate Chat Completions message role {role!r} to Responses.",
+                "Cannot translate unsupported Chat Completions message role to Responses.",
             )
         response_role = role
         reasoning_output = _chat_reasoning_output(message) if role == "assistant" else None
@@ -1294,7 +1298,7 @@ def _chat_native_tool_to_responses(item: Mapping[str, Any]) -> dict[str, Any]:
     if tool_type not in CHAT_NATIVE_TOOL_TYPES:
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
-            f"Cannot translate Chat Completions tool type {tool_type!r} to Responses.",
+            "Cannot translate unsupported Chat Completions tool type to Responses.",
         )
     for key, child in item.items():
         if isinstance(key, str) and "encrypted" in key and child not in (None, "", [], False):
@@ -1350,10 +1354,9 @@ def chat_tools_to_responses_tools(value: Any) -> list[dict[str, Any]]:
             tools.append(_chat_native_tool_to_responses(item))
             continue
         if not isinstance(item, dict) or item.get("type") != "function":
-            tool_type = item.get("type") if isinstance(item, Mapping) else type(item).__name__
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
-                f"Cannot translate Chat Completions tool type {tool_type!r} to Responses.",
+                "Cannot translate unsupported Chat Completions tool type to Responses.",
             )
         _require_supported_fields(item, {"type", "function"}, "Chat Completions function tool")
         function = item.get("function")
@@ -1408,10 +1411,9 @@ def chat_tool_choice_to_responses_tool_choice(value: Any) -> Any:
         _require_supported_fields(value, {"type"}, "Chat Completions tool_search tool_choice")
         return {"type": "tool_search"}
     if not isinstance(value, dict) or value.get("type") != "function":
-        choice_type = value.get("type") if isinstance(value, Mapping) else type(value).__name__
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
-            f"Cannot translate Chat Completions tool_choice type {choice_type!r} to Responses.",
+            "Cannot translate unsupported Chat Completions tool_choice type to Responses.",
         )
     _require_supported_fields(value, {"type", "function"}, "Chat Completions function tool_choice")
     function = value.get("function")
@@ -1644,7 +1646,7 @@ def _chat_completion_tool_outputs(
         if tool_type not in (None, "function"):
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
-                f"Cannot translate assistant tool type {tool_type!r} to Responses.",
+                "Cannot translate unsupported assistant tool type to Responses.",
             )
         function = tool_call.get("function")
         if not isinstance(function, dict):
@@ -1737,7 +1739,7 @@ def chat_completion_to_response_body(
             if choice_index not in (None, 0):
                 raise UnsupportedProtocolTranslationError(
                     "unsupported_protocol_semantics",
-                    f"Cannot translate Chat Completions choice index {choice_index!r} to a single Responses result.",
+                    "Cannot translate unsupported Chat Completions choice index to a single Responses result.",
                 )
             finish_reason = choice.get("finish_reason")
             if finish_reason == "length":
@@ -1745,7 +1747,7 @@ def chat_completion_to_response_body(
             elif finish_reason not in (None, "stop", "tool_calls"):
                 raise UnsupportedProtocolTranslationError(
                     "unsupported_protocol_semantics",
-                    f"Cannot translate Chat Completions finish_reason {finish_reason!r} to Responses.",
+                    "Cannot translate unsupported Chat Completions finish_reason to Responses.",
                 )
             message = choice.get("message")
             if not isinstance(message, dict):
@@ -1880,7 +1882,7 @@ def response_body_to_chat_completion_body(
                 if role not in (None, "assistant"):
                     raise UnsupportedProtocolTranslationError(
                         "unsupported_protocol_semantics",
-                        f"Cannot translate Responses output message role {role!r} to Chat Completions.",
+                        "Cannot translate unsupported Responses output message role to Chat Completions.",
                     )
                 if isinstance(content, list):
                     responses_content_to_chat_content(content)
@@ -1928,7 +1930,7 @@ def response_body_to_chat_completion_body(
             else:
                 raise UnsupportedProtocolTranslationError(
                     "unsupported_protocol_semantics",
-                    f"Cannot translate Responses output item type {item.get('type')!r} to Chat Completions.",
+                    "Cannot translate unsupported Responses output item type to Chat Completions.",
                 )
 
     if not text_parts and not tool_calls and not reasoning_parts:
@@ -2054,7 +2056,7 @@ def chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
                 if tool_type not in (None, "function"):
                     raise UnsupportedProtocolTranslationError(
                         "unsupported_protocol_semantics",
-                        f"Cannot translate assistant tool type {tool_type!r} into Chat Completions chunks.",
+                        "Cannot translate unsupported assistant tool type into Chat Completions chunks.",
                     )
                 function = tool_call.get("function")
                 if not isinstance(function, Mapping):
@@ -2151,7 +2153,7 @@ def _validate_chat_stream_choices(chunk: Mapping[str, Any]) -> None:
     if choice_index != 0:
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
-            f"Cannot translate Chat Completions stream choice index {choice_index!r} to one Responses stream.",
+            "Cannot translate unsupported Chat Completions stream choice index to one Responses stream.",
         )
 
 
@@ -2357,7 +2359,7 @@ def chat_stream_chunks_to_response_events(
                 elif finish_reason not in {"stop", "tool_calls"}:
                     raise UnsupportedProtocolTranslationError(
                         "unsupported_protocol_semantics",
-                        f"Cannot translate Chat Completions finish_reason {finish_reason!r} to Responses stream events.",
+                        "Cannot translate unsupported Chat Completions finish_reason to Responses stream events.",
                     )
             source = _chat_stream_source(choice)
             if not isinstance(source, dict):
@@ -2403,7 +2405,7 @@ def chat_stream_chunks_to_response_events(
                 if tool_type not in (None, "function"):
                     raise UnsupportedProtocolTranslationError(
                         "unsupported_protocol_semantics",
-                        f"Cannot translate assistant tool type {tool_type!r} to Responses stream events.",
+                        "Cannot translate unsupported assistant tool type to Responses stream events.",
                     )
                 raw_index = tool_call.get("index", fallback_index)
                 if not isinstance(raw_index, int):
@@ -2664,7 +2666,7 @@ def _validated_responses_stream_output_item(
     if item_type != "function_call":
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
-            f"Cannot translate Responses stream output item type {item_type!r} to Chat Completions.",
+            "Cannot translate unsupported Responses stream output item type to Chat Completions.",
         )
     _require_supported_fields(
         item,
@@ -2801,7 +2803,7 @@ def response_events_to_chat_stream_chunks(
         if event_type in {"response.failed", "response.incomplete", "error"}:
             raise UnsupportedProtocolTranslationError(
                 "upstream_response_failed",
-                f"Cannot translate terminal Responses stream event {event_type!r} as a successful Chat Completions stream.",
+                "Cannot translate unsupported terminal Responses stream event as a successful Chat Completions stream.",
             )
         if event_type == "response.created":
             response_obj = event.get("response")
@@ -3227,7 +3229,7 @@ class ResponsesToChatStreamConverter:
         if event_type in {"response.failed", "response.incomplete", "error"}:
             raise UnsupportedProtocolTranslationError(
                 "upstream_response_failed",
-                f"Cannot translate terminal Responses stream event {event_type!r} as a successful Chat Completions stream.",
+                "Cannot translate unsupported terminal Responses stream event as a successful Chat Completions stream.",
             )
         if event_type == "response.created":
             response_obj = event.get("response")
@@ -3855,7 +3857,7 @@ class ChatToResponsesStreamConverter:
                         if tool_type not in (None, "function"):
                             raise UnsupportedProtocolTranslationError(
                                 "unsupported_protocol_semantics",
-                                f"Cannot translate assistant tool type {tool_type!r} to Responses stream events.",
+                                "Cannot translate unsupported assistant tool type to Responses stream events.",
                             )
                         raw_index = tool_call.get("index", fallback_index)
                         if not isinstance(raw_index, int):
@@ -3926,7 +3928,7 @@ class ChatToResponsesStreamConverter:
                 if finish_reason not in {"stop", "tool_calls"}:
                     raise UnsupportedProtocolTranslationError(
                         "unsupported_protocol_semantics",
-                        f"Cannot translate Chat Completions finish_reason {finish_reason!r} to Responses stream events.",
+                        "Cannot translate unsupported Chat Completions finish_reason to Responses stream events.",
                     )
                 self.pending_incomplete = False
         return events
@@ -4099,7 +4101,7 @@ def response_body_to_response_sse_events(
     if status not in {"completed", "incomplete", "failed"}:
         raise UnsupportedProtocolTranslationError(
             "unsupported_protocol_semantics",
-            f"Cannot synthesize a terminal Responses stream from body status {status!r}.",
+            "Cannot synthesize a terminal Responses stream from an unsupported body status.",
         )
     response["status"] = status
     output = response.get("output")
