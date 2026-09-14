@@ -52,6 +52,7 @@ from model_limits import (
     FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
     OfficialContextBudget,
     apply_resolved_model_limits,
+    catalog_auto_compact_token_limit,
     load_resolved_model_limits,
     resolve_official_context_budget,
 )
@@ -2607,6 +2608,18 @@ def build_external_provider_model(
         effective_context_window = model.get("context_window")
         if isinstance(effective_context_window, int) and effective_context_window > 0:
             model["max_output_tokens"] = effective_context_window
+    compact_limit = None
+    published_window = model.get("context_window")
+    if isinstance(published_window, int):
+        compact_limit = catalog_auto_compact_token_limit(
+            context_window=published_window,
+            upstream_name=external_model.get("upstream_name"),
+            upstream_model=external_model.get("upstream_model"),
+        )
+    if compact_limit is None:
+        model.pop("auto_compact_token_limit", None)
+    else:
+        model["auto_compact_token_limit"] = compact_limit
     _disable_responses_only_capabilities_for_chat(
         model,
         external_model.get("upstream_format"),

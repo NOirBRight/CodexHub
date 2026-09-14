@@ -10,9 +10,8 @@ pub mod web_adapter;
 
 pub use handlers::*;
 pub(crate) use handlers::{
-    generate_catalog_coordinated, refresh_official_models_coordinated,
-    refresh_official_models_published_coordinated, save_official_multi_agent_version_coordinated,
-    sync_catalog_coordinated,
+    generate_catalog_coordinated, refresh_official_models_published,
+    save_official_multi_agent_version_coordinated, sync_catalog_coordinated,
 };
 pub use web_adapter::dispatch_web;
 
@@ -33,14 +32,8 @@ const NO_ALIASES: &[(&str, &str)] = &[];
 const ALIASES_SWITCH_MODE: &[(&str, &str)] = &[
     ("autoSync", "auto_sync"),
     ("forceTakeover", "force_takeover"),
-    ("restartCodex", "restart_codex"),
 ];
 const ALIASES_REQUEST_ID: &[(&str, &str)] = &[("requestId", "request_id")];
-const ALIASES_OFFICIAL_REFRESH: &[(&str, &str)] = &[
-    ("restartCodex", "restart_codex"),
-    ("requestId", "request_id"),
-];
-const ALIASES_RESTART: &[(&str, &str)] = &[("restartCodex", "restart_codex")];
 const ALIASES_USAGE: &[(&str, &str)] = &[
     ("startTime", "start_time"),
     ("endTime", "end_time"),
@@ -66,8 +59,7 @@ const ALIASES_TEST_MODEL_ENDPOINT: &[(&str, &str)] = &[
 ];
 const ALIASES_CLIENT_ID: &[(&str, &str)] = &[("clientId", "client_id")];
 const ALIASES_INCLUDE_VERSIONS: &[(&str, &str)] = &[("includeVersions", "include_versions")];
-const ALIASES_MODEL_ID_RESTART: &[(&str, &str)] =
-    &[("modelId", "model_id"), ("restartCodex", "restart_codex")];
+const ALIASES_MODEL_ID: &[(&str, &str)] = &[("modelId", "model_id")];
 const ALIASES_TARGET_PROVIDER: &[(&str, &str)] = &[("targetProvider", "target_provider")];
 const ALIASES_PREFLIGHT: &[(&str, &str)] = &[
     ("applyRepairs", "apply_repairs"),
@@ -103,7 +95,7 @@ macro_rules! desktop_command_registry {
             GetAppFlavor => "get_app_flavor" => $crate::desktop_commands::get_app_flavor, true, true, true, false, NO_ALIASES;
             SaveSettings => "save_settings" => $crate::desktop_commands::save_settings, true, true, true, false, NO_ALIASES;
             CancelOfficialModelRefresh => "cancel_official_model_refresh" => $crate::desktop_commands::cancel_official_model_refresh, true, true, true, false, ALIASES_REQUEST_ID;
-            RefreshOfficialModels => "refresh_official_models" => $crate::desktop_commands::refresh_official_models, true, true, true, false, ALIASES_OFFICIAL_REFRESH;
+            RefreshOfficialModels => "refresh_official_models" => $crate::desktop_commands::refresh_official_models, true, true, true, false, ALIASES_REQUEST_ID;
             OpenaiUsageCompletions => "openai_usage_completions" => $crate::desktop_commands::openai_usage_completions, true, true, true, false, ALIASES_USAGE;
             DiscoverProviderModels => "discover_provider_models" => $crate::desktop_commands::discover_provider_models, true, true, true, false, ALIASES_DISCOVER;
             ProbeUpstreamFormat => "probe_upstream_format" => $crate::desktop_commands::probe_upstream_format, true, true, true, false, ALIASES_BASE_URL_API_KEY;
@@ -132,14 +124,14 @@ macro_rules! desktop_command_registry {
             SwitchGatewayClientRoute => "switch_gateway_client_route" => $crate::desktop_commands::switch_gateway_client_route, true, true, true, false, ALIASES_SWITCH_ROUTE;
             SyncGatewayClients => "sync_gateway_clients" => $crate::desktop_commands::sync_gateway_clients, true, true, true, false, NO_ALIASES;
             SubagentMatrixStatus => "subagent_matrix_status" => $crate::desktop_commands::subagent_matrix_status, true, true, true, false, NO_ALIASES;
-            GenerateCatalog => "generate_catalog" => $crate::desktop_commands::generate_catalog, true, true, true, false, ALIASES_RESTART;
+            GenerateCatalog => "generate_catalog" => $crate::desktop_commands::generate_catalog, true, true, true, false, NO_ALIASES;
             GetCatalogOverrideDiagnostics => "get_catalog_override_diagnostics" => $crate::desktop_commands::get_catalog_override_diagnostics, true, true, true, false, NO_ALIASES;
             ListModels => "list_models" => $crate::desktop_commands::list_models, true, true, true, false, NO_ALIASES;
             ListOfficialModels => "list_official_models" => $crate::desktop_commands::list_official_models, true, true, true, false, NO_ALIASES;
             RefreshModelMetadata => "refresh_model_metadata" => $crate::desktop_commands::refresh_model_metadata, true, true, true, false, NO_ALIASES;
             ListModelMetadata => "list_model_metadata" => $crate::desktop_commands::list_model_metadata, true, true, true, false, NO_ALIASES;
             SaveModelMetadataOverride => "save_model_metadata_override" => $crate::desktop_commands::save_model_metadata_override, true, true, true, false, NO_ALIASES;
-            SaveOfficialMultiAgentVersion => "save_official_multi_agent_version" => $crate::desktop_commands::save_official_multi_agent_version, true, true, true, false, ALIASES_MODEL_ID_RESTART;
+            SaveOfficialMultiAgentVersion => "save_official_multi_agent_version" => $crate::desktop_commands::save_official_multi_agent_version, true, true, true, false, ALIASES_MODEL_ID;
             ListOfficialMultiAgentOverrides => "list_official_multi_agent_overrides" => $crate::desktop_commands::list_official_multi_agent_overrides, true, true, true, false, NO_ALIASES;
             ListOfficialMultiAgentBaselines => "list_official_multi_agent_baselines" => $crate::desktop_commands::list_official_multi_agent_baselines, true, true, true, false, NO_ALIASES;
             SyncHistory => "sync_history" => $crate::desktop_commands::sync_history, true, true, true, false, ALIASES_TARGET_PROVIDER;
@@ -150,7 +142,7 @@ macro_rules! desktop_command_registry {
             GetConversationSyncStatus => "get_conversation_sync_status" => $crate::desktop_commands::get_conversation_sync_status, true, true, true, false, NO_ALIASES;
             SyncConversationHistory => "sync_conversation_history" => $crate::desktop_commands::sync_conversation_history, true, true, true, false, ALIASES_TARGET_PROVIDER;
             DiagnoseConversationHistory => "diagnose_conversation_history" => $crate::desktop_commands::diagnose_conversation_history, true, true, true, false, ALIASES_FULL_SCAN;
-            SyncCatalog => "sync_catalog" => $crate::desktop_commands::sync_catalog, true, true, true, false, ALIASES_RESTART;
+            SyncCatalog => "sync_catalog" => $crate::desktop_commands::sync_catalog, true, true, true, false, NO_ALIASES;
             SetAutostart => "set_autostart" => $crate::desktop_commands::set_autostart, true, true, true, false, NO_ALIASES;
             RemoveAutostart => "remove_autostart" => $crate::desktop_commands::remove_autostart, true, true, true, false, NO_ALIASES;
             GetAutostartStatus => "get_autostart_status" => $crate::desktop_commands::get_autostart_status, true, true, true, false, NO_ALIASES;

@@ -5,11 +5,18 @@ import json
 from pathlib import Path
 from typing import Any
 
+import maintained_catalog as _maintained_catalog
+
 
 CURRENT_DIRECT_OFFICIAL_SOURCE = "current_direct_official"
 FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE = "fresh_direct_official_cache_authority"
 DEGRADED_LAST_KNOWN_OFFICIAL_SOURCE = "degraded_last_known_official"
 NATIVE_AUTO_COMPACT_PERCENT = 90
+# Codex derives compact as 90% of catalog context_window, then clamps any
+# explicit auto_compact_token_limit to that 90% cap. xAI's prompt meter
+# (especially images / tool history) counts above Codex, so a 500k Grok
+# window still 400s after Codex thinks it is under 90%. Compact earlier.
+XAI_AUTO_COMPACT_PERCENT = 70
 TRUSTED_FRESH_OFFICIAL_CONTEXT_SOURCES = frozenset(
     {
         CURRENT_DIRECT_OFFICIAL_SOURCE,
@@ -34,6 +41,41 @@ class OfficialContextBudget:
 
 def _positive_int(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+_GROK_PROMPT_METER_FAMILIES = frozenset({"grok", "grok-4.5"})
+
+
+def uses_xai_prompt_meter(upstream_name: Any, upstream_model: Any) -> bool:
+    """True when Codex token counts must not be trusted against a Grok/xAI cap.
+
+    Selector is Maintained Catalog family (ADR-0002 / ADR-0008), not a
+    provider-id or slug prefix.
+    """
+
+    _ = upstream_name
+    family = _maintained_catalog.family_for(str(upstream_model or ""))
+    return family in _GROK_PROMPT_METER_FAMILIES
+
+
+def catalog_auto_compact_token_limit(
+    *,
+    context_window: int,
+    upstream_name: Any = None,
+    upstream_model: Any = None,
+) -> int | None:
+    """Return a catalog compact threshold Codex will honor, or None to omit.
+
+    Codex ``ModelInfo::auto_compact_token_limit()`` uses 90% of
+    ``context_window`` when the field is omitted, and ``min(field, 90%)``
+    when it is set. Only a value below that 90% cap changes client behavior.
+    """
+
+    if context_window <= 0 or not uses_xai_prompt_meter(upstream_name, upstream_model):
+        return None
+    native_cap = context_window * NATIVE_AUTO_COMPACT_PERCENT // 100
+    xai_limit = max(1, context_window * XAI_AUTO_COMPACT_PERCENT // 100)
+    return min(xai_limit, native_cap)
 
 
 def _context_percent(value: Any) -> int | None:

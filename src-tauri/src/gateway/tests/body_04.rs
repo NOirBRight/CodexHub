@@ -1400,10 +1400,11 @@ theme = "dark"
         fs::create_dir_all(grok_path.parent().unwrap()).unwrap();
         fs::write(&grok_path, grok_seed_toml()).unwrap();
 
-        let settings = Settings {
-            include_official_models: false,
-            ..settings_with_port(9099)
-        };
+        let settings = settings_with_port(9099);
+        assert!(
+            settings.include_official_models,
+            "official + xai + third-party must use the Official catalog path"
+        );
         let grok_input = IsolatedClientApplyInput {
             client_id: "grok".to_string(),
             model: Some("openai/gpt-5.5".to_string()),
@@ -1576,6 +1577,75 @@ theme = "dark"
     }
 
     #[test]
+    fn grok_detach_clears_legacy_skipped_xai_default() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = fresh_root("grok-detach-legacy-xai-default");
+        let grok_path = root.join("grok").join("config.toml");
+        fs::create_dir_all(grok_path.parent().unwrap()).unwrap();
+        fs::write(
+            &grok_path,
+            r#"
+[models]
+default = "codexhub-xai-grok-4.6"
+
+[model.local-llama]
+model = "llama3"
+name = "Local Llama"
+
+[model_providers.codexhub-xai]
+base_url = "http://127.0.0.1:9099/v1/providers/xai"
+api_key = "old-xai"
+"#,
+        )
+        .unwrap();
+        let restored = super::super::grok_ownership_bounded_cleanup(&grok_path).unwrap();
+        assert!(restored.applied);
+        let table = parse_grok_toml(&grok_path);
+        assert!(table["models"].get("default").is_none());
+        assert!(table["model"]["local-llama"].as_table().is_some());
+        assert!(table.get("model_providers").is_none());
+    }
+
+    #[test]
+    fn grok_detach_leaves_live_xai_proxy_default() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = fresh_root("grok-detach-live-xai-proxy-default");
+        let grok_path = root.join("grok").join("config.toml");
+        fs::create_dir_all(grok_path.parent().unwrap()).unwrap();
+        fs::write(
+            &grok_path,
+            r#"
+[models]
+default = "codexhub-xai-proxy"
+
+[model.local-llama]
+model = "llama3"
+name = "Local Llama"
+
+[model_providers.codexhub-xai-proxy]
+base_url = "http://127.0.0.1:9099/v1/providers/xai-proxy"
+api_key = "live-xai"
+"#,
+        )
+        .unwrap();
+        let restored = super::super::grok_ownership_bounded_cleanup(&grok_path).unwrap();
+        assert!(restored.applied);
+        let table = parse_grok_toml(&grok_path);
+        assert_eq!(
+            table["models"]["default"].as_str(),
+            Some("codexhub-xai-proxy")
+        );
+        assert!(table["model"]["local-llama"].as_table().is_some());
+        assert!(table.get("model_providers").is_none());
+    }
+
+    #[test]
     fn grok_conflict_does_not_overwrite_foreign_owned_table() {
         let _guard = TEST_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -1650,6 +1720,94 @@ api_key = "sk-foreign"
     }
 
     #[test]
+    fn grok_conflict_does_not_adopt_other_loopback_or_missing_base_url() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let settings = Settings {
+            include_official_models: false,
+            ..settings_with_port(9099)
+        };
+        for (label, original) in [
+            (
+                "other-loopback",
+                r#"
+[model_providers.codexhub-openai]
+base_url = "http://127.0.0.1:8080/v1"
+api_key = "sk-foreign"
+"#,
+            ),
+            (
+                "missing-base-url",
+                r#"
+[model_providers.codexhub-openai]
+api_key = "sk-foreign"
+"#,
+            ),
+        ] {
+            let root = fresh_root(label);
+            let isolated = validate_isolated_root(&root).unwrap();
+            let grok_path = isolated.root().join("grok").join("config.toml");
+            fs::create_dir_all(grok_path.parent().unwrap()).unwrap();
+            fs::write(&grok_path, original).unwrap();
+            let inp = IsolatedClientApplyInput {
+                client_id: "grok".to_string(),
+                model: Some("openai/gpt-5.5".to_string()),
+                settings: settings.clone(),
+                providers: grok_mixed_providers(),
+                catalog_path: None,
+                backup_subdir: None,
+            };
+            let error = apply_gateway_client_config_isolated(&isolated, &inp).unwrap_err();
+            assert!(
+                error.to_ascii_lowercase().contains("refusing")
+                    || error.to_ascii_lowercase().contains("conflict"),
+                "{label} unexpected error: {error}"
+            );
+            assert_eq!(fs::read_to_string(&grok_path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn grok_readback_ignores_foreign_tables_after_apply() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = fresh_root("grok-readback-foreign");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let grok_path = isolated.root().join("grok").join("config.toml");
+        fs::create_dir_all(grok_path.parent().unwrap()).unwrap();
+        fs::write(&grok_path, grok_seed_toml()).unwrap();
+        let inp = IsolatedClientApplyInput {
+            client_id: "grok".to_string(),
+            model: Some("openai/gpt-5.5".to_string()),
+            settings: Settings {
+                include_official_models: false,
+                ..settings_with_port(9099)
+            },
+            providers: grok_mixed_providers(),
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        assert!(
+            apply_gateway_client_config_isolated(&isolated, &inp)
+                .unwrap()
+                .applied
+        );
+        let mut written = fs::read_to_string(&grok_path).unwrap();
+        written.push_str("\n[model.user-extra]\nname = \"kept-foreign\"\n");
+        fs::write(&grok_path, written).unwrap();
+        readback_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let table = parse_grok_toml(&grok_path);
+        assert_eq!(
+            table["model"]["user-extra"]["name"].as_str(),
+            Some("kept-foreign")
+        );
+    }
+
+    #[test]
     fn list_gateway_clients_reports_grok_from_fixture_home() {
         let _guard = TEST_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -1696,6 +1854,48 @@ api_backend = "responses"
         assert_eq!(
             grok.config_path.as_deref(),
             Some(grok_home.join("config.toml").as_path())
+        );
+    }
+
+    #[test]
+    fn list_gateway_clients_reports_grok_allowed_models_from_home_requirements() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = unique_temp_dir("grok-roster-requirements");
+        let grok_home = root.join("home");
+        fs::create_dir_all(&grok_home).unwrap();
+        fs::write(
+            grok_home.join("config.toml"),
+            r#"
+[model_providers.codexhub]
+base_url = "http://127.0.0.1:9099/v1"
+api_key = "fixture-key"
+api_backend = "responses"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            grok_home.join("requirements.toml"),
+            r#"
+[models]
+allowed_models = ["grok-4.6"]
+"#,
+        )
+        .unwrap();
+        let previous = std::env::var_os("CODEXHUB_GROK_HOME");
+        std::env::set_var("CODEXHUB_GROK_HOME", &grok_home);
+        let clients = super::super::list_gateway_clients(false).unwrap();
+        super::restore_env("CODEXHUB_GROK_HOME", previous);
+        let grok = clients
+            .iter()
+            .find(|client| client.id == "grok")
+            .expect("grok roster row");
+        assert!(
+            grok.status.contains("allowed_models"),
+            "home requirements.toml pin disclosure missing from status: {}",
+            grok.status
         );
     }
 }

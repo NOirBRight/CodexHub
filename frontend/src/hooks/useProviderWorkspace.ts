@@ -2,7 +2,6 @@ import { readCodexRestartNotice } from "../lib/providerWorkspace/restart";
 import { createWorkspaceSaveCoordinator } from "../lib/providerWorkspace/save";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { useToasts } from "../components/PageToast";
-import { publishCatalog } from "../lib/catalogPublish";
 import { fillMissingModelLimits, mergeDiscoveredModels } from "../lib/format";
 import { applyProviderProbeResult, probeSucceeded, shortProviderDiscoveryError } from "../lib/providerEndpoint";
 import { api, isBackendDisconnectedMessage, messageFromError } from "../lib/tauri";
@@ -167,46 +166,6 @@ export function useProviderWorkspace(options: {
 
   const saveCoordinator = useRef(createWorkspaceSaveCoordinator()).current;
 
-  const publishAndSync = useCallback(async (
-    restartCodex: boolean,
-    settings: Settings | null,
-    updateText: (text: string, tone: "loading" | "success" | "error") => void,
-    catalogAlreadyPublished = false,
-  ): Promise<GatewayClientSyncSummary | null> => {
-    if (!catalogAlreadyPublished) {
-      updateText("providers.generatingCatalog", "loading");
-    }
-    const published = await publishCatalog(
-      {
-        reason: "provider-catalog",
-        persist: !catalogAlreadyPublished,
-        syncClients: Boolean(settings?.auto_sync_clients),
-      },
-      {
-        generate: () => api.generateCatalog(restartCodex),
-        sync: async () => {
-          updateText("providers.syncBoundClients", "loading");
-          return api.syncGatewayClients().catch((err) => ({
-            applied: 0,
-            skipped: 0,
-            failed: 1,
-            results: [],
-            message: messageFromError(err),
-          }));
-        },
-      },
-    );
-    let syncResult = published.syncResult;
-    await refreshGatewayState();
-    const diagnostics = await api.catalogOverrideDiagnostics().catch(() => null);
-    if (syncResult) {
-      syncResult = { ...syncResult, catalog_override_diagnostics: diagnostics };
-    } else if (diagnostics) {
-      syncResult = { applied: 0, skipped: 0, failed: 0, results: [], message: "", catalog_override_diagnostics: diagnostics };
-    }
-    return syncResult;
-  }, [refreshGatewayState]);
-
   const edit = useCallback((intent: ProviderEditIntent) => {
     dispatch(intent);
   }, []);
@@ -302,7 +261,7 @@ export function useProviderWorkspace(options: {
       persist: input.persist,
       committed: input.committed,
       publish: input.publish ? async () => {
-        await api.generateCatalog(false);
+        await api.generateCatalog();
         restartNotice = await readCodexRestartNotice(api);
       } : undefined,
       sync: input.publish ? async () => {
@@ -536,8 +495,8 @@ export function useProviderWorkspace(options: {
             }
             // Refresh reads the current Official model list. Applying a new
             // Codex overlay is a separate, explicitly authorized mutation.
-            const refreshResult = await api.refreshOfficialModels(false, requestId);
-            if (refreshResult.warning?.trim() && !refreshResult.codex_restart_result) {
+            const refreshResult = await api.refreshOfficialModels(requestId);
+            if (refreshResult.warning?.trim()) {
               throw new Error(refreshResult.warning.trim());
             }
             dispatch({ type: "applyOfficialRefresh", models: refreshResult.models });
@@ -546,31 +505,16 @@ export function useProviderWorkspace(options: {
               dispatch({ type: "setDiscoveryError", error: null });
               return { kind: "ok" };
             }
-            // A read-only refresh does not publish a catalog. The coordinated
-            // path reports a restart result when it did publish while Codex
-            // was stopped, so only that path syncs bound clients.
-            const syncResult = refreshResult.codex_restart_result
-              ? await publishAndSync(
-                  false,
-                  sourceRef.current.settings,
-                  (text, tone) => updateToast(toastId!, { action: null, text: t(text), tone }),
-                  true,
-                )
-              : null;
-            const refreshMessage = refreshResult.codex_restart_result === "restarted"
-              ? t("providers.officialModelsRefreshedCodexRestarted")
-              : refreshResult.codex_restart_result === "switched_relaunch_failed"
-                ? t("providers.officialModelsRefreshedCodexRelaunchFailed")
-                : refreshResult.restart_required
-                  ? t("providers.officialModelsRefreshed") + " " + t("providers.officialContextLimitsRestartCodex")
-                  : t("providers.officialModelsRefreshed");
+            const refreshMessage = refreshResult.restart_required
+              ? t("providers.officialModelsRefreshed") + " " + t("providers.officialContextLimitsRestartCodex")
+              : t("providers.officialModelsRefreshed");
             const refreshFeedback = refreshResult.warning?.trim()
               ? t("providers.officialModelsRefreshedWithWarning", {
                   message: refreshResult.warning.trim(),
                   status: refreshMessage,
                 })
               : refreshMessage;
-            const toastMessage = catalogSyncToastMessage(refreshFeedback, syncResult);
+            const toastMessage = catalogSyncToastMessage(refreshFeedback, null);
             updateToast(toastId!, {
               action: null,
               text: toastMessage ?? t("providers.officialModelsRefreshed"),
@@ -617,7 +561,7 @@ export function useProviderWorkspace(options: {
         }
       }
     },
-    [saveWorkspace, catalogSyncToastMessage, onProvidersChanged, onSettingsChanged, publishAndSync, refreshGatewayState, saveProvidersCore, showToast, state, t, tr, updateProbeToast, updateToast, updateToastWithError],
+    [saveWorkspace, catalogSyncToastMessage, onProvidersChanged, onSettingsChanged, refreshGatewayState, saveProvidersCore, showToast, state, t, tr, updateProbeToast, updateToast, updateToastWithError],
   );
 
   const stageSettings = useCallback(

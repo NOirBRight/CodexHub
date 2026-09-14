@@ -89,29 +89,22 @@ test('failed replacement save preserves the previous publication retry', async (
 
 import { readCodexRestartNotice } from '../src/lib/providerWorkspace/restart.ts';
 test('restart readback failure does not turn a durable save into a failure or retry publication', async () => {
-  for (const failingRead of ['getStatus', 'getCodexDesktopStatus']) {
-    const source = { getStatus: async () => ({ mode: 'custom' }), getCodexDesktopStatus: async () => ({ running: true }) };
-    source[failingRead] = async () => { throw Error('readback unavailable'); };
-    let notice;
-    const c = createWorkspaceSaveCoordinator();
-    const op = operation({ publish: async () => { notice = await readCodexRestartNotice(source); } });
-    assert.equal((await c.save(op)).kind, 'ok');
-    assert.equal(notice, 'unknown');
-    assert.equal(op.events.at(-1).stage, 'complete');
-    assert.equal(op.events.at(-1).retry, undefined);
-    assert.ok(op.calls.includes('sync'));
-  }
+  const source = { getStatus: async () => { throw Error('readback unavailable'); } };
+  let notice;
+  const c = createWorkspaceSaveCoordinator();
+  const op = operation({ publish: async () => { notice = await readCodexRestartNotice(source); } });
+  assert.equal((await c.save(op)).kind, 'ok');
+  assert.equal(notice, 'unknown');
+  assert.equal(op.events.at(-1).stage, 'complete');
+  assert.equal(op.events.at(-1).retry, undefined);
+  assert.ok(op.calls.includes('sync'));
 });
-test('restart notice is required only for a connected running Codex App', async () => {
-  for (const running of [true, false]) {
-    assert.equal(await readCodexRestartNotice({
-      getStatus: async () => ({ mode: 'custom' }),
-      getCodexDesktopStatus: async () => ({ running }),
-    }), running ? 'required' : 'none');
-  }
+test('restart notice is required for a connected Codex regardless of Desktop', async () => {
+  assert.equal(await readCodexRestartNotice({
+    getStatus: async () => ({ mode: 'custom' }),
+  }), 'required');
   assert.equal(await readCodexRestartNotice({
     getStatus: async () => ({ mode: 'official' }),
-    getCodexDesktopStatus: async () => { throw Error('must not query disconnected desktop'); },
   }), 'none');
 });
 
@@ -170,17 +163,16 @@ test('discovered-model save keeps editing locked until publication finishes', as
   assert.equal(busy, null);
 });
 
-test('published provider change persists and announces the pending desktop restart', async () => {
+test('published provider change persists and announces the pending restart reminder', async () => {
   const values = new Map();
   const events = [];
-  globalThis.localStorage = { getItem: k => values.get(k), setItem: (k,v) => values.set(k,v), removeItem: k => values.delete(k) };
+  globalThis.localStorage = { getItem: k => values.get(k) ?? null, setItem: (k,v) => values.set(k,v), removeItem: k => values.delete(k) };
   globalThis.window = { dispatchEvent: event => { events.push(event.type); } };
   try {
     assert.equal(await readCodexRestartNotice({
       getStatus: async () => ({ mode: 'custom' }),
-      getCodexDesktopStatus: async () => ({ running: true, instance_id: 321 }),
     }), 'required');
-    assert.deepEqual(JSON.parse(values.get('codexhub.pendingConnectionRestart.v1') || 'null'), {mode:'custom', instanceId:321});
+    assert.equal(values.get('codexhub.restartReminder.v1'), 'true');
     assert.ok(events.includes('codexhub:pending-restart-changed'));
   } finally {
     delete globalThis.localStorage;

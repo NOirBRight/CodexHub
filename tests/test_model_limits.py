@@ -11,9 +11,13 @@ sys.path.insert(0, str(ROOT / "src-python"))
 from model_limits import (
     CURRENT_DIRECT_OFFICIAL_SOURCE,
     FRESH_DIRECT_OFFICIAL_CACHE_AUTHORITY_SOURCE,
+    NATIVE_AUTO_COMPACT_PERCENT,
+    XAI_AUTO_COMPACT_PERCENT,
     apply_resolved_model_limits,
+    catalog_auto_compact_token_limit,
     load_resolved_model_limits,
     resolve_official_context_budget,
+    uses_xai_prompt_meter,
 )
 
 
@@ -277,6 +281,32 @@ class ResolvedModelLimitsTests(unittest.TestCase):
         )
         self.assertEqual(untrusted.context_window, 272_000)
         self.assertEqual(untrusted.source, "degraded_last_known_official")
+
+    def test_xai_catalog_compact_is_below_codex_native_ninety_percent_cap(self):
+        self.assertTrue(uses_xai_prompt_meter("xai", "grok-4.6"))
+        self.assertTrue(uses_xai_prompt_meter("opencode_go", "grok-4.6"))
+        self.assertTrue(uses_xai_prompt_meter("xai", "xai/grok-4.5"))
+        self.assertFalse(uses_xai_prompt_meter("xai", "glm-5.2"))
+        self.assertFalse(uses_xai_prompt_meter("volcengine", "glm-5.2"))
+        self.assertFalse(uses_xai_prompt_meter("official", "gpt-5.6-terra"))
+
+        window = 500_000
+        compact = catalog_auto_compact_token_limit(
+            context_window=window,
+            upstream_name="xai",
+            upstream_model="grok-4.6",
+        )
+        native_cap = window * NATIVE_AUTO_COMPACT_PERCENT // 100
+        self.assertEqual(compact, window * XAI_AUTO_COMPACT_PERCENT // 100)
+        self.assertEqual(compact, 350_000)
+        self.assertLess(compact, native_cap)
+        self.assertIsNone(
+            catalog_auto_compact_token_limit(
+                context_window=window,
+                upstream_name="volcengine",
+                upstream_model="glm-5.2",
+            )
+        )
 
 
 if __name__ == "__main__":

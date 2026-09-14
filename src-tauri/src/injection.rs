@@ -1225,7 +1225,7 @@ mod tests {
     #[test]
     fn registry_returns_only_injection_migrated_clients() {
         assert!(descriptor_for("dsh").is_some());
-        // Native adapters (including Grok CLI) are not DSH YAML descriptors.
+        // Native adapters (including Grok Build) are not DSH YAML descriptors.
         for native in ["codex", "opencode", "pi", "omp", "zcode", "grok"] {
             assert!(
                 descriptor_for(native).is_none(),

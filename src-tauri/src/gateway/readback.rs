@@ -1,4 +1,4 @@
-use super::clients::grok::grok_config_text;
+use super::clients::grok::{grok_config_text, grok_injected_blocks_match};
 use super::clients::omp::{omp_config_text, omp_models_yml_text};
 use super::clients::opencode::opencode_config_text;
 use super::clients::pi::pi_models_text;
@@ -188,9 +188,9 @@ pub fn verify_apply_readback(
             let written = fs::read_to_string(&target_paths[0])
                 .map_err(|error| format!("readback failed: {error}"))?;
             let expected = grok_config_text(Some(&written), settings, providers, model)?;
-            if written != expected {
+            if !grok_injected_blocks_match(&written, &expected)? {
                 return Err(
-                    "readback failed: grok output does not round-trip production preview"
+                    "readback failed: grok injected block does not match production preview"
                         .to_string(),
                 );
             }

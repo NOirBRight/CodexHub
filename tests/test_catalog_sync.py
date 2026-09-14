@@ -2918,6 +2918,47 @@ class CatalogSyncTests(unittest.TestCase):
         )
         self.assertEqual(model["default_reasoning_level"], "max")
 
+    def test_grok_catalog_rows_publish_auto_compact_below_native_cap(self):
+        grok = catalog_sync.build_external_provider_model(
+            {
+                "alias": "xai/grok-4.6",
+                "provider_alias": "xai",
+                "upstream_name": "xai",
+                "upstream_model": "grok-4.6",
+                "context_window": 500000,
+                "max_output_tokens": 500000,
+            },
+            self.policy,
+            None,
+        )
+        opencode_grok = catalog_sync.build_external_provider_model(
+            {
+                "alias": "opencode-go/grok-4.6",
+                "provider_alias": "opencode-go",
+                "upstream_name": "opencode_go",
+                "upstream_model": "grok-4.6",
+                "context_window": 500000,
+                "max_output_tokens": 500000,
+            },
+            self.policy,
+            None,
+        )
+        volc = catalog_sync.build_external_provider_model(
+            {
+                "alias": "volc/glm-5.2",
+                "provider_alias": "volc",
+                "upstream_name": "volcengine",
+                "upstream_model": "glm-5.2",
+                "context_window": 1024000,
+                "max_output_tokens": 4096,
+            },
+            self.policy,
+            None,
+        )
+        self.assertEqual(grok["auto_compact_token_limit"], 350000)
+        self.assertEqual(opencode_grok["auto_compact_token_limit"], 350000)
+        self.assertNotIn("auto_compact_token_limit", volc)
+
     def test_chat_external_catalog_does_not_advertise_responses_only_controls(self):
         external_model = {
             "alias": "ollama-e2e-chat/deepseek-v4-flash:0731",

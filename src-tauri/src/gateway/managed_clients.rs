@@ -638,12 +638,14 @@ impl ManagedClientAdapter for GrokAdapter {
         intent: ClientIntent,
         _ctx: &AdapterCtx<'_>,
     ) -> Result<ClientMutationPlan, String> {
-        Ok(native_plan(
+        let mut plan = native_plan(
             self.metadata().id,
             intent,
             target_write_paths(_ctx, vec![detect_grok_config_path()]),
             &_ctx.target,
-        ))
+        );
+        plan.restart_required = "Grok CLI".to_owned();
+        Ok(plan)
     }
 }
 
@@ -1437,7 +1439,10 @@ mod tests {
             let plan = adapter.plan(ClientIntent::Connect, &ctx).expect("plan");
             assert_eq!(plan.client_id, id);
             assert!(!plan.activation_touched, "{id} must not touch activation");
-            assert_eq!(plan.restart_required, "none");
+            assert_eq!(
+                plan.restart_required,
+                if id == "grok" { "Grok CLI" } else { "none" }
+            );
         }
     }
 }

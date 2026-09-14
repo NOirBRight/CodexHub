@@ -27,19 +27,20 @@ test("Codex keeps connected surfaces visible for a foreign owner and takes over 
   assert.match(providers, /const codexOwnedByOtherApp =/);
   assert.match(providers, /const codexConnected = realCodexConnected \|\| codexOwnedByOtherApp/);
   assert.match(providers, /await applyCodexHubConnection\(\s*nextMode,\s*Boolean\(appFlavor\?\.codex_takeover_required\),\s*\)/);
-  assert.match(providers, /await api\.switchMode\(nextMode, false, true, restartCodex\)/);
-  assert.match(providers, /await api\.switchMode\(nextMode, false, false, restartCodex\)/);
+  assert.match(providers, /await api\.switchMode\(nextMode, false, true\)/);
+  assert.match(providers, /await api\.switchMode\(nextMode, false, false\)/);
   assert.doesNotMatch(providers, /authorizeCodexRestart/);
+  assert.doesNotMatch(providers, /restartCodex/);
   assert.match(providers, /providers\.codexRouteChangedRestart/);
   const localesEn = await source("../src/i18n/locales/en-US.ts");
   const localesZh = await source("../src/i18n/locales/zh-CN.ts");
-  assert.match(localesEn, /codexRouteChangedRestart: "\{\{status\}\}; restart Codex Desktop to apply"/);
-  assert.match(localesZh, /codexRouteChangedRestart: "\{\{status\}\}；请重启 Codex Desktop 使其生效"/);
-  assert.doesNotMatch(localesEn, /codexRouteChangedRestart: "\{\{status\}\}; restart Codex App to apply"/);
+  assert.match(localesEn, /codexRouteChangedRestart: "\{\{status\}\}; restart Codex to apply"/);
+  assert.match(localesZh, /codexRouteChangedRestart: "\{\{status\}\}；请重启 Codex 使其生效"/);
+  assert.doesNotMatch(localesEn, /restart Codex Desktop to apply/);
   const handlers = await source("../../src-tauri/src/desktop_commands/handlers.rs");
   assert.match(
     handlers,
-    /Connect\/disconnect writes the overlay while Codex Desktop stays open/,
+    /Connect\/disconnect writes the overlay while Codex stays open/,
   );
   assert.match(handlers, /serialize_config_writer\(\|\| \{/);
   assert.match(

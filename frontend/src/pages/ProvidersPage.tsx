@@ -1,10 +1,8 @@
-import { CODEX_RESTART_CHANGED, readPendingCodexRestart, storePendingCodexRestart, codexRestartObserved, type PendingCodexRestart } from "../lib/providerWorkspace/restart";
+import { CODEX_RESTART_CHANGED, readRestartReminder, storeRestartReminder, markRestartReminder, readCodexRestartNotice } from "../lib/providerWorkspace/restart";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { ProviderWorkspaceView } from "../components/workspace/ProviderWorkspaceView";
 import type { WorkspacePage } from "../components/workspace/WorkspaceShell";
 import type { ReactNode } from "react";
-import { X } from "lucide-react";
-import { readCodexRestartNotice } from "../lib/providerWorkspace/restart";
 import {
   LogOut,
   LogIn,
@@ -13,6 +11,7 @@ import {
   Plus,
   RefreshCcw,
   Save,
+  X,
 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -183,15 +182,17 @@ function ProvidersPageImpl({
     refreshOfficialModels,
     cancelOfficialModelRefresh,
     selectProvider,
+    stageSettings,
     trackProviderDraft,
   } = workspace;
   const handledCodexSwitchRequestRef = useRef<number | null>(null);
+  const defaultSubagentSaveGen = useRef(0);
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(
     appStatusSnapshot,
   );
-  const [pendingCodexRestart, setPendingCodexRestart] = useState<PendingCodexRestart | null>(readPendingCodexRestart);
+  const [restartReminder, setRestartReminder] = useState(readRestartReminder);
   useEffect(() => {
-    const sync = () => setPendingCodexRestart(readPendingCodexRestart());
+    const sync = () => setRestartReminder(readRestartReminder());
     window.addEventListener(CODEX_RESTART_CHANGED, sync);
     window.addEventListener("storage", sync);
     return () => {
@@ -199,29 +200,10 @@ function ProvidersPageImpl({
       window.removeEventListener("storage", sync);
     };
   }, []);
-  function updatePendingCodexRestart(value: PendingCodexRestart | null) {
-    storePendingCodexRestart(value);
-    setPendingCodexRestart(value);
+  function updateRestartReminder(value: boolean) {
+    storeRestartReminder(value);
+    setRestartReminder(value);
   }
-  useEffect(() => {
-    if (!pendingCodexRestart) return;
-    let active = true;
-    let loading = false;
-    const check = async () => {
-      if (loading) return;
-      loading = true;
-      try {
-        const status = await api.getCodexDesktopStatus();
-        if (active && codexRestartObserved(pendingCodexRestart, status)) {
-          updatePendingCodexRestart(null);
-        }
-      } catch { /* Keep pending state until restart is confirmed. */ }
-      finally { loading = false; }
-    };
-    void check();
-    const timer = window.setInterval(() => void check(), 5000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [pendingCodexRestart]);
   const [connectionPendingMode, setConnectionPendingMode] =
     useState<ConnectionMode | null>(null);
   const [codexTargetOwnerOverride, setCodexTargetOwnerOverride] = useState<
@@ -793,12 +775,68 @@ function ProvidersPageImpl({
     );
   }
 
+  async function persistDefaultSubagent(model: string, effort: string) {
+    const current = settingsDraft ?? settings;
+    if (!current) return;
+    if (
+      current.codex_default_subagent_model === model &&
+      current.codex_default_subagent_reasoning_effort === effort
+    ) {
+      return;
+    }
+    const next = normalizeSettings({
+      ...current,
+      codex_default_subagent_model: model,
+      codex_default_subagent_reasoning_effort: effort,
+    });
+    const overlayActive = codexStatus?.mode === "custom" && !codexOwnedByOtherApp;
+    const gen = ++defaultSubagentSaveGen.current;
+    stageSettings(next);
+    const toastId = showToast({
+      dedupeKey: "default-subagent",
+      text: t("workspace.savingDefaultSubagent"),
+      tone: "loading",
+    });
+    const result = await saveWorkspaceSettings(next, {
+      toastId,
+      successMessage: overlayActive
+        ? t("workspace.defaultSubagentSaved")
+        : t("workspace.defaultSubagentSavedDisconnected"),
+    });
+    if (gen !== defaultSubagentSaveGen.current) return;
+    if (result.kind !== "ok") {
+      stageSettings(current);
+      if (result.kind === "blocked") {
+        updateToast(toastId, {
+          action: null,
+          text: t("workspace.transitioning"),
+          tone: "error",
+        });
+      }
+      return;
+    }
+    if (!overlayActive) return;
+    try {
+      await api.switchMode("custom", false, false);
+      if (gen !== defaultSubagentSaveGen.current) return;
+      markRestartReminder();
+      setRestartReminder(true);
+      updateToast(toastId, {
+        action: null,
+        text: t("workspace.defaultSubagentSaved"),
+        tone: "success",
+      });
+    } catch (err) {
+      if (gen !== defaultSubagentSaveGen.current) return;
+      updateToastWithError(toastId, err);
+    }
+  }
+
   async function applyCodexHubConnection(
     nextMode: ConnectionMode,
     forceTakeover: boolean,
-    restartCodex = false,
   ) {
-    const actionLabel = restartCodex ? t("workspace.restartCodex") :
+    const actionLabel =
       nextMode === "custom"
         ? t("providers.connectingToHub")
         : t("providers.disconnectingFromHub");
@@ -806,22 +844,11 @@ function ProvidersPageImpl({
     setOperationBusy("route");
     const toastId = showToast(`${actionLabel}...`, "loading");
     try {
-      const desktopBefore = await api.getCodexDesktopStatus().catch(() => null);
       let status = forceTakeover
-        ? await api.switchMode(nextMode, false, true, restartCodex)
-        : await api.switchMode(nextMode, false, false, restartCodex);
+        ? await api.switchMode(nextMode, false, true)
+        : await api.switchMode(nextMode, false, false);
       const historySyncStatus = status.history_sync_status;
       const historySyncMessage = status.history_sync_message;
-      const codexRestartResult = status.codex_restart_result;
-      if (codexRestartResult === "switch_failed_reopened") {
-        setConnectionPendingMode(null);
-        updateToast(toastId, {
-          action: null,
-          text: status.message,
-          tone: "error",
-        });
-        return;
-      }
       if (nextMode === "custom" && !status.proxy_running) {
         updateToast(toastId, {
           action: null,
@@ -829,16 +856,9 @@ function ProvidersPageImpl({
           tone: "loading",
         });
         const refreshedStatus = await startProxyForHubConnection();
-        status = refreshedStatus
-          ? { ...refreshedStatus, codex_restart_result: codexRestartResult }
-          : status;
+        status = refreshedStatus ?? status;
       }
-      if (codexRestartResult === "restarted" || codexRestartResult === "not_running"
-          || (!restartCodex && desktopBefore?.running === false)) {
-        updatePendingCodexRestart(null);
-      } else {
-        updatePendingCodexRestart({ mode: nextMode, instanceId: desktopBefore?.instance_id ?? null });
-      }
+      updateRestartReminder(true);
       setCodexStatus(status);
       setCodexTargetOwnerOverride(
         nextMode === "custom" ? (appFlavor?.routing_owner ?? null) : "official",
@@ -870,19 +890,10 @@ function ProvidersPageImpl({
       }
       updateToast(toastId, {
         action: null,
-        text:
-          status.codex_restart_result === "restarted"
-            ? t("providers.codexRouteChangedRestarted", {
-                status: codexHubConnectionSuccessMessage(nextMode, tr),
-              })
-            : status.codex_restart_result === "switched_relaunch_failed"
-              ? t("providers.codexRouteChangedRelaunchFailed", {
-                  status: codexHubConnectionSuccessMessage(nextMode, tr),
-                })
-              : t("providers.codexRouteChangedRestart", {
-                  status: codexHubConnectionSuccessMessage(nextMode, tr),
-                }),
-        tone: status.codex_restart_result === "switched_relaunch_failed" ? "error" : "success",
+        text: t("providers.codexRouteChangedRestart", {
+          status: codexHubConnectionSuccessMessage(nextMode, tr),
+        }),
+        tone: "success",
       });
     } catch (err) {
       const message = messageFromError(err);
@@ -1041,10 +1052,8 @@ function ProvidersPageImpl({
               ? (codexRouteOwnerLabel ?? undefined)
               : undefined
           }
-          restartPending={Boolean(pendingCodexRestart)}
-          onRestartCodex={() => {
-            if (pendingCodexRestart) void applyCodexHubConnection(codexStatus?.mode === "custom" ? "custom" : "official", false, true);
-          }}
+          restartPending={restartReminder}
+          onDismissRestartReminder={() => updateRestartReminder(false)}
           connectionBusy={Boolean(connectionPendingMode)}
           busy={Boolean(busy)}
           onToggleConnection={() => void toggleCodexHubConnection()}
@@ -1065,6 +1074,19 @@ function ProvidersPageImpl({
             )
           }
           onRefresh={() => loadOfficialOpenAIUsage(true, true)}
+          defaultSubagentModel={
+            settingsDraft?.codex_default_subagent_model ??
+            settings?.codex_default_subagent_model ??
+            ""
+          }
+          defaultSubagentEffort={
+            settingsDraft?.codex_default_subagent_reasoning_effort ??
+            settings?.codex_default_subagent_reasoning_effort ??
+            ""
+          }
+          onDefaultSubagentChange={(model, effort) => {
+            void persistDefaultSubagent(model, effort);
+          }}
         >
           {children}
         </ProviderWorkspaceView>
@@ -2005,7 +2027,6 @@ function OfficialDetail({
       const result = await api.saveOfficialMultiAgentVersion(
         modelId,
         version,
-        false,
       );
       const canonical = normalizeOfficialModelId(modelId) ?? modelId;
       const next = { ...officialCollaborationOverrides };

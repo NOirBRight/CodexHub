@@ -430,6 +430,8 @@ struct SettingsDocument {
     official_disabled_models: Option<Vec<String>>,
     official_model_sort_order: Option<Vec<String>>,
     official_provider_sort_order: Option<i32>,
+    codex_default_subagent_model: Option<String>,
+    codex_default_subagent_reasoning_effort: Option<String>,
     proxy_port: Option<u16>,
 }
 
@@ -512,6 +514,14 @@ impl SettingsDocument {
             official_provider_sort_order: self
                 .official_provider_sort_order
                 .unwrap_or(defaults.official_provider_sort_order),
+            codex_default_subagent_model: self
+                .codex_default_subagent_model
+                .map(|value| sanitize_default_subagent_model(value, known_official_models))
+                .unwrap_or(defaults.codex_default_subagent_model),
+            codex_default_subagent_reasoning_effort: self
+                .codex_default_subagent_reasoning_effort
+                .map(sanitize_default_subagent_effort)
+                .unwrap_or(defaults.codex_default_subagent_reasoning_effort),
             proxy_port: self.proxy_port.unwrap_or(defaults.proxy_port),
         }
     }
@@ -648,7 +658,52 @@ fn sanitize_settings_for_save(
         sanitize_model_ids_with_known(settings.official_disabled_models, known_official_models);
     settings.official_model_sort_order =
         sanitize_model_ids_with_known(settings.official_model_sort_order, known_official_models);
+    settings.codex_default_subagent_model = sanitize_default_subagent_model(
+        settings.codex_default_subagent_model,
+        known_official_models,
+    );
+    settings.codex_default_subagent_reasoning_effort =
+        sanitize_default_subagent_effort(settings.codex_default_subagent_reasoning_effort);
+    if settings.codex_default_subagent_model.is_empty() {
+        settings.codex_default_subagent_reasoning_effort.clear();
+    }
     settings
+}
+
+const DEFAULT_SUBAGENT_EFFORTS: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+fn sanitize_default_subagent_model(
+    value: String,
+    known_official_models: &HashSet<String>,
+) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    normalize_official_model_id(trimmed, known_official_models)
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
+fn sanitize_default_subagent_effort(value: String) -> String {
+    let effort = value.trim().to_ascii_lowercase();
+    if DEFAULT_SUBAGENT_EFFORTS.contains(&effort.as_str()) {
+        effort
+    } else {
+        String::new()
+    }
+}
+
+fn push_default_subagent_overlay_args(args: &mut Vec<String>, settings: &Settings) {
+    args.extend([
+        "--default-subagent-model".to_string(),
+        settings.codex_default_subagent_model.trim().to_string(),
+        "--default-subagent-reasoning-effort".to_string(),
+        settings
+            .codex_default_subagent_reasoning_effort
+            .trim()
+            .to_string(),
+    ]);
 }
 
 fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String> {
@@ -795,7 +850,7 @@ fn republish_managed_codex_context_budget_with_paths(
     let managed_owner = codex_overlay_owner(&before);
 
     if managed_owner == Some(current_owner) {
-        let args = vec![
+        let mut args = vec![
             "apply".to_string(),
             "--config".to_string(),
             config_path.to_string_lossy().into_owned(),
@@ -824,6 +879,7 @@ fn republish_managed_codex_context_budget_with_paths(
                 _ => "release".to_string(),
             },
         ];
+        push_default_subagent_overlay_args(&mut args, &settings);
         run_python_script(
             "republish managed Codex context budget",
             python,
@@ -1055,6 +1111,7 @@ fn switch_mode_with_paths_takeover_as_owner_and_catalog(
                 _ => "release".to_string(),
             },
         ]);
+        push_default_subagent_overlay_args(&mut args, &settings);
         if force_takeover && target_owner != Some(current_app_owner) {
             args.push("--takeover".to_string());
         }

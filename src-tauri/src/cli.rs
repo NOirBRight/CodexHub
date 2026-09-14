@@ -14,25 +14,23 @@ pub fn run(args: &[String]) -> i32 {
         Some("switch") => run_switch_command(
             &args[1..],
             config::get_settings,
-            |mode, auto_sync, restart_codex| {
-                crate::switch_mode(mode.to_string(), auto_sync, None, Some(restart_codex))
+            |mode, auto_sync| {
+                crate::switch_mode(mode.to_string(), auto_sync, None)
             },
         ),
         Some("start") => print_result(crate::start_proxy()),
         Some("stop") => print_result(proxy::stop()),
         Some("restart") => print_result(crate::restart_proxy()),
-        Some("refresh-models") => match parse_restart_codex_flag(&args[1..]) {
-            Ok(restart_codex) => print_result(
-                crate::refresh_official_models_published_coordinated(restart_codex),
-            ),
+        Some("refresh-models") => match reject_extra_args(&args[1..]) {
+            Ok(()) => print_result(crate::refresh_official_models_published()),
             Err(()) => {
                 print_refresh_models_usage();
                 2
             }
         },
         Some("sync-history") => print_result(history::sync_history(None)),
-        Some("sync-catalog") => match parse_restart_codex_flag(&args[1..]) {
-            Ok(restart_codex) => print_result(crate::sync_catalog_coordinated(restart_codex)),
+        Some("sync-catalog") => match reject_extra_args(&args[1..]) {
+            Ok(()) => print_result(crate::sync_catalog_coordinated()),
             Err(()) => {
                 print_sync_catalog_usage();
                 2
@@ -77,22 +75,21 @@ fn parse_set_autostart_enabled(values: &[String]) -> Result<bool, ()> {
     }
 }
 
-fn parse_restart_codex_flag(values: &[String]) -> Result<bool, ()> {
-    match values {
-        [] => Ok(false),
-        [flag] if flag == "--restart-codex" => Ok(true),
-        _ => Err(()),
+fn reject_extra_args(values: &[String]) -> Result<(), ()> {
+    if values.is_empty() {
+        Ok(())
+    } else {
+        Err(())
     }
 }
 
 fn print_sync_catalog_usage() {
-    eprintln!("usage: codexhub sync-catalog [--restart-codex]");
+    eprintln!("usage: codexhub sync-catalog");
 }
 
 struct SwitchRequest<'a> {
     mode: &'a str,
     auto_sync: Option<bool>,
-    restart_codex: bool,
 }
 
 fn parse_switch_args(values: &[String]) -> Result<SwitchRequest<'_>, ()> {
@@ -104,7 +101,6 @@ fn parse_switch_args(values: &[String]) -> Result<SwitchRequest<'_>, ()> {
     }
 
     let mut auto_sync = None;
-    let mut restart_codex = false;
     for flag in flags {
         match flag.as_str() {
             "--auto-sync" | "--no-auto-sync" => {
@@ -113,16 +109,11 @@ fn parse_switch_args(values: &[String]) -> Result<SwitchRequest<'_>, ()> {
                     return Err(());
                 }
             }
-            "--restart-codex" if !restart_codex => restart_codex = true,
             _ => return Err(()),
         }
     }
 
-    Ok(SwitchRequest {
-        mode,
-        auto_sync,
-        restart_codex,
-    })
+    Ok(SwitchRequest { mode, auto_sync })
 }
 
 fn run_switch_command<GetSettings, SwitchMode>(
@@ -132,7 +123,7 @@ fn run_switch_command<GetSettings, SwitchMode>(
 ) -> i32
 where
     GetSettings: FnOnce() -> Result<Settings, String>,
-    SwitchMode: FnOnce(&str, bool, bool) -> Result<AppStatus, String>,
+    SwitchMode: FnOnce(&str, bool) -> Result<AppStatus, String>,
 {
     let request = match parse_switch_args(values) {
         Ok(request) => request,
@@ -143,18 +134,7 @@ where
     };
 
     let auto_sync = request.auto_sync.unwrap_or(false);
-
-    match switch_mode(request.mode, auto_sync, request.restart_codex) {
-        Ok(status)
-            if status.codex_restart_result
-                == Some(crate::codex_desktop::CodexRestartResult::SwitchFailedReopened) =>
-        {
-            let _ = serde_json::to_writer_pretty(std::io::stderr(), &status);
-            eprintln!();
-            1
-        }
-        result => print_result(result),
-    }
+    print_result(switch_mode(request.mode, auto_sync))
 }
 
 #[derive(Debug, Clone)]
@@ -530,9 +510,7 @@ fn print_set_autostart_usage() {
 }
 
 fn print_switch_usage() {
-    eprintln!(
-        "usage: codexhub switch <official|custom> [--auto-sync|--no-auto-sync] [--restart-codex]"
-    );
+    eprintln!("usage: codexhub switch <official|custom> [--auto-sync|--no-auto-sync]");
 }
 
 fn print_result<T: Serialize>(result: Result<T, String>) -> i32 {
@@ -559,7 +537,7 @@ fn print_help() {
 }
 
 fn print_refresh_models_usage() {
-    eprintln!("usage: codexhub refresh-models [--restart-codex]");
+    eprintln!("usage: codexhub refresh-models");
 }
 
 fn help_text() -> String {
@@ -570,13 +548,13 @@ CodexHub CLI
 Usage:
   codexhub app
   codexhub status
-  codexhub switch <official|custom> [--auto-sync|--no-auto-sync] [--restart-codex]
+  codexhub switch <official|custom> [--auto-sync|--no-auto-sync]
   codexhub start
   codexhub stop
   codexhub restart
-  codexhub refresh-models [--restart-codex]
+  codexhub refresh-models
   codexhub sync-history
-  codexhub sync-catalog [--restart-codex]
+  codexhub sync-catalog
   codexhub list-providers
   codexhub list-models
   codexhub set-autostart [true|false]
@@ -590,7 +568,7 @@ Usage:
 #[cfg(test)]
 mod tests {
     use super::{
-        help_text, parse_restart_codex_flag, parse_set_autostart_enabled, run, run_switch_command,
+        help_text, parse_set_autostart_enabled, reject_extra_args, run, run_switch_command,
     };
     use crate::config::{self, CommandOutcome, CommandRunner, ConfigPaths};
     use std::cell::RefCell;
@@ -660,13 +638,29 @@ mod tests {
     }
 
     #[test]
-    fn refresh_models_restart_flag_defaults_safe_and_rejects_unknown_values() {
-        assert_eq!(parse_restart_codex_flag(&[]), Ok(false));
+    fn refresh_models_and_sync_catalog_reject_unknown_flags() {
+        assert_eq!(reject_extra_args(&[]), Ok(()));
         assert_eq!(
-            parse_restart_codex_flag(&["--restart-codex".to_string()]),
-            Ok(true)
+            reject_extra_args(&["--restart-codex".to_string()]),
+            Err(())
         );
-        assert_eq!(parse_restart_codex_flag(&["--force".to_string()]), Err(()));
+        assert_eq!(parse_switch_args_rejects_restart(), 2);
+        assert_eq!(
+            run(&["refresh-models".to_string(), "--restart-codex".to_string()]),
+            2
+        );
+        assert_eq!(
+            run(&["sync-catalog".to_string(), "--restart-codex".to_string()]),
+            2
+        );
+    }
+
+    fn parse_switch_args_rejects_restart() -> i32 {
+        run_switch_command(
+            &["custom".to_string(), "--restart-codex".to_string()],
+            || panic!("rejected flag should not read settings"),
+            |_mode, _auto_sync| panic!("rejected flag should not switch"),
+        )
     }
 
     #[test]
@@ -679,8 +673,7 @@ mod tests {
         let exit = run_switch_command(
             &args,
             || panic!("explicit flag should not read settings"),
-            |mode, auto_sync, restart_codex| {
-                assert!(!restart_codex);
+            |mode, auto_sync| {
                 config::switch_mode_with_paths(
                     mode,
                     auto_sync,
@@ -708,8 +701,7 @@ mod tests {
         let exit = run_switch_command(
             &args,
             || panic!("explicit flag should not read settings"),
-            |mode, auto_sync, restart_codex| {
-                assert!(!restart_codex);
+            |mode, auto_sync| {
                 config::switch_mode_with_paths(
                     mode,
                     auto_sync,
@@ -737,8 +729,7 @@ mod tests {
         let exit = run_switch_command(
             &args,
             || panic!("switch default should not read settings"),
-            |mode, auto_sync, restart_codex| {
-                assert!(!restart_codex);
+            |mode, auto_sync| {
                 config::switch_mode_with_paths(
                     mode,
                     auto_sync,
@@ -754,39 +745,16 @@ mod tests {
     }
 
     #[test]
-    fn switch_restart_codex_flag_is_forwarded_explicitly() {
-        let args = vec!["custom".to_string(), "--restart-codex".to_string()];
-        let observed = std::cell::Cell::new(false);
-
-        let exit = run_switch_command(
-            &args,
-            || panic!("switch flag should not read settings"),
-            |_mode, _auto_sync, restart_codex| {
-                observed.set(restart_codex);
-                Ok(crate::AppStatus::scaffold("switched"))
-            },
-        );
-
-        assert_eq!(exit, 0);
-        assert!(observed.get());
-    }
-
-    #[test]
-    fn switch_failed_reopened_is_serialized_but_exits_failure() {
+    fn switch_restart_codex_flag_is_rejected() {
         let args = vec!["custom".to_string(), "--restart-codex".to_string()];
 
         let exit = run_switch_command(
             &args,
-            || panic!("switch flag should not read settings"),
-            |_mode, _auto_sync, _restart_codex| {
-                let mut status = crate::AppStatus::scaffold("switch failed; reopened");
-                status.codex_restart_result =
-                    Some(crate::codex_desktop::CodexRestartResult::SwitchFailedReopened);
-                Ok(status)
-            },
+            || panic!("rejected flag should not read settings"),
+            |_mode, _auto_sync| panic!("rejected flag should not switch"),
         );
 
-        assert_eq!(exit, 1);
+        assert_eq!(exit, 2);
     }
 
     #[derive(Debug, Clone)]

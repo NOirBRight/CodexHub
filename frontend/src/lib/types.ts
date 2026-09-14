@@ -561,6 +561,8 @@ export interface Settings {
   official_disabled_models: string[];
   official_model_sort_order: string[];
   official_provider_sort_order: number;
+  codex_default_subagent_model: string;
+  codex_default_subagent_reasoning_effort: string;
   proxy_port: number;
 }
 

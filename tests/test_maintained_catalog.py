@@ -274,6 +274,12 @@ class MaintainedCatalogTests(unittest.TestCase):
         self.assertEqual(by_slug["xai/grok-4.6"]["default_reasoning_level"], "high")
         self.assertEqual(by_slug["xai/grok-4.6"]["input_modalities"], ["text", "image"])
         self.assertEqual(by_slug["xai/grok-4.6"]["context_window"], 500000)
+        self.assertEqual(by_slug["xai/grok-4.6"]["auto_compact_token_limit"], 350000)
+        self.assertLess(
+            by_slug["xai/grok-4.6"]["auto_compact_token_limit"],
+            by_slug["xai/grok-4.6"]["context_window"] * 90 // 100,
+        )
+        self.assertNotIn("auto_compact_token_limit", by_slug["custom-lab/other"])
         self.assertEqual(
             [item["effort"] for item in by_slug["custom-lab/other"]["supported_reasoning_levels"]],
             ["high"],

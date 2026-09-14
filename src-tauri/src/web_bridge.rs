@@ -363,23 +363,23 @@ mod tests {
     }
 
     #[test]
-    fn restart_codex_argument_accepts_both_cases_and_defaults_to_none() {
+    fn optional_bool_argument_accepts_both_cases_and_defaults_to_none() {
         assert_eq!(
             optional_bool_arg(
-                &json!({"restartCodex": true}),
-                &["restartCodex", "restart_codex"]
+                &json!({"forceTakeover": true}),
+                &["forceTakeover", "force_takeover"]
             ),
             Some(true)
         );
         assert_eq!(
             optional_bool_arg(
-                &json!({"restart_codex": true}),
-                &["restartCodex", "restart_codex"]
+                &json!({"force_takeover": true}),
+                &["forceTakeover", "force_takeover"]
             ),
             Some(true)
         );
         assert_eq!(
-            optional_bool_arg(&json!({}), &["restartCodex", "restart_codex"]),
+            optional_bool_arg(&json!({}), &["forceTakeover", "force_takeover"]),
             None
         );
     }

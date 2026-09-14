@@ -23,6 +23,7 @@ from config_overlay import (
     _migrate_legacy_context_guard_values_for_backups,
     _overlay_marks_managed_catalog,
     _selected_official_context_budget,
+    apply_default_subagent_override,
     apply_overlay,
     inject_unified_history_config,
     inspect_unified_history_config,
@@ -30,6 +31,7 @@ from config_overlay import (
     restore_overlay,
     catalog_config_value,
     set_feature_flags,
+    set_table_values,
     strip_section,
     strip_top_level_keys,
     top_level_value,
@@ -563,6 +565,256 @@ class ConfigOverlayTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+
+    def test_set_table_values_updates_exact_agents_table_only(self):
+        original = self._agents_config()
+        updated = set_table_values(
+            original,
+            "agents",
+            {
+                "default_subagent_model": "'gpt-5.6-luna'",
+                "default_subagent_reasoning_effort": "'max'",
+            },
+        )
+        parsed = tomllib.loads(updated)
+        self.assertEqual(parsed["agents"]["default_subagent_model"], "gpt-5.6-luna")
+        self.assertEqual(parsed["agents"]["default_subagent_reasoning_effort"], "max")
+        self.assertEqual(
+            parsed["agents"]["reviewer"],
+            tomllib.loads(original)["agents"]["reviewer"],
+        )
+        self.assertEqual(
+            self._table_family_text(updated, "agents.reviewer"),
+            self._table_family_text(original, "agents.reviewer"),
+        )
+        self.assertIn("enabled  = true # preserve spacing and comment", updated)
+
+    def test_hub_default_subagent_overwrite_is_atomic_and_restore_returns_original(self):
+        original = self._agents_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            catalog_path = tmp / "catalog.json"
+            config_path.write_text(original, encoding="utf-8", newline="")
+
+            apply_overlay(
+                config_path,
+                backup_path,
+                catalog_path,
+                "http://127.0.0.1:9099",
+                default_subagent_model="gpt-5.6-luna",
+                default_subagent_reasoning_effort="max",
+            )
+            live = config_path.read_text(encoding="utf-8")
+            backup = backup_path.read_text(encoding="utf-8")
+            parsed = tomllib.loads(live)
+            self.assertEqual(backup, original)
+            self.assertEqual(parsed["agents"]["default_subagent_model"], "gpt-5.6-luna")
+            self.assertEqual(parsed["agents"]["default_subagent_reasoning_effort"], "max")
+            self.assertIn(MARKER_BEGIN, live)
+            self.assertEqual(
+                parsed["agents"]["reviewer"],
+                tomllib.loads(original)["agents"]["reviewer"],
+            )
+            self.assertEqual(
+                self._table_family_text(live, "agents.reviewer"),
+                self._table_family_text(original, "agents.reviewer"),
+            )
+
+            apply_overlay(
+                config_path,
+                backup_path,
+                catalog_path,
+                "http://127.0.0.1:9099",
+                default_subagent_model="gpt-5.6-luna",
+                default_subagent_reasoning_effort="max",
+            )
+            restarted = config_path.read_text(encoding="utf-8")
+            self.assertEqual(backup_path.read_text(encoding="utf-8"), original)
+            self.assertEqual(
+                tomllib.loads(restarted)["agents"]["default_subagent_model"],
+                "gpt-5.6-luna",
+            )
+
+            restore_overlay(config_path, backup_path)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+
+    def test_hub_default_subagent_creates_agents_table_when_missing(self):
+        original = 'model = "gpt-5.6-terra"\nmodel_reasoning_effort = "high"\n'
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text(original, encoding="utf-8", newline="")
+
+            apply_overlay(
+                config_path,
+                backup_path,
+                None,
+                "http://127.0.0.1:9099",
+                default_subagent_model="gpt-5.6-luna",
+                default_subagent_reasoning_effort="max",
+            )
+            live = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(backup_path.read_text(encoding="utf-8"), original)
+            self.assertEqual(live["agents"]["default_subagent_model"], "gpt-5.6-luna")
+            self.assertEqual(live["agents"]["default_subagent_reasoning_effort"], "max")
+            self.assertNotIn("[agents.reviewer]", config_path.read_text(encoding="utf-8"))
+
+            restore_overlay(config_path, backup_path)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+            self.assertNotIn("[agents]", config_path.read_text(encoding="utf-8"))
+
+    def test_empty_hub_default_subagent_restores_backup_keys_while_connected(self):
+        original = self._agents_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            catalog_path = tmp / "catalog.json"
+            config_path.write_text(original, encoding="utf-8", newline="")
+
+            apply_overlay(
+                config_path,
+                backup_path,
+                catalog_path,
+                "http://127.0.0.1:9099",
+                default_subagent_model="gpt-5.6-luna",
+                default_subagent_reasoning_effort="max",
+            )
+            apply_overlay(
+                config_path,
+                backup_path,
+                catalog_path,
+                "http://127.0.0.1:9099",
+                default_subagent_model="",
+                default_subagent_reasoning_effort="",
+            )
+            live = config_path.read_text(encoding="utf-8")
+            self.assertEqual(backup_path.read_text(encoding="utf-8"), original)
+            self.assertEqual(
+                tomllib.loads(live)["agents"]["default_subagent_model"],
+                tomllib.loads(original)["agents"]["default_subagent_model"],
+            )
+            self.assertEqual(
+                tomllib.loads(live)["agents"]["default_subagent_reasoning_effort"],
+                tomllib.loads(original)["agents"]["default_subagent_reasoning_effort"],
+            )
+            self.assertEqual(
+                tomllib.loads(live)["agents"]["reviewer"],
+                tomllib.loads(original)["agents"]["reviewer"],
+            )
+            self.assertIn(MARKER_BEGIN, live)
+
+            restore_overlay(config_path, backup_path)
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+
+    def test_invalid_hub_default_subagent_effort_does_not_mutate_config(self):
+        original = self._agents_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.toml"
+            backup_path = tmp / "config.backup.toml"
+            config_path.write_text(original, encoding="utf-8", newline="")
+
+            with self.assertRaises(ValueError):
+                apply_overlay(
+                    config_path,
+                    backup_path,
+                    None,
+                    "http://127.0.0.1:9099",
+                    default_subagent_model="gpt-5.6-luna",
+                    default_subagent_reasoning_effort="ultra",
+                )
+            self.assertEqual(config_path.read_text(encoding="utf-8"), original)
+            self.assertFalse(backup_path.exists())
+
+    def test_apply_default_subagent_override_omitted_args_leave_text(self):
+        original = self._agents_config()
+        self.assertEqual(
+            apply_default_subagent_override(original, original, None, None),
+            original,
+        )
+
+    def test_isolated_apply_cli_writes_opencode_go_flash_default_subagent(self):
+        original = self._agents_config()
+        slug = "opencode-go/deepseek-v4.1-flash"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            codex_home = home / "codex-home"
+            catalog_dir = home / "model-catalogs"
+            codex_home.mkdir()
+            catalog_dir.mkdir()
+            config_path = codex_home / "config.toml"
+            backup_path = home / "config.backup.toml"
+            catalog_path = catalog_dir / "codexhub-model-catalog.json"
+            config_path.write_text(original, encoding="utf-8", newline="")
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "models": [
+                            {
+                                "slug": slug,
+                                "display_name": "deepseek-v4.1-flash",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+            env["CODEX_HOME"] = str(codex_home)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).parents[1] / "src-python" / "config_overlay.py"),
+                    "apply",
+                    "--config",
+                    str(config_path),
+                    "--backup",
+                    str(backup_path),
+                    "--catalog",
+                    str(catalog_path),
+                    "--use-managed-catalog",
+                    "--base-url",
+                    "http://127.0.0.1:9099",
+                    "--default-subagent-model",
+                    slug,
+                    "--default-subagent-reasoning-effort",
+                    "max",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(completed.returncode, 0)
+            live = config_path.read_text(encoding="utf-8")
+            parsed = tomllib.loads(live)
+            self.assertTrue(config_path.is_relative_to(home))
+            self.assertEqual(parsed["agents"]["default_subagent_model"], slug)
+            self.assertEqual(parsed["agents"]["default_subagent_reasoning_effort"], "max")
+            self.assertNotEqual(
+                parsed["agents"]["default_subagent_model"],
+                "openai/gpt-5.6-terra",
+            )
+            self.assertEqual(
+                Path(parsed["model_catalog_json"]).resolve(),
+                catalog_path.resolve(),
+            )
+            catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+            self.assertEqual(catalog["models"][0]["slug"], slug)
+
+            restore_overlay(config_path, backup_path)
+            restored_text = config_path.read_text(encoding="utf-8")
+            restored = tomllib.loads(restored_text)
+            self.assertEqual(
+                restored["agents"]["default_subagent_model"],
+                "openai/gpt-5.6-terra",
+            )
+            self.assertNotIn(slug, restored_text)
 
     def test_apply_and_restore_overlay_preserves_user_owned_catalog_path(self):
         original = (

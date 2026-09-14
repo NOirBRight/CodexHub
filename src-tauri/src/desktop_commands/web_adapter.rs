@@ -45,13 +45,10 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
             let auto_sync = registry_bool_arg(args, command, "auto_sync")?;
             let force_takeover =
                 registry_optional_bool_arg(args, command, "force_takeover").unwrap_or(false);
-            let restart_codex =
-                registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
             to_value(crate::switch_mode(
                 mode,
                 auto_sync,
                 Some(force_takeover),
-                Some(restart_codex),
             ))
         }
         Command::StartProxy => to_value(crate::start_proxy()),
@@ -87,18 +84,12 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
             to_value(crate::official_catalog::cancel(&request_id))
         }
         Command::RefreshOfficialModels => {
-            let restart_codex =
-                registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
-            if !restart_codex {
-                let request_id = registry_optional_string_arg(args, command, "request_id");
-                to_value(
-                    crate::official_refresh::refresh_current_models_with_request(
-                        request_id.as_deref(),
-                    ),
-                )
-            } else {
-                to_value(crate::refresh_official_models_coordinated(true))
-            }
+            let request_id = registry_optional_string_arg(args, command, "request_id");
+            to_value(
+                crate::official_refresh::refresh_current_models_with_request(
+                    request_id.as_deref(),
+                ),
+            )
         }
         Command::OpenaiUsageCompletions => {
             let start_time = registry_optional_u64_arg(args, command, "start_time");
@@ -264,11 +255,7 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
             to_value(gateway::sync_gateway_clients(model))
         }
         Command::SubagentMatrixStatus => to_value(gateway::subagent_matrix_status()),
-        Command::GenerateCatalog => {
-            let restart_codex =
-                registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
-            to_value(crate::generate_catalog_coordinated(restart_codex))
-        }
+        Command::GenerateCatalog => to_value(crate::generate_catalog_coordinated()),
         Command::GetCatalogOverrideDiagnostics => to_value(catalog::catalog_override_diagnostics()),
         Command::ListModels => to_value(models::list_models()),
         Command::ListOfficialModels => to_value(models::list_official_models()),
@@ -290,12 +277,9 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
                 .get("version")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            let restart_codex =
-                registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
             to_value(crate::save_official_multi_agent_version_coordinated(
                 model_id,
                 version,
-                restart_codex,
             ))
         }
         Command::ListOfficialMultiAgentOverrides => {
@@ -344,11 +328,7 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
             let full_scan = registry_optional_bool_arg(args, command, "full_scan").unwrap_or(true);
             to_value(history::diagnose_unified_history(full_scan))
         }
-        Command::SyncCatalog => {
-            let restart_codex =
-                registry_optional_bool_arg(args, command, "restart_codex").unwrap_or(false);
-            to_value(crate::sync_catalog_coordinated(restart_codex))
-        }
+        Command::SyncCatalog => to_value(crate::sync_catalog_coordinated()),
         Command::SetAutostart => to_value(autostart::set_autostart(registry_bool_arg(
             args, command, "enabled",
         )?)),

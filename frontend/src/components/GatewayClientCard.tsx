@@ -14,7 +14,7 @@ import piIcon from "../assets/pi-icon.png";
 import dshIcon from "../assets/dsh-icon.svg";
 import zcodeIcon from "../assets/zcode-icon.png";
 import codexIcon from "../assets/codex-logo.svg";
-import grokIcon from "../assets/providers/xai.svg";
+import grokIcon from "../assets/grok-icon.svg";
 import { cx } from "../lib/format";
 import type { GatewayClientContract, GatewayClientInfo } from "../lib/types";
 import { SwitchControl } from "./SettingsDrawer";
@@ -379,6 +379,9 @@ function clientIcon(id: string) {
 function clientIconClass(id: string) {
   if (id === "codex" || id === "dsh") {
     return "h-8 w-8 object-contain";
+  }
+  if (id === "grok") {
+    return "h-6 w-6 object-contain";
   }
   if (id === "pi") {
     return "h-full w-full scale-125 object-cover";

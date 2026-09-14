@@ -83,6 +83,5 @@ test("dsh_client_info asymmetry and aliases are explicit in the manifest", async
   assert.deepEqual(switchMode.argument_aliases, [
     ["autoSync", "auto_sync"],
     ["forceTakeover", "force_takeover"],
-    ["restartCodex", "restart_codex"],
   ]);
 });

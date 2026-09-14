@@ -41,7 +41,7 @@ pub use readback::verify_apply_readback;
 
 use clients::codex::read_codex_auth_status;
 #[cfg(test)]
-use clients::grok::restore_grok_config_with_backup_roots;
+use clients::grok::{grok_ownership_bounded_cleanup, restore_grok_config_with_backup_roots};
 use clients::grok::{
     detect_grok_config_path, detect_grok_route_details, detect_grok_version, grok_home,
     grok_injected_keys_may_be_hidden, grok_installed,

@@ -337,6 +337,10 @@
   gap: 10px;
   min-height: 72px;
   flex-shrink: 0;
+  flex-wrap: nowrap;
+  position: relative;
+  z-index: 5;
+  overflow: visible;
   padding: 12px 16px;
   border: 1px solid color-mix(in srgb, var(--ws-accent) 30%, var(--ws-line));
   border-radius: var(--ws-radius-panel);
@@ -364,6 +368,10 @@
   border-radius: var(--ws-radius-control);
   background: var(--ws-brand-surface);
 }
+.ws-bridge > div:not(.ws-bridge-action) {
+  min-width: 0;
+  flex: 0 1 auto;
+}
 .ws-bridge b {
   font-size: 13px;
   font-weight: 600;
@@ -374,12 +382,17 @@
   color: var(--ws-muted);
   display: block;
   margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ws-bridge-line {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 106px;
+  min-width: 24px;
+  flex: 0 1 106px;
   color: var(--ws-accent);
   margin: 0 6px;
 }
@@ -397,11 +410,163 @@
   align-items: center;
   gap: 12px;
   margin-left: auto;
+  flex-wrap: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
 }
-.ws-bridge-action > span {
+.ws-bridge-action > span,
+.ws-bridge-action > button.ws-restart-pending,
+.ws-bridge-action > .ws-button {
+  flex-shrink: 0;
+}
+.ws-bridge-action > span,
+.ws-bridge-action > button.ws-restart-pending {
   padding: 3px 8px;
   background: color-mix(in srgb, var(--ws-green) 8%, transparent);
   border-radius: var(--ws-radius-micro);
+  white-space: nowrap;
+}
+.ws-bridge-action > button.ws-restart-pending {
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.ws-bridge-subagent {
+  position: relative;
+  flex: 0 1 220px;
+  min-width: 132px;
+  max-width: 220px;
+}
+.ws-bridge-subagent-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius-small);
+  background: var(--ws-surface);
+  color: var(--ws-ink);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  box-shadow: var(--ws-shadow-control);
+}
+.ws-bridge-subagent-kicker {
+  flex-shrink: 0;
+  color: var(--ws-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.ws-bridge-subagent-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-bridge-subagent-mark {
+  flex-shrink: 0;
+  color: var(--ws-accent);
+}
+.ws-bridge-subagent-chevron {
+  flex-shrink: 0;
+  color: var(--ws-muted);
+  transition: transform 0.15s ease;
+}
+.ws-bridge-subagent-chevron.open {
+  transform: rotate(180deg);
+}
+.ws-bridge-subagent-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  width: max(100%, 220px);
+  min-width: 188px;
+  max-width: min(280px, 42vw);
+  max-height: min(280px, 50vh);
+  overflow: auto;
+  padding: 4px 0;
+}
+.ws-bridge-subagent-heading {
+  padding: 4px 10px 6px;
+  color: var(--ws-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.ws-bridge-subagent-row,
+.ws-bridge-subagent-back {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 28px;
+  padding: 5px 10px;
+  border-radius: 0;
+  color: var(--ws-ink);
+  font-size: 11px;
+  text-align: left;
+  white-space: nowrap;
+}
+.ws-bridge-subagent-heading + .ws-bridge-subagent-row,
+.ws-bridge-subagent-row + .ws-bridge-subagent-row,
+.ws-bridge-subagent-back + .ws-bridge-subagent-options {
+  box-shadow: inset 0 1px 0 var(--ws-line);
+}
+.ws-bridge-subagent-row:hover,
+.ws-bridge-subagent-back:hover,
+.ws-bridge-subagent-options .select-option:hover {
+  background: var(--ws-soft);
+}
+.ws-bridge-subagent-row > span:first-child,
+.ws-bridge-subagent-back {
+  flex-shrink: 0;
+  color: var(--ws-muted);
+  font-size: 11px;
+}
+.ws-bridge-subagent-row > span:last-child {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  min-width: 0;
+  color: var(--ws-ink);
+  font-size: 11px;
+  font-weight: 500;
+}
+.ws-bridge-subagent-row-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ws-bridge-subagent-row-value + svg {
+  flex-shrink: 0;
+}
+.ws-bridge-subagent-back {
+  justify-content: flex-start;
+  gap: 4px;
+  font-weight: 600;
+}
+.ws-bridge-subagent-options {
+  display: grid;
+}
+.ws-bridge-subagent-options .select-option {
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 0;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ws-metrics {
   display: grid;
@@ -2159,20 +2324,50 @@
 }
 .workspace-root .ws-chart-plot { border: 1px solid var(--ws-line); }
 
-/* Preserve two complete client rows at the default desktop window size. */
+/* Fit six client cards in two rows at the default desktop window; scroll only after that. */
 .ws-clients { gap: 8px; padding-top: 12px; }
 .ws-clients .ws-heading { min-height: 44px; }
 .ws-clients .ws-heading p { margin-top: 3px; }
-.ws-clients .ws-bridge { min-height: 60px; padding-block: 8px; }
+.ws-clients .ws-bridge { min-height: 0; padding-block: 8px; }
+.ws-clients > .ws-gateway {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
 .ws-clients .ws-gateway[data-workspace-view="clients"] > .ws-gateway-clients > div:first-child {
   padding: 0 0 8px;
 }
-.ws-clients .ws-gateway-clients > div:nth-child(2) > div { gap: 10px; }
-.ws-clients .ws-gateway-clients > div:nth-child(2) > div > .ws-client-card > .ws-client-config {
+.ws-clients .ws-client-board {
+  scrollbar-gutter: auto;
+  padding-inline-end: 0;
+}
+.ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: calc((100% - 10px) / 2);
+  align-content: start;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+}
+.ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid > .ws-client-card,
+.ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid > section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid > .ws-client-card > .ws-client-config {
   margin-block: 6px;
   padding-block: 4px;
 }
-.ws-clients .ws-client-bottom { padding-block: 6px; }
+.ws-clients .ws-client-bottom { padding-block: 6px; margin-top: auto; }
+@media (max-width: 850px) {
+  .ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: calc((100% - 20px) / 3);
+  }
+}
 
 .ws-overview .ws-resource-table > .ws-scroll {
   flex: 1;
@@ -2180,16 +2375,6 @@
   grid-auto-rows: minmax(62px, 25%);
   align-content: start;
 }
-.ws-clients .ws-gateway-clients > div:nth-child(2) > div {
-  height: 100%;
-  grid-auto-rows: minmax(142px, calc((100% - 10px) / 2));
-  padding-block: 0;
-}
-.ws-clients .ws-gateway-clients > div:nth-child(2) > div > .ws-client-card {
-  display: flex;
-  flex-direction: column;
-}
-.ws-clients .ws-client-bottom { margin-top: auto; }
 
 
 /* Model-detail capability groups share typography, spacing and theme tokens. */

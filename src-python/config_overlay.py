@@ -869,6 +869,118 @@ def insert_provider_section(text: str, provider_section: str) -> str:
     return provider_section
 
 
+DEFAULT_SUBAGENT_KEYS = (
+    "default_subagent_model",
+    "default_subagent_reasoning_effort",
+)
+DEFAULT_SUBAGENT_EFFORTS = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+_TABLE_HEADER = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?\s*$")
+_TABLE_KEY = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=")
+
+
+def _validate_default_subagent_override(model: str | None, effort: str | None) -> None:
+    if model is None and effort is None:
+        return
+    if model is None or effort is None:
+        raise ValueError("default subagent model and reasoning effort must be set together")
+    model = model.strip()
+    effort = effort.strip()
+    if not model:
+        return
+    if any(ord(char) < 32 or ord(char) == 127 for char in model):
+        raise ValueError("default subagent model cannot contain control characters")
+    if effort.lower() not in DEFAULT_SUBAGENT_EFFORTS:
+        raise ValueError(f"unsupported default subagent reasoning effort: {effort}")
+
+
+def apply_default_subagent_override(
+    text: str,
+    backup_text: str,
+    model: str | None,
+    effort: str | None,
+) -> str:
+    if model is None and effort is None:
+        return text
+    model = (model or "").strip()
+    effort = (effort or "").strip()
+    if not model:
+        values = section_key_values(backup_text, "agents") or {}
+        return set_table_values(
+            text,
+            "agents",
+            {
+                key: toml_literal(values[key]) if key in values else None
+                for key in DEFAULT_SUBAGENT_KEYS
+            },
+        )
+    return set_table_values(
+        text,
+        "agents",
+        {
+            "default_subagent_model": toml_literal(model),
+            "default_subagent_reasoning_effort": toml_literal(effort.lower()),
+        },
+    )
+
+
+def _table_assignment_lines(values: dict[str, str | None], newline: str) -> list[str]:
+    return [f"{key} = {value}{newline}" for key, value in values.items() if value is not None]
+
+
+def set_table_values(text: str, section_name: str, values: dict[str, str | None]) -> str:
+    """Set or delete keys in an exact TOML table. Nested tables are untouched.
+
+    ``values`` maps a key to a preformatted TOML right-hand side, or ``None``
+    to delete that key. Missing tables are created only when a value is set.
+    """
+
+    if not values:
+        return text
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+    result: list[str] = []
+    remaining = dict(values)
+    in_section = False
+    section_seen = False
+
+    for line in lines:
+        header = _TABLE_HEADER.match(line.rstrip("\r\n"))
+        if header:
+            if in_section:
+                result.extend(_table_assignment_lines(remaining, newline))
+                remaining.clear()
+            in_section = header.group(1).strip() == section_name
+            section_seen = section_seen or in_section
+            result.append(line)
+            continue
+        if in_section:
+            key_match = _TABLE_KEY.match(line)
+            if key_match and key_match.group(1) in remaining:
+                value = remaining.pop(key_match.group(1))
+                if value is not None:
+                    result.append(f"{key_match.group(1)} = {value}{newline}")
+                continue
+        result.append(line)
+
+    if in_section:
+        result.extend(_table_assignment_lines(remaining, newline))
+        remaining.clear()
+
+    assignments = _table_assignment_lines(remaining, newline)
+    if assignments:
+        if result and not result[-1].endswith(("\n", "\r")):
+            result.append(newline)
+        if result and result[-1].strip():
+            result.append(newline)
+        result.append(f"[{section_name}]{newline}")
+        result.extend(assignments)
+    elif not section_seen:
+        return text
+    return "".join(result)
+
+
 def apply_overlay(
     config_path: Path,
     backup_path: Path,
@@ -879,9 +991,15 @@ def apply_overlay(
     gateway_key: str = "codexhub-proxy",
     context_guard_state_path: Path | None = None,
     use_managed_catalog: bool = False,
+    default_subagent_model: str | None = None,
+    default_subagent_reasoning_effort: str | None = None,
 ) -> None:
     if owner not in {"release", "beta"}:
         raise ValueError(f"unsupported CodexHub owner: {owner}")
+    _validate_default_subagent_override(
+        default_subagent_model,
+        default_subagent_reasoning_effort,
+    )
     if use_managed_catalog and catalog_path is None:
         raise ValueError("selecting the managed catalog requires --catalog")
     _migrate_legacy_context_guard_values(
@@ -935,6 +1053,13 @@ def apply_overlay(
         catalog_owned=catalog_owned,
     ) + cleaned.lstrip()
     updated = insert_provider_section(updated, build_provider_section(base_url, gateway_key))
+    backup_text = read_text_preserving_newlines(backup_path) if backup_path.exists() else ""
+    updated = apply_default_subagent_override(
+        updated,
+        backup_text,
+        default_subagent_model,
+        default_subagent_reasoning_effort,
+    )
     atomic_write_text(config_path, updated, encoding="utf-8")
     _repair_codex_desktop_global_state(config_path, backup_path)
 
@@ -1043,6 +1168,8 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("--takeover", action="store_true")
     apply_parser.add_argument("--gateway-key", default="codexhub-proxy")
     apply_parser.add_argument("--context-guard-state", type=Path)
+    apply_parser.add_argument("--default-subagent-model", default=None)
+    apply_parser.add_argument("--default-subagent-reasoning-effort", default=None)
 
     restore_parser = subparsers.add_parser("restore")
     restore_parser.add_argument("--config", required=True, type=Path)
@@ -1071,6 +1198,8 @@ def main(argv: list[str] | None = None) -> int:
             args.gateway_key,
             args.context_guard_state,
             args.use_managed_catalog,
+            args.default_subagent_model,
+            args.default_subagent_reasoning_effort,
         )
     elif args.command == "restore":
         status = restore_overlay(

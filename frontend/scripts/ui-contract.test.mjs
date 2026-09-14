@@ -28,6 +28,8 @@ test("UI data contract has stable unique ids and portable config paths", async (
     assert.match(client.id, /^[a-z][a-z0-9-]*$/);
     assert.match(client.config_path, /^~\//);
   }
+  const grok = contract.gatewayClients.find((client) => client.id === "grok");
+  assert.equal(grok?.name, "Grok CLI");
 });
 
 test("English and Chinese locales expose exactly the same keys", async () => {
@@ -70,6 +72,20 @@ test("main window capability keeps required native window permissions", async ()
   ]) {
     assert.ok(capability.permissions.includes(permission));
   }
+});
+
+test("subagent trigger and menu truncate long model names", async () => {
+  const workspaceCss = await readFile(
+    new URL("../src/components/workspace/workspace.css", import.meta.url),
+    "utf8",
+  );
+  assert.match(workspaceCss, /\.ws-bridge-subagent \{[\s\S]*max-width: 220px;/);
+  assert.match(workspaceCss, /\.ws-bridge-subagent-value \{[\s\S]*text-overflow: ellipsis;/);
+  assert.match(workspaceCss, /\.ws-bridge-subagent-row-value \{[\s\S]*text-overflow: ellipsis;/);
+  assert.match(
+    workspaceCss,
+    /\.ws-bridge-subagent-options \.select-option \{[\s\S]*text-overflow: ellipsis;/,
+  );
 });
 
 test("scrollable workspace surfaces reserve rails before the final controls", async () => {

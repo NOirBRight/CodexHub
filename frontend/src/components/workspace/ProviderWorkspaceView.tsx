@@ -1,8 +1,12 @@
 import { readQuotaCache } from "../../lib/quotaCache";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ArrowRight,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Layers,
+  Sparkles,
   Link2,
   Plus,
   RefreshCw,
@@ -24,6 +28,14 @@ import {
   displayModelName,
   enabledPreviewModels,
 } from "../../lib/modelDisplay";
+import {
+  listDefaultSubagentOptions,
+  resolveSubagentEffort,
+  defaultSubagentSummary,
+  formatSubagentEffort,
+  CODEX_SUBAGENT_EFFORTS,
+  type DefaultSubagentOption,
+} from "../../lib/defaultSubagent";
 import { meanResponseDurationLabel } from "../../lib/workspaceResources";
 import { SwitchControl } from "../SettingsDrawer";
 import { WorkspaceHeading, type WorkspacePage } from "./WorkspaceShell";
@@ -49,7 +61,7 @@ type Props = {
   running: boolean;
   connectionBusy: boolean;
   restartPending: boolean;
-  onRestartCodex: () => void;
+  onDismissRestartReminder: () => void;
   busy: boolean;
   ownerLabel?: string;
   onToggleConnection: () => void;
@@ -60,6 +72,9 @@ type Props = {
   onRefresh: () => Promise<unknown>;
   onNavigate: (page: WorkspacePage) => void;
   officialId: string;
+  defaultSubagentModel: string;
+  defaultSubagentEffort: string;
+  onDefaultSubagentChange?: (model: string, effort: string) => void;
 };
 let dailyCache: { day: string; snapshot: GatewayUsageSnapshot } | null = null;
 
@@ -188,6 +203,28 @@ export function ProviderWorkspaceView(props: Props) {
       (n, p) => n + p.models.filter((m) => m.enabled !== false).length,
       props.officialIncluded ? props.officialEnabled : 0,
     );
+  const subagentOptions = listDefaultSubagentOptions({
+    officialId: props.officialId,
+    officialIncluded: props.officialIncluded,
+    officialModels: props.officialModels,
+    officialDisabledModels: props.officialDisabledModels,
+    providers: props.providers,
+  });
+  const selectedSubagent =
+    subagentOptions.find((option) => option.id === props.defaultSubagentModel) ??
+    (props.defaultSubagentModel
+      ? {
+          id: props.defaultSubagentModel,
+          label: props.defaultSubagentModel,
+          efforts: [],
+          defaultEffort: "medium",
+        }
+      : undefined);
+  const subagentEfforts = selectedSubagent
+    ? resolveSubagentEffort(selectedSubagent, props.defaultSubagentEffort)
+    : "";
+  const subagentDisabled =
+    props.connectionBusy || !props.onDefaultSubagentChange;
   const bridge = (
     <section className="ws-bridge">
       <img src={codex} alt="Codex" />
@@ -212,25 +249,38 @@ export function ProviderWorkspaceView(props: Props) {
         <small>{t("workspace.modelCount", { count: totalModels })}</small>
       </div>
       <div className="ws-bridge-action">
-        <span
-          className={
-            props.restartPending ? "ws-restart-pending" : props.connected && props.running ? "ws-online" : "ws-muted"
+        <DefaultSubagentPicker
+          disabled={subagentDisabled}
+          model={props.defaultSubagentModel}
+          effort={subagentEfforts}
+          options={subagentOptions}
+          selected={selectedSubagent}
+          onChange={(nextModel, nextEffort) =>
+            props.onDefaultSubagentChange?.(nextModel, nextEffort)
           }
-        >
-          {props.restartPending ? t("workspace.restartPending") : props.ownerLabel ||
-            t(
-              props.connected
-                ? props.running
-                  ? "workspace.connected"
-                  : "workspace.serviceOffline"
-                : "workspace.disconnected",
-            )}
-        </span>
-        {props.restartPending && (
-          <button className="ws-button" disabled={props.busy || props.connectionBusy} onClick={props.onRestartCodex}>
-            <RefreshCw size={13} className={props.connectionBusy ? "animate-spin" : undefined} />
-            {t("workspace.restartCodex")}
+        />
+        {props.restartPending ? (
+          <button
+            type="button"
+            className="ws-restart-pending"
+            title={t("workspace.restartPendingHint")}
+            onClick={props.onDismissRestartReminder}
+          >
+            {t("workspace.restartPending")}
           </button>
+        ) : (
+          <span
+            className={props.connected && props.running ? "ws-online" : "ws-muted"}
+          >
+            {props.ownerLabel ||
+              t(
+                props.connected
+                  ? props.running
+                    ? "workspace.connected"
+                    : "workspace.serviceOffline"
+                  : "workspace.disconnected",
+              )}
+          </span>
         )}
         <button
           className="ws-button"
@@ -588,5 +638,252 @@ export function ProviderWorkspaceView(props: Props) {
       )}
       {props.children}
     </main>
+  );
+}
+
+function DefaultSubagentPicker({
+  disabled,
+  model,
+  effort,
+  options,
+  selected,
+  onChange,
+}: {
+  disabled: boolean;
+  model: string;
+  effort: string;
+  options: DefaultSubagentOption[];
+  selected?: DefaultSubagentOption;
+  onChange: (model: string, effort: string) => void;
+}) {
+  const { t } = useTranslation();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [panel, setPanel] = useState<"menu" | "model" | "effort">("menu");
+  const [draftModel, setDraftModel] = useState(model);
+  const [draftEffort, setDraftEffort] = useState(effort);
+  const draftRef = useRef({ model: draftModel, effort: draftEffort });
+  const propsRef = useRef({ model, effort, onChange });
+  const openRef = useRef(open);
+  draftRef.current = { model: draftModel, effort: draftEffort };
+  propsRef.current = { model, effort, onChange };
+  openRef.current = open;
+  const fallback = t("workspace.defaultSubagentCodexDefault");
+  const activeSelected =
+    options.find((option) => option.id === draftModel) ??
+    (draftModel && selected?.id === draftModel ? selected : undefined);
+  const summary = defaultSubagentSummary(
+    draftModel ? activeSelected?.label || draftModel : "",
+    draftEffort,
+    fallback,
+  );
+  const effortChoices = activeSelected?.efforts.length
+    ? activeSelected.efforts
+    : activeSelected
+      ? [...CODEX_SUBAGENT_EFFORTS]
+      : [];
+  const modelChoices =
+    activeSelected && !options.some((option) => option.id === activeSelected.id)
+      ? [activeSelected, ...options]
+      : options;
+
+  useEffect(() => {
+    setDraftModel(model);
+    setDraftEffort(effort);
+  }, [model, effort]);
+
+  function commitIfChanged(nextModel: string, nextEffort: string) {
+    const current = propsRef.current;
+    if (nextModel !== current.model || nextEffort !== current.effort) {
+      current.onChange(nextModel, nextEffort);
+    }
+  }
+
+  function closeMenu() {
+    if (!openRef.current) return;
+    const draft = draftRef.current;
+    commitIfChanged(draft.model, draft.effort);
+    setOpen(false);
+    setPanel("menu");
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        closeMenu();
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [open]);
+
+  function chooseModel(nextModel: string) {
+    const option =
+      options.find((item) => item.id === nextModel) ??
+      (nextModel && selected?.id === nextModel ? selected : undefined);
+    const nextEffort = nextModel ? resolveSubagentEffort(option, draftEffort) : "";
+    setDraftModel(nextModel);
+    setDraftEffort(nextEffort);
+    setPanel("menu");
+    commitIfChanged(nextModel, nextEffort);
+  }
+
+  function chooseEffort(nextEffort: string) {
+    setDraftEffort(nextEffort);
+    setPanel("menu");
+    commitIfChanged(draftModel, nextEffort);
+  }
+
+  const modelLabel = draftModel ? activeSelected?.label || draftModel : fallback;
+
+  return (
+    <div
+      ref={rootRef}
+      className="ws-bridge-subagent"
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && open) {
+          event.stopPropagation();
+          closeMenu();
+        }
+      }}
+    >
+      <button
+        type="button"
+        className="ws-bridge-subagent-trigger"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={t("workspace.defaultSubagent")}
+        title={summary}
+        disabled={disabled}
+        onClick={() => {
+          if (open) {
+            closeMenu();
+            return;
+          }
+          setDraftModel(model);
+          setDraftEffort(effort);
+          setPanel("menu");
+          setOpen(true);
+        }}
+      >
+        <Sparkles size={11} className="ws-bridge-subagent-mark" />
+        <span className="ws-bridge-subagent-kicker">
+          {t("workspace.defaultSubagentLabel")}
+        </span>
+        <span className="ws-bridge-subagent-value">{summary}</span>
+        <ChevronDown
+          size={11}
+          className={
+            open
+              ? "ws-bridge-subagent-chevron open"
+              : "ws-bridge-subagent-chevron"
+          }
+        />
+      </button>
+      {open && (
+        <div
+          className="select-popover ws-bridge-subagent-menu"
+          role="dialog"
+          aria-label={t("workspace.defaultSubagent")}
+        >
+          {panel === "menu" ? (
+            <>
+              <div className="ws-bridge-subagent-heading">
+                {t("workspace.defaultSubagent")}
+              </div>
+              <button
+                type="button"
+                className="ws-bridge-subagent-row"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => setPanel("model")}
+              >
+                <span>{t("workspace.defaultSubagentModel")}</span>
+                <span>
+                  <span className="ws-bridge-subagent-row-value" title={modelLabel}>
+                    {modelLabel}
+                  </span>
+                  <ChevronRight size={11} />
+                </span>
+              </button>
+              <button
+                type="button"
+                className="ws-bridge-subagent-row"
+                disabled={!draftModel}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => setPanel("effort")}
+              >
+                <span>{t("workspace.defaultSubagentEffort")}</span>
+                <span>
+                  {draftModel ? formatSubagentEffort(draftEffort) || "—" : "—"}
+                  <ChevronRight size={11} />
+                </span>
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="ws-bridge-subagent-back"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => setPanel("menu")}
+              >
+                <ChevronLeft size={11} />
+                {t(
+                  panel === "model"
+                    ? "workspace.defaultSubagentModel"
+                    : "workspace.defaultSubagentEffort",
+                )}
+              </button>
+              <div className="ws-bridge-subagent-options" role="listbox">
+                {panel === "model" ? (
+                  <>
+                    <button
+                      type="button"
+                      className="select-option"
+                      role="option"
+                      aria-selected={!draftModel}
+                      title={fallback}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => chooseModel("")}
+                    >
+                      {fallback}
+                    </button>
+                    {modelChoices.map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        className="select-option"
+                        role="option"
+                        aria-selected={option.id === draftModel}
+                        title={option.label}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => chooseModel(option.id)}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </>
+                ) : (
+                  effortChoices.map((item) => (
+                    <button
+                      key={item}
+                      type="button"
+                      className="select-option"
+                      role="option"
+                      aria-selected={item === draftEffort}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => chooseEffort(item)}
+                    >
+                      {formatSubagentEffort(item)}
+                    </button>
+                  ))
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

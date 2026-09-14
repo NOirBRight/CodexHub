@@ -1,15 +1,18 @@
 use super::super::{
     adopt_legacy_baseline_locked, ensure_rollback_baseline, executable_version,
-    gateway_client_provider_groups, is_codexhub_client_provider_id, is_local_gateway_url,
+    gateway_client_provider_groups, is_codexhub_client_provider_id, is_this_app_gateway_url,
     read_rollback_baseline, resolve_gateway_client_model_id, route_owner_from_endpoint,
     sanitize_text, write_text_replace, BackupChannel, BaselineFile, GatewayClientApplyResult,
     GatewayClientConfigPreview, GatewayClientEndpointSelection, GatewayClientProviderGroup,
 };
 use crate::app_flavor::RoutingOwner;
 use crate::{Provider, Settings};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use toml::{Table, Value};
+
+const GROK_FLEET_REQUIREMENTS: &str = "/etc/grok/requirements.toml";
 
 const CLIENT_ID: &str = "grok";
 const SENTINEL_PROVIDER_ID: &str = "codexhub";
@@ -104,6 +107,12 @@ fn is_leftover_codexhub_xai_key(key: &str, kept_ids: &[String]) -> bool {
     key == "codexhub-xai" || key.starts_with("codexhub-xai-")
 }
 
+fn is_legacy_skipped_xai_selector(value: &str) -> bool {
+    // Story 12: only leftover selectors from the skipped Maintained xAI
+    // adapter. Live custom `codexhub-xai-proxy*` stays as Activation.
+    value == "codexhub-xai" || value.starts_with("codexhub-xai-grok")
+}
+
 fn grok_picker_key(client_provider_id: &str, short_id: &str) -> String {
     format!(
         "{}-{}",
@@ -152,7 +161,11 @@ fn table_base_url(table: &Table) -> Option<&str> {
     table.get("base_url").and_then(Value::as_str)
 }
 
-fn grok_owned_table_conflict(root: &Table, kept_ids: &[String]) -> Result<(), String> {
+fn grok_owned_table_conflict(
+    root: &Table,
+    kept_ids: &[String],
+    settings: &Settings,
+) -> Result<(), String> {
     if let Some(providers) = root.get("model_providers").and_then(Value::as_table) {
         for (key, value) in providers {
             if !is_codexhub_client_provider_id(key) || is_leftover_codexhub_xai_key(key, kept_ids) {
@@ -161,13 +174,12 @@ fn grok_owned_table_conflict(root: &Table, kept_ids: &[String]) -> Result<(), St
             let Some(table) = value.as_table() else {
                 continue;
             };
-            if let Some(url) = table_base_url(table) {
-                if !is_local_gateway_url(url) {
-                    return Err(format!(
-                        "Grok config already has [model_providers.{key}] pointing at a non-Gateway endpoint; refusing overwrite."
-                    ));
-                }
-            }
+            grok_refuse_foreign_owned_url(
+                table_base_url(table),
+                settings.proxy_port,
+                &format!("[model_providers.{key}]"),
+                true,
+            )?;
         }
     }
     if let Some(models) = root.get("model").and_then(Value::as_table) {
@@ -178,16 +190,33 @@ fn grok_owned_table_conflict(root: &Table, kept_ids: &[String]) -> Result<(), St
             let Some(table) = value.as_table() else {
                 continue;
             };
-            if let Some(url) = table_base_url(table) {
-                if !is_local_gateway_url(url) {
-                    return Err(format!(
-                        "Grok config already has [model.{key}] pointing at a non-Gateway endpoint; refusing overwrite."
-                    ));
-                }
-            }
+            grok_refuse_foreign_owned_url(
+                table_base_url(table),
+                settings.proxy_port,
+                &format!("[model.{key}]"),
+                false,
+            )?;
         }
     }
     Ok(())
+}
+
+fn grok_refuse_foreign_owned_url(
+    url: Option<&str>,
+    port: u16,
+    table_name: &str,
+    missing_is_conflict: bool,
+) -> Result<(), String> {
+    match url {
+        Some(url) if is_this_app_gateway_url(url, port) => Ok(()),
+        Some(_) => Err(format!(
+            "Grok config already has {table_name} pointing at a non-Gateway endpoint; refusing overwrite."
+        )),
+        None if missing_is_conflict => Err(format!(
+            "Grok config already has {table_name} without a Gateway base_url; refusing overwrite."
+        )),
+        None => Ok(()),
+    }
 }
 
 fn strip_owned_grok_tables(root: &mut Table) {
@@ -212,7 +241,7 @@ fn repair_leftover_xai_default(root: &mut Table) {
     let should_clear = models
         .get("default")
         .and_then(Value::as_str)
-        .is_some_and(|value| is_leftover_codexhub_xai_key(value, &[]));
+        .is_some_and(is_legacy_skipped_xai_selector);
     if should_clear {
         models.remove("default");
     }
@@ -291,7 +320,7 @@ pub(in crate::gateway) fn grok_config_text(
         .map(|group| group.client_provider_id.clone())
         .collect();
     let mut root = parse_grok_table(current.unwrap_or(""))?;
-    grok_owned_table_conflict(&root, &kept_ids)?;
+    grok_owned_table_conflict(&root, &kept_ids, settings)?;
     strip_owned_grok_tables(&mut root);
 
     if kept.is_empty() {
@@ -368,15 +397,52 @@ fn grok_has_allowed_models(text: &str) -> bool {
         })
 }
 
+fn grok_requirements_files(home: &Path) -> Vec<PathBuf> {
+    vec![
+        PathBuf::from(GROK_FLEET_REQUIREMENTS),
+        home.join("requirements.toml"),
+    ]
+}
+
 pub(in crate::gateway) fn grok_injected_keys_may_be_hidden(
     home: &Path,
     config_text: Option<&str>,
 ) -> bool {
     config_text.is_some_and(grok_has_allowed_models)
-        || fs::read_to_string(home.join("requirements.toml"))
-            .ok()
-            .as_deref()
-            .is_some_and(grok_has_allowed_models)
+        || grok_requirements_files(home).iter().any(|path| {
+            fs::read_to_string(path)
+                .ok()
+                .as_deref()
+                .is_some_and(grok_has_allowed_models)
+        })
+}
+
+fn grok_owned_snapshot(root: &Table) -> (BTreeMap<String, Value>, BTreeMap<String, Value>) {
+    (
+        grok_owned_section(root, "model_providers"),
+        grok_owned_section(root, "model"),
+    )
+}
+
+fn grok_owned_section(root: &Table, key: &str) -> BTreeMap<String, Value> {
+    root.get(key)
+        .and_then(Value::as_table)
+        .map(|table| {
+            table
+                .iter()
+                .filter(|(name, _)| is_codexhub_client_provider_id(name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(in crate::gateway) fn grok_injected_blocks_match(
+    written: &str,
+    expected: &str,
+) -> Result<bool, String> {
+    Ok(grok_owned_snapshot(&parse_grok_table(written)?)
+        == grok_owned_snapshot(&parse_grok_table(expected)?))
 }
 
 fn grok_owned_provider_base_url(text: &str) -> Option<String> {

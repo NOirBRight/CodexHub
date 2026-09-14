@@ -457,6 +457,8 @@ fn settings_missing_file_returns_defaults_and_roundtrips_saved_values() {
         official_disabled_models: vec!["gpt-5.4-mini".to_string()],
         official_model_sort_order: vec!["gpt-5.4".to_string(), "gpt-5.5".to_string()],
         official_provider_sort_order: 3,
+        codex_default_subagent_model: "gpt-5.6-luna".to_string(),
+        codex_default_subagent_reasoning_effort: "max".to_string(),
         proxy_port: 4555,
     };
     let saved = save_settings_with_paths(custom.clone(), &paths).expect("settings save");
@@ -475,6 +477,8 @@ fn settings_missing_file_returns_defaults_and_roundtrips_saved_values() {
     assert!(written.contains("\"official_disabled_models\""));
     assert!(written.contains("\"official_model_sort_order\""));
     assert!(written.contains("\"official_provider_sort_order\": 3"));
+    assert!(written.contains("\"codex_default_subagent_model\": \"gpt-5.6-luna\""));
+    assert!(written.contains("\"codex_default_subagent_reasoning_effort\": \"max\""));
     assert!(written.contains("\"auto_sync_clients\": false"));
     assert!(written.contains("\"auto_start_software\": false"));
     assert!(written.contains("\"auto_start_gateway\": false"));
@@ -550,6 +554,48 @@ fn legacy_official_model_ids_are_normalized_on_load_and_save() {
     assert_eq!(saved.official_model_sort_order, vec!["gpt-5.5".to_string()]);
     let written = fs::read_to_string(paths.settings_path()).expect("normalized settings text");
     assert!(!written.contains("openai/gpt-"));
+}
+
+#[test]
+fn default_subagent_settings_normalize_official_prefix_and_effort() {
+    let root = temp_root("default-subagent-normalize");
+    let paths = test_paths(&root);
+    let saved = save_settings_with_paths(
+        Settings {
+            codex_default_subagent_model: "openai/gpt-5.6-luna".to_string(),
+            codex_default_subagent_reasoning_effort: "MAX".to_string(),
+            ..Settings::default()
+        },
+        &paths,
+    )
+    .expect("settings save");
+    assert_eq!(saved.codex_default_subagent_model, "gpt-5.6-luna");
+    assert_eq!(saved.codex_default_subagent_reasoning_effort, "max");
+    let written = fs::read_to_string(paths.settings_path()).expect("settings text");
+    assert!(!written.contains("openai/gpt-5.6-luna"));
+    assert!(written.contains("\"codex_default_subagent_model\": \"gpt-5.6-luna\""));
+}
+
+#[test]
+fn default_subagent_settings_keep_opencode_go_flash_slug() {
+    let root = temp_root("default-subagent-opencode-go");
+    let paths = test_paths(&root);
+    let saved = save_settings_with_paths(
+        Settings {
+            codex_default_subagent_model: "opencode-go/deepseek-v4.1-flash".to_string(),
+            codex_default_subagent_reasoning_effort: "MAX".to_string(),
+            ..Settings::default()
+        },
+        &paths,
+    )
+    .expect("settings save");
+    assert_eq!(
+        saved.codex_default_subagent_model,
+        "opencode-go/deepseek-v4.1-flash"
+    );
+    assert_eq!(saved.codex_default_subagent_reasoning_effort, "max");
+    let written = fs::read_to_string(paths.settings_path()).expect("settings text");
+    assert!(written.contains("\"codex_default_subagent_model\": \"opencode-go/deepseek-v4.1-flash\""));
 }
 
 #[test]
@@ -872,6 +918,8 @@ fn switch_mode_custom_applies_config_overlay_without_history_sync() {
     assert_arg_literal(&commands[0].args, "--base-url", "http://127.0.0.1:4555");
     assert_arg_literal(&commands[0].args, "--gateway-key", "codexhub-proxy");
     assert_arg_literal(&commands[0].args, "--owner", "release");
+    assert_arg_literal(&commands[0].args, "--default-subagent-model", "");
+    assert_arg_literal(&commands[0].args, "--default-subagent-reasoning-effort", "");
     assert_eq!(
         paths
             .config_backup_path()
@@ -882,6 +930,119 @@ fn switch_mode_custom_applies_config_overlay_without_history_sync() {
     assert!(!commands[0].args.iter().any(|arg| arg == "normalize-fast"));
     assert_eq!(status.history_sync_status, None);
     assert_eq!(status.history_sync_message, None);
+}
+
+#[test]
+fn switch_mode_custom_forwards_default_subagent_overlay_args() {
+    let root = temp_root("switch-custom-subagent");
+    let paths = test_paths(&root);
+    save_settings_with_paths(
+        Settings {
+            proxy_port: 4555,
+            codex_default_subagent_model: "openai/gpt-5.6-luna".to_string(),
+            codex_default_subagent_reasoning_effort: "MAX".to_string(),
+            ..Settings::default()
+        },
+        &paths,
+    )
+    .expect("settings save");
+    let runner = RecordingRunner::successful();
+
+    switch_mode_with_paths("custom", true, &paths, Path::new("python-test"), &runner)
+        .expect("switch custom");
+
+    let commands = runner.commands.borrow();
+    assert_arg_literal(
+        &commands[0].args,
+        "--default-subagent-model",
+        "gpt-5.6-luna",
+    );
+    assert_arg_literal(
+        &commands[0].args,
+        "--default-subagent-reasoning-effort",
+        "max",
+    );
+}
+
+#[test]
+fn switch_mode_custom_forwards_opencode_go_flash_subagent_slug() {
+    let root = temp_root("switch-custom-opencode-go-subagent");
+    let paths = test_paths(&root);
+    save_settings_with_paths(
+        Settings {
+            proxy_port: 4555,
+            codex_default_subagent_model: "opencode-go/deepseek-v4.1-flash".to_string(),
+            codex_default_subagent_reasoning_effort: "max".to_string(),
+            ..Settings::default()
+        },
+        &paths,
+    )
+    .expect("settings save");
+    let runner = RecordingRunner::successful();
+
+    switch_mode_with_paths("custom", true, &paths, Path::new("python-test"), &runner)
+        .expect("switch custom");
+
+    let commands = runner.commands.borrow();
+    assert_arg_literal(
+        &commands[0].args,
+        "--default-subagent-model",
+        "opencode-go/deepseek-v4.1-flash",
+    );
+    assert_arg_literal(
+        &commands[0].args,
+        "--default-subagent-reasoning-effort",
+        "max",
+    );
+}
+
+#[test]
+fn isolated_switch_mode_writes_opencode_go_flash_default_subagent() {
+    let root = temp_root("isolated-opencode-go-subagent");
+    let runtime = root.join(".codexhub");
+    let target = root.join(".codex");
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let paths = ConfigPaths::new_isolated(&runtime, &target, repo);
+    fs::create_dir_all(&target).unwrap();
+    fs::write(
+        paths.codex_config_path(),
+        "model_reasoning_effort = \"high\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(paths.generated_catalog_path().parent().unwrap()).unwrap();
+    fs::write(
+        paths.generated_catalog_path(),
+        r#"{"models":[{"slug":"opencode-go/deepseek-v4.1-flash","display_name":"deepseek-v4.1-flash"}]}"#,
+    )
+    .unwrap();
+    save_settings_with_paths(
+        Settings {
+            proxy_port: 4555,
+            gateway_client_key: "isolated-subagent-key".to_string(),
+            codex_default_subagent_model: "opencode-go/deepseek-v4.1-flash".to_string(),
+            codex_default_subagent_reasoning_effort: "max".to_string(),
+            ..Settings::default()
+        },
+        &paths,
+    )
+    .expect("settings save");
+    let python = super::find_python().expect("repository Python interpreter");
+
+    switch_mode_with_paths("custom", true, &paths, &python, &ProcessCommandRunner)
+        .expect("switch custom");
+
+    let live = fs::read_to_string(paths.codex_config_path()).unwrap();
+    assert!(paths.codex_config_path().starts_with(&root));
+    assert!(live.contains("opencode-go/deepseek-v4.1-flash"));
+    assert!(live.contains("default_subagent_model"));
+    assert!(
+        live.contains("default_subagent_reasoning_effort = 'max'")
+            || live.contains("default_subagent_reasoning_effort = \"max\"")
+    );
+    assert!(!live.contains("openai/deepseek"));
 }
 
 #[test]
@@ -1588,6 +1749,14 @@ fn assert_settings_eq(left: &Settings, right: &Settings) {
     assert_eq!(
         left.official_provider_sort_order,
         right.official_provider_sort_order
+    );
+    assert_eq!(
+        left.codex_default_subagent_model,
+        right.codex_default_subagent_model
+    );
+    assert_eq!(
+        left.codex_default_subagent_reasoning_effort,
+        right.codex_default_subagent_reasoning_effort
     );
     assert_eq!(left.proxy_port, right.proxy_port);
 }
