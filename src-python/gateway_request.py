@@ -345,7 +345,10 @@ def sanitize_third_party_reasoning_items(
         index = 0
         while index < len(value):
             item = value[index]
-            if isinstance(item, dict):
+            if (
+                isinstance(item, dict)
+                and not preserve_collaboration_agent_message_encryption
+            ):
                 rewritten_agent_message = _rewrite_third_party_encrypted_agent_message(item)
                 if rewritten_agent_message is not None:
                     value[index] = rewritten_agent_message
@@ -424,7 +427,16 @@ def sanitize_third_party_reasoning_items(
             and value.get("type") == "agent_message"
         )
     )
-    for nested in list(value.values()):
+    for key, nested in list(value.items()):
+        if (
+            isinstance(nested, dict)
+            and not preserve_collaboration_agent_message_encryption
+        ):
+            rewritten_agent_message = _rewrite_third_party_encrypted_agent_message(nested)
+            if rewritten_agent_message is not None:
+                value[key] = rewritten_agent_message
+                nested = rewritten_agent_message
+                changed = True
         if sanitize_third_party_reasoning_items(
             nested,
             preserve_collaboration_agent_message_encryption=preserve_collaboration_agent_message_encryption,

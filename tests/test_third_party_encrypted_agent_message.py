@@ -106,3 +106,28 @@ def test_opencode_go_keeps_plaintext_agent_message_parts() -> None:
     _assert_portable(adapted)
     text = json.dumps(adapted)
     assert "inspect the tray" in text
+
+
+def test_opencode_go_omits_encrypted_agent_message_when_input_is_object() -> None:
+    adapted = _adapt(
+        {
+            "model": "opencode-go/deepseek-v4.1-flash",
+            "input": _encrypted_agent_message(),
+        },
+        {"request_kind": "main_generation"},
+    )
+    dumped = json.dumps(adapted)
+    assert CIPHER not in dumped
+    assert "encrypted_content" not in dumped
+    item = adapted.get("input")
+    assert item
+    if isinstance(item, list):
+        _assert_portable(adapted)
+        return
+    assert isinstance(item, dict)
+    assert item.get("type") != "agent_message" or not any(
+        isinstance(part, dict) and part.get("type") == "encrypted_content"
+        for part in (item.get("content") or [])
+        if isinstance(item.get("content"), list)
+    )
+    assert item.get("role") == "developer" or item.get("type") == "message"

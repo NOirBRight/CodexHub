@@ -717,6 +717,8 @@ def compatible_request_body(
         )
         if finalized_plan is not None:
             runtime_tool_plan = finalized_plan
+    # Ciphertext must be omitted before encode_payload; otherwise V2 history
+    # fail-closes the whole third-party compact/generation turn.
     if upstream_name != "official" and host._sanitize_third_party_reasoning_items(
         payload,
         preserve_collaboration_agent_message_encryption=False,
@@ -790,9 +792,7 @@ def compatible_request_body(
         changed = True
     if upstream_name != "official" and host._sanitize_third_party_reasoning_items(
         payload,
-        preserve_collaboration_agent_message_encryption=(
-            collaboration_protocol == _COLLABORATION_V2
-        ),
+        preserve_collaboration_agent_message_encryption=False,
     ):
         changed = True
 
