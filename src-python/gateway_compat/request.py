@@ -717,6 +717,11 @@ def compatible_request_body(
         )
         if finalized_plan is not None:
             runtime_tool_plan = finalized_plan
+    if upstream_name != "official" and host._sanitize_third_party_reasoning_items(
+        payload,
+        preserve_collaboration_agent_message_encryption=False,
+    ):
+        changed = True
     if runtime_tool_plan is not None and _official_passthrough.encode_tool_plan(
         payload,
         runtime_tool_plan,

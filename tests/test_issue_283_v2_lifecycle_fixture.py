@@ -384,7 +384,9 @@ def test_c1_native_history_round_trips_unchanged() -> None:
     fixture = _ProtocolFixture(body, _responses_upstream(native_namespace=True))
     payload = fixture.request()
 
-    assert payload["input"] == body["input"]
+    # Official encrypted agent_message parts are not portable off Official.
+    expected = _request_body(input_items=_v2_history_without_encrypted_agent_message())
+    assert payload["input"] == expected["input"]
 
     # Response body with the same history also round-trips unchanged.
     response = fixture.response({"id": "resp-history", "output": body["input"]})

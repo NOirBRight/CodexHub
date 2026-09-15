@@ -400,7 +400,7 @@ def test_v2_plaintext_agent_message_round_trip_preserves_identity_and_roles() ->
     assert decoded["input"] == [agent_message]
 
 
-def test_v2_encrypted_agent_message_fails_before_chat_sampling() -> None:
+def test_v2_encrypted_agent_message_is_omitted_before_chat_sampling() -> None:
     encrypted = {
         "type": "agent_message",
         "id": "agent_message_encrypted",
@@ -410,9 +410,11 @@ def test_v2_encrypted_agent_message_fails_before_chat_sampling() -> None:
             {"type": "encrypted_content", "encrypted_content": "opaque"}
         ],
     }
-    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
-        _prepared_chat(input_items=[encrypted])
-    assert caught.value.cause.code == "tool_compatibility_boundary"
+    chat_request, _context = _prepared_chat(input_items=[encrypted])
+    dumped = json.dumps(chat_request)
+    assert "opaque" not in dumped
+    assert "encrypted_content" not in dumped
+    assert chat_request.get("messages")
 
 
 def test_v2_child_agent_message_without_repeated_namespace_uses_chat_envelope() -> None:

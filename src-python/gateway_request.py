@@ -289,6 +289,47 @@ def _third_party_reasoning_summary_parts(value: Any) -> list[dict[str, str]]:
     return parts
 
 
+_THIRD_PARTY_ENCRYPTED_AGENT_MESSAGE_PLACEHOLDER = (
+    "[Official encrypted agent_message unavailable]"
+)
+
+
+def _rewrite_third_party_encrypted_agent_message(
+    item: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Drop Official ciphertext from collaboration handoff history.
+
+    Third-party Responses endpoints cannot decrypt ``encrypted_content``.
+    Keeping it for later fail-closed kills compact and the child turn; the
+    ciphertext is also useless as model input. Preserve any plaintext parts.
+    Replace an encrypted-only item with a bounded developer placeholder.
+    """
+
+    if item.get("type") != "agent_message":
+        return None
+    content = item.get("content")
+    if not isinstance(content, list):
+        return None
+    kept: list[Any] = []
+    saw_encrypted = False
+    for part in content:
+        if isinstance(part, Mapping) and part.get("type") == "encrypted_content":
+            saw_encrypted = True
+            continue
+        kept.append(part)
+    if not saw_encrypted:
+        return None
+    if kept:
+        rewritten = dict(item)
+        rewritten["content"] = kept
+        return rewritten
+    return {
+        "type": "message",
+        "role": "developer",
+        "content": _THIRD_PARTY_ENCRYPTED_AGENT_MESSAGE_PLACEHOLDER,
+    }
+
+
 def sanitize_third_party_reasoning_items(
     value: Any,
     *,
@@ -304,6 +345,12 @@ def sanitize_third_party_reasoning_items(
         index = 0
         while index < len(value):
             item = value[index]
+            if isinstance(item, dict):
+                rewritten_agent_message = _rewrite_third_party_encrypted_agent_message(item)
+                if rewritten_agent_message is not None:
+                    value[index] = rewritten_agent_message
+                    item = rewritten_agent_message
+                    changed = True
             if (
                 isinstance(item, dict)
                 and item.get("type") in {"encrypted_content", "item_reference"}
