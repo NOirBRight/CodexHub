@@ -25,14 +25,14 @@ Record `git rev-parse HEAD` and `sha256sum src-tauri/target/release/codexhub`.
 ```
 
 `--expect-failures` is for an unfixed binary: the run passes only if CodexHub
-empty or unreadable labels are actually captured. After a fix, use
-`--expect-pass`.
+empty labels (`kind: empty-labels`) are actually captured. Missing trays do not
+count. After a fix, use `--expect-pass`.
 
 Artifacts land in `$CODEXHUB_TRAY_LAB` (default `/tmp/codexhub-tray-lab`):
 
 - `artifacts/environment.json` — SHA, binary hash, GNOME/theme/package versions
 - `artifacts/repeat-results.jsonl` — per-sample Shell label/contrast checks
-- `artifacts/repeat-N.json` and `repeat-N-dbus.json` — actor dump and D-Bus layout
+- `artifacts/repeat-N.json` and `repeat-N-dbus.txt` — actor dump and D-Bus layout
 - `artifacts/summary.json`
 
 The test observer only enables `unsafe_mode` inside the disposable Shell so

@@ -262,11 +262,11 @@ fi
 
 case "$expect" in
   failures)
-    if [[ "$codex_fail" -gt 0 ]]; then
-      echo "captured $codex_fail CodexHub failures on the unfixed binary"
+    if [[ "$codex_empty" -gt 0 ]]; then
+      echo "captured $codex_empty CodexHub empty-label failures on the unfixed binary"
       exit 0
     fi
-    echo "error: unfixed binary did not produce a readable-menu failure in $repeats restarts" >&2
+    echo "error: unfixed binary did not produce empty CodexHub labels in $repeats restarts" >&2
     exit 1
     ;;
   pass)

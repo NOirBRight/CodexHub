@@ -1,6 +1,6 @@
 # GNOME 托盘菜单对比度：应用责任与修复边界
 
-日期：2026-09-15。范围：方案研究及隔离 GNOME 实测；未修改应用源码或当前用户桌面。文档变更按 `fast` 检查；下述运行证据属于时序相关实验，不代表发布验收完成。
+日期：2026-09-15。范围：方案研究、隔离 GNOME 实测，以及随后在 `fix/gnome-tray-empty-labels`（`488bc45`）落地的 Linux 托盘标签重发。研究当时未改应用源码；实现见 `src-tauri/src/main.rs`。时序证据按 `strict` 管理。
 
 ## 结论
 
@@ -69,4 +69,4 @@ CodexHub 应承担可用性和兼容性验收，但当前 GNOME 托盘菜单由�
 
 ## 源码绑定复现
 
-#529 已把复现入口固化为 `scripts/gnome-tray-lab/`，并用 SHA `f82c24a03082148b49b646a6e26b57c9a1450039` 构建的 release 二进制（SHA-256 `20b08e55774005a7d90dd743dbe6b65bcd600ddbb093eda7afb700c71ef15335`）在隔离原版 AppIndicators 上再次捕获空标签。失败时 Shell actor 文本为空，D-Bus `GetLayout` 仍有七个完整标签；对照程序正常；浅/深主题对比度分别为 15.91:1 与 12.03:1。证据见 [source-f82c24a](../evidence/gnome-tray-2026-09-15/source-f82c24a/README.md)。
+#529 已把复现入口固化为 `scripts/gnome-tray-lab/`，并用 SHA `f82c24a03082148b49b646a6e26b57c9a1450039` 构建的 release 二进制（SHA-256 `20b08e55774005a7d90dd743dbe6b65bcd600ddbb093eda7afb700c71ef15335`）在隔离原版 AppIndicators 上再次捕获空标签。失败时 Shell actor 文本为空，D-Bus `GetLayout` 仍有七个完整标签；对照程序正常；浅/深主题对比度分别为 15.91:1 与 12.03:1。未修复基线证据见 [source-f82c24a](../evidence/gnome-tray-2026-09-15/source-f82c24a/README.md)。修复候选 SHA `488bc453796387b4e9cff76b48d4e17ac6c027c7`、二进制 `1a5094b32b79a4f3fab96e6407abe68ebd8d5f486495ced597a6f9a572cbf461` 见 [candidate-531](../evidence/gnome-tray-2026-09-15/source-f82c24a/candidate-531/README.md)。
