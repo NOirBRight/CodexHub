@@ -51,6 +51,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/e2e_codex_catalog_roundtrip.py",
     "scripts/e2e_catalog_connection_recovery.py",
     "scripts/e2e_gateway_client_matrix.py",
+    "scripts/e2e_grok_provider_compat.py",
     "scripts/e2e_client_tool_discovery.py",
     "scripts/e2e_history_online_sync.py",
     "scripts/e2e_chat_completions.py",
