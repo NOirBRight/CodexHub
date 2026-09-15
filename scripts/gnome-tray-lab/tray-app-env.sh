@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared CodexHub/reference process environment inside the isolated session.
 export WAYLAND_DISPLAY=wayland-tray-lab
 export GDK_BACKEND=wayland

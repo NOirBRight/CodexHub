@@ -154,6 +154,8 @@ prepare_lab() {
     rmdir "$lab_root/extensions/ubuntu-appindicators@ubuntu.com" || true
   fi
   cp -a "$lab_root/stock/usr/share/gnome-shell/extensions/ubuntu-appindicators@ubuntu.com" "$lab_root/extensions/"
+  # Intentional word-split of pkg-config cflags/libs.
+  # shellcheck disable=SC2046
   gcc "$lab_root/reference.c" -o "$lab_root/reference" $(pkg-config --cflags --libs gtk+-3.0 ayatana-appindicator3-0.1)
 }
 
@@ -171,11 +173,19 @@ open_menus() {
 
 capture_sample() {
   local stem="$1"
+  local json="$lab_root/artifacts/${stem}.json"
   open_menus
   sleep 1
-  eval_js "$(cat "$lab_root/inspect-expression.js")" > "$lab_root/artifacts/${stem}.json"
+  if ! eval_js "$(cat "$lab_root/inspect-expression.js")" > "$json"; then
+    rm -f "$json"
+    return 1
+  fi
+  if [[ ! -s "$json" ]]; then
+    rm -f "$json"
+    return 1
+  fi
   bash "$lab_root/dbus-layout.sh" > "$lab_root/artifacts/${stem}-dbus.txt" 2>&1 || true
-  gjs -m "$lab_root/check.js" "$lab_root/artifacts/${stem}.json" | tee "$lab_root/artifacts/${stem}-check.jsonl"
+  gjs -m "$lab_root/check.js" "$json" | tee "$lab_root/artifacts/${stem}-check.jsonl"
 }
 
 restart_codexhub() {
@@ -253,7 +263,7 @@ if [[ "$ref_fail" -ne 0 ]]; then
   exit 1
 fi
 
-restart_samples=$(find "$lab_root/artifacts" -maxdepth 1 -name 'repeat-[0-9]*.json' ! -name '*-dbus.json' ! -name '*-check.jsonl' | wc -l)
+restart_samples=$(find "$lab_root/artifacts" -maxdepth 1 -name 'repeat-[0-9]*.json' ! -name '*-dbus.json' ! -name '*-check.jsonl' -size +0c | wc -l)
 if [[ "$restart_samples" -ne "$repeats" ]]; then
   echo "error: captured $restart_samples restart samples, expected $repeats" >&2
   exit 1
