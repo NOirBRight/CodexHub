@@ -16,10 +16,12 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DebugDiagnosticsOverlay } from "../components/DebugDiagnosticsPanel";
 import { EndpointRow } from "../components/EndpointRow";
+import { GatewayClientCard } from "../components/GatewayClientCard";
 import {
+  clientIdFromBusyKey,
   connectionStateFromInfo,
-  GatewayClientCard,
-} from "../components/GatewayClientCard";
+  listReachedClientBusyTarget,
+} from "../lib/clientConnectionState";
 import {
   BACKEND_DISCONNECTED_TOAST_KEY,
   useToasts,
@@ -242,6 +244,16 @@ function GatewayPageImpl({
     [clientInfos],
   );
 
+  useEffect(() => {
+    if (!clientBusy) {
+      return;
+    }
+    const info = clientInfoById.get(clientIdFromBusyKey(clientBusy));
+    if (listReachedClientBusyTarget(clientBusy, info)) {
+      setClientBusy(null);
+    }
+  }, [clientBusy, clientInfoById]);
+
   function markCopied(target: string) {
     setCopiedTarget(target);
     if (copyResetTimer.current !== null) {
@@ -434,8 +446,6 @@ function GatewayPageImpl({
       });
       setError(null);
     } catch {
-      // Toast already updated by runPersistentAction.
-    } finally {
       setClientBusy(null);
     }
   }
@@ -571,8 +581,6 @@ function GatewayPageImpl({
       });
       setError(null);
     } catch {
-      // Toast already updated by runPersistentAction.
-    } finally {
       setClientBusy(null);
     }
   }

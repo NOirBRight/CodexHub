@@ -40,6 +40,14 @@ test("Gateway connect toggle maps foreign ownership to takeover without a segmen
   assert.match(page, /switchClientMode\(clientId, runtimeOwner, takeoverRequired\)/);
   assert.match(page, /if \(!result\.applied\)/);
   assert.match(page, /onRefreshClients\(\{ force: true \}\)/);
+  assert.match(page, /listReachedClientBusyTarget/);
+  assert.match(page, /setClientBusy\(null\);/);
+  const switchFn = page.slice(
+    page.indexOf("async function switchClientMode"),
+    page.indexOf("async function refreshGatewayClients"),
+  );
+  assert.match(switchFn, /catch \{\s*setClientBusy\(null\);/);
+  assert.doesNotMatch(switchFn, /finally \{\s*setClientBusy\(null\);/);
 });
 
 test("Codex keeps connected surfaces visible for a foreign owner and takes over through the existing button", async () => {
