@@ -20,15 +20,15 @@ The repository-owned table of official model identity for Maintained Providers: 
 _Avoid_: five-level fill, guessed effort grades
 
 **Display Name**:
-The provider-independent label stored on a model (for example `GLM-5.3`). The Provider page and grouped Client pickers show this string.
+The provider-independent label stored on a model (for example `GLM-5.3`). The Provider page shows this string.
 _Avoid_: prefixed name, long name, catalog title
 
 **Display Prefix**:
-The Provider brand token used only to compose a Flat Label (`Ollama`, `Volc`, `Kimi CN`). It is not part of Display Name.
+The Provider brand token used only to compose a Flat Label (`Ollama`, `Volc`, `Kimi CN`, `CC`, `OC`, `xAI`). It is not part of Display Name.
 _Avoid_: provider alias
 
 **Flat Label**:
-Display Name with Display Prefix composed, used only on lists that mix more than one Provider (Gateway `/v1/models`). Official models keep their own short-name rule and do not compose a Prefix.
+Display Name with Display Prefix composed, used on lists that mix more than one Provider (Gateway `/v1/models`, and Client pickers that flatten groups, including Grok/T3 `/model`, OpenCode, Pi, OMP, and ZCode). Official models keep their own short-name rule and do not compose a Prefix. Grouped Client Provider Groups still put the Flat Label on the model row.
 _Avoid_: qualified display name, long name, prefixed display name
 
 **Owning module**:
@@ -60,7 +60,7 @@ One `codexhub-{provider}` entry in a Client that has a provider map, correspondi
 _Avoid_: injected provider, managed provider
 
 **Client Projection**:
-The derived model entries written into the Injected Block on Connect or republish. Identity and capabilities come from the Provider; the Client adapter only supplies that Client's file shape. Republish replaces the projection; the Client does not keep a second editable copy.
+The derived model entries written into the Injected Block on Connect or republish. Identity and capabilities come from the Provider; third-party Display Name is the Flat Label. The Client adapter only supplies that Client's file shape. Republish replaces the projection; the Client does not keep a second editable copy.
 _Avoid_: client catalog, client-owned models, synced copy
 
 **History Bucket**:

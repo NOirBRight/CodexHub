@@ -220,6 +220,18 @@ def display_name_for(model_id: str, policy: CatalogPolicy) -> str:
 _FLAT_LABEL_SEPARATORS = " \t/:_-"
 
 
+def _wire_id_and_leaf(*candidates: str) -> set[str]:
+    """Wire ids and their last path segment — previous catalog slugs (ADR-0011.4)."""
+    keys: set[str] = set()
+    for candidate in candidates:
+        key = canonical_model_id(candidate)
+        if not key:
+            continue
+        keys.add(key)
+        keys.add(key.split("/")[-1])
+    return keys
+
+
 def catalog_or_wire_display_name(
     stored: str | None,
     policy: CatalogPolicy,
@@ -227,9 +239,7 @@ def catalog_or_wire_display_name(
 ) -> str:
     """Stored Display Name, else catalog identity, else the short wire id."""
     stored_name = (stored or "").strip()
-    candidate_ids = [canonical_model_id(candidate) for candidate in candidates]
-    candidate_ids = [key for key in candidate_ids if key]
-    if stored_name and stored_name not in candidate_ids:
+    if stored_name and stored_name not in _wire_id_and_leaf(*candidates):
         return stored_name
     for candidate in candidates:
         key = canonical_model_id(candidate)
@@ -240,6 +250,22 @@ def catalog_or_wire_display_name(
         if key:
             return key.split("/")[-1]
     return ""
+
+
+# Long bundled prefixes → short mixed-list tokens. Lookup is case-insensitive.
+_CATALOG_PREFIX_ABBREVIATIONS = {
+    "command code": "CC",
+    "opencode": "OC",
+    "opencode go": "OC",
+}
+
+
+def mixed_list_prefix(display_prefix: str | None) -> str | None:
+    """Short Display Prefix for mixed-Provider lists (ADR-0011)."""
+    prefix = (display_prefix or "").strip()
+    if not prefix or prefix.endswith("/"):
+        return None
+    return _CATALOG_PREFIX_ABBREVIATIONS.get(prefix.casefold(), prefix)
 
 
 def compose_flat_label(display_prefix: str | None, display_name: str) -> str:
@@ -259,8 +285,14 @@ def catalog_owned_display_name(
     stored: str | None,
     display_prefix: str | None,
     catalog_name: str,
+    *identity_candidates: str,
 ) -> str | None:
-    """Rewrite a baked-in prefixed catalog string; keep a true user override."""
+    """Rewrite a previous catalog string; keep a true user override.
+
+    Wire id / leaf matches are the previous catalog slug (ADR-0011.4), not a
+    typed override. A stored value that matches neither the current catalog
+    string, a composed Flat Label, nor that slug is preserved.
+    """
     catalog = (catalog_name or "").strip()
     if not catalog:
         return stored
@@ -270,6 +302,11 @@ def catalog_owned_display_name(
     if value == catalog:
         return catalog
     if value == compose_flat_label(display_prefix, catalog):
+        return catalog
+    short_prefix = mixed_list_prefix(display_prefix)
+    if short_prefix and value == compose_flat_label(short_prefix, catalog):
+        return catalog
+    if identity_candidates and value in _wire_id_and_leaf(*identity_candidates):
         return catalog
     return value
 

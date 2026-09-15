@@ -9,11 +9,15 @@ export type ModelLabelProvider = {
   display_prefix?: string | null;
 };
 
+const PROVIDER_PREFIX_ALIASES: Record<string, readonly string[]> = {
+  "opencode-go": ["OpenCode", "OC"],
+  commandcode: ["Command Code", "CC"],
+};
+
 export function providerDisplayPrefixes(provider: ModelLabelProvider) {
   const prefixes = [
     provider.display_prefix,
-    provider.id === "opencode-go" ? "OpenCode" : null,
-    provider.id === "commandcode" ? "Command Code" : null,
+    ...(PROVIDER_PREFIX_ALIASES[provider.id ?? ""] ?? []),
   ].filter((value): value is string => Boolean(value?.trim()));
   return [...new Set(prefixes)].sort((a, b) => b.length - a.length);
 }

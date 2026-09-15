@@ -778,7 +778,21 @@ fn display_name_starts_with_prefix(display_name: &str, display_prefix: &str) -> 
     }
 }
 
-fn compose_flat_label(display_prefix: Option<&str>, display_name: &str) -> String {
+pub(crate) fn mixed_list_prefix(display_prefix: Option<&str>) -> Option<String> {
+    let prefix = display_prefix
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if prefix.ends_with('/') {
+        return None;
+    }
+    Some(match prefix.to_ascii_lowercase().as_str() {
+        "command code" => "CC".to_string(),
+        "opencode" | "opencode go" => "OC".to_string(),
+        _ => prefix.to_string(),
+    })
+}
+
+pub(crate) fn compose_flat_label(display_prefix: Option<&str>, display_name: &str) -> String {
     let prefix = display_prefix
         .map(str::trim)
         .filter(|value| !value.is_empty());
@@ -795,10 +809,29 @@ fn compose_flat_label(display_prefix: Option<&str>, display_name: &str) -> Strin
     format!("{prefix} {name}")
 }
 
+fn is_previous_catalog_slug(value: &str, identities: &[&str]) -> bool {
+    identities.iter().any(|identity| {
+        let id = identity.trim();
+        if id.is_empty() {
+            return false;
+        }
+        if value == id {
+            return true;
+        }
+        let leaf = id
+            .rsplit('/')
+            .next()
+            .filter(|part| !part.is_empty())
+            .unwrap_or(id);
+        value == leaf
+    })
+}
+
 fn catalog_owned_display_name(
     stored: Option<&str>,
     display_prefix: Option<&str>,
     catalog_name: &str,
+    identities: &[&str],
 ) -> Option<String> {
     let catalog = catalog_name.trim();
     if catalog.is_empty() {
@@ -808,6 +841,13 @@ fn catalog_owned_display_name(
         return stored.map(str::to_string);
     };
     if value == catalog || value == compose_flat_label(display_prefix, catalog) {
+        return Some(catalog.to_string());
+    }
+    let short_prefix = mixed_list_prefix(display_prefix);
+    if value == compose_flat_label(short_prefix.as_deref(), catalog) {
+        return Some(catalog.to_string());
+    }
+    if is_previous_catalog_slug(value, identities) {
         return Some(catalog.to_string());
     }
     Some(value.to_string())
@@ -820,19 +860,28 @@ fn refresh_catalog_display_names(providers: &mut [Provider], catalog: &[Provider
         };
         let prefix = provider.display_prefix.as_deref();
         for model in &mut provider.models {
-            let Some(catalog_name) = preset
+            let Some(catalog_model) = preset
                 .models
                 .iter()
                 .find(|candidate| candidate.id == model.id)
-                .and_then(|candidate| candidate.display_name.as_deref())
+            else {
+                continue;
+            };
+            let Some(catalog_name) = catalog_model
+                .display_name
+                .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             else {
                 continue;
             };
-            if let Some(refreshed) =
-                catalog_owned_display_name(model.display_name.as_deref(), prefix, catalog_name)
-            {
+            let identities = [model.id.as_str(), catalog_model.id.as_str()];
+            if let Some(refreshed) = catalog_owned_display_name(
+                model.display_name.as_deref(),
+                prefix,
+                catalog_name,
+                &identities,
+            ) {
                 model.display_name = Some(refreshed);
             }
         }

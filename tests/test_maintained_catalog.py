@@ -14,6 +14,7 @@ from maintained_catalog import (
     reasoning_levels_for,
     resolve_model,
     thinking_payload,
+    third_party_display_name,
 )
 
 
@@ -94,8 +95,15 @@ class MaintainedCatalogTests(unittest.TestCase):
         self.assertIn("meta/muse-spark-1.3", ids)
         gpt = resolve_model("commandcode", "gpt-5.6-sol")
         assert gpt is not None
-        self.assertEqual(gpt.display_name, "gpt-5.6-sol")
+        self.assertEqual(gpt.display_name, "GPT 5.6 Sol")
         self.assertFalse(gpt.display_name.startswith("Command Code"))
+        self.assertFalse(gpt.display_name.startswith("CC"))
+        flash = resolve_model("commandcode", "deepseek/deepseek-v4-flash")
+        assert flash is not None
+        self.assertEqual(flash.display_name, "DeepSeek V4 Flash")
+        self.assertEqual(third_party_display_name("qwen/qwen3.8-27b"), "Qwen3.8 27B")
+        self.assertEqual(third_party_display_name("stepfun/step-3.7-flash"), "Step 3.7 Flash")
+        self.assertEqual(third_party_display_name("unknown-leaf-xyz"), "unknown-leaf-xyz")
         self.assertEqual(gpt.input_modalities, ("text", "image"))
         self.assertEqual(gpt.default_reasoning_level, "high")
         glm = resolve_model("commandcode", "zai-org/glm-5.3")

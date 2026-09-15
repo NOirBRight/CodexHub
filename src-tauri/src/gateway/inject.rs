@@ -384,10 +384,12 @@ pub(in crate::gateway) fn gateway_models_from_sources(
                 .filter(|levels| !levels.is_empty());
             output.push(GatewayModel {
                 id: model_id.clone(),
-                display_name: projection_display_name(
-                    model.display_name.as_deref(),
-                    model.id.trim(),
-                ),
+                display_name: {
+                    let short_name =
+                        projection_display_name(model.display_name.as_deref(), model.id.trim());
+                    let prefix = config::mixed_list_prefix(provider.display_prefix.as_deref());
+                    config::compose_flat_label(prefix.as_deref(), &short_name)
+                },
                 source: provider.name.clone(),
                 source_kind: "external".to_string(),
                 supports_responses: provider
@@ -425,6 +427,7 @@ pub(in crate::gateway) fn gateway_models_from_sources(
 
 /// Display Name is short (ADR-0011). A stored value that only repeats the
 /// namespaced wire id is treated as missing; use the last path segment.
+/// Callers compose the mixed-list Flat Label on top of this string.
 pub(in crate::gateway) fn projection_display_name(stored: Option<&str>, model_id: &str) -> String {
     let leaf = short_wire_id(model_id);
     match stored.map(str::trim).filter(|name| !name.is_empty()) {

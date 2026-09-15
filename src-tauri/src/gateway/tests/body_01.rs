@@ -2602,7 +2602,7 @@ fn client_projection_name_and_limits_providers() -> Vec<Provider> {
 }
 
 #[test]
-fn client_projection_uses_short_display_name_and_provider_max_output() {
+fn client_projection_uses_flat_label_and_provider_max_output() {
     let root = unique_temp_dir("codexhub-client-projection-names");
     let models_path = root.join("models.json");
     let v2_config_path = root.join("v2").join("config.json");
@@ -2621,19 +2621,19 @@ fn client_projection_uses_short_display_name_and_provider_max_output() {
         gateway_by_id
             .get("volc/glm-5.3")
             .map(|model| model.display_name.as_str()),
-        Some("GLM-5.3")
+        Some("Volc GLM-5.3")
     );
     assert_eq!(
         gateway_by_id
             .get("volc/custom-flash")
             .map(|model| model.display_name.as_str()),
-        Some("My Flash")
+        Some("Volc My Flash")
     );
     assert_eq!(
         gateway_by_id
             .get("volc/no-name")
             .map(|model| model.display_name.as_str()),
-        Some("no-name")
+        Some("Volc no-name")
     );
     assert_eq!(
         gateway_by_id
@@ -2650,15 +2650,15 @@ fn client_projection_uses_short_display_name_and_provider_max_output() {
     );
     assert_eq!(
         opencode_value.pointer("/provider/codexhub-volc/models/glm-5.3/name"),
-        Some(&serde_json::json!("GLM-5.3"))
+        Some(&serde_json::json!("Volc GLM-5.3"))
     );
     assert_eq!(
         opencode_value.pointer("/provider/codexhub-volc/models/custom-flash/name"),
-        Some(&serde_json::json!("My Flash"))
+        Some(&serde_json::json!("Volc My Flash"))
     );
     assert_eq!(
         opencode_value.pointer("/provider/codexhub-volc/models/no-name/name"),
-        Some(&serde_json::json!("no-name"))
+        Some(&serde_json::json!("Volc no-name"))
     );
 
     let pi_text = pi_models_text(&models_path, &settings, &providers, "volc/glm-5.3").unwrap();
@@ -2670,16 +2670,16 @@ fn client_projection_uses_short_display_name_and_provider_max_output() {
         .iter()
         .map(|model| (model["id"].as_str().unwrap().to_string(), model.clone()))
         .collect::<HashMap<_, _>>();
-    assert_eq!(pi_by_id["glm-5.3"]["name"], serde_json::json!("GLM-5.3"));
-    assert_eq!(pi_by_id["custom-flash"]["name"], serde_json::json!("My Flash"));
-    assert_eq!(pi_by_id["no-name"]["name"], serde_json::json!("no-name"));
+    assert_eq!(pi_by_id["glm-5.3"]["name"], serde_json::json!("Volc GLM-5.3"));
+    assert_eq!(pi_by_id["custom-flash"]["name"], serde_json::json!("Volc My Flash"));
+    assert_eq!(pi_by_id["no-name"]["name"], serde_json::json!("Volc no-name"));
     assert_eq!(pi_by_id["glm-5.3"]["maxTokens"], serde_json::json!(128_000));
     assert!(pi_by_id["no-name"].get("maxTokens").is_none());
 
     let omp_text = omp_models_yml_text(None, &settings, &providers, "volc/glm-5.3").unwrap();
-    assert!(omp_text.contains("name: \"GLM-5.3\""));
-    assert!(omp_text.contains("name: \"My Flash\""));
-    assert!(omp_text.contains("name: \"no-name\""));
+    assert!(omp_text.contains("name: \"Volc GLM-5.3\""));
+    assert!(omp_text.contains("name: \"Volc My Flash\""));
+    assert!(omp_text.contains("name: \"Volc no-name\""));
     assert!(omp_text.contains("maxTokens: 128000"));
     assert!(!omp_text.contains("maxTokens: 32768"));
 
@@ -2696,7 +2696,7 @@ fn client_projection_uses_short_display_name_and_provider_max_output() {
         zcode_catalog_value.pointer("/providers/0/name"),
         Some(&serde_json::json!("CodexHub Volcengine"))
     );
-    assert_eq!(zcode_by_id["glm-5.3"]["name"], serde_json::json!("GLM-5.3"));
+    assert_eq!(zcode_by_id["glm-5.3"]["name"], serde_json::json!("Volc GLM-5.3"));
     assert_eq!(
         zcode_by_id["glm-5.3"]["maxOutputTokens"],
         serde_json::json!(128_000)
@@ -2771,7 +2771,33 @@ fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
                 ..Model::default()
             },
         ],
-    }];
+    },
+    Provider {
+        id: "opencode-go".to_string(),
+        name: "OpenCode Go".to_string(),
+        base_url: "https://opencode.example.test/v1".to_string(),
+        api_key: None,
+        upstream_format: None,
+        available_upstream_formats: None,
+        tool_protocol: None,
+        tool_surface_strategy: None,
+        reports_cached_input_tokens: None,
+        supports_developer_role: None,
+        display_prefix: Some("OpenCode".to_string()),
+        auth_capabilities: None,
+        onboarding_hint: None,
+        discovery_policy: None,
+        sort_order: Some(2),
+        enabled: true,
+        locked: false,
+        models: vec![Model {
+            id: "deepseek-v4.1-flash".to_string(),
+            display_name: Some("DeepSeek V4.1 Flash".to_string()),
+            gateway_exported: true,
+            ..Model::default()
+        }],
+    },
+    ];
 
     let gateway_by_id = gateway_models_from_config(&settings, &providers)
         .into_iter()
@@ -2781,19 +2807,25 @@ fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
         gateway_by_id
             .get("commandcode/deepseek/deepseek-v4.1-flash")
             .map(|model| model.display_name.as_str()),
-        Some("deepseek-v4.1-flash")
+        Some("CC deepseek-v4.1-flash")
     );
     assert_eq!(
         gateway_by_id
             .get("commandcode/deepseek/deepseek-v4.1-flash-dup")
             .map(|model| model.display_name.as_str()),
-        Some("deepseek-v4.1-flash-dup")
+        Some("CC deepseek-v4.1-flash-dup")
     );
     assert_eq!(
         gateway_by_id
             .get("commandcode/moonshotai/kimi-k3")
             .map(|model| model.display_name.as_str()),
-        Some("Kimi K3")
+        Some("CC Kimi K3")
+    );
+    assert_eq!(
+        gateway_by_id
+            .get("opencode-go/deepseek-v4.1-flash")
+            .map(|model| model.display_name.as_str()),
+        Some("OC DeepSeek V4.1 Flash")
     );
 
     let grok_text = grok_config_text(
@@ -2808,14 +2840,18 @@ fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
         "wire id stays namespaced: {grok_text}"
     );
     assert!(
-        grok_text.contains("name = \"CodexHub deepseek-v4.1-flash\""),
-        "Grok Display Name must be the short wire id: {grok_text}"
+        grok_text.contains("name = \"CodexHub CC deepseek-v4.1-flash\""),
+        "Grok Display Name must carry the short provider token: {grok_text}"
     );
     assert!(
         !grok_text.contains("name = \"CodexHub deepseek/deepseek-v4.1-flash\""),
         "Grok Display Name kept a vendor path: {grok_text}"
     );
-    assert!(grok_text.contains("name = \"CodexHub Kimi K3\""));
+    assert!(grok_text.contains("name = \"CodexHub CC Kimi K3\""));
+    assert!(
+        grok_text.contains("name = \"CodexHub OC DeepSeek V4.1 Flash\""),
+        "Grok mixed list must distinguish the OpenCode copy: {grok_text}"
+    );
 
     let opencode_text = opencode_config_text(
         None,
@@ -2831,7 +2867,7 @@ fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
                 .get("deepseek/deepseek-v4.1-flash")
                 .and_then(|model| model.get("name"))
         }),
-        Some(&serde_json::json!("deepseek-v4.1-flash"))
+        Some(&serde_json::json!("CC deepseek-v4.1-flash"))
     );
 
     let pi_root = unique_temp_dir("codexhub-vendor-path-pi");
@@ -2853,7 +2889,7 @@ fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
                 model.get("id") == Some(&serde_json::json!("deepseek/deepseek-v4.1-flash"))
             }))
             .and_then(|model| model.get("name")),
-        Some(&serde_json::json!("deepseek-v4.1-flash"))
+        Some(&serde_json::json!("CC deepseek-v4.1-flash"))
     );
 
     let omp_text = omp_models_yml_text(
@@ -2864,8 +2900,8 @@ fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
     )
     .unwrap();
     assert!(
-        omp_text.contains("name: \"deepseek-v4.1-flash\""),
-        "OMP picker must use the short Display Name: {omp_text}"
+        omp_text.contains("name: \"CC deepseek-v4.1-flash\""),
+        "OMP picker must carry the short provider token: {omp_text}"
     );
     assert!(
         !omp_text.contains("name: \"deepseek/deepseek-v4.1-flash\""),
@@ -2892,6 +2928,6 @@ fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
                 model.get("id") == Some(&serde_json::json!("deepseek/deepseek-v4.1-flash"))
             }))
             .and_then(|model| model.get("name")),
-        Some(&serde_json::json!("deepseek-v4.1-flash"))
+        Some(&serde_json::json!("CC deepseek-v4.1-flash"))
     );
 }

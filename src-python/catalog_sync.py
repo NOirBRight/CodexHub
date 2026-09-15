@@ -34,6 +34,7 @@ from catalog import (
     catalog_visibility_diagnostics,
     compose_flat_label,
     display_name_for,
+    mixed_list_prefix,
     is_catalog_model_listable,
     is_internal_model,
     load_catalog_models,
@@ -2388,7 +2389,7 @@ def build_ollama_model(
         slug,
     )
     raw_prefix = metadata.get("display_prefix")
-    display_prefix = (
+    display_prefix = mixed_list_prefix(
         raw_prefix.strip()
         if isinstance(raw_prefix, str) and raw_prefix.strip()
         else "Ollama"
@@ -2525,11 +2526,12 @@ def build_external_provider_model(
 
     alias = str(external_model["alias"])
     raw_prefix = external_model.get("display_prefix")
-    display_prefix = (
+    stored_prefix = (
         raw_prefix.strip()
         if isinstance(raw_prefix, str) and raw_prefix.strip()
         else None
     )
+    display_prefix = mixed_list_prefix(stored_prefix)
     wire_id = str(external_model.get("upstream_model") or alias.rsplit("/", 1)[-1])
 
     model["slug"] = alias
@@ -2542,7 +2544,12 @@ def build_external_provider_model(
     )
     model["display_name"] = compose_flat_label(display_prefix, display_name)
     description = external_model.get("description")
-    description_brand = display_prefix or str(external_model.get("provider_alias") or "provider")
+    raw_name = external_model.get("provider_name")
+    description_brand = (
+        raw_name.strip()
+        if isinstance(raw_name, str) and raw_name.strip()
+        else stored_prefix or str(external_model.get("provider_alias") or "provider")
+    )
     model["description"] = (
         description
         if isinstance(description, str) and description.strip()

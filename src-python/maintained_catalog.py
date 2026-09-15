@@ -296,6 +296,73 @@ _HIGH_XHIGH = ("high", "xhigh")
 _LOW_HIGH = ("low", "high")
 
 
+_LEAF_DISPLAY_NAMES = {
+    "grok-4.6": "Grok 4.6",
+    "grok-4.5": "Grok 4.5",
+    "gpt-5.6-luna": "GPT 5.6 Luna",
+    "gpt-5.6-sol": "GPT 5.6 Sol",
+    "gpt-5.6-terra": "GPT 5.6 Terra",
+    "gpt-5.5": "GPT 5.5",
+    "gpt-5.4": "GPT 5.4",
+    "gpt-5.4-mini": "GPT 5.4 Mini",
+    "gpt-5.3-codex": "GPT 5.3 Codex",
+    "muse-spark-1.1": "Muse Spark 1.1",
+    "muse-spark-1.2": "Muse Spark 1.2",
+    "muse-spark-1.2-contributor": "Muse Spark 1.2 Contributor",
+    "muse-spark-1.3": "Muse Spark 1.3",
+    "muse-spark-1.3-contributor": "Muse Spark 1.3 Contributor",
+    "glm-5.3-flash": "GLM-5.3 Flash",
+    "glm-5.3": "GLM-5.3",
+    "glm-5.2": "GLM-5.2",
+    "kimi-k3": "Kimi K3",
+    "kimi-k2.7-code": "Kimi K2.7 Code",
+    "kimi-k2.7-code-highspeed": "Kimi K2.7 Code Highspeed",
+    "kimi-k2.6": "Kimi K2.6",
+    "kimi-k2.5": "Kimi K2.5",
+    "deepseek-v4-pro": "DeepSeek V4 Pro",
+    "deepseek-v4-flash": "DeepSeek V4 Flash",
+    "deepseek-v4-flash-vision-exp": "DeepSeek V4 Flash Vision Exp",
+    "deepseek-v4-flash-fast": "DeepSeek V4 Flash Fast",
+    "mimo-v2.5": "MiMo V2.5",
+    "mimo-v2.5-pro": "MiMo V2.5 Pro",
+    "hy3": "Hy3",
+    "hy3-preview": "Hy3 Preview",
+    "hy4-preview": "Hy4 Preview",
+    "minimax-m3": "MiniMax M3",
+    "minimax-m2.7": "MiniMax M2.7",
+    "minimax-m2.7-free": "MiniMax M2.7 Free",
+    "minimax-m2.5": "MiniMax M2.5",
+    "qwen3.8-max": "Qwen3.8 Max",
+    "qwen3.8-flash": "Qwen3.8 Flash",
+    "qwen3.8-max-0902": "Qwen3.8 Max 0902",
+    "qwen3.8-27b": "Qwen3.8 27B",
+    "step-3.7-flash": "Step 3.7 Flash",
+    "step-3.5-flash": "Step 3.5 Flash",
+    "hy3-paid": "Hy3 Paid",
+    "gemini-3.8-flash": "Gemini 3.8 Flash",
+    "gemini-3.7-flash": "Gemini 3.7 Flash",
+    "gemini-3.6-flash": "Gemini 3.6 Flash",
+    "gemini-3.5-flash": "Gemini 3.5 Flash",
+    "gemini-3.5-flash-lite": "Gemini 3.5 Flash Lite",
+    "gemini-3.1-flash-lite": "Gemini 3.1 Flash Lite",
+    "fugu-ultra": "Fugu Ultra",
+    "claude-sonnet-5": "Claude Sonnet 5",
+    "claude-sonnet-4-6": "Claude Sonnet 4.6",
+    "claude-fable-5": "Claude Fable 5",
+    "claude-fable-5-1": "Claude Fable 5.1",
+    "claude-opus-5": "Claude Opus 5",
+    "claude-opus-4-8": "Claude Opus 4.8",
+    "claude-opus-4-7": "Claude Opus 4.7",
+    "claude-haiku-4-5-20251001": "Claude Haiku 4.5",
+}
+
+
+def third_party_display_name(model_id: str) -> str:
+    """Provider-independent short label from a wire id (ADR-0011)."""
+    leaf = str(model_id or "").split("/")[-1]
+    return _LEAF_DISPLAY_NAMES.get(leaf) or leaf
+
+
 def _commandcode_rows() -> tuple[MaintainedModel, ...]:
     defaults = {
         "z-ai/glm-5.3-flash": "max",
@@ -371,13 +438,12 @@ def _commandcode_rows() -> tuple[MaintainedModel, ...]:
     )
     rows: list[MaintainedModel] = []
     for index, (model_id, levels, context_window, max_output_tokens) in enumerate(specs, 1):
-        leaf = model_id.split("/")[-1]
         default = defaults.get(model_id, levels[-1] if levels else None)
         rows.append(
             _row(
                 "commandcode",
                 model_id,
-                leaf,
+                third_party_display_name(model_id),
                 context_window,
                 max_output_tokens,
                 index,

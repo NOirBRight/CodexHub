@@ -60,6 +60,23 @@ test("namespaced wire ids fall back to the last path segment", () => {
   );
 });
 
+test("CC and OC prefixes are stripped on the provider page", () => {
+  assert.equal(
+    exported.displayModelName(
+      model("deepseek/deepseek-v4-flash", { display_name: "CC DeepSeek V4 Flash" }),
+      { id: "commandcode", name: "Command Code", display_prefix: "CC" },
+    ),
+    "DeepSeek V4 Flash",
+  );
+  assert.equal(
+    exported.displayModelName(
+      model("glm-5.3-flash", { display_name: "OC GLM-5.3 Flash" }),
+      { id: "opencode-go", name: "OpenCode Go", display_prefix: "OC" },
+    ),
+    "GLM-5.3 Flash",
+  );
+});
+
 test("generic provider names are not stripped from model labels", () => {
   assert.equal(
     exported.displayModelName(
