@@ -2,10 +2,8 @@
 set -euo pipefail
 # shellcheck source=guard.sh
 source "$CODEXHUB_TRAY_LAB/guard.sh"
-export WAYLAND_DISPLAY=wayland-tray-lab
-export GDK_BACKEND=wayland
-export CODEXHUB_RUNTIME_HOME="$CODEXHUB_TRAY_LAB/user/app-runtime"
-export CODEXHUB_RESOURCE_ROOT=/mnt
+# shellcheck source=tray-app-env.sh
+source "$CODEXHUB_TRAY_LAB/tray-app-env.sh"
 mkdir -p "$CODEXHUB_RUNTIME_HOME/proxy"
 printf '%s\n' '{"auto_start_software":false,"auto_start_gateway":false}' > "$CODEXHUB_RUNTIME_HOME/proxy/settings.json"
 for _ in $(seq 1 30); do

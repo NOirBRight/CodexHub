@@ -6,7 +6,7 @@ exec bwrap \
   --ro-bind / / \
   --tmpfs /tmp \
   --bind "$CODEXHUB_TRAY_LAB" "$CODEXHUB_TRAY_LAB" \
-  --tmpfs /home/noirbright \
+  --tmpfs "$HOME" \
   --ro-bind "$CODEXHUB_TRAY_REPO" /mnt \
   --tmpfs /run \
   --dev /dev \

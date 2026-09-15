@@ -145,11 +145,7 @@ prepare_lab() {
   cp -a "$script_dir/." "$lab_root/"
   write_bus_conf
   if [[ ! -f "$lab_root/packages/gnome-shell-ubuntu-extensions_${deb_version}_all.deb" ]]; then
-    if [[ -f /tmp/codexhub-tray-lab/packages/gnome-shell-ubuntu-extensions_${deb_version}_all.deb ]]; then
-      cp /tmp/codexhub-tray-lab/packages/gnome-shell-ubuntu-extensions_${deb_version}_all.deb "$lab_root/packages/"
-    else
-      (cd "$lab_root/packages" && apt-get download "gnome-shell-ubuntu-extensions=${deb_version}")
-    fi
+    (cd "$lab_root/packages" && apt-get download "gnome-shell-ubuntu-extensions=${deb_version}")
   fi
   find "$lab_root/stock" -mindepth 1 -delete
   dpkg-deb -x "$lab_root/packages/gnome-shell-ubuntu-extensions_${deb_version}_all.deb" "$lab_root/stock"
