@@ -13,7 +13,8 @@ const stripped = displaySource
   .replace(/export function/g, "function");
 const js = ts.transpileModule(
   [
-    "function displayModel(model) { return (model.display_name && String(model.display_name).trim()) || model.id; }",
+    "function shortWireDisplayName(stored, modelId) { const id = (modelId && String(modelId).trim()) || ''; const leaf = id.split('/').filter(Boolean).pop() || id; const name = (stored && String(stored).trim()) || ''; if (!name || name === id || name === leaf) return leaf; return name; }",
+    "function displayModel(model) { return shortWireDisplayName(model.display_name, model.id); }",
     "function normalizeOfficialModelId(value) { value = String(value).trim(); if (value.startsWith('openai/gpt-')) return value.slice('openai/'.length); return value; }",
     stripped,
   ].join("\n"),
@@ -36,6 +37,26 @@ test("Command Code display names drop the provider prefix", () => {
       { id: "commandcode", name: "Command Code", display_prefix: "Command Code" },
     ),
     "mimo-v2.5-pro",
+  );
+});
+
+test("namespaced wire ids fall back to the last path segment", () => {
+  assert.equal(
+    exported.displayModelName(model("deepseek/deepseek-v4.1-flash"), {
+      id: "commandcode",
+      name: "Command Code",
+      display_prefix: "Command Code",
+    }),
+    "deepseek-v4.1-flash",
+  );
+  assert.equal(
+    exported.displayModelName(
+      model("deepseek/deepseek-v4.1-flash", {
+        display_name: "deepseek/deepseek-v4.1-flash",
+      }),
+      { id: "commandcode", name: "Command Code", display_prefix: "Command Code" },
+    ),
+    "deepseek-v4.1-flash",
   );
 });
 

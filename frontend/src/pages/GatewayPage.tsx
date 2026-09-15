@@ -16,10 +16,12 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { DebugDiagnosticsOverlay } from "../components/DebugDiagnosticsPanel";
 import { EndpointRow } from "../components/EndpointRow";
+import { GatewayClientCard } from "../components/GatewayClientCard";
 import {
+  clientIdFromBusyKey,
   connectionStateFromInfo,
-  GatewayClientCard,
-} from "../components/GatewayClientCard";
+  listReachedClientBusyTarget,
+} from "../lib/clientConnectionState";
 import {
   BACKEND_DISCONNECTED_TOAST_KEY,
   useToasts,
@@ -76,6 +78,7 @@ interface GatewayPageProps {
   clientInfos: GatewayClientInfo[];
   onApplySettings: (settings: Settings) => Promise<string>;
   onRefreshClients: (options?: {
+    force?: boolean;
     includeClientVersions?: boolean;
   }) => Promise<void>;
   onStartProxy: () => Promise<AppStatus | null>;
@@ -240,6 +243,16 @@ function GatewayPageImpl({
     () => new Map(clientInfos.map((client) => [client.id, client])),
     [clientInfos],
   );
+
+  useEffect(() => {
+    if (!clientBusy) {
+      return;
+    }
+    const info = clientInfoById.get(clientIdFromBusyKey(clientBusy));
+    if (listReachedClientBusyTarget(clientBusy, info)) {
+      setClientBusy(null);
+    }
+  }, [clientBusy, clientInfoById]);
 
   function markCopied(target: string) {
     setCopiedTarget(target);
@@ -415,13 +428,16 @@ function GatewayPageImpl({
         ...persistentActionBase(),
         loading: t("gateway.switchClient", { clientName, routeName }),
         work: async () => {
-          await api.switchGatewayClientRoute(
+          const result = await api.switchGatewayClientRoute(
             clientId,
             owner,
             defaultModel,
             shouldForceTakeover,
           );
-          await onRefreshClients();
+          if (!result.applied) {
+            throw new Error(result.message);
+          }
+          await onRefreshClients({ force: true });
         },
         success: () => ({
           text: t("gateway.switchClientDone", { routeName }),
@@ -430,8 +446,6 @@ function GatewayPageImpl({
       });
       setError(null);
     } catch {
-      // Toast already updated by runPersistentAction.
-    } finally {
       setClientBusy(null);
     }
   }
@@ -443,7 +457,7 @@ function GatewayPageImpl({
         ...persistentActionBase(),
         loading: t("gateway.refreshingClients"),
         work: async () => {
-          await onRefreshClients({ includeClientVersions: true });
+          await onRefreshClients({ force: true, includeClientVersions: true });
           setClientBusy(null);
         },
         success: () => ({
@@ -547,7 +561,7 @@ function GatewayPageImpl({
           const report = connect
             ? await api.dshClientConnect()
             : await api.dshClientDisconnect();
-          await onRefreshClients();
+          await onRefreshClients({ force: true });
           return report;
         },
         success: (report) => ({
@@ -567,8 +581,6 @@ function GatewayPageImpl({
       });
       setError(null);
     } catch {
-      // Toast already updated by runPersistentAction.
-    } finally {
       setClientBusy(null);
     }
   }

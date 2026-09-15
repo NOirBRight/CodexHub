@@ -30,6 +30,24 @@ for (const oldFails of [false,true]) test(`older usage ${oldFails?'error':'respo
   assert.equal(current.gatewayUsageSnapshot,'new 1m window');
 });
 
+test('force cache writes commit without waiting for startTransition', async () => {
+  const source=fs.readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
+  const body=source.slice(source.indexOf('  const runCachedRequest = useCallback('),source.indexOf('  const setRuntimeCacheData = useCallback('));
+  assert.match(body, /const publishCacheUpdate = \(force: boolean \| undefined, commit: \(\) => void\) => \{/);
+  assert.match(body, /publishCacheUpdate\(options\?\.force, commit\);/);
+  const code=ts.transpileModule(body+'\nglobalThis.run = runCachedRequest;', {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+  let current={};
+  let transitioned=false;
+  const context={useCallback:f=>f,runtimeInflight:{current:{}},runtimeRef:{current:{}},startUiTransition:f=>{transitioned=true;f()},setRuntime:f=>{current=f(current)},setCacheData:(o,k,v)=>({...o,[k]:v}),setCacheError:(o,k,v)=>({...o,[k]:v}),messageFromError:String,setBanner:()=>{}};
+  vm.createContext(context);vm.runInContext(code,context);
+  await context.run('gatewayClients',()=>Promise.resolve('connected'),{force:true,quiet:true});
+  assert.equal(current.gatewayClients,'connected');
+  assert.equal(transitioned,false);
+  await context.run('gatewayEvents',()=>Promise.resolve('later'),{quiet:true});
+  assert.equal(current.gatewayEvents,'later');
+  assert.equal(transitioned,true);
+});
+
 test('workspace reminder does not restart Codex or watch Desktop', () => {
   const source=fs.readFileSync(new URL('../src/pages/ProvidersPage.tsx',import.meta.url),'utf8');
   assert.match(source, /onDismissRestartReminder=\{\(\) => updateRestartReminder\(false\)\}/);

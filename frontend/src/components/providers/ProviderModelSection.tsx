@@ -747,7 +747,10 @@ export function SwitchControl({
       aria-describedby={ariaDescribedBy}
     >
       <span className={showLabel ? "truncate" : "sr-only"}>{label}</span>
-      <span className="ws-model-switch relative inline-flex h-5 w-9 shrink-0 items-center">
+      <span
+        className="ws-model-switch relative inline-flex h-5 w-9 shrink-0 items-center"
+        data-on={checked ? "" : undefined}
+      >
         <input
           type="checkbox"
           className="peer sr-only"
@@ -760,7 +763,9 @@ export function SwitchControl({
             "absolute inset-0 rounded-full border transition-colors",
             disabled
               ? "border-slate-200 bg-slate-200"
-              : "border-line bg-slate-200 peer-checked:border-action peer-checked:bg-action",
+              : checked
+                ? "border-action bg-action"
+                : "border-line bg-slate-200",
           )}
         />
         <span

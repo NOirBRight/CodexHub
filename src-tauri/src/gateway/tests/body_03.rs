@@ -67,6 +67,76 @@ fn opencode_apply_records_baseline_before_first_managed_write() {
 }
 
 #[test]
+fn opencode_apply_creates_config_when_absent() {
+    let _guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _official_home = isolated_official_models_home();
+    let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
+    let root = unique_temp_dir("codexhub-opencode-absent-first-apply");
+    let config_path = root.join("opencode.json");
+    let backup_root = root.join("backups");
+    fs::create_dir_all(&root).unwrap();
+    std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
+    let settings = Settings::default();
+
+    let result = super::apply_opencode_config_with_paths(
+        &config_path,
+        &[stable_root(backup_root.clone())],
+        &settings,
+        &[],
+        "openai/gpt-5.5",
+    )
+    .unwrap();
+
+    assert!(
+        result.applied,
+        "first connect with no OpenCode config must write an injected file, got {:?}",
+        result
+    );
+    let written = fs::read_to_string(&config_path).unwrap();
+    assert!(
+        super::is_opencode_codexhub_config(&written),
+        "written OpenCode config must be detected as bound: {written}"
+    );
+    let baseline = super::read_rollback_baseline("opencode").unwrap().unwrap();
+    restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
+    assert_eq!(
+        baseline.files.get("opencode.json"),
+        Some(&super::BaselineFile::Absent)
+    );
+
+    let restored = super::restore_opencode_config_with_backup_roots(
+        &config_path,
+        &[stable_root(backup_root.clone())],
+    )
+    .unwrap();
+    assert!(restored.applied);
+    assert!(
+        !config_path.exists(),
+        "disconnect after a first-created config must restore the absent baseline"
+    );
+
+    let reapplied = super::apply_opencode_config_with_paths(
+        &config_path,
+        &[stable_root(backup_root)],
+        &settings,
+        &[],
+        "openai/gpt-5.5",
+    )
+    .unwrap();
+    assert!(
+        reapplied.applied,
+        "enable after cancel/disconnect must recreate the injected OpenCode config, got {:?}",
+        reapplied
+    );
+    assert!(super::is_opencode_codexhub_config(
+        &fs::read_to_string(&config_path).unwrap()
+    ));
+}
+
+#[test]
 fn pi_apply_records_absence_tombstone_before_first_managed_write() {
     let _guard = TEST_ENV_LOCK
         .get_or_init(|| Mutex::new(()))

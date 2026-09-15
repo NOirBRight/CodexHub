@@ -494,12 +494,13 @@ dependencies = [
 
 [[package]]
 name = "codexhub"
-version = "0.2.12"
+version = "0.2.14"
 dependencies = [
  "cairo-rs",
  "chrono",
  "dirs 5.0.1",
  "gdk-pixbuf",
+ "gdkx11",
  "glib",
  "gtk",
  "libc",
@@ -518,6 +519,7 @@ dependencies = [
  "toml 0.8.2",
  "which",
  "windows-sys 0.59.0",
+ "x11",
 ]
 
 [[package]]
@@ -1344,6 +1346,7 @@ version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e2e7445fe01ac26f11601db260dd8608fe172514eb63b3b5e261ea6b0f4428d"
 dependencies = [
+ "cairo-sys-rs",
  "gdk-sys",
  "glib-sys",
  "libc",

@@ -38,9 +38,7 @@ pub(crate) use desktop_commands::{
     generate_catalog_coordinated, refresh_official_models_published,
     save_official_multi_agent_version_coordinated, sync_catalog_coordinated,
 };
-use desktop_commands::{
-    open_codex_app, restart_proxy, start_proxy, stop_proxy, switch_mode,
-};
+use desktop_commands::{open_codex_app, restart_proxy, start_proxy, stop_proxy, switch_mode};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{image::Image, AppHandle, Emitter, Manager, RunEvent, WindowEvent};
@@ -378,9 +376,21 @@ fn default_gateway_auto_retry_max_attempts() -> u8 {
 }
 
 fn show_main_window(app: &AppHandle) {
+    #[cfg(target_os = "linux")]
+    {
+        // Single-instance D-Bus runs this off the GTK thread. Server-time and
+        // EWMH restore must own the display on that thread.
+        let app = app.clone();
+        glib::MainContext::default().invoke(move || {
+            if let Some(window) = app.get_webview_window("main") {
+                linux_window::reveal_on_taskbar(&window);
+                let _ = window.show();
+                let _ = window.unminimize();
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
     if let Some(window) = app.get_webview_window("main") {
-        #[cfg(target_os = "linux")]
-        linux_window::reveal_on_taskbar(&window);
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -907,6 +917,25 @@ mod tests {
         assert_eq!(failure.id, loading.id);
         assert_eq!(failure.tone, "error");
         assert!(failure.text.contains("safe snapshot unavailable"));
+    }
+
+    #[test]
+    fn linux_show_main_window_marshals_reveal_onto_the_gtk_thread() {
+        let main = include_str!("main.rs");
+        let start = main.find("fn show_main_window").expect("show_main_window");
+        let body = &main[start..main.len().min(start + 1200)];
+        assert!(
+            body.contains("linux_window::reveal_on_taskbar"),
+            "Linux restore must go through reveal_on_taskbar"
+        );
+        assert!(
+            body.contains("MainContext::default().invoke"),
+            "single-instance D-Bus is not the GTK thread: {body}"
+        );
+        assert!(
+            body.contains("#[cfg(not(target_os = \"linux\"))]") && body.contains("set_focus"),
+            "tao Focus uses GDK_CURRENT_TIME; GNOME turns that into DEMANDS_ATTENTION and keeps Iconic/HIDDEN: {body}"
+        );
     }
 
     #[test]

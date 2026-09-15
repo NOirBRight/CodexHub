@@ -339,25 +339,35 @@ export default function App() {
         });
       }
 
+      const publishCacheUpdate = (force: boolean | undefined, commit: () => void) => {
+        if (force) {
+          commit();
+        } else {
+          startUiTransition(commit);
+        }
+      };
+
       let request: Promise<RuntimeData<K>>;
       request = loader()
         .then((data) => {
-          startUiTransition(() => {
+          const commit = () => {
             if (runtimeInflight.current[key] !== request) return;
             setRuntime((current) =>
               options?.apply
                 ? options.apply(current, data)
                 : setCacheData(current, key, data),
             );
-          });
+          };
+          publishCacheUpdate(options?.force, commit);
           return data;
         })
         .catch((err) => {
           const message = messageFromError(err);
-          startUiTransition(() => {
+          const commit = () => {
             if (runtimeInflight.current[key] !== request) return;
             setRuntime((current) => setCacheError(current, key, message));
-          });
+          };
+          publishCacheUpdate(options?.force, commit);
           if (!options?.quiet && runtimeInflight.current[key] === request) {
             setBanner(message);
           }

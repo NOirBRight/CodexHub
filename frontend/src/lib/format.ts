@@ -1,5 +1,6 @@
 import i18n from "../i18n";
 import type { Model, Provider } from "./types";
+import { shortWireDisplayName } from "./wireDisplayName";
 
 export function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
@@ -27,7 +28,7 @@ export function formatContextWindow(value?: number | null) {
 }
 
 export function displayModel(model: Model) {
-  return model.display_name?.trim() || model.id;
+  return shortWireDisplayName(model.display_name, model.id);
 }
 
 export function slugify(value: string) {

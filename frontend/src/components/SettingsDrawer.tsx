@@ -795,7 +795,10 @@ export function SwitchControl({
   tone?: "action" | "warn";
 }) {
   return (
-    <span className="ws-switch-control relative inline-flex h-5 w-9 shrink-0 items-center">
+    <span
+      className="ws-switch-control relative inline-flex h-5 w-9 shrink-0 items-center"
+      data-on={checked ? "" : undefined}
+    >
       <input
         type="checkbox"
         className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
@@ -811,10 +814,15 @@ export function SwitchControl({
             ? "bg-warn"
             : checked
               ? "bg-action"
-              : "bg-slate-200 peer-checked:bg-action",
+              : "bg-slate-200",
         )}
       />
-      <span className="pointer-events-none absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4 peer-disabled:opacity-80" />
+      <span
+        className={cx(
+          "pointer-events-none absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-disabled:opacity-80",
+          checked && "translate-x-4",
+        )}
+      />
     </span>
   );
 }

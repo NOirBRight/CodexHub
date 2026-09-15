@@ -16,15 +16,16 @@ import zcodeIcon from "../assets/zcode-icon.png";
 import codexIcon from "../assets/codex-logo.svg";
 import grokIcon from "../assets/grok-icon.svg";
 import { cx } from "../lib/format";
+import {
+  connectionStateFromInfo,
+  switchCheckedFromState,
+  type ClientConnectionState,
+} from "../lib/clientConnectionState";
 import type { GatewayClientContract, GatewayClientInfo } from "../lib/types";
 import { SwitchControl } from "./SettingsDrawer";
 
-export type ClientConnectionState =
-  | "connected"
-  | "disconnected"
-  | "busy"
-  | "drift"
-  | "unavailable";
+export type { ClientConnectionState };
+export { connectionStateFromInfo };
 
 interface GatewayClientCardProps {
   busy?: boolean;
@@ -67,7 +68,7 @@ export function GatewayClientCard({
   const configPath = info?.config_path ?? client.config_path;
   const kindLabel = info?.kind ?? t("gateway.clientKind." + client.id);
   const name = info?.name ?? client.name;
-  const checked = state === "connected" || state === "busy";
+  const checked = switchCheckedFromState(state);
   const disabled = state === "unavailable" || state === "busy" || !info;
   const label = busy
     ? t("gateway.connectionUpdating")
@@ -296,38 +297,6 @@ function ConnectionNarrative({
       <span>{t("gateway.configUnchanged")}</span>
     </>
   );
-}
-
-export function connectionStateFromInfo(
-  info: GatewayClientInfo | undefined,
-  busy?: boolean,
-): ClientConnectionState {
-  if (busy) {
-    return "busy";
-  }
-  if (!info) {
-    return "disconnected";
-  }
-  if (!info.installed) {
-    return "unavailable";
-  }
-  if (info.route_mode === "stale") {
-    return "drift";
-  }
-  if (
-    info.route_mode === "other_channel" &&
-    (info.route_owner === "release" || info.route_owner === "beta")
-  ) {
-    return "connected";
-  }
-  if (
-    info.route_mode === "hub" ||
-    info.route_mode === "release" ||
-    info.route_mode === "beta"
-  ) {
-    return "connected";
-  }
-  return "disconnected";
 }
 
 function ClientLogo({ id, name }: { id: string; name: string }) {

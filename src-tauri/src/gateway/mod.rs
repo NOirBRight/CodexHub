@@ -47,6 +47,8 @@ use clients::grok::{
     grok_injected_keys_may_be_hidden, grok_installed,
 };
 #[cfg(test)]
+use clients::grok::grok_config_text;
+#[cfg(test)]
 use clients::omp::{
     apply_omp_config_with_paths, omp_config_text, omp_models_yml_text, omp_route_mode,
     plan_omp_apply, publish_omp_apply, restore_omp_config_with_paths, OmpConfigPaths,
@@ -59,7 +61,6 @@ use clients::opencode::{
     apply_opencode_config_with_paths, detect_opencode_executable_path_in_home,
     opencode_config_text, opencode_ownership_bounded_cleanup, opencode_reasoning_variants,
     plan_opencode_apply, restore_latest_backup, restore_opencode_config_with_backup_roots,
-    OpenCodeApplyDecision,
 };
 use clients::opencode::{
     detect_opencode_config_path, detect_opencode_executable_path, detect_opencode_version,
@@ -620,16 +621,13 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         name: "OpenCode".to_string(),
         kind: "Terminal client".to_string(),
         installed: opencode_installed,
-        auto_apply_supported: opencode_path
-            .as_ref()
-            .map(|path| path.exists())
-            .unwrap_or(false),
+        auto_apply_supported: opencode_installed,
         config_path: opencode_path,
         route_owner: opencode_owner_details.0,
         route_endpoint: opencode_owner_details.1,
         managed_by_current_app: opencode_owner_details.0 == current_owner,
         route_mode: opencode_route_mode.to_string(),
-        status: "Managed overwrite with backup is supported when config exists.".to_string(),
+        status: "Provider injection is supported when OpenCode is installed.".to_string(),
         versions_checked: include_versions && opencode_installed,
         current_version: include_versions.then(detect_opencode_version).flatten(),
         latest_version: (include_versions && opencode_installed)
@@ -1858,7 +1856,8 @@ fn has_nonempty_payload(bytes: &[u8]) -> bool {
 mod tests {
     use super::{
         apply_opencode_config_with_paths, gateway_client_provider_groups_from_exported,
-        gateway_models_from_config, gateway_models_from_sources, official_gateway_reasoning_levels,
+        gateway_models_from_config, gateway_models_from_sources, grok_config_text,
+        official_gateway_reasoning_levels,
         official_models_from_metadata, omp_models_yml_text, opencode_config_text,
         opencode_reasoning_variants, pi_models_text, pi_settings_text,
         read_usage_events_from_sqlite_path, read_usage_events_from_text,

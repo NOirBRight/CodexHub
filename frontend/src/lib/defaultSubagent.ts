@@ -1,4 +1,5 @@
 import type { Model, Provider } from "./types";
+import { shortWireDisplayName } from "./wireDisplayName";
 
 export const CODEX_SUBAGENT_EFFORTS = [
   "low",
@@ -52,7 +53,7 @@ export function listDefaultSubagentOptions(input: {
       const id = subagentCatalogSlug(input.officialId, model.id, input.officialId);
       push({
         id,
-        label: model.display_name?.trim() || model.id,
+        label: shortWireDisplayName(model.display_name, model.id),
         efforts: effortsForModel(model),
         defaultEffort: defaultEffortForModel(model),
       });
@@ -66,7 +67,7 @@ export function listDefaultSubagentOptions(input: {
       const id = subagentCatalogSlug(provider.id, model.id, input.officialId);
       push({
         id,
-        label: `${provider.name} · ${model.display_name?.trim() || model.id}`,
+        label: `${provider.name} · ${shortWireDisplayName(model.display_name, model.id)}`,
         efforts: effortsForModel(model),
         defaultEffort: defaultEffortForModel(model),
       });

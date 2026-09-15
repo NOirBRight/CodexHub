@@ -1250,7 +1250,7 @@
     animation: none !important;
   }
 }
-.workspace-root input[type="checkbox"]:checked + span {
+.workspace-root :not(.ws-switch-control, .ws-model-switch) > input[type="checkbox"]:checked + span {
   background: var(--ws-accent);
 }
 .workspace-root input[type="checkbox"] ~ span:last-child {
@@ -1879,7 +1879,7 @@
   background: var(--ws-line);
   border-color: var(--ws-line);
 }
-.workspace-root.workspace-root .ws-model-switch > input:checked + span {
+.workspace-root.workspace-root .ws-model-switch[data-on] > input + span {
   background: var(--ws-accent);
   border-color: var(--ws-accent);
 }

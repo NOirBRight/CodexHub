@@ -226,8 +226,11 @@ def catalog_or_wire_display_name(
     *candidates: str,
 ) -> str:
     """Stored Display Name, else catalog identity, else the short wire id."""
-    if stored and stored.strip():
-        return stored.strip()
+    stored_name = (stored or "").strip()
+    candidate_ids = [canonical_model_id(candidate) for candidate in candidates]
+    candidate_ids = [key for key in candidate_ids if key]
+    if stored_name and stored_name not in candidate_ids:
+        return stored_name
     for candidate in candidates:
         key = canonical_model_id(candidate)
         if key in policy.display_names:
@@ -235,7 +238,7 @@ def catalog_or_wire_display_name(
     for candidate in candidates:
         key = canonical_model_id(candidate)
         if key:
-            return key.rsplit("/", 1)[-1]
+            return key.split("/")[-1]
     return ""
 
 
