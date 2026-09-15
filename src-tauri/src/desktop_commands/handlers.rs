@@ -439,84 +439,36 @@ pub fn cancel_official_model_refresh(request_id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn refresh_official_models(
-    restart_codex: Option<bool>,
     request_id: Option<String>,
 ) -> Result<official_refresh::OfficialRefreshResult, String> {
     run_blocking("refresh_official_models", move || {
-        if !restart_codex.unwrap_or(false) {
-            return official_refresh::refresh_current_models_with_request(request_id.as_deref());
-        }
-        refresh_official_models_coordinated(true)
+        official_refresh::refresh_current_models_with_request(request_id.as_deref())
     })
     .await
 }
 
-pub(crate) fn refresh_official_models_coordinated(
-    restart_codex: bool,
-) -> Result<official_refresh::OfficialRefreshResult, String> {
-    // The frontend Refresh action is read-only. The legacy boolean remains
-    // accepted as an explicit opt-in for callers that intentionally apply the
-    // managed Codex overlay in the same transaction.
-    if !restart_codex {
-        return official_refresh::refresh_current_models();
-    }
-    refresh_official_models_published_coordinated(restart_codex)
-}
-
-pub(crate) fn refresh_official_models_published_coordinated(
-    restart_codex: bool,
-) -> Result<official_refresh::OfficialRefreshResult, String> {
-    let coordinated =
-        codex_desktop::coordinate_switch(restart_codex, official_refresh::refresh_manual)?;
-    let Some(mut result) = coordinated.value else {
-        return Err(format!(
-            "codex_desktop_switch_failed_reopened: {}",
-            coordinated
-                .switch_error
-                .unwrap_or_else(|| "Official catalog refresh failed".to_string())
-        ));
-    };
-    result.codex_restart_result = Some(coordinated.restart_result);
-    if coordinated.restart_result == codex_desktop::CodexRestartResult::Restarted {
-        match official_refresh::acknowledge_codex_restart() {
-            Ok(()) => result.restart_required = false,
-            Err(error) => log::warn!(
-                "Codex Desktop restarted, but the Official restart requirement could not be acknowledged: {error}"
-            ),
-        }
-    }
-    Ok(result)
+pub(crate) fn refresh_official_models_published() -> Result<official_refresh::OfficialRefreshResult, String> {
+    codex_desktop::serialize_config_writer(|| {
+        official_refresh::refresh_manual().map_err(|error| error.to_string())
+    })
 }
 
 #[tauri::command]
-pub async fn generate_catalog(restart_codex: Option<bool>) -> Result<Vec<Model>, String> {
-    run_blocking("generate_catalog", move || {
-        generate_catalog_coordinated(restart_codex.unwrap_or(false))
-    })
-    .await
+pub async fn generate_catalog() -> Result<Vec<Model>, String> {
+    run_blocking("generate_catalog", generate_catalog_coordinated).await
 }
 
-pub(crate) fn generate_catalog_coordinated(restart_codex: bool) -> Result<Vec<Model>, String> {
-    if !restart_codex {
-        return codex_desktop::serialize_config_writer(
-            catalog::generate_catalog_with_existing_lock,
-        );
-    }
-    coordinated_catalog_write(restart_codex, catalog::generate_catalog_with_existing_lock)
+pub(crate) fn generate_catalog_coordinated() -> Result<Vec<Model>, String> {
+    codex_desktop::serialize_config_writer(catalog::generate_catalog_with_existing_lock)
 }
 
 #[tauri::command]
 pub async fn save_official_multi_agent_version(
     model_id: String,
     version: Option<String>,
-    restart_codex: Option<bool>,
 ) -> Result<OfficialMultiAgentSaveResult, String> {
     run_blocking("save_official_multi_agent_version", move || {
-        save_official_multi_agent_version_coordinated(
-            model_id,
-            version,
-            restart_codex.unwrap_or(false),
-        )
+        save_official_multi_agent_version_coordinated(model_id, version)
     })
     .await
 }
@@ -533,51 +485,19 @@ pub struct OfficialMultiAgentSaveResult {
 pub(crate) fn save_official_multi_agent_version_coordinated(
     model_id: String,
     version: Option<String>,
-    restart_codex: bool,
 ) -> Result<OfficialMultiAgentSaveResult, String> {
-    if !restart_codex {
-        let outcome = codex_desktop::serialize_config_writer(|| {
-            let prepared = models::prepare_official_multi_agent_version(model_id, version)?;
-            models::publish_official_multi_agent_version(prepared)
-                .map_err(|error| error.to_string())
-        })?;
-        return Ok(OfficialMultiAgentSaveResult {
-            model: outcome.model,
-            warning: outcome.warning,
-            codex_restart_result: None,
-        });
-    }
-    let coordinated = codex_desktop::coordinate_switch(restart_codex, || {
-        prepare_then_commit_official_multi_agent(
-            || {
-                models::prepare_official_multi_agent_version(model_id, version)
-                    .map_err(codex_desktop::SwitchMutationError::from)
-            },
-            models::publish_official_multi_agent_version,
-            |prepared, publish| codex_desktop::run_if_stopped(|| publish(prepared)),
-        )?
-        .ok_or_else(|| {
-            codex_desktop::SwitchMutationError::from(format!(
-                "{}: Codex Desktop started before the Collaboration catalog commit; no catalog or Codex configuration was written",
-                codex_desktop::BECAME_RUNNING_ERROR
-            ))
-        })
+    let outcome = codex_desktop::serialize_config_writer(|| {
+        let prepared = models::prepare_official_multi_agent_version(model_id, version)?;
+        models::publish_official_multi_agent_version(prepared).map_err(|error| error.to_string())
     })?;
-    let Some(outcome) = coordinated.value else {
-        return Err(format!(
-            "codex_desktop_switch_failed_reopened: {}",
-            coordinated
-                .switch_error
-                .unwrap_or_else(|| "Collaboration catalog update failed".to_string())
-        ));
-    };
     Ok(OfficialMultiAgentSaveResult {
         model: outcome.model,
         warning: outcome.warning,
-        codex_restart_result: Some(coordinated.restart_result),
+        codex_restart_result: None,
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prepare_then_commit_official_multi_agent<
     Prepared,
     Output,
@@ -600,22 +520,15 @@ where
 }
 
 #[tauri::command]
-pub fn sync_catalog(restart_codex: Option<bool>) -> Result<String, String> {
-    sync_catalog_coordinated(restart_codex.unwrap_or(false))
+pub fn sync_catalog() -> Result<String, String> {
+    sync_catalog_coordinated()
 }
 
-pub(crate) fn sync_catalog_coordinated(restart_codex: bool) -> Result<String, String> {
-    coordinated_catalog_write(restart_codex, catalog::sync_catalog_with_existing_lock)
+pub(crate) fn sync_catalog_coordinated() -> Result<String, String> {
+    codex_desktop::serialize_config_writer(catalog::sync_catalog_with_existing_lock)
 }
 
-fn coordinated_catalog_write<T>(
-    restart_codex: bool,
-    write: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    let coordinated = codex_desktop::coordinate_switch(restart_codex, write)?;
-    finish_catalog_write(coordinated)
-}
-
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn finish_catalog_write<T>(
     coordinated: codex_desktop::CoordinatedSwitch<T>,
 ) -> Result<T, String> {
@@ -643,23 +556,17 @@ pub fn switch_mode(
     mode: String,
     auto_sync: bool,
     force_takeover: Option<bool>,
-    restart_codex: Option<bool>,
 ) -> Result<AppStatus, String> {
     let takeover = force_takeover.unwrap_or(false);
-    if !restart_codex.unwrap_or(false) {
-        // Connect/disconnect writes the overlay while Codex Desktop stays open.
-        // The UI discloses that a manual restart is required for the route to
-        // take effect; this path must not close or relaunch Codex.
-        return codex_desktop::serialize_config_writer(|| {
-            config::switch_mode_with_takeover(&mode, auto_sync, takeover)
-        });
-    }
-    let coordinated = codex_desktop::coordinate_switch(true, || {
+    // Connect/disconnect writes the overlay while Codex stays open.
+    // The UI reminds the user to restart Codex; this path must not close
+    // or relaunch it.
+    codex_desktop::serialize_config_writer(|| {
         config::switch_mode_with_takeover(&mode, auto_sync, takeover)
-    })?;
-    finish_app_status_switch(coordinated, proxy::status)
+    })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn finish_app_status_switch<Readback>(
     coordinated: codex_desktop::CoordinatedSwitch<AppStatus>,
     readback: Readback,

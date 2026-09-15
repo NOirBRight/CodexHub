@@ -35,9 +35,8 @@ mod web_bridge;
 mod xai_auth;
 
 pub(crate) use desktop_commands::{
-    generate_catalog_coordinated, refresh_official_models_coordinated,
-    refresh_official_models_published_coordinated, save_official_multi_agent_version_coordinated,
-    sync_catalog_coordinated,
+    generate_catalog_coordinated, refresh_official_models_published,
+    save_official_multi_agent_version_coordinated, sync_catalog_coordinated,
 };
 use desktop_commands::{
     open_codex_app, restart_proxy, start_proxy, stop_proxy, switch_mode,
@@ -324,6 +323,10 @@ pub struct Settings {
     pub official_disabled_models: Vec<String>,
     pub official_model_sort_order: Vec<String>,
     pub official_provider_sort_order: i32,
+    #[serde(default)]
+    pub codex_default_subagent_model: String,
+    #[serde(default)]
+    pub codex_default_subagent_reasoning_effort: String,
     pub proxy_port: u16,
 }
 
@@ -348,7 +351,7 @@ impl Default for Settings {
             gateway_enable_models: true,
             gateway_enable_responses: true,
             gateway_enable_chat_completions: true,
-            gateway_request_timeout_seconds: 300,
+            gateway_request_timeout_seconds: 600,
             gateway_auto_retry_enabled: true,
             gateway_auto_retry_max_attempts: default_gateway_auto_retry_max_attempts(),
             gateway_image_proxy_enabled: false,
@@ -357,6 +360,8 @@ impl Default for Settings {
             official_disabled_models: Vec::new(),
             official_model_sort_order: Vec::new(),
             official_provider_sort_order: 0,
+            codex_default_subagent_model: String::new(),
+            codex_default_subagent_reasoning_effort: String::new(),
             proxy_port: app_flavor::default_gateway_port(),
         }
     }

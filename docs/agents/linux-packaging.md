@@ -71,9 +71,9 @@ and the flavor contract.
 ./scripts/build-linux-release.sh --flavor normal
 ```
 
-Windows continues to use `build-windows-portable.ps1` / `build-windows-release.ps1`.
-`tauri.conf.json` lists `nsis`, `appimage`, and `deb`; each script selects the
-bundles it owns.
+Windows artifacts are built on SSH host `yoga` from the same SHA; see
+[Release](release.md). `tauri.conf.json` lists `nsis`, `appimage`, and `deb`;
+each script selects the bundles it owns.
 
 ## Python runtime
 

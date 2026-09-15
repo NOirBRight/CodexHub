@@ -5,6 +5,7 @@ import anthropic from './prototype-assets/anthropic.svg';
 import deepseek from './prototype-assets/deepseek.svg';
 import kimi from '../assets/providers/kimi.svg';
 import xai from '../assets/providers/xai.svg';
+import grok from '../assets/grok-icon.svg';
 import codex from '../assets/codex-logo.svg';
 import opencode from '../assets/opencode-icon.png';
 import pi from '../assets/pi-icon.png';
@@ -24,6 +25,7 @@ export const clientFixtures = [
   {id:'pi',name:'Pi',icon:pi,kind:'轻量 CLI',path:'~/.pi/agent/config.json',on:false},
   {id:'zcode',name:'ZCode',icon:zcode,kind:'IDE 扩展',path:'~/.zcode/v2/config.json',on:true},
   {id:'omp',name:'OMP',icon:omp,kind:'提示词运行时',path:'~/.omp/agent/config.yml',on:false},
+  {id:'grok',name:'Grok CLI',icon:grok,kind:'终端客户端',path:'~/.grok/config.toml',on:false},
 ];
 export const codexIcon=codex;
 export const chartProviders:Provider[]=providerFixtures.map(p=>({id:p.id,name:p.name,base_url:p.base,enabled:true,models:[],reports_cached_input_tokens:true}));

@@ -1485,6 +1485,52 @@ class RoutePlanSeamTests(unittest.TestCase):
         )
         self.assertEqual(plan.vision.action, route_primitives.VisionAction.REJECT)
 
+    def test_main_generation_pre_response_budget_matches_request_timeout(self):
+        self.assertEqual(route_primitives.DEFAULT_UPSTREAM_TIMEOUT_SECONDS, 600)
+        self.assertEqual(
+            route_primitives.DEFAULT_MAIN_GENERATION_PRE_RESPONSE_BUDGET_SECONDS,
+            float(route_primitives.DEFAULT_UPSTREAM_TIMEOUT_SECONDS),
+        )
+        self.assertEqual(
+            route_primitives.DEFAULT_MAIN_GENERATION_PRE_RESPONSE_BUDGET_SECONDS,
+            route_primitives.DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS,
+        )
+        plan = route_plan.route_plan_for_request(
+            {
+                "name": "official",
+                "upstream_model": "gpt-5.6-terra",
+                "upstream_format": "responses",
+            },
+            {"client_id": "unknown"},
+            inbound_format="responses",
+            model_requested="gpt-5.6-terra",
+        )
+        retry = plan.attempts[0].retry
+        self.assertEqual(
+            retry.pre_response_budget_seconds,
+            float(retry.request_timeout_seconds),
+        )
+
+    def test_route_runtime_facts_pre_response_budget_follows_timeout(self):
+        with patch("route_plan.upstream_timeout_seconds", return_value=90):
+            facts = route_plan.route_runtime_facts("main_generation")
+        self.assertEqual(facts.request_timeout_seconds, 90)
+        self.assertEqual(facts.pre_response_budget_seconds, 90.0)
+        plan = route_plan.route_plan_for_request(
+            {
+                "name": "official",
+                "upstream_model": "gpt-5.6-terra",
+                "upstream_format": "responses",
+            },
+            {"client_id": "unknown"},
+            inbound_format="responses",
+            model_requested="gpt-5.6-terra",
+            runtime_facts=facts,
+        )
+        retry = plan.attempts[0].retry
+        self.assertEqual(retry.request_timeout_seconds, 90)
+        self.assertEqual(retry.pre_response_budget_seconds, 90.0)
+
 
 def test_route_plan_seam_source_does_not_use_handler_privates() -> None:
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))

@@ -155,6 +155,13 @@ impl RuntimeFlavor {
             Self::Beta => "codexhub-beta-proxy.service",
         }
     }
+
+    pub fn linux_autostart_desktop_file(self) -> &'static str {
+        match self {
+            Self::Stable => "com.codexhub.app.desktop",
+            Self::Beta => "com.codexhub.beta.app.desktop",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +179,10 @@ mod tests {
             assert_eq!(runtime.gateway_port(), 9099);
             assert_eq!(runtime.runtime_home_suffix(), ".codex");
             assert_eq!(runtime.autostart_task_name(), "CodexHubProxy");
+            assert_eq!(
+                runtime.linux_autostart_desktop_file(),
+                "com.codexhub.app.desktop"
+            );
         }
     }
 
@@ -183,6 +194,10 @@ mod tests {
         assert_eq!(flavor.bridge_port(), 1431);
         assert_eq!(flavor.gateway_port(), 9109);
         assert_eq!(flavor.autostart_task_name(), "CodexHubBetaProxy");
+        assert_eq!(
+            flavor.linux_autostart_desktop_file(),
+            "com.codexhub.beta.app.desktop"
+        );
         assert_ne!(
             flavor.default_codex_home_suffix(),
             RuntimeFlavor::Stable.default_codex_home_suffix()

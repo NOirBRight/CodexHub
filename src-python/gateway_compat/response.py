@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable as IterableABC
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable, Mapping, NoReturn
 
@@ -398,23 +399,156 @@ def _sanitize_unsupported_compaction_input_items(payload: dict[str, Any]) -> boo
 
 
 def _sanitize_official_system_messages(payload: dict[str, Any]) -> bool:
-    input_items = payload.get("input")
-    if not isinstance(input_items, list):
-        return False
-
+    """Rewrite Official-bound system roles to developer. Official Codex 400s otherwise."""
     changed = False
-    rewritten_items: list[Any] = []
-    for item in input_items:
-        if isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "system":
-            rewritten = dict(item)
-            rewritten["role"] = "developer"
-            rewritten_items.append(rewritten)
+    for key in ("input", "messages"):
+        items = payload.get(key)
+        if not isinstance(items, list):
+            continue
+        rewritten_items: list[Any] = []
+        key_changed = False
+        for item in items:
+            if not isinstance(item, dict):
+                rewritten_items.append(item)
+                continue
+            item_type = item.get("type")
+            role = item.get("role")
+            if item_type == "system" or role == "system":
+                rewritten = dict(item)
+                if key == "input":
+                    rewritten["type"] = "message"
+                rewritten["role"] = "developer"
+                rewritten_items.append(rewritten)
+                key_changed = True
+            else:
+                rewritten_items.append(item)
+        if key_changed:
+            payload[key] = rewritten_items
             changed = True
-        else:
-            rewritten_items.append(item)
+    return changed
 
+
+def _fold_official_instructions_into_developer(payload: dict[str, Any]) -> bool:
+    """Move Chat→Responses ``instructions`` into a developer input item.
+
+    Chat Completions ``role=system`` becomes ``instructions`` during
+    translation. Official still 400s leftover ``role=system``; folding
+    keeps the same rewrite as inbound Responses/Chat developer.
+    """
+    instructions = payload.get("instructions")
+    if not isinstance(instructions, str) or not instructions.strip():
+        return False
+    input_items = payload.get("input")
+    if input_items is None:
+        next_input: list[Any] = []
+    elif isinstance(input_items, list):
+        next_input = input_items
+    else:
+        return False
+    payload["input"] = [
+        {
+            "type": "message",
+            "role": "developer",
+            "content": instructions,
+        },
+        *next_input,
+    ]
+    del payload["instructions"]
+    return True
+
+
+def _fill_official_strict_json_schema(node: Any) -> bool:
+    """Fill Official Codex strict-function schema requirements in place."""
+    if not isinstance(node, dict):
+        return False
+    changed = False
+    looks_like_object = node.get("type") == "object" or isinstance(node.get("properties"), dict)
+    if looks_like_object:
+        if "additionalProperties" not in node:
+            node["additionalProperties"] = False
+            changed = True
+        properties = node.get("properties")
+        if isinstance(properties, dict) and properties:
+            required = node.get("required")
+            property_names = [name for name in properties if isinstance(name, str)]
+            if not isinstance(required, list):
+                node["required"] = list(property_names)
+                changed = True
+            else:
+                present = {name for name in required if isinstance(name, str)}
+                missing = [name for name in property_names if name not in present]
+                if missing:
+                    node["required"] = [
+                        name for name in required if isinstance(name, str)
+                    ] + missing
+                    changed = True
+            for child in properties.values():
+                if _fill_official_strict_json_schema(child):
+                    changed = True
+    additional = node.get("additionalProperties")
+    if isinstance(additional, dict) and _fill_official_strict_json_schema(additional):
+        changed = True
+    items = node.get("items")
+    if isinstance(items, dict) and _fill_official_strict_json_schema(items):
+        changed = True
+    elif isinstance(items, list):
+        for item in items:
+            if _fill_official_strict_json_schema(item):
+                changed = True
+    for key in ("allOf", "anyOf", "oneOf", "prefixItems"):
+        value = node.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if _fill_official_strict_json_schema(item):
+                    changed = True
+    for key in ("$defs", "defs", "definitions"):
+        value = node.get(key)
+        if isinstance(value, dict):
+            for child in value.values():
+                if _fill_official_strict_json_schema(child):
+                    changed = True
+    return changed
+
+
+def _sanitize_official_strict_function_tool(tool: Any) -> dict[str, Any] | None:
+    if not isinstance(tool, dict) or tool.get("type") != "function":
+        return None
+    nested = tool.get("function")
+    envelope = nested if isinstance(nested, dict) else tool
+    if envelope.get("strict") is not True:
+        return None
+    parameters = envelope.get("parameters")
+    if not isinstance(parameters, dict):
+        return None
+    next_parameters = deepcopy(parameters)
+    if not _fill_official_strict_json_schema(next_parameters):
+        return None
+    next_tool = dict(tool)
+    if isinstance(nested, dict):
+        next_function = dict(nested)
+        next_function["parameters"] = next_parameters
+        next_tool["function"] = next_function
+    else:
+        next_tool["parameters"] = next_parameters
+    return next_tool
+
+
+def _sanitize_official_strict_function_schemas(payload: dict[str, Any]) -> bool:
+    """Official Codex 400s strict tools that omit additionalProperties=false."""
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+    changed = False
+    next_tools: list[Any] = []
+    for tool in tools:
+        rewritten = _sanitize_official_strict_function_tool(tool)
+        if rewritten is None:
+            next_tools.append(tool)
+            continue
+        next_tools.append(rewritten)
+        changed = True
     if changed:
-        payload["input"] = rewritten_items
+        payload["tools"] = next_tools
     return changed
 
 

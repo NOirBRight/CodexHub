@@ -196,6 +196,7 @@ def _prepare_runtime(
             "CODEXHUB_ROLLBACK_PROVENANCE_DIR": str(work / "rollback"),
             "CODEXHUB_PYTHON": sys.executable,
             "CODEXHUB_PROXY_PYTHON": sys.executable,
+            "CODEXHUB_RESOURCE_ROOT": str(ROOT),
         }
     )
     Path(env["HOME"]).mkdir(parents=True)

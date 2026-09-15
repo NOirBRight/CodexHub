@@ -954,6 +954,9 @@ def responses_request_to_chat_completion_body(
             "parallel_tool_calls",
             "max_output_tokens",
             "reasoning",
+            # Gateway-injected vendor thinking JSON (MiniMax and similar).
+            # Transparent mutation may attach it before Responses→Chat.
+            "thinking",
             # These Responses-only transport controls are accepted only when
             # they carry their explicit no-op defaults; semantic values are
             # rejected below instead of silently dropped.
@@ -1052,6 +1055,8 @@ def responses_request_to_chat_completion_body(
         # inferred from a provider name or silently added to ordinary Chat
         # requests.
         chat_payload["reasoning_effort"] = chat_reasoning_effort
+    if "thinking" in payload:
+        chat_payload["thinking"] = payload["thinking"]
 
     tools = responses_tools_to_chat_tools(payload.get("tools"))
     tools.extend(loaded_tools)
@@ -1358,6 +1363,33 @@ def chat_tools_to_responses_tools(value: Any) -> list[dict[str, Any]]:
                 "unsupported_protocol_semantics",
                 "Cannot translate unsupported Chat Completions tool type to Responses.",
             )
+        if "function" not in item:
+            # Grok's Chat backend reuses the Responses function-tool shape
+            # (name at the top level). Wrap it into the Chat envelope so the
+            # hop to a Responses upstream stays lossless.
+            _validate_function_tool_fields(
+                item,
+                {"type", "name", "description", "parameters", "strict"},
+                "Chat Completions function tool",
+            )
+            name = item.get("name")
+            if not isinstance(name, str) or not name:
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate a Chat Completions function tool without a non-empty name.",
+                )
+            tool: dict[str, Any] = {"type": "function", "name": name}
+            description = item.get("description")
+            if isinstance(description, str):
+                tool["description"] = description
+            parameters = item.get("parameters")
+            if isinstance(parameters, dict):
+                tool["parameters"] = parameters
+            strict = item.get("strict")
+            if isinstance(strict, bool):
+                tool["strict"] = strict
+            tools.append(tool)
+            continue
         _require_supported_fields(item, {"type", "function"}, "Chat Completions function tool")
         function = item.get("function")
         if not isinstance(function, dict):

@@ -601,11 +601,11 @@ class GatewayHandlerMixin:
                 else True
             )
             route_runtime_facts: dict[str, RouteRuntimeFacts] = {
-                request_kind: _route_plan_module._route_runtime_facts(request_kind)
+                request_kind: _route_plan_module.route_runtime_facts(request_kind)
             }
             if request_kind != RETRY_REQUEST_MAIN_GENERATION:
                 route_runtime_facts[RETRY_REQUEST_MAIN_GENERATION] = (
-                    _route_plan_module._route_runtime_facts(
+                    _route_plan_module.route_runtime_facts(
                         RETRY_REQUEST_MAIN_GENERATION
                     )
                 )

@@ -119,7 +119,7 @@ function GatewayPageImpl({
   );
   const [draftKey, setDraftKey] = useState(settings?.gateway_client_key ?? "");
   const [draftTimeout, setDraftTimeout] = useState(
-    settings?.gateway_request_timeout_seconds ?? 300,
+    settings?.gateway_request_timeout_seconds ?? 600,
   );
   const [clientBusy, setClientBusy] = useState<string | null>(null);
   const [clientRefreshBusy, setClientRefreshBusy] = useState(false);
@@ -166,7 +166,7 @@ function GatewayPageImpl({
   useEffect(() => {
     setDraftPort(settings?.proxy_port ?? status?.port ?? 9099);
     setDraftKey(settings?.gateway_client_key ?? "");
-    setDraftTimeout(settings?.gateway_request_timeout_seconds ?? 300);
+    setDraftTimeout(settings?.gateway_request_timeout_seconds ?? 600);
   }, [settings, status?.port]);
 
   useEffect(
@@ -842,8 +842,19 @@ function GatewayPageImpl({
             </button>
           </div>
         </div>
-        <div className="min-h-0 overflow-x-hidden overflow-y-auto bg-panel">
-          <div className="flex min-h-full flex-col gap-2.5 py-3 pl-3 pr-1">
+        <div
+          className={cx(
+            "min-h-0 overflow-x-hidden overflow-y-auto bg-panel",
+            desktopView === "clients" && "ws-client-board",
+          )}
+        >
+          <div
+            className={
+              desktopView === "clients"
+                ? "ws-client-board-grid"
+                : "flex min-h-full flex-col gap-2.5 py-3 pl-3 pr-1"
+            }
+          >
             {clients
               .filter(
                 (client) =>

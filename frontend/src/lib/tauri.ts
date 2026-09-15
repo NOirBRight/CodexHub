@@ -199,14 +199,12 @@ export const api = {
   getStatus: () => call<AppStatus>(COMMANDS.getStatus),
   getCodexDesktopStatus: () =>
     call<CodexDesktopStatus>(COMMANDS.getCodexDesktopStatus),
-  switchMode: (mode: string, autoSync: boolean, forceTakeover = false, restartCodex = false) =>
+  switchMode: (mode: string, autoSync: boolean, forceTakeover = false) =>
     call<AppStatus>(COMMANDS.switchMode, {
       mode,
       autoSync,
       forceTakeover,
       force_takeover: forceTakeover,
-      restartCodex,
-      restart_codex: restartCodex,
     }),
   startProxy: () => call<AppStatus>(COMMANDS.startProxy),
   stopProxy: () => call<AppStatus>(COMMANDS.stopProxy),
@@ -222,12 +220,10 @@ export const api = {
       }),
     ),
   cancelOfficialModelRefresh: (requestId: string) => call<void>(COMMANDS.cancelOfficialModelRefresh, { requestId, request_id: requestId }),
-  refreshOfficialModels: (restartCodex = false, requestId?: string) =>
+  refreshOfficialModels: (requestId?: string) =>
     call<OfficialRefreshResult>(COMMANDS.refreshOfficialModels, {
       requestId,
       request_id: requestId,
-      restartCodex,
-      restart_codex: restartCodex,
     }),
   openaiUsageCompletions: (window?: OpenAIUsageQueryWindow | null) =>
     call<OpenAIUsageSnapshot>(COMMANDS.openaiUsageCompletions, openaiUsageWindowArgs(window)),
@@ -329,11 +325,7 @@ export const api = {
   syncGatewayClients: (model?: string | null) =>
     call<GatewayClientSyncSummary>(COMMANDS.syncGatewayClients, { model: model ?? null }),
   subagentMatrixStatus: () => call<SubagentMatrixStatus>(COMMANDS.subagentMatrixStatus),
-  generateCatalog: (restartCodex = false) =>
-    call<Model[]>(COMMANDS.generateCatalog, {
-      restartCodex,
-      restart_codex: restartCodex,
-    }),
+  generateCatalog: () => call<Model[]>(COMMANDS.generateCatalog),
   catalogOverrideDiagnostics: () =>
     call<CatalogOverrideDiagnostics>(COMMANDS.getCatalogOverrideDiagnostics),
   listModels: () => call<Model[]>(COMMANDS.listModels),
@@ -342,12 +334,10 @@ export const api = {
   listModelMetadata: () => call<Model[]>(COMMANDS.listModelMetadata),
   saveModelMetadataOverride: (model: Model) =>
     call<Model>(COMMANDS.saveModelMetadataOverride, { model }),
-  saveOfficialMultiAgentVersion: (modelId: string, version: "v1" | "v2" | null, restartCodex = false) =>
+  saveOfficialMultiAgentVersion: (modelId: string, version: "v1" | "v2" | null) =>
     call<OfficialMultiAgentSaveResult>(COMMANDS.saveOfficialMultiAgentVersion, {
       modelId,
       version,
-      restartCodex,
-      restart_codex: restartCodex,
     }),
   listOfficialMultiAgentOverrides: () =>
     call<Record<string, "v1" | "v2">>(COMMANDS.listOfficialMultiAgentOverrides),
@@ -369,11 +359,7 @@ export const api = {
     call<UnifiedHistoryResult>(COMMANDS.syncConversationHistory, { targetProvider: targetProvider ?? null }),
   diagnoseConversationHistory: (fullScan = true) =>
     call<UnifiedHistoryResult>(COMMANDS.diagnoseConversationHistory, { fullScan }),
-  syncCatalog: (restartCodex = false) =>
-    call<string>(COMMANDS.syncCatalog, {
-      restartCodex,
-      restart_codex: restartCodex,
-    }),
+  syncCatalog: () => call<string>(COMMANDS.syncCatalog),
   setAutostart: (enabled: boolean) => call<string>(COMMANDS.setAutostart, { enabled }),
   removeAutostart: () => call<string>(COMMANDS.removeAutostart),
   getAutostartStatus: () => call<AutostartStatus>(COMMANDS.getAutostartStatus),

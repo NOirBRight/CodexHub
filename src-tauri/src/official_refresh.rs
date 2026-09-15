@@ -229,10 +229,6 @@ pub(crate) fn refresh_manual(
 /// Read the current Official model list without publishing or coordinating
 /// the Codex Desktop process. This is the manual Refresh path while Codex is
 /// running; applying a new managed overlay remains a separate mutating flow.
-pub(crate) fn refresh_current_models() -> Result<OfficialRefreshResult, String> {
-    refresh_current_models_with_request(None)
-}
-
 pub(crate) fn refresh_current_models_with_request(
     request_id: Option<&str>,
 ) -> Result<OfficialRefreshResult, String> {
@@ -276,16 +272,6 @@ fn read_only_refresh_result(
             )),
         },
     }
-}
-
-pub(crate) fn acknowledge_codex_restart() -> Result<(), String> {
-    let state_path = refresh_state_path()?;
-    let mut state = read_state(&state_path);
-    if !state.outstanding_restart_required {
-        return Ok(());
-    }
-    state.outstanding_restart_required = false;
-    write_state(&state_path, &state)
 }
 
 fn manual_refresh_models<LoadPublishedCatalog>(

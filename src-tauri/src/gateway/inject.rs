@@ -103,6 +103,14 @@ impl GatewayClientEndpointSelection {
         }
     }
 
+    pub(in crate::gateway) fn grok_api_backend(self) -> &'static str {
+        match self.openai_compatible_selection() {
+            GatewayClientEndpointSelection::Responses => "responses",
+            GatewayClientEndpointSelection::ChatCompletions => "chat_completions",
+            GatewayClientEndpointSelection::AnthropicMessages => "chat_completions",
+        }
+    }
+
     pub(in crate::gateway) fn openai_compatible_selection(self) -> Self {
         match self {
             GatewayClientEndpointSelection::AnthropicMessages => {
@@ -569,6 +577,18 @@ pub(in crate::gateway) fn is_codexhub_client_model_selector(model: &str) -> bool
 pub(in crate::gateway) fn is_local_gateway_url(url: &str) -> bool {
     let value = url.trim().trim_matches('"').trim_matches('\'');
     value.starts_with("http://127.0.0.1:") || value.starts_with("http://localhost:")
+}
+
+pub(in crate::gateway) fn is_this_app_gateway_url(url: &str, port: u16) -> bool {
+    let value = url
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_end_matches('/');
+    ["127.0.0.1", "localhost"].iter().any(|host| {
+        let prefix = format!("http://{host}:{port}");
+        value == prefix || value.starts_with(&format!("{prefix}/"))
+    })
 }
 
 pub(in crate::gateway) fn routing_owner_from_gateway_url(url: &str) -> RoutingOwner {

@@ -1463,6 +1463,12 @@ def official_passthrough_request_body(
         changed = True
     if _response._sanitize_unsupported_compaction_input_items(next_payload):
         changed = True
+    if host._normalize_responses_message_input_items(next_payload):
+        changed = True
+    if _response._sanitize_official_system_messages(next_payload):
+        changed = True
+    if _response._sanitize_official_strict_function_schemas(next_payload):
+        changed = True
     if next_payload.get("store") is not False:
         next_payload["store"] = False
         changed = True
@@ -1504,7 +1510,17 @@ def transparent_request_body(
             changed = False
             if host._normalize_responses_message_input_items(next_payload):
                 changed = True
+            if official_responses_backend and _response._sanitize_official_system_messages(next_payload):
+                changed = True
+            if official_responses_backend and _response._fold_official_instructions_into_developer(next_payload):
+                changed = True
+            if official_responses_backend and _response._sanitize_official_strict_function_schemas(next_payload):
+                changed = True
             if official_responses_backend and _response._sanitize_unsupported_compaction_input_items(next_payload):
+                changed = True
+            if upstream_is_third_party and _request._drop_third_party_web_search_external_web_access(next_payload):
+                changed = True
+            if isinstance(next_payload.get("messages"), list) and _request._wrap_chat_function_tools(next_payload):
                 changed = True
             if upstream_is_third_party and _rewrite_internal_input_items(
                 next_payload,
@@ -1565,6 +1581,16 @@ def transparent_request_body(
     if official_responses_backend and _response._sanitize_unsupported_compaction_input_items(next_payload):
         changed = True
     if host._normalize_responses_message_input_items(next_payload):
+        changed = True
+    if official_responses_backend and _response._sanitize_official_system_messages(next_payload):
+        changed = True
+    if official_responses_backend and _response._fold_official_instructions_into_developer(next_payload):
+        changed = True
+    if official_responses_backend and _response._sanitize_official_strict_function_schemas(next_payload):
+        changed = True
+    if upstream_is_third_party and _request._drop_third_party_web_search_external_web_access(next_payload):
+        changed = True
+    if isinstance(next_payload.get("messages"), list) and _request._wrap_chat_function_tools(next_payload):
         changed = True
     if upstream_is_third_party and _rewrite_internal_input_items(
         next_payload,

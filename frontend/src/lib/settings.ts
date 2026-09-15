@@ -19,7 +19,7 @@ const DEFAULT_SETTINGS: Settings = {
   gateway_enable_models: true,
   gateway_enable_responses: true,
   gateway_enable_chat_completions: true,
-  gateway_request_timeout_seconds: 300,
+  gateway_request_timeout_seconds: 600,
   gateway_auto_retry_enabled: true,
   gateway_auto_retry_max_attempts: 30,
   gateway_image_proxy_enabled: false,
@@ -28,6 +28,8 @@ const DEFAULT_SETTINGS: Settings = {
   official_disabled_models: [],
   official_model_sort_order: [],
   official_provider_sort_order: 0,
+  codex_default_subagent_model: "",
+  codex_default_subagent_reasoning_effort: "",
   proxy_port: 9099,
 };
 
@@ -57,7 +59,39 @@ export function normalizeSettings(settings: LegacySettings | null | undefined): 
     gateway_fast_model_variants: normalizeFastModelVariants(source.gateway_fast_model_variants),
     official_disabled_models: normalizeModelIds(source.official_disabled_models),
     official_model_sort_order: normalizeModelIds(source.official_model_sort_order),
+    ...defaultSubagentSettings(source),
   };
+}
+
+function defaultSubagentSettings(source: LegacySettings) {
+  const model = normalizeDefaultSubagentModel(source.codex_default_subagent_model);
+  return {
+    codex_default_subagent_model: model,
+    codex_default_subagent_reasoning_effort: model
+      ? normalizeDefaultSubagentEffort(source.codex_default_subagent_reasoning_effort)
+      : "",
+  };
+}
+
+function normalizeDefaultSubagentModel(value: string | null | undefined) {
+  const normalized = (value ?? "").trim();
+  if (!normalized) return "";
+  return normalizeOfficialModelId(normalized) ?? normalized;
+}
+
+const ALLOWED_SUBAGENT_EFFORTS = new Set([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+function normalizeDefaultSubagentEffort(value: string | null | undefined) {
+  const effort = (value ?? "").trim().toLowerCase();
+  return ALLOWED_SUBAGENT_EFFORTS.has(effort) ? effort : "";
 }
 
 export function normalizeOfficialModelId(

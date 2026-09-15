@@ -59,7 +59,6 @@ from route_primitives import (
     CollaborationBackend,
     DEFAULT_CAPACITY_RETRY_ELAPSED_LIMIT_SECONDS,
     DEFAULT_GATEWAY_AUTO_RETRY_MAX_ATTEMPTS,
-    DEFAULT_MAIN_GENERATION_PRE_RESPONSE_BUDGET_SECONDS,
     DEFAULT_OFFICIAL_UPSTREAM_OPEN_ATTEMPTS,
     DEFAULT_STREAM_RETRY_ELAPSED_LIMIT_SECONDS,
     DEFAULT_UPSTREAM_TIMEOUT_SECONDS,
@@ -1144,15 +1143,14 @@ def _default_route_runtime_facts(request_kind: str) -> RouteRuntimeFacts:
         ),
         stream_elapsed_limit_seconds=DEFAULT_STREAM_RETRY_ELAPSED_LIMIT_SECONDS,
         downstream_retry_notice_enabled=False,
-        pre_response_budget_seconds=(
-            DEFAULT_MAIN_GENERATION_PRE_RESPONSE_BUDGET_SECONDS
-        ),
+        pre_response_budget_seconds=float(DEFAULT_UPSTREAM_TIMEOUT_SECONDS),
     )
 
 
-def _route_runtime_facts(request_kind: str) -> RouteRuntimeFacts:
+def route_runtime_facts(request_kind: str) -> RouteRuntimeFacts:
+    request_timeout_seconds = upstream_timeout_seconds()
     return RouteRuntimeFacts(
-        request_timeout_seconds=upstream_timeout_seconds(),
+        request_timeout_seconds=request_timeout_seconds,
         request_kind_base_attempts=_upstream_retry_attempts(request_kind),
         request_kind_attempts_configured=(
             _request_kind_retry_attempts_configured(request_kind)
@@ -1168,9 +1166,7 @@ def _route_runtime_facts(request_kind: str) -> RouteRuntimeFacts:
         downstream_retry_notice_enabled=(
             gateway_downstream_retry_notice_enabled()
         ),
-        pre_response_budget_seconds=(
-            DEFAULT_MAIN_GENERATION_PRE_RESPONSE_BUDGET_SECONDS
-        ),
+        pre_response_budget_seconds=float(request_timeout_seconds),
     )
 
 
@@ -1259,7 +1255,10 @@ def _route_supports_transparent_metering(
         )
         or (
             inbound_format == "chat_completions"
-            and configured_upstream_format == "responses"
+            and configured_upstream_format in {
+                RouteProtocol.RESPONSES.value,
+                RouteProtocol.AUTO.value,
+            }
             and selected_upstream_format == "responses"
             and wire_format_adapter == WIRE_CHAT_TO_RESPONSES
         )

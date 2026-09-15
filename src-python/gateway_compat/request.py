@@ -262,6 +262,10 @@ def compatible_request_body(
             changed = True
         if _response._sanitize_official_system_messages(payload):
             changed = True
+        if _response._fold_official_instructions_into_developer(payload):
+            changed = True
+        if _response._sanitize_official_strict_function_schemas(payload):
+            changed = True
         if _response._sanitize_official_invalid_tool_calls(payload):
             changed = True
         if isinstance(upstream_model, str) and upstream_model and payload.get("model") != upstream_model:
@@ -286,6 +290,8 @@ def compatible_request_body(
             changed = True
         if _response._sanitize_official_system_messages(payload):
             changed = True
+        if _response._fold_official_instructions_into_developer(payload):
+            changed = True
         try:
             if _collab_v2.expand_chat_v2_for_official(payload, event_context if isinstance(event_context, dict) else None):
                 changed = True
@@ -300,6 +306,8 @@ def compatible_request_body(
                 changed = True
         except RuntimeToolCompatibilityError as exc:
             _official_passthrough._raise_runtime_tool_compatibility_error(exc)
+        if _response._sanitize_official_strict_function_schemas(payload):
+            changed = True
 
     if upstream_name != "official" and host._strip_reasoning_encrypted_content(payload):
         changed = True

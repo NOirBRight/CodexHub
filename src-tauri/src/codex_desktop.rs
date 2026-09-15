@@ -8,13 +8,20 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const RESTART_REQUIRED_ERROR: &str = "codex_desktop_restart_required";
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const CLOSE_TIMEOUT_ERROR: &str = "codex_desktop_close_timeout";
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const RESTART_UNSUPPORTED_ERROR: &str = "codex_desktop_restart_unsupported";
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const SWITCH_REOPEN_FAILED_ERROR: &str = "codex_desktop_switch_failed_reopen_failed";
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const SWITCH_RELAUNCH_FAILED_ERROR: &str = "codex_desktop_switched_relaunch_failed";
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const SWITCH_STATE_UNCERTAIN_ERROR: &str = "codex_desktop_switch_state_uncertain";
 pub(crate) const BECAME_RUNNING_ERROR: &str = "codex_desktop_became_running_before_commit";
+#[cfg_attr(not(test), allow(dead_code))]
 const CODEX_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +78,7 @@ pub enum CodexRestartResult {
 }
 
 #[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct CoordinatedSwitch<T> {
     pub(crate) value: Option<T>,
     pub(crate) restart_result: CodexRestartResult,
@@ -79,7 +87,9 @@ pub(crate) struct CoordinatedSwitch<T> {
 
 pub(crate) trait CodexDesktopLifecycle {
     fn status(&self) -> Result<CodexDesktopStatus, String>;
+    #[allow(dead_code)]
     fn request_close(&self, timeout: Duration) -> Result<(), String>;
+    #[allow(dead_code)]
     fn wait_for_running(&self, running: bool, timeout: Duration) -> Result<bool, String>;
     fn launch(&self) -> Result<(), String>;
 }
@@ -92,23 +102,6 @@ pub(crate) fn status() -> Result<CodexDesktopStatus, String> {
 
 pub(crate) fn launch() -> Result<(), String> {
     SystemCodexDesktopLifecycle.launch()
-}
-
-pub(crate) fn coordinate_switch<T, F, E>(
-    restart_codex: bool,
-    switch: F,
-) -> Result<CoordinatedSwitch<T>, String>
-where
-    F: FnOnce() -> Result<T, E>,
-    E: Into<SwitchMutationError>,
-{
-    let lock_path = switch_lock_path()?;
-    coordinate_switch_with(
-        &SystemCodexDesktopLifecycle,
-        &lock_path,
-        restart_codex,
-        switch,
-    )
 }
 
 /// Run a background Codex configuration mutation only when Codex Desktop is
@@ -186,6 +179,7 @@ where
     mutation().map(Some)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn coordinate_switch_with<T, B, F, E>(
     backend: &B,
     lock_path: &Path,
@@ -206,6 +200,7 @@ where
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn coordinate_switch_with_timeout<T, B, F, E>(
     backend: &B,
     lock_path: &Path,
@@ -371,6 +366,7 @@ fn acquire_switch_lock(path: &Path) -> Result<File, String> {
 }
 
 #[cfg(target_os = "linux")]
+#[cfg_attr(not(test), allow(dead_code))]
 fn wait_for_status<B: CodexDesktopLifecycle>(
     backend: &B,
     running: bool,
