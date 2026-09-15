@@ -75,9 +75,12 @@ On `yoga`, clone or fetch the pushed SHA into the isolated checkout, then:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Prepare-PythonRuntime.ps1
+Push-Location frontend; npm ci --no-fund --no-audit; Pop-Location
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows-portable.ps1 -Flavor normal
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows-release.ps1 -Flavor normal -Notes 'CodexHub <version>'
 ```
+
+A fresh isolated checkout has no `frontend/node_modules`; `tsc` is not on PATH until `npm ci`.
 
 Copy artifacts back to this workstation. Required stable files: portable ZIP,
 NSIS installer, installer `.sig`, and Windows `latest.json`.
