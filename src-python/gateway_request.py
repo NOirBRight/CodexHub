@@ -860,6 +860,18 @@ def json_response_bytes(payload: dict[str, Any]) -> bytes:
 _json_response_bytes = json_response_bytes
 
 
+OFFICIAL_IMAGE_POST_PATHS: Mapping[str, str] = {
+    "/v1/images/generations": "/images/generations",
+    "/v1/images/edits": "/images/edits",
+    "/v1/images/variations": "/images/variations",
+}
+
+
+def official_image_upstream_path(path: str) -> str | None:
+    """Return the Official Images suffix for a Gateway POST, or None."""
+    return OFFICIAL_IMAGE_POST_PATHS.get(path)
+
+
 def provider_scoped_path(path: str, endpoint_suffix: str) -> str | None:
     from urllib.parse import unquote
 

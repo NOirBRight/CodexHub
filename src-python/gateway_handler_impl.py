@@ -239,7 +239,7 @@ def _parse_gateway_request_input(
 class GatewayHandlerMixin:
     """Request-handling methods mixed into CodexProxyHandler."""
 
-    def _proxy_official_image_generation(self) -> None:
+    def _proxy_official_image(self, upstream_image_path: str) -> None:
         request_id = uuid.uuid4().hex[:12]
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
@@ -312,7 +312,7 @@ class GatewayHandlerMixin:
             )
             request = gateway_transport.build_request(
                 upstream,
-                "/images/generations",
+                upstream_image_path,
                 data=body,
                 headers=headers,
                 method="POST",

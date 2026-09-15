@@ -48,6 +48,7 @@ from gateway_handler_impl import GatewayHandlerMixin
 from gateway_request import (
     is_websocket_upgrade as _is_websocket_upgrade,
     local_request_authorized as _local_request_authorized,
+    official_image_upstream_path,
     provider_scoped_path,
     request_context_from_headers,
 )
@@ -209,8 +210,9 @@ class CodexProxyHandler(GatewayHandlerMixin, BaseHTTPRequestHandler):
             self._proxy_post_request(inbound_format="chat_completions", provider_hint=provider_hint)
             return
 
-        if parsed.path == "/v1/images/generations":
-            self._proxy_official_image_generation()
+        upstream_image_path = official_image_upstream_path(parsed.path)
+        if upstream_image_path is not None:
+            self._proxy_official_image(upstream_image_path)
             return
 
         self._send_json_and_close(404, {"error": "not found"})
