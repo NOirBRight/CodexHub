@@ -50,8 +50,128 @@ pub fn reveal_on_taskbar(window: &WebviewWindow) {
         gtk_window.set_skip_taskbar_hint(false);
         gtk_window.set_skip_pager_hint(false);
         gtk_window.set_type_hint(WindowTypeHint::Normal);
+        gtk_window.set_urgency_hint(false);
+        gtk_window.deiconify();
+        request_x11_unhide(&gtk_window);
         apply_full_input_region(&gtk_window.clone().upcast());
     }
+}
+
+/// GNOME can mark a still-mapped XWayland window Iconic with
+/// `_NET_WM_STATE_HIDDEN` without going through GTK `iconify()`. Tauri
+/// `show()`/`unminimize()` then no-op or `present()` with timestamp 0, which
+/// only sets DEMANDS_ATTENTION. Ask the WM to drop HIDDEN and activate.
+fn request_x11_unhide(gtk_window: &gtk::ApplicationWindow) {
+    let Some(gdk_window) = gtk::prelude::WidgetExt::window(gtk_window) else {
+        return;
+    };
+    let Ok(x11_window) = gdk_window.downcast::<gdkx11::X11Window>() else {
+        gtk_window.present();
+        return;
+    };
+    x11_window.move_to_current_desktop();
+    let display = gtk_window.display();
+    // user_time is 0 in the single-instance callback. GNOME then treats
+    // present/_NET_ACTIVE_WINDOW as DEMANDS_ATTENTION and keeps Iconic.
+    // gdk_x11_get_server_time round-trips a real X timestamp.
+    let timestamp = gdkx11::functions::x11_get_server_time(&x11_window);
+    x11_window.set_user_time(timestamp);
+    let xid = x11_window.xid();
+    let x11_display = display.downcast::<gdkx11::X11Display>().ok();
+    if let Some(x11_display) = x11_display.as_ref() {
+        send_net_wm_remove_hidden(x11_display, xid);
+    }
+    gtk_window.present_with_time(timestamp);
+    gtk_window.set_urgency_hint(false);
+    if let Some(x11_display) = x11_display.as_ref() {
+        send_net_wm_activate(x11_display, xid, timestamp);
+    }
+}
+
+fn send_net_wm_remove_hidden(display: &gdkx11::X11Display, window: gdkx11::x11::xlib::Window) {
+    use gdkx11::x11::xlib;
+    with_x11_display(display, |dpy| unsafe {
+        let hidden = xlib::XInternAtom(dpy, c"_NET_WM_STATE_HIDDEN".as_ptr(), 0);
+        let net_state = xlib::XInternAtom(dpy, c"_NET_WM_STATE".as_ptr(), 0);
+        let root = xlib::XDefaultRootWindow(dpy);
+        send_client_message(
+            dpy,
+            root,
+            window,
+            net_state,
+            [0, hidden as libc::c_long, 0, 1, 0],
+            xlib::SubstructureNotifyMask | xlib::SubstructureRedirectMask,
+        );
+        xlib::XFlush(dpy);
+    });
+}
+
+fn send_net_wm_activate(
+    display: &gdkx11::X11Display,
+    window: gdkx11::x11::xlib::Window,
+    timestamp: u32,
+) {
+    use gdkx11::x11::xlib;
+    with_x11_display(display, |dpy| unsafe {
+        let active = xlib::XInternAtom(dpy, c"_NET_ACTIVE_WINDOW".as_ptr(), 0);
+        let root = xlib::XDefaultRootWindow(dpy);
+        send_client_message(
+            dpy,
+            root,
+            window,
+            active,
+            [1, timestamp as libc::c_long, 0, 0, 0],
+            xlib::SubstructureNotifyMask | xlib::SubstructureRedirectMask,
+        );
+        xlib::XMapRaised(dpy, window);
+        xlib::XFlush(dpy);
+    });
+}
+
+fn with_x11_display(
+    display: &gdkx11::X11Display,
+    body: impl FnOnce(*mut gdkx11::x11::xlib::Display),
+) {
+    use glib::translate::ToGlibPtr;
+
+    display.error_trap_push();
+    unsafe {
+        let dpy = gdkx11::ffi::gdk_x11_display_get_xdisplay(display.to_glib_none().0);
+        if dpy.is_null() {
+            display.error_trap_pop_ignored();
+            return;
+        }
+        body(dpy);
+    }
+    display.error_trap_pop_ignored();
+}
+
+unsafe fn send_client_message(
+    dpy: *mut gdkx11::x11::xlib::Display,
+    root: gdkx11::x11::xlib::Window,
+    window: gdkx11::x11::xlib::Window,
+    message_type: gdkx11::x11::xlib::Atom,
+    data: [libc::c_long; 5],
+    mask: libc::c_long,
+) {
+    use gdkx11::x11::xlib;
+    let mut payload = xlib::ClientMessageData::new();
+    for (index, value) in data.into_iter().enumerate() {
+        payload.set_long(index, value);
+    }
+    let client_message = xlib::XClientMessageEvent {
+        type_: xlib::ClientMessage,
+        serial: 0,
+        send_event: 1,
+        display: dpy,
+        window,
+        message_type,
+        format: 32,
+        data: payload,
+    };
+    let mut xevent = std::mem::zeroed::<xlib::XEvent>();
+    xevent.client_message = client_message;
+    xlib::XSendEvent(dpy, root, 0, mask, &mut xevent);
 }
 
 fn configure_shell(window: &WebviewWindow) -> Result<(), String> {
@@ -670,6 +790,64 @@ mod tests {
              StartupWMClass=com.codexhub.app\n\
              X-GNOME-UsesNotifications=true\n"
         )
+    }
+
+    #[test]
+    fn reveal_on_taskbar_asks_the_wm_to_clear_iconic_hidden() {
+        let production = include_str!("linux_window.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("source contains the production module");
+        let reveal = production
+            .split("pub fn reveal_on_taskbar")
+            .nth(1)
+            .expect("reveal_on_taskbar")
+            .split("\nfn ")
+            .next()
+            .expect("reveal_on_taskbar body");
+        assert!(
+            reveal.contains("deiconify()"),
+            "GNOME can leave a mapped window Iconic; reveal must deiconify: {reveal}"
+        );
+        assert!(
+            reveal.contains("request_x11_unhide(&gtk_window)"),
+            "public reveal must call the WM restore: {reveal}"
+        );
+        assert!(
+            production.contains("_NET_WM_STATE_HIDDEN"),
+            "gtk deiconify is a no-op when GTK did not iconify the window; ask the WM to drop HIDDEN"
+        );
+        assert!(
+            production.contains("x11_get_server_time"),
+            "single-instance restore has no user event; GNOME ignores timestamp 0"
+        );
+        assert!(
+            production.contains("gtk_window.present()"),
+            "native Wayland has no EWMH; still present() when the X11 downcast fails"
+        );
+        let unhide = production
+            .split("fn request_x11_unhide")
+            .nth(1)
+            .expect("request_x11_unhide")
+            .split("\nfn send_net_wm_remove_hidden")
+            .next()
+            .expect("request_x11_unhide body");
+        let drop_hidden = unhide
+            .find("send_net_wm_remove_hidden")
+            .expect("drop HIDDEN before present");
+        let present = unhide
+            .find("present_with_time")
+            .expect("present_with_time after drop HIDDEN");
+        let urgency = unhide
+            .find("set_urgency_hint(false)")
+            .expect("clear urgency after present");
+        let activate = unhide
+            .find("send_net_wm_activate")
+            .expect("activate after present");
+        assert!(
+            drop_hidden < present && present < urgency && urgency < activate,
+            "GNOME present-on-HIDDEN is DEMANDS_ATTENTION: {unhide}"
+        );
     }
 
     #[test]
