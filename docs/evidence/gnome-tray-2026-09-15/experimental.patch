@@ -1,0 +1,10 @@
+--- /tmp/codexhub-tray-lab/stock-dbusMenu.js	2026-09-15 09:59:54.021544511 +0800
++++ /tmp/codexhub-tray-lab/extensions/ubuntu-appindicators@ubuntu.com/dbusMenu.js	2026-09-15 09:59:54.022934848 +0800
+@@ -286,6 +286,7 @@
+     }
+
+     async _requestProperties(propertyId, cancellable) {
++        cancellable = this._cancellable; // Disposable experiment: isolate request cancellation lifetime.
+         this._propertiesRequestedFor.add(propertyId);
+
+         if (this._propertiesRequest && this._propertiesRequest.pending())

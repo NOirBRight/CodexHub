@@ -45,6 +45,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{image::Image, AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 
+#[cfg(all(desktop, target_os = "linux"))]
+use tauri::menu::{Menu, MenuItemKind};
 #[cfg(desktop)]
 use tauri::{
     menu::MenuBuilder,
@@ -584,7 +586,55 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         });
 
     tray.build(app)?;
+    #[cfg(target_os = "linux")]
+    republish_linux_tray_menu_labels(&menu);
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_tray_label_items(menu: &Menu<tauri::Wry>) -> Vec<tauri::menu::MenuItem<tauri::Wry>> {
+    menu.items()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|kind| match kind {
+            MenuItemKind::MenuItem(item) => Some(item),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn refresh_linux_tray_menu_labels(items: &[tauri::menu::MenuItem<tauri::Wry>]) {
+    for item in items {
+        if let Ok(text) = item.text() {
+            // GTK may skip notify::label when the string is unchanged, so
+            // dbusmenu would not emit ItemsPropertiesUpdated.
+            let _ = item.set_text(format!("{text}\u{2060}"));
+            let _ = item.set_text(&text);
+        }
+    }
+}
+
+/// GNOME AppIndicators fetches labels on a cancellable idle. A later layout
+/// update can cancel that fetch and leave empty Shell actors even though
+/// D-Bus GetLayout still has text. Re-write the same GTK labels after the
+/// StatusNotifierItem is on the bus so dbusmenu emits PropertiesUpdated.
+/// Trigger: Linux tray menu has been published. Bound: immediate, next GTK
+/// idle, and one 100ms timeout; then stop. Not an unbounded retry.
+#[cfg(target_os = "linux")]
+fn republish_linux_tray_menu_labels(menu: &Menu<tauri::Wry>) {
+    let items = linux_tray_label_items(menu);
+    refresh_linux_tray_menu_labels(&items);
+    glib::idle_add_local_once({
+        let items = items.clone();
+        move || {
+            refresh_linux_tray_menu_labels(&items);
+            glib::timeout_add_local_once(std::time::Duration::from_millis(100), {
+                let items = items.clone();
+                move || refresh_linux_tray_menu_labels(&items)
+            });
+        }
+    });
 }
 
 fn run_gui() {

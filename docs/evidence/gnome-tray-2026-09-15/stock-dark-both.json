@@ -1,0 +1,68 @@
+[
+  {
+    "id": "appindicator-:1.42@/org/ayatana/NotificationItem/tray_reference",
+    "open": false,
+    "items": [
+      {
+        "text": "Show Reference",
+        "fg": "#ffffffff",
+        "bg": "#36363aff",
+        "style": null
+      },
+      {
+        "text": "Exit Reference",
+        "fg": "#ffffffff",
+        "bg": "#36363aff",
+        "style": null
+      }
+    ]
+  },
+  {
+    "id": "appindicator-:1.43@/org/ayatana/NotificationItem/tray_icon_tray_app_codexhub",
+    "open": true,
+    "items": [
+      {
+        "text": "",
+        "fg": "#ffffffff",
+        "bg": "#36363aff",
+        "style": null
+      },
+      {
+        "text": "",
+        "fg": "#ffffffff",
+        "bg": "#36363aff",
+        "style": null
+      },
+      {
+        "text": "",
+        "fg": "#ffffffff",
+        "bg": "#36363aff",
+        "style": null
+      },
+      {
+        "text": "",
+        "fg": "#ffffffff",
+        "bg": "#36363aff",
+        "style": null
+      },
+      {
+        "text": "",
+        "fg": "#ffffffff",
+        "bg": "#36363aff",
+        "style": null
+      },
+      {
+        "text": "",
+        "fg": "#ffffffff",
+        "bg": "#36363aff",
+        "style": null
+      },
+      {
+        "text": "",
+        "fg": "#ffffffff",
+        "bg": "#36363aff",
+        "style": null
+      }
+    ]
+  }
+]

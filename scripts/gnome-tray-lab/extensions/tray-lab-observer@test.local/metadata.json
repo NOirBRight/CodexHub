@@ -1,0 +1,6 @@
+{
+  "uuid": "tray-lab-observer@test.local",
+  "name": "Isolated tray test observer",
+  "description": "Enable introspection only inside a disposable test session. Do not install on a login session.",
+  "shell-version": ["50"]
+}

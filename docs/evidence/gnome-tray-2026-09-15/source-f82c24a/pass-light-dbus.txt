@@ -1,0 +1,5 @@
+items: (<[':1.58@/org/ayatana/NotificationItem/tray_reference', ':1.72@/org/ayatana/NotificationItem/tray_icon_tray_app_codexhub']>,)
+dest=:1.58 path=/org/ayatana/NotificationItem/tray_reference/Menu
+(uint32 2, (0, {'children-display': <'submenu'>}, [<(2, {'label': <'Show Reference'>}, @av [])>, <(3, {'label': <'Exit Reference'>}, @av [])>]))
+dest=:1.72 path=/org/ayatana/NotificationItem/tray_icon_tray_app_codexhub/Menu
+(uint32 2, (0, {'children-display': <'submenu'>}, [<(2, {'label': <'Show CodexHub'>}, @av [])>, <(3, {'enabled': <true>, 'type': <'separator'>}, @av [])>, <(4, {'label': <'Connect Codex to Official'>}, @av [])>, <(5, {'label': <'Connect Codex to CodexHub'>}, @av [])>, <(6, {'enabled': <true>, 'type': <'separator'>}, @av [])>, <(7, {'label': <'Start Gateway'>}, @av [])>, <(8, {'label': <'Stop Gateway'>}, @av [])>, <(9, {'label': <'Restart Gateway'>}, @av [])>, <(10, {'enabled': <true>, 'type': <'separator'>}, @av [])>, <(11, {'label': <'Exit'>}, @av [])>]))
