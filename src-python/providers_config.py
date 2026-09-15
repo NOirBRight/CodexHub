@@ -309,6 +309,7 @@ def build_external_model_index(
                 "default_reasoning_level": model.default_reasoning_level,
                 "thinking_mode": model.thinking_mode,
                 "display_name": model.display_name,
+                "provider_name": provider.name,
                 "context_source": "providers_toml",
                 "max_output_source": "providers_toml",
                 "priority_base": _provider_priority_base(provider),
@@ -393,6 +394,7 @@ def build_ollama_cloud_model_index(
                 "default_reasoning_level": model.default_reasoning_level,
                 "thinking_mode": model.thinking_mode,
                 "display_name": model.display_name,
+                "provider_name": provider.name,
                 "context_source": "providers_toml",
                 "max_output_source": "providers_toml",
                 "priority_base": _provider_priority_base(provider),
@@ -702,6 +704,8 @@ def _apply_catalog_display_name_refresh(runtime_providers: Iterable[ProviderConf
                 runtime_model.display_name,
                 prefix,
                 bundled_model.display_name,
+                runtime_model.id,
+                bundled_model.id,
             )
             if refreshed != runtime_model.display_name:
                 runtime_model.display_name = refreshed

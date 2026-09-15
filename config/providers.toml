@@ -565,7 +565,7 @@ id = "commandcode"
 name = "Command Code"
 base_url = "https://api.commandcode.ai/provider/v1"
 api_key = "{env:COMMANDCODE_API_KEY}"
-display_prefix = "Command Code"
+display_prefix = "CC"
 upstream_format = "chat_completions"
 available_upstream_formats = ["chat_completions", "responses"]
 sort_order = 6
@@ -573,7 +573,7 @@ enabled = true
 
   [[providers.models]]
   id = "claude-sonnet-5"
-  display_name = "claude-sonnet-5"
+  display_name = "Claude Sonnet 5"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -585,7 +585,7 @@ enabled = true
 
   [[providers.models]]
   id = "claude-sonnet-4-6"
-  display_name = "claude-sonnet-4-6"
+  display_name = "Claude Sonnet 4.6"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -597,7 +597,7 @@ enabled = true
 
   [[providers.models]]
   id = "claude-fable-5"
-  display_name = "claude-fable-5"
+  display_name = "Claude Fable 5"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -609,7 +609,7 @@ enabled = true
 
   [[providers.models]]
   id = "claude-fable-5-1"
-  display_name = "claude-fable-5-1"
+  display_name = "Claude Fable 5.1"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -621,7 +621,7 @@ enabled = true
 
   [[providers.models]]
   id = "claude-opus-5"
-  display_name = "claude-opus-5"
+  display_name = "Claude Opus 5"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -633,7 +633,7 @@ enabled = true
 
   [[providers.models]]
   id = "claude-opus-4-8"
-  display_name = "claude-opus-4-8"
+  display_name = "Claude Opus 4.8"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -645,7 +645,7 @@ enabled = true
 
   [[providers.models]]
   id = "claude-opus-4-7"
-  display_name = "claude-opus-4-7"
+  display_name = "Claude Opus 4.7"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -657,7 +657,7 @@ enabled = true
 
   [[providers.models]]
   id = "claude-haiku-4-5-20251001"
-  display_name = "claude-haiku-4-5-20251001"
+  display_name = "Claude Haiku 4.5"
   context_window = 200000
   max_output_tokens = 64000
   input_modalities = ["text", "image"]
@@ -669,7 +669,7 @@ enabled = true
 
   [[providers.models]]
   id = "gpt-5.6-sol"
-  display_name = "gpt-5.6-sol"
+  display_name = "GPT 5.6 Sol"
   context_window = 1048576
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -681,7 +681,7 @@ enabled = true
 
   [[providers.models]]
   id = "gpt-5.6-terra"
-  display_name = "gpt-5.6-terra"
+  display_name = "GPT 5.6 Terra"
   context_window = 1048576
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -693,7 +693,7 @@ enabled = true
 
   [[providers.models]]
   id = "gpt-5.6-luna"
-  display_name = "gpt-5.6-luna"
+  display_name = "GPT 5.6 Luna"
   context_window = 1050000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -705,7 +705,7 @@ enabled = true
 
   [[providers.models]]
   id = "gpt-5.5"
-  display_name = "gpt-5.5"
+  display_name = "GPT 5.5"
   context_window = 256000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -717,7 +717,7 @@ enabled = true
 
   [[providers.models]]
   id = "gpt-5.4"
-  display_name = "gpt-5.4"
+  display_name = "GPT 5.4"
   context_window = 256000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -729,7 +729,7 @@ enabled = true
 
   [[providers.models]]
   id = "gpt-5.3-codex"
-  display_name = "gpt-5.3-codex"
+  display_name = "GPT 5.3 Codex"
   context_window = 256000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -741,7 +741,7 @@ enabled = true
 
   [[providers.models]]
   id = "gpt-5.4-mini"
-  display_name = "gpt-5.4-mini"
+  display_name = "GPT 5.4 Mini"
   context_window = 256000
   max_output_tokens = 64000
   input_modalities = ["text", "image"]
@@ -753,7 +753,7 @@ enabled = true
 
   [[providers.models]]
   id = "deepseek/deepseek-v4-pro"
-  display_name = "deepseek-v4-pro"
+  display_name = "DeepSeek V4 Pro"
   context_window = 1000000
   max_output_tokens = 384000
   input_modalities = ["text"]
@@ -765,7 +765,7 @@ enabled = true
 
   [[providers.models]]
   id = "deepseek/deepseek-v4-flash"
-  display_name = "deepseek-v4-flash"
+  display_name = "DeepSeek V4 Flash"
   context_window = 1000000
   max_output_tokens = 384000
   input_modalities = ["text"]
@@ -777,7 +777,7 @@ enabled = true
 
   [[providers.models]]
   id = "deepseek/deepseek-v4-flash-vision-exp"
-  display_name = "deepseek-v4-flash-vision-exp"
+  display_name = "DeepSeek V4 Flash Vision Exp"
   context_window = 1000000
   max_output_tokens = 384000
   input_modalities = ["text", "image"]
@@ -789,7 +789,7 @@ enabled = true
 
   [[providers.models]]
   id = "deepseek/deepseek-v4-flash-fast"
-  display_name = "deepseek-v4-flash-fast"
+  display_name = "DeepSeek V4 Flash Fast"
   context_window = 1000000
   max_output_tokens = 384000
   input_modalities = ["text"]
@@ -801,7 +801,7 @@ enabled = true
 
   [[providers.models]]
   id = "moonshotai/kimi-k3"
-  display_name = "kimi-k3"
+  display_name = "Kimi K3"
   context_window = 1048576
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
@@ -813,7 +813,7 @@ enabled = true
 
   [[providers.models]]
   id = "moonshotai/kimi-k2.7-code"
-  display_name = "kimi-k2.7-code"
+  display_name = "Kimi K2.7 Code"
   context_window = 262144
   max_output_tokens = 32768
   input_modalities = ["text", "image"]
@@ -825,7 +825,7 @@ enabled = true
 
   [[providers.models]]
   id = "moonshotai/kimi-k2.7-code-highspeed"
-  display_name = "kimi-k2.7-code-highspeed"
+  display_name = "Kimi K2.7 Code Highspeed"
   context_window = 262144
   max_output_tokens = 32768
   input_modalities = ["text", "image"]
@@ -837,7 +837,7 @@ enabled = true
 
   [[providers.models]]
   id = "moonshotai/kimi-k2.6"
-  display_name = "kimi-k2.6"
+  display_name = "Kimi K2.6"
   context_window = 262144
   max_output_tokens = 32768
   input_modalities = ["text", "image"]
@@ -849,7 +849,7 @@ enabled = true
 
   [[providers.models]]
   id = "moonshotai/kimi-k2.5"
-  display_name = "kimi-k2.5"
+  display_name = "Kimi K2.5"
   context_window = 262144
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
@@ -861,7 +861,7 @@ enabled = true
 
   [[providers.models]]
   id = "z-ai/glm-5.3-flash"
-  display_name = "glm-5.3-flash"
+  display_name = "GLM-5.3 Flash"
   context_window = 1000000
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
@@ -873,7 +873,7 @@ enabled = true
 
   [[providers.models]]
   id = "zai-org/glm-5.3"
-  display_name = "glm-5.3"
+  display_name = "GLM-5.3"
   context_window = 1000000
   max_output_tokens = 131072
   input_modalities = ["text"]
@@ -885,7 +885,7 @@ enabled = true
 
   [[providers.models]]
   id = "zai-org/glm-5.2"
-  display_name = "glm-5.2"
+  display_name = "GLM-5.2"
   context_window = 1000000
   max_output_tokens = 131072
   input_modalities = ["text"]
@@ -897,7 +897,7 @@ enabled = true
 
   [[providers.models]]
   id = "minimax/minimax-m2.7-free"
-  display_name = "minimax-m2.7-free"
+  display_name = "MiniMax M2.7 Free"
   context_window = 204800
   max_output_tokens = 131072
   input_modalities = ["text"]
@@ -909,7 +909,7 @@ enabled = true
 
   [[providers.models]]
   id = "minimaxai/minimax-m2.5"
-  display_name = "minimax-m2.5"
+  display_name = "MiniMax M2.5"
   context_window = 204800
   max_output_tokens = 131072
   input_modalities = ["text"]
@@ -921,7 +921,7 @@ enabled = true
 
   [[providers.models]]
   id = "xiaomi/mimo-v2.5-pro"
-  display_name = "mimo-v2.5-pro"
+  display_name = "MiMo V2.5 Pro"
   context_window = 1048576
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -933,7 +933,7 @@ enabled = true
 
   [[providers.models]]
   id = "xiaomi/mimo-v2.5"
-  display_name = "mimo-v2.5"
+  display_name = "MiMo V2.5"
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
@@ -945,7 +945,7 @@ enabled = true
 
   [[providers.models]]
   id = "qwen/qwen3.8-max"
-  display_name = "qwen3.8-max"
+  display_name = "Qwen3.8 Max"
   context_window = 1000000
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
@@ -957,7 +957,7 @@ enabled = true
 
   [[providers.models]]
   id = "qwen/qwen3.8-max-0902"
-  display_name = "qwen3.8-max-0902"
+  display_name = "Qwen3.8 Max 0902"
   context_window = 1000000
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
@@ -969,7 +969,7 @@ enabled = true
 
   [[providers.models]]
   id = "qwen/qwen3.8-27b"
-  display_name = "qwen3.8-27b"
+  display_name = "Qwen3.8 27B"
   context_window = 262144
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
@@ -981,7 +981,7 @@ enabled = true
 
   [[providers.models]]
   id = "qwen/qwen3.8-flash"
-  display_name = "qwen3.8-flash"
+  display_name = "Qwen3.8 Flash"
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
@@ -993,7 +993,7 @@ enabled = true
 
   [[providers.models]]
   id = "stepfun/step-3.7-flash"
-  display_name = "step-3.7-flash"
+  display_name = "Step 3.7 Flash"
   context_window = 256000
   max_output_tokens = 64000
   input_modalities = ["text"]
@@ -1005,7 +1005,7 @@ enabled = true
 
   [[providers.models]]
   id = "stepfun/step-3.5-flash"
-  display_name = "step-3.5-flash"
+  display_name = "Step 3.5 Flash"
   context_window = 256000
   max_output_tokens = 64000
   input_modalities = ["text"]
@@ -1017,7 +1017,7 @@ enabled = true
 
   [[providers.models]]
   id = "tencent/hy3"
-  display_name = "hy3"
+  display_name = "Hy3"
   context_window = 256000
   max_output_tokens = 64000
   input_modalities = ["text"]
@@ -1029,7 +1029,7 @@ enabled = true
 
   [[providers.models]]
   id = "tencent/hy3-paid"
-  display_name = "hy3-paid"
+  display_name = "Hy3 Paid"
   context_window = 256000
   max_output_tokens = 64000
   input_modalities = ["text"]
@@ -1041,7 +1041,7 @@ enabled = true
 
   [[providers.models]]
   id = "tencent/hy4-preview"
-  display_name = "hy4-preview"
+  display_name = "Hy4 Preview"
   context_window = 1024000
   max_output_tokens = 64000
   input_modalities = ["text"]
@@ -1053,7 +1053,7 @@ enabled = true
 
   [[providers.models]]
   id = "google/gemini-3.8-flash"
-  display_name = "gemini-3.8-flash"
+  display_name = "Gemini 3.8 Flash"
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
@@ -1065,7 +1065,7 @@ enabled = true
 
   [[providers.models]]
   id = "google/gemini-3.7-flash"
-  display_name = "gemini-3.7-flash"
+  display_name = "Gemini 3.7 Flash"
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
@@ -1077,7 +1077,7 @@ enabled = true
 
   [[providers.models]]
   id = "google/gemini-3.6-flash"
-  display_name = "gemini-3.6-flash"
+  display_name = "Gemini 3.6 Flash"
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
@@ -1089,7 +1089,7 @@ enabled = true
 
   [[providers.models]]
   id = "google/gemini-3.5-flash"
-  display_name = "gemini-3.5-flash"
+  display_name = "Gemini 3.5 Flash"
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
@@ -1101,7 +1101,7 @@ enabled = true
 
   [[providers.models]]
   id = "google/gemini-3.5-flash-lite"
-  display_name = "gemini-3.5-flash-lite"
+  display_name = "Gemini 3.5 Flash Lite"
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
@@ -1113,7 +1113,7 @@ enabled = true
 
   [[providers.models]]
   id = "google/gemini-3.1-flash-lite"
-  display_name = "gemini-3.1-flash-lite"
+  display_name = "Gemini 3.1 Flash Lite"
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
@@ -1125,7 +1125,7 @@ enabled = true
 
   [[providers.models]]
   id = "sakana/fugu-ultra"
-  display_name = "fugu-ultra"
+  display_name = "Fugu Ultra"
   context_window = 256000
   max_output_tokens = 64000
   input_modalities = ["text"]
@@ -1137,7 +1137,7 @@ enabled = true
 
   [[providers.models]]
   id = "meta/muse-spark-1.1"
-  display_name = "muse-spark-1.1"
+  display_name = "Muse Spark 1.1"
   context_window = 1048576
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
@@ -1149,7 +1149,7 @@ enabled = true
 
   [[providers.models]]
   id = "meta/muse-spark-1.2"
-  display_name = "muse-spark-1.2"
+  display_name = "Muse Spark 1.2"
   context_window = 1048576
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
@@ -1161,7 +1161,7 @@ enabled = true
 
   [[providers.models]]
   id = "meta/muse-spark-1.2-contributor"
-  display_name = "muse-spark-1.2-contributor"
+  display_name = "Muse Spark 1.2 Contributor"
   context_window = 1048576
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
@@ -1173,7 +1173,7 @@ enabled = true
 
   [[providers.models]]
   id = "meta/muse-spark-1.3"
-  display_name = "muse-spark-1.3"
+  display_name = "Muse Spark 1.3"
   context_window = 1048576
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
@@ -1185,7 +1185,7 @@ enabled = true
 
   [[providers.models]]
   id = "meta/muse-spark-1.3-contributor"
-  display_name = "muse-spark-1.3-contributor"
+  display_name = "Muse Spark 1.3 Contributor"
   context_window = 1048576
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
@@ -1197,7 +1197,7 @@ enabled = true
 
   [[providers.models]]
   id = "xai/grok-4.5"
-  display_name = "grok-4.5"
+  display_name = "Grok 4.5"
   context_window = 500000
   max_output_tokens = 500000
   input_modalities = ["text", "image"]
@@ -1209,7 +1209,7 @@ enabled = true
 
   [[providers.models]]
   id = "xai/grok-4.6"
-  display_name = "grok-4.6"
+  display_name = "Grok 4.6"
   context_window = 500000
   max_output_tokens = 500000
   input_modalities = ["text", "image"]
@@ -1224,7 +1224,7 @@ id = "opencode-go"
 name = "OpenCode Go"
 base_url = "https://opencode.ai/zen/go/v1"
 api_key = "{env:OPENCODE_API_KEY}"
-display_prefix = "OpenCode"
+display_prefix = "OC"
 upstream_format = "auto"
 available_upstream_formats = ["chat_completions", "responses"]
 sort_order = 7

@@ -2574,7 +2574,7 @@ fn zcode_route_mode_marks_stale_projected_name_and_max_output() {
     );
 
     let stale_catalog =
-        expected_catalog.replacen("\"name\": \"GLM-5.3\"", "\"name\": \"Ollama GLM-5.3\"", 1);
+        expected_catalog.replacen("\"name\": \"Volc GLM-5.3\"", "\"name\": \"Ollama GLM-5.3\"", 1);
     assert_ne!(stale_catalog, expected_catalog);
     fs::write(&catalog_path, stale_catalog).unwrap();
     assert_eq!(

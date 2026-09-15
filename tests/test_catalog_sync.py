@@ -450,6 +450,121 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["kimi/kimi-k3"]["display_name"], "Kimi K3")
         self.assertEqual(by_slug["kimi-cn/kimi-k3"]["display_name"], "Kimi CN K3")
 
+    def test_gateway_flat_label_abbreviates_long_third_party_prefixes(self):
+        catalog = build_codex_catalog(
+            [],
+            [],
+            CatalogPolicy(
+                denied_models=set(),
+                denied_substrings=set(),
+                display_names={
+                    "commandcode/deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
+                    "opencode-go/glm-5.3-flash": "GLM-5.3 Flash",
+                    "xai/grok-4.6": "Grok 4.6",
+                },
+            ),
+            "0.142.0",
+            external_models=[
+                {
+                    "alias": "commandcode/deepseek/deepseek-v4-flash",
+                    "provider_alias": "commandcode",
+                    "upstream_name": "commandcode",
+                    "display_prefix": "Command Code",
+                    "display_name": "deepseek-v4-flash",
+                    "base_url": "https://commandcode.example.test/v1",
+                    "api_key": "secret-test-key",
+                    "upstream_model": "deepseek/deepseek-v4-flash",
+                    "priority_base": 200,
+                    "context_window": 1000000,
+                    "max_output_tokens": 384000,
+                    "input_modalities": ("text",),
+                    "context_source": "providers_toml",
+                    "max_output_source": "providers_toml",
+                },
+                {
+                    "alias": "opencode-go/glm-5.3-flash",
+                    "provider_alias": "opencode-go",
+                    "upstream_name": "opencode_go",
+                    "display_prefix": "OpenCode",
+                    "display_name": "GLM-5.3 Flash",
+                    "base_url": "https://opencode.example.test/v1",
+                    "api_key": "secret-test-key",
+                    "upstream_model": "glm-5.3-flash",
+                    "priority_base": 200,
+                    "context_window": 1000000,
+                    "max_output_tokens": 131072,
+                    "input_modalities": ("text",),
+                    "context_source": "providers_toml",
+                    "max_output_source": "providers_toml",
+                },
+                {
+                    "alias": "xai/grok-4.6",
+                    "provider_alias": "xai",
+                    "upstream_name": "xai",
+                    "display_prefix": "xAI",
+                    "display_name": "Grok 4.6",
+                    "base_url": "https://api.x.ai/v1",
+                    "api_key": "secret-test-key",
+                    "upstream_model": "grok-4.6",
+                    "priority_base": 200,
+                    "context_window": 500000,
+                    "max_output_tokens": 500000,
+                    "input_modalities": ("text", "image"),
+                    "context_source": "providers_toml",
+                    "max_output_source": "providers_toml",
+                },
+            ],
+        )
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+        self.assertEqual(
+            by_slug["commandcode/deepseek/deepseek-v4-flash"]["display_name"],
+            "CC DeepSeek V4 Flash",
+        )
+        self.assertEqual(
+            by_slug["commandcode/deepseek/deepseek-v4-flash"]["description"],
+            "External Command Code model via providers.toml.",
+        )
+        cc_catalog = build_codex_catalog(
+            [],
+            [],
+            CatalogPolicy(
+                denied_models=set(),
+                denied_substrings=set(),
+                display_names={"commandcode/deepseek/deepseek-v4-flash": "DeepSeek V4 Flash"},
+            ),
+            "0.142.0",
+            external_models=[
+                {
+                    "alias": "commandcode/deepseek/deepseek-v4-flash",
+                    "provider_alias": "commandcode",
+                    "provider_name": "Command Code",
+                    "upstream_name": "commandcode",
+                    "display_prefix": "CC",
+                    "display_name": "DeepSeek V4 Flash",
+                    "base_url": "https://commandcode.example.test/v1",
+                    "api_key": "secret-test-key",
+                    "upstream_model": "deepseek/deepseek-v4-flash",
+                    "priority_base": 200,
+                    "context_window": 1000000,
+                    "max_output_tokens": 384000,
+                    "input_modalities": ("text",),
+                    "context_source": "providers_toml",
+                    "max_output_source": "providers_toml",
+                },
+            ],
+        )
+        cc_row = cc_catalog["models"][0]
+        self.assertEqual(cc_row["display_name"], "CC DeepSeek V4 Flash")
+        self.assertEqual(
+            cc_row["description"],
+            "External Command Code model via providers.toml.",
+        )
+        self.assertEqual(
+            by_slug["opencode-go/glm-5.3-flash"]["display_name"],
+            "OC GLM-5.3 Flash",
+        )
+        self.assertEqual(by_slug["xai/grok-4.6"]["display_name"], "xAI Grok 4.6")
+
     def test_gateway_flat_label_does_not_invent_a_prefix_for_custom_providers(self):
         catalog = build_codex_catalog(
             [],

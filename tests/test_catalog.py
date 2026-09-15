@@ -12,6 +12,7 @@ from catalog import (
     display_name_for,
     load_catalog_models,
     load_policy,
+    mixed_list_prefix,
     should_include_external_provider_model,
     should_include_model,
 )
@@ -118,6 +119,16 @@ class CatalogPolicyTests(unittest.TestCase):
         self.assertEqual(compose_flat_label("Ollama", "Ollama GLM-5.3"), "Ollama GLM-5.3")
         self.assertEqual(compose_flat_label("", "GLM-5.3"), "GLM-5.3")
         self.assertEqual(compose_flat_label(None, "GLM-5.3"), "GLM-5.3")
+        self.assertEqual(mixed_list_prefix("Command Code"), "CC")
+        self.assertEqual(mixed_list_prefix("OpenCode"), "OC")
+        self.assertEqual(mixed_list_prefix("OpenCode Go"), "OC")
+        self.assertEqual(mixed_list_prefix("OpenCode GO"), "OC")
+        self.assertEqual(mixed_list_prefix("Volc"), "Volc")
+        self.assertEqual(mixed_list_prefix("xAI"), "xAI")
+        self.assertIsNone(mixed_list_prefix("minimax/"))
+        self.assertIsNone(mixed_list_prefix(""))
+        self.assertEqual(compose_flat_label(mixed_list_prefix("Command Code"), "DeepSeek V4 Flash"), "CC DeepSeek V4 Flash")
+        self.assertEqual(compose_flat_label(mixed_list_prefix("OpenCode"), "GLM-5.3 Flash"), "OC GLM-5.3 Flash")
 
     def test_catalog_owned_display_name_rewrites_prefixed_catalog_string_only(self):
         self.assertEqual(
@@ -136,6 +147,23 @@ class CatalogPolicyTests(unittest.TestCase):
             catalog_owned_display_name("MiniMax M3", "MiniMax.cn", "MiniMax M3"),
             "MiniMax M3",
         )
+        self.assertEqual(
+            catalog_owned_display_name(
+                "deepseek-v4-flash",
+                "Command Code",
+                "DeepSeek V4 Flash",
+                "deepseek/deepseek-v4-flash",
+            ),
+            "DeepSeek V4 Flash",
+        )
+        self.assertEqual(
+            catalog_owned_display_name(
+                "CC DeepSeek V4 Flash",
+                "Command Code",
+                "DeepSeek V4 Flash",
+            ),
+            "DeepSeek V4 Flash",
+        )
         self.assertIsNone(catalog_owned_display_name(None, "Ollama", "GLM-5.3"))
 
     def test_catalog_or_wire_display_name_prefers_stored_then_catalog_then_wire_id(self):
@@ -150,6 +178,21 @@ class CatalogPolicyTests(unittest.TestCase):
         self.assertEqual(
             catalog_or_wire_display_name(None, self.policy, "volc/my-model", "my-model"),
             "my-model",
+        )
+        self.assertEqual(
+            catalog_or_wire_display_name(
+                "deepseek-v4-flash",
+                CatalogPolicy(
+                    denied_models=set(),
+                    denied_substrings=set(),
+                    display_names={
+                        "commandcode/deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
+                    },
+                ),
+                "commandcode/deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-v4-flash",
+            ),
+            "DeepSeek V4 Flash",
         )
         self.assertEqual(
             catalog_or_wire_display_name(
