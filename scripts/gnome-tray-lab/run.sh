@@ -10,7 +10,6 @@ app_rel="src-tauri/target/release/codexhub"
 repeats=10
 expect="report"
 theme="prefer-light"
-keep=0
 timeout_secs=420
 deb_version="50.26.04.7ubuntu"
 
@@ -23,7 +22,6 @@ Usage: scripts/gnome-tray-lab/run.sh [options]
   --theme light|dark  Isolated color-scheme (default light)
   --lab-root PATH     Disposable lab directory
   --bin PATH          CodexHub binary inside the repo worktree
-  --keep              Leave the lab directory after exit
   --timeout SECS      Overall timeout (default 420)
 HINT
 }
@@ -43,7 +41,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --lab-root) lab_root="${2:?}"; shift 2 ;;
     --bin) app_rel="${2:?}"; shift 2 ;;
-    --keep) keep=1; shift ;;
     --timeout) timeout_secs="${2:?}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
@@ -260,6 +257,12 @@ if [[ "$ref_fail" -ne 0 ]]; then
   exit 1
 fi
 
+restart_samples=$(find "$lab_root/artifacts" -maxdepth 1 -name 'repeat-[0-9]*.json' ! -name '*-dbus.json' ! -name '*-check.jsonl' | wc -l)
+if [[ "$restart_samples" -ne "$repeats" ]]; then
+  echo "error: captured $restart_samples restart samples, expected $repeats" >&2
+  exit 1
+fi
+
 case "$expect" in
   failures)
     if [[ "$codex_empty" -gt 0 ]]; then
@@ -270,10 +273,10 @@ case "$expect" in
     exit 1
     ;;
   pass)
-    if [[ "$codex_fail" -eq 0 && "$codex_pass" -gt 0 ]]; then
+    if [[ "$codex_fail" -eq 0 && "$codex_pass" -ge "$repeats" ]]; then
       exit 0
     fi
-    echo "error: expected every CodexHub sample to pass" >&2
+    echo "error: expected every CodexHub sample to pass ($codex_pass pass / $codex_fail fail, $repeats restarts)" >&2
     exit 1
     ;;
   *)

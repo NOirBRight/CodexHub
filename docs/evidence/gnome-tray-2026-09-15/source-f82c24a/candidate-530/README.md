@@ -1,5 +1,6 @@
 # App-side candidate (#530)
 
+Candidate git SHA `488bc453796387b4e9cff76b48d4e17ac6c027c7` (same `main.rs` blob as the 30/30 run).
 Binary SHA-256 `1a5094b32b79a4f3fab96e6407abe68ebd8d5f486495ced597a6f9a572cbf461`.
 Stock AppIndicators, no Contrast Guard.
 
@@ -27,4 +28,4 @@ Tried and rejected on this harness:
 | Light, 15 restarts + theme + reopen | 18 | 0 | 0 |
 | Dark, 10 restarts + theme + reopen | 12 | 0 | 0 |
 
-Unfixed same-SHA baseline: 1/8 and 5/12 empty-label failures.
+Unfixed baseline SHA `f82c24a03082148b49b646a6e26b57c9a1450039` (binary `20b08e55…`): 1/8 and 5/12 empty-label failures.

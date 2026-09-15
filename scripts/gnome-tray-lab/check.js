@@ -22,15 +22,12 @@ function classify(menu) {
     return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
   });
   const empty = labels.some(label => !label);
-  const missing = !labels.includes(target);
   const missingItems = required.some(label => !labels.includes(label));
   const minContrast = ratios.length ? Math.min(...ratios) : 0;
   const lowContrast = ratios.some(ratio => ratio < 4.5);
   let kind = 'ok';
-  if (missing && empty) kind = 'empty-labels';
-  else if (empty) kind = 'empty-labels';
+  if (empty) kind = 'empty-labels';
   else if (missingItems) kind = 'missing-items';
-  else if (missing) kind = 'missing-target';
   else if (lowContrast) kind = 'low-contrast';
   return {
     target,
