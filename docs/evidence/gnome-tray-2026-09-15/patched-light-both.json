@@ -1,0 +1,68 @@
+[
+  {
+    "id": "appindicator-:1.51@/org/ayatana/NotificationItem/tray_reference",
+    "open": false,
+    "items": [
+      {
+        "text": "Show Reference",
+        "fg": "#222222ff",
+        "bg": "#ffffffff",
+        "style": null
+      },
+      {
+        "text": "Exit Reference",
+        "fg": "#222222ff",
+        "bg": "#ffffffff",
+        "style": null
+      }
+    ]
+  },
+  {
+    "id": "appindicator-:1.52@/org/ayatana/NotificationItem/tray_icon_tray_app_codexhub",
+    "open": true,
+    "items": [
+      {
+        "text": "Show CodexHub",
+        "fg": "#222222ff",
+        "bg": "#ffffffff",
+        "style": null
+      },
+      {
+        "text": "Connect Codex to Official",
+        "fg": "#222222ff",
+        "bg": "#ffffffff",
+        "style": null
+      },
+      {
+        "text": "Connect Codex to CodexHub",
+        "fg": "#222222ff",
+        "bg": "#ffffffff",
+        "style": null
+      },
+      {
+        "text": "Start Gateway",
+        "fg": "#222222ff",
+        "bg": "#ffffffff",
+        "style": null
+      },
+      {
+        "text": "Stop Gateway",
+        "fg": "#222222ff",
+        "bg": "#ffffffff",
+        "style": null
+      },
+      {
+        "text": "Restart Gateway",
+        "fg": "#222222ff",
+        "bg": "#ffffffff",
+        "style": null
+      },
+      {
+        "text": "Exit",
+        "fg": "#222222ff",
+        "bg": "#ffffffff",
+        "style": null
+      }
+    ]
+  }
+]

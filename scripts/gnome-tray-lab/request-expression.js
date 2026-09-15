@@ -1,0 +1,1 @@
+Object.entries(Main.panel.statusArea).filter(([k])=>k.includes('codexhub')).map(([k,s])=>{let c=s._menuClient._client;return {id:k,labels:s.menu._getMenuItems().map(i=>i.label?.text),queued:[...c._propertiesRequestedFor],cancelled:c._propertiesRequest?.cancelled(),rejected:c._propertiesRequest?.rejected(),clientCancelled:c.cancellable.is_cancelled()}})

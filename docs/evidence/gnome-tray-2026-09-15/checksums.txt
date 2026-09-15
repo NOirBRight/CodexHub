@@ -1,0 +1,3 @@
+701b999f6086756d32b08dfc946dedcf18bb98281fd28a5163ec81ca977383fc  src-tauri/target/release/codexhub
+ac1bd47a587cb8b803dcf3197782e5f79e3a8d3c795f784024ea9c3f44584458  /tmp/codexhub-tray-lab/packages/gnome-shell-ubuntu-extensions_50.26.04.7ubuntu_all.deb
+9d336e18077907237a1feaa9412b09790a15bc3881a34e590d291fe75a228662  /tmp/codexhub-tray-lab/stock-dbusMenu.js

@@ -1,0 +1,10 @@
+{
+  "expect": "failures",
+  "repeats": 8,
+  "codexhub_pass_lines": 10,
+  "codexhub_fail_lines": 1,
+  "codexhub_empty_label_lines": 1,
+  "codexhub_low_contrast_lines": 0,
+  "codexhub_missing_lines": 0,
+  "reference_fail_lines": 0
+}
