@@ -1,4 +1,5 @@
 import { displayModel } from "./format";
+import { shortWireDisplayName } from "./wireDisplayName";
 import { normalizeOfficialModelId } from "./settings";
 import type { Model } from "./types";
 
@@ -35,7 +36,7 @@ export function displayModelName(model: Model, provider?: ModelLabelProvider) {
       break;
     }
   }
-  return name || model.id;
+  return shortWireDisplayName(name, model.id) || model.id;
 }
 
 export function isDisplayedModelEnabled(

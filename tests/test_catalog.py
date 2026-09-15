@@ -151,6 +151,23 @@ class CatalogPolicyTests(unittest.TestCase):
             catalog_or_wire_display_name(None, self.policy, "volc/my-model", "my-model"),
             "my-model",
         )
+        self.assertEqual(
+            catalog_or_wire_display_name(
+                "deepseek/deepseek-v4.1-flash",
+                self.policy,
+                "commandcode/deepseek/deepseek-v4.1-flash",
+                "deepseek/deepseek-v4.1-flash",
+            ),
+            "deepseek-v4.1-flash",
+        )
+        self.assertEqual(
+            catalog_or_wire_display_name(
+                None,
+                self.policy,
+                "commandcode/deepseek/deepseek-v4.1-flash",
+            ),
+            "deepseek-v4.1-flash",
+        )
 
     def test_load_catalog_models_reads_models_array(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -76,6 +76,7 @@ interface GatewayPageProps {
   clientInfos: GatewayClientInfo[];
   onApplySettings: (settings: Settings) => Promise<string>;
   onRefreshClients: (options?: {
+    force?: boolean;
     includeClientVersions?: boolean;
   }) => Promise<void>;
   onStartProxy: () => Promise<AppStatus | null>;
@@ -415,13 +416,16 @@ function GatewayPageImpl({
         ...persistentActionBase(),
         loading: t("gateway.switchClient", { clientName, routeName }),
         work: async () => {
-          await api.switchGatewayClientRoute(
+          const result = await api.switchGatewayClientRoute(
             clientId,
             owner,
             defaultModel,
             shouldForceTakeover,
           );
-          await onRefreshClients();
+          if (!result.applied) {
+            throw new Error(result.message);
+          }
+          await onRefreshClients({ force: true });
         },
         success: () => ({
           text: t("gateway.switchClientDone", { routeName }),
@@ -443,7 +447,7 @@ function GatewayPageImpl({
         ...persistentActionBase(),
         loading: t("gateway.refreshingClients"),
         work: async () => {
-          await onRefreshClients({ includeClientVersions: true });
+          await onRefreshClients({ force: true, includeClientVersions: true });
           setClientBusy(null);
         },
         success: () => ({
@@ -547,7 +551,7 @@ function GatewayPageImpl({
           const report = connect
             ? await api.dshClientConnect()
             : await api.dshClientDisconnect();
-          await onRefreshClients();
+          await onRefreshClients({ force: true });
           return report;
         },
         success: (report) => ({

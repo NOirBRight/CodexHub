@@ -4,6 +4,28 @@ import test from "node:test";
 
 const source = async (path) => readFile(new URL(path, import.meta.url), "utf8");
 
+test("Gateway connect switch paints from the checked prop, not native :checked", async () => {
+  const [drawer, models, css] = await Promise.all([
+    source("../src/components/SettingsDrawer.tsx"),
+    source("../src/components/providers/ProviderModelSection.tsx"),
+    source("../src/components/workspace/workspace.css"),
+  ]);
+
+  assert.match(drawer, /checked && "translate-x-4"/);
+  assert.doesNotMatch(drawer, /peer-checked:/);
+  assert.match(models, /checked && "translate-x-4"/);
+  assert.doesNotMatch(models, /peer-checked:/);
+  assert.match(
+    css,
+    /:not\(\.ws-switch-control, \.ws-model-switch\) > input\[type="checkbox"\]:checked \+ span/,
+  );
+  assert.doesNotMatch(
+    css,
+    /\.ws-model-switch > input:checked \+ span/,
+  );
+  assert.match(css, /\.ws-model-switch\[data-on\] > input \+ span/);
+});
+
 test("Gateway connect toggle maps foreign ownership to takeover without a segmented control", async () => {
   const [card, page] = await Promise.all([
     source("../src/components/GatewayClientCard.tsx"),
@@ -16,6 +38,8 @@ test("Gateway connect toggle maps foreign ownership to takeover without a segmen
   assert.doesNotMatch(page, /TakeoverSummaryDialog/);
   assert.match(page, /takeoverRequired/);
   assert.match(page, /switchClientMode\(clientId, runtimeOwner, takeoverRequired\)/);
+  assert.match(page, /if \(!result\.applied\)/);
+  assert.match(page, /onRefreshClients\(\{ force: true \}\)/);
 });
 
 test("Codex keeps connected surfaces visible for a foreign owner and takes over through the existing button", async () => {

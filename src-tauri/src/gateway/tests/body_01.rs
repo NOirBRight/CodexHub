@@ -2726,3 +2726,172 @@ fn client_projection_uses_short_display_name_and_provider_max_output() {
         .pointer("/provider/codexhub-volc/models/no-name/limit/output")
         .is_none());
 }
+
+#[test]
+fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
+    let settings = Settings {
+        include_official_models: false,
+        ..Settings::default()
+    };
+    let providers = vec![Provider {
+        id: "commandcode".to_string(),
+        name: "Command Code".to_string(),
+        base_url: "https://commandcode.example.test/v1".to_string(),
+        api_key: None,
+        upstream_format: None,
+        available_upstream_formats: None,
+        tool_protocol: None,
+        tool_surface_strategy: None,
+        reports_cached_input_tokens: None,
+        supports_developer_role: None,
+        display_prefix: Some("Command Code".to_string()),
+        auth_capabilities: None,
+        onboarding_hint: None,
+        discovery_policy: None,
+        sort_order: Some(1),
+        enabled: true,
+        locked: false,
+        models: vec![
+            Model {
+                id: "deepseek/deepseek-v4.1-flash".to_string(),
+                display_name: None,
+                gateway_exported: true,
+                ..Model::default()
+            },
+            Model {
+                id: "deepseek/deepseek-v4.1-flash-dup".to_string(),
+                display_name: Some("deepseek/deepseek-v4.1-flash-dup".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+            Model {
+                id: "moonshotai/kimi-k3".to_string(),
+                display_name: Some("Kimi K3".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+        ],
+    }];
+
+    let gateway_by_id = gateway_models_from_config(&settings, &providers)
+        .into_iter()
+        .map(|model| (model.id.clone(), model))
+        .collect::<HashMap<_, _>>();
+    assert_eq!(
+        gateway_by_id
+            .get("commandcode/deepseek/deepseek-v4.1-flash")
+            .map(|model| model.display_name.as_str()),
+        Some("deepseek-v4.1-flash")
+    );
+    assert_eq!(
+        gateway_by_id
+            .get("commandcode/deepseek/deepseek-v4.1-flash-dup")
+            .map(|model| model.display_name.as_str()),
+        Some("deepseek-v4.1-flash-dup")
+    );
+    assert_eq!(
+        gateway_by_id
+            .get("commandcode/moonshotai/kimi-k3")
+            .map(|model| model.display_name.as_str()),
+        Some("Kimi K3")
+    );
+
+    let grok_text = grok_config_text(
+        Some("[models]\ndefault = \"grok-4.6\"\n"),
+        &settings,
+        &providers,
+        "commandcode/deepseek/deepseek-v4.1-flash",
+    )
+    .unwrap();
+    assert!(
+        grok_text.contains("model = \"deepseek/deepseek-v4.1-flash\""),
+        "wire id stays namespaced: {grok_text}"
+    );
+    assert!(
+        grok_text.contains("name = \"CodexHub deepseek-v4.1-flash\""),
+        "Grok Display Name must be the short wire id: {grok_text}"
+    );
+    assert!(
+        !grok_text.contains("name = \"CodexHub deepseek/deepseek-v4.1-flash\""),
+        "Grok Display Name kept a vendor path: {grok_text}"
+    );
+    assert!(grok_text.contains("name = \"CodexHub Kimi K3\""));
+
+    let opencode_text = opencode_config_text(
+        None,
+        &settings,
+        &providers,
+        "commandcode/deepseek/deepseek-v4.1-flash",
+    )
+    .unwrap();
+    let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
+    assert_eq!(
+        opencode_value.pointer("/provider/codexhub-commandcode/models").and_then(|models| {
+            models
+                .get("deepseek/deepseek-v4.1-flash")
+                .and_then(|model| model.get("name"))
+        }),
+        Some(&serde_json::json!("deepseek-v4.1-flash"))
+    );
+
+    let pi_root = unique_temp_dir("codexhub-vendor-path-pi");
+    fs::create_dir_all(&pi_root).unwrap();
+    let pi_models_path = pi_root.join("models.json");
+    let pi_text = pi_models_text(
+        &pi_models_path,
+        &settings,
+        &providers,
+        "commandcode/deepseek/deepseek-v4.1-flash",
+    )
+    .unwrap();
+    let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
+    assert_eq!(
+        pi_value
+            .pointer("/providers/codexhub-commandcode/models")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|models| models.iter().find(|model| {
+                model.get("id") == Some(&serde_json::json!("deepseek/deepseek-v4.1-flash"))
+            }))
+            .and_then(|model| model.get("name")),
+        Some(&serde_json::json!("deepseek-v4.1-flash"))
+    );
+
+    let omp_text = omp_models_yml_text(
+        None,
+        &settings,
+        &providers,
+        "commandcode/deepseek/deepseek-v4.1-flash",
+    )
+    .unwrap();
+    assert!(
+        omp_text.contains("name: \"deepseek-v4.1-flash\""),
+        "OMP picker must use the short Display Name: {omp_text}"
+    );
+    assert!(
+        !omp_text.contains("name: \"deepseek/deepseek-v4.1-flash\""),
+        "OMP picker leaked a vendor path: {omp_text}"
+    );
+
+    let zcode_text = zcode_catalog_text(
+        &settings,
+        &providers,
+        "commandcode/deepseek/deepseek-v4.1-flash",
+    )
+    .unwrap();
+    let zcode_value: serde_json::Value = serde_json::from_str(&zcode_text).unwrap();
+    assert_eq!(
+        zcode_value
+            .pointer("/providers")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|providers| providers.iter().find(|provider| {
+                provider.get("id") == Some(&serde_json::json!("codexhub-commandcode"))
+            }))
+            .and_then(|provider| provider.get("models"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|models| models.iter().find(|model| {
+                model.get("id") == Some(&serde_json::json!("deepseek/deepseek-v4.1-flash"))
+            }))
+            .and_then(|model| model.get("name")),
+        Some(&serde_json::json!("deepseek-v4.1-flash"))
+    );
+}

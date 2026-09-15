@@ -913,16 +913,11 @@ fn plan_opencode_apply_does_not_write_or_backup() {
     fs::write(&config_path, original).unwrap();
     let settings = Settings::default();
 
-    let decision = super::plan_opencode_apply(&config_path, &settings, &[], "openai/gpt-5.5")
+    let plan = super::plan_opencode_apply(&config_path, &settings, &[], "openai/gpt-5.5")
         .unwrap();
-    match decision {
-        super::OpenCodeApplyDecision::Apply(plan) => {
-            assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
-            assert!(plan.next.contains("codexhub"));
-            assert!(!plan.skip_snapshot);
-        }
-        super::OpenCodeApplyDecision::NotApplied(_) => panic!("expected apply plan"),
-    }
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), original);
+    assert!(plan.next.contains("codexhub"));
+    assert!(!plan.skip_snapshot);
 }
 
 #[test]

@@ -24,7 +24,7 @@ use super::clients::omp::{
 };
 use super::clients::opencode::{
     detect_opencode_config_path, plan_opencode_apply, preview_opencode_config_with_path,
-    publish_opencode_apply, restore_opencode_config_with_backup_roots, OpenCodeApplyDecision,
+    publish_opencode_apply, restore_opencode_config_with_backup_roots,
 };
 use super::clients::pi::{
     detect_pi_config_paths, plan_pi_apply, preview_pi_config_with_paths, publish_pi_apply,
@@ -721,22 +721,18 @@ pub fn apply_native_at(
 ) -> Result<super::GatewayClientApplyResult, String> {
     match spec {
         NativeApplySpec::OpenCode { path, backup_roots } => {
-            match plan_opencode_apply(path, settings, providers, model)? {
-                OpenCodeApplyDecision::NotApplied(result) => Ok(result),
-                OpenCodeApplyDecision::Apply(plan) => {
-                    let result = publish_opencode_apply(&plan, backup_roots)?;
-                    if result.applied {
-                        readback_native_at(
-                            "opencode",
-                            &[path.to_path_buf()],
-                            settings,
-                            providers,
-                            model,
-                        )?;
-                    }
-                    Ok(result)
-                }
+            let plan = plan_opencode_apply(path, settings, providers, model)?;
+            let result = publish_opencode_apply(&plan, backup_roots)?;
+            if result.applied {
+                readback_native_at(
+                    "opencode",
+                    &[path.to_path_buf()],
+                    settings,
+                    providers,
+                    model,
+                )?;
             }
+            Ok(result)
         }
         NativeApplySpec::Pi {
             settings_path,

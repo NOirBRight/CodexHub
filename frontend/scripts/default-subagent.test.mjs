@@ -1,14 +1,45 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs";
+import ts from "typescript";
 import { readFile } from "node:fs/promises";
-import {
+import { markRestartReminder, readRestartReminder, storeRestartReminder } from "../src/lib/providerWorkspace/restart.ts";
+
+function loadDefaultSubagent() {
+  const strip = (text) =>
+    text
+      .replace(/^\s*import[\s\S]*?;\s*$/gm, "")
+      .replace(/export type [\s\S]*?\};\n/g, "")
+      .replace(/^export /gm, "");
+  const wire = strip(
+    fs.readFileSync(new URL("../src/lib/wireDisplayName.ts", import.meta.url), "utf8"),
+  );
+  const source = strip(
+    fs.readFileSync(new URL("../src/lib/defaultSubagent.ts", import.meta.url), "utf8"),
+  );
+  const js = ts.transpileModule(`${wire}\n${source}`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  }).outputText;
+  const exported = {};
+  new Function(
+    "exports",
+    `${js}
+    exports.subagentCatalogSlug = subagentCatalogSlug;
+    exports.listDefaultSubagentOptions = listDefaultSubagentOptions;
+    exports.resolveSubagentEffort = resolveSubagentEffort;
+    exports.formatSubagentEffort = formatSubagentEffort;
+    exports.defaultSubagentSummary = defaultSubagentSummary;`,
+  )(exported);
+  return exported;
+}
+
+const {
   defaultSubagentSummary,
   formatSubagentEffort,
   listDefaultSubagentOptions,
   resolveSubagentEffort,
   subagentCatalogSlug,
-} from "../src/lib/defaultSubagent.ts";
-import { markRestartReminder, readRestartReminder, storeRestartReminder } from "../src/lib/providerWorkspace/restart.ts";
+} = loadDefaultSubagent();
 
 const official = (id, overrides = {}) => ({
   id,
@@ -113,6 +144,29 @@ test("OpenCode Go flash stays a provider-qualified subagent option", () => {
     defaultSubagentSummary(options[0].label, "max", "Codex default"),
     "OpenCode Go · deepseek-v4.1-flash · Max",
   );
+});
+
+test("namespaced third-party ids do not keep a vendor path in the subagent label", () => {
+  const options = listDefaultSubagentOptions({
+    officialId: "__official__",
+    officialIncluded: false,
+    officialModels: [],
+    officialDisabledModels: [],
+    providers: [
+      {
+        id: "commandcode",
+        name: "Command Code",
+        enabled: true,
+        base_url: "",
+        api_key: null,
+        models: [
+          { id: "deepseek/deepseek-v4.1-flash", enabled: true },
+        ],
+      },
+    ],
+  });
+  assert.equal(options[0].id, "commandcode/deepseek/deepseek-v4.1-flash");
+  assert.equal(options[0].label, "Command Code · deepseek-v4.1-flash");
 });
 
 test("subagent summaries keep model and effort on one line", () => {
