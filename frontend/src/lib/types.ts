@@ -294,6 +294,7 @@ export interface GatewayModel {
   supports_responses: boolean;
   supports_chat_completions: boolean;
   context_window: number;
+  max_output_tokens?: number | null;
   input_modalities?: string[] | null;
   supported_reasoning_levels?: string[] | null;
   default_reasoning_level?: string | null;

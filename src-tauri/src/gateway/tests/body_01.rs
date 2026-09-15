@@ -2143,6 +2143,7 @@ fn reasoning_contract_client_export_test_providers() -> Vec<Provider> {
                     "xhigh".to_string(),
                 ]),
                 default_reasoning_level: Some("high".to_string()),
+                thinking_mode: Some("always_on".to_string()),
                 gateway_exported: true,
                 ..Model::default()
             },
@@ -2216,7 +2217,7 @@ fn client_exports_map_configured_reasoning_contract() {
 
     let expected_reasoning = serde_json::json!({
         "enabled": true,
-        "variants": ["low", "high", "xhigh", "off"],
+        "variants": ["low", "high", "xhigh"],
         "defaultVariant": "high",
     });
 
@@ -2549,4 +2550,179 @@ fn omp_apply_writes_vision_role_for_image_capable_selection() {
     assert!(!config.contains("codexhub-volc/glm-5.2"));
     assert!(!config.contains("vision: codexhub-volc"));
     assert!(!result.message.contains("text-only"));
+}
+
+fn client_projection_name_and_limits_providers() -> Vec<Provider> {
+    vec![Provider {
+        id: "volc".to_string(),
+        name: "Volcengine".to_string(),
+        base_url: "https://ark.example.test/v1".to_string(),
+        api_key: None,
+        upstream_format: None,
+        available_upstream_formats: None,
+        tool_protocol: None,
+        tool_surface_strategy: None,
+        reports_cached_input_tokens: None,
+        supports_developer_role: None,
+        display_prefix: Some("Volc".to_string()),
+        auth_capabilities: None,
+        onboarding_hint: None,
+        discovery_policy: None,
+        sort_order: Some(1),
+        enabled: true,
+        locked: false,
+        models: vec![
+            Model {
+                id: "glm-5.3".to_string(),
+                display_name: Some("GLM-5.3".to_string()),
+                max_output_tokens: Some(128_000),
+                thinking_mode: Some("always_on".to_string()),
+                supported_reasoning_levels: Some(vec!["low".to_string(), "high".to_string()]),
+                default_reasoning_level: Some("high".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+            Model {
+                id: "custom-flash".to_string(),
+                display_name: Some("My Flash".to_string()),
+                thinking_mode: Some("toggle".to_string()),
+                supported_reasoning_levels: Some(vec!["low".to_string()]),
+                gateway_exported: true,
+                ..Model::default()
+            },
+            Model {
+                id: "no-name".to_string(),
+                display_name: None,
+                thinking_mode: Some("toggle".to_string()),
+                gateway_exported: true,
+                ..Model::default()
+            },
+        ],
+    }]
+}
+
+#[test]
+fn client_projection_uses_short_display_name_and_provider_max_output() {
+    let root = unique_temp_dir("codexhub-client-projection-names");
+    let models_path = root.join("models.json");
+    let v2_config_path = root.join("v2").join("config.json");
+    fs::create_dir_all(root.as_path()).unwrap();
+    let settings = Settings {
+        include_official_models: false,
+        ..Settings::default()
+    };
+    let providers = client_projection_name_and_limits_providers();
+
+    let gateway_by_id = gateway_models_from_config(&settings, &providers)
+        .into_iter()
+        .map(|model| (model.id.clone(), model))
+        .collect::<HashMap<_, _>>();
+    assert_eq!(
+        gateway_by_id
+            .get("volc/glm-5.3")
+            .map(|model| model.display_name.as_str()),
+        Some("GLM-5.3")
+    );
+    assert_eq!(
+        gateway_by_id
+            .get("volc/custom-flash")
+            .map(|model| model.display_name.as_str()),
+        Some("My Flash")
+    );
+    assert_eq!(
+        gateway_by_id
+            .get("volc/no-name")
+            .map(|model| model.display_name.as_str()),
+        Some("no-name")
+    );
+    assert_eq!(
+        gateway_by_id
+            .get("volc/glm-5.3")
+            .and_then(|model| model.max_output_tokens),
+        Some(128_000)
+    );
+
+    let opencode_text = opencode_config_text(None, &settings, &providers, "volc/glm-5.3").unwrap();
+    let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
+    assert_eq!(
+        opencode_value.pointer("/provider/codexhub-volc/name"),
+        Some(&serde_json::json!("CodexHub Volcengine"))
+    );
+    assert_eq!(
+        opencode_value.pointer("/provider/codexhub-volc/models/glm-5.3/name"),
+        Some(&serde_json::json!("GLM-5.3"))
+    );
+    assert_eq!(
+        opencode_value.pointer("/provider/codexhub-volc/models/custom-flash/name"),
+        Some(&serde_json::json!("My Flash"))
+    );
+    assert_eq!(
+        opencode_value.pointer("/provider/codexhub-volc/models/no-name/name"),
+        Some(&serde_json::json!("no-name"))
+    );
+
+    let pi_text = pi_models_text(&models_path, &settings, &providers, "volc/glm-5.3").unwrap();
+    let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
+    let pi_by_id = pi_value
+        .pointer("/providers/codexhub-volc/models")
+        .and_then(serde_json::Value::as_array)
+        .unwrap()
+        .iter()
+        .map(|model| (model["id"].as_str().unwrap().to_string(), model.clone()))
+        .collect::<HashMap<_, _>>();
+    assert_eq!(pi_by_id["glm-5.3"]["name"], serde_json::json!("GLM-5.3"));
+    assert_eq!(pi_by_id["custom-flash"]["name"], serde_json::json!("My Flash"));
+    assert_eq!(pi_by_id["no-name"]["name"], serde_json::json!("no-name"));
+    assert_eq!(pi_by_id["glm-5.3"]["maxTokens"], serde_json::json!(128_000));
+    assert!(pi_by_id["no-name"].get("maxTokens").is_none());
+
+    let omp_text = omp_models_yml_text(None, &settings, &providers, "volc/glm-5.3").unwrap();
+    assert!(omp_text.contains("name: \"GLM-5.3\""));
+    assert!(omp_text.contains("name: \"My Flash\""));
+    assert!(omp_text.contains("name: \"no-name\""));
+    assert!(omp_text.contains("maxTokens: 128000"));
+    assert!(!omp_text.contains("maxTokens: 32768"));
+
+    let zcode_catalog = zcode_catalog_text(&settings, &providers, "volc/glm-5.3").unwrap();
+    let zcode_catalog_value: serde_json::Value = serde_json::from_str(&zcode_catalog).unwrap();
+    let zcode_by_id = zcode_catalog_value
+        .pointer("/providers/0/models")
+        .and_then(serde_json::Value::as_array)
+        .unwrap()
+        .iter()
+        .map(|model| (model["id"].as_str().unwrap().to_string(), model.clone()))
+        .collect::<HashMap<_, _>>();
+    assert_eq!(
+        zcode_catalog_value.pointer("/providers/0/name"),
+        Some(&serde_json::json!("CodexHub Volcengine"))
+    );
+    assert_eq!(zcode_by_id["glm-5.3"]["name"], serde_json::json!("GLM-5.3"));
+    assert_eq!(
+        zcode_by_id["glm-5.3"]["maxOutputTokens"],
+        serde_json::json!(128_000)
+    );
+    assert_eq!(
+        zcode_by_id["glm-5.3"]["reasoning"]["variants"],
+        serde_json::json!(["low", "high"])
+    );
+    assert_eq!(
+        zcode_by_id["custom-flash"]["reasoning"]["variants"],
+        serde_json::json!(["low", "off"])
+    );
+    assert_eq!(
+        zcode_by_id["no-name"]["reasoning"]["variants"],
+        serde_json::json!(["off"])
+    );
+    assert!(zcode_by_id["no-name"].get("maxOutputTokens").is_none());
+
+    let zcode_v2 =
+        super::zcode_v2_config_text(&v2_config_path, &settings, &providers, "volc/glm-5.3").unwrap();
+    let zcode_v2_value: serde_json::Value = serde_json::from_str(&zcode_v2).unwrap();
+    assert_eq!(
+        zcode_v2_value.pointer("/provider/codexhub-volc/models/glm-5.3/limit/output"),
+        Some(&serde_json::json!(128_000))
+    );
+    assert!(zcode_v2_value
+        .pointer("/provider/codexhub-volc/models/no-name/limit/output")
+        .is_none());
 }

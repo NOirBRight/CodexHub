@@ -154,11 +154,15 @@ pub struct GatewayModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub input_modalities: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supported_reasoning_levels: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_reasoning_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

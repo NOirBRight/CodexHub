@@ -217,6 +217,72 @@ def display_name_for(model_id: str, policy: CatalogPolicy) -> str:
     return " ".join(word.upper() if len(word) <= 3 else word.capitalize() for word in words)
 
 
+_FLAT_LABEL_SEPARATORS = " \t/:_-"
+
+
+def catalog_or_wire_display_name(
+    stored: str | None,
+    policy: CatalogPolicy,
+    *candidates: str,
+) -> str:
+    """Stored Display Name, else catalog identity, else the short wire id."""
+    if stored and stored.strip():
+        return stored.strip()
+    for candidate in candidates:
+        key = canonical_model_id(candidate)
+        if key in policy.display_names:
+            return policy.display_names[key]
+    for candidate in candidates:
+        key = canonical_model_id(candidate)
+        if key:
+            return key.rsplit("/", 1)[-1]
+    return ""
+
+
+def compose_flat_label(display_prefix: str | None, display_name: str) -> str:
+    """Compose a mixed-list label from Display Prefix + Display Name (ADR-0011)."""
+    prefix = (display_prefix or "").strip()
+    name = (display_name or "").strip()
+    if not name:
+        return name
+    if not prefix:
+        return name
+    if _display_name_starts_with_prefix(name, prefix):
+        return name
+    return f"{prefix} {name}"
+
+
+def catalog_owned_display_name(
+    stored: str | None,
+    display_prefix: str | None,
+    catalog_name: str,
+) -> str | None:
+    """Rewrite a baked-in prefixed catalog string; keep a true user override."""
+    catalog = (catalog_name or "").strip()
+    if not catalog:
+        return stored
+    value = None if stored is None else stored.strip()
+    if not value:
+        return stored
+    if value == catalog:
+        return catalog
+    if value == compose_flat_label(display_prefix, catalog):
+        return catalog
+    return value
+
+
+def _display_name_starts_with_prefix(display_name: str, display_prefix: str) -> bool:
+    name = display_name.strip()
+    prefix = display_prefix.strip()
+    if not prefix or len(name) < len(prefix):
+        return False
+    if name[: len(prefix)].casefold() != prefix.casefold():
+        return False
+    if len(name) == len(prefix):
+        return True
+    return name[len(prefix)] in _FLAT_LABEL_SEPARATORS
+
+
 def load_catalog_models(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []

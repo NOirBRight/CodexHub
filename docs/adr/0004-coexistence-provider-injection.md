@@ -88,6 +88,16 @@ dedicated adapter, not by distorting the generic descriptor.
 
 The adapter interface stays internal to the Rust crate: metadata(), inspect(ctx) -> ClientSnapshot, and plan(intent, ctx) -> ClientMutationPlan. Public Tauri/bridge commands only ever see the coordinator, never an adapter.
 
+## Amendment: Injected Block shape (ADR-0011)
+
+Decision 1's "exactly one provider entry, fixed route key `codexhub`" is the
+DSH shape. Clients that already have a provider map (OpenCode, Pi, OMP,
+ZCode) inject one Client Provider Group per enabled CodexHub Provider
+(`codexhub-{provider}`), still without rewriting foreign entries and still
+without Activation. The Injected Block is that owned set plus the credential
+key, not necessarily a single map key. Codex's History Bucket exception is
+unchanged. Model naming and which fields are projected are ADR-0011.
+
 ## Consequences
 
 - Users can run the Gateway alongside their own providers in the same client;

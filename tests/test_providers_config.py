@@ -1579,6 +1579,33 @@ sort_order = 20
         self.assertEqual(providers[1].models[1].max_output_tokens, 10)
         self.assertFalse(providers[1].models[1].enabled)
 
+    def test_load_rewrites_prefixed_catalog_display_name_and_keeps_overrides(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "providers.toml"
+            path.write_text(
+                """
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.com/v1"
+display_prefix = "Ollama"
+
+  [[providers.models]]
+  id = "glm-5.3"
+  display_name = "Ollama GLM-5.3"
+
+  [[providers.models]]
+  id = "glm-5.3-flash"
+  display_name = "My Flash"
+""".lstrip(),
+                encoding="utf-8",
+            )
+            providers = load_providers(path)
+
+        by_id = {model.id: model.display_name for model in providers[0].models}
+        self.assertEqual(by_id["glm-5.3"], "GLM-5.3")
+        self.assertEqual(by_id["glm-5.3-flash"], "My Flash")
+
     def test_resolved_api_key_handles_env_placeholders_literals_and_empty_values(self):
         env_provider = ProviderConfig(
             id="env",

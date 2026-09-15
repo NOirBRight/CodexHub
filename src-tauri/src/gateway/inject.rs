@@ -126,9 +126,23 @@ pub(in crate::gateway) struct GatewayClientProviderModel {
     pub(in crate::gateway) id: String,
     pub(in crate::gateway) display_name: String,
     pub(in crate::gateway) context_window: Option<u32>,
+    pub(in crate::gateway) max_output_tokens: Option<u32>,
     pub(in crate::gateway) input_modalities: Vec<String>,
     pub(in crate::gateway) supported_reasoning_levels: Vec<String>,
     pub(in crate::gateway) default_reasoning_level: Option<String>,
+    pub(in crate::gateway) thinking_mode: Option<String>,
+}
+
+impl GatewayClientProviderModel {
+    pub(in crate::gateway) fn positive_max_output_tokens(&self) -> Option<u32> {
+        self.max_output_tokens.filter(|value| *value > 0)
+    }
+
+    pub(in crate::gateway) fn thinking_off_control(&self) -> bool {
+        self.thinking_mode
+            .as_deref()
+            .is_some_and(|mode| mode.eq_ignore_ascii_case("toggle"))
+    }
 }
 
 pub(in crate::gateway) fn official_models(settings: &Settings) -> Vec<GatewayModel> {
@@ -226,9 +240,11 @@ pub(in crate::gateway) fn official_models_from_metadata(
                 supports_responses: true,
                 supports_chat_completions: true,
                 context_window,
+                max_output_tokens: None,
                 input_modalities: Some(official_gateway_input_modalities()),
                 supported_reasoning_levels: Some(official_gateway_reasoning_levels()),
                 default_reasoning_level: Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string()),
+                thinking_mode: None,
             });
         }
     }
@@ -273,6 +289,8 @@ pub(in crate::gateway) fn official_gateway_model_from_metadata(
             .clone()
             .filter(|level| !level.is_empty())
             .or_else(|| Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string())),
+        max_output_tokens: model.max_output_tokens,
+        thinking_mode: model.thinking_mode.clone(),
     })
 }
 
@@ -291,9 +309,11 @@ pub(in crate::gateway) fn fallback_official_gateway_models(
             supports_responses: true,
             supports_chat_completions: true,
             context_window: published_context_windows.get(*id).copied(),
+            max_output_tokens: None,
             input_modalities: Some(official_gateway_input_modalities()),
             supported_reasoning_levels: Some(official_gateway_reasoning_levels()),
             default_reasoning_level: Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string()),
+            thinking_mode: None,
         })
         .collect()
 }
@@ -367,7 +387,8 @@ pub(in crate::gateway) fn gateway_models_from_sources(
                 display_name: model
                     .display_name
                     .clone()
-                    .unwrap_or_else(|| model_id.clone()),
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| model.id.trim().to_string()),
                 source: provider.name.clone(),
                 source_kind: "external".to_string(),
                 supports_responses: provider
@@ -379,6 +400,7 @@ pub(in crate::gateway) fn gateway_models_from_sources(
                     .unwrap_or(true),
                 supports_chat_completions: true,
                 context_window: model.context_window,
+                max_output_tokens: model.max_output_tokens.filter(|value| *value > 0),
                 input_modalities: model
                     .input_modalities
                     .clone()
@@ -392,6 +414,10 @@ pub(in crate::gateway) fn gateway_models_from_sources(
                     None
                 },
                 supported_reasoning_levels: reasoning_levels,
+                thinking_mode: model
+                    .thinking_mode
+                    .clone()
+                    .filter(|mode| !mode.trim().is_empty()),
             });
         }
     }
@@ -922,11 +948,13 @@ pub(in crate::gateway) fn gateway_client_provider_groups_from_exported(
             id: short_id,
             display_name: model.display_name,
             context_window: model.context_window,
+            max_output_tokens: model.max_output_tokens,
             input_modalities: model
                 .input_modalities
                 .unwrap_or_else(|| vec!["text".to_string()]),
             supported_reasoning_levels: model.supported_reasoning_levels.unwrap_or_default(),
             default_reasoning_level: model.default_reasoning_level,
+            thinking_mode: model.thinking_mode,
         });
     }
 

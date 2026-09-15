@@ -12,6 +12,7 @@ pub fn get_providers() -> Result<Vec<Provider>, String> {
         load_bundled_providers_from_candidates(&bundled_providers_candidate_paths(&paths))
     {
         fill_missing_model_limits_from_catalog(&mut providers, &catalog);
+        refresh_catalog_display_names(&mut providers, &catalog);
     }
     Ok(providers)
 }
@@ -717,6 +718,7 @@ fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String
     if path == paths.runtime_providers_path() {
         if let Ok(catalog) = load_providers_from_path(&paths.bundled_providers_path()) {
             fill_missing_model_limits_from_catalog(&mut providers, &catalog);
+            refresh_catalog_display_names(&mut providers, &catalog);
         }
     }
     Ok(providers)
@@ -751,6 +753,88 @@ fn fill_missing_model_limits_from_catalog(providers: &mut [Provider], catalog: &
                 keep_positive_limit(model.max_context_window, catalog_model.max_context_window);
             model.max_output_tokens =
                 keep_positive_limit(model.max_output_tokens, catalog_model.max_output_tokens);
+        }
+    }
+}
+
+const FLAT_LABEL_SEPARATORS: &[char] = &[' ', '\t', '/', ':', '_', '-'];
+
+fn display_name_starts_with_prefix(display_name: &str, display_prefix: &str) -> bool {
+    let name = display_name.trim();
+    let prefix = display_prefix.trim();
+    if prefix.is_empty() {
+        return false;
+    }
+    let mut name_chars = name.chars();
+    for prefix_ch in prefix.chars() {
+        match name_chars.next() {
+            Some(name_ch) if name_ch.eq_ignore_ascii_case(&prefix_ch) => {}
+            _ => return false,
+        }
+    }
+    match name_chars.next() {
+        None => true,
+        Some(ch) => FLAT_LABEL_SEPARATORS.contains(&ch),
+    }
+}
+
+fn compose_flat_label(display_prefix: Option<&str>, display_name: &str) -> String {
+    let prefix = display_prefix
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let name = display_name.trim();
+    if name.is_empty() {
+        return name.to_string();
+    }
+    let Some(prefix) = prefix else {
+        return name.to_string();
+    };
+    if display_name_starts_with_prefix(name, prefix) {
+        return name.to_string();
+    }
+    format!("{prefix} {name}")
+}
+
+fn catalog_owned_display_name(
+    stored: Option<&str>,
+    display_prefix: Option<&str>,
+    catalog_name: &str,
+) -> Option<String> {
+    let catalog = catalog_name.trim();
+    if catalog.is_empty() {
+        return stored.map(str::to_string);
+    }
+    let Some(value) = stored.map(str::trim).filter(|value| !value.is_empty()) else {
+        return stored.map(str::to_string);
+    };
+    if value == catalog || value == compose_flat_label(display_prefix, catalog) {
+        return Some(catalog.to_string());
+    }
+    Some(value.to_string())
+}
+
+fn refresh_catalog_display_names(providers: &mut [Provider], catalog: &[Provider]) {
+    for provider in providers {
+        let Some(preset) = catalog.iter().find(|candidate| candidate.id == provider.id) else {
+            continue;
+        };
+        let prefix = provider.display_prefix.as_deref();
+        for model in &mut provider.models {
+            let Some(catalog_name) = preset
+                .models
+                .iter()
+                .find(|candidate| candidate.id == model.id)
+                .and_then(|candidate| candidate.display_name.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if let Some(refreshed) =
+                catalog_owned_display_name(model.display_name.as_deref(), prefix, catalog_name)
+            {
+                model.display_name = Some(refreshed);
+            }
         }
     }
 }

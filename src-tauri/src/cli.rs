@@ -832,7 +832,7 @@ enabled = true
 
 [[providers.models]]
 id = "glm-5.2"
-display_name = "Volc GLM-5.2"
+display_name = "GLM-5.2"
 gateway_exported = true
 "#,
             )

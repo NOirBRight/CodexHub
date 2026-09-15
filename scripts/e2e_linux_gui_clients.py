@@ -151,7 +151,7 @@ def write_isolated_fixtures(root: Path) -> tuple[Path, Path]:
                 "",
                 "  [[providers.models]]",
                 '  id = "glm-5.2"',
-                '  display_name = "Volc GLM-5.2"',
+                '  display_name = "GLM-5.2"',
                 "  enabled = true",
                 "  gateway_exported = true",
                 "",

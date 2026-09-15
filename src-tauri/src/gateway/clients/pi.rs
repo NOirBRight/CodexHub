@@ -88,7 +88,6 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
         "headers": {
             "x-codex-client-id": "pi",
         },
-        "maxTokens": 32768,
         "cost": {
             "input": 0,
             "output": 0,
@@ -98,6 +97,11 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
     });
     if let (Some(object), Some(context_window)) = (value.as_object_mut(), model.context_window) {
         object.insert("contextWindow".to_string(), json!(context_window));
+    }
+    if let (Some(object), Some(max_tokens)) =
+        (value.as_object_mut(), model.positive_max_output_tokens())
+    {
+        object.insert("maxTokens".to_string(), json!(max_tokens));
     }
     value
 }
