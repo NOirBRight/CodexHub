@@ -1,0 +1,21 @@
+{
+  "recorded_at": "2026-09-15T11:04:59+08:00",
+  "git_sha": "5f0f67692d1745e1630bc09084246084b8278c27",
+  "git_status": " M src-tauri/src/main.rs ?? docs/evidence/gnome-tray-2026-09-15/source-f82c24a/candidate-530/ ?? src-tauri/vendor/ ",
+  "build_command": "cd frontend && npm ci && npm run build && cd ../src-tauri && cargo build --locked --release --features custom-protocol",
+  "binary_host_path": "/home/noirbright/Workstation/CodexHub-gnome-tray/src-tauri/target/release/codexhub",
+  "binary_sha256": "1a5094b32b79a4f3fab96e6407abe68ebd8d5f486495ced597a6f9a572cbf461",
+  "ubuntu": "Ubuntu 26.04.1 LTS",
+  "gnome_shell": "GNOME Shell 50.1",
+  "gnome_shell_ubuntu_extensions_package": "50.26.04.7ubuntu",
+  "stock_dbusmenu_sha256": "9d336e18077907237a1feaa9412b09790a15bc3881a34e590d291fe75a228662",
+  "yaru_theme_gnome_shell": "26.04.5.1ubuntu",
+  "tauri": "2.11.3",
+  "tray_icon": "0.24.1",
+  "muda": "0.19.3",
+  "color_scheme": "prefer-light",
+  "repeats": 30,
+  "expect": "pass",
+  "contrast_guard_loaded": false,
+  "host_desktop_modified": false
+}

@@ -1,17 +1,7 @@
 {
-  "recorded_at": "2026-09-15T11:01:43+08:00",
-  "git_sha": "488bc453796387b4e9cff76b48d4e17ac6c027c7",
-  "unfixed_git_sha": "f82c24a03082148b49b646a6e26b57c9a1450039",
-  "build_command": "cd frontend && npm ci && npm run build && cd ../src-tauri && cargo build --locked --release --features custom-protocol",
+  "candidate_git_sha": "488bc453796387b4e9cff76b48d4e17ac6c027c7",
+  "note": "Live lab environment.json files are environment-light.json and environment-dark.json. Those runs had git_sha 5f0f676 with dirty src-tauri/src/main.rs; that blob was committed as 488bc45. Binary SHA-256 matches those runs.",
   "binary_sha256": "1a5094b32b79a4f3fab96e6407abe68ebd8d5f486495ced597a6f9a572cbf461",
-  "unfixed_binary_sha256": "20b08e55774005a7d90dd743dbe6b65bcd600ddbb093eda7afb700c71ef15335",
-  "ubuntu": "Ubuntu 26.04.1 LTS",
-  "gnome_shell": "GNOME Shell 50.1",
-  "gnome_shell_ubuntu_extensions_package": "50.26.04.7ubuntu",
-  "yaru_theme_gnome_shell": "26.04.5.1ubuntu",
-  "tauri": "2.11.3",
-  "tray_icon": "0.24.1",
-  "muda": "0.19.3",
-  "contrast_guard_loaded": false,
-  "host_desktop_modified": false
+  "unfixed_git_sha": "f82c24a03082148b49b646a6e26b57c9a1450039",
+  "unfixed_binary_sha256": "20b08e55774005a7d90dd743dbe6b65bcd600ddbb093eda7afb700c71ef15335"
 }

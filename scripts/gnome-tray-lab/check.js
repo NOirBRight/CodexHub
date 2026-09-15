@@ -11,7 +11,10 @@ function luminance(hex) {
 }
 
 function classify(menu) {
-  const target = menu.id.includes('codexhub') ? 'Show CodexHub' : 'Show Reference';
+  const required = menu.id.includes('codexhub')
+    ? ['Show CodexHub', 'Connect Codex to Official', 'Connect Codex to CodexHub', 'Start Gateway', 'Stop Gateway', 'Restart Gateway', 'Exit']
+    : ['Show Reference', 'Exit Reference'];
+  const target = required[0];
   const labels = menu.items.map(i => i.text ?? '');
   const ratios = menu.items.map(i => {
     const a = luminance(i.fg);
@@ -20,12 +23,14 @@ function classify(menu) {
   });
   const empty = labels.some(label => !label);
   const missing = !labels.includes(target);
+  const missingItems = required.some(label => !labels.includes(label));
   const minContrast = ratios.length ? Math.min(...ratios) : 0;
   const lowContrast = ratios.some(ratio => ratio < 4.5);
   let kind = 'ok';
   if (missing && empty) kind = 'empty-labels';
-  else if (missing) kind = 'missing-target';
   else if (empty) kind = 'empty-labels';
+  else if (missingItems) kind = 'missing-items';
+  else if (missing) kind = 'missing-target';
   else if (lowContrast) kind = 'low-contrast';
   return {
     target,

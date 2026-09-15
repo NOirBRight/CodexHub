@@ -12,10 +12,10 @@ npm ci --prefix frontend
 npm run build --prefix frontend
 (cd src-tauri && cargo build --locked --release --features custom-protocol)
 ./scripts/gnome-tray-lab/verify-fixtures.sh
-./scripts/gnome-tray-lab/run.sh --expect-failures --repeats 10 --theme light
+./scripts/gnome-tray-lab/run.sh --expect-failures --repeats 8 --theme light
 ```
 
-二进制 SHA-256 `20b08e55774005a7d90dd743dbe6b65bcd600ddbb093eda7afb700c71ef15335`。
+绑定复现实际用了 `--repeats 8`（另有同二进制 12 次循环）。二进制 SHA-256 `20b08e55774005a7d90dd743dbe6b65bcd600ddbb093eda7afb700c71ef15335`。
 隔离环境：Ubuntu 26.04.1、GNOME Shell 50.1、原版 AppIndicators 包 `50.26.04.7ubuntu`、Yaru `26.04.5.1ubuntu`。不加载 Contrast Guard，不连接宿主 D-Bus，Gateway 自动启动关闭。
 
 机器结果在 [source-f82c24a](source-f82c24a/README.md)。
@@ -44,4 +44,4 @@ npm run build --prefix frontend
 ./scripts/gnome-tray-lab/verify-fixtures.sh
 ```
 
-这只检查已保存样本，不是实时回归。
+这只检查已保存样本，不是实时回归。`harness.tar.gz` 是 2026-09-15 一次性实验脚本快照，不是当前 `scripts/gnome-tray-lab/` 入口。

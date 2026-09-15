@@ -7,7 +7,7 @@
 - Build: `npm ci --prefix frontend && npm run build --prefix frontend && (cd src-tauri && cargo build --locked --release --features custom-protocol)`
 - Stock AppIndicators, no Contrast Guard, Gateway auto-start off
 
-The binary was built from this `main.rs` immediately before `488bc45`. Parent SHA `f82c24a` is the unfixed baseline only; do not treat `source-f82c24a/environment.json` as the fixed candidate.
+Live lab envelopes: [environment-light.json](environment-light.json), [environment-dark.json](environment-dark.json) (recorded `git_sha` 5f0f676 with dirty `main.rs`). That blob is `488bc45`. Parent SHA `f82c24a` is the unfixed baseline only.
 
 ## Isolation
 
