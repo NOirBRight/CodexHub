@@ -361,6 +361,46 @@ class CatalogSyncTests(unittest.TestCase):
                 self.assertNotIn("native_responses_tool_codec", metadata)
                 self.assertNotIn("tool_surface_strategy", metadata)
 
+    def test_gateway_flat_label_composes_prefix_onto_short_stored_display_name(self):
+        catalog = build_codex_catalog(
+            [],
+            ["glm-5.3"],
+            CatalogPolicy(
+                denied_models=set(),
+                denied_substrings=set(),
+                display_names={"glm-5.3": "GLM-5.3"},
+            ),
+            "0.142.0",
+            ollama_model_metadata={
+                "glm-5.3": {
+                    "display_name": "GLM-5.3",
+                    "display_prefix": "Ollama",
+                }
+            },
+            use_ollama_policy_allowlist=False,
+            external_models=[
+                {
+                    "alias": "volc/glm-5.3",
+                    "provider_alias": "volc",
+                    "upstream_name": "volcengine",
+                    "display_prefix": "Volc",
+                    "display_name": "GLM-5.3",
+                    "base_url": "https://ark.example.test/v1",
+                    "api_key": "secret-test-key",
+                    "upstream_model": "glm-5.3",
+                    "priority_base": 200,
+                    "context_window": 1024000,
+                    "max_output_tokens": 4096,
+                    "input_modalities": ("text",),
+                    "context_source": "providers_toml",
+                    "max_output_source": "providers_toml",
+                }
+            ],
+        )
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+        self.assertEqual(by_slug["glm-5.3"]["display_name"], "Ollama GLM-5.3")
+        self.assertEqual(by_slug["volc/glm-5.3"]["display_name"], "Volc GLM-5.3")
+
     def test_build_catalog_runtime_ollama_models_use_provider_settings_instead_of_static_allowlist(self):
         policy = CatalogPolicy(
             denied_models={"blocked-model", "ollama-cloud/provider-blocked"},
@@ -2795,7 +2835,7 @@ class CatalogSyncTests(unittest.TestCase):
         )
         glm_model = next(model for model in catalog["models"] if model["slug"] == "glm-5.2")
 
-        self.assertEqual(glm_model["display_name"], "GLM-5.2")
+        self.assertEqual(glm_model["display_name"], "Ollama GLM-5.2")
         self.assertEqual(glm_model["description"], "Fallback description")
         self.assertEqual(glm_model["context_window"], 1000000)
         self.assertEqual(glm_model["max_context_window"], 1000000)

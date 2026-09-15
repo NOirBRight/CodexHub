@@ -209,8 +209,12 @@ pub(in crate::gateway) fn omp_models_yml_text(
                 .context_window
                 .map(|value| format!("        contextWindow: {value}\n"))
                 .unwrap_or_default();
+            let max_tokens = gateway_model
+                .positive_max_output_tokens()
+                .map(|value| format!("        maxTokens: {value}\n"))
+                .unwrap_or_default();
             output.push_str(&format!(
-            "      - id: {model_id}\n        name: {model_name}\n        reasoning: {reasoning}\n        input:\n{input_list}        headers:\n          x-codex-client-id: omp\n{context_window}        maxTokens: 32768\n        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
+            "      - id: {model_id}\n        name: {model_name}\n        reasoning: {reasoning}\n        input:\n{input_list}        headers:\n          x-codex-client-id: omp\n{context_window}{max_tokens}        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
         ));
         }
     }

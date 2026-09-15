@@ -3,9 +3,9 @@ use super::{
     get_providers_with_paths, get_settings_with_paths,
     managed_codex_projection_transaction_paths_with_paths, merge_post_switch_gateway_status,
     migrate_legacy_context_guard_with_paths, republish_managed_codex_context_budget_with_paths,
-    save_providers_with_paths, save_settings_with_paths,
-    switch_mode_with_paths, switch_mode_with_paths_takeover_as_owner, takeover_metadata_path,
-    CommandOutcome, CommandRunner, ConfigPaths, ProcessCommandRunner,
+    save_providers_with_paths, save_settings_with_paths, switch_mode_with_paths,
+    switch_mode_with_paths_takeover_as_owner, takeover_metadata_path, CommandOutcome,
+    CommandRunner, ConfigPaths, ProcessCommandRunner,
 };
 use crate::{Model, Provider, Settings, ToolProtocol, ToolSurfaceStrategy, UpstreamFormat};
 use std::cell::RefCell;
@@ -395,6 +395,59 @@ base_url = "https://opencode.ai/zen/go/v1"
 }
 
 #[test]
+fn get_providers_rewrites_prefixed_catalog_display_name_and_keeps_overrides() {
+    let root = temp_root("providers-catalog-display-name-refresh");
+    let paths = test_paths(&root);
+    fs::create_dir_all(paths.bundled_providers_path().parent().unwrap()).unwrap();
+    fs::create_dir_all(paths.runtime_providers_path().parent().unwrap()).unwrap();
+    fs::write(
+        paths.bundled_providers_path(),
+        r#"
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.com/v1"
+display_prefix = "Ollama"
+
+  [[providers.models]]
+  id = "glm-5.3"
+  display_name = "GLM-5.3"
+
+  [[providers.models]]
+  id = "glm-5.3-flash"
+  display_name = "GLM-5.3 Flash"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        paths.runtime_providers_path(),
+        r#"
+[[providers]]
+id = "ollama-cloud"
+name = "Ollama Cloud"
+base_url = "https://ollama.com/v1"
+display_prefix = "Ollama"
+
+  [[providers.models]]
+  id = "glm-5.3"
+  display_name = "Ollama GLM-5.3"
+
+  [[providers.models]]
+  id = "glm-5.3-flash"
+  display_name = "My Flash"
+"#,
+    )
+    .unwrap();
+
+    let loaded = get_providers_with_paths(&paths).expect("runtime providers");
+    assert_eq!(loaded[0].models[0].display_name.as_deref(), Some("GLM-5.3"));
+    assert_eq!(
+        loaded[0].models[1].display_name.as_deref(),
+        Some("My Flash")
+    );
+}
+
+#[test]
 fn bundled_catalog_prefers_compile_time_repo_over_exe_copy() {
     let root = temp_root("bundled-catalog-order");
     let paths = test_paths(&root);
@@ -412,7 +465,11 @@ fn retired_context_guard_setting_is_ignored_and_not_saved() {
     let root = temp_root("retired-context-guard-setting");
     let paths = test_paths(&root);
     fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
-    fs::write(paths.settings_path(), r#"{"openai_context_guard_enabled":true,"proxy_port":4555}"#).unwrap();
+    fs::write(
+        paths.settings_path(),
+        r#"{"openai_context_guard_enabled":true,"proxy_port":4555}"#,
+    )
+    .unwrap();
     let settings = get_settings_with_paths(&paths).expect("legacy settings load");
     assert_eq!(settings.proxy_port, 4555);
     save_settings_with_paths(settings, &paths).expect("settings save");

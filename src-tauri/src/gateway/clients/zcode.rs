@@ -144,11 +144,14 @@ pub(in crate::gateway) fn zcode_provider_endpoint(
 }
 
 fn zcode_reasoning_value(model: &GatewayClientProviderModel) -> Option<Value> {
-    if model.supported_reasoning_levels.is_empty() {
-        return None;
-    }
     let mut variants = model.supported_reasoning_levels.clone();
-    if !variants.iter().any(|variant| variant == "off") {
+    let thinking_off = model.thinking_off_control();
+    if variants.is_empty() {
+        if !thinking_off {
+            return None;
+        }
+        variants.push("off".to_string());
+    } else if thinking_off && !variants.iter().any(|variant| variant == "off") {
         variants.push("off".to_string());
     }
     let default_variant = model
@@ -174,10 +177,14 @@ fn zcode_model_value(model: &GatewayClientProviderModel, kind: &str) -> Value {
             "input": model.input_modalities.clone(),
             "output": ["text"],
         },
-        "maxOutputTokens": 32768,
     });
     if let (Some(object), Some(context_window)) = (value.as_object_mut(), model.context_window) {
         object.insert("contextWindow".to_string(), json!(context_window));
+    }
+    if let (Some(object), Some(max_output)) =
+        (value.as_object_mut(), model.positive_max_output_tokens())
+    {
+        object.insert("maxOutputTokens".to_string(), json!(max_output));
     }
     if let (Some(object), Some(reasoning)) = (value.as_object_mut(), zcode_reasoning_value(model)) {
         object.insert("reasoning".to_string(), reasoning);
@@ -229,19 +236,22 @@ fn zcode_v2_provider_value(settings: &Settings, group: &GatewayClientProviderGro
             (model.id.clone(), {
                 let mut value = json!({
                 "name": model.display_name.clone(),
-                "limit": {
-                    "output": 32768,
-                },
                 "modalities": {
                     "input": model.input_modalities.clone(),
                     "output": ["text"],
                 },
                 });
-                if let (Some(limit), Some(context_window)) = (
-                    value.get_mut("limit").and_then(Value::as_object_mut),
-                    model.context_window,
-                ) {
-                    limit.insert("context".to_string(), json!(context_window));
+                if let Some(object) = value.as_object_mut() {
+                    let mut limit = serde_json::Map::new();
+                    if let Some(output) = model.positive_max_output_tokens() {
+                        limit.insert("output".to_string(), json!(output));
+                    }
+                    if let Some(context_window) = model.context_window {
+                        limit.insert("context".to_string(), json!(context_window));
+                    }
+                    if !limit.is_empty() {
+                        object.insert("limit".to_string(), Value::Object(limit));
+                    }
                 }
                 if let (Some(object), Some(reasoning)) =
                     (value.as_object_mut(), zcode_reasoning_value(model))

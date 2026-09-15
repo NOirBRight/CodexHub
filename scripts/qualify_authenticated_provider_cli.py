@@ -94,9 +94,9 @@ class Cell:
 
 
 MODELS = (
-    ModelFacts("glm-5.2", "Ollama GLM-5.2", 1_000_000, 131_072),
-    ModelFacts("kimi-k2.7-code", "Ollama Kimi K2.7 Code", 262_144, 32_768),
-    ModelFacts("deepseek-v4-flash:0731", "Ollama DeepSeek V4 Flash 0731", 1_048_576, 393_216),
+    ModelFacts("glm-5.2", "GLM-5.2", 1_000_000, 131_072),
+    ModelFacts("kimi-k2.7-code", "Kimi K2.7 Code", 262_144, 32_768),
+    ModelFacts("deepseek-v4-flash:0731", "DeepSeek V4 Flash 0731", 1_048_576, 393_216),
 )
 CELLS = tuple(Cell("chat_completions", model) for model in MODELS)
 CELL_BY_KEY = {cell.key: cell for cell in CELLS}

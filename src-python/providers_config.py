@@ -10,7 +10,7 @@ from typing import Any, Iterable
 from urllib.request import Request, urlopen
 
 from atomic_io import atomic_write_text
-from catalog import canonical_model_id
+from catalog import canonical_model_id, catalog_owned_display_name
 
 
 DEFAULT_PROVIDERS_PATH = Path(__file__).resolve().parents[1] / "config" / "providers.toml"
@@ -308,6 +308,7 @@ def build_external_model_index(
                 "supported_reasoning_levels": model.supported_reasoning_levels,
                 "default_reasoning_level": model.default_reasoning_level,
                 "thinking_mode": model.thinking_mode,
+                "display_name": model.display_name,
                 "context_source": "providers_toml",
                 "max_output_source": "providers_toml",
                 "priority_base": _provider_priority_base(provider),
@@ -391,6 +392,7 @@ def build_ollama_cloud_model_index(
                 "supported_reasoning_levels": model.supported_reasoning_levels,
                 "default_reasoning_level": model.default_reasoning_level,
                 "thinking_mode": model.thinking_mode,
+                "display_name": model.display_name,
                 "context_source": "providers_toml",
                 "max_output_source": "providers_toml",
                 "priority_base": _provider_priority_base(provider),
@@ -479,6 +481,7 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
         _apply_bundled_native_responses_tool_codec_defaults(providers)
         _apply_bundled_multi_agent_version_defaults(providers)
         _apply_bundled_model_limit_defaults(providers)
+        _apply_catalog_display_name_refresh(providers)
     return providers
 
 
@@ -674,6 +677,34 @@ def _apply_bundled_multi_agent_version_defaults(
             bundled_model = _matching_model_config(runtime_model, bundled_models_by_id)
             if bundled_model is not None:
                 runtime_model._bundled_multi_agent_version = bundled_model.multi_agent_version
+
+
+def _apply_catalog_display_name_refresh(runtime_providers: Iterable[ProviderConfig]) -> None:
+    runtime_providers = list(runtime_providers)
+    try:
+        bundled_data = tomllib.loads(DEFAULT_PROVIDERS_PATH.read_text(encoding="utf-8"))
+        bundled_providers = _providers_from_data(bundled_data)
+    except (OSError, ValueError):
+        return
+
+    bundled_by_id = _provider_config_index_by_id(bundled_providers)
+    for runtime_provider in runtime_providers:
+        bundled_provider = bundled_by_id.get(_canonical_config_identifier(runtime_provider.id))
+        if bundled_provider is None:
+            continue
+        bundled_models_by_id = _model_config_index_by_identifier(bundled_provider.models)
+        prefix = runtime_provider.display_prefix
+        for runtime_model in runtime_provider.models:
+            bundled_model = _matching_model_config(runtime_model, bundled_models_by_id)
+            if bundled_model is None or not bundled_model.display_name:
+                continue
+            refreshed = catalog_owned_display_name(
+                runtime_model.display_name,
+                prefix,
+                bundled_model.display_name,
+            )
+            if refreshed != runtime_model.display_name:
+                runtime_model.display_name = refreshed
 
 
 def _positive_model_limit(value: int | None) -> int | None:

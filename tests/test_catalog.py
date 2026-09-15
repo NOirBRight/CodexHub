@@ -6,6 +6,8 @@ import unittest
 from catalog import (
     CatalogPolicy,
     canonical_model_id,
+    catalog_owned_display_name,
+    compose_flat_label,
     display_name_for,
     load_catalog_models,
     load_policy,
@@ -105,6 +107,35 @@ class CatalogPolicyTests(unittest.TestCase):
 
     def test_display_name_override(self):
         self.assertEqual(display_name_for("kimi-k2.7-code", self.policy), "Kimi K2.7 Code")
+
+    def test_flat_label_composes_prefix_unless_name_already_starts_with_it(self):
+        self.assertEqual(compose_flat_label("Ollama", "GLM-5.3"), "Ollama GLM-5.3")
+        self.assertEqual(compose_flat_label("Volc", "GLM-5.3"), "Volc GLM-5.3")
+        self.assertEqual(compose_flat_label("Kimi CN", "K3"), "Kimi CN K3")
+        self.assertEqual(compose_flat_label("Kimi", "K3"), "Kimi K3")
+        self.assertEqual(compose_flat_label("MiniMax.cn", "MiniMax M3"), "MiniMax.cn MiniMax M3")
+        self.assertEqual(compose_flat_label("Ollama", "Ollama GLM-5.3"), "Ollama GLM-5.3")
+        self.assertEqual(compose_flat_label("", "GLM-5.3"), "GLM-5.3")
+        self.assertEqual(compose_flat_label(None, "GLM-5.3"), "GLM-5.3")
+
+    def test_catalog_owned_display_name_rewrites_prefixed_catalog_string_only(self):
+        self.assertEqual(
+            catalog_owned_display_name("Ollama GLM-5.3", "Ollama", "GLM-5.3"),
+            "GLM-5.3",
+        )
+        self.assertEqual(
+            catalog_owned_display_name("GLM-5.3", "Ollama", "GLM-5.3"),
+            "GLM-5.3",
+        )
+        self.assertEqual(
+            catalog_owned_display_name("My GLM", "Ollama", "GLM-5.3"),
+            "My GLM",
+        )
+        self.assertEqual(
+            catalog_owned_display_name("MiniMax M3", "MiniMax.cn", "MiniMax M3"),
+            "MiniMax M3",
+        )
+        self.assertIsNone(catalog_owned_display_name(None, "Ollama", "GLM-5.3"))
 
     def test_load_catalog_models_reads_models_array(self):
         with tempfile.TemporaryDirectory() as tmpdir:

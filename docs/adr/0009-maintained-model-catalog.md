@@ -62,8 +62,10 @@ never padded to Codex's five-level `max` set.
 
 ## Consequences
 
-- Adding or correcting a model’s name, thinking levels, default, or modalities
-  is a Maintained Catalog change, then a Preset row when the model is new.
+- Adding or correcting a model’s Display Name, thinking levels, default, or
+  modalities is a Maintained Catalog change, then a Preset row when the model
+  is new. Display Name is the short label (ADR-0011); Display Prefix is not
+  stored in the name.
 - Volc GLM-5.2 is not in the bundled official list. Family policy still resolves
   it so existing user rows keep high/max instead of five filled levels.
 - Kimi dual Presets share one family table and differ by base URL and env key.

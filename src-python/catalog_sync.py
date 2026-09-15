@@ -31,6 +31,7 @@ from catalog import (
     MAX_VISIBILITY_DIAGNOSTIC_COUNT,
     canonical_model_id,
     catalog_visibility_diagnostics,
+    compose_flat_label,
     display_name_for,
     is_catalog_model_listable,
     is_internal_model,
@@ -2369,7 +2370,16 @@ def build_ollama_model(
     # Discovery runs in Codex; Gateway adapts its call/result lifecycle to
     # ordinary function tools. Do not inherit the old eager-only fallback.
     model["supports_search_tool"] = _supports_client_tool_discovery((model_metadata or {}).get(slug, {}))
-    model["display_name"] = display_name_for(slug, policy)
+    metadata = (model_metadata or {}).get(slug, {})
+    stored_name = metadata.get("display_name")
+    if isinstance(stored_name, str) and stored_name.strip():
+        display_name = stored_name.strip()
+    else:
+        display_name = display_name_for(slug, policy)
+    model["display_name"] = compose_flat_label(
+        str(metadata.get("display_prefix") or "Ollama"),
+        display_name,
+    )
     model.setdefault("description", DEFAULT_OLLAMA_MODEL["description"])
     model.setdefault("visibility", "list")
     model.setdefault("supported_in_api", True)
@@ -2503,7 +2513,12 @@ def build_external_provider_model(
     display_prefix = str(external_model.get("display_prefix") or external_model.get("provider_alias") or "provider")
 
     model["slug"] = alias
-    model["display_name"] = display_name_for(alias, policy)
+    stored_name = external_model.get("display_name")
+    if isinstance(stored_name, str) and stored_name.strip():
+        display_name = stored_name.strip()
+    else:
+        display_name = display_name_for(alias, policy)
+    model["display_name"] = compose_flat_label(display_prefix, display_name)
     description = external_model.get("description")
     model["description"] = (
         description

@@ -76,8 +76,8 @@ class MaintainedCatalogTests(unittest.TestCase):
         global_row = resolve_model("kimi", "kimi-k3")
         assert cn is not None and global_row is not None
         self.assertEqual(cn.reasoning_levels, global_row.reasoning_levels)
-        self.assertEqual(cn.display_name, "Kimi CN K3")
-        self.assertEqual(global_row.display_name, "Kimi K3")
+        self.assertEqual(cn.display_name, "K3")
+        self.assertEqual(global_row.display_name, "K3")
 
     def test_commandcode_includes_open_models_and_vision(self):
         ids = [model.id for model in official_models("commandcode")]
