@@ -220,6 +220,25 @@ def display_name_for(model_id: str, policy: CatalogPolicy) -> str:
 _FLAT_LABEL_SEPARATORS = " \t/:_-"
 
 
+def catalog_or_wire_display_name(
+    stored: str | None,
+    policy: CatalogPolicy,
+    *candidates: str,
+) -> str:
+    """Stored Display Name, else catalog identity, else the short wire id."""
+    if stored and stored.strip():
+        return stored.strip()
+    for candidate in candidates:
+        key = canonical_model_id(candidate)
+        if key in policy.display_names:
+            return policy.display_names[key]
+    for candidate in candidates:
+        key = canonical_model_id(candidate)
+        if key:
+            return key.rsplit("/", 1)[-1]
+    return ""
+
+
 def compose_flat_label(display_prefix: str | None, display_name: str) -> str:
     """Compose a mixed-list label from Display Prefix + Display Name (ADR-0011)."""
     prefix = (display_prefix or "").strip()

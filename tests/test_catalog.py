@@ -6,6 +6,7 @@ import unittest
 from catalog import (
     CatalogPolicy,
     canonical_model_id,
+    catalog_or_wire_display_name,
     catalog_owned_display_name,
     compose_flat_label,
     display_name_for,
@@ -136,6 +137,20 @@ class CatalogPolicyTests(unittest.TestCase):
             "MiniMax M3",
         )
         self.assertIsNone(catalog_owned_display_name(None, "Ollama", "GLM-5.3"))
+
+    def test_catalog_or_wire_display_name_prefers_stored_then_catalog_then_wire_id(self):
+        self.assertEqual(
+            catalog_or_wire_display_name("My GLM", self.policy, "glm-5.2"),
+            "My GLM",
+        )
+        self.assertEqual(
+            catalog_or_wire_display_name(None, self.policy, "glm-5.2"),
+            "GLM-5.2",
+        )
+        self.assertEqual(
+            catalog_or_wire_display_name(None, self.policy, "volc/my-model", "my-model"),
+            "my-model",
+        )
 
     def test_load_catalog_models_reads_models_array(self):
         with tempfile.TemporaryDirectory() as tmpdir:

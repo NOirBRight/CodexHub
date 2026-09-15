@@ -401,6 +401,101 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(by_slug["glm-5.3"]["display_name"], "Ollama GLM-5.3")
         self.assertEqual(by_slug["volc/glm-5.3"]["display_name"], "Volc GLM-5.3")
 
+    def test_gateway_flat_label_keeps_kimi_and_kimi_cn_distinct(self):
+        catalog = build_codex_catalog(
+            [],
+            [],
+            CatalogPolicy(
+                denied_models=set(),
+                denied_substrings=set(),
+                display_names={},
+            ),
+            "0.142.0",
+            external_models=[
+                {
+                    "alias": "kimi/kimi-k3",
+                    "provider_alias": "kimi",
+                    "upstream_name": "kimi",
+                    "display_prefix": "Kimi",
+                    "display_name": "K3",
+                    "base_url": "https://kimi.example.test/v1",
+                    "api_key": "secret-test-key",
+                    "upstream_model": "kimi-k3",
+                    "priority_base": 200,
+                    "context_window": 256000,
+                    "max_output_tokens": 32768,
+                    "input_modalities": ("text",),
+                    "context_source": "providers_toml",
+                    "max_output_source": "providers_toml",
+                },
+                {
+                    "alias": "kimi-cn/kimi-k3",
+                    "provider_alias": "kimi-cn",
+                    "upstream_name": "kimi-cn",
+                    "display_prefix": "Kimi CN",
+                    "display_name": "K3",
+                    "base_url": "https://kimi-cn.example.test/v1",
+                    "api_key": "secret-test-key",
+                    "upstream_model": "kimi-k3",
+                    "priority_base": 200,
+                    "context_window": 256000,
+                    "max_output_tokens": 32768,
+                    "input_modalities": ("text",),
+                    "context_source": "providers_toml",
+                    "max_output_source": "providers_toml",
+                },
+            ],
+        )
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+        self.assertEqual(by_slug["kimi/kimi-k3"]["display_name"], "Kimi K3")
+        self.assertEqual(by_slug["kimi-cn/kimi-k3"]["display_name"], "Kimi CN K3")
+
+    def test_gateway_flat_label_does_not_invent_a_prefix_for_custom_providers(self):
+        catalog = build_codex_catalog(
+            [],
+            [],
+            CatalogPolicy(
+                denied_models=set(),
+                denied_substrings=set(),
+                display_names={},
+            ),
+            "0.142.0",
+            external_models=[
+                {
+                    "alias": "custom/my-model",
+                    "provider_alias": "custom",
+                    "upstream_name": "custom",
+                    "base_url": "https://custom.example.test/v1",
+                    "api_key": "secret-test-key",
+                    "upstream_model": "my-model",
+                    "priority_base": 200,
+                    "context_window": 32000,
+                    "max_output_tokens": 4096,
+                    "input_modalities": ("text",),
+                    "context_source": "providers_toml",
+                    "max_output_source": "providers_toml",
+                },
+                {
+                    "alias": "custom/named",
+                    "provider_alias": "custom",
+                    "upstream_name": "custom",
+                    "display_name": "My Named",
+                    "base_url": "https://custom.example.test/v1",
+                    "api_key": "secret-test-key",
+                    "upstream_model": "named",
+                    "priority_base": 200,
+                    "context_window": 32000,
+                    "max_output_tokens": 4096,
+                    "input_modalities": ("text",),
+                    "context_source": "providers_toml",
+                    "max_output_source": "providers_toml",
+                },
+            ],
+        )
+        by_slug = {model["slug"]: model for model in catalog["models"]}
+        self.assertEqual(by_slug["custom/my-model"]["display_name"], "my-model")
+        self.assertEqual(by_slug["custom/named"]["display_name"], "My Named")
+
     def test_build_catalog_runtime_ollama_models_use_provider_settings_instead_of_static_allowlist(self):
         policy = CatalogPolicy(
             denied_models={"blocked-model", "ollama-cloud/provider-blocked"},
@@ -2885,7 +2980,7 @@ class CatalogSyncTests(unittest.TestCase):
 
         self.assertEqual(slugs[-2:], ["volc/glm-5.2", "volc/minimax-m3"])
         by_slug = {model["slug"]: model for model in catalog["models"]}
-        self.assertEqual(by_slug["volc/glm-5.2"]["display_name"], "Volc GLM 5.2")
+        self.assertEqual(by_slug["volc/glm-5.2"]["display_name"], "Volc GLM-5.2")
         self.assertEqual(by_slug["volc/glm-5.2"]["context_window"], 1024000)
         self.assertEqual(by_slug["volc/glm-5.2"]["max_output_tokens"], 4096)
         self.assertEqual(by_slug["volc/glm-5.2"]["priority"], 200)

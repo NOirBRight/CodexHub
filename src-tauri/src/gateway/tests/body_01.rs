@@ -2645,6 +2645,10 @@ fn client_projection_uses_short_display_name_and_provider_max_output() {
     let opencode_text = opencode_config_text(None, &settings, &providers, "volc/glm-5.3").unwrap();
     let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
     assert_eq!(
+        opencode_value.pointer("/provider/codexhub-volc/name"),
+        Some(&serde_json::json!("CodexHub Volcengine"))
+    );
+    assert_eq!(
         opencode_value.pointer("/provider/codexhub-volc/models/glm-5.3/name"),
         Some(&serde_json::json!("GLM-5.3"))
     );
@@ -2688,6 +2692,10 @@ fn client_projection_uses_short_display_name_and_provider_max_output() {
         .iter()
         .map(|model| (model["id"].as_str().unwrap().to_string(), model.clone()))
         .collect::<HashMap<_, _>>();
+    assert_eq!(
+        zcode_catalog_value.pointer("/providers/0/name"),
+        Some(&serde_json::json!("CodexHub Volcengine"))
+    );
     assert_eq!(zcode_by_id["glm-5.3"]["name"], serde_json::json!("GLM-5.3"));
     assert_eq!(
         zcode_by_id["glm-5.3"]["maxOutputTokens"],
