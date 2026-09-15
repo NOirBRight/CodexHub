@@ -455,6 +455,7 @@ pub(in crate::gateway) fn zcode_v2_provider_matches_expected(
             .pointer("/options/baseURL")
             .and_then(Value::as_str)
             .is_some_and(|value| value == group.base_url.as_str())
+        && zcode_provider_projection_matches(provider, group, false)
 }
 
 pub(in crate::gateway) fn zcode_catalog_matches_expected(
@@ -512,6 +513,59 @@ pub(in crate::gateway) fn zcode_catalog_provider_matches_expected(
             .pointer(&path_pointer)
             .and_then(Value::as_str)
             .is_some_and(|value| value == expected_path)
+        && zcode_provider_projection_matches(provider, group, true)
+}
+
+fn zcode_provider_projection_matches(
+    provider: &Value,
+    group: &GatewayClientProviderGroup,
+    catalog_shape: bool,
+) -> bool {
+    let group_name_matches = provider
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| name == group.display_name);
+    group_name_matches
+        && group.models.iter().all(|model| {
+            let actual = if catalog_shape {
+                provider
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .and_then(|models| {
+                        models.iter().find(|entry| {
+                            entry
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .is_some_and(|id| id == model.id)
+                        })
+                    })
+            } else {
+                provider
+                    .get("models")
+                    .and_then(Value::as_object)
+                    .and_then(|models| models.get(&model.id))
+            };
+            actual
+                .is_some_and(|actual| zcode_model_projection_matches(actual, model, catalog_shape))
+        })
+}
+
+fn zcode_model_projection_matches(
+    actual: &Value,
+    model: &GatewayClientProviderModel,
+    catalog_shape: bool,
+) -> bool {
+    let name_matches = actual
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| name == model.display_name);
+    let actual_max = if catalog_shape {
+        actual.get("maxOutputTokens").and_then(Value::as_u64)
+    } else {
+        actual.pointer("/limit/output").and_then(Value::as_u64)
+    };
+    let expected_max = model.positive_max_output_tokens().map(u64::from);
+    name_matches && actual_max == expected_max
 }
 
 pub(in crate::gateway) fn zcode_app_data_root() -> PathBuf {

@@ -1937,6 +1937,14 @@ def ollama_provider_model_metadata(ollama_models: Iterable[dict[str, Any]]) -> d
         if multi_agent_version in {"v1", "v2"}:
             entry["multi_agent_version"] = multi_agent_version
 
+        display_name = model.get("display_name")
+        if isinstance(display_name, str) and display_name.strip():
+            entry["display_name"] = display_name.strip()
+
+        display_prefix = model.get("display_prefix")
+        if isinstance(display_prefix, str) and display_prefix.strip():
+            entry["display_prefix"] = display_prefix.strip()
+
         if entry:
             metadata[slug] = entry
     return metadata

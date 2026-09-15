@@ -533,6 +533,35 @@ class CatalogSyncTests(unittest.TestCase):
         self.assertEqual(model["codex_proxy_metadata"]["context_source"], "providers_toml")
         self.assertEqual(model["codex_proxy_metadata"]["max_output_source"], "providers_toml")
 
+    def test_runtime_ollama_metadata_preserves_custom_display_name_into_flat_label(self):
+        metadata = catalog_sync.ollama_provider_model_metadata(
+            [
+                {
+                    "upstream_model": "glm-5.3",
+                    "display_name": "My Flash",
+                    "display_prefix": "Ollama",
+                    "context_window": 202752,
+                    "max_output_tokens": 128000,
+                }
+            ]
+        )
+        catalog = build_codex_catalog(
+            [],
+            ["glm-5.3"],
+            CatalogPolicy(
+                denied_models=set(),
+                denied_substrings=set(),
+                display_names={"glm-5.3": "GLM-5.3"},
+            ),
+            "0.142.0",
+            ollama_model_metadata=metadata,
+            use_ollama_policy_allowlist=False,
+        )
+
+        model = catalog["models"][0]
+        self.assertEqual(model["slug"], "glm-5.3")
+        self.assertEqual(model["display_name"], "Ollama My Flash")
+
     def test_build_catalog_runtime_versioned_ollama_defaults_missing_output_limit_to_context_window(self):
         slug = "deepseek-v4-flash:0731"
         metadata = catalog_sync.ollama_provider_model_metadata(

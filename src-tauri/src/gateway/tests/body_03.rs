@@ -2472,6 +2472,70 @@ fn zcode_route_mode_marks_protocol_mismatch_as_stale() {
 }
 
 #[test]
+fn zcode_route_mode_marks_stale_projected_name_and_max_output() {
+    let root = unique_temp_dir("codexhub-zcode-stale-projection");
+    let catalog_path = root.join("model-providers").join("codexhub.json");
+    let v2_config_path = root.join("v2").join("config.json");
+    let v2_cache_path = root.join("v2").join("bots-model-cache.v2.json");
+    let targets = super::ZcodeConfigTargets {
+        catalog_path: catalog_path.clone(),
+        v2_config_path: v2_config_path.clone(),
+        v2_cache_path: v2_cache_path.clone(),
+    };
+    fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(v2_config_path.parent().unwrap()).unwrap();
+    let settings = Settings {
+        include_official_models: false,
+        ..Settings::default()
+    };
+    let providers = client_projection_name_and_limits_providers();
+    let model = "volc/glm-5.3";
+    let expected_config =
+        super::zcode_v2_config_text(&v2_config_path, &settings, &providers, model).unwrap();
+    let expected_catalog = super::zcode_catalog_text(&settings, &providers, model).unwrap();
+    let expected_cache = super::zcode_v2_cache_text(&settings, &providers, model).unwrap();
+
+    fs::write(&catalog_path, &expected_catalog).unwrap();
+    fs::write(&v2_config_path, &expected_config).unwrap();
+    fs::write(&v2_cache_path, &expected_cache).unwrap();
+    assert_eq!(
+        super::zcode_route_mode_with_expected(&targets, &settings, &providers, model),
+        "hub"
+    );
+
+    let stale_catalog =
+        expected_catalog.replacen("\"name\": \"GLM-5.3\"", "\"name\": \"Ollama GLM-5.3\"", 1);
+    assert_ne!(stale_catalog, expected_catalog);
+    fs::write(&catalog_path, stale_catalog).unwrap();
+    assert_eq!(
+        super::zcode_route_mode_with_expected(&targets, &settings, &providers, model),
+        "stale"
+    );
+
+    fs::write(&catalog_path, &expected_catalog).unwrap();
+    let stale_cache = expected_cache.replacen(
+        "\"maxOutputTokens\": 128000",
+        "\"maxOutputTokens\": 32768",
+        1,
+    );
+    assert_ne!(stale_cache, expected_cache);
+    fs::write(&v2_cache_path, stale_cache).unwrap();
+    assert_eq!(
+        super::zcode_route_mode_with_expected(&targets, &settings, &providers, model),
+        "stale"
+    );
+
+    fs::write(&v2_cache_path, &expected_cache).unwrap();
+    let stale_config = expected_config.replacen("\"output\": 128000", "\"output\": 32768", 1);
+    assert_ne!(stale_config, expected_config);
+    fs::write(&v2_config_path, stale_config).unwrap();
+    assert_eq!(
+        super::zcode_route_mode_with_expected(&targets, &settings, &providers, model),
+        "stale"
+    );
+}
+
+#[test]
 fn zcode_route_mode_accepts_zcode_normalized_v2_provider_config() {
     let root = unique_temp_dir("codexhub-zcode-normalized-v2");
     let catalog_path = root.join("model-providers").join("codexhub.json");
