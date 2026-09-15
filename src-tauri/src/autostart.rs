@@ -19,6 +19,10 @@ fn linux_service_file() -> &'static str {
     crate::app_flavor::current().linux_service_file()
 }
 
+fn linux_autostart_desktop_file() -> &'static str {
+    crate::app_flavor::current().linux_autostart_desktop_file()
+}
+
 pub fn set_autostart(enabled: bool) -> Result<String, String> {
     let paths = RuntimePathProvider;
     let filesystem = RealAutostartFileSystem;
@@ -62,18 +66,98 @@ pub fn get_autostart_status() -> Result<AutostartStatus, String> {
     get_autostart_status_with_dependencies(
         OperatingSystem::current(),
         &paths,
+        &RealAutostartFileSystem,
         &ProcessCommandRunner,
     )
 }
 
-pub fn reconcile_settings(mut settings: crate::Settings) -> Result<crate::Settings, String> {
+pub fn reconcile_settings(settings: crate::Settings) -> Result<crate::Settings, String> {
+    let os = OperatingSystem::current();
     let status = get_autostart_status()?;
-    if status.authoritative && settings.auto_start_software != status.enabled {
-        settings.auto_start_software = status.enabled;
-        config::save_settings(settings)
+    apply_autostart_reconcile_plan(
+        plan_autostart_reconcile(os, settings.auto_start_software, &status),
+        status.enabled,
+        settings,
+        || set_autostart(true).map(|_| ()),
+        || remove_autostart().map(|_| ()),
+        config::save_settings,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutostartReconcilePlan {
+    Keep,
+    Materialize,
+    RetireStale,
+    PersistOsEnabled,
+}
+
+fn plan_autostart_reconcile(
+    os: OperatingSystem,
+    desired: bool,
+    status: &AutostartStatus,
+) -> AutostartReconcilePlan {
+    if should_materialize_from_settings(os, desired, status) {
+        AutostartReconcilePlan::Materialize
+    } else if should_retire_stale_registration(os, desired, status) {
+        AutostartReconcilePlan::RetireStale
+    } else if status.authoritative && desired != status.enabled {
+        AutostartReconcilePlan::PersistOsEnabled
     } else {
-        Ok(settings)
+        AutostartReconcilePlan::Keep
     }
+}
+
+fn apply_autostart_reconcile_plan(
+    plan: AutostartReconcilePlan,
+    os_enabled: bool,
+    mut settings: crate::Settings,
+    materialize: impl FnOnce() -> Result<(), String>,
+    retire: impl FnOnce() -> Result<(), String>,
+    persist: impl FnOnce(crate::Settings) -> Result<crate::Settings, String>,
+) -> Result<crate::Settings, String> {
+    match plan {
+        AutostartReconcilePlan::Keep => Ok(settings),
+        AutostartReconcilePlan::Materialize => match materialize() {
+            Ok(()) => Ok(settings),
+            Err(error) => {
+                log::warn!("failed to materialize autostart from settings: {error}");
+                Ok(settings)
+            }
+        },
+        AutostartReconcilePlan::RetireStale => {
+            if let Err(error) = retire() {
+                log::warn!("failed to retire stale autostart registration: {error}");
+            }
+            Ok(settings)
+        }
+        AutostartReconcilePlan::PersistOsEnabled => {
+            settings.auto_start_software = os_enabled;
+            persist(settings)
+        }
+    }
+}
+
+fn should_materialize_from_settings(
+    os: OperatingSystem,
+    desired: bool,
+    status: &AutostartStatus,
+) -> bool {
+    desired
+        && status.authoritative
+        && !status.enabled
+        && matches!(os, OperatingSystem::Linux | OperatingSystem::Macos)
+}
+
+fn should_retire_stale_registration(
+    os: OperatingSystem,
+    desired: bool,
+    status: &AutostartStatus,
+) -> bool {
+    !desired
+        && status.authoritative
+        && status.state == "malformed-or-stale"
+        && matches!(os, OperatingSystem::Linux | OperatingSystem::Macos)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +193,7 @@ impl OperatingSystem {
 trait AutostartPathProvider {
     fn current_exe(&self) -> Result<PathBuf, String>;
     fn home_dir(&self) -> Result<PathBuf, String>;
+    fn appimage_path(&self) -> Option<PathBuf>;
 }
 
 struct RuntimePathProvider;
@@ -124,11 +209,22 @@ impl AutostartPathProvider for RuntimePathProvider {
         dirs::home_dir()
             .ok_or_else(|| "failed to resolve user home directory for autostart".to_string())
     }
+
+    fn appimage_path(&self) -> Option<PathBuf> {
+        std::env::var_os("APPIMAGE")
+            .map(PathBuf::from)
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.to_ascii_lowercase().starts_with("codexhub"))
+            })
+    }
 }
 
 trait AutostartFileSystem {
     fn create_dir_all(&self, path: &Path) -> Result<(), String>;
     fn write(&self, path: &Path, content: &str) -> Result<(), String>;
+    fn read(&self, path: &Path) -> Result<Option<String>, String>;
     fn remove_file_if_exists(&self, path: &Path) -> Result<(), String>;
 }
 
@@ -143,6 +239,14 @@ impl AutostartFileSystem for RealAutostartFileSystem {
     fn write(&self, path: &Path, content: &str) -> Result<(), String> {
         fs::write(path, content)
             .map_err(|error| format!("failed to write {}: {error}", path.display()))
+    }
+
+    fn read(&self, path: &Path) -> Result<Option<String>, String> {
+        match fs::read_to_string(path) {
+            Ok(content) => Ok(Some(content)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("failed to read {}: {error}", path.display())),
+        }
     }
 
     fn remove_file_if_exists(&self, path: &Path) -> Result<(), String> {
@@ -165,11 +269,17 @@ fn set_autostart_with_dependencies(
         return remove_autostart_with_dependencies(os, paths, filesystem, runner);
     }
 
-    let exe = paths.current_exe()?;
     match os {
-        OperatingSystem::Windows => register_windows_autostart(&exe, runner),
-        OperatingSystem::Macos => register_macos_autostart(&exe, paths, filesystem),
-        OperatingSystem::Linux => register_linux_autostart(&exe, paths, filesystem, runner),
+        OperatingSystem::Windows => register_windows_autostart(&paths.current_exe()?, runner),
+        OperatingSystem::Macos => {
+            register_macos_autostart(&paths.current_exe()?, paths, filesystem)
+        }
+        OperatingSystem::Linux => register_linux_autostart(
+            &linux_autostart_exec_path(paths)?,
+            paths,
+            filesystem,
+            runner,
+        ),
         OperatingSystem::Unsupported(name) => {
             Err(format!("autostart registration is not supported on {name}"))
         }
@@ -305,17 +415,21 @@ fn delete_windows_task(runner: &dyn CommandRunner) -> Result<(), String> {
 fn get_autostart_status_with_dependencies(
     os: OperatingSystem,
     paths: &dyn AutostartPathProvider,
+    filesystem: &dyn AutostartFileSystem,
     runner: &dyn CommandRunner,
 ) -> Result<AutostartStatus, String> {
-    if os != OperatingSystem::Windows {
-        return Ok(AutostartStatus {
+    match os {
+        OperatingSystem::Windows => query_windows_autostart(&paths.current_exe()?, runner),
+        OperatingSystem::Macos => query_macos_autostart(&paths.current_exe()?, paths, filesystem),
+        OperatingSystem::Linux => {
+            query_linux_autostart(&linux_autostart_exec_path(paths)?, paths, filesystem)
+        }
+        OperatingSystem::Unsupported(_) => Ok(AutostartStatus {
             enabled: false,
             authoritative: false,
             state: "unsupported-readback",
-        });
+        }),
     }
-    let exe = paths.current_exe()?;
-    query_windows_autostart(&exe, runner)
 }
 
 fn query_windows_autostart(
@@ -585,6 +699,12 @@ fn register_macos_autostart(
     filesystem.create_dir_all(parent)?;
     filesystem.write(&plist_path, &macos_plist_content(exe))?;
 
+    let status = query_macos_autostart(exe, paths, filesystem)?;
+    if !status.enabled {
+        let _ = filesystem.remove_file_if_exists(&plist_path);
+        return Err("macOS autostart registration failed readback verification".to_string());
+    }
+
     Ok(format!(
         "Autostart enabled via macOS LaunchAgent {}",
         plist_path.display()
@@ -597,6 +717,9 @@ fn remove_macos_autostart(
 ) -> Result<String, String> {
     let plist_path = macos_plist_path(paths)?;
     filesystem.remove_file_if_exists(&plist_path)?;
+    if filesystem.read(&plist_path)?.is_some() {
+        return Err("macOS autostart removal failed readback verification".to_string());
+    }
 
     Ok(format!(
         "Autostart removed from macOS LaunchAgent {}",
@@ -610,31 +733,35 @@ fn register_linux_autostart(
     filesystem: &dyn AutostartFileSystem,
     runner: &dyn CommandRunner,
 ) -> Result<String, String> {
-    let service_path = linux_service_path(paths)?;
-    let parent = service_path.parent().ok_or_else(|| {
+    let desktop_path = linux_autostart_desktop_path(paths)?;
+    if is_development_linux_exe(exe) {
+        return Err(
+            "Autostart is only available from an installed, portable, or AppImage build"
+                .to_string(),
+        );
+    }
+    cleanup_legacy_linux_systemd_unit(paths, filesystem, runner)?;
+    let parent = desktop_path.parent().ok_or_else(|| {
         format!(
             "failed to resolve parent directory for {}",
-            service_path.display()
+            desktop_path.display()
         )
     })?;
     filesystem.create_dir_all(parent)?;
-    filesystem.write(&service_path, &linux_service_content(exe))?;
+    let content = linux_autostart_desktop_content(exe);
+    if filesystem.read(&desktop_path)? != Some(content.clone()) {
+        filesystem.write(&desktop_path, &content)?;
+    }
 
-    let reload_args = linux_systemctl_args("daemon-reload");
-    run_autostart_command(
-        "reload Linux systemd user daemon",
-        Path::new("systemctl"),
-        &reload_args,
-        runner,
-    )?;
-
-    let program = Path::new("systemctl");
-    let args = linux_systemctl_args_with_unit("enable");
-    run_autostart_command("enable Linux autostart service", program, &args, runner)?;
+    let status = query_linux_autostart(exe, paths, filesystem)?;
+    if !status.enabled {
+        let _ = filesystem.remove_file_if_exists(&desktop_path);
+        return Err("Linux autostart registration failed readback verification".to_string());
+    }
 
     Ok(format!(
-        "Autostart enabled via Linux systemd user service {}",
-        service_path.display()
+        "Autostart enabled via Linux XDG autostart {}",
+        desktop_path.display()
     ))
 }
 
@@ -643,43 +770,151 @@ fn remove_linux_autostart(
     filesystem: &dyn AutostartFileSystem,
     runner: &dyn CommandRunner,
 ) -> Result<String, String> {
+    let desktop_path = linux_autostart_desktop_path(paths)?;
     let service_path = linux_service_path(paths)?;
+    let skip_xdg = linux_autostart_exec_path(paths)
+        .ok()
+        .is_some_and(|exe| is_development_linux_exe(&exe));
 
     let program = Path::new("systemctl");
     let args = linux_systemctl_args_with_unit("disable");
     let disable_result = run_linux_systemctl_disable_best_effort(program, &args, runner);
 
     filesystem.remove_file_if_exists(&service_path)?;
+    if !skip_xdg {
+        filesystem.remove_file_if_exists(&desktop_path)?;
+    }
 
     let reload_args = linux_systemctl_args("daemon-reload");
     let reload_result = run_linux_systemctl_cleanup_best_effort(program, &reload_args, runner);
 
     disable_result?;
     reload_result?;
+    if !skip_xdg && filesystem.read(&desktop_path)?.is_some() {
+        return Err("Linux autostart removal failed readback verification".to_string());
+    }
 
     Ok(format!(
-        "Autostart removed from Linux systemd user service {}",
-        service_path.display()
+        "Autostart removed from Linux XDG autostart {}",
+        desktop_path.display()
     ))
 }
 
-fn run_autostart_command(
-    label: &str,
-    program: &Path,
-    args: &[String],
+fn cleanup_legacy_linux_systemd_unit(
+    paths: &dyn AutostartPathProvider,
+    filesystem: &dyn AutostartFileSystem,
     runner: &dyn CommandRunner,
 ) -> Result<(), String> {
-    let outcome = runner
-        .run(program, args)
-        .map_err(|error| format!("{label} failed to start: {error}"))?;
-
-    if outcome.code == Some(0) {
-        Ok(())
-    } else {
-        Err(config::format_command_failure(
-            label, program, args, &outcome,
-        ))
+    let service_path = linux_service_path(paths)?;
+    if filesystem.read(&service_path)?.is_none() {
+        return Ok(());
     }
+
+    let program = Path::new("systemctl");
+    let args = linux_systemctl_args_with_unit("disable");
+    let _ = run_linux_systemctl_disable_best_effort(program, &args, runner);
+    filesystem.remove_file_if_exists(&service_path)?;
+    let reload_args = linux_systemctl_args("daemon-reload");
+    let _ = run_linux_systemctl_cleanup_best_effort(program, &reload_args, runner);
+    if filesystem.read(&service_path)?.is_some() {
+        return Err("failed to retire leftover Linux systemd autostart unit".to_string());
+    }
+    Ok(())
+}
+
+fn linux_autostart_exec_path(paths: &dyn AutostartPathProvider) -> Result<PathBuf, String> {
+    match paths.appimage_path() {
+        Some(path) => Ok(path),
+        None => paths.current_exe(),
+    }
+}
+
+fn is_development_linux_exe(path: &Path) -> bool {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .contains("/src-tauri/target/")
+}
+
+fn query_linux_autostart(
+    expected_exe: &Path,
+    paths: &dyn AutostartPathProvider,
+    filesystem: &dyn AutostartFileSystem,
+) -> Result<AutostartStatus, String> {
+    if is_development_linux_exe(expected_exe) {
+        return Ok(AutostartStatus {
+            enabled: false,
+            authoritative: false,
+            state: "unsupported-readback",
+        });
+    }
+    let desktop_path = linux_autostart_desktop_path(paths)?;
+    let Some(content) = filesystem.read(&desktop_path)? else {
+        return Ok(owned_autostart_status(false, true, "missing"));
+    };
+    if linux_autostart_desktop_matches(&content, expected_exe) {
+        Ok(owned_autostart_status(true, true, "enabled"))
+    } else {
+        Ok(owned_autostart_status(false, true, "malformed-or-stale"))
+    }
+}
+
+fn query_macos_autostart(
+    expected_exe: &Path,
+    paths: &dyn AutostartPathProvider,
+    filesystem: &dyn AutostartFileSystem,
+) -> Result<AutostartStatus, String> {
+    let plist_path = macos_plist_path(paths)?;
+    let Some(content) = filesystem.read(&plist_path)? else {
+        return Ok(owned_autostart_status(false, true, "missing"));
+    };
+    if macos_plist_matches(&content, expected_exe) {
+        Ok(owned_autostart_status(true, true, "enabled"))
+    } else {
+        Ok(owned_autostart_status(false, true, "malformed-or-stale"))
+    }
+}
+
+fn owned_autostart_status(
+    enabled: bool,
+    authoritative: bool,
+    state: &'static str,
+) -> AutostartStatus {
+    AutostartStatus {
+        enabled,
+        authoritative,
+        state,
+    }
+}
+
+fn linux_autostart_desktop_matches(content: &str, expected_exe: &Path) -> bool {
+    let expected_exec = quote_desktop_exec(expected_exe);
+    let mut exec = None;
+    let mut hidden = false;
+    let mut gnome_enabled = true;
+    let mut managed = false;
+    let mut is_application = false;
+    for line in content.lines() {
+        if let Some(value) = line.strip_prefix("Exec=") {
+            exec = Some(value.trim());
+        } else if line == "Type=Application" {
+            is_application = true;
+        } else if line == "X-CodexHub-Autostart=true" {
+            managed = true;
+        } else if line.eq_ignore_ascii_case("Hidden=true") {
+            hidden = true;
+        } else if line.eq_ignore_ascii_case("X-GNOME-Autostart-enabled=false") {
+            gnome_enabled = false;
+        }
+    }
+    is_application && managed && !hidden && gnome_enabled && exec == Some(expected_exec.as_str())
+}
+
+fn macos_plist_matches(content: &str, expected_exe: &Path) -> bool {
+    let escaped = escape_xml(&expected_exe.to_string_lossy());
+    content.contains(&format!("<string>{escaped}</string>"))
+        && content.contains("<key>RunAtLoad</key>")
+        && content.contains("<true/>")
+        && !content.contains("<string>start</string>")
 }
 
 fn linux_systemctl_args(command: &str) -> Vec<String> {
@@ -761,6 +996,14 @@ fn linux_service_path(paths: &dyn AutostartPathProvider) -> Result<PathBuf, Stri
         .join(linux_service_file()))
 }
 
+fn linux_autostart_desktop_path(paths: &dyn AutostartPathProvider) -> Result<PathBuf, String> {
+    Ok(paths
+        .home_dir()?
+        .join(".config")
+        .join("autostart")
+        .join(linux_autostart_desktop_file()))
+}
+
 fn macos_plist_content(exe: &Path) -> String {
     let exe = escape_xml(&exe.to_string_lossy());
     format!(
@@ -773,7 +1016,6 @@ fn macos_plist_content(exe: &Path) -> String {
   <key>ProgramArguments</key>
   <array>
     <string>{exe}</string>
-    <string>start</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -786,26 +1028,19 @@ fn macos_plist_content(exe: &Path) -> String {
     )
 }
 
-fn linux_service_content(exe: &Path) -> String {
+fn linux_autostart_desktop_content(exe: &Path) -> String {
     format!(
-        "[Unit]\nDescription=CodexHub Proxy\n\n[Service]\nType=simple\nExecStart={} start\n\n[Install]\nWantedBy=default.target\n",
-        systemd_quote_exec_path(exe)
+        "[Desktop Entry]\nType=Application\nName=CodexHub\nExec={}\nTerminal=false\nX-GNOME-Autostart-enabled=true\nX-CodexHub-Autostart=true\n",
+        quote_desktop_exec(exe)
     )
 }
 
-fn systemd_quote_exec_path(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    let escaped = text
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('%', "%%");
-    if text
-        .chars()
-        .any(|character| character.is_whitespace() || character == '"' || character == '\\')
-    {
-        format!("\"{}\"", escaped)
+fn quote_desktop_exec(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    if raw.chars().any(char::is_whitespace) {
+        format!("\"{}\"", raw.replace('"', "\\\""))
     } else {
-        escaped
+        raw.into_owned()
     }
 }
 
@@ -1200,9 +1435,13 @@ mod tests {
             &windows_query_output(r"D:\Old\codexhub.exe"),
             "",
         ))]);
-        let status =
-            get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &stale)
-                .unwrap();
+        let status = get_autostart_status_with_dependencies(
+            OperatingSystem::Windows,
+            &paths,
+            &MemoryFileSystem::default(),
+            &stale,
+        )
+        .unwrap();
         assert!(!status.enabled);
         assert_eq!(status.state, "malformed-or-stale");
 
@@ -1212,9 +1451,14 @@ mod tests {
             "",
         ))]);
         assert!(
-            get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &valid,)
-                .unwrap()
-                .enabled
+            get_autostart_status_with_dependencies(
+                OperatingSystem::Windows,
+                &paths,
+                &MemoryFileSystem::default(),
+                &valid,
+            )
+            .unwrap()
+            .enabled
         );
 
         let sid_trigger = RecordingRunner::sequence(vec![Ok(command_outcome(
@@ -1226,9 +1470,14 @@ mod tests {
             "",
         ))]);
         assert!(
-            get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &sid_trigger,)
-                .unwrap()
-                .enabled
+            get_autostart_status_with_dependencies(
+                OperatingSystem::Windows,
+                &paths,
+                &MemoryFileSystem::default(),
+                &sid_trigger,
+            )
+            .unwrap()
+            .enabled
         );
     }
 
@@ -1277,9 +1526,13 @@ mod tests {
         for readback in invalid_readbacks {
             let runner =
                 RecordingRunner::sequence(vec![Ok(command_outcome(Some(0), &readback, ""))]);
-            let status =
-                get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &runner)
-                    .unwrap();
+            let status = get_autostart_status_with_dependencies(
+                OperatingSystem::Windows,
+                &paths,
+                &MemoryFileSystem::default(),
+                &runner,
+            )
+            .unwrap();
             assert!(!status.enabled, "invalid task was accepted: {readback}");
             assert_eq!(status.state, "malformed-or-stale");
         }
@@ -1328,9 +1581,13 @@ mod tests {
             "",
         ))]);
 
-        let status =
-            get_autostart_status_with_dependencies(OperatingSystem::Windows, &paths, &runner)
-                .unwrap();
+        let status = get_autostart_status_with_dependencies(
+            OperatingSystem::Windows,
+            &paths,
+            &MemoryFileSystem::default(),
+            &runner,
+        )
+        .unwrap();
         assert!(!status.enabled);
         assert_eq!(status.state, "missing");
     }
@@ -1435,7 +1692,7 @@ mod tests {
         let plist = writes.get(&plist_path).unwrap();
         assert!(plist.contains(&format!("<string>{}</string>", super::macos_label())));
         assert!(plist.contains("CodexHub &amp; Tools"));
-        assert!(plist.contains("<string>start</string>"));
+        assert!(!plist.contains("<string>start</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>\n  <true/>"));
         assert!(plist.contains("<key>KeepAlive</key>\n  <false/>"));
     }
@@ -1461,7 +1718,7 @@ mod tests {
     }
 
     #[test]
-    fn linux_set_autostart_writes_systemd_user_service_and_enables_it() {
+    fn linux_set_autostart_writes_xdg_desktop_that_launches_the_gui() {
         let home = PathBuf::from("home").join("alice");
         let exe = PathBuf::from("opt/codexhub/codexhub");
         let paths = FakePaths::new(exe.clone(), home.clone());
@@ -1471,69 +1728,94 @@ mod tests {
         set_autostart_with_dependencies(true, OperatingSystem::Linux, &paths, &filesystem, &runner)
             .unwrap();
 
+        let desktop_path = home
+            .join(".config")
+            .join("autostart")
+            .join("com.codexhub.app.desktop");
+        let writes = filesystem.writes.borrow();
+        let desktop = writes
+            .get(&desktop_path)
+            .expect("Linux autostart must write an XDG desktop entry");
+        assert!(desktop.contains("Type=Application"));
+        assert!(desktop.contains(&format!("Exec={}", exe.to_string_lossy())));
+        assert!(
+            !desktop.contains(" start"),
+            "login autostart must launch the GUI, not `codexhub start`: {desktop}"
+        );
+        assert!(desktop.contains("X-CodexHub-Autostart=true"));
+        assert!(
+            writes
+                .get(
+                    &home
+                        .join(".config")
+                        .join("systemd")
+                        .join("user")
+                        .join(super::linux_service_file())
+                )
+                .is_none(),
+            "GUI autostart must not register a systemd proxy unit"
+        );
+        assert!(
+            runner.commands.borrow().is_empty(),
+            "fresh Linux enable should not require systemctl: {:?}",
+            runner.commands.borrow()
+        );
+    }
+
+    #[test]
+    fn linux_set_autostart_retires_legacy_systemd_unit_when_present() {
+        let home = PathBuf::from("home").join("alice");
+        let exe = PathBuf::from("opt/codexhub/codexhub");
+        let paths = FakePaths::new(exe, home.clone());
+        let filesystem = MemoryFileSystem::default();
         let service_path = home
             .join(".config")
             .join("systemd")
             .join("user")
             .join(super::linux_service_file());
-        assert!(filesystem
-            .created_dirs
-            .borrow()
-            .contains(&home.join(".config").join("systemd").join("user")));
-        let writes = filesystem.writes.borrow();
-        let service = writes.get(&service_path).unwrap();
-        assert!(service.contains("[Unit]"));
-        assert!(service.contains("[Service]"));
-        assert!(service.contains(&format!("ExecStart={} start", exe.to_string_lossy())));
-        assert!(service.contains("[Install]"));
-        assert!(service.contains("WantedBy=default.target"));
+        filesystem
+            .write(&service_path, "[Unit]\nDescription=legacy\n")
+            .unwrap();
+        let runner = RecordingRunner::successful();
+
+        set_autostart_with_dependencies(true, OperatingSystem::Linux, &paths, &filesystem, &runner)
+            .unwrap();
+
+        assert!(filesystem.writes.borrow().get(&service_path).is_none());
         assert_eq!(
             runner.commands.borrow().as_slice(),
             &[
                 RecordedCommand {
                     program: PathBuf::from("systemctl"),
-                    args: vec!["--user".to_string(), "daemon-reload".to_string(),],
+                    args: vec![
+                        "--user".to_string(),
+                        "disable".to_string(),
+                        super::linux_service_file().to_string(),
+                    ],
                 },
                 RecordedCommand {
                     program: PathBuf::from("systemctl"),
-                    args: vec![
-                        "--user".to_string(),
-                        "enable".to_string(),
-                        super::linux_service_file().to_string(),
-                    ],
+                    args: vec!["--user".to_string(), "daemon-reload".to_string()],
                 }
             ]
         );
     }
 
     #[test]
-    fn linux_set_autostart_escapes_systemd_exec_paths_with_spaces_quotes_and_percent() {
+    fn linux_set_autostart_fails_when_leftover_systemd_unit_cannot_be_removed() {
         let home = PathBuf::from("home").join("alice");
-        let exe = PathBuf::from("opt/Codex Hub/quoted\"dir/codex%hub");
+        let exe = PathBuf::from("opt/codexhub/codexhub");
         let paths = FakePaths::new(exe, home.clone());
-        let filesystem = MemoryFileSystem::default();
-        let runner = RecordingRunner::successful();
-
-        set_autostart_with_dependencies(true, OperatingSystem::Linux, &paths, &filesystem, &runner)
-            .unwrap();
-
+        let filesystem = MemoryFileSystem::new_with_remove_error("permission denied".to_string());
         let service_path = home
             .join(".config")
             .join("systemd")
             .join("user")
             .join(super::linux_service_file());
-        let writes = filesystem.writes.borrow();
-        let service = writes.get(&service_path).unwrap();
-        assert!(service.contains("ExecStart=\"opt/Codex Hub/quoted\\\"dir/codex%%hub\" start"));
-    }
-
-    #[test]
-    fn linux_set_autostart_returns_daemon_reload_failure_before_enabling() {
-        let home = PathBuf::from("home").join("alice");
-        let paths = FakePaths::new(PathBuf::from("codexhub"), home);
-        let filesystem = MemoryFileSystem::default();
-        let runner =
-            RecordingRunner::sequence(vec![Ok(command_outcome(Some(1), "", "reload failed"))]);
+        filesystem
+            .write(&service_path, "[Unit]\nDescription=legacy\n")
+            .unwrap();
+        let runner = RecordingRunner::successful();
 
         let error = set_autostart_with_dependencies(
             true,
@@ -1544,14 +1826,268 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.contains("reload Linux systemd user daemon"));
+        assert!(error.contains("permission denied"));
+        assert!(filesystem
+            .writes
+            .borrow()
+            .get(
+                &home
+                    .join(".config")
+                    .join("autostart")
+                    .join(super::linux_autostart_desktop_file())
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn linux_set_autostart_quotes_desktop_exec_paths_with_spaces() {
+        let home = PathBuf::from("home").join("alice");
+        let exe = PathBuf::from("opt/Codex Hub/quoted\"dir/codexhub");
+        let paths = FakePaths::new(exe, home.clone());
+        let filesystem = MemoryFileSystem::default();
+        let runner = RecordingRunner::successful();
+
+        set_autostart_with_dependencies(true, OperatingSystem::Linux, &paths, &filesystem, &runner)
+            .unwrap();
+
+        let desktop_path = home
+            .join(".config")
+            .join("autostart")
+            .join(super::linux_autostart_desktop_file());
+        let writes = filesystem.writes.borrow();
+        let desktop = writes.get(&desktop_path).unwrap();
+        assert!(desktop.contains("Exec=\"opt/Codex Hub/quoted\\\"dir/codexhub\""));
+        assert!(!desktop.contains(" start"));
+    }
+
+    #[test]
+    fn linux_set_autostart_skips_cargo_development_executable() {
+        let home = PathBuf::from("home").join("alice");
+        let exe = PathBuf::from("/home/dev/CodexHub/src-tauri/target/debug/codexhub");
+        let paths = FakePaths::new(exe, home.clone());
+        let filesystem = MemoryFileSystem::default();
+        let runner = RecordingRunner::successful();
+
+        let error = set_autostart_with_dependencies(
+            true,
+            OperatingSystem::Linux,
+            &paths,
+            &filesystem,
+            &runner,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("installed, portable, or AppImage"));
+        assert!(filesystem.writes.borrow().is_empty());
+        let status = get_autostart_status_with_dependencies(
+            OperatingSystem::Linux,
+            &paths,
+            &filesystem,
+            &runner,
+        )
+        .unwrap();
+        assert!(!status.authoritative);
+        assert_eq!(status.state, "unsupported-readback");
+
+        filesystem
+            .write(
+                &home
+                    .join(".config")
+                    .join("autostart")
+                    .join(super::linux_autostart_desktop_file()),
+                "packaged-autostart",
+            )
+            .unwrap();
+        set_autostart_with_dependencies(
+            false,
+            OperatingSystem::Linux,
+            &paths,
+            &filesystem,
+            &runner,
+        )
+        .unwrap();
         assert_eq!(
-            runner.commands.borrow().as_slice(),
-            &[RecordedCommand {
-                program: PathBuf::from("systemctl"),
-                args: vec!["--user".to_string(), "daemon-reload".to_string()],
-            }]
+            filesystem
+                .writes
+                .borrow()
+                .get(
+                    &home
+                        .join(".config")
+                        .join("autostart")
+                        .join(super::linux_autostart_desktop_file())
+                )
+                .map(String::as_str),
+            Some("packaged-autostart")
         );
+    }
+
+    #[test]
+    fn linux_set_autostart_prefers_appimage_over_ephemeral_mount_exe() {
+        let home = PathBuf::from("home").join("alice");
+        let mount = PathBuf::from("/tmp/.mount_CodexHxxxx/usr/bin/codexhub");
+        let appimage = PathBuf::from("/home/alice/Applications/CodexHub.AppImage");
+        let paths = FakePaths::new(mount.clone(), home.clone()).with_appimage(appimage.clone());
+        let filesystem = MemoryFileSystem::default();
+        let runner = RecordingRunner::successful();
+
+        set_autostart_with_dependencies(true, OperatingSystem::Linux, &paths, &filesystem, &runner)
+            .unwrap();
+
+        let desktop = filesystem
+            .writes
+            .borrow()
+            .get(
+                &home
+                    .join(".config")
+                    .join("autostart")
+                    .join(super::linux_autostart_desktop_file()),
+            )
+            .cloned()
+            .unwrap();
+        assert!(desktop.contains(&format!("Exec={}", appimage.to_string_lossy())));
+        assert!(!desktop.contains(mount.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn linux_matching_xdg_autostart_reads_back_enabled() {
+        let home = PathBuf::from("home").join("alice");
+        let exe = PathBuf::from("/opt/codexhub/codexhub");
+        let paths = FakePaths::new(exe.clone(), home.clone());
+        let filesystem = MemoryFileSystem::default();
+        filesystem
+            .write(
+                &home
+                    .join(".config")
+                    .join("autostart")
+                    .join(super::linux_autostart_desktop_file()),
+                &super::linux_autostart_desktop_content(&exe),
+            )
+            .unwrap();
+
+        let status = get_autostart_status_with_dependencies(
+            OperatingSystem::Linux,
+            &paths,
+            &filesystem,
+            &RecordingRunner::successful(),
+        )
+        .unwrap();
+        assert!(status.enabled);
+        assert!(status.authoritative);
+        assert_eq!(status.state, "enabled");
+    }
+
+    #[test]
+    fn linux_missing_or_stale_xdg_autostart_reads_back_disabled() {
+        let home = PathBuf::from("home").join("alice");
+        let exe = PathBuf::from("/opt/codexhub/codexhub");
+        let paths = FakePaths::new(exe, home.clone());
+        let filesystem = MemoryFileSystem::default();
+        let missing = get_autostart_status_with_dependencies(
+            OperatingSystem::Linux,
+            &paths,
+            &filesystem,
+            &RecordingRunner::successful(),
+        )
+        .unwrap();
+        assert!(!missing.enabled);
+        assert!(missing.authoritative);
+        assert_eq!(missing.state, "missing");
+
+        filesystem
+            .write(
+                &home
+                    .join(".config")
+                    .join("autostart")
+                    .join(super::linux_autostart_desktop_file()),
+                "[Desktop Entry]\nType=Application\nExec=/tmp/.mount_old/usr/bin/codexhub start\nX-CodexHub-Autostart=true\n",
+            )
+            .unwrap();
+        let stale = get_autostart_status_with_dependencies(
+            OperatingSystem::Linux,
+            &paths,
+            &filesystem,
+            &RecordingRunner::successful(),
+        )
+        .unwrap();
+        assert!(!stale.enabled);
+        assert_eq!(stale.state, "malformed-or-stale");
+    }
+
+    #[test]
+    fn linux_and_macos_materialize_missing_registration_from_enabled_settings() {
+        let missing = super::AutostartStatus {
+            enabled: false,
+            authoritative: true,
+            state: "missing",
+        };
+        let stale = super::AutostartStatus {
+            enabled: false,
+            authoritative: true,
+            state: "malformed-or-stale",
+        };
+        assert_eq!(
+            super::plan_autostart_reconcile(OperatingSystem::Linux, true, &missing),
+            super::AutostartReconcilePlan::Materialize
+        );
+        assert_eq!(
+            super::plan_autostart_reconcile(OperatingSystem::Macos, true, &missing),
+            super::AutostartReconcilePlan::Materialize
+        );
+        assert_eq!(
+            super::plan_autostart_reconcile(OperatingSystem::Windows, true, &missing),
+            super::AutostartReconcilePlan::PersistOsEnabled
+        );
+        assert_eq!(
+            super::plan_autostart_reconcile(OperatingSystem::Linux, false, &missing),
+            super::AutostartReconcilePlan::Keep
+        );
+        assert_eq!(
+            super::plan_autostart_reconcile(OperatingSystem::Linux, false, &stale),
+            super::AutostartReconcilePlan::RetireStale
+        );
+
+        let settings = crate::Settings {
+            auto_start_software: true,
+            ..crate::Settings::default()
+        };
+        let mut materialized = 0;
+        let mut persisted = 0;
+        let kept = super::apply_autostart_reconcile_plan(
+            super::AutostartReconcilePlan::Materialize,
+            false,
+            settings.clone(),
+            || {
+                materialized += 1;
+                Err("disk full".to_string())
+            },
+            || panic!("retire should not run"),
+            |next| {
+                persisted += 1;
+                Ok(next)
+            },
+        )
+        .unwrap();
+        assert_eq!(materialized, 1);
+        assert_eq!(persisted, 0);
+        assert!(kept.auto_start_software);
+
+        let mut retired = 0;
+        super::apply_autostart_reconcile_plan(
+            super::AutostartReconcilePlan::RetireStale,
+            false,
+            crate::Settings {
+                auto_start_software: false,
+                ..crate::Settings::default()
+            },
+            || panic!("materialize should not run"),
+            || {
+                retired += 1;
+                Ok(())
+            },
+            Ok,
+        )
+        .unwrap();
+        assert_eq!(retired, 1);
     }
 
     #[test]
@@ -1583,11 +2119,15 @@ mod tests {
         );
         assert_eq!(
             filesystem.removed_files.borrow().as_slice(),
-            &[home
-                .join(".config")
-                .join("systemd")
-                .join("user")
-                .join(super::linux_service_file())]
+            &[
+                home.join(".config")
+                    .join("systemd")
+                    .join("user")
+                    .join(super::linux_service_file()),
+                home.join(".config")
+                    .join("autostart")
+                    .join(super::linux_autostart_desktop_file()),
+            ]
         );
     }
 
@@ -1613,11 +2153,15 @@ mod tests {
 
         assert_eq!(
             filesystem.removed_files.borrow().as_slice(),
-            &[home
-                .join(".config")
-                .join("systemd")
-                .join("user")
-                .join(super::linux_service_file())]
+            &[
+                home.join(".config")
+                    .join("systemd")
+                    .join("user")
+                    .join(super::linux_service_file()),
+                home.join(".config")
+                    .join("autostart")
+                    .join(super::linux_autostart_desktop_file()),
+            ]
         );
         assert_eq!(
             runner.commands.borrow().as_slice(),
@@ -1653,11 +2197,15 @@ mod tests {
 
         assert_eq!(
             filesystem.removed_files.borrow().as_slice(),
-            &[home
-                .join(".config")
-                .join("systemd")
-                .join("user")
-                .join(super::linux_service_file())]
+            &[
+                home.join(".config")
+                    .join("systemd")
+                    .join("user")
+                    .join(super::linux_service_file()),
+                home.join(".config")
+                    .join("autostart")
+                    .join(super::linux_autostart_desktop_file()),
+            ]
         );
     }
 
@@ -1680,11 +2228,15 @@ mod tests {
 
         assert_eq!(
             filesystem.removed_files.borrow().as_slice(),
-            &[home
-                .join(".config")
-                .join("systemd")
-                .join("user")
-                .join(super::linux_service_file())]
+            &[
+                home.join(".config")
+                    .join("systemd")
+                    .join("user")
+                    .join(super::linux_service_file()),
+                home.join(".config")
+                    .join("autostart")
+                    .join(super::linux_autostart_desktop_file()),
+            ]
         );
     }
 
@@ -1711,11 +2263,15 @@ mod tests {
 
         assert_eq!(
             filesystem.removed_files.borrow().as_slice(),
-            &[home
-                .join(".config")
-                .join("systemd")
-                .join("user")
-                .join(super::linux_service_file())]
+            &[
+                home.join(".config")
+                    .join("systemd")
+                    .join("user")
+                    .join(super::linux_service_file()),
+                home.join(".config")
+                    .join("autostart")
+                    .join(super::linux_autostart_desktop_file()),
+            ]
         );
     }
 
@@ -1743,7 +2299,7 @@ mod tests {
     }
 
     #[test]
-    fn set_autostart_false_uses_removal_path_without_resolving_current_exe() {
+    fn set_autostart_false_still_removes_when_current_exe_is_unavailable() {
         let home = PathBuf::from("home").join("alice");
         let paths = FakePaths::new_with_current_exe_error(
             "current exe should not be needed".to_string(),
@@ -1761,7 +2317,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(*paths.current_exe_calls.borrow(), 0);
+        assert_eq!(*paths.current_exe_calls.borrow(), 1);
         assert_eq!(
             runner.commands.borrow().as_slice(),
             &[
@@ -1781,11 +2337,15 @@ mod tests {
         );
         assert_eq!(
             filesystem.removed_files.borrow().as_slice(),
-            &[home
-                .join(".config")
-                .join("systemd")
-                .join("user")
-                .join(super::linux_service_file())]
+            &[
+                home.join(".config")
+                    .join("systemd")
+                    .join("user")
+                    .join(super::linux_service_file()),
+                home.join(".config")
+                    .join("autostart")
+                    .join(super::linux_autostart_desktop_file()),
+            ]
         );
     }
 
@@ -1897,6 +2457,7 @@ mod tests {
     struct FakePaths {
         current_exe: Result<PathBuf, String>,
         home_dir: PathBuf,
+        appimage: Option<PathBuf>,
         current_exe_calls: RefCell<usize>,
     }
 
@@ -1905,14 +2466,21 @@ mod tests {
             Self {
                 current_exe: Ok(current_exe),
                 home_dir,
+                appimage: None,
                 current_exe_calls: RefCell::new(0),
             }
+        }
+
+        fn with_appimage(mut self, appimage: PathBuf) -> Self {
+            self.appimage = Some(appimage);
+            self
         }
 
         fn new_with_current_exe_error(error: String, home_dir: PathBuf) -> Self {
             Self {
                 current_exe: Err(error),
                 home_dir,
+                appimage: None,
                 current_exe_calls: RefCell::new(0),
             }
         }
@@ -1932,6 +2500,10 @@ mod tests {
 
         fn home_dir(&self) -> Result<PathBuf, String> {
             Ok(self.home_dir.clone())
+        }
+
+        fn appimage_path(&self) -> Option<PathBuf> {
+            self.appimage.clone()
         }
     }
 
@@ -1965,11 +2537,16 @@ mod tests {
             Ok(())
         }
 
+        fn read(&self, path: &Path) -> Result<Option<String>, String> {
+            Ok(self.writes.borrow().get(path).cloned())
+        }
+
         fn remove_file_if_exists(&self, path: &Path) -> Result<(), String> {
             self.removed_files.borrow_mut().push(path.to_path_buf());
             if let Some(error) = &self.remove_error {
                 return Err(error.clone());
             }
+            self.writes.borrow_mut().remove(path);
             Ok(())
         }
     }

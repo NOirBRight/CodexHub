@@ -16,6 +16,10 @@ Single-context layout — one `CONTEXT.md` + `docs/adr/` at the repo root. See `
 
 Classify work as fast, standard, or strict and select local checks from `docs/agents/verification-policy.md`. GitHub Actions remains the final PR gate for `dev` and `main`; when unavailable, run the documented fallback commands in `docs/agents/ci.md`.
 
+### Release
+
+Publish Linux and Windows from the same SHA. Build Windows on SSH host `yoga` in an isolated checkout. See `docs/agents/release.md`.
+
 ### Python runtime
 
 CodexHub requires Python 3.13 or newer. The interactive Codex environment may

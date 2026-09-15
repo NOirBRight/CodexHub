@@ -92,9 +92,10 @@ named sentinel in content, no `encrypted_content`, and no Responses events.
 
 ## Authoritative host and compatibility baselines
 
-Run on the authoritative machine-bound local dedicated Windows host
-environment `codexhub-real-client-e2e` with a new output root, dedicated Codex
-login input, and no reused host user session or client configuration. Do not
+Run on SSH host `yoga` in the `codexhub-real-client-e2e` lab, with a new output
+root, dedicated Codex login input, and no reused host user session or client
+configuration. Use an isolated checkout; leave `D:\Workstation\CodexHub`
+untouched. Isolated-checkout rules live in `docs/agents/release.md`. Do not
 supply Ollama credentials. Use `isolated/credentials/opencode-go.json`. A VM or named snapshot is not required. The runner
 verifies each native installed version against the versioned CLI contract
 (`scripts/real_client_cli_contract.v1.json`) before launching the candidate or
