@@ -253,7 +253,7 @@ export function SortableList<T>({
   }
 
   return (
-    <div className={cx("space-y-3 px-px py-px", draggedId && "cursor-grabbing", className)}>
+    <div className={cx("px-px py-px", draggedId && "cursor-grabbing", className ?? "space-y-3")}>
       {renderedItems.map((item) => {
         const id = getId(item);
         return (

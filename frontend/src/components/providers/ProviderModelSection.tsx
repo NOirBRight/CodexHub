@@ -158,7 +158,7 @@ export function ModelSection({
       setEditingModelId(model.id);
     }
     const actions = (
-      <div className="flex min-w-0 flex-nowrap items-center justify-end gap-1.5 overflow-hidden text-xs text-slate-500">
+      <div className="flex min-w-0 max-w-full flex-nowrap items-center justify-end gap-1 overflow-hidden text-xs text-slate-500">
         {modelCapabilityTags(displayed).map((tag) => (
           <ModelCapabilityChip key={tag} tag={tag} />
         ))}
@@ -201,7 +201,7 @@ export function ModelSection({
     return (
       <div
         className={cx(
-          "grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 overflow-hidden px-3 py-1",
+          "grid min-h-9 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-center gap-2 overflow-hidden px-3 py-1",
           rowInteractable && "cursor-pointer",
           !modelEnabled && "opacity-70",
         )}
@@ -732,7 +732,7 @@ function optionalPositiveNumber(value: string) {
 
 function CapabilityChip({ icon, label, title }: { icon?: React.ReactNode; label: string; title?: string }) {
   return (
-    <span title={title} className="ws-model-tag inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-line bg-panel px-2 text-xs font-semibold text-slate-600">
+    <span title={title} className="ws-model-tag inline-flex h-5 min-w-0 shrink items-center gap-1 truncate rounded-full border border-line bg-panel px-1.5 text-[11px] font-semibold text-slate-600">
       {icon}
       {label}
     </span>
