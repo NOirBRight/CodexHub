@@ -1164,7 +1164,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
         call_aliases: dict[str, str] = {}
         raw_input = result.get("input")
         if isinstance(raw_input, list):
-            raw_input = self._prepare_history_input(raw_input)
+            raw_input = self._omit_unproven_optional_client_history(raw_input)
             encoded_input: list[Any] = []
             changed = tools_changed or choice_changed or raw_input is not result.get("input")
             failed_calls = failed_argument_call_ids(raw_input)

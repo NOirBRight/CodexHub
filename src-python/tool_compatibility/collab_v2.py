@@ -521,7 +521,7 @@ class CollaborationV2PlanMixin:
             self._raise_collaboration_contract(exc, surface=surface)
         return item_id, call_id
 
-    def _prepare_history_input(self, items: list[Any]) -> list[Any]:
+    def _omit_unproven_optional_client_history(self, items: list[Any]) -> list[Any]:
         retained = [
             item
             for item in items

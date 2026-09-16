@@ -10,6 +10,7 @@ from collaboration_runtime_contract import (
     CollaborationContractError,
     validate_collaboration_arguments,
 )
+from codex_app_heartbeat import desktop_automation_heartbeat_result as _desktop_automation_heartbeat_result
 from codex_semantic_adapter import (
     CollaborationBoundaryError,
     classify_collaboration_payload,
@@ -405,19 +406,6 @@ def test_encode_history_rejects_retained_call_without_call_identity(call_id):
     assert exc_info.value.classification == "missing_call_identity"
 
 
-def _desktop_automation_heartbeat_result(*, call_id=None):
-    item = {
-        "type": "function_call_output",
-        "id": "fco_01a0a8ae-eb1b-7a73-a360-6ac018c90d48",
-        "name": "automation_update",
-        "namespace": "codex_app",
-        "output": '{"status":"ok"}',
-    }
-    if call_id is not None:
-        item["call_id"] = call_id
-    return item
-
-
 def test_encode_history_omits_codex_app_result_without_call_identity():
     plan = _native_plan({"type": "function", "name": "keep"})
     heartbeat = _desktop_automation_heartbeat_result()
@@ -455,6 +443,41 @@ def test_encode_history_omits_codex_app_result_with_empty_call_identity():
     plan = _native_plan({"type": "function", "name": "keep"})
     encoded = plan.encode_payload(
         {"input": [_desktop_automation_heartbeat_result(call_id="")]}
+    )
+    assert encoded["input"] == []
+
+
+def test_encode_history_omits_flattened_codex_app_result_without_call_identity():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    encoded = plan.encode_payload(
+        {
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "id": "fco_flat",
+                    "name": "codex_app__automation_update",
+                    "output": "{}",
+                }
+            ]
+        }
+    )
+    assert encoded["input"] == []
+
+
+def test_encode_history_omits_custom_codex_app_result_without_call_identity():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    encoded = plan.encode_payload(
+        {
+            "input": [
+                {
+                    "type": "custom_tool_call_output",
+                    "id": "cto_app",
+                    "name": "automation_update",
+                    "namespace": "codex_app",
+                    "output": "{}",
+                }
+            ]
+        }
     )
     assert encoded["input"] == []
 
