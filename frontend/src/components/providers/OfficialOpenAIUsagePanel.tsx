@@ -164,7 +164,7 @@ type OfficialOpenAIUsageTooltipState = {
 
 function UsageMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="grid min-w-0 place-items-center rounded-inner bg-surface px-2 py-1.5 text-center shadow-control">
+    <div className="grid min-w-0 place-items-center rounded-inner bg-surface px-2 py-1 text-center shadow-control">
       <div className="text-[9px] font-semibold uppercase leading-3 text-slate-500">{label}</div>
       <div className="mt-0.5 font-semibold leading-4 text-ink">{value}</div>
     </div>
@@ -203,7 +203,7 @@ export function OfficialOpenAIUsageLimitBars({
         return (
           <div
             key={limit.key}
-            className="ws-account-quota min-w-0 rounded-control bg-surface px-2 py-1.5 shadow-control"
+            className="ws-account-quota min-w-0 rounded-control bg-surface px-2 py-1 shadow-control"
             title={`${label} · ${value} · ${endTime}`}
             aria-label={
               percent === null
@@ -316,15 +316,53 @@ export function OfficialOpenAIUsagePanel({
     });
   }
 
+  const showUsageSkeleton = Boolean(busy && !snapshot && !error);
+  const metricUnknown = t("common.unknown");
+
   if (usageHidden) {
     return null;
   }
 
   return (
-    <section className="grid min-w-0 gap-3 rounded-inner bg-panel-soft p-3 shadow-hairline">
-      <div className="flex min-w-0 items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <h3 className="truncate text-sm font-semibold text-ink">{t("providers.openaiUsage")}</h3>
+    <section className="grid min-w-0 gap-2 rounded-inner bg-panel-soft p-2 shadow-hairline">
+      <div className="flex min-w-0 items-center gap-2">
+        <h3 className="shrink-0 truncate text-sm font-semibold text-ink">{t("providers.openaiUsage")}</h3>
+        <div className="grid min-w-0 flex-1 grid-cols-[repeat(5,minmax(0,1fr))] gap-2 text-xs">
+          {showUsageSkeleton ? (
+            Array.from({ length: 5 }, (_, index) => (
+              <div
+                key={`metric-${index}`}
+                className="grid min-w-0 place-items-center rounded-inner bg-surface px-2 py-1 shadow-control"
+                aria-hidden="true"
+              >
+                <span className="h-2 w-10 rounded-full bg-slate-200" />
+                <span className={cx("mt-2 h-3 rounded-full bg-slate-200", index === 0 ? "w-12" : "w-9")} />
+              </div>
+            ))
+          ) : (
+            <>
+              <UsageMetric
+                label={t("gateway.tokens")}
+                value={snapshot ? formatUsageNumber(snapshot.total_tokens, locale) : metricUnknown}
+              />
+              <UsageMetric
+                label={t("providers.peakDayTokens")}
+                value={snapshot ? formatUsageNumber(peakTokens, locale) : metricUnknown}
+              />
+              <UsageMetric
+                label={t("providers.longestTaskDuration")}
+                value={snapshot ? formatUsageDuration(snapshot.longest_running_turn_sec, locale, t as Translate) : metricUnknown}
+              />
+              <UsageMetric
+                label={t("providers.currentStreak")}
+                value={snapshot ? t("providers.daysCount", { count: currentStreak }) : metricUnknown}
+              />
+              <UsageMetric
+                label={t("providers.longestStreak")}
+                value={snapshot ? t("providers.daysCount", { count: longestStreak }) : metricUnknown}
+              />
+            </>
+          )}
         </div>
         <div className="flex shrink-0 rounded-full bg-surface p-0.5 shadow-control">
           {modeOptions.map((option) => (
@@ -347,110 +385,85 @@ export function OfficialOpenAIUsagePanel({
         <div className="rounded-inner bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 shadow-hairline">
           {error}
         </div>
-      ) : busy && !snapshot ? (
+      ) : showUsageSkeleton ? (
         <OfficialOpenAIUsageSkeleton label={t("providers.loadingOpenAIUsage")} />
       ) : (
-        <>
-          <div className="grid grid-cols-[repeat(5,minmax(0,1fr))] gap-2 text-xs">
-            <UsageMetric
-              label={t("gateway.tokens")}
-              value={snapshot ? formatUsageNumber(snapshot.total_tokens, locale) : t("common.unknown")}
-            />
-            <UsageMetric
-              label={t("providers.peakDayTokens")}
-              value={snapshot ? formatUsageNumber(peakTokens, locale) : t("common.unknown")}
-            />
-            <UsageMetric
-              label={t("providers.longestTaskDuration")}
-              value={snapshot ? formatUsageDuration(snapshot.longest_running_turn_sec, locale, t as Translate) : t("common.unknown")}
-            />
-            <UsageMetric
-              label={t("providers.currentStreak")}
-              value={snapshot ? t("providers.daysCount", { count: currentStreak }) : t("common.unknown")}
-            />
-            <UsageMetric
-              label={t("providers.longestStreak")}
-              value={snapshot ? t("providers.daysCount", { count: longestStreak }) : t("common.unknown")}
-            />
-          </div>
-
-          <div
-            ref={chartHostRef}
-            className="relative min-w-0 max-w-full overflow-hidden rounded-inner bg-surface px-3 py-2 shadow-control"
-            data-openai-usage-chart
-            onPointerLeave={() => setHoveredUsageCell(null)}
-          >
-            {snapshot && days.length ? (
-              <div className="max-w-full overflow-x-auto overflow-y-hidden">
-                <div
-                  className="grid"
-                  role="img"
-                  aria-label={t("providers.openaiUsageActivity")}
-                  style={{
-                    gridAutoFlow: "column",
-                    gridTemplateColumns: `repeat(${Math.max(1, chart.columns.length)}, ${OFFICIAL_USAGE_CELL_SIZE}px)`,
-                    gridTemplateRows: `repeat(7, ${OFFICIAL_USAGE_CELL_SIZE}px)`,
-                    gap: `${OFFICIAL_USAGE_CELL_GAP}px`,
-                    height: usageGridHeight(),
-                    width: usageGridWidth(chart.columns.length),
-                  }}
-                >
-                  {chart.cells.map((cell, index) => {
-                    if (!cell) {
-                      return <span key={`empty-${index}`} className="h-full w-full" />;
-                    }
-                    const highlighted =
-                      cell.mode === "week"
-                        ? cell.columnKey === (hoveredUsageColumnKey ?? selectedUsageColumnKey)
-                        : cell.selectionKey === highlightedUsageCellKey;
-                    return (
-                      <button
-                        key={cell.key}
-                        type="button"
-                        className={cx(
-                          "focus-ring h-full w-full rounded-[3px] border-0 p-0 hover:brightness-[0.97]",
-                          highlighted && "ring-1 ring-action/20 brightness-[0.96]",
-                        )}
-                        style={{ backgroundColor: usageCellColor(cell.intensity, cell.filled) }}
-                        aria-label={formatUsageCellLabel(cell, locale, t as Translate)}
-                        onPointerEnter={(event) => activateUsageCell(event, cell)}
-                        onPointerMove={(event) => activateUsageCell(event, cell)}
-                        onFocus={(event) => focusUsageCell(event, cell)}
-                        onBlur={() => setHoveredUsageCell(null)}
-                        onClick={() => setSelectedUsageCellKey(cell.selectionKey)}
-                      />
-                    );
-                  })}
-                </div>
-                <div
-                  className="relative mt-1 h-4 text-[10px] text-slate-400"
-                  style={{ width: usageGridWidth(chart.columns.length) }}
-                >
-                  {usageMonthLabels(chart.columns, locale, usageGridWidth(chart.columns.length)).map((label) => (
-                    <span
-                      key={label.key}
-                      data-openai-usage-month-label
+        <div
+          ref={chartHostRef}
+          className="relative min-w-0 max-w-full overflow-hidden rounded-inner bg-surface px-3 py-2 shadow-control"
+          data-openai-usage-chart
+          onPointerLeave={() => setHoveredUsageCell(null)}
+        >
+          {snapshot && days.length ? (
+            <div className="max-w-full overflow-x-auto overflow-y-hidden">
+              <div
+                className="grid"
+                role="img"
+                aria-label={t("providers.openaiUsageActivity")}
+                style={{
+                  gridAutoFlow: "column",
+                  gridTemplateColumns: `repeat(${Math.max(1, chart.columns.length)}, ${OFFICIAL_USAGE_CELL_SIZE}px)`,
+                  gridTemplateRows: `repeat(7, ${OFFICIAL_USAGE_CELL_SIZE}px)`,
+                  gap: `${OFFICIAL_USAGE_CELL_GAP}px`,
+                  height: usageGridHeight(),
+                  width: usageGridWidth(chart.columns.length),
+                }}
+              >
+                {chart.cells.map((cell, index) => {
+                  if (!cell) {
+                    return <span key={`empty-${index}`} className="h-full w-full" />;
+                  }
+                  const highlighted =
+                    cell.mode === "week"
+                      ? cell.columnKey === (hoveredUsageColumnKey ?? selectedUsageColumnKey)
+                      : cell.selectionKey === highlightedUsageCellKey;
+                  return (
+                    <button
+                      key={cell.key}
+                      type="button"
                       className={cx(
-                        "absolute top-0 truncate",
-                        label.align === "start" && "translate-x-0",
-                        label.align === "center" && "-translate-x-1/2",
-                        label.align === "end" && "-translate-x-full",
+                        "focus-ring h-full w-full rounded-[3px] border-0 p-0 hover:brightness-[0.97]",
+                        highlighted && "ring-1 ring-action/20 brightness-[0.96]",
                       )}
-                      style={{ left: `${label.leftPercent}%` }}
-                    >
-                      {label.label}
-                    </span>
-                  ))}
-                </div>
-                <OfficialOpenAIUsageTooltip tooltip={hoveredUsageCell} locale={locale} t={t as Translate} />
+                      style={{ backgroundColor: usageCellColor(cell.intensity, cell.filled) }}
+                      aria-label={formatUsageCellLabel(cell, locale, t as Translate)}
+                      onPointerEnter={(event) => activateUsageCell(event, cell)}
+                      onPointerMove={(event) => activateUsageCell(event, cell)}
+                      onFocus={(event) => focusUsageCell(event, cell)}
+                      onBlur={() => setHoveredUsageCell(null)}
+                      onClick={() => setSelectedUsageCellKey(cell.selectionKey)}
+                    />
+                  );
+                })}
               </div>
-            ) : (
-              <div className="grid min-h-[82px] place-items-center text-xs font-medium text-slate-500">
-                {busy ? t("providers.loadingOpenAIUsage") : t("providers.openaiUsageNoData")}
+              <div
+                className="relative mt-1 h-4 text-[10px] text-slate-400"
+                style={{ width: usageGridWidth(chart.columns.length) }}
+              >
+                {usageMonthLabels(chart.columns, locale, usageGridWidth(chart.columns.length)).map((label) => (
+                  <span
+                    key={label.key}
+                    data-openai-usage-month-label
+                    className={cx(
+                      "absolute top-0 truncate",
+                      label.align === "start" && "translate-x-0",
+                      label.align === "center" && "-translate-x-1/2",
+                      label.align === "end" && "-translate-x-full",
+                    )}
+                    style={{ left: `${label.leftPercent}%` }}
+                  >
+                    {label.label}
+                  </span>
+                ))}
               </div>
-            )}
-          </div>
-        </>
+              <OfficialOpenAIUsageTooltip tooltip={hoveredUsageCell} locale={locale} t={t as Translate} />
+            </div>
+          ) : (
+            <div className="grid min-h-[82px] place-items-center text-xs font-medium text-slate-500">
+              {busy ? t("providers.loadingOpenAIUsage") : t("providers.openaiUsageNoData")}
+            </div>
+          )}
+        </div>
       )}
     </section>
   );
@@ -461,46 +474,33 @@ function OfficialOpenAIUsageSkeleton({ label }: { label: string }) {
   const cells = Array.from({ length: columns * 7 }, (_, index) => index);
 
   return (
-    <div className="grid gap-3 animate-pulse" role="status" aria-label={label}>
-      <div className="grid grid-cols-[repeat(5,minmax(0,1fr))] gap-2 text-xs" aria-hidden="true">
-        {Array.from({ length: 5 }, (_, index) => (
-          <div
-            key={`metric-${index}`}
-            className="grid min-w-0 place-items-center rounded-inner bg-surface px-2 py-1.5 shadow-control"
-          >
-            <span className="h-2 w-10 rounded-full bg-slate-200" />
-            <span className={cx("mt-2 h-3 rounded-full bg-slate-200", index === 0 ? "w-12" : "w-9")} />
-          </div>
+    <div className="min-w-0 overflow-hidden rounded-inner bg-surface px-3 py-2 shadow-control animate-pulse" role="status" aria-label={label}>
+      <div
+        className="grid"
+        style={{
+          gridAutoFlow: "column",
+          gridTemplateColumns: `repeat(${columns}, ${OFFICIAL_USAGE_CELL_SIZE}px)`,
+          gridTemplateRows: `repeat(7, ${OFFICIAL_USAGE_CELL_SIZE}px)`,
+          gap: `${OFFICIAL_USAGE_CELL_GAP}px`,
+          height: usageGridHeight(),
+          width: usageGridWidth(columns),
+        }}
+      >
+        {cells.map((index) => (
+          <span
+            key={`cell-${index}`}
+            className={cx(
+              "h-full w-full rounded-[3px] bg-slate-200",
+              index % 11 === 0 && "bg-slate-300/80",
+              index % 17 === 0 && "bg-slate-300",
+            )}
+          />
         ))}
       </div>
-      <div className="min-w-0 overflow-hidden rounded-inner bg-surface px-3 py-2 shadow-control" aria-hidden="true">
-        <div
-          className="grid"
-          style={{
-            gridAutoFlow: "column",
-            gridTemplateColumns: `repeat(${columns}, ${OFFICIAL_USAGE_CELL_SIZE}px)`,
-            gridTemplateRows: `repeat(7, ${OFFICIAL_USAGE_CELL_SIZE}px)`,
-            gap: `${OFFICIAL_USAGE_CELL_GAP}px`,
-            height: usageGridHeight(),
-            width: usageGridWidth(columns),
-          }}
-        >
-          {cells.map((index) => (
-            <span
-              key={`cell-${index}`}
-              className={cx(
-                "h-full w-full rounded-[3px] bg-slate-200",
-                index % 11 === 0 && "bg-slate-300/80",
-                index % 17 === 0 && "bg-slate-300",
-              )}
-            />
-          ))}
-        </div>
-        <div className="mt-2 flex gap-5">
-          {Array.from({ length: 6 }, (_, index) => (
-            <span key={`month-${index}`} className="h-2 w-7 rounded-full bg-slate-200" />
-          ))}
-        </div>
+      <div className="mt-2 flex gap-5">
+        {Array.from({ length: 6 }, (_, index) => (
+          <span key={`month-${index}`} className="h-2 w-7 rounded-full bg-slate-200" />
+        ))}
       </div>
     </div>
   );

@@ -1705,13 +1705,6 @@
   font-size: 13px;
 }
 .ws-editor-overlay[data-editor-tab="unified"]
-  .ws-provider-detail
-  > div:first-child
-  > .grid-cols-2
-  > .col-span-2 {
-  grid-column: auto;
-}
-.ws-editor-overlay[data-editor-tab="unified"]
   :is(.ws-provider-detail, .ws-official-detail)
   > :last-child {
   position: sticky;

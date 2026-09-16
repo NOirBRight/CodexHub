@@ -2067,7 +2067,7 @@ function OfficialDetail({
 
   return (
     <div className="ws-official-detail grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
-      <div className="grid gap-3 border-b border-line p-4">
+      <div className="grid gap-2 border-b border-line px-4 py-2.5">
         <HeaderRow
           title={t("common.codex")}
           subtitle={t("providers.openaiSubscriptionCatalog")}

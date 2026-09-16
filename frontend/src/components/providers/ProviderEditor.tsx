@@ -437,7 +437,7 @@ export function ProviderDetail({
 
   return (
     <div className="ws-provider-detail grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
-      <div className="grid gap-2 border-b border-line p-4">
+      <div className="grid gap-2 border-b border-line px-4 py-2.5">
         <HeaderRow
           title={provider.name}
           titleAccessory={
@@ -518,7 +518,7 @@ export function ProviderDetail({
                 }
               />
             </Field>
-            <Field label={t("common.baseUrl")} className="col-span-2">
+            <Field label={t("common.baseUrl")}>
               <input
                 className="field field-compact"
                 value={draft.base_url}
@@ -527,20 +527,18 @@ export function ProviderDetail({
                 }
               />
             </Field>
-            <div className="col-span-2">
-              <EndpointSelectionPanel
-                value={draft.upstream_format ?? "auto"}
-                result={probeResult}
-                availableFormats={draft.available_upstream_formats}
-                toolProtocol={draft.tool_protocol}
-                probeDisabled={busy === "probe" || !draft.base_url.trim()}
-                testState={endpointTestState}
-                onChange={(upstreamFormat) =>
-                  setDraft({ ...draft, upstream_format: upstreamFormat })
-                }
-                onProbe={() => void runProbe()}
-              />
-            </div>
+            <EndpointSelectionPanel
+              value={draft.upstream_format ?? "auto"}
+              result={probeResult}
+              availableFormats={draft.available_upstream_formats}
+              toolProtocol={draft.tool_protocol}
+              probeDisabled={busy === "probe" || !draft.base_url.trim()}
+              testState={endpointTestState}
+              onChange={(upstreamFormat) =>
+                setDraft({ ...draft, upstream_format: upstreamFormat })
+              }
+              onProbe={() => void runProbe()}
+            />
           </div>
         )}
       </div>
@@ -697,7 +695,7 @@ export function AddProviderPanel({
 
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
-      <div className="grid gap-2 border-b border-line p-4">
+      <div className="grid gap-2 border-b border-line px-4 py-2.5">
         <HeaderRow title={t("providers.addProvider")} />
         <div className="grid grid-cols-2 gap-2">
           <Field label={t("common.name")}>
@@ -715,7 +713,7 @@ export function AddProviderPanel({
               onChange={(apiKey) => onFormChange({ ...form, api_key: apiKey })}
             />
           </Field>
-          <Field label={t("common.baseUrl")} className="col-span-2">
+          <Field label={t("common.baseUrl")}>
             <input
               className="field field-compact"
               value={form.base_url}
@@ -724,20 +722,18 @@ export function AddProviderPanel({
               }
             />
           </Field>
-          <div className="col-span-2">
-            <EndpointSelectionPanel
-              value={form.upstream_format}
-              result={probeResult}
-              availableFormats={form.available_upstream_formats}
-              toolProtocol={form.tool_protocol}
-              probeDisabled={busy === "probe" || !form.base_url.trim()}
-              testState={endpointTestState}
-              onChange={(upstreamFormat) =>
-                onFormChange({ ...form, upstream_format: upstreamFormat })
-              }
-              onProbe={() => void runProbe()}
-            />
-          </div>
+          <EndpointSelectionPanel
+            value={form.upstream_format}
+            result={probeResult}
+            availableFormats={form.available_upstream_formats}
+            toolProtocol={form.tool_protocol}
+            probeDisabled={busy === "probe" || !form.base_url.trim()}
+            testState={endpointTestState}
+            onChange={(upstreamFormat) =>
+              onFormChange({ ...form, upstream_format: upstreamFormat })
+            }
+            onProbe={() => void runProbe()}
+          />
         </div>
       </div>
 
