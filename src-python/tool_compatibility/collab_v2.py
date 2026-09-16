@@ -22,7 +22,12 @@ from collaboration_runtime_contract import (
     validate_collaboration_result,
 )
 
-from .contracts import ToolCompatibilityEntry, ToolCompatibilityError, copy_mapping as _copy_mapping
+from .contracts import (
+    ToolCompatibilityEntry,
+    ToolCompatibilityError,
+    copy_mapping as _copy_mapping,
+    unproven_optional_client_history_result as _unproven_optional_client_history_result,
+)
 from .dispositions import ADAPT, NAMESPACE, name_of
 
 
@@ -515,6 +520,20 @@ class CollaborationV2PlanMixin:
         except CollaborationContractError as exc:
             self._raise_collaboration_contract(exc, surface=surface)
         return item_id, call_id
+
+    def _prepare_history_input(self, items: list[Any]) -> list[Any]:
+        retained = [
+            item
+            for item in items
+            if not (
+                isinstance(item, Mapping)
+                and _unproven_optional_client_history_result(item)
+            )
+        ]
+        if len(retained) == len(items):
+            retained = items
+        self._validate_collaboration_v2_items(retained, surface="history")
+        return retained
 
     def _validate_collaboration_v2_items(
         self,

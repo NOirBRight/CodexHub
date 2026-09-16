@@ -3,7 +3,8 @@
 Date: 2026-08-04
 Status: Accepted for 0.1.8 Beta2; generic compatibility shipped in Beta3 and
 the exact frozen Collaboration V1/V2 contract was calibrated for Beta4 by
-#392.
+#392. History Call identity versus Item identity, and omit of unproven
+optional client results, clarified 2026-09-16.
 
 ## Context
 
@@ -159,6 +160,33 @@ protocol, but it may not downgrade V2 to V1 or run V1 repair logic. V1 and V2
 selection is decided before any schema repair or adaptation, and each version's
 declaration, call, result, stream, and history fields remain isolated.
 
+### History identity and unproven optional client results
+
+Call identity (`call_id`) names one tool roundtrip. Item identity (`id` /
+`item_id`) names one history or stream row. They are not aliases. The Gateway
+must not copy Item identity into Call identity, invent a matching
+`function_call`, or otherwise repair a result into a completed roundtrip.
+That would mint a lifecycle that never entered the request-scoped mapping, and
+it would make fail-closed ID checks validate a value the Gateway just wrote.
+
+Fail-closed classifications such as `missing_call_identity` apply to a call
+that occurred without Call identity, to a result that claims a Call identity
+it cannot prove, and to any ambiguous inverse after an `adapt` declaration
+has been sent. They do not apply to optional Codex-client-internal history
+that never had a Call identity.
+
+A `function_call_output` or `custom_tool_call_output` with no Call identity
+that is identifiable as optional client-internal work (`codex_app` or
+`mcp__*` namespace/name) is `omit` from the model-visible third-party
+history: drop the structured item; do not transcript it into a fake call;
+do not fail the turn. Compact and main generation use the same rule,
+including Collaboration V2 third-party routes. Official passthrough does not
+apply this plan; the Codex client remains the owner of its rollout. The
+omission is request-scoped: it does not rewrite the client's session file.
+
+Plain or adapted model results that lack Call identity and cannot be
+classified as optional client-internal history remain fail-closed.
+
 ### Ownership and Provider identity
 
 CodexHub adapts protocol shapes only. The Gateway does not execute tools,
@@ -246,6 +274,16 @@ Rejected. Gateway-owned execution, agent creation, and Collaboration
 scheduling would make protocol adaptation an unauthorized second runtime.
 The Codex client owns those actions; V1 repair and V2 adaptation remain
 isolated.
+
+### Copy Item identity into Call identity, or fail the turn on client-internal heartbeat results
+
+Rejected. Filling `call_id` from `id` forges a tool roundtrip the model never
+made and poisons inverse mapping. Treating every missing Call identity as
+fail-closed, including unpaired `codex_app` / `mcp__*` results Desktop injects
+without a call, bricks third-party generation and compact of an otherwise
+optional client-owned item. Transcript of that guardian JSON is also rejected
+for this family: it is not user-task context, and it still presents a tool
+result that had no call.
 
 ## Scope and follow-up boundaries
 

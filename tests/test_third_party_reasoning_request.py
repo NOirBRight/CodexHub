@@ -12,6 +12,7 @@ from live_gateway_support import configured_live_gateway
 
 import gateway_compat
 import gateway_request
+import gateway_stream_semantics
 from collaboration_runtime_contract import COLLABORATION_V2, EXPECTED_PARAMETER_SCHEMAS
 
 
@@ -262,6 +263,58 @@ def test_sanitize_third_party_reasoning_items_strips_encrypted_content_everywher
     assert "encrypted_content" not in json.dumps(payload)
     assert payload["input"][0]["content"] == []
     assert payload["input"][0]["summary"] == [{"type": "summary_text", "text": "keep"}]
+
+
+def _desktop_automation_heartbeat_result() -> dict:
+    return {
+        "type": "function_call_output",
+        "id": "fco_01a0a8ae-eb1b-7a73-a360-6ac018c90d48",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": '{"status":"ok"}',
+    }
+
+
+def test_xai_v2_omits_unproven_codex_app_heartbeat_result():
+    payload = _codex_app_xai_history_request()
+    payload["input"].insert(-1, _desktop_automation_heartbeat_result())
+    transformed = json.loads(
+        gateway_compat.compatible_request_body(
+            json.dumps(payload).encode(),
+            _xai_upstream(),
+            event_context={},
+            inject_codex_tools=False,
+            behavior_profile="codex_app_external_adapter",
+        )
+    )
+    heartbeat_id = "fco_01a0a8ae-eb1b-7a73-a360-6ac018c90d48"
+    assert all(
+        item.get("id") != heartbeat_id and item.get("call_id") != heartbeat_id
+        for item in transformed["input"]
+        if isinstance(item, dict)
+    )
+    assert any(item.get("type") == "function_call_output" for item in transformed["input"])
+
+
+def test_xai_v2_compact_omits_unproven_codex_app_heartbeat_result():
+    payload = _codex_app_xai_history_request()
+    payload["input"].insert(-1, _desktop_automation_heartbeat_result())
+    context = {"request_kind": "compact", "compact_placeholder_authorized": True}
+    gateway_stream_semantics.strip_tools_for_compact_payload(payload, event_context=context)
+    transformed = json.loads(
+        gateway_compat.compatible_request_body(
+            json.dumps(payload).encode(),
+            _xai_upstream(),
+            event_context=context,
+            inject_codex_tools=False,
+            behavior_profile="codex_app_external_adapter",
+        )
+    )
+    heartbeat_id = "fco_01a0a8ae-eb1b-7a73-a360-6ac018c90d48"
+    dumped = json.dumps(transformed)
+    assert heartbeat_id not in dumped
+    assert "tools" not in transformed
+    assert context.get("collaboration_protocol") == COLLABORATION_V2
 
 
 def test_xai_v2_codex_app_history_is_safe_for_strict_responses_deserializers():

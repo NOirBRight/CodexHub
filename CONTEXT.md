@@ -35,6 +35,14 @@ _Avoid_: qualified display name, long name, prefixed display name
 The single Gateway Python module that holds one seam (catalog, transport, events, compatibility, stream semantics, request boundary, relay, or handler methods). The process entry only wires HTTP. Tests patch the owning module, not the entry. Cross-SCC calls import the module object and read the attribute at call time (ADR-0007); they do not go through `lookup()`, `api`, or `RelaySymbols`.
 _Avoid_: facade, runtime proxy module, exec dump
 
+**Call identity**:
+The pairing key of one tool roundtrip (`call_id`). It is not the identity of a history row.
+_Avoid_: tool id, item id, function call id (when that means the row)
+
+**Item identity**:
+The identity of one history or stream row (`id` or `item_id`). It is not Call identity and must not be copied into `call_id`.
+_Avoid_: call id, tool_call_id
+
 ## Operations
 
 If ChatGPT/Codex cannot start or native Windows sandbox commands hang, follow

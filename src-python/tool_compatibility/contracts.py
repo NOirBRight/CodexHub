@@ -212,6 +212,31 @@ def copy_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
 _copy_mapping = copy_mapping
 
 
+def unproven_optional_client_history_result(item: Mapping[str, Any]) -> bool:
+    """True when a client-internal tool result cannot prove Call identity.
+
+    Item identity is not Call identity; callers must omit the row, not copy
+    ``id`` into ``call_id``.
+    """
+    if item.get("type") not in {"function_call_output", "custom_tool_call_output"}:
+        return False
+    call_id = item.get("call_id")
+    if isinstance(call_id, str) and call_id:
+        return False
+    namespace = item.get("namespace")
+    if isinstance(namespace, str) and (
+        namespace == "codex_app" or namespace.startswith("mcp__")
+    ):
+        return True
+    name = item.get("name")
+    return isinstance(name, str) and (
+        name == "codex_app"
+        or name.startswith("codex_app__")
+        or name.startswith("mcp__")
+    )
+_unproven_optional_client_history_result = unproven_optional_client_history_result
+
+
 CUSTOM_INPUT_KEY = "__codexhub_custom_input"
 CUSTOM_OUTPUT_KEY = "__codexhub_custom_output"
 TOOL_SEARCH_INPUT_KEY = "__codexhub_tool_search_input"

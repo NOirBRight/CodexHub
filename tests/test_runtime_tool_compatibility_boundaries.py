@@ -405,6 +405,77 @@ def test_encode_history_rejects_retained_call_without_call_identity(call_id):
     assert exc_info.value.classification == "missing_call_identity"
 
 
+def _desktop_automation_heartbeat_result(*, call_id=None):
+    item = {
+        "type": "function_call_output",
+        "id": "fco_01a0a8ae-eb1b-7a73-a360-6ac018c90d48",
+        "name": "automation_update",
+        "namespace": "codex_app",
+        "output": '{"status":"ok"}',
+    }
+    if call_id is not None:
+        item["call_id"] = call_id
+    return item
+
+
+def test_encode_history_omits_codex_app_result_without_call_identity():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    heartbeat = _desktop_automation_heartbeat_result()
+    user = {"type": "message", "role": "user", "content": "continue"}
+
+    encoded = plan.encode_payload({"input": [heartbeat, user]})
+
+    assert encoded["input"] == [user]
+    assert all(
+        item.get("call_id") != heartbeat["id"]
+        for item in encoded["input"]
+        if isinstance(item, dict)
+    )
+
+
+def test_encode_history_omits_mcp_result_without_call_identity():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    encoded = plan.encode_payload(
+        {
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "id": "fco_mcp",
+                    "name": "search",
+                    "namespace": "mcp__codex_app",
+                    "output": "{}",
+                }
+            ]
+        }
+    )
+    assert encoded["input"] == []
+
+
+def test_encode_history_omits_codex_app_result_with_empty_call_identity():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    encoded = plan.encode_payload(
+        {"input": [_desktop_automation_heartbeat_result(call_id="")]}
+    )
+    assert encoded["input"] == []
+
+
+def test_encode_history_rejects_plain_result_without_call_identity():
+    plan = _native_plan({"type": "function", "name": "keep"})
+    with pytest.raises(ToolCompatibilityError) as exc_info:
+        plan.encode_payload(
+            {
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "id": "out_plain",
+                        "output": "lost-call",
+                    }
+                ]
+            }
+        )
+    assert exc_info.value.classification == "missing_call_identity"
+
+
 @pytest.mark.parametrize("identity_key", ["id", "item_id"], ids=["id", "item-id"])
 def test_encode_history_rejects_duplicate_item_identity_even_with_distinct_call_ids(identity_key):
     plan = _native_plan({"type": "function", "name": "keep"})
