@@ -480,6 +480,7 @@ const enUS = {
     addHubProviderEmpty: "Add a Hub provider to expose external models.",
     addModel: "Add model",
     appsMaySortModels: "Apps may sort models alphabetically.",
+    hiddenFromPicker: "Hidden from picker",
     availableFormats: "{{formats}} available",
     authMissing: "Auth missing",
     authUnknown: "Auth unknown",

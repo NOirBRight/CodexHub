@@ -479,6 +479,7 @@ const zhCN = {
     addHubProviderEmpty: "添加 Hub 供应商以暴露外部模型。",
     addModel: "添加模型",
     appsMaySortModels: "应用可能会按字母顺序排列模型。",
+    hiddenFromPicker: "未在选择器中显示",
     availableFormats: "{{formats}} 可用",
     authMissing: "缺少认证",
     authUnknown: "认证未知",
