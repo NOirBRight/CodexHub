@@ -72,3 +72,36 @@ export function sortModelsEnabledFirst(
     return leftEnabled - rightEnabled;
   });
 }
+
+export function partitionDisplayedModels(
+  models: Model[],
+  officialDisabledModels?: string[],
+) {
+  const enabled: Model[] = [];
+  const disabled: Model[] = [];
+  for (const model of models) {
+    if (isDisplayedModelEnabled(model, officialDisabledModels)) {
+      enabled.push(model);
+    } else {
+      disabled.push(model);
+    }
+  }
+  return { enabled, disabled };
+}
+
+export function stitchDisplayedModelReorder(
+  models: Model[],
+  reorderedGroup: Model[],
+  officialDisabledModels?: string[],
+) {
+  if (reorderedGroup.length === 0) {
+    return [...models];
+  }
+  const groupEnabled = isDisplayedModelEnabled(reorderedGroup[0], officialDisabledModels);
+  const queue = [...reorderedGroup];
+  return models.map((model) =>
+    isDisplayedModelEnabled(model, officialDisabledModels) === groupEnabled
+      ? (queue.shift() ?? model)
+      : model,
+  );
+}
