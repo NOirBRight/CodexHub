@@ -15,13 +15,13 @@ export function HeaderRow({
   titleAccessory?: React.ReactNode;
 }) {
   return (
-    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
       <div className="min-w-0">
         <div className="flex min-w-0 items-center gap-2">
-          <h2 className="min-w-0 truncate text-base font-semibold">{title}</h2>
+          <h2 className="min-w-0 truncate text-sm font-semibold">{title}</h2>
           {titleAccessory && <div className="shrink-0">{titleAccessory}</div>}
         </div>
-        {subtitle && <p className="mt-1 truncate text-sm text-slate-500">{subtitle}</p>}
+        {subtitle && <p className="mt-0.5 truncate text-xs text-slate-500">{subtitle}</p>}
       </div>
       {actions && <div className="flex shrink-0 items-center justify-end gap-2">{actions}</div>}
     </div>
