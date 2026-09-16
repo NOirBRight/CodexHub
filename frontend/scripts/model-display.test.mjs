@@ -25,7 +25,7 @@ const exported = {};
 new Function(
   "exports",
   js +
-    "\nexports.displayModelName = displayModelName; exports.enabledPreviewModels = enabledPreviewModels; exports.sortModelsEnabledFirst = sortModelsEnabledFirst; exports.partitionDisplayedModels = partitionDisplayedModels; exports.stitchDisplayedModelReorder = stitchDisplayedModelReorder;",
+    "\nexports.displayModelName = displayModelName; exports.enabledPreviewModels = enabledPreviewModels; exports.sortModelsEnabledFirst = sortModelsEnabledFirst; exports.partitionDisplayedModels = partitionDisplayedModels; exports.stitchGroupReorderIntoList = stitchGroupReorderIntoList;",
 )(exported);
 
 const model = (id, overrides = {}) => ({ id, enabled: true, ...overrides });
@@ -137,7 +137,7 @@ test("official disabled ids partition the same way as enabled false", () => {
 test("reordering enabled rows stitches them back into the other group's slots", () => {
   const { enabled } = exported.partitionDisplayedModels(mixed);
   assert.deepEqual(
-    ids(exported.stitchDisplayedModelReorder(mixed, [enabled[1], enabled[0]])),
+    ids(exported.stitchGroupReorderIntoList(mixed, [enabled[1], enabled[0]])),
     ["off-a", "on-b", "off-b", "on-a"],
   );
 });
@@ -145,7 +145,7 @@ test("reordering enabled rows stitches them back into the other group's slots", 
 test("reordering disabled rows stitches them back into the other group's slots", () => {
   const { disabled } = exported.partitionDisplayedModels(mixed);
   assert.deepEqual(
-    ids(exported.stitchDisplayedModelReorder(mixed, [disabled[1], disabled[0]])),
+    ids(exported.stitchGroupReorderIntoList(mixed, [disabled[1], disabled[0]])),
     ["off-b", "on-a", "off-a", "on-b"],
   );
 });
@@ -169,19 +169,14 @@ test("toggling enabled only moves the row between groups and leaves persisted or
 });
 
 test("hidden from picker heading comes from paired i18n keys", async () => {
-  const [section, en, zh, sortable] = await Promise.all([
+  const [section, en, zh] = await Promise.all([
     readFile(new URL("../src/components/providers/ProviderModelSection.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/i18n/locales/en-US.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/i18n/locales/zh-CN.ts", import.meta.url), "utf8"),
-    readFile(new URL("../src/components/SortableList.tsx", import.meta.url), "utf8"),
   ]);
   assert.match(en, /hiddenFromPicker:\s*"Hidden from picker"/);
   assert.match(zh, /hiddenFromPicker:\s*"未在选择器中显示"/);
   assert.match(section, /t\("providers\.hiddenFromPicker"\)/);
   assert.doesNotMatch(section, /Hidden from picker/);
   assert.doesNotMatch(section, /未在选择器中显示/);
-  assert.match(section, /className="space-y-1"/);
-  assert.match(section, /grid-cols-\[minmax\(0,1fr\)_minmax\(0,1fr\)\]/);
-  assert.match(sortable, /cx\("px-px py-px"/);
-  assert.doesNotMatch(sortable, /cx\("space-y-3 px-px py-px"/);
 });

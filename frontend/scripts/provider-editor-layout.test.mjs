@@ -63,6 +63,17 @@ test("ProviderDetail and AddProviderPanel share a two-column connection grid ins
   assert.doesNotMatch(editorSource, /账户与用量|模型 \/ /);
 });
 
+test("model rows stay one identity line with a compact SortableList gap", async () => {
+  const [section, sortable] = await Promise.all([
+    readFile(new URL("../src/components/providers/ProviderModelSection.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/SortableList.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(section, /className="space-y-1"/);
+  assert.match(section, /grid-cols-\[minmax\(0,1fr\)_minmax\(0,1fr\)\]/);
+  assert.match(sortable, /cx\("px-px py-px"/);
+  assert.doesNotMatch(sortable, /cx\("space-y-3 px-px py-px"/);
+});
+
 test("Official usage header composes title, metric windows, and day/week on one row", () => {
   const panel = namedFunction(usageSource, "OfficialOpenAIUsagePanel");
   const sectionStart = panel.indexOf("<section");
