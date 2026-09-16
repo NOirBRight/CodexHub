@@ -169,14 +169,19 @@ test("toggling enabled only moves the row between groups and leaves persisted or
 });
 
 test("hidden from picker heading comes from paired i18n keys", async () => {
-  const [section, en, zh] = await Promise.all([
+  const [section, en, zh, sortable] = await Promise.all([
     readFile(new URL("../src/components/providers/ProviderModelSection.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/i18n/locales/en-US.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/i18n/locales/zh-CN.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/SortableList.tsx", import.meta.url), "utf8"),
   ]);
   assert.match(en, /hiddenFromPicker:\s*"Hidden from picker"/);
   assert.match(zh, /hiddenFromPicker:\s*"未在选择器中显示"/);
   assert.match(section, /t\("providers\.hiddenFromPicker"\)/);
   assert.doesNotMatch(section, /Hidden from picker/);
   assert.doesNotMatch(section, /未在选择器中显示/);
+  assert.match(section, /className="space-y-1"/);
+  assert.match(section, /grid-cols-\[minmax\(0,1fr\)_minmax\(0,1fr\)\]/);
+  assert.match(sortable, /cx\("px-px py-px"/);
+  assert.doesNotMatch(sortable, /cx\("space-y-3 px-px py-px"/);
 });
