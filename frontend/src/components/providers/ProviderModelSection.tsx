@@ -7,8 +7,9 @@ import i18n from "../../i18n";
 import { cx, formatContextWindow } from "../../lib/format";
 import {
   displayModelName,
+  isDisplayedModelEnabled,
   partitionDisplayedModels,
-  stitchDisplayedModelReorder,
+  stitchGroupReorderIntoList,
   type ModelLabelProvider,
 } from "../../lib/modelDisplay";
 import {
@@ -147,9 +148,10 @@ export function ModelSection({
       displayed.context_window,
       contextById?.get(model.id),
     );
-    const modelEnabled = disabled
-      ? !isOfficialModelDisabled(officialDisabledModels ?? [], model.id)
-      : model.enabled;
+    const modelEnabled = isDisplayedModelEnabled(
+      model,
+      disabled ? (officialDisabledModels ?? []) : officialDisabledModels,
+    );
     const rowInteractable = !interactionDisabled;
     function activateModelRow() {
       if (interactionDisabled) {
@@ -252,7 +254,7 @@ export function ModelSection({
           items={items}
           getId={(model) => model.id}
           onReorder={(next) =>
-            onReorder(stitchDisplayedModelReorder(models, next, officialDisabledModels))
+            onReorder(stitchGroupReorderIntoList(models, next, officialDisabledModels))
           }
           renderItem={renderModelRow}
         />

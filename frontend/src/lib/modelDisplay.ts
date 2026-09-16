@@ -89,7 +89,7 @@ export function partitionDisplayedModels(
   return { enabled, disabled };
 }
 
-export function stitchDisplayedModelReorder(
+export function stitchGroupReorderIntoList(
   models: Model[],
   reorderedGroup: Model[],
   officialDisabledModels?: string[],
