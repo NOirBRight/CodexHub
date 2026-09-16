@@ -7,7 +7,8 @@ import i18n from "../../i18n";
 import { cx, formatContextWindow } from "../../lib/format";
 import {
   displayModelName,
-  sortModelsEnabledFirst,
+  partitionDisplayedModels,
+  stitchDisplayedModelReorder,
   type ModelLabelProvider,
 } from "../../lib/modelDisplay";
 import {
@@ -97,9 +98,11 @@ export function ModelSection({
     name: providerName,
     display_prefix: providerDisplayPrefix,
   };
-  const displayedModels = reorderable
-    ? models
-    : sortModelsEnabledFirst(models, officialDisabledModels);
+  const { enabled: enabledModels, disabled: disabledModels } = partitionDisplayedModels(
+    models,
+    officialDisabledModels,
+  );
+  const canReorder = reorderable && !interactionDisabled;
 
 
   function addAndEdit() {
@@ -155,7 +158,7 @@ export function ModelSection({
       setEditingModelId(model.id);
     }
     const actions = (
-      <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5 text-xs text-slate-500">
+      <div className="flex min-w-0 flex-nowrap items-center justify-end gap-1.5 overflow-hidden text-xs text-slate-500">
         {modelCapabilityTags(displayed).map((tag) => (
           <ModelCapabilityChip key={tag} tag={tag} />
         ))}
@@ -188,6 +191,7 @@ export function ModelSection({
           <SwitchControl
             checked={modelEnabled}
             label={modelEnabled ? t("providers.modelEnabled") : t("providers.modelDisabled")}
+            disabled={interactionDisabled}
             showLabel={false}
             onChange={(checked) => onToggle(model.id, checked)}
           />
@@ -197,7 +201,7 @@ export function ModelSection({
     return (
       <div
         className={cx(
-          "grid min-h-[52px] grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-3 py-2",
+          "grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 overflow-hidden px-3 py-1",
           rowInteractable && "cursor-pointer",
           !modelEnabled && "opacity-70",
         )}
@@ -237,6 +241,34 @@ export function ModelSection({
     );
   }
 
+  function renderGroup(items: Model[]) {
+    if (items.length === 0) {
+      return null;
+    }
+    if (canReorder) {
+      return (
+        <SortableList
+          className="space-y-1"
+          items={items}
+          getId={(model) => model.id}
+          onReorder={(next) =>
+            onReorder(stitchDisplayedModelReorder(models, next, officialDisabledModels))
+          }
+          renderItem={renderModelRow}
+        />
+      );
+    }
+    return (
+      <div className="space-y-1">
+        {items.map((model) => (
+          <div key={model.id} className="rounded-control border border-line bg-white shadow-subtle">
+            {renderModelRow(model)}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div
       className={cx(
@@ -247,8 +279,9 @@ export function ModelSection({
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold">{t("common.models")}</h3>
-          <p className="mt-1 text-xs text-slate-500">{t("providers.configured", { count: models.length })}</p>
           <p className="mt-1 truncate text-xs leading-4 text-slate-500">
+            {t("providers.configured", { count: models.length })}
+            {" · "}
             {t("providers.appsMaySortModels")}
           </p>
         </div>
@@ -304,25 +337,21 @@ export function ModelSection({
           interactionDisabled && "opacity-60 grayscale",
         )}
       >
-        {displayedModels.length === 0 ? (
+        {models.length === 0 ? (
           <div className="rounded-inner bg-panel-soft p-4 text-sm text-slate-500 shadow-hairline">
             {t("common.noModels")}
           </div>
-        ) : reorderable ? (
-          <SortableList
-            className="space-y-2"
-            items={displayedModels}
-            getId={(model) => model.id}
-            onReorder={onReorder}
-            renderItem={renderModelRow}
-          />
         ) : (
-          <div className="space-y-2">
-            {displayedModels.map((model) => (
-              <div key={model.id} className="rounded-control border border-line bg-white shadow-subtle">
-                {renderModelRow(model)}
+          <div className="grid gap-2">
+            {renderGroup(enabledModels)}
+            {disabledModels.length > 0 && (
+              <div className="grid gap-1">
+                <h4 className="px-1 text-xs font-semibold text-slate-500">
+                  {t("providers.hiddenFromPicker")}
+                </h4>
+                {renderGroup(disabledModels)}
               </div>
-            ))}
+            )}
           </div>
         )}
       </div>
@@ -387,40 +416,38 @@ function ModelIdentity({
   }
 
   return (
-    <div className="min-w-0">
-      <span className="block truncate text-sm font-medium">{displayModelName(model, provider)}</span>
-      <span className="mt-0.5 flex min-w-0 items-center gap-1 text-xs text-slate-500">
-        <span className="min-w-0 truncate font-mono">{model.id}</span>
+    <div className="flex min-w-0 items-center gap-1.5">
+      <span className="min-w-0 truncate text-sm font-medium">{displayModelName(model, provider)}</span>
+      <span className="min-w-0 truncate font-mono text-xs text-slate-500">{model.id}</span>
+      <button
+        type="button"
+        className="focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-transparent text-slate-500 transition-[background-color,border-color,color] duration-150 ease-out hover:border-line hover:bg-panel hover:text-ink"
+        disabled={actionsDisabled}
+        onClick={copyModelId}
+        title={copied ? t("common.copied") : t("providers.copyModelIdTitle", { id: copyValue })}
+        aria-label={copied ? t("providers.copiedModelId", { id: copyValue }) : t("providers.copyModelId", { id: copyValue })}
+      >
+        {copied ? <Check size={12} /> : <Copy size={12} />}
+      </button>
+      {onTest && (
         <button
           type="button"
-          className="focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-transparent text-slate-500 transition-[background-color,border-color,color] duration-150 ease-out hover:border-line hover:bg-panel hover:text-ink"
-          disabled={actionsDisabled}
-          onClick={copyModelId}
-          title={copied ? t("common.copied") : t("providers.copyModelIdTitle", { id: copyValue })}
-          aria-label={copied ? t("providers.copiedModelId", { id: copyValue }) : t("providers.copyModelId", { id: copyValue })}
+          className={cx(
+            "focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border text-slate-500 transition-[background-color,border-color,color,transform] duration-150 ease-out active:scale-[0.96]",
+            testState === "success"
+              ? "status-pop border-emerald-200 bg-emerald-50 text-emerald-700"
+              : testState === "error"
+                ? "status-pop border-red-200 bg-red-50 text-danger"
+                : "border-transparent text-slate-500 hover:border-line hover:bg-panel hover:text-ink",
+          )}
+          disabled={testDisabled || testState === "testing"}
+          onClick={testCurrentModel}
+          title={t("providers.testModelTitle", { id: copyValue })}
+          aria-label={t("providers.testModelTitle", { id: copyValue })}
         >
-          {copied ? <Check size={12} /> : <Copy size={12} />}
+          <ModelTestStateIcon state={testState} size={13} />
         </button>
-        {onTest && (
-          <button
-            type="button"
-            className={cx(
-              "focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border text-slate-500 transition-[background-color,border-color,color,transform] duration-150 ease-out active:scale-[0.96]",
-              testState === "success"
-                ? "status-pop border-emerald-200 bg-emerald-50 text-emerald-700"
-                : testState === "error"
-                  ? "status-pop border-red-200 bg-red-50 text-danger"
-                  : "border-transparent text-slate-500 hover:border-line hover:bg-panel hover:text-ink",
-            )}
-            disabled={testDisabled || testState === "testing"}
-            onClick={testCurrentModel}
-            title={t("providers.testModelTitle", { id: copyValue })}
-            aria-label={t("providers.testModelTitle", { id: copyValue })}
-          >
-            <ModelTestStateIcon state={testState} size={13} />
-          </button>
-        )}
-      </span>
+      )}
     </div>
   );
 }
