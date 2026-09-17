@@ -1,6 +1,7 @@
 use super::super::{
-    gateway_client_provider_groups, pin_json_agent_models, resolve_client_default_subagent_pin,
-    restore_json_agent_models, rollback_file_text, OPENCODE_PARENT_AGENTS, OPENCODE_SPAWN_AGENTS,
+    gateway_client_provider_groups, json_spawn_models_are_owned, pin_json_agent_models,
+    resolve_client_default_subagent_pin, restore_json_agent_models, rollback_file_text,
+    OPENCODE_PARENT_AGENTS, OPENCODE_SPAWN_AGENTS,
 };
 use crate::{Provider, Settings};
 use serde_json::{json, Map, Value};
@@ -120,7 +121,7 @@ fn apply_opencode_default_subagent(
         .and_then(|text| serde_json::from_str(text).ok());
     if let Some(pin) = pin {
         pin_json_agent_models(object, OPENCODE_SPAWN_AGENTS, &pin.opencode_model_id());
-    } else {
+    } else if json_spawn_models_are_owned(object, OPENCODE_SPAWN_AGENTS) {
         restore_json_agent_models(object, baseline.as_ref(), OPENCODE_SPAWN_AGENTS);
     }
     debug_assert!(OPENCODE_SPAWN_AGENTS

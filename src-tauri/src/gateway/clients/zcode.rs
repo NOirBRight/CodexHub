@@ -316,10 +316,9 @@ const ZCODE_RESTORE_THOUGHT: &str = "x-codexhub-restore-thoughtLevel";
 
 fn zcode_agents_dir(targets: &ZcodeConfigTargets) -> PathBuf {
     match targets.v2_config_path.parent() {
-        Some(parent) if parent.file_name().is_some_and(|name| name == "v2") => parent
-            .parent()
-            .unwrap_or(parent)
-            .join("agents"),
+        Some(parent) if parent.file_name().is_some_and(|name| name == "v2") => {
+            parent.parent().unwrap_or(parent).join("agents")
+        }
         Some(parent) => parent.join("agents"),
         None => PathBuf::from("agents"),
     }
@@ -999,17 +998,21 @@ pub(in crate::gateway) fn preview_zcode_config_with_targets(
     let next_config = zcode_v2_config_text(&targets.v2_config_path, settings, providers, &model)?;
     let next_catalog = zcode_catalog_text(settings, providers, &model)?;
     let next_cache = zcode_v2_cache_text(settings, providers, &model)?;
+    let agent_files = zcode_default_subagent_files(targets, settings, providers, &model)?;
     Ok(GatewayClientConfigPreview {
         client_id: "zcode".to_string(),
         can_apply: true,
         strategy: "managed_native_config".to_string(),
         config_path: Some(targets.v2_config_path.clone()),
         current_redacted: current,
-        next_redacted: sanitize_text(&combined_named_text(&[
-            ("config.json", &next_config),
-            ("codexhub.json", &next_catalog),
-            ("bots-model-cache.v2.json", &next_cache),
-        ])),
+        next_redacted: sanitize_text(&super::super::append_planned_file_previews(
+            &combined_named_text(&[
+                ("config.json", &next_config),
+                ("codexhub.json", &next_catalog),
+                ("bots-model-cache.v2.json", &next_cache),
+            ]),
+            &agent_files,
+        )),
         backup_required: targets.v2_config_path.exists()
             || targets.catalog_path.exists()
             || targets.v2_cache_path.exists(),

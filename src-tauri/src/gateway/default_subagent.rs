@@ -1,9 +1,10 @@
 use super::{
-    codexhub_client_provider_id, gateway_client_provider_groups, split_gateway_model_id,
-    GatewayClientProviderGroup, GatewayClientProviderModel,
+    codexhub_client_provider_id, gateway_client_provider_groups, is_codexhub_client_model_selector,
+    split_gateway_model_id, GatewayClientProviderGroup, GatewayClientProviderModel,
 };
 use crate::{Provider, Settings};
 use serde_json::{Map, Value};
+use std::path::PathBuf;
 
 pub(in crate::gateway) const DEFAULT_SUBAGENT_EFFORTS: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -20,8 +21,10 @@ pub(in crate::gateway) const OMP_BUNDLED_AGENTS: &[&str] = &[
     "sonic",
 ];
 pub(in crate::gateway) const GROK_SPAWN_TYPES: &[&str] = &["general-purpose", "explore", "plan"];
-pub(in crate::gateway) const ZCODE_SPAWN_AGENTS: &[(&str, &str)] =
-    &[("general-purpose", "general-purpose.md"), ("Explore", "Explore.md")];
+pub(in crate::gateway) const ZCODE_SPAWN_AGENTS: &[(&str, &str)] = &[
+    ("general-purpose", "general-purpose.md"),
+    ("Explore", "Explore.md"),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::gateway) struct ClientDefaultSubagentPin {
@@ -140,7 +143,8 @@ fn grok_skips_group(group: &GatewayClientProviderGroup, providers: &[Provider]) 
         super::codexhub_client_provider_id(&provider.id) == group.client_provider_id
             && (provider.id.eq_ignore_ascii_case("xai")
                 || provider.auth_capabilities.as_ref().is_some_and(|caps| {
-                    caps.iter().any(|capability| capability == "subscription:xai_oauth")
+                    caps.iter()
+                        .any(|capability| capability == "subscription:xai_oauth")
                 }))
     })
 }
@@ -148,7 +152,10 @@ fn grok_skips_group(group: &GatewayClientProviderGroup, providers: &[Provider]) 
 fn find_catalog_model<'a>(
     groups: &'a [GatewayClientProviderGroup],
     slug: &str,
-) -> Option<(&'a GatewayClientProviderGroup, &'a GatewayClientProviderModel)> {
+) -> Option<(
+    &'a GatewayClientProviderGroup,
+    &'a GatewayClientProviderModel,
+)> {
     let (slug_provider, slug_short) = split_gateway_model_id(slug);
     groups.iter().find_map(|group| {
         group.models.iter().find_map(|model| {
@@ -181,7 +188,9 @@ pub(in crate::gateway) fn restore_json_agent_models(
     baseline: Option<&Value>,
     agent_names: &[&str],
 ) {
-    let baseline_agent = baseline.and_then(|value| value.get("agent")).and_then(Value::as_object);
+    let baseline_agent = baseline
+        .and_then(|value| value.get("agent"))
+        .and_then(Value::as_object);
     let live_agent = match live.get_mut("agent") {
         Some(Value::Object(object)) => object,
         _ => {
@@ -207,6 +216,42 @@ pub(in crate::gateway) fn restore_json_agent_models(
     if live_agent.is_empty() {
         live.remove("agent");
     }
+}
+
+pub(in crate::gateway) fn append_planned_file_previews(
+    text: &str,
+    files: &[(PathBuf, Option<String>)],
+) -> String {
+    let mut out = text.to_string();
+    for (path, content) in files {
+        if let Some(body) = content {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("file");
+            out.push('\n');
+            out.push_str(name);
+            out.push_str(":\n");
+            out.push_str(body);
+        }
+    }
+    out
+}
+
+pub(in crate::gateway) fn json_spawn_models_are_owned(
+    live: &Map<String, Value>,
+    agent_names: &[&str],
+) -> bool {
+    let Some(agent) = live.get("agent").and_then(Value::as_object) else {
+        return false;
+    };
+    agent_names.iter().any(|name| {
+        agent
+            .get(*name)
+            .and_then(|value| value.get("model"))
+            .and_then(Value::as_str)
+            .is_some_and(is_codexhub_client_model_selector)
+    })
 }
 
 pub(in crate::gateway) fn pin_json_agent_models(

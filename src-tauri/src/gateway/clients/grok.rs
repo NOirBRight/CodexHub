@@ -459,7 +459,8 @@ fn grok_owned_default_subagent(
     providers: &[Provider],
     model: &str,
 ) -> Result<(), String> {
-    let pin = super::super::resolve_client_default_subagent_pin(settings, providers, "grok", model)?;
+    let pin =
+        super::super::resolve_client_default_subagent_pin(settings, providers, "grok", model)?;
     let baseline_text = super::super::rollback_file_text(CLIENT_ID, "config.toml", current);
     let baseline = baseline_text
         .as_deref()
@@ -490,8 +491,26 @@ fn apply_grok_subagent_tables(
                 }
             }
         }
-        None => restore_grok_subagent_tables(root, baseline),
+        None if grok_spawn_models_are_owned(root) => restore_grok_subagent_tables(root, baseline),
+        None => {}
     }
+}
+
+fn grok_spawn_models_are_owned(root: &Table) -> bool {
+    let Some(models) = root
+        .get("subagents")
+        .and_then(Value::as_table)
+        .and_then(|table| table.get("models"))
+        .and_then(Value::as_table)
+    else {
+        return false;
+    };
+    super::super::GROK_SPAWN_TYPES.iter().any(|spawn_type| {
+        models
+            .get(*spawn_type)
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with("codexhub-"))
+    })
 }
 
 fn grok_role_can_carry_effort(root: &Table, spawn_type: &str) -> bool {
@@ -526,13 +545,17 @@ pub(in crate::gateway) fn grok_shadow_agent_plan(
     providers: &[Provider],
     model: &str,
 ) -> Result<Vec<(PathBuf, Option<String>)>, String> {
-    let pin = super::super::resolve_client_default_subagent_pin(settings, providers, "grok", model)?;
+    let pin =
+        super::super::resolve_client_default_subagent_pin(settings, providers, "grok", model)?;
     let agents_dir = grok_agents_dir(config_path);
     let mut files = Vec::new();
     for spawn_type in super::super::GROK_SPAWN_TYPES {
         let path = agents_dir.join(format!("{spawn_type}.md"));
         match &pin {
-            Some(pin) if current.is_some_and(|table| !grok_role_can_carry_effort(table, spawn_type)) => {
+            Some(pin)
+                if current.is_some_and(|table| !grok_role_can_carry_effort(table, spawn_type))
+                    && (grok_shadow_is_ours(&path) || !path.exists()) =>
+            {
                 files.push((
                     path,
                     Some(format!(
@@ -596,7 +619,8 @@ pub(in crate::gateway) fn grok_owned_shadows_match(
     let current = fs::read_to_string(config_path)
         .ok()
         .and_then(|text| parse_grok_table(&text).ok());
-    let expected = grok_shadow_agent_plan(config_path, current.as_ref(), settings, providers, model)?;
+    let expected =
+        grok_shadow_agent_plan(config_path, current.as_ref(), settings, providers, model)?;
     for (path, content) in expected {
         match content {
             Some(text) => {
@@ -737,7 +761,13 @@ pub(in crate::gateway) fn grok_injected_keys_may_be_hidden(
         })
 }
 
-fn grok_owned_snapshot(root: &Table) -> (BTreeMap<String, Value>, BTreeMap<String, Value>, BTreeMap<String, Value>) {
+fn grok_owned_snapshot(
+    root: &Table,
+) -> (
+    BTreeMap<String, Value>,
+    BTreeMap<String, Value>,
+    BTreeMap<String, Value>,
+) {
     (
         grok_owned_section(root, "model_providers"),
         grok_owned_section(root, "model"),
@@ -839,11 +869,15 @@ pub(in crate::gateway) fn preview_grok_config_with_path(
     providers: &[Provider],
     model: &str,
 ) -> Result<GatewayClientConfigPreview, String> {
-    let current = fs::read_to_string(config_path)
-        .ok()
-        .map(|text| sanitize_text(&text));
-    let next = grok_config_text(
-        fs::read_to_string(config_path).ok().as_deref(),
+    let current_text = fs::read_to_string(config_path).ok();
+    let current = current_text.as_deref().map(sanitize_text);
+    let next = grok_config_text(current_text.as_deref(), settings, providers, model)?;
+    let current_table = current_text
+        .as_deref()
+        .and_then(|text| parse_grok_table(text).ok());
+    let shadows = grok_shadow_agent_plan(
+        config_path,
+        current_table.as_ref(),
         settings,
         providers,
         model,
@@ -854,7 +888,7 @@ pub(in crate::gateway) fn preview_grok_config_with_path(
         strategy: "provider_injection".to_string(),
         config_path: Some(config_path.to_path_buf()),
         current_redacted: current,
-        next_redacted: sanitize_text(&next),
+        next_redacted: sanitize_text(&super::super::append_planned_file_previews(&next, &shadows)),
         backup_required: config_path.exists(),
         message: "Apply will back up the current Grok CLI config, then surgically add CodexHub Gateway models while preserving your own providers and settings.".to_string(),
     })
@@ -886,7 +920,9 @@ pub(in crate::gateway) fn plan_grok_apply(
         .as_deref()
         .is_none_or(|text| text.trim().is_empty() || is_grok_codexhub_config(text));
     let next = grok_config_text(current.as_deref(), settings, providers, &model)?;
-    let current_table = current.as_deref().and_then(|text| parse_grok_table(text).ok());
+    let current_table = current
+        .as_deref()
+        .and_then(|text| parse_grok_table(text).ok());
     Ok(GrokApplyPlan {
         config_path: config_path.to_path_buf(),
         skip_snapshot,

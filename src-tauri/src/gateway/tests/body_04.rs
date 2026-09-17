@@ -2332,6 +2332,19 @@ allowed_models = ["grok-4.6"]
             readback_gateway_client_config_isolated(&isolated, &inp).is_err(),
             "spawn-target hand-edits must be drift"
         );
+        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        assert!(
+            readback_gateway_client_config_isolated(&isolated, &inp)
+                .unwrap()
+                .ok,
+            "Repair must rewrite the owned spawn slice"
+        );
+        let repaired: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            repaired["agent"]["general"]["model"].as_str(),
+            Some("codexhub-volc/glm-5.2#high")
+        );
     }
 
     #[test]
@@ -2441,5 +2454,119 @@ allowed_models = ["grok-4.6"]
         let pi_text = fs::read_to_string(isolated.root().join("pi").join("models.json")).unwrap();
         assert!(!pi_text.contains("default_subagent"));
         assert!(!pi_text.contains("agentModelOverrides"));
+    }
+
+    #[test]
+    fn default_subagent_empty_pin_preserves_disconnected_hand_edits() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let providers = volc_provider(UpstreamFormat::Responses);
+        let root = fresh_root("subagent-disconnected-edit");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let path = isolated.root().join("opencode").join("opencode.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"model":"anthropic/claude-sonnet-4","agent":{"general":{"model":"foreign/keep-me"}}}"#,
+        )
+        .unwrap();
+        let mut inp = IsolatedClientApplyInput {
+            client_id: "opencode".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings: pinned_settings("high"),
+            providers,
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        restore_isolated("opencode", &root, &isolated);
+        fs::write(
+            &path,
+            r#"{"model":"anthropic/claude-sonnet-4","agent":{"general":{"model":"user-after-disconnect"}}}"#,
+        )
+        .unwrap();
+        inp.settings.opencode_default_subagent_model.clear();
+        inp.settings.opencode_default_subagent_reasoning_effort.clear();
+        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            json["agent"]["general"]["model"].as_str(),
+            Some("user-after-disconnect")
+        );
+    }
+
+    #[test]
+    fn default_subagent_omp_pin_preserves_foreign_override_keys() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let providers = volc_provider(UpstreamFormat::Responses);
+        let root = fresh_root("subagent-omp-foreign");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let config = isolated.root().join("omp").join("config.yml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(
+            &config,
+            "modelRoles:\n  default: foreign/keep-activation\ntask:\n  agentModelOverrides:\n    scout: foreign/scout\n    custom-agent: mine/keep\n",
+        )
+        .unwrap();
+        let inp = IsolatedClientApplyInput {
+            client_id: "omp".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings: pinned_settings("high"),
+            providers,
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let text = fs::read_to_string(&config).unwrap();
+        assert!(
+            text.contains("custom-agent: mine/keep"),
+            "pin must keep foreign override keys: {text}"
+        );
+        assert!(text.contains("codexhub-volc/glm-5.2:high"));
+        assert!(!text.contains("foreign/scout"));
+    }
+
+    #[test]
+    fn default_subagent_grok_shadow_does_not_overwrite_unmarked_agent_files() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let providers = volc_provider(UpstreamFormat::Responses);
+        let root = fresh_root("subagent-grok-shadow");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let grok_path = isolated.root().join("grok").join("config.toml");
+        let plan_shadow = isolated.root().join("grok").join("agents").join("plan.md");
+        fs::create_dir_all(plan_shadow.parent().unwrap()).unwrap();
+        fs::write(
+            &grok_path,
+            "[models]\ndefault = \"grok-4.6\"\n\n[subagents.roles]\nplan = \"persona-string\"\n",
+        )
+        .unwrap();
+        fs::write(&plan_shadow, "---\nname: plan\nmodel: user-plan\n---\nkeep me\n").unwrap();
+        let inp = IsolatedClientApplyInput {
+            client_id: "grok".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings: pinned_settings("high"),
+            providers,
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let plan_text = fs::read_to_string(&plan_shadow).unwrap();
+        assert!(
+            plan_text.contains("keep me"),
+            "unmarked Grok agent files must stay user-owned: {plan_text}"
+        );
+        assert!(!plan_text.contains("x-codexhub-default-subagent: true"));
+        restore_isolated("grok", &root, &isolated);
+        assert!(plan_shadow.exists());
+        assert!(fs::read_to_string(&plan_shadow).unwrap().contains("keep me"));
     }
 }
