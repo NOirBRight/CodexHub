@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "codexhub"
-version = "0.2.19"
+version = "0.2.20"
 dependencies = [
  "cairo-rs",
  "chrono",

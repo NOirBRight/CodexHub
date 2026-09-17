@@ -736,6 +736,23 @@ def relay_transparent_upstream_response(
         return status
 
     pending_lines: list[bytes] = []
+    sequence_state = protocol_translation.wire_sequence_state(
+        event_context if isinstance(event_context, dict) else None
+    )
+    if sequence_state is None:
+        sequence_state = {"next": 0}
+    self._wire_sequence = sequence_state
+
+    def _note_forwarded_sequence(line: bytes) -> None:
+        payload_bytes = _sse_payload_bytes(line)
+        if not payload_bytes or payload_bytes == b"[DONE]":
+            return
+        try:
+            payload = json.loads(payload_bytes.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return
+        if isinstance(payload, Mapping):
+            protocol_translation.advance_wire_sequence(self._wire_sequence, payload)
 
     def transparent_error_event(payload: Mapping[str, Any]) -> UpstreamStreamErrorEvent | None:
         if upstream_format == "responses" and _responses_stream_error_type(payload) is not None:
@@ -747,6 +764,7 @@ def relay_transparent_upstream_response(
     def _commit_pending_lines() -> bool:
         """Commit buffered pending lines through the seam. Returns True on success."""
         for pending_line in pending_lines:
+            _note_forwarded_sequence(pending_line)
             if not seam.commit_data(pending_line):
                 return False
         pending_lines.clear()
@@ -868,6 +886,7 @@ def relay_transparent_upstream_response(
                 continue
             if not send_downstream_headers_once():
                 return _handle_write_failure()
+            _note_forwarded_sequence(line)
             if not seam.commit_data(line):
                 return _handle_write_failure()
         if pending_lines and not headers_sent:

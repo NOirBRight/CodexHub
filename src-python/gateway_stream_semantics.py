@@ -818,9 +818,14 @@ def _chat_stream_chunks_have_terminal(chunks: list[Mapping[str, Any] | str]) -> 
     return False
 
 
-def sse_json_line(payload: Mapping[str, Any], line_ending: bytes) -> bytes:
+def sse_json_line(
+    payload: Mapping[str, Any],
+    line_ending: bytes,
+    *,
+    sequence_state: dict[str, int] | None = None,
+) -> bytes:
     if isinstance(payload, dict):
-        protocol_translation.stamp_wire_timestamps(payload)
+        protocol_translation.stamp_wire_timestamps(payload, sequence_state=sequence_state)
     return b"data: " + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + line_ending
 _sse_json_line = sse_json_line
 

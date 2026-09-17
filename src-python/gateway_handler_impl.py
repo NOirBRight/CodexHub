@@ -1313,7 +1313,7 @@ class GatewayHandlerMixin:
             self,
             event,
             payload,
-            encode_json_line=_sse_json_line,
+            encode_json_line=self._encode_sse_json_line,
             commit_sse_bytes=self._write_sse_bytes,
         )
 
@@ -1321,8 +1321,15 @@ class GatewayHandlerMixin:
         return write_sse_data(
             self,
             payload,
-            encode_json_line=_sse_json_line,
+            encode_json_line=self._encode_sse_json_line,
             commit_sse_bytes=self._write_sse_bytes,
+        )
+
+    def _encode_sse_json_line(self, payload: Mapping[str, Any], line_ending: bytes) -> bytes:
+        return _sse_json_line(
+            payload,
+            line_ending,
+            sequence_state=getattr(self, "_wire_sequence", None),
         )
 
     def _write_sse_keepalive(self) -> bool:

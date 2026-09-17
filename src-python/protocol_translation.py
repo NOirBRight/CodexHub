@@ -98,8 +98,61 @@ def _stamp_created_field(payload: dict[str, Any], field: str, *, fallback: Mappi
     return True
 
 
-def stamp_wire_timestamps(payload: dict[str, Any], *, fallback: Mapping[str, Any] | None = None) -> bool:
-    """Fill required OpenAI/xAI created timestamps on Chat and Responses envelopes."""
+def _is_responses_stream_event(payload: Mapping[str, Any]) -> bool:
+    event_type = payload.get("type")
+    return isinstance(event_type, str) and (
+        event_type.startswith("response.") or event_type == "error"
+    )
+
+
+def wire_sequence_state(event_context: Mapping[str, Any] | None) -> dict[str, int] | None:
+    """Request-scoped Responses SSE sequence counter, stored on event_context."""
+    if not isinstance(event_context, dict):
+        return None
+    stored = event_context.get("_wire_sequence")
+    if not isinstance(stored, dict):
+        stored = {"next": 0}
+        event_context["_wire_sequence"] = stored
+    next_number = stored.get("next", 0)
+    if not isinstance(next_number, int) or isinstance(next_number, bool):
+        stored["next"] = 0
+    return stored
+
+
+def advance_wire_sequence(
+    sequence_state: dict[str, int] | None, payload: Mapping[str, Any] | None
+) -> None:
+    """Advance the request-scoped counter from an already-numbered stream event."""
+    if sequence_state is None or not isinstance(payload, Mapping):
+        return
+    current = payload.get("sequence_number")
+    if isinstance(current, int) and not isinstance(current, bool):
+        sequence_state["next"] = max(sequence_state.get("next", 0), current + 1)
+
+
+def _stamp_sequence_number(
+    payload: dict[str, Any],
+    sequence_state: dict[str, int] | None,
+) -> bool:
+    current = payload.get("sequence_number")
+    if isinstance(current, int) and not isinstance(current, bool):
+        if sequence_state is not None:
+            sequence_state["next"] = max(sequence_state.get("next", 0), current + 1)
+        return False
+    next_number = 0 if sequence_state is None else sequence_state.get("next", 0)
+    payload["sequence_number"] = next_number
+    if sequence_state is not None:
+        sequence_state["next"] = next_number + 1
+    return True
+
+
+def stamp_wire_timestamps(
+    payload: dict[str, Any],
+    *,
+    fallback: Mapping[str, Any] | None = None,
+    sequence_state: dict[str, int] | None = None,
+) -> bool:
+    """Fill required OpenAI/xAI created timestamps and stream sequence numbers."""
     if not isinstance(payload, dict):
         return False
     changed = False
@@ -112,6 +165,8 @@ def stamp_wire_timestamps(payload: dict[str, Any], *, fallback: Mapping[str, Any
         changed = _stamp_created_field(payload, "created_at", fallback=fallback) or changed
     elif object_name in {"chat.completion", "chat.completion.chunk"}:
         changed = _stamp_created_field(payload, "created", fallback=fallback) or changed
+    if _is_responses_stream_event(payload):
+        changed = _stamp_sequence_number(payload, sequence_state) or changed
     return changed
 
 

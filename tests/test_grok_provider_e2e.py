@@ -19,9 +19,46 @@ def test_grok_e2e_covers_both_endpoints_for_each_provider() -> None:
     assert by_provider["openai"] == {"responses", "chat_completions"}
     assert by_provider["opencode-go"] == {"responses", "chat_completions"}
     assert by_provider["commandcode"] == {"responses", "chat_completions"}
+    assert by_provider["seq-fixture"] == {"responses"}
     paths = {case["endpoint"] for case in E2E.CASES}
     assert "/v1/providers/openai/responses" in paths
     assert "/v1/providers/openai/chat/completions" in paths
+    assert "/v1/providers/seq-fixture/responses" in paths
+    assert "/v1/responses" in paths
+
+
+def test_grok_e2e_covers_gateway_synthesized_sequence_terminals() -> None:
+    fixture = [case for case in E2E.CASES if case["requires"] == "fixture"]
+    assert {case["case_id"] for case in fixture} == {
+        "seq-fixture-synth-completed",
+        "seq-fixture-synth-failed",
+    }
+    complete = next(case for case in fixture if case["case_id"] == "seq-fixture-synth-completed")
+    failed = next(case for case in fixture if case["case_id"] == "seq-fixture-synth-failed")
+    assert complete["endpoint"] == "/v1/responses"
+    assert failed["endpoint"] == "/v1/providers/seq-fixture/responses"
+    complete_events = E2E._fixture_upstream_events(E2E.SYNTH_COMPLETE_MODEL)
+    assert [event["type"] for event in complete_events] == [
+        "response.created",
+        "response.output_item.added",
+        "response.output_item.done",
+    ]
+    assert complete_events[-1]["sequence_number"] == E2E.SYNTH_COMPLETE_LAST_SEQUENCE
+    assert complete["expect_min_sequence"] == E2E.SYNTH_COMPLETE_LAST_SEQUENCE + 1
+    assert failed["expect_min_sequence"] == E2E.LAST_UPSTREAM_SEQUENCE + 1
+    body = (
+        b'data: {"type":"response.created","sequence_number":0}\n\n'
+        b'data: {"type":"response.completed","sequence_number":2}\n\n'
+    )
+    assert E2E.synthetic_terminal_error(
+        body, expect_type="response.completed", expect_min_sequence=2
+    ) == ""
+    assert "missing sequence_number on response.failed" in E2E.missing_sequence_number(
+        b'data: {"type":"response.failed","response":{"status":"failed"}}\n\n'
+    )
+    assert "missing response.failed" in E2E.synthetic_terminal_error(
+        body, expect_type="response.failed", expect_min_sequence=2
+    )
 
 
 def test_grok_e2e_headers_stay_unknown_client() -> None:

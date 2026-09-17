@@ -496,7 +496,9 @@ def responses_failed_event_for_stream_error(
     }
     import protocol_translation as _protocol_translation
 
-    _protocol_translation.stamp_wire_timestamps(event)
+    nested = event.get("response")
+    if isinstance(nested, dict):
+        _protocol_translation.stamp_wire_timestamps(nested)
     return event
 _responses_failed_event_for_stream_error = responses_failed_event_for_stream_error
 

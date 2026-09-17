@@ -231,6 +231,7 @@ def compatible_sse_line(
         if selected_protocol in {_COLLABORATION_V1, _COLLABORATION_V2}:
             collaboration_protocol = selected_protocol
     event_context = _collaboration_adapter_module.context_with_protocol(event_context, collaboration_protocol)
+    sequence_state = _protocol_translation.wire_sequence_state(event_context)
     if not runtime_tool_inverse_only:
         if collaboration_protocol != _COLLABORATION_V2:
             _remember_worker_stream_event(payload, event_context)
@@ -248,7 +249,7 @@ def compatible_sse_line(
             return b""
         if len(decoded_events) > 1:
             return b"".join(
-                host._sse_json_line(event, line_ending) + line_ending
+                host._sse_json_line(event, line_ending, sequence_state=sequence_state) + line_ending
                 for event in decoded_events
             )
         decoded_payload = decoded_events[0]
@@ -267,7 +268,7 @@ def compatible_sse_line(
             notice_changed = True
         if not runtime_tool_changed and not notice_changed:
             return line
-        return host._sse_json_line(payload, line_ending) + line_ending
+        return host._sse_json_line(payload, line_ending, sequence_state=sequence_state) + line_ending
 
     if host._is_raw_reasoning_stream_event(payload):
         return b""
@@ -312,8 +313,10 @@ def compatible_sse_line(
         payload, event_context
     ):
         changed = True
-    if isinstance(payload, dict) and _protocol_translation.stamp_wire_timestamps(payload):
+    if isinstance(payload, dict) and _protocol_translation.stamp_wire_timestamps(
+        payload, sequence_state=sequence_state
+    ):
         changed = True
     if not changed:
         return line
-    return host._sse_json_line(payload, line_ending)
+    return host._sse_json_line(payload, line_ending, sequence_state=sequence_state)

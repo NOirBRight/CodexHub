@@ -206,6 +206,12 @@ class RelaySseOutput:
 
     writer: RelayWriter
     commit: gateway_sse.DownstreamStreamCommit
+    sequence_state: dict[str, int] | None = None
+
+    def _encode_json_line(self, payload: Mapping[str, Any], line_ending: bytes) -> bytes:
+        return gateway_stream_semantics.sse_json_line(
+            payload, line_ending, sequence_state=self.sequence_state
+        )
 
     def headers(self, status: int, upstream_name: str) -> bool:
         return send_sse_headers(self.writer, status, upstream_name, commit_headers=self.commit.commit_headers)
@@ -215,11 +221,11 @@ class RelaySseOutput:
 
     def event(self, event: str, payload: Mapping[str, Any]) -> bool:
         return write_sse_event(self.writer, event, payload,
-            encode_json_line=gateway_stream_semantics.sse_json_line, commit_sse_bytes=self.write)
+            encode_json_line=self._encode_json_line, commit_sse_bytes=self.write)
 
     def data(self, payload: Mapping[str, Any]) -> bool:
         return write_sse_data(self.writer, payload,
-            encode_json_line=gateway_stream_semantics.sse_json_line, commit_sse_bytes=self.write)
+            encode_json_line=self._encode_json_line, commit_sse_bytes=self.write)
 
     def done(self) -> bool:
         return write_sse_done(self.writer, commit_sse_bytes=self.write,
@@ -563,10 +569,12 @@ def relay_upstream_response(
             ),
         )
         self._downstream_stream_commit = seam
-    output = RelaySseOutput(self, seam)
     # Copy after request adaptation so compact omission stats are present,
     # without mutating the caller's event_context.
     compatibility_event_context = dict(event_context or {})
+    sequence_state = protocol_translation.wire_sequence_state(compatibility_event_context)
+    self._wire_sequence = sequence_state
+    output = RelaySseOutput(self, seam, sequence_state)
     compatibility_event_context["_apply_patch_adapter_enabled"] = not want_chat_output
     # When the caller asked for a non-streaming response but the upstream
     # returns SSE (e.g. chatgpt.com forces stream=true), buffer the entire
@@ -737,7 +745,7 @@ def relay_upstream_response(
                 redact_identity=relay_redact_identity,
             )
             wrote_error = output.write(
-                gateway_stream_semantics._sse_json_line(failed_event, b"\n") + b"\n"
+                output._encode_json_line(failed_event, b"\n") + b"\n"
             )
         else:
             wrote_error = self._write_downstream_sse_error(
@@ -1364,7 +1372,7 @@ def relay_upstream_response(
                         payload, compatibility_event_context
                     )
                 event = payload
-                line = gateway_stream_semantics._sse_json_line(event, line_ending) + line_ending
+                line = output._encode_json_line(event, line_ending) + line_ending
                 try:
                     compatible_line = compatible_sse_line(
                         line,
@@ -2013,7 +2021,7 @@ def relay_upstream_response(
                             event, compatibility_event_context
                         )
                     if not output.write(
-                        gateway_stream_semantics._sse_json_line(event, line_ending) + line_ending
+                        output._encode_json_line(event, line_ending) + line_ending
                     ):
                         return finish_downstream_stream_closed(
                             seam.last_write_error() or OSError("downstream closed")
@@ -2083,7 +2091,7 @@ def relay_upstream_response(
                         )
                         if apply_patch_changed:
                             rewritten_line = (
-                                gateway_stream_semantics._sse_json_line(
+                                output._encode_json_line(
                                     replacement_events[0], gateway_sse._sse_line_ending(line)
                                 )
                                 if replacement_events
@@ -2500,7 +2508,7 @@ def relay_upstream_response(
                         if not replacement_events:
                             line = b""
                         else:
-                            line = gateway_stream_semantics._sse_json_line(
+                            line = output._encode_json_line(
                                 replacement_events[0], gateway_sse._sse_line_ending(line)
                             )
                 line = compatible_sse_line(line, upstream_name, event_context=compatibility_event_context)

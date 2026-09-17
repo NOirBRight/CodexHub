@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 
 import gateway_compat
+import gateway_errors
 import gateway_stream_semantics
+import protocol_translation
 from gateway_exchange_adapters import live_handle_empty_completed
 from gateway_stream_semantics import UpstreamEmptyCompletedResponseError
 
@@ -132,10 +134,18 @@ def test_official_output_text_starts_and_commits() -> None:
 def test_compatible_sse_line_drops_raw_reasoning_for_third_party() -> None:
     raw = _sse(_raw_reasoning_delta())
     assert gateway_compat.compatible_sse_line(raw, "xai") == b""
-    summary = _sse(_summary_delta())
-    assert gateway_compat.compatible_sse_line(summary, "xai") == summary
-    text = _sse(_text_delta())
-    assert gateway_compat.compatible_sse_line(text, "xai") == text
+    summary = json.loads(
+        gateway_compat.compatible_sse_line(_sse(_summary_delta()), "xai").split(b"data:", 1)[1]
+    )
+    text = json.loads(
+        gateway_compat.compatible_sse_line(_sse(_text_delta()), "xai").split(b"data:", 1)[1]
+    )
+    assert summary["type"] == "response.reasoning_summary_text.delta"
+    assert summary["delta"] == "thinking"
+    assert summary["sequence_number"] == 0
+    assert text["type"] == "response.output_text.delta"
+    assert text["delta"] == "hello"
+    assert text["sequence_number"] == 0
 
 
 def test_compatible_sse_line_passthrough_for_official() -> None:
@@ -212,7 +222,63 @@ def test_compatible_sse_line_stamps_created_at_for_third_party_responses() -> No
     rewritten = gateway_compat.compatible_sse_line(line, "xai")
     payload = json.loads(rewritten.split(b"data:", 1)[1])
     assert isinstance(payload["response"]["created_at"], int)
+    assert payload["sequence_number"] == 0
     assert gateway_compat.compatible_sse_line(line, "official") == line
+
+
+def test_compatible_sse_line_preserves_and_increments_sequence_number() -> None:
+    context: dict[str, object] = {}
+    first = _sse(
+        {
+            "type": "response.created",
+            "response": {"id": "resp_seq", "object": "response", "status": "in_progress"},
+        }
+    )
+    first_payload = json.loads(
+        gateway_compat.compatible_sse_line(first, "xai", event_context=context).split(b"data:", 1)[1]
+    )
+    second = _sse(
+        {
+            "type": "response.completed",
+            "response": {"id": "resp_seq", "object": "response", "status": "completed"},
+        }
+    )
+    second_payload = json.loads(
+        gateway_compat.compatible_sse_line(second, "xai", event_context=context).split(b"data:", 1)[1]
+    )
+    kept = _sse(
+        {
+            "type": "response.in_progress",
+            "sequence_number": 9,
+            "response": {"id": "resp_seq", "object": "response", "status": "in_progress"},
+        }
+    )
+    kept_payload = json.loads(
+        gateway_compat.compatible_sse_line(kept, "xai", event_context=context).split(b"data:", 1)[1]
+    )
+    assert first_payload["sequence_number"] == 0
+    assert second_payload["sequence_number"] == 1
+    assert kept_payload["sequence_number"] == 9
+    failed = gateway_errors.responses_failed_event_for_stream_error(
+        upstream_name="opencode-go",
+        model="muse-spark-1.3-contributor",
+        status=502,
+        error="UpstreamStreamError",
+        detail="stream failed",
+        response_id="resp_seq",
+    )
+    assert "sequence_number" not in failed
+    synthetic = gateway_stream_semantics.sse_json_line(
+        failed,
+        b"\n",
+        sequence_state=protocol_translation.wire_sequence_state(context),
+    )
+    assert json.loads(synthetic.split(b"data:", 1)[1])["sequence_number"] == 10
+    state = protocol_translation.wire_sequence_state(context)
+    protocol_translation.advance_wire_sequence(
+        state, {"type": "response.in_progress", "sequence_number": 12}
+    )
+    assert state is not None and state["next"] == 13
 
 
 def test_compatible_response_body_stamps_created_at_and_chat_created() -> None:
@@ -242,8 +308,6 @@ def test_compatible_response_body_stamps_created_at_and_chat_created() -> None:
 
 
 def test_responses_failed_event_includes_created_at() -> None:
-    import gateway_errors
-
     event = gateway_errors.responses_failed_event_for_stream_error(
         upstream_name="opencode-go",
         model="muse-spark-1.3-contributor",
@@ -254,3 +318,26 @@ def test_responses_failed_event_includes_created_at() -> None:
     )
     assert event["type"] == "response.failed"
     assert isinstance(event["response"]["created_at"], int)
+    assert "sequence_number" not in event
+    encoded = json.loads(
+        gateway_stream_semantics.sse_json_line(event, b"\n").split(b"data:", 1)[1]
+    )
+    assert encoded["sequence_number"] == 0
+
+
+def test_sse_json_line_stamps_sequence_number_on_synthetic_completed() -> None:
+    line = gateway_stream_semantics.sse_json_line(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_synth",
+                "object": "response",
+                "status": "completed",
+                "output": [],
+            },
+        },
+        b"\n",
+    )
+    payload = json.loads(line.split(b"data:", 1)[1])
+    assert payload["sequence_number"] == 0
+    assert isinstance(payload["response"]["created_at"], int)
