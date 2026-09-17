@@ -107,6 +107,10 @@ def _wrap_chat_function_tools(payload: dict[str, Any]) -> bool:
 
 
 _WEB_SEARCH_TOOL_TYPES = frozenset({"web_search", "web_search_preview"})
+_WEB_SEARCH_PREVIEW_TOOL_TYPES = frozenset(
+    {"web_search_preview", "web_search_preview_2025_03_11"}
+)
+_CONSOLE_GO_PREVIEW_ONLY_SEARCH_FIELDS = ("search_content_types", "image_settings")
 
 
 def _drop_third_party_web_search_external_web_access(payload: dict[str, Any]) -> bool:
@@ -179,6 +183,32 @@ def _drop_third_party_function_strict(payload: dict[str, Any]) -> bool:
     return changed
 
 
+def _drop_console_go_preview_only_search_fields(payload: dict[str, Any]) -> bool:
+    """Drop image-search fields unless the tool is web_search_preview.
+
+    Codex Desktop copies Official image-search controls onto hosted
+    ``web_search`` when the catalog advertises ``text_and_image``. Official
+    now documents ``search_content_types`` and ``image_settings`` on
+    ``web_search``. Console Go still validates the older schema and 400s with
+    ``tools[].search_content_types is only supported for web_search_preview
+    tools``. Text search remains; only the preview-only fields are removed.
+    """
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False
+    changed = False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("type") in _WEB_SEARCH_PREVIEW_TOOL_TYPES:
+            continue
+        for key in _CONSOLE_GO_PREVIEW_ONLY_SEARCH_FIELDS:
+            if key in tool:
+                tool.pop(key, None)
+                changed = True
+    return changed
+
+
 def sanitize_opencode_go_responses_fields(
     payload: dict[str, Any], upstream: Mapping[str, Any]
 ) -> bool:
@@ -190,7 +220,8 @@ def sanitize_opencode_go_responses_fields(
     if upstream.get("name") != "opencode_go" or upstream.get("upstream_format") == "chat_completions":
         return False
     changed = _drop_third_party_responses_transport_fields(payload)
-    return _drop_third_party_function_strict(payload) or changed
+    changed = _drop_third_party_function_strict(payload) or changed
+    return _drop_console_go_preview_only_search_fields(payload) or changed
 
 
 def compatible_request_body(

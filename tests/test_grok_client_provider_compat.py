@@ -317,6 +317,25 @@ def test_grok_opencode_go_drops_console_go_rejected_fields():
     assert _system_roles(transformed)
 
 
+def test_grok_opencode_go_drops_search_content_types_on_web_search():
+    payload = {
+        **_GROK_RESPONSES,
+        "tools": [
+            {
+                "type": "web_search",
+                "search_content_types": ["text", "image"],
+                "image_settings": {"max_results": 3, "caption": True},
+                "search_context_size": "low",
+            }
+        ],
+    }
+    transformed = _mutate(payload, _RESPONSES_PROVIDERS[1]["upstream"])
+    web_search = next(tool for tool in transformed["tools"] if tool.get("type") == "web_search")
+    assert "search_content_types" not in web_search
+    assert "image_settings" not in web_search
+    assert web_search["search_context_size"] == "low"
+
+
 def test_grok_ollama_aliases_xhigh_effort():
     transformed = _mutate(_GROK_RESPONSES, _RESPONSES_PROVIDERS[2]["upstream"])
     assert transformed["reasoning"]["effort"] == "max"
