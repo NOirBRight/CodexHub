@@ -37,6 +37,7 @@ from codex_semantic_adapter import (
 )
 from gateway_errors import UpstreamProtocolTranslationError
 from gateway_sse import sse_line_ending as _sse_line_ending, sse_payload_bytes as _sse_payload_bytes
+import protocol_translation as _protocol_translation
 from protocol_translation import UnsupportedProtocolTranslationError
 from runtime_tool_compatibility import (
     HostedCapabilityFacts as RuntimeHostedCapabilityFacts,
@@ -723,6 +724,8 @@ def compatible_response_body(
     if isinstance(payload, dict) and _multimodal_tool_result.annotate_compact_response_payload(
         payload, event_context
     ):
+        changed = True
+    if isinstance(payload, dict) and _protocol_translation.stamp_wire_timestamps(payload):
         changed = True
     if not changed:
         return body

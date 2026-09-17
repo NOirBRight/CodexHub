@@ -1,5 +1,6 @@
 import json
 import unittest
+import unittest.mock
 
 import pytest
 
@@ -2126,7 +2127,7 @@ class ProtocolTranslationTests(unittest.TestCase):
             ) as raised:
                 converter.events_for_chunk(chunk)
             self.assertEqual(raised.exception.code, "unsupported_protocol_semantics")
-            self.assertFalse(converter.created)
+            self.assertFalse(converter.created_emitted)
             self.assertFalse(converter.completed)
             self.assertEqual(converter.text_parts, [])
 
@@ -2967,7 +2968,227 @@ class ProtocolTranslationTests(unittest.TestCase):
         )
         self.assertEqual(chunks[0]["choices"][0]["finish_reason"], "stop")
 
+    def test_chat_completion_to_response_body_copies_created_to_created_at(self):
+        body = json.dumps(
+            {
+                "id": "chatcmpl_stamp",
+                "object": "chat.completion",
+                "created": 1_700_000_000,
+                "model": "muse-spark-1.3-contributor",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ).encode()
+        payload = json.loads(protocol_translation.chat_completion_to_response_body(body))
+        self.assertEqual(payload["created_at"], 1_700_000_000)
+        self.assertIsInstance(payload["created_at"], int)
 
+    def test_chat_completion_to_response_body_stamps_created_at_when_chat_omits_created(self):
+        body = json.dumps(
+            {
+                "id": "chatcmpl_missing",
+                "object": "chat.completion",
+                "model": "muse-spark-1.3-contributor",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ).encode()
+        with unittest.mock.patch("protocol_translation.time.time", return_value=1_800_000_000.9):
+            payload = json.loads(protocol_translation.chat_completion_to_response_body(body))
+        self.assertEqual(payload["created_at"], 1_800_000_000)
+
+    def test_chat_stream_to_responses_stamps_created_at_on_created_and_completed(self):
+        chunks = [
+            {
+                "id": "chatcmpl_stream",
+                "object": "chat.completion.chunk",
+                "created": 1_700_000_111,
+                "model": "muse-spark-1.3-contributor",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hi"}, "finish_reason": None}],
+            },
+            {
+                "id": "chatcmpl_stream",
+                "object": "chat.completion.chunk",
+                "created": 1_700_000_111,
+                "model": "muse-spark-1.3-contributor",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            },
+        ]
+        events = protocol_translation.chat_stream_chunks_to_response_events(chunks)
+        self.assertEqual(events[0]["response"]["created_at"], 1_700_000_111)
+        self.assertEqual(events[-1]["response"]["created_at"], 1_700_000_111)
+
+    def test_response_sse_and_reconstructed_body_keep_created_at(self):
+        body = {
+            "id": "resp_keep",
+            "object": "response",
+            "created_at": 1_700_000_222,
+            "status": "completed",
+            "model": "example-model",
+            "output": [],
+        }
+        events = protocol_translation.response_body_to_response_sse_events(json.dumps(body).encode())
+        self.assertEqual(events[0]["response"]["created_at"], 1_700_000_222)
+        self.assertEqual(events[-1]["response"]["created_at"], 1_700_000_222)
+        rebuilt = json.loads(protocol_translation.events_to_responses_body(events, require_completed=True))
+        self.assertEqual(rebuilt["created_at"], 1_700_000_222)
+
+    def test_chat_to_responses_stream_converter_stamps_created_at(self):
+        converter = protocol_translation.ChatToResponsesStreamConverter()
+        with unittest.mock.patch("protocol_translation.time.time", return_value=1_800_000_333):
+            started = converter.events_for_chunk(
+                {
+                    "id": "chatcmpl_live",
+                    "object": "chat.completion.chunk",
+                    "model": "muse-spark-1.3-contributor",
+                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": "x"}, "finish_reason": None}],
+                }
+            )
+            done = converter.events_for_chunk(
+                {
+                    "id": "chatcmpl_live",
+                    "object": "chat.completion.chunk",
+                    "model": "muse-spark-1.3-contributor",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                }
+            )
+            done.extend(converter.events_for_done())
+        created = next(event for event in started if event["type"] == "response.created")
+        completed = next(event for event in done if event["type"] == "response.completed")
+        self.assertEqual(created["response"]["created_at"], 1_800_000_333)
+        self.assertEqual(completed["response"]["created_at"], 1_800_000_333)
+
+    def test_chat_to_responses_stream_converter_copies_chunk_created(self):
+        converter = protocol_translation.ChatToResponsesStreamConverter()
+        started = converter.events_for_chunk(
+            {
+                "id": "chatcmpl_live",
+                "object": "chat.completion.chunk",
+                "created": 1_700_000_555,
+                "model": "muse-spark-1.3-contributor",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": "x"}, "finish_reason": None}],
+            }
+        )
+        done = converter.events_for_chunk(
+            {
+                "id": "chatcmpl_live",
+                "object": "chat.completion.chunk",
+                "created": 1_700_000_555,
+                "model": "muse-spark-1.3-contributor",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+        )
+        done.extend(converter.events_for_done())
+        created = next(event for event in started if event["type"] == "response.created")
+        completed = next(event for event in done if event["type"] == "response.completed")
+        self.assertEqual(created["response"]["created_at"], 1_700_000_555)
+        self.assertEqual(completed["response"]["created_at"], 1_700_000_555)
+
+    def test_responses_to_chat_stream_converter_copies_created_at(self):
+        converter = protocol_translation.ResponsesToChatStreamConverter()
+        created_chunks = converter.chunks_for_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp_live",
+                    "object": "response",
+                    "created_at": 1_700_000_666,
+                    "status": "in_progress",
+                    "model": "example-model",
+                    "output": [],
+                },
+            }
+        )
+        delta_chunks = converter.chunks_for_event({"type": "response.output_text.delta", "delta": "hi"})
+        done_chunks = converter.chunks_for_event(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_live",
+                    "object": "response",
+                    "created_at": 1_700_000_666,
+                    "status": "completed",
+                    "model": "example-model",
+                    "output": [],
+                },
+            }
+        )
+        chunks = [*created_chunks, *delta_chunks, *done_chunks]
+        self.assertTrue(chunks)
+        self.assertTrue(all(chunk["created"] == 1_700_000_666 for chunk in chunks))
+
+    def test_response_events_to_chat_stream_chunks_copies_created_at(self):
+        chunks = protocol_translation.response_events_to_chat_stream_chunks(
+            [
+                {
+                    "type": "response.created",
+                    "response": {
+                        "id": "resp_batch",
+                        "object": "response",
+                        "created_at": 1_700_000_777,
+                        "status": "in_progress",
+                        "model": "example-model",
+                    },
+                },
+                {"type": "response.output_text.delta", "delta": "ok"},
+                {
+                    "type": "response.completed",
+                    "response": {"id": "resp_batch", "status": "completed", "output": []},
+                },
+            ]
+        )
+        self.assertTrue(chunks)
+        self.assertTrue(all(chunk["created"] == 1_700_000_777 for chunk in chunks))
+
+    def test_chat_completion_body_to_stream_chunks_copies_created(self):
+        body = json.dumps(
+            {
+                "id": "chatcmpl_chunks",
+                "object": "chat.completion",
+                "created": 1_700_000_888,
+                "model": "example-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ).encode()
+        chunks = protocol_translation.chat_completion_body_to_stream_chunks(body)
+        self.assertTrue(chunks)
+        self.assertTrue(all(chunk["created"] == 1_700_000_888 for chunk in chunks))
+
+    def test_response_body_to_chat_copies_created_at_to_created(self):
+        body = json.dumps(
+            {
+                "id": "resp_chat",
+                "object": "response",
+                "created_at": 1_700_000_444,
+                "status": "completed",
+                "model": "example-model",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                    }
+                ],
+            }
+        ).encode()
+        chat = json.loads(protocol_translation.response_body_to_chat_completion_body(body))
+        self.assertEqual(chat["created"], 1_700_000_444)
 
 
 @pytest.mark.parametrize("body", [b'{"id":"a","id":"b"}', b'{"value":NaN}', b'{"value":1e999}', b'{"value":' + b'9' * 5000 + b'}'])

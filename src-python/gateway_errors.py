@@ -483,7 +483,7 @@ def responses_failed_event_for_stream_error(
         error_payload["failure_class"] = stream_error["failure_class"]
     if "retryable" in stream_error:
         error_payload["retryable"] = stream_error["retryable"]
-    return {
+    event = {
         "type": "response.failed",
         "response": {
             "id": response_id if isinstance(response_id, str) and response_id else f"resp_{uuid.uuid4().hex[:12]}",
@@ -494,6 +494,10 @@ def responses_failed_event_for_stream_error(
             "error": error_payload,
         },
     }
+    import protocol_translation as _protocol_translation
+
+    _protocol_translation.stamp_wire_timestamps(event)
+    return event
 _responses_failed_event_for_stream_error = responses_failed_event_for_stream_error
 
 

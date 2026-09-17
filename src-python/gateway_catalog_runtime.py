@@ -995,7 +995,7 @@ def openai_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
     models = catalog.get("models")
     if not isinstance(models, list):
         models = []
-    data: list[dict[str, str]] = []
+    data: list[dict[str, Any]] = []
     for model in models:
         if not isinstance(model, Mapping):
             continue
@@ -1008,6 +1008,7 @@ def openai_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
             {
                 "id": model_id,
                 "object": "model",
+                "created": 0,
                 "owned_by": owner
                 if isinstance(owner, str) and owner.strip()
                 else "codexhub",

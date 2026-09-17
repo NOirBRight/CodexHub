@@ -103,8 +103,8 @@ def test_openai_model_list_stays_openai_shaped() -> None:
     assert payload == {
         "object": "list",
         "data": [
-            {"id": "gpt-5.6-luna", "object": "model", "owned_by": "openai"},
-            {"id": "xai/grok-4", "object": "model", "owned_by": "xai"},
+            {"id": "gpt-5.6-luna", "object": "model", "created": 0, "owned_by": "openai"},
+            {"id": "xai/grok-4", "object": "model", "created": 0, "owned_by": "xai"},
         ],
     }
 

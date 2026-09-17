@@ -62,6 +62,59 @@ def decode_protocol_json(value: str | bytes) -> Any:
         ) from exc
 
 
+def _unix_created_from_mappings(*sources: Mapping[str, Any] | None) -> int | None:
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for key in ("created_at", "created"):
+            value = source.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                return int(value)
+    return None
+
+
+def unix_created_timestamp(*sources: Mapping[str, Any] | None) -> int:
+    """Unix seconds from Responses ``created_at`` or Chat ``created``, else now."""
+    captured = _unix_created_from_mappings(*sources)
+    return captured if captured is not None else int(time.time())
+
+
+def _remember_unix_created(current: int | None, *sources: Mapping[str, Any] | None) -> int | None:
+    return current if current is not None else _unix_created_from_mappings(*sources)
+
+
+def _stable_unix_created(current: int | None, *sources: Mapping[str, Any] | None) -> int:
+    remembered = _remember_unix_created(current, *sources)
+    return remembered if remembered is not None else unix_created_timestamp()
+
+
+def _stamp_created_field(payload: dict[str, Any], field: str, *, fallback: Mapping[str, Any] | None = None) -> bool:
+    current = payload.get(field)
+    if isinstance(current, (int, float)) and not isinstance(current, bool):
+        return False
+    payload[field] = unix_created_timestamp(payload, fallback)
+    return True
+
+
+def stamp_wire_timestamps(payload: dict[str, Any], *, fallback: Mapping[str, Any] | None = None) -> bool:
+    """Fill required OpenAI/xAI created timestamps on Chat and Responses envelopes."""
+    if not isinstance(payload, dict):
+        return False
+    changed = False
+    event_type = payload.get("type")
+    nested = payload.get("response")
+    if isinstance(nested, dict) and isinstance(event_type, str) and event_type.startswith("response."):
+        changed = _stamp_created_field(nested, "created_at", fallback=fallback) or changed
+    object_name = payload.get("object")
+    if object_name == "response":
+        changed = _stamp_created_field(payload, "created_at", fallback=fallback) or changed
+    elif object_name in {"chat.completion", "chat.completion.chunk"}:
+        changed = _stamp_created_field(payload, "created", fallback=fallback) or changed
+    return changed
+
+
 def _default_collect_text_fragments(value: Any) -> list[str]:
     if isinstance(value, str):
         text = value.strip()
@@ -1733,18 +1786,16 @@ def chat_completion_to_response_body(
     if upstream_error is not None:
         error = dict(upstream_error) if isinstance(upstream_error, Mapping) else {"message": str(upstream_error)}
         error.setdefault("type", "upstream_error")
-        return json.dumps(
-            {
-                "id": payload.get("id") if isinstance(payload.get("id"), str) else f"resp_{uuid.uuid4().hex[:12]}",
-                "object": "response",
-                "status": "failed",
-                "model": payload.get("model"),
-                "output": [],
-                "error": error,
-            },
-            ensure_ascii=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        failed_payload = {
+            "id": payload.get("id") if isinstance(payload.get("id"), str) else f"resp_{uuid.uuid4().hex[:12]}",
+            "object": "response",
+            "status": "failed",
+            "model": payload.get("model"),
+            "output": [],
+            "error": error,
+        }
+        stamp_wire_timestamps(failed_payload, fallback=payload)
+        return json.dumps(failed_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
     if "choices" in payload and not isinstance(payload["choices"], list):
         raise UnsupportedProtocolTranslationError(
@@ -1825,6 +1876,7 @@ def chat_completion_to_response_body(
 
     if repair and repair_response is not None:
         response_payload = repair_response(response_payload)
+    stamp_wire_timestamps(response_payload, fallback=payload)
     return json.dumps(response_payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -1992,7 +2044,7 @@ def response_body_to_chat_completion_body(
     chat_payload: dict[str, Any] = {
         "id": payload.get("id") if isinstance(payload.get("id"), str) else f"chatcmpl_{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
-        "created": int(time.time()),
+        "created": unix_created_timestamp(payload),
         "model": payload.get("model"),
         "choices": [choice],
     }
@@ -2014,11 +2066,12 @@ def chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
 
     response_id = payload.get("id") if isinstance(payload.get("id"), str) else f"chatcmpl_{uuid.uuid4().hex[:12]}"
     model = payload.get("model")
+    created = unix_created_timestamp(payload)
     chunks: list[dict[str, Any]] = [
         {
             "id": response_id,
             "object": "chat.completion.chunk",
-            "created": int(time.time()),
+            "created": created,
             "model": model,
             "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
         }
@@ -2049,7 +2102,7 @@ def chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
                     {
                         "id": response_id,
                         "object": "chat.completion.chunk",
-                        "created": int(time.time()),
+                        "created": created,
                         "model": model,
                         "choices": [
                             {
@@ -2063,13 +2116,13 @@ def chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
         content = message.get("content")
         if isinstance(content, str) and content:
             chunks.append(
-                {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": model,
-                    "choices": [{"index": index, "delta": {"content": content}, "finish_reason": None}],
-                }
+                    {
+                        "id": response_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"index": index, "delta": {"content": content}, "finish_reason": None}],
+                    }
             )
         tool_calls = message.get("tool_calls")
         if isinstance(tool_calls, list):
@@ -2120,7 +2173,7 @@ def chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
                     {
                         "id": response_id,
                         "object": "chat.completion.chunk",
-                        "created": int(time.time()),
+                        "created": created,
                         "model": model,
                         "choices": [
                             {
@@ -2147,7 +2200,7 @@ def chat_completion_body_to_stream_chunks(body: bytes) -> list[dict[str, Any]]:
             {
                 "id": response_id,
                 "object": "chat.completion.chunk",
-                "created": int(time.time()),
+                "created": created,
                 "model": model,
                 "choices": [{"index": index, "delta": {}, "finish_reason": finish_reason}],
             }
@@ -2303,6 +2356,8 @@ def chat_stream_chunks_to_response_events(
     }
     if model:
         created_response["model"] = model
+    first_chunk = next((chunk for chunk in chunks if isinstance(chunk, Mapping)), None)
+    stamp_wire_timestamps(created_response, fallback=first_chunk)
     events.append({"type": "response.created", "response": created_response})
 
     def allocate_output_index() -> int:
@@ -2653,6 +2708,7 @@ def chat_stream_chunks_to_response_events(
         completed_response["model"] = model
     if usage is not None:
         completed_response["usage"] = usage
+    stamp_wire_timestamps(completed_response, fallback=created_response)
     events.append(
         {
             "type": "response.incomplete" if incomplete_details is not None else "response.completed",
@@ -2782,6 +2838,12 @@ def response_events_to_chat_stream_chunks(
     response_id: str | None = None
     finish_reason: str | None = None
     reasoning_texts_emitted: set[str] = set()
+    stream_created: int | None = None
+
+    def chunk_created(source: Mapping[str, Any] | None = None) -> int:
+        nonlocal stream_created
+        stream_created = _stable_unix_created(stream_created, source)
+        return stream_created
 
     def tool_state(item_id: str) -> dict[str, Any]:
         if item_id not in tool_states:
@@ -2808,7 +2870,7 @@ def response_events_to_chat_stream_chunks(
             {
                 "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
                 "object": "chat.completion.chunk",
-                "created": int(time.time()),
+                "created": chunk_created(),
                 "model": model,
                 "choices": [
                     {
@@ -2842,11 +2904,12 @@ def response_events_to_chat_stream_chunks(
             if isinstance(response_obj, Mapping):
                 response_id = response_obj.get("id") or response_id
                 model = response_obj.get("model") or model
+                chunk_created(response_obj)
             chunks.append(
                 {
                     "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
                     "object": "chat.completion.chunk",
-                    "created": int(time.time()),
+                    "created": chunk_created(),
                     "model": model,
                     "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
                 }
@@ -2859,7 +2922,7 @@ def response_events_to_chat_stream_chunks(
                     {
                         "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
                         "object": "chat.completion.chunk",
-                        "created": int(time.time()),
+                        "created": chunk_created(),
                         "model": model,
                         "choices": [{"index": 0, "delta": {"content": delta_text}, "finish_reason": None}],
                     }
@@ -2913,7 +2976,7 @@ def response_events_to_chat_stream_chunks(
                     {
                         "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
                         "object": "chat.completion.chunk",
-                        "created": int(time.time()),
+                        "created": chunk_created(),
                         "model": model,
                         "choices": [
                             {
@@ -2954,7 +3017,7 @@ def response_events_to_chat_stream_chunks(
                     {
                         "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
                         "object": "chat.completion.chunk",
-                        "created": int(time.time()),
+                        "created": chunk_created(),
                         "model": model,
                         "choices": [
                             {
@@ -2983,7 +3046,7 @@ def response_events_to_chat_stream_chunks(
                     {
                         "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
                         "object": "chat.completion.chunk",
-                        "created": int(time.time()),
+                        "created": chunk_created(),
                         "model": model,
                         "choices": [
                             {
@@ -3020,7 +3083,7 @@ def response_events_to_chat_stream_chunks(
                         {
                             "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
                             "object": "chat.completion.chunk",
-                            "created": int(time.time()),
+                            "created": chunk_created(),
                             "model": model,
                             "choices": [
                                 {
@@ -3046,7 +3109,7 @@ def response_events_to_chat_stream_chunks(
                         {
                             "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
                             "object": "chat.completion.chunk",
-                            "created": int(time.time()),
+                            "created": chunk_created(),
                             "model": model,
                             "choices": [
                                 {
@@ -3134,7 +3197,7 @@ def response_events_to_chat_stream_chunks(
                                             {
                                                 "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
                                                 "object": "chat.completion.chunk",
-                                                "created": int(time.time()),
+                                                "created": chunk_created(),
                                                 "model": model,
                                                 "choices": [
                                                     {
@@ -3176,7 +3239,7 @@ def response_events_to_chat_stream_chunks(
         {
             "id": response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
             "object": "chat.completion.chunk",
-            "created": int(time.time()),
+            "created": chunk_created(),
             "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason or "stop"}],
         }
@@ -3191,10 +3254,15 @@ class ResponsesToChatStreamConverter:
         self.tool_states: dict[str, dict[str, Any]] = {}
         self.model: str | None = None
         self.response_id: str | None = None
+        self.created_at: int | None = None
         self.completed = False
         self.preserve_reasoning_history = preserve_reasoning_history
         self._reasoning_texts_emitted: set[str] = set()
         self._visible_output = False
+
+    def _stream_created(self, source: Mapping[str, Any] | None = None) -> int:
+        self.created_at = _stable_unix_created(self.created_at, source)
+        return self.created_at
 
     def _tool_state(self, item_id: str) -> dict[str, Any]:
         if item_id not in self.tool_states:
@@ -3214,7 +3282,7 @@ class ResponsesToChatStreamConverter:
         return {
             "id": self.response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
             "object": "chat.completion.chunk",
-            "created": int(time.time()),
+            "created": self._stream_created(),
             "model": self.model,
             "choices": [{"index": 0, "delta": dict(delta), "finish_reason": finish_reason}],
         }
@@ -3268,6 +3336,7 @@ class ResponsesToChatStreamConverter:
             if isinstance(response_obj, Mapping):
                 self.response_id = response_obj.get("id") or self.response_id
                 self.model = response_obj.get("model") or self.model
+                self._stream_created(response_obj)
             return [self._chunk({"role": "assistant"})]
         if event_type == "response.output_text.delta":
             delta_text = event.get("delta")
@@ -3476,6 +3545,7 @@ class ResponsesToChatStreamConverter:
                 response_model = response_obj.get("model")
                 if isinstance(response_model, str) and response_model:
                     self.model = response_model
+                self._stream_created(response_obj)
                 output = response_obj.get("output")
                 if "output" in response_obj and not isinstance(output, list):
                     raise UnsupportedProtocolTranslationError(
@@ -3544,7 +3614,7 @@ class ResponsesToChatStreamConverter:
                     {
                         "id": self.response_id or f"chatcmpl_{uuid.uuid4().hex[:12]}",
                         "object": "chat.completion.chunk",
-                        "created": int(time.time()),
+                        "created": self._stream_created(),
                         "model": self.model,
                         "choices": [],
                         "usage": _responses_usage_to_chat_usage(usage),
@@ -3569,11 +3639,20 @@ class ChatToResponsesStreamConverter:
         self.message_output_index: int | None = None
         self.next_output_index = 0
         self.tool_states: dict[int, dict[str, Any]] = {}
-        self.created = False
+        self.created_emitted = False
         self.message_started = False
         self.completed = False
         self.pending_incomplete: bool | None = None
         self.usage: dict[str, Any] | None = None
+        self.created_at: int | None = None
+
+    def _stamp_response(self, response: dict[str, Any]) -> None:
+        if isinstance(self.created_at, int):
+            response["created_at"] = self.created_at
+        stamp_wire_timestamps(response)
+        created_at = response.get("created_at")
+        if isinstance(created_at, int):
+            self.created_at = created_at
 
     def _allocate_output_index(self) -> int:
         output_index = self.next_output_index
@@ -3581,9 +3660,9 @@ class ChatToResponsesStreamConverter:
         return output_index
 
     def _created_events(self) -> list[dict[str, Any]]:
-        if self.created:
+        if self.created_emitted:
             return []
-        self.created = True
+        self.created_emitted = True
         response = {
             "id": self.response_id,
             "object": "response",
@@ -3591,6 +3670,7 @@ class ChatToResponsesStreamConverter:
             "model": self.model,
             "output": [],
         }
+        self._stamp_response(response)
         return [
             {"type": "response.created", "response": response},
             {"type": "response.in_progress", "response": response},
@@ -3804,6 +3884,7 @@ class ChatToResponsesStreamConverter:
             response["incomplete_details"] = {"reason": "max_output_tokens"}
         if self.usage is not None:
             response["usage"] = dict(self.usage)
+        self._stamp_response(response)
         events.append({"type": "response.incomplete" if incomplete else "response.completed", "response": response})
         return events
 
@@ -3836,6 +3917,7 @@ class ChatToResponsesStreamConverter:
             )
         if isinstance(chunk.get("model"), str):
             self.model = chunk.get("model")
+        self.created_at = _remember_unix_created(self.created_at, chunk)
         events: list[dict[str, Any]] = []
         if not isinstance(choices, list):
             return events
@@ -4111,6 +4193,7 @@ def events_to_responses_body(
         payload["output"] = output
     if usage is not None:
         payload["usage"] = dict(usage)
+    stamp_wire_timestamps(payload)
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -4127,6 +4210,7 @@ def response_body_to_response_sse_events(
     response_id = response.get("id") if isinstance(response.get("id"), str) else f"resp_{uuid.uuid4().hex[:12]}"
     response["id"] = response_id
     response.setdefault("object", "response")
+    stamp_wire_timestamps(response)
     status = response.get("status")
     if status is None:
         status = "failed" if response.get("error") is not None else "completed"
@@ -4508,5 +4592,7 @@ __all__ = [
         responses_request_to_chat_completion_body,
         responses_tool_choice_to_chat_tool_choice,
         responses_tools_to_chat_tools,
+        stamp_wire_timestamps,
+        unix_created_timestamp,
     )
 ]

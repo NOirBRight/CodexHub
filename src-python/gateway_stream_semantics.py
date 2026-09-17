@@ -12,7 +12,6 @@ import html
 import json
 import logging
 import re
-import time
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -724,6 +723,7 @@ def _synthetic_response_completed_from_tool_items(
     response["status"] = "completed"
     response["model"] = response.get("model") if isinstance(response.get("model"), str) else model
     response["output"] = completed_items
+    protocol_translation.stamp_wire_timestamps(response)
     return {"type": "response.completed", "response": response}
 
 
@@ -819,6 +819,8 @@ def _chat_stream_chunks_have_terminal(chunks: list[Mapping[str, Any] | str]) -> 
 
 
 def sse_json_line(payload: Mapping[str, Any], line_ending: bytes) -> bytes:
+    if isinstance(payload, dict):
+        protocol_translation.stamp_wire_timestamps(payload)
     return b"data: " + json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8") + line_ending
 _sse_json_line = sse_json_line
 
@@ -830,7 +832,7 @@ def _chat_stream_status_chunk(
     return {
         "id": f"chatcmpl_{uuid.uuid4().hex[:12]}",
         "object": "chat.completion.chunk",
-        "created": int(time.time()),
+        "created": protocol_translation.unix_created_timestamp(),
         "model": model,
         "choices": [
             {
