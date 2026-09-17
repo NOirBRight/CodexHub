@@ -404,9 +404,9 @@ fn case_sensitive_client_export_test_providers() -> Vec<Provider> {
             reports_cached_input_tokens: None,
             supports_developer_role: None,
             display_prefix: Some("Ollama".to_string()),
-        auth_capabilities: None,
-        onboarding_hint: None,
-        discovery_policy: None,
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
             sort_order: Some(1),
             enabled: true,
             locked: false,
@@ -430,9 +430,9 @@ fn case_sensitive_client_export_test_providers() -> Vec<Provider> {
             reports_cached_input_tokens: None,
             supports_developer_role: None,
             display_prefix: Some("Volc".to_string()),
-        auth_capabilities: None,
-        onboarding_hint: None,
-        discovery_policy: None,
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
             sort_order: Some(2),
             enabled: true,
             locked: false,
@@ -456,9 +456,9 @@ fn case_sensitive_client_export_test_providers() -> Vec<Provider> {
             reports_cached_input_tokens: None,
             supports_developer_role: None,
             display_prefix: Some("MiniMax.cn".to_string()),
-        auth_capabilities: None,
-        onboarding_hint: None,
-        discovery_policy: None,
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
             sort_order: Some(3),
             enabled: true,
             locked: false,
@@ -812,7 +812,10 @@ fn list_gateway_clients_uses_current_exported_model_for_zcode_drift_check() {
         .unwrap_or_else(|e| e.into_inner());
     let root = unique_temp_dir("codexhub-zcode-current-model");
     let runtime_home = root.join("runtime");
-    let catalog_path = root.join("zcode").join("model-providers").join("codexhub.json");
+    let catalog_path = root
+        .join("zcode")
+        .join("model-providers")
+        .join("codexhub.json");
     let v2_root = root.join("zcode").join("v2");
     let v2_config_path = v2_root.join("config.json");
     let v2_cache_path = v2_root.join("bots-model-cache.v2.json");
@@ -849,7 +852,9 @@ fn list_gateway_clients_uses_current_exported_model_for_zcode_drift_check() {
     let loaded_providers = crate::config::get_providers().unwrap();
     let model = super::default_gateway_client_sync_model(&loaded_settings, &loaded_providers)
         .expect("bundled providers should export a fallback model");
-    let config = super::zcode_v2_config_text(&v2_config_path, &loaded_settings, &loaded_providers, &model).unwrap();
+    let config =
+        super::zcode_v2_config_text(&v2_config_path, &loaded_settings, &loaded_providers, &model)
+            .unwrap();
     let catalog = super::zcode_catalog_text(&loaded_settings, &loaded_providers, &model).unwrap();
     let cache = super::zcode_v2_cache_text(&loaded_settings, &loaded_providers, &model).unwrap();
     fs::write(&v2_config_path, config).unwrap();
@@ -1000,9 +1005,9 @@ fn gateway_models_preserve_provider_prefix_and_exact_model_case() {
             reports_cached_input_tokens: None,
             supports_developer_role: None,
             display_prefix: Some("Ollama".to_string()),
-        auth_capabilities: None,
-        onboarding_hint: None,
-        discovery_policy: None,
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
             sort_order: Some(1),
             enabled: true,
             locked: false,
@@ -1025,9 +1030,9 @@ fn gateway_models_preserve_provider_prefix_and_exact_model_case() {
             reports_cached_input_tokens: None,
             supports_developer_role: None,
             display_prefix: Some("Volc".to_string()),
-        auth_capabilities: None,
-        onboarding_hint: None,
-        discovery_policy: None,
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
             sort_order: Some(2),
             enabled: true,
             locked: false,
@@ -1050,9 +1055,9 @@ fn gateway_models_preserve_provider_prefix_and_exact_model_case() {
             reports_cached_input_tokens: None,
             supports_developer_role: None,
             display_prefix: Some("MiniMax.cn".to_string()),
-        auth_capabilities: None,
-        onboarding_hint: None,
-        discovery_policy: None,
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
             sort_order: Some(3),
             enabled: true,
             locked: false,
@@ -1460,7 +1465,8 @@ fn client_exports_use_explicit_responses_provider_protocols() {
     let mut providers = client_export_test_providers();
     providers[0].upstream_format = Some(UpstreamFormat::Responses);
 
-    let opencode_text = opencode_config_text(None, &settings, &providers, "minimax/minimax-m3").unwrap();
+    let opencode_text =
+        opencode_config_text(None, &settings, &providers, "minimax/minimax-m3").unwrap();
     let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
     let pi_text =
         pi_models_text(&models_path, &settings, &providers, "minimax/minimax-m3").unwrap();
@@ -1551,7 +1557,8 @@ fn client_exports_use_explicit_chat_provider_protocols() {
     let mut providers = client_export_test_providers();
     providers[0].upstream_format = Some(UpstreamFormat::ChatCompletions);
 
-    let opencode_text = opencode_config_text(None, &settings, &providers, "minimax/minimax-m3").unwrap();
+    let opencode_text =
+        opencode_config_text(None, &settings, &providers, "minimax/minimax-m3").unwrap();
     let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
     let pi_text =
         pi_models_text(&models_path, &settings, &providers, "minimax/minimax-m3").unwrap();
@@ -1690,7 +1697,8 @@ fn pi_and_omp_configs_keep_duplicate_glm_models_distinct() {
     .unwrap();
     let pi_models_text =
         pi_models_text(&models_path, &settings, &providers, "ollama-cloud/glm-5.2").unwrap();
-    let omp_text = omp_models_yml_text(None, &settings, &providers, "ollama-cloud/glm-5.2").unwrap();
+    let omp_text =
+        omp_models_yml_text(None, &settings, &providers, "ollama-cloud/glm-5.2").unwrap();
     let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
     let pi_models_value: serde_json::Value = serde_json::from_str(&pi_models_text).unwrap();
     let ollama_models = pi_models_value
@@ -1779,7 +1787,8 @@ fn client_config_rejects_unexported_selected_model_case() {
     let settings = Settings::default();
     let providers = case_sensitive_client_export_test_providers();
 
-    let error = opencode_config_text(None, &settings, &providers, "minimax-cn/MINIMAX-M3").unwrap_err();
+    let error =
+        opencode_config_text(None, &settings, &providers, "minimax-cn/MINIMAX-M3").unwrap_err();
 
     assert!(error.contains("Gateway model is not exported: minimax-cn/MINIMAX-M3"));
 }
@@ -2006,6 +2015,60 @@ fn yaml_string(value: &serde_yaml::Value) -> &str {
         serde_yaml::Value::String(text) => text.as_str(),
         other => panic!("expected YAML string, got {other:?}"),
     }
+}
+
+fn expected_pi_thinking_level_map(offered: &[&str]) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+        if offered.contains(&level) {
+            map.insert(level.to_string(), serde_json::json!(level));
+        } else {
+            map.insert(level.to_string(), serde_json::Value::Null);
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+fn yaml_thinking_level_map_to_json(value: &serde_yaml::Value) -> serde_json::Value {
+    let mapping = value
+        .as_mapping()
+        .unwrap_or_else(|| panic!("thinkingLevelMap must be a YAML mapping, got {value:?}"));
+    let mut map = serde_json::Map::new();
+    for (key, mapped) in mapping {
+        let key = yaml_string(key).to_string();
+        let mapped = match mapped {
+            serde_yaml::Value::Null => serde_json::Value::Null,
+            serde_yaml::Value::String(text) => serde_json::Value::String(text.clone()),
+            other => panic!("unexpected thinkingLevelMap value for {key}: {other:?}"),
+        };
+        map.insert(key, mapped);
+    }
+    serde_json::Value::Object(map)
+}
+
+fn omp_thinking_level_map(
+    text: &str,
+    provider_id: &str,
+    model_id: &str,
+) -> Option<serde_json::Value> {
+    let document: serde_yaml::Value = serde_yaml::from_str(text).unwrap();
+    document
+        .get("providers")
+        .and_then(|providers| providers.get(provider_id))
+        .and_then(|provider| providers_yaml_model(provider, model_id))
+        .and_then(|model| model.get("thinkingLevelMap"))
+        .map(yaml_thinking_level_map_to_json)
+}
+
+fn providers_yaml_model<'a>(
+    provider: &'a serde_yaml::Value,
+    model_id: &str,
+) -> Option<&'a serde_yaml::Value> {
+    provider
+        .get("models")?
+        .as_sequence()?
+        .iter()
+        .find(|model| model.get("id").and_then(serde_yaml::Value::as_str) == Some(model_id))
 }
 
 #[test]
@@ -2288,8 +2351,22 @@ fn client_exports_map_configured_reasoning_contract() {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or_else(|| panic!("missing Pi reasoning flag for {model_id}"))
     };
+    let expected_thinking_map = expected_pi_thinking_level_map(&["low", "high", "xhigh"]);
+    let pi_entry = |model_id: &str| {
+        pi_models
+            .iter()
+            .find(|model| model["id"] == model_id)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing Pi model {model_id}"))
+    };
     assert!(pi_reasoning("glm-5.2"));
+    assert_eq!(
+        pi_entry("glm-5.2").get("thinkingLevelMap"),
+        Some(&expected_thinking_map)
+    );
+    let pi_flash = pi_entry("glm-5.2-flash");
     assert!(!pi_reasoning("glm-5.2-flash"));
+    assert!(pi_flash.get("thinkingLevelMap").is_none());
 
     let omp_text = omp_models_yml_text(None, &settings, &providers, "volc/glm-5.2").unwrap();
     let omp_block = |model_id: &str| {
@@ -2301,7 +2378,205 @@ fn client_exports_map_configured_reasoning_contract() {
             .to_string()
     };
     assert!(omp_block("glm-5.2").contains("reasoning: true"));
+    assert_eq!(
+        omp_thinking_level_map(&omp_text, "codexhub-volc", "glm-5.2"),
+        Some(expected_thinking_map.clone())
+    );
     assert!(omp_block("glm-5.2-flash").contains("reasoning: false"));
+    assert!(omp_thinking_level_map(&omp_text, "codexhub-volc", "glm-5.2-flash").is_none());
+
+    let grok_text = grok_config_text(None, &settings, &providers, "volc/glm-5.2").unwrap();
+    let grok_root: toml::Table = toml::from_str(&grok_text).unwrap();
+    let grok_models = grok_root
+        .get("model")
+        .and_then(toml::Value::as_table)
+        .expect("Grok model tables");
+    let grok_entry = |key: &str| {
+        grok_models
+            .get(key)
+            .and_then(toml::Value::as_table)
+            .unwrap_or_else(|| panic!("missing Grok model table {key}; got {grok_text}"))
+    };
+    let grok_capable = grok_entry("codexhub-volc-glm-5.2");
+    assert_eq!(
+        grok_capable
+            .get("supports_reasoning_effort")
+            .and_then(toml::Value::as_bool),
+        Some(true),
+        "Grok picker needs the effort gate: {grok_text}"
+    );
+    assert_eq!(
+        grok_capable
+            .get("reasoning_effort")
+            .and_then(toml::Value::as_str),
+        Some("high")
+    );
+    let grok_efforts = grok_capable
+        .get("reasoning_efforts")
+        .and_then(toml::Value::as_array)
+        .expect("Grok reasoning_efforts menu");
+    let grok_effort_values: Vec<&str> = grok_efforts
+        .iter()
+        .filter_map(|entry| entry.get("value").and_then(toml::Value::as_str))
+        .collect();
+    assert_eq!(grok_effort_values, ["low", "high", "xhigh"]);
+    let grok_defaults: Vec<bool> = grok_efforts
+        .iter()
+        .map(|entry| {
+            entry
+                .get("default")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(grok_defaults, [false, true, false]);
+
+    let grok_incapable = grok_entry("codexhub-volc-glm-5.2-flash");
+    assert!(grok_incapable.get("supports_reasoning_effort").is_none());
+    assert!(grok_incapable.get("reasoning_effort").is_none());
+    assert!(grok_incapable.get("reasoning_efforts").is_none());
+}
+
+#[test]
+fn grok_config_omits_unknown_reasoning_effort_grades() {
+    let settings = Settings {
+        include_official_models: false,
+        ..Settings::default()
+    };
+    let providers = vec![Provider {
+        id: "volc".to_string(),
+        name: "Volcengine".to_string(),
+        base_url: "https://ark.example.test/v1".to_string(),
+        api_key: None,
+        upstream_format: None,
+        available_upstream_formats: None,
+        tool_protocol: None,
+        tool_surface_strategy: None,
+        reports_cached_input_tokens: None,
+        supports_developer_role: None,
+        display_prefix: Some("Volc".to_string()),
+        auth_capabilities: None,
+        onboarding_hint: None,
+        discovery_policy: None,
+        sort_order: Some(1),
+        enabled: true,
+        locked: false,
+        models: vec![Model {
+            id: "sol-proxy".to_string(),
+            display_name: Some("Sol Proxy".to_string()),
+            supported_reasoning_levels: Some(vec![
+                "low".to_string(),
+                "ultra".to_string(),
+                "high".to_string(),
+            ]),
+            default_reasoning_level: Some("ultra".to_string()),
+            gateway_exported: true,
+            ..Model::default()
+        }],
+    }];
+
+    let grok_text = grok_config_text(None, &settings, &providers, "volc/sol-proxy").unwrap();
+    let grok_root: toml::Table = toml::from_str(&grok_text).unwrap();
+    let entry = grok_root["model"]["codexhub-volc-sol-proxy"]
+        .as_table()
+        .expect("Grok model table");
+    let values: Vec<&str> = entry["reasoning_efforts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.get("value").and_then(toml::Value::as_str))
+        .collect();
+    assert_eq!(values, ["low", "high"], "{grok_text}");
+    assert_eq!(
+        entry.get("reasoning_effort").and_then(toml::Value::as_str),
+        Some("high"),
+        "unknown ultra must snap to the nearest remaining Grok grade: {grok_text}"
+    );
+    assert!(!grok_text.contains("ultra"));
+
+    let root = unique_temp_dir("codexhub-pi-omp-unknown-effort");
+    let models_path = root.join("models.json");
+    fs::create_dir_all(root.as_path()).unwrap();
+    let expected_thinking_map = expected_pi_thinking_level_map(&["low", "high"]);
+    let pi_text = pi_models_text(&models_path, &settings, &providers, "volc/sol-proxy").unwrap();
+    let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
+    assert_eq!(
+        pi_value.pointer("/providers/codexhub-volc/models/0/thinkingLevelMap"),
+        Some(&expected_thinking_map),
+        "{pi_text}"
+    );
+    assert!(!pi_text.contains("ultra"));
+
+    let omp_text = omp_models_yml_text(None, &settings, &providers, "volc/sol-proxy").unwrap();
+    assert_eq!(
+        omp_thinking_level_map(&omp_text, "codexhub-volc", "sol-proxy"),
+        Some(expected_thinking_map)
+    );
+    assert!(!omp_text.contains("ultra"));
+}
+
+#[test]
+fn pi_and_omp_map_catalog_none_to_thinking_off() {
+    let root = unique_temp_dir("codexhub-pi-omp-none-off");
+    let models_path = root.join("models.json");
+    fs::create_dir_all(root.as_path()).unwrap();
+    let settings = Settings {
+        include_official_models: false,
+        ..Settings::default()
+    };
+    let providers = vec![Provider {
+        id: "volc".to_string(),
+        name: "Volcengine".to_string(),
+        base_url: "https://ark.example.test/v1".to_string(),
+        api_key: None,
+        upstream_format: None,
+        available_upstream_formats: None,
+        tool_protocol: None,
+        tool_surface_strategy: None,
+        reports_cached_input_tokens: None,
+        supports_developer_role: None,
+        display_prefix: Some("Volc".to_string()),
+        auth_capabilities: None,
+        onboarding_hint: None,
+        discovery_policy: None,
+        sort_order: Some(1),
+        enabled: true,
+        locked: false,
+        models: vec![Model {
+            id: "toggle-proxy".to_string(),
+            display_name: Some("Toggle Proxy".to_string()),
+            supported_reasoning_levels: Some(vec!["none".to_string(), "low".to_string()]),
+            thinking_mode: Some("toggle".to_string()),
+            gateway_exported: true,
+            ..Model::default()
+        }],
+    }];
+
+    let expected_thinking_map = expected_pi_thinking_level_map(&["off", "low"]);
+    let pi_text = pi_models_text(&models_path, &settings, &providers, "volc/toggle-proxy").unwrap();
+    let pi_value: serde_json::Value = serde_json::from_str(&pi_text).unwrap();
+    assert_eq!(
+        pi_value.pointer("/providers/codexhub-volc/models/0/thinkingLevelMap"),
+        Some(&expected_thinking_map),
+        "{pi_text}"
+    );
+
+    let omp_text = omp_models_yml_text(None, &settings, &providers, "volc/toggle-proxy").unwrap();
+    assert_eq!(
+        omp_thinking_level_map(&omp_text, "codexhub-volc", "toggle-proxy"),
+        Some(expected_thinking_map)
+    );
+
+    let grok_text = grok_config_text(None, &settings, &providers, "volc/toggle-proxy").unwrap();
+    let grok_root: toml::Table = toml::from_str(&grok_text).unwrap();
+    let grok_values: Vec<&str> = grok_root["model"]["codexhub-volc-toggle-proxy"]
+        ["reasoning_efforts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.get("value").and_then(toml::Value::as_str))
+        .collect();
+    assert_eq!(grok_values, ["none", "low"], "{grok_text}");
 }
 
 #[test]
@@ -2670,11 +2945,33 @@ fn client_projection_uses_flat_label_and_provider_max_output() {
         .iter()
         .map(|model| (model["id"].as_str().unwrap().to_string(), model.clone()))
         .collect::<HashMap<_, _>>();
-    assert_eq!(pi_by_id["glm-5.3"]["name"], serde_json::json!("Volc GLM-5.3"));
-    assert_eq!(pi_by_id["custom-flash"]["name"], serde_json::json!("Volc My Flash"));
-    assert_eq!(pi_by_id["no-name"]["name"], serde_json::json!("Volc no-name"));
+    assert_eq!(
+        pi_by_id["glm-5.3"]["name"],
+        serde_json::json!("Volc GLM-5.3")
+    );
+    assert_eq!(
+        pi_by_id["custom-flash"]["name"],
+        serde_json::json!("Volc My Flash")
+    );
+    assert_eq!(
+        pi_by_id["no-name"]["name"],
+        serde_json::json!("Volc no-name")
+    );
     assert_eq!(pi_by_id["glm-5.3"]["maxTokens"], serde_json::json!(128_000));
     assert!(pi_by_id["no-name"].get("maxTokens").is_none());
+    assert_eq!(
+        pi_by_id["glm-5.3"]["thinkingLevelMap"],
+        expected_pi_thinking_level_map(&["low", "high"])
+    );
+    assert_eq!(
+        pi_by_id["custom-flash"]["thinkingLevelMap"],
+        expected_pi_thinking_level_map(&["off", "low"])
+    );
+    assert_eq!(
+        pi_by_id["no-name"]["thinkingLevelMap"],
+        expected_pi_thinking_level_map(&["off"])
+    );
+    assert_eq!(pi_by_id["no-name"]["reasoning"], serde_json::json!(true));
 
     let omp_text = omp_models_yml_text(None, &settings, &providers, "volc/glm-5.3").unwrap();
     assert!(omp_text.contains("name: \"Volc GLM-5.3\""));
@@ -2682,6 +2979,46 @@ fn client_projection_uses_flat_label_and_provider_max_output() {
     assert!(omp_text.contains("name: \"Volc no-name\""));
     assert!(omp_text.contains("maxTokens: 128000"));
     assert!(!omp_text.contains("maxTokens: 32768"));
+    assert_eq!(
+        omp_thinking_level_map(&omp_text, "codexhub-volc", "glm-5.3"),
+        Some(expected_pi_thinking_level_map(&["low", "high"]))
+    );
+    assert_eq!(
+        omp_thinking_level_map(&omp_text, "codexhub-volc", "custom-flash"),
+        Some(expected_pi_thinking_level_map(&["off", "low"]))
+    );
+    assert_eq!(
+        omp_thinking_level_map(&omp_text, "codexhub-volc", "no-name"),
+        Some(expected_pi_thinking_level_map(&["off"]))
+    );
+
+    let grok_text = grok_config_text(None, &settings, &providers, "volc/glm-5.3").unwrap();
+    let grok_root: toml::Table = toml::from_str(&grok_text).unwrap();
+    let grok_models = grok_root
+        .get("model")
+        .and_then(toml::Value::as_table)
+        .expect("Grok model tables");
+    let grok_efforts = |key: &str| -> Vec<&str> {
+        grok_models
+            .get(key)
+            .and_then(|entry| entry.get("reasoning_efforts"))
+            .and_then(toml::Value::as_array)
+            .unwrap_or_else(|| panic!("missing Grok reasoning_efforts for {key}; got {grok_text}"))
+            .iter()
+            .filter_map(|item| item.get("value").and_then(toml::Value::as_str))
+            .collect()
+    };
+    assert_eq!(grok_efforts("codexhub-volc-glm-5.3"), ["low", "high"]);
+    assert_eq!(grok_efforts("codexhub-volc-custom-flash"), ["low", "none"]);
+    assert_eq!(grok_efforts("codexhub-volc-no-name"), ["none"]);
+    assert!(
+        grok_models["codexhub-volc-glm-5.3"]["reasoning_efforts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.get("value").and_then(toml::Value::as_str) != Some("none")),
+        "always_on must not invent Grok none: {grok_text}"
+    );
 
     let zcode_catalog = zcode_catalog_text(&settings, &providers, "volc/glm-5.3").unwrap();
     let zcode_catalog_value: serde_json::Value = serde_json::from_str(&zcode_catalog).unwrap();
@@ -2696,7 +3033,10 @@ fn client_projection_uses_flat_label_and_provider_max_output() {
         zcode_catalog_value.pointer("/providers/0/name"),
         Some(&serde_json::json!("CodexHub Volcengine"))
     );
-    assert_eq!(zcode_by_id["glm-5.3"]["name"], serde_json::json!("Volc GLM-5.3"));
+    assert_eq!(
+        zcode_by_id["glm-5.3"]["name"],
+        serde_json::json!("Volc GLM-5.3")
+    );
     assert_eq!(
         zcode_by_id["glm-5.3"]["maxOutputTokens"],
         serde_json::json!(128_000)
@@ -2716,7 +3056,8 @@ fn client_projection_uses_flat_label_and_provider_max_output() {
     assert!(zcode_by_id["no-name"].get("maxOutputTokens").is_none());
 
     let zcode_v2 =
-        super::zcode_v2_config_text(&v2_config_path, &settings, &providers, "volc/glm-5.3").unwrap();
+        super::zcode_v2_config_text(&v2_config_path, &settings, &providers, "volc/glm-5.3")
+            .unwrap();
     let zcode_v2_value: serde_json::Value = serde_json::from_str(&zcode_v2).unwrap();
     assert_eq!(
         zcode_v2_value.pointer("/provider/codexhub-volc/models/glm-5.3/limit/output"),
@@ -2733,70 +3074,71 @@ fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
         include_official_models: false,
         ..Settings::default()
     };
-    let providers = vec![Provider {
-        id: "commandcode".to_string(),
-        name: "Command Code".to_string(),
-        base_url: "https://commandcode.example.test/v1".to_string(),
-        api_key: None,
-        upstream_format: None,
-        available_upstream_formats: None,
-        tool_protocol: None,
-        tool_surface_strategy: None,
-        reports_cached_input_tokens: None,
-        supports_developer_role: None,
-        display_prefix: Some("Command Code".to_string()),
-        auth_capabilities: None,
-        onboarding_hint: None,
-        discovery_policy: None,
-        sort_order: Some(1),
-        enabled: true,
-        locked: false,
-        models: vec![
-            Model {
-                id: "deepseek/deepseek-v4.1-flash".to_string(),
-                display_name: None,
+    let providers = vec![
+        Provider {
+            id: "commandcode".to_string(),
+            name: "Command Code".to_string(),
+            base_url: "https://commandcode.example.test/v1".to_string(),
+            api_key: None,
+            upstream_format: None,
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: Some("Command Code".to_string()),
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
+            sort_order: Some(1),
+            enabled: true,
+            locked: false,
+            models: vec![
+                Model {
+                    id: "deepseek/deepseek-v4.1-flash".to_string(),
+                    display_name: None,
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+                Model {
+                    id: "deepseek/deepseek-v4.1-flash-dup".to_string(),
+                    display_name: Some("deepseek/deepseek-v4.1-flash-dup".to_string()),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+                Model {
+                    id: "moonshotai/kimi-k3".to_string(),
+                    display_name: Some("Kimi K3".to_string()),
+                    gateway_exported: true,
+                    ..Model::default()
+                },
+            ],
+        },
+        Provider {
+            id: "opencode-go".to_string(),
+            name: "OpenCode Go".to_string(),
+            base_url: "https://opencode.example.test/v1".to_string(),
+            api_key: None,
+            upstream_format: None,
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: Some("OpenCode".to_string()),
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
+            sort_order: Some(2),
+            enabled: true,
+            locked: false,
+            models: vec![Model {
+                id: "deepseek-v4.1-flash".to_string(),
+                display_name: Some("DeepSeek V4.1 Flash".to_string()),
                 gateway_exported: true,
                 ..Model::default()
-            },
-            Model {
-                id: "deepseek/deepseek-v4.1-flash-dup".to_string(),
-                display_name: Some("deepseek/deepseek-v4.1-flash-dup".to_string()),
-                gateway_exported: true,
-                ..Model::default()
-            },
-            Model {
-                id: "moonshotai/kimi-k3".to_string(),
-                display_name: Some("Kimi K3".to_string()),
-                gateway_exported: true,
-                ..Model::default()
-            },
-        ],
-    },
-    Provider {
-        id: "opencode-go".to_string(),
-        name: "OpenCode Go".to_string(),
-        base_url: "https://opencode.example.test/v1".to_string(),
-        api_key: None,
-        upstream_format: None,
-        available_upstream_formats: None,
-        tool_protocol: None,
-        tool_surface_strategy: None,
-        reports_cached_input_tokens: None,
-        supports_developer_role: None,
-        display_prefix: Some("OpenCode".to_string()),
-        auth_capabilities: None,
-        onboarding_hint: None,
-        discovery_policy: None,
-        sort_order: Some(2),
-        enabled: true,
-        locked: false,
-        models: vec![Model {
-            id: "deepseek-v4.1-flash".to_string(),
-            display_name: Some("DeepSeek V4.1 Flash".to_string()),
-            gateway_exported: true,
-            ..Model::default()
-        }],
-    },
+            }],
+        },
     ];
 
     let gateway_by_id = gateway_models_from_config(&settings, &providers)
@@ -2862,11 +3204,13 @@ fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
     .unwrap();
     let opencode_value: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
     assert_eq!(
-        opencode_value.pointer("/provider/codexhub-commandcode/models").and_then(|models| {
-            models
-                .get("deepseek/deepseek-v4.1-flash")
-                .and_then(|model| model.get("name"))
-        }),
+        opencode_value
+            .pointer("/provider/codexhub-commandcode/models")
+            .and_then(|models| {
+                models
+                    .get("deepseek/deepseek-v4.1-flash")
+                    .and_then(|model| model.get("name"))
+            }),
         Some(&serde_json::json!("CC deepseek-v4.1-flash"))
     );
 

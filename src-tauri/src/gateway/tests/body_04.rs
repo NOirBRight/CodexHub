@@ -562,6 +562,95 @@ theme = "dark"
     }
 
     #[test]
+    fn isolated_apply_projects_reasoning_contract_into_grok_pi_omp() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let settings = Settings {
+            proxy_port: 9099,
+            gateway_client_key: "isolated-key".to_string(),
+            include_official_models: false,
+            ..Settings::default()
+        };
+        let providers = super::reasoning_contract_client_export_test_providers();
+        let expected_map = super::expected_pi_thinking_level_map(&["low", "high", "xhigh"]);
+
+        let grok_root = fresh_root("reasoning-grok");
+        let grok_isolated = validate_isolated_root(&grok_root).unwrap();
+        let grok_inp = input("grok", "volc/glm-5.2", settings.clone(), providers.clone());
+        assert!(
+            apply_gateway_client_config_isolated(&grok_isolated, &grok_inp)
+                .unwrap()
+                .applied
+        );
+        let grok_table = parse_grok_toml(&grok_isolated.root().join("grok/config.toml"));
+        let capable = grok_table["model"]["codexhub-volc-glm-5.2"]
+            .as_table()
+            .unwrap();
+        assert_eq!(capable["supports_reasoning_effort"].as_bool(), Some(true));
+        assert_eq!(capable["reasoning_effort"].as_str(), Some("high"));
+        let grok_values: Vec<&str> = capable["reasoning_efforts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item.get("value").and_then(toml::Value::as_str))
+            .collect();
+        assert_eq!(grok_values, ["low", "high", "xhigh"]);
+        assert!(grok_table["model"]["codexhub-volc-glm-5.2-flash"]
+            .as_table()
+            .unwrap()
+            .get("supports_reasoning_effort")
+            .is_none());
+
+        let pi_root = fresh_root("reasoning-pi");
+        let pi_isolated = validate_isolated_root(&pi_root).unwrap();
+        let pi_inp = input("pi", "volc/glm-5.2", settings.clone(), providers.clone());
+        assert!(
+            apply_gateway_client_config_isolated(&pi_isolated, &pi_inp)
+                .unwrap()
+                .applied
+        );
+        let pi_value: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(pi_isolated.root().join("pi/models.json")).unwrap(),
+        )
+        .unwrap();
+        let pi_models = pi_value["providers"]["codexhub-volc"]["models"]
+            .as_array()
+            .unwrap();
+        let pi_entry = |model_id: &str| {
+            pi_models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .unwrap_or_else(|| panic!("missing Pi model {model_id}"))
+        };
+        assert_eq!(pi_entry("glm-5.2")["thinkingLevelMap"], expected_map);
+        assert!(pi_entry("glm-5.2-flash").get("thinkingLevelMap").is_none());
+
+        let omp_root = fresh_root("reasoning-omp");
+        let omp_isolated = validate_isolated_root(&omp_root).unwrap();
+        let omp_inp = input("omp", "volc/glm-5.2", settings, providers);
+        assert!(
+            apply_gateway_client_config_isolated(&omp_isolated, &omp_inp)
+                .unwrap()
+                .applied
+        );
+        let omp_text = fs::read_to_string(omp_isolated.root().join("omp/models.yml")).unwrap();
+        assert_eq!(
+            super::omp_thinking_level_map(&omp_text, "codexhub-volc", "glm-5.2"),
+            Some(expected_map)
+        );
+        assert!(
+            super::omp_thinking_level_map(&omp_text, "codexhub-volc", "glm-5.2-flash").is_none()
+        );
+        assert!(
+            readback_gateway_client_config_isolated(&omp_isolated, &omp_inp)
+                .unwrap()
+                .ok
+        );
+    }
+
+    #[test]
     fn isolated_five_client_switches_round_trip_without_host_writes() {
         let _guard = TEST_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
