@@ -4543,6 +4543,27 @@ def prepare_exchange(
         if inbound == "chat_completions" and outbound == "responses":
             upstream = chat_completions_request_to_responses_body(conversion_body)
             return converted(upstream)
+        if outbound == "anthropic_messages":
+            import anthropic_messages
+
+            if inbound == "responses":
+                request_payload = source_payload
+                keep_reasoning = True
+                _consume_codex_chat_transport_fields(
+                    request_payload,
+                    preserve_reasoning_history=keep_reasoning,
+                )
+                chat_body = responses_request_to_chat_completion_body(
+                    json.dumps(
+                        request_payload,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8"),
+                    preserve_reasoning_history=keep_reasoning,
+                )
+                return converted(anthropic_messages.chat_request_to_anthropic_body(chat_body))
+            if inbound == "chat_completions":
+                return converted(anthropic_messages.chat_request_to_anthropic_body(conversion_body))
         if inbound == outbound:
             stream = bool(
                 re.search(rb'"stream"\s*:\s*true\b', request_body, flags=re.IGNORECASE)

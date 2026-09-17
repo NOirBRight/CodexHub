@@ -308,6 +308,33 @@ def test_grok_official_strict_tools_get_additional_properties():
     assert "additionalProperties" not in _GROK_RESPONSES["tools"][0]["parameters"]
 
 
+def test_grok_opencode_go_union_alpha_prepares_anthropic_messages():
+    case = {
+        "id": "opencode-go",
+        "upstream": {
+            "name": "opencode_go",
+            "upstream_model": "union-alpha",
+            "upstream_format": "auto",
+            "base_url": "https://opencode.ai/zen/go/v1",
+        },
+    }
+    transformed, decision = _prepare_endpoint(
+        {**_GROK_RESPONSES, "model": "union-alpha"},
+        case,
+        "responses",
+    )
+    attempt = decision.primary_attempt
+    assert decision.behavior_profile == (
+        route_primitives.BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED
+    )
+    assert attempt.selected_upstream_format == "anthropic_messages"
+    assert attempt.endpoint_url.endswith("/messages")
+    assert transformed["model"] == "union-alpha"
+    assert transformed["messages"][0]["role"] == "user"
+    assert transformed["tools"][0]["name"] == "read_file"
+    assert "input_schema" in transformed["tools"][0]
+
+
 def test_grok_opencode_go_drops_console_go_rejected_fields():
     transformed = _mutate(_GROK_RESPONSES, _RESPONSES_PROVIDERS[1]["upstream"])
     for field in ("include", "prompt_cache_key", "store", "max_output_tokens"):

@@ -484,7 +484,19 @@ def load_providers(path: Path | None = None) -> list[ProviderConfig]:
         _apply_bundled_multi_agent_version_defaults(providers)
         _apply_bundled_model_limit_defaults(providers)
         _apply_catalog_display_name_refresh(providers)
+        _drop_retired_maintained_models(providers)
     return providers
+
+
+def _drop_retired_maintained_models(providers: Iterable[ProviderConfig]) -> None:
+    import maintained_catalog
+
+    for provider in providers:
+        provider.models[:] = [
+            model
+            for model in provider.models
+            if not maintained_catalog.is_retired_maintained_model(provider.id, model.id)
+        ]
 
 
 def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:

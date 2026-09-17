@@ -14,6 +14,7 @@ from gateway_interfaces import RequestAdmission, RelayWriter, UpstreamResponseLi
 import http.client
 import urllib.error
 
+import anthropic_messages
 import collaboration_adapter
 import gateway_compat
 import gateway_errors
@@ -793,11 +794,18 @@ def relay_upstream_response(
             incomplete_frame = False
 
             try:
+                anthropic_converter = (
+                    anthropic_messages.AnthropicToChatStreamConverter()
+                    if upstream_format == "anthropic_messages"
+                    else None
+                )
                 for frame in iter_upstream_sse_events(
                     response,
                     read_lines=self._iter_upstream_sse_lines,
                     event_resets_idle_timeout=(
-                        gateway_stream_semantics._chat_sse_event_resets_idle_timeout
+                        anthropic_messages.sse_event_resets_idle_timeout
+                        if upstream_format == "anthropic_messages"
+                        else gateway_stream_semantics._chat_sse_event_resets_idle_timeout
                         if upstream_format == "chat_completions"
                         else gateway_stream_semantics._responses_sse_event_resets_idle_timeout
                     ),
@@ -805,11 +813,16 @@ def relay_upstream_response(
                 ):
                     payload = gateway_stream_semantics._converted_sse_payload(
                         frame,
-                        verified_source_format=verified_source_format,
+                        verified_source_format=None if upstream_format == "anthropic_messages" else verified_source_format,
                     )
                     if payload is None:
                         continue
-                    if upstream_format == "chat_completions":
+                    if anthropic_converter is not None:
+                        event_name = frame.event.decode("utf-8") if frame.event else None
+                        chat_chunks.extend(
+                            anthropic_messages.chat_chunks_for_sse_event(event_name, payload, anthropic_converter)
+                        )
+                    elif upstream_format == "chat_completions":
                         chat_chunks.append(payload)
                     elif payload != "[DONE]":
                         events.append(payload)
@@ -831,7 +844,7 @@ def relay_upstream_response(
                             "Upstream SSE stream ended with an incomplete pending frame"
                         )
                     if (
-                        upstream_format == "chat_completions"
+                        upstream_format in {"chat_completions", "anthropic_messages"}
                         and not want_chat_output
                     ):
                         response_events = gateway_stream_semantics._chat_stream_chunks_to_response_events(
@@ -891,6 +904,9 @@ def relay_upstream_response(
             if converted_stream_failure:
                 pass
             elif want_chat_output:
+                if upstream_format == "anthropic_messages":
+                    body = anthropic_messages.anthropic_message_to_chat_completion_body(body)
+                    upstream_format = "chat_completions"
                 if upstream_format == "chat_completions":
                     body = gateway_stream_semantics.response_body_to_chat_completion_body(
                         gateway_compat.compatible_response_body(
@@ -912,7 +928,9 @@ def relay_upstream_response(
                         mutated_body,
                         preserve_reasoning_history=preserve_reasoning_history,
                     )
-            elif upstream_format == "chat_completions":
+            elif upstream_format in {"chat_completions", "anthropic_messages"}:
+                if upstream_format == "anthropic_messages":
+                    body = anthropic_messages.anthropic_message_to_chat_completion_body(body)
                 if buffered_chat_sse_to_responses:
                     converted_body = body
                 else:
@@ -1349,11 +1367,16 @@ def relay_upstream_response(
 
         if (
             streaming_policy == StreamingPolicy.TRANSPARENT_CONVERTED
-            and upstream_format == "chat_completions"
+            and upstream_format in {"chat_completions", "anthropic_messages"}
             and not want_chat_output
         ):
             line_ending = b"\n"
             converter = _ChatToResponsesStreamConverter()
+            anthropic_converter = (
+                anthropic_messages.AnthropicToChatStreamConverter()
+                if upstream_format == "anthropic_messages"
+                else None
+            )
             incomplete_frame = False
 
             def write_converted_response_event(event: Mapping[str, Any]) -> bool:
@@ -1382,19 +1405,28 @@ def relay_upstream_response(
                 for frame in iter_upstream_sse_events(
                     response,
                     read_lines=self._iter_upstream_sse_lines,
-                    event_resets_idle_timeout=gateway_stream_semantics._chat_sse_event_resets_idle_timeout,
+                    event_resets_idle_timeout=(
+                        anthropic_messages.sse_event_resets_idle_timeout
+                        if upstream_format == "anthropic_messages"
+                        else gateway_stream_semantics._chat_sse_event_resets_idle_timeout
+                    ),
                     on_chunk=observe_diagnostic_sse_line,
                 ):
                     payload = gateway_stream_semantics._converted_sse_payload(
                         frame,
-                        verified_source_format=verified_source_format,
+                        verified_source_format=None if upstream_format == "anthropic_messages" else verified_source_format,
                     )
                     if payload is None:
                         continue
+                    event_name = frame.event.decode("utf-8") if frame.event else None
+                    chat_payloads = anthropic_messages.chat_chunks_for_sse_event(
+                        event_name, payload, anthropic_converter
+                    )
                     events: list[dict[str, Any]] = []
-                    if payload == "[DONE]":
-                        events = converter.events_for_done()
-                    else:
+                    for payload in chat_payloads:
+                        if payload == "[DONE]":
+                            events.extend(converter.events_for_done())
+                            continue
                         chat_error_detail = gateway_errors._redact_identity_in_text(
                             gateway_stream_semantics._chat_stream_error_detail(payload) or "",
                             relay_redact_identity,
@@ -1429,7 +1461,7 @@ def relay_upstream_response(
                             frame.raw,
                             upstream_format=upstream_format,
                         )
-                        events = converter.events_for_chunk(payload)
+                        events.extend(converter.events_for_chunk(payload))
                     for event in events:
                         try:
                             if not write_converted_response_event(event):
@@ -1736,36 +1768,50 @@ def relay_upstream_response(
             )
             return status
 
-        if upstream_format == "chat_completions":
+        if upstream_format in {"chat_completions", "anthropic_messages"}:
             line_ending = b"\n"
             chunks: list[Mapping[str, Any] | str] = []
+            anthropic_converter = (
+                anthropic_messages.AnthropicToChatStreamConverter()
+                if upstream_format == "anthropic_messages"
+                else None
+            )
             incomplete_frame = False
             try:
                 for frame in iter_upstream_sse_events(
                     response,
                     read_lines=self._iter_upstream_sse_lines,
-                    event_resets_idle_timeout=gateway_stream_semantics._chat_sse_event_resets_idle_timeout,
+                    event_resets_idle_timeout=(
+                        anthropic_messages.sse_event_resets_idle_timeout
+                        if upstream_format == "anthropic_messages"
+                        else gateway_stream_semantics._chat_sse_event_resets_idle_timeout
+                    ),
                     on_chunk=observe_diagnostic_sse_line,
                 ):
                     line_ending = gateway_sse._sse_line_ending(frame.raw)
                     payload = gateway_stream_semantics._converted_sse_payload(
                         frame,
-                        verified_source_format=verified_source_format,
+                        verified_source_format=None if upstream_format == "anthropic_messages" else verified_source_format,
                     )
                     if payload is None:
                         continue
-                    if payload == "[DONE]":
-                        chunks.append("[DONE]")
-                        continue
-                    chunks.append(payload)
-                    if usage_policy == UsagePolicy.ASYNC_TAP:
-                        gateway_events.offer_usage_observed_sse_line(
-                            usage_context,
-                            frame.raw,
-                            upstream_format=upstream_format,
-                        )
-                    else:
-                        gateway_events.capture_usage(usage_capture, gateway_events._usage_from_payload(payload))
+                    event_name = frame.event.decode("utf-8") if frame.event else None
+                    chat_payloads = anthropic_messages.chat_chunks_for_sse_event(
+                        event_name, payload, anthropic_converter
+                    )
+                    for payload in chat_payloads:
+                        if payload == "[DONE]":
+                            chunks.append("[DONE]")
+                            continue
+                        chunks.append(payload)
+                        if usage_policy == UsagePolicy.ASYNC_TAP:
+                            gateway_events.offer_usage_observed_sse_line(
+                                usage_context,
+                                frame.raw,
+                                upstream_format=upstream_format,
+                            )
+                        else:
+                            gateway_events.capture_usage(usage_capture, gateway_events._usage_from_payload(payload))
             except (UpstreamSseSemanticError, SseFrameTooLargeError) as exc:
                 return finish_converted_sse_semantic_error(exc)
             except UpstreamStreamIncompleteError:

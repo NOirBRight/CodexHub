@@ -27,6 +27,25 @@ MAINTAINED_PROVIDER_IDS = frozenset(
     }
 )
 
+# Retired maintained (provider_id, model_id) rows.  ADR-0009: removed from
+# the runtime Preset on catalog apply, discovery, and Gateway load.
+RETIRED_MAINTAINED_MODELS = frozenset({("opencode-go", "omen-alpha")})
+
+# Request-time routing facts, keyed by (provider_id, model_id).  The only
+# maintained model that is Anthropic Messages on the wire is union-alpha;
+# every other maintained model resolves to its Provider's configured format.
+# Routing imports this table at call time (ADR-0007) and never reads
+# per-model rows from providers.toml.
+MAINTAINED_UPSTREAM_FORMATS = {("opencode-go", "union-alpha"): "anthropic_messages"}
+
+
+def maintained_upstream_format(provider_id: str, model_id: str) -> str | None:
+    return MAINTAINED_UPSTREAM_FORMATS.get((str(provider_id), str(model_id)))
+
+
+def is_retired_maintained_model(provider_id: str, model_id: str) -> bool:
+    return (str(provider_id), str(model_id)) in RETIRED_MAINTAINED_MODELS
+
 # xAI is Preset-owned (ADR-0009) but still shares grok family policy.
 FAMILY_POLICY_PROVIDER_IDS = MAINTAINED_PROVIDER_IDS | {"xai"}
 
@@ -311,6 +330,7 @@ _LEAF_DISPLAY_NAMES = {
     "muse-spark-1.2-contributor": "Muse Spark 1.2 Contributor",
     "muse-spark-1.3": "Muse Spark 1.3",
     "muse-spark-1.3-contributor": "Muse Spark 1.3 Contributor",
+    "union-alpha": "Union Alpha",
     "glm-5.3-flash": "GLM-5.3 Flash",
     "glm-5.3": "GLM-5.3",
     "glm-5.2": "GLM-5.2",
@@ -490,13 +510,13 @@ def _opencode_rows() -> tuple[MaintainedModel, ...]:
         ("qwen3.7-plus", "Qwen3.7 Plus", 1_000_000, 65_536, True, None),
         ("qwen3.6-plus", "Qwen3.6 Plus", 1_000_000, 65_536, True, None),
         ("qwen3.5-plus", "Qwen3.5 Plus", 1_000_000, 65_536, True, None),
-        ("omen-alpha", "Omen Alpha", 500_000, 128_000, True, "high"),
+        ("union-alpha", "Union Alpha", 262_144, 131_072, True, "medium"),
     )
     extra_levels = {
         "muse-spark-1.3-contributor": _FOUR,
         "deepseek-v4-pro": _LOW_HIGH_MAX,
         "deepseek-v4-flash": _LOW_HIGH_MAX,
-        "omen-alpha": _LOW_HIGH,
+        "union-alpha": _ALL,
     }
     rows: list[MaintainedModel] = []
     for index, (model_id, name, context_window, max_output_tokens, vision, default) in enumerate(specs, 1):

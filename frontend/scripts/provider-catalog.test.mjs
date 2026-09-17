@@ -277,6 +277,23 @@ test("empty discovered grok-4.6 inherits catalog levels instead of Codex max", (
   assert.equal(filled[0].default_reasoning_level, "high");
 });
 
+test("catalog apply drops retired maintained ids and keeps custom rows", () => {
+  const merged = mergeOfficialPresetModels(
+    [
+      { id: "omen-alpha", enabled: true, display_name: "Omen Alpha" },
+      { id: "custom-go-model", enabled: true, display_name: "Mine" },
+    ],
+    [{ id: "muse-spark-1.3-contributor", enabled: true, display_name: "Muse Spark 1.3 Contributor" }],
+    { providerId: "opencode-go", addMissing: true },
+  );
+  assert.equal(
+    merged.some((model) => model.id === "omen-alpha"),
+    false,
+  );
+  assert.equal(merged.find((model) => model.id === "custom-go-model")?.display_name, "Mine");
+  assert.equal(merged.at(-1)?.id, "muse-spark-1.3-contributor");
+});
+
 test("additive merge inserts missing official models without re-enabling user-disabled rows", () => {
   const merged = mergeOfficialPresetModels(
     [{ id: "grok-4", enabled: false, display_name: "My Grok" }],

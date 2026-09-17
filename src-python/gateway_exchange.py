@@ -589,7 +589,17 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
                         f"the bound of {_passthrough.EXCESSIVE_TOOL_LOOP_BOUND}.",
                     )
                 )
-    elif policy is MutationPolicy.GATEWAY_COMPATIBILITY and (prepared_exchange is not None or (not caller_is_chat and attempt.selected_upstream_format == "chat_completions")):
+    elif policy is MutationPolicy.GATEWAY_COMPATIBILITY and (
+        prepared_exchange is not None
+        or (
+            not caller_is_chat
+            and attempt.selected_upstream_format in {"chat_completions", "anthropic_messages"}
+        )
+        or (
+            caller_is_chat
+            and attempt.selected_upstream_format == "anthropic_messages"
+        )
+    ):
         conversion_body = _gateway_compat.compatible_request_body(conversion_body, upstream, model_id=request.inbound.model, event_context=request.event_context, inject_codex_tools=request.route_plan.tool_exposure.gateway_schema_injection, tool_protocol_override=attempt.tool_protocol, tool_surface_strategy_override=attempt.tool_surface_strategy, native_responses_tool_codec_override=attempt.native_responses_tool_codec)
         pre_compatibility_applied = True
     if prepared_exchange is None:

@@ -76,6 +76,22 @@ CASES = (
         "requires": "opencode-go",
     },
     {
+        "case_id": "opencode-go-union-alpha-responses",
+        "provider_id": "opencode-go",
+        "model": "union-alpha",
+        "inbound": "responses",
+        "endpoint": "/v1/providers/opencode-go/responses",
+        "requires": "opencode-go",
+    },
+    {
+        "case_id": "opencode-go-union-alpha-chat",
+        "provider_id": "opencode-go",
+        "model": "union-alpha",
+        "inbound": "chat_completions",
+        "endpoint": "/v1/providers/opencode-go/chat/completions",
+        "requires": "opencode-go",
+    },
+    {
         "case_id": "commandcode-responses",
         "provider_id": "commandcode",
         "model": "deepseek/deepseek-v4.1-flash",

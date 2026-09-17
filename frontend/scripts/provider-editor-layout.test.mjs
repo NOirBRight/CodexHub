@@ -101,3 +101,15 @@ test("Official usage header composes title, metric windows, and day/week on one 
   assert.match(officialDetail, /openaiSourceExcludedDetail/);
   assert.doesNotMatch(officialDetail, /账户与用量/);
 });
+
+test("model settings overlay is a nested dialog that consumes Escape", async () => {
+  const [section, focus] = await Promise.all([
+    readFile(new URL("../src/components/providers/ProviderModelSection.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/hooks/useDialogFocus.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(section, /useDialogFocus\(true, panel, onClose\)/);
+  assert.match(section, /data-nested-dialog=""/);
+  assert.match(section, /role="dialog"/);
+  assert.match(focus, /querySelector\("\[data-nested-dialog\]"\)/);
+  assert.match(focus, /nested\.contains\(document\.activeElement\)/);
+});

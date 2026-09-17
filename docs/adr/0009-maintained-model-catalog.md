@@ -25,16 +25,21 @@ module object and read attributes at call time (ADR-0007).
 
 - Family policy (reasoning levels, thinking_mode, vision, developer-role) is
   shared across endpoints.
-- Endpoint numbers (context, max_output, format, tool codec) stay on the Preset.
+- Endpoint numbers (context, max_output, tool codec) stay on the Preset.
+  A catalog-owned model may name the routing seam for its own wire format
+  (`MAINTAINED_UPSTREAM_FORMATS`); today only `opencode-go/union-alpha`
+  resolves to `anthropic_messages`. This is a routing fact, not a migration
+  of the Preset's format field onto family policy.
 - Thinking mode (`none` / `always_on` / `toggle`) is orthogonal to effort grades.
   CodexHub does not add a global `off` effort.
 - Maintained models do not get the five-level fill. Empty levels stay empty.
   Custom providers with no declared list still get the five-level fill.
   A declared list is never padded to Codex `max`.
 - Bundled official model ids that a runtime Preset is missing are inserted
-  additively. User-disabled rows, user-edited fields, custom ids, and leftover
-  retired ids (for example `volc/glm-5.2`) are not overwritten or deleted.
-  URL, protocol, and prefix remain empty-only (ADR-0008).
+  additively. User-disabled rows, user-edited fields, and custom ids are not
+  overwritten. Retired catalog ids are removed from the runtime Preset on
+  catalog apply, discovery, and Gateway load. URL, protocol, and prefix remain
+  empty-only (ADR-0008).
 - Families without documented effort grades stay empty: GLM-5 and LongCat-2.0
   are thinking on/off; Qwen 3.6 / 3.7 are hybrid thinking without
   `reasoning_effort`; Hy3 is `low` / `medium` / `high`; Hy4 family is `high`

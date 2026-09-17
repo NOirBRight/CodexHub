@@ -2411,19 +2411,22 @@
         "enabled": true
       },
       {
-        "id": "omen-alpha",
-        "display_name": "OpenCode Omen Alpha",
-        "context_window": 500000,
-        "max_output_tokens": 128000,
+        "id": "union-alpha",
+        "display_name": "OpenCode Union Alpha",
+        "context_window": 262144,
+        "max_output_tokens": 131072,
         "input_modalities": [
           "text",
           "image"
         ],
         "supported_reasoning_levels": [
           "low",
-          "high"
+          "medium",
+          "high",
+          "xhigh",
+          "max"
         ],
-        "default_reasoning_level": "high",
+        "default_reasoning_level": "medium",
         "thinking_mode": "always_on",
         "sort_order": 35,
         "enabled": true

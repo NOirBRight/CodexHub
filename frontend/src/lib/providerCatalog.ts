@@ -3,6 +3,13 @@ import { sortModelsEnabledFirst } from "./modelDisplay";
 
 const CODEX_FIVE_LEVEL_FILL = ["low", "medium", "high", "xhigh", "max"];
 
+/** Catalog-owned ids that must leave a runtime Preset once the bundled row is gone. */
+export const RETIRED_MAINTAINED_MODELS: ReadonlySet<string> = new Set(["opencode-go/omen-alpha"]);
+
+export function isRetiredMaintainedModel(providerId: string | undefined, modelId: string): boolean {
+  return Boolean(providerId && RETIRED_MAINTAINED_MODELS.has(`${providerId}/${modelId}`));
+}
+
 function sameLevelSet(left: string[] | null | undefined, right: string[] | null | undefined): boolean {
   const a = [...(left ?? [])].sort();
   const b = [...(right ?? [])].sort();
@@ -107,23 +114,27 @@ export function applyCatalogModelDefaults(model: Model, catalog: Model | null | 
 export function mergeOfficialPresetModels(
   existing: Model[],
   presetModels: Model[],
-  options?: { addMissing?: boolean },
+  options?: { addMissing?: boolean; providerId?: string },
 ): Model[] {
   const addMissing = options?.addMissing !== false;
+  const providerId = options?.providerId;
   if (existing.length === 0) {
     return addMissing ? presetModels.map((model) => ({ ...model })) : [];
   }
   const seen = new Set(existing.map((model) => model.id));
-  const merged = existing.map((model) => {
+  const merged = existing.flatMap((model) => {
+    if (isRetiredMaintainedModel(providerId, model.id)) {
+      return [];
+    }
     const official = presetModels.find((candidate) => candidate.id === model.id);
     if (!official) {
-      return model;
+      return [model];
     }
-    return mergeOfficialModelDefaults(model, official);
+    return [mergeOfficialModelDefaults(model, official)];
   });
   if (addMissing) {
     for (const official of presetModels) {
-      if (!seen.has(official.id)) {
+      if (!seen.has(official.id) && !isRetiredMaintainedModel(providerId, official.id)) {
         merged.push({ ...official });
       }
     }
@@ -143,9 +154,14 @@ export function applyCatalogPresetDefaults(
   const needsBaseUrl = existing.base_url.trim() === "";
   const mergedModels = includeModels
     ? existing.models.length === 0
-      ? sortModelsEnabledFirst(mergeOfficialPresetModels(existing.models, preset.models))
-      : mergeOfficialPresetModels(existing.models, preset.models)
-    : mergeOfficialPresetModels(existing.models, preset.models, { addMissing: false });
+      ? sortModelsEnabledFirst(
+          mergeOfficialPresetModels(existing.models, preset.models, { providerId: existing.id }),
+        )
+      : mergeOfficialPresetModels(existing.models, preset.models, { providerId: existing.id })
+    : mergeOfficialPresetModels(existing.models, preset.models, {
+        addMissing: false,
+        providerId: existing.id,
+      });
   const needsModels =
     mergedModels.length !== existing.models.length ||
     existing.models.some((model, index) => {

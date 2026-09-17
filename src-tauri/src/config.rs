@@ -14,6 +14,7 @@ pub fn get_providers() -> Result<Vec<Provider>, String> {
         fill_missing_model_limits_from_catalog(&mut providers, &catalog);
         refresh_catalog_display_names(&mut providers, &catalog);
     }
+    drop_retired_maintained_models(&mut providers);
     Ok(providers)
 }
 
@@ -720,8 +721,21 @@ fn get_providers_with_paths(paths: &ConfigPaths) -> Result<Vec<Provider>, String
             fill_missing_model_limits_from_catalog(&mut providers, &catalog);
             refresh_catalog_display_names(&mut providers, &catalog);
         }
+        drop_retired_maintained_models(&mut providers);
     }
     Ok(providers)
+}
+
+fn is_retired_maintained_model(provider_id: &str, model_id: &str) -> bool {
+    matches!((provider_id, model_id), ("opencode-go", "omen-alpha"))
+}
+
+fn drop_retired_maintained_models(providers: &mut [Provider]) {
+    for provider in providers {
+        provider
+            .models
+            .retain(|model| !is_retired_maintained_model(&provider.id, &model.id));
+    }
 }
 
 fn keep_positive_limit(current: Option<u32>, catalog: Option<u32>) -> Option<u32> {

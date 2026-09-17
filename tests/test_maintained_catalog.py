@@ -10,6 +10,7 @@ from maintained_catalog import (
     family_for,
     family_policy,
     is_maintained_provider,
+    is_retired_maintained_model,
     official_models,
     reasoning_levels_for,
     resolve_model,
@@ -118,16 +119,23 @@ class MaintainedCatalogTests(unittest.TestCase):
         self.assertIn("qwen3.8-flash", ids)
         self.assertIn("hy4-preview", ids)
         self.assertIn("muse-spark-1.3-contributor", ids)
-        self.assertIn("omen-alpha", ids)
+        self.assertNotIn("omen-alpha", ids)
+        self.assertIn("union-alpha", ids)
         self.assertIn("deepseek-v4-flash-vision-exp", ids)
-        self.assertIn("omen-alpha", ids)
-        omen = resolve_model("opencode-go", "omen-alpha")
-        assert omen is not None
-        self.assertEqual(omen.context_window, 500_000)
-        self.assertEqual(omen.max_output_tokens, 128_000)
-        self.assertEqual(omen.input_modalities, ("text", "image"))
-        self.assertEqual(omen.reasoning_levels, ("low", "high"))
-        self.assertEqual(omen.default_reasoning_level, "high")
+        self.assertIsNone(resolve_model("opencode-go", "omen-alpha"))
+        union = resolve_model("opencode-go", "union-alpha")
+        assert union is not None
+        self.assertEqual(union.context_window, 262_144)
+        self.assertEqual(union.max_output_tokens, 131_072)
+        self.assertEqual(union.input_modalities, ("text", "image"))
+        self.assertEqual(union.reasoning_levels, ("low", "medium", "high", "xhigh", "max"))
+        self.assertEqual(union.default_reasoning_level, "medium")
+        self.assertTrue(is_retired_maintained_model("opencode-go", "omen-alpha"))
+        self.assertFalse(is_retired_maintained_model("opencode-go", "union-alpha"))
+        from maintained_catalog import maintained_upstream_format
+
+        self.assertEqual(maintained_upstream_format("opencode-go", "union-alpha"), "anthropic_messages")
+        self.assertIsNone(maintained_upstream_format("opencode-go", "glm-5.3-flash"))
         flash = resolve_model("opencode-go", "glm-5.3-flash")
         assert flash is not None
         self.assertEqual(flash.input_modalities, ("text", "image"))
@@ -529,9 +537,11 @@ class BundledMaintainedProvidersTests(unittest.TestCase):
         )
         self.assertEqual(longcat.supported_reasoning_levels, ())
         self.assertEqual(longcat.thinking_mode, "toggle")
-        omen = next(model for model in providers["opencode-go"].models if model.id == "omen-alpha")
-        self.assertEqual(omen.context_window, 500000)
-        self.assertEqual(omen.supported_reasoning_levels, ("low", "high"))
+        self.assertFalse(any(model.id == "omen-alpha" for model in providers["opencode-go"].models))
+        union = next(model for model in providers["opencode-go"].models if model.id == "union-alpha")
+        self.assertEqual(union.context_window, 262144)
+        self.assertEqual(union.supported_reasoning_levels, ("low", "medium", "high", "xhigh", "max"))
+        self.assertEqual(union.default_reasoning_level, "medium")
         self.assertIn("claude-fable-5-1", [model.id for model in providers["commandcode"].models])
         self.assertIn("moonshotai/kimi-k3", [model.id for model in providers["commandcode"].models])
 

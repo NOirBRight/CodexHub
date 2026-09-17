@@ -1198,6 +1198,26 @@ class RoutePlanSeamTests(unittest.TestCase):
                 self.assertEqual(plan.retry_eligibility, capability_state)
                 self.assertEqual(plan.attempts, ())
 
+    def test_route_plan_union_alpha_uses_anthropic_messages(self):
+        plan = route_plan.route_plan_for_request(
+            {
+                "name": "opencode_go",
+                "upstream_model": "union-alpha",
+                "upstream_format": "auto",
+                "base_url": "https://opencode.ai/zen/go/v1",
+            },
+            {"client_id": "unknown"},
+            inbound_format="responses",
+            model_requested="opencode-go/union-alpha",
+            provider_hint="opencode-go",
+        )
+        self.assertEqual(plan.attempts[0].selected_upstream_format, "anthropic_messages")
+        self.assertTrue(plan.attempts[0].endpoint_url.endswith("/messages"))
+        self.assertEqual(
+            plan.attempts[0].request_body_mode,
+            route_primitives.AttemptRequestBodyMode.CONVERT_RESPONSES_TO_ANTHROPIC,
+        )
+
     def test_route_plan_separates_schema_identity_from_optional_manifest_evidence(self):
         valid_manifest_hash = f"sha256:{'a' * 64}"
         unqualified = route_plan.route_plan_for_request(

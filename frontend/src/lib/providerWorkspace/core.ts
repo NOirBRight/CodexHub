@@ -7,6 +7,7 @@ import {
   probeSucceeded,
 } from "../providerEndpoint";
 import { fillMissingModelLimits, mergeDiscoveredModels, renumberModels, slugify } from "../format";
+import { isRetiredMaintainedModel } from "../providerCatalog";
 import {
   filterCodexVisibleOfficialModels,
   officialModelSortKeys,
@@ -305,11 +306,16 @@ export function applyDiscoveredModelsForProvider(
   const previousModelIds = new Set(baseProvider.models.map((model) => model.id));
   const retained = retainIntersection
     ? baseProvider.models.filter((model) => discovered.some((item) => item.id === model.id))
-    : baseProvider.models;
+    : baseProvider.models.filter(
+        (model) => !isRetiredMaintainedModel(baseProvider.id, model.id),
+      );
+  const liveDiscovered = discovered.filter(
+    (model) => !isRetiredMaintainedModel(baseProvider.id, model.id),
+  );
   const provider = {
     ...baseProvider,
     models: fillMissingModelLimits(
-      applyPresetReasoningDefaults(mergeDiscoveredModels(retained, discovered), preset),
+      applyPresetReasoningDefaults(mergeDiscoveredModels(retained, liveDiscovered), preset),
       retained,
     ),
   };

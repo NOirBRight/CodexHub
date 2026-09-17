@@ -247,9 +247,59 @@ def test_prepare_exchange_rejects_unknown_protocol_pair() -> None:
         prepare_exchange(
             _responses_body(),
             inbound_format="responses",
-            outbound_format="anthropic_messages",
+            outbound_format="unknown_wire",
         )
     assert caught.value.code == "unsupported_protocol_semantics"
+
+
+def test_prepare_exchange_responses_to_anthropic_keeps_text_and_tools() -> None:
+    exchange = prepare_exchange(
+        json.dumps(
+            {
+                "model": "union-alpha",
+                "input": [
+                    {"type": "message", "role": "system", "content": "Be concise."},
+                    {"type": "message", "role": "user", "content": "hi"},
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "read_file",
+                        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                    }
+                ],
+                "stream": True,
+            }
+        ).encode("utf-8"),
+        inbound_format="responses",
+        outbound_format="anthropic_messages",
+    )
+    payload = json.loads(exchange.upstream_body)
+    assert payload["model"] == "union-alpha"
+    assert payload["stream"] is True
+    assert payload["system"] == "Be concise."
+    assert payload["messages"][0]["role"] == "user"
+    assert payload["messages"][0]["content"] == "hi"
+    assert payload["tools"][0]["name"] == "read_file"
+    assert payload["tools"][0]["input_schema"]["properties"]["path"]["type"] == "string"
+    assert payload["max_tokens"] == 131072
+
+
+def test_prepare_exchange_responses_to_anthropic_maps_reasoning_effort() -> None:
+    exchange = prepare_exchange(
+        json.dumps(
+            {
+                "model": "union-alpha",
+                "input": [{"type": "message", "role": "user", "content": "hi"}],
+                "reasoning": {"effort": "high"},
+                "stream": True,
+            }
+        ).encode("utf-8"),
+        inbound_format="responses",
+        outbound_format="anthropic_messages",
+    )
+    payload = json.loads(exchange.upstream_body)
+    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 8192}
 
 
 def test_prepare_exchange_chat_upstream_body_translates_to_chat_completion() -> None:

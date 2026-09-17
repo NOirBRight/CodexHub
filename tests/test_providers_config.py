@@ -53,6 +53,7 @@ class ProvidersConfigTests(unittest.TestCase):
                         base_url="https://opencode.ai/zen/go/v1",
                         api_key="fixture",
                         models=[
+                            ModelConfig(id="union-alpha"),
                             ModelConfig(id="omen-alpha"),
                             ModelConfig(id="muse-spark-1.2-contributor", context_window=202_752),
                         ],
@@ -62,8 +63,9 @@ class ProvidersConfigTests(unittest.TestCase):
             )
             loaded = load_providers(path)
             by_id = {model.id: model for model in loaded[0].models}
-            self.assertEqual(by_id["omen-alpha"].context_window, 500_000)
-            self.assertEqual(by_id["omen-alpha"].max_output_tokens, 128_000)
+            self.assertNotIn("omen-alpha", by_id)
+            self.assertEqual(by_id["union-alpha"].context_window, 262_144)
+            self.assertEqual(by_id["union-alpha"].max_output_tokens, 131_072)
             self.assertEqual(by_id["muse-spark-1.2-contributor"].context_window, 202_752)
 
     def test_bundled_volc_declares_responses_as_its_only_upstream_format(self):
