@@ -1,4 +1,4 @@
-# ADR-0012: Default subagent is a connected sibling owned slice
+# ADR-0013: Default subagent is a connected sibling owned slice
 
 Date: 2026-09-17
 Status: Accepted
