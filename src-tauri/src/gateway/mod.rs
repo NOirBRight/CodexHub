@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 mod backup;
 mod clients;
+mod default_subagent;
 mod inject;
 mod isolated;
 mod managed_clients;
@@ -20,6 +21,7 @@ mod providers;
 mod readback;
 
 pub(in crate::gateway) use backup::*;
+pub(in crate::gateway) use default_subagent::*;
 pub(in crate::gateway) use inject::*;
 #[allow(unused_imports)]
 pub use isolated::{

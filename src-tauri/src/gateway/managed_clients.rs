@@ -453,7 +453,7 @@ fn native_plan(
     id: &'static str,
     intent: ClientIntent,
     write_paths: Vec<PathBuf>,
-    target: &AdapterTarget,
+    ctx: &AdapterCtx<'_>,
 ) -> ClientMutationPlan {
     ClientMutationPlan {
         client_id: id.to_owned(),
@@ -461,12 +461,30 @@ fn native_plan(
         readback: native_readback(&write_paths),
         write_paths,
         expected_fingerprint: None,
-        restart_required: "none".to_owned(),
+        restart_required: native_restart_required(id, ctx).to_owned(),
         activation_touched: false,
         preview: None,
-        backup: target.backup_strategy(),
+        backup: ctx.target.backup_strategy(),
         no_execution: None,
     }
+}
+
+fn native_restart_required(id: &str, ctx: &AdapterCtx<'_>) -> &'static str {
+    match id {
+        "grok" => "Grok CLI",
+        "opencode" if default_subagent_slice_changes(id, ctx) => "OpenCode",
+        "omp" if default_subagent_slice_changes(id, ctx) => "OMP",
+        "zcode" if default_subagent_slice_changes(id, ctx) => "ZCode",
+        _ => "none",
+    }
+}
+
+fn default_subagent_slice_changes(id: &str, ctx: &AdapterCtx<'_>) -> bool {
+    let model = ctx.models.first().cloned().unwrap_or_default();
+    super::resolve_client_default_subagent_pin(ctx.settings, ctx.providers, id, &model)
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 fn codex_plan(intent: ClientIntent, ctx: &AdapterCtx<'_>) -> ClientMutationPlan {
@@ -474,7 +492,7 @@ fn codex_plan(intent: ClientIntent, ctx: &AdapterCtx<'_>) -> ClientMutationPlan 
         "codex",
         intent,
         target_write_paths(ctx, vec![codex_home().join("config.toml")]),
-        &ctx.target,
+        ctx,
     );
     plan.preview = Some(ClientPreview {
         strategy: "overlay".to_owned(),
@@ -516,7 +534,7 @@ impl ManagedClientAdapter for OpenCodeAdapter {
             self.metadata().id,
             intent,
             target_write_paths(_ctx, detect_opencode_config_path().into_iter().collect()),
-            &_ctx.target,
+            _ctx,
         ))
     }
 }
@@ -546,7 +564,7 @@ impl ManagedClientAdapter for PiAdapter {
             self.metadata().id,
             intent,
             target_write_paths(_ctx, vec![paths.settings_path, paths.models_path]),
-            &_ctx.target,
+            _ctx,
         ))
     }
 }
@@ -576,7 +594,7 @@ impl ManagedClientAdapter for OmpAdapter {
             self.metadata().id,
             intent,
             target_write_paths(_ctx, vec![paths.config_path, paths.models_path]),
-            &_ctx.target,
+            _ctx,
         ))
     }
 }
@@ -613,7 +631,7 @@ impl ManagedClientAdapter for ZcodeAdapter {
                     targets.v2_cache_path,
                 ],
             ),
-            &_ctx.target,
+            _ctx,
         ))
     }
 }
@@ -638,14 +656,12 @@ impl ManagedClientAdapter for GrokAdapter {
         intent: ClientIntent,
         _ctx: &AdapterCtx<'_>,
     ) -> Result<ClientMutationPlan, String> {
-        let mut plan = native_plan(
+        Ok(native_plan(
             self.metadata().id,
             intent,
             target_write_paths(_ctx, vec![detect_grok_config_path()]),
-            &_ctx.target,
-        );
-        plan.restart_required = "Grok CLI".to_owned();
-        Ok(plan)
+            _ctx,
+        ))
     }
 }
 
@@ -1437,7 +1453,10 @@ mod tests {
             assert!(!plan.activation_touched, "{id} must not touch activation");
             assert_eq!(
                 plan.restart_required,
-                if id == "grok" { "Grok CLI" } else { "none" }
+                match id {
+                    "grok" => "Grok CLI",
+                    _ => "none",
+                }
             );
         }
     }

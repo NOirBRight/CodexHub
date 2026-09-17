@@ -1,10 +1,10 @@
 use super::super::{
     adopt_legacy_baseline_locked, ensure_rollback_baseline, executable_version,
     gateway_client_provider_groups, is_codexhub_client_provider_id, is_this_app_gateway_url,
-    read_rollback_baseline, resolve_gateway_client_model_id, route_owner_from_endpoint,
-    sanitize_text, write_text_replace, BackupChannel, BaselineFile, GatewayClientApplyResult,
-    GatewayClientConfigPreview, GatewayClientEndpointSelection, GatewayClientProviderGroup,
-    GatewayClientProviderModel,
+    read_rollback_baseline, resolve_gateway_client_model_id, rollback_file_text,
+    route_owner_from_endpoint, sanitize_text, write_text_replace, BackupChannel, BaselineFile,
+    GatewayClientApplyResult, GatewayClientConfigPreview, GatewayClientEndpointSelection,
+    GatewayClientProviderGroup, GatewayClientProviderModel, RollbackBaseline,
 };
 use crate::app_flavor::RoutingOwner;
 use crate::{Provider, Settings};
@@ -448,7 +448,266 @@ pub(in crate::gateway) fn grok_config_text(
             }
         }
     }
+    grok_owned_default_subagent(&mut root, current, settings, providers, model)?;
     grok_toml_to_string(&root)
+}
+
+fn grok_owned_default_subagent(
+    root: &mut Table,
+    current: Option<&str>,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<(), String> {
+    let pin =
+        super::super::resolve_client_default_subagent_pin(settings, providers, "grok", model)?;
+    let baseline_text = super::super::rollback_file_text(CLIENT_ID, "config.toml", current);
+    let baseline = baseline_text
+        .as_deref()
+        .and_then(|text| parse_grok_table(text).ok());
+    apply_grok_subagent_tables(root, baseline.as_ref(), pin.as_ref());
+    Ok(())
+}
+
+fn apply_grok_subagent_tables(
+    root: &mut Table,
+    baseline: Option<&Table>,
+    pin: Option<&super::super::ClientDefaultSubagentPin>,
+) {
+    match pin {
+        Some(pin) => {
+            let models = nested_table_mut(root, &["subagents", "models"]);
+            let picker = pin.grok_picker_key();
+            for spawn_type in super::super::GROK_SPAWN_TYPES {
+                models.insert((*spawn_type).to_string(), Value::String(picker.clone()));
+            }
+            for spawn_type in super::super::GROK_SPAWN_TYPES {
+                if grok_role_can_carry_effort(root, spawn_type) {
+                    let role = nested_table_mut(root, &["subagents", "roles", spawn_type]);
+                    role.insert(
+                        "reasoning_effort".to_string(),
+                        Value::String(pin.effort.clone()),
+                    );
+                }
+            }
+        }
+        None if grok_spawn_models_are_owned(root) => restore_grok_subagent_tables(root, baseline),
+        None => {}
+    }
+}
+
+fn grok_spawn_models_are_owned(root: &Table) -> bool {
+    let Some(models) = root
+        .get("subagents")
+        .and_then(Value::as_table)
+        .and_then(|table| table.get("models"))
+        .and_then(Value::as_table)
+    else {
+        return false;
+    };
+    super::super::GROK_SPAWN_TYPES.iter().any(|spawn_type| {
+        models
+            .get(*spawn_type)
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with("codexhub-"))
+    })
+}
+
+fn grok_role_can_carry_effort(root: &Table, spawn_type: &str) -> bool {
+    let Some(roles) = root
+        .get("subagents")
+        .and_then(Value::as_table)
+        .and_then(|table| table.get("roles"))
+        .and_then(Value::as_table)
+    else {
+        return true;
+    };
+    match roles.get(spawn_type) {
+        None => true,
+        Some(Value::Table(_)) => true,
+        Some(_) => false,
+    }
+}
+
+const GROK_SHADOW_MARKER: &str = "x-codexhub-default-subagent: true";
+
+fn grok_agents_dir(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .map(|parent| parent.join("agents"))
+        .unwrap_or_else(|| PathBuf::from("agents"))
+}
+
+pub(in crate::gateway) fn grok_shadow_agent_plan(
+    config_path: &Path,
+    current: Option<&Table>,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<Vec<(PathBuf, Option<String>)>, String> {
+    let pin =
+        super::super::resolve_client_default_subagent_pin(settings, providers, "grok", model)?;
+    let agents_dir = grok_agents_dir(config_path);
+    let mut files = Vec::new();
+    for spawn_type in super::super::GROK_SPAWN_TYPES {
+        let path = agents_dir.join(format!("{spawn_type}.md"));
+        match &pin {
+            Some(pin)
+                if current.is_some_and(|table| !grok_role_can_carry_effort(table, spawn_type)) =>
+            {
+                files.push((
+                    path,
+                    Some(format!(
+                        "---\nname: {spawn_type}\nmodel: {}\nreasoning_effort: {}\n{GROK_SHADOW_MARKER}\n---\n",
+                        pin.grok_picker_key(),
+                        pin.effort
+                    )),
+                ));
+            }
+            Some(_) if grok_shadow_is_ours(&path) => files.push((path, None)),
+            None => match rollback_file_text(CLIENT_ID, &format!("agents/{spawn_type}.md"), None) {
+                Some(content) if !content.is_empty() => files.push((path, Some(content))),
+                Some(_) => files.push((path, None)),
+                None if grok_shadow_is_ours(&path) => files.push((path, None)),
+                None => {}
+            },
+            _ => {}
+        }
+    }
+    Ok(files)
+}
+
+fn grok_shadow_is_ours(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .is_some_and(|text| text.contains(GROK_SHADOW_MARKER))
+}
+
+fn publish_grok_shadow_agents(files: &[(PathBuf, Option<String>)]) -> Result<(), String> {
+    for (path, content) in files {
+        match content {
+            Some(text) => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        format!("failed to create Grok agents directory: {error}")
+                    })?;
+                }
+                write_text_replace(path, text)
+                    .map_err(|_| "failed to write Grok shadow agent".to_string())?;
+            }
+            None if path.exists() => {
+                fs::remove_file(path)
+                    .map_err(|error| format!("failed to remove Grok shadow agent: {error}"))?;
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+fn clear_owned_grok_shadow_agents(config_path: &Path) -> Result<(), String> {
+    let agents_dir = grok_agents_dir(config_path);
+    let files = super::super::GROK_SPAWN_TYPES
+        .iter()
+        .map(|spawn_type| (agents_dir.join(format!("{spawn_type}.md")), None))
+        .filter(|(path, _)| grok_shadow_is_ours(path))
+        .collect::<Vec<_>>();
+    publish_grok_shadow_agents(&files)
+}
+
+pub(in crate::gateway) fn grok_owned_shadows_match(
+    config_path: &Path,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<bool, String> {
+    let current = fs::read_to_string(config_path)
+        .ok()
+        .and_then(|text| parse_grok_table(&text).ok());
+    let expected =
+        grok_shadow_agent_plan(config_path, current.as_ref(), settings, providers, model)?;
+    for (path, content) in expected {
+        match content {
+            Some(text) => {
+                if fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+                    return Ok(false);
+                }
+            }
+            None if grok_shadow_is_ours(&path) => return Ok(false),
+            None => {}
+        }
+    }
+    Ok(true)
+}
+
+fn nested_table_mut<'a>(root: &'a mut Table, path: &[&str]) -> &'a mut Table {
+    let mut current = root;
+    for key in path {
+        if !matches!(current.get(*key), Some(Value::Table(_))) {
+            current.insert((*key).to_string(), Value::Table(Table::new()));
+        }
+        current = current
+            .get_mut(*key)
+            .and_then(Value::as_table_mut)
+            .expect("nested table");
+    }
+    current
+}
+
+fn restore_grok_subagent_tables(root: &mut Table, baseline: Option<&Table>) {
+    let baseline_models = baseline
+        .and_then(|table| table.get("subagents"))
+        .and_then(Value::as_table)
+        .and_then(|table| table.get("models"))
+        .and_then(Value::as_table);
+    let baseline_roles = baseline
+        .and_then(|table| table.get("subagents"))
+        .and_then(Value::as_table)
+        .and_then(|table| table.get("roles"))
+        .and_then(Value::as_table);
+    {
+        let models = nested_table_mut(root, &["subagents", "models"]);
+        for spawn_type in super::super::GROK_SPAWN_TYPES {
+            match baseline_models.and_then(|table| table.get(*spawn_type)) {
+                Some(value) => {
+                    models.insert((*spawn_type).to_string(), value.clone());
+                }
+                None => {
+                    models.remove(*spawn_type);
+                }
+            }
+        }
+        if models.is_empty() {
+            if let Some(Value::Table(subagents)) = root.get_mut("subagents") {
+                subagents.remove("models");
+            }
+        }
+    }
+    for spawn_type in super::super::GROK_SPAWN_TYPES {
+        match baseline_roles.and_then(|table| table.get(*spawn_type)) {
+            Some(value) => {
+                let roles = nested_table_mut(root, &["subagents", "roles"]);
+                roles.insert((*spawn_type).to_string(), value.clone());
+            }
+            None => {
+                if let Some(Value::Table(subagents)) = root.get_mut("subagents") {
+                    if let Some(Value::Table(roles)) = subagents.get_mut("roles") {
+                        roles.remove(*spawn_type);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(Value::Table(subagents)) = root.get_mut("subagents") {
+        if let Some(Value::Table(roles)) = subagents.get("roles") {
+            if roles.is_empty() {
+                subagents.remove("roles");
+            }
+        }
+        if subagents.is_empty() {
+            root.remove("subagents");
+        }
+    }
 }
 
 pub(in crate::gateway) fn is_grok_codexhub_config(text: &str) -> bool {
@@ -507,11 +766,47 @@ pub(in crate::gateway) fn grok_injected_keys_may_be_hidden(
         })
 }
 
-fn grok_owned_snapshot(root: &Table) -> (BTreeMap<String, Value>, BTreeMap<String, Value>) {
+fn grok_owned_snapshot(
+    root: &Table,
+) -> (
+    BTreeMap<String, Value>,
+    BTreeMap<String, Value>,
+    BTreeMap<String, Value>,
+) {
     (
         grok_owned_section(root, "model_providers"),
         grok_owned_section(root, "model"),
+        grok_owned_subagent_slice(root),
     )
+}
+
+fn grok_owned_subagent_slice(root: &Table) -> BTreeMap<String, Value> {
+    let mut owned = BTreeMap::new();
+    if let Some(models) = root
+        .get("subagents")
+        .and_then(Value::as_table)
+        .and_then(|table| table.get("models"))
+        .and_then(Value::as_table)
+    {
+        for spawn_type in super::super::GROK_SPAWN_TYPES {
+            if let Some(value) = models.get(*spawn_type) {
+                owned.insert(format!("models.{spawn_type}"), value.clone());
+            }
+        }
+    }
+    if let Some(roles) = root
+        .get("subagents")
+        .and_then(Value::as_table)
+        .and_then(|table| table.get("roles"))
+        .and_then(Value::as_table)
+    {
+        for spawn_type in super::super::GROK_SPAWN_TYPES {
+            if let Some(value) = roles.get(*spawn_type) {
+                owned.insert(format!("roles.{spawn_type}"), value.clone());
+            }
+        }
+    }
+    owned
 }
 
 fn grok_owned_section(root: &Table, key: &str) -> BTreeMap<String, Value> {
@@ -579,11 +874,15 @@ pub(in crate::gateway) fn preview_grok_config_with_path(
     providers: &[Provider],
     model: &str,
 ) -> Result<GatewayClientConfigPreview, String> {
-    let current = fs::read_to_string(config_path)
-        .ok()
-        .map(|text| sanitize_text(&text));
-    let next = grok_config_text(
-        fs::read_to_string(config_path).ok().as_deref(),
+    let current_text = fs::read_to_string(config_path).ok();
+    let current = current_text.as_deref().map(sanitize_text);
+    let next = grok_config_text(current_text.as_deref(), settings, providers, model)?;
+    let current_table = current_text
+        .as_deref()
+        .and_then(|text| parse_grok_table(text).ok());
+    let shadows = grok_shadow_agent_plan(
+        config_path,
+        current_table.as_ref(),
         settings,
         providers,
         model,
@@ -594,7 +893,7 @@ pub(in crate::gateway) fn preview_grok_config_with_path(
         strategy: "provider_injection".to_string(),
         config_path: Some(config_path.to_path_buf()),
         current_redacted: current,
-        next_redacted: sanitize_text(&next),
+        next_redacted: sanitize_text(&super::super::append_planned_file_previews(&next, &shadows)),
         backup_required: config_path.exists(),
         message: "Apply will back up the current Grok CLI config, then surgically add CodexHub Gateway models while preserving your own providers and settings.".to_string(),
     })
@@ -604,6 +903,7 @@ pub(in crate::gateway) struct GrokApplyPlan {
     pub config_path: PathBuf,
     pub next: String,
     pub skip_snapshot: bool,
+    pub shadow_agents: Vec<(PathBuf, Option<String>)>,
 }
 
 pub(in crate::gateway) fn plan_grok_apply(
@@ -625,10 +925,20 @@ pub(in crate::gateway) fn plan_grok_apply(
         .as_deref()
         .is_none_or(|text| text.trim().is_empty() || is_grok_codexhub_config(text));
     let next = grok_config_text(current.as_deref(), settings, providers, &model)?;
+    let current_table = current
+        .as_deref()
+        .and_then(|text| parse_grok_table(text).ok());
     Ok(GrokApplyPlan {
         config_path: config_path.to_path_buf(),
         skip_snapshot,
         next,
+        shadow_agents: grok_shadow_agent_plan(
+            config_path,
+            current_table.as_ref(),
+            settings,
+            providers,
+            &model,
+        )?,
     })
 }
 
@@ -656,6 +966,7 @@ pub(in crate::gateway) fn publish_grok_apply(
     record_grok_rollback_baseline(&plan.config_path, backup_roots)?;
     write_text_replace(&plan.config_path, &plan.next)
         .map_err(|_| "failed to write managed Grok config".to_string())?;
+    publish_grok_shadow_agents(&plan.shadow_agents)?;
     Ok(GatewayClientApplyResult {
         client_id: CLIENT_ID.to_string(),
         applied: true,
@@ -670,31 +981,79 @@ pub(in crate::gateway) fn record_grok_rollback_baseline(
     config_path: &Path,
     backup_roots: &[(PathBuf, BackupChannel)],
 ) -> Result<(), String> {
-    ensure_rollback_baseline(
-        "grok",
-        backup_roots,
-        &[("config.toml", config_path)],
-        |_, text| is_grok_codexhub_config(text),
-    )
+    let agents_dir = grok_agents_dir(config_path);
+    let agent_paths = super::super::GROK_SPAWN_TYPES
+        .iter()
+        .map(|spawn_type| {
+            (
+                format!("agents/{spawn_type}.md"),
+                agents_dir.join(format!("{spawn_type}.md")),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut files: Vec<(&str, &Path)> = vec![("config.toml", config_path)];
+    files.extend(
+        agent_paths
+            .iter()
+            .map(|(name, path)| (name.as_str(), path.as_path())),
+    );
+    ensure_rollback_baseline("grok", backup_roots, &files, |name, text| {
+        if name.starts_with("agents/") {
+            text.contains(GROK_SHADOW_MARKER)
+        } else {
+            is_grok_codexhub_config(text)
+        }
+    })
+}
+
+fn restore_grok_agent_files(config_path: &Path, baseline: &RollbackBaseline) -> Result<(), String> {
+    let agents_dir = grok_agents_dir(config_path);
+    for spawn_type in super::super::GROK_SPAWN_TYPES {
+        let key = format!("agents/{spawn_type}.md");
+        let path = agents_dir.join(format!("{spawn_type}.md"));
+        match baseline.files.get(&key) {
+            Some(BaselineFile::Snapshot { content }) => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        format!("failed to restore Grok agents directory: {error}")
+                    })?;
+                }
+                write_text_replace(&path, content)
+                    .map_err(|_| "failed to restore Grok shadow agent".to_string())?;
+            }
+            Some(BaselineFile::Absent) => {
+                if path.exists() {
+                    fs::remove_file(&path)
+                        .map_err(|error| format!("failed to remove Grok shadow agent: {error}"))?;
+                }
+            }
+            None if grok_shadow_is_ours(&path) => {
+                fs::remove_file(&path)
+                    .map_err(|error| format!("failed to remove Grok shadow agent: {error}"))?;
+            }
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 pub(in crate::gateway) fn restore_grok_from_baseline(
     config_path: &Path,
-    file: &BaselineFile,
+    baseline: &RollbackBaseline,
 ) -> Result<GatewayClientApplyResult, String> {
-    match file {
-        BaselineFile::Snapshot { content } => {
+    let result = match baseline.files.get("config.toml") {
+        Some(BaselineFile::Snapshot { content }) => {
             write_text_replace(config_path, content)
                 .map_err(|_| "failed to restore Grok config from baseline".to_string())?;
-            Ok(GatewayClientApplyResult {
+            GatewayClientApplyResult {
                 client_id: CLIENT_ID.to_string(),
                 applied: true,
                 config_path: None,
                 backup_path: None,
                 message: "Grok CLI official config restored from canonical baseline.".to_string(),
-            })
+            }
         }
-        BaselineFile::Absent => {
+        Some(BaselineFile::Absent) => {
             if config_path.exists() {
                 let text = fs::read_to_string(config_path).unwrap_or_default();
                 if !is_grok_codexhub_config(&text) && !text.trim().is_empty() {
@@ -705,7 +1064,7 @@ pub(in crate::gateway) fn restore_grok_from_baseline(
                 }
                 grok_ownership_bounded_cleanup(config_path)?;
             }
-            Ok(GatewayClientApplyResult {
+            GatewayClientApplyResult {
                 client_id: CLIENT_ID.to_string(),
                 applied: true,
                 config_path: None,
@@ -713,9 +1072,12 @@ pub(in crate::gateway) fn restore_grok_from_baseline(
                 message:
                     "Grok CLI CodexHub entries removed; original baseline recorded it as absent."
                         .to_string(),
-            })
+            }
         }
-    }
+        None => return Err("rollback baseline is incomplete".to_string()),
+    };
+    restore_grok_agent_files(config_path, baseline)?;
+    Ok(result)
 }
 
 pub(in crate::gateway) fn grok_ownership_bounded_cleanup(
@@ -742,6 +1104,7 @@ pub(in crate::gateway) fn grok_ownership_bounded_cleanup(
         });
     }
     let mut root = parse_grok_table(&text)?;
+    clear_owned_grok_shadow_agents(config_path)?;
     strip_owned_grok_tables(&mut root);
     repair_leftover_xai_default(&mut root);
     if root.is_empty() {
@@ -772,22 +1135,14 @@ pub(in crate::gateway) fn restore_grok_config_with_backup_roots(
     backup_roots: &[(PathBuf, BackupChannel)],
 ) -> Result<GatewayClientApplyResult, String> {
     if let Some(baseline) = read_rollback_baseline("grok")? {
-        return match baseline.files.get("config.toml") {
-            Some(file) => restore_grok_from_baseline(config_path, file),
-            None => Err("rollback baseline is incomplete".to_string()),
-        };
+        return restore_grok_from_baseline(config_path, &baseline);
     }
     let _ = adopt_legacy_baseline_locked("grok", backup_roots)?;
     if let Some(baseline) = read_rollback_baseline("grok")? {
-        return match baseline.files.get("config.toml") {
-            Some(file) => {
-                let mut result = restore_grok_from_baseline(config_path, file)?;
-                result.message =
-                    "Grok CLI official config restored from legacy-adopted baseline.".to_string();
-                Ok(result)
-            }
-            None => Err("rollback baseline is incomplete".to_string()),
-        };
+        let mut result = restore_grok_from_baseline(config_path, &baseline)?;
+        result.message =
+            "Grok CLI official config restored from legacy-adopted baseline.".to_string();
+        return Ok(result);
     }
     grok_ownership_bounded_cleanup(config_path)
 }

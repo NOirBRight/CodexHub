@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { WorkspaceDialog } from "./workspace/WorkspaceDialog";
+import { DefaultSubagentPicker } from "./workspace/ProviderWorkspaceView";
 import { api, messageFromError } from "../lib/tauri";
 import {
   MoreHorizontal,
@@ -23,6 +24,10 @@ import {
 } from "../lib/clientConnectionState";
 import type { GatewayClientContract, GatewayClientInfo } from "../lib/types";
 import { SwitchControl } from "./SettingsDrawer";
+import {
+  resolveSubagentEffort,
+  type DefaultSubagentOption,
+} from "../lib/defaultSubagent";
 
 export type { ClientConnectionState };
 export { connectionStateFromInfo };
@@ -33,6 +38,12 @@ interface GatewayClientCardProps {
   client: GatewayClientContract;
   enabledModelCount?: number;
   info?: GatewayClientInfo;
+  defaultSubagent?: {
+    model: string;
+    effort: string;
+    options: DefaultSubagentOption[];
+    onChange: (model: string, effort: string) => void;
+  };
   onToggle: (connect: boolean) => void;
   onRefresh?: () => Promise<void>;
 }
@@ -43,6 +54,7 @@ export function GatewayClientCard({
   client,
   enabledModelCount,
   info,
+  defaultSubagent,
   onToggle,
   onRefresh,
 }: GatewayClientCardProps) {
@@ -118,6 +130,28 @@ export function GatewayClientCard({
             {configPath || t("common.copyOnly")}
           </code>
         </div>
+        {defaultSubagent ? (
+          <DefaultSubagentPicker
+            disabled={Boolean(busy)}
+            model={defaultSubagent.model}
+            effort={
+              defaultSubagent.model
+                ? resolveSubagentEffort(
+                    defaultSubagent.options.find(
+                      (option) => option.id === defaultSubagent.model,
+                    ),
+                    defaultSubagent.effort,
+                  )
+                : ""
+            }
+            options={defaultSubagent.options}
+            selected={defaultSubagent.options.find(
+              (option) => option.id === defaultSubagent.model,
+            )}
+            emptyLabel={t("workspace.defaultSubagentCliDefault")}
+            onChange={defaultSubagent.onChange}
+          />
+        ) : null}
         <div className="ws-client-bottom">
           <div>
             <span className={labelTone}>{label}</span>
