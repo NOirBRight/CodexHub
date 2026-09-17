@@ -36,6 +36,7 @@ async function loadCombinedModule() {
     "function slugify(name) { return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''); }",
     "function normalizeModel(m) { return m; }",
     "function renumberModels(models) { return models.map((m, i) => ({ ...m, sort_order: i + 1 })); }",
+    "function isRetiredMaintainedModel(providerId, modelId) { return providerId === 'opencode-go' && modelId === 'omen-alpha'; }",
     "function applyPresetReasoningDefaults(models, _preset) { return models; }",
     "function normalizeEndpointFormats(fmts) { return fmts; }",
     "function applyProviderProbeResult(p, _r) { return p; }",

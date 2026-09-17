@@ -53,6 +53,7 @@ import urllib3
 
 import gateway_admission
 import gateway_events
+import anthropic_messages
 import opencode_go_session
 from gateway_admission import sleep_for_retry_with_gateway_cancellation
 from gateway_errors import (
@@ -2409,8 +2410,11 @@ def bind_route_plan_operational_authentication(
         plan,
         attempts=tuple(
             replace(attempt, request_headers=FrozenRequestHeaders(
-                opencode_go_session.bind_session_headers(
-                    request_headers.to_dict(), attempt.endpoint_url, prompt_cache_key,
+                anthropic_messages.bind_request_headers(
+                    opencode_go_session.bind_session_headers(
+                        request_headers.to_dict(), attempt.endpoint_url, prompt_cache_key,
+                    ),
+                    attempt.endpoint_url,
                 ),
                 materialized=True,
             ))

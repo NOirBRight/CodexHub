@@ -87,6 +87,8 @@ from route_primitives import (
     VisionAction,
     VisionNetworkAction,
     WIRE_CHAT_TO_RESPONSES,
+    WIRE_CHAT_TO_ANTHROPIC,
+    WIRE_RESPONSES_TO_ANTHROPIC,
     WIRE_RESPONSES_TO_CHAT,
     WIRE_TRANSPARENT,
 )
@@ -552,6 +554,22 @@ class RouteAttemptPlan:
                 RouteProtocol.CHAT_COMPLETIONS.value,
                 RouteProtocol.RESPONSES.value,
             )
+        if (
+            self.request_body_mode
+            == AttemptRequestBodyMode.CONVERT_RESPONSES_TO_ANTHROPIC
+        ):
+            return (
+                RouteProtocol.RESPONSES.value,
+                RouteProtocol.ANTHROPIC_MESSAGES.value,
+            )
+        if (
+            self.request_body_mode
+            == AttemptRequestBodyMode.CONVERT_CHAT_TO_ANTHROPIC
+        ):
+            return (
+                RouteProtocol.CHAT_COMPLETIONS.value,
+                RouteProtocol.ANTHROPIC_MESSAGES.value,
+            )
         if self.request_body_mode == AttemptRequestBodyMode.PREPARED_DIRECT:
             protocol = self.upstream_protocol.value
             return protocol, protocol
@@ -806,7 +824,23 @@ def _wire_format_adapter(inbound_format: str, upstream_format: str) -> str:
         return WIRE_RESPONSES_TO_CHAT
     if inbound_format == "chat_completions" and upstream_format == "responses":
         return WIRE_CHAT_TO_RESPONSES
+    if inbound_format == "responses" and upstream_format == "anthropic_messages":
+        return WIRE_RESPONSES_TO_ANTHROPIC
+    if inbound_format == "chat_completions" and upstream_format == "anthropic_messages":
+        return WIRE_CHAT_TO_ANTHROPIC
     return WIRE_TRANSPARENT
+
+
+def _maintained_upstream_protocol(provider_id: str, model_id: str) -> RouteProtocol | None:
+    if not provider_id or not model_id:
+        return None
+    import maintained_catalog
+
+    protocol_format = maintained_catalog.maintained_upstream_format(provider_id, model_id)
+    if protocol_format is None:
+        return None
+    protocol = _route_protocol(protocol_format)
+    return protocol if protocol == RouteProtocol.ANTHROPIC_MESSAGES else None
 
 
 def _route_protocol(value: Any) -> RouteProtocol:
@@ -830,6 +864,8 @@ def _route_provider_id(upstream: Mapping[str, Any], requested_provider: str | No
         "ollama-cloud": "ollama-cloud",
         "volcengine": "volc",
         "minimax_cn": "minimax-cn",
+        "opencode_go": "opencode-go",
+        "opencode-go": "opencode-go",
     }.get(str(upstream.get("name") or ""), canonical_model_id(str(upstream.get("name") or "")))
 
 
@@ -901,6 +937,12 @@ def _route_endpoint_url(
             if isinstance(base_url, str) and base_url
             else "/chat/completions"
         )
+    if protocol == RouteProtocol.ANTHROPIC_MESSAGES:
+        return (
+            _upstream_endpoint_url(upstream, "/messages")
+            if isinstance(base_url, str) and base_url
+            else "/messages"
+        )
     raise UnsupportedRouteProtocolError(
         f"planned attempt has no executable upstream protocol: {protocol.value}"
     )
@@ -934,6 +976,8 @@ def _safe_route_endpoint_url(endpoint_url: str) -> str:
             "/v1/responses",
             "/v1/response",
             "/v1/chat/completions",
+            "/messages",
+            "/v1/messages",
         }
         if path in safe_paths:
             return path
@@ -1273,6 +1317,24 @@ def _route_supports_transparent_metering(
             and selected_upstream_format == "chat_completions"
             and wire_format_adapter == WIRE_RESPONSES_TO_CHAT
         )
+        or (
+            inbound_format == "responses"
+            and configured_upstream_format in {
+                RouteProtocol.AUTO.value,
+                RouteProtocol.ANTHROPIC_MESSAGES.value,
+            }
+            and selected_upstream_format == "anthropic_messages"
+            and wire_format_adapter == WIRE_RESPONSES_TO_ANTHROPIC
+        )
+        or (
+            inbound_format == "chat_completions"
+            and configured_upstream_format in {
+                RouteProtocol.AUTO.value,
+                RouteProtocol.ANTHROPIC_MESSAGES.value,
+            }
+            and selected_upstream_format == "anthropic_messages"
+            and wire_format_adapter == WIRE_CHAT_TO_ANTHROPIC
+        )
     )
 
 
@@ -1435,6 +1497,11 @@ def route_plan_for_request(
         or upstream.get("upstream_model")
         or ""
     )
+    maintained_protocol = _maintained_upstream_protocol(
+        binding_provider_id, binding_model_id
+    )
+    if maintained_protocol is not None:
+        attempt_protocols = (maintained_protocol,)
     capability_binding = _route_capability_binding(
         upstream,
         configured_upstream_protocol=configured_upstream_protocol,
@@ -1501,6 +1568,8 @@ def route_plan_for_request(
     transparent_lightweight_fallback = transparent_metered and wire_adapter in {
         WIRE_CHAT_TO_RESPONSES,
         WIRE_RESPONSES_TO_CHAT,
+        WIRE_CHAT_TO_ANTHROPIC,
+        WIRE_RESPONSES_TO_ANTHROPIC,
     }
     codex_semantic_adapter = (
         CODEX_SEMANTIC_EXTERNAL_ADAPTER
@@ -1621,6 +1690,16 @@ def route_plan_for_request(
             and attempt_protocol == RouteProtocol.CHAT_COMPLETIONS
         ):
             request_body_mode = AttemptRequestBodyMode.CONVERT_RESPONSES_TO_CHAT
+        elif (
+            inbound_format == RouteProtocol.RESPONSES.value
+            and attempt_protocol == RouteProtocol.ANTHROPIC_MESSAGES
+        ):
+            request_body_mode = AttemptRequestBodyMode.CONVERT_RESPONSES_TO_ANTHROPIC
+        elif (
+            inbound_format == RouteProtocol.CHAT_COMPLETIONS.value
+            and attempt_protocol == RouteProtocol.ANTHROPIC_MESSAGES
+        ):
+            request_body_mode = AttemptRequestBodyMode.CONVERT_CHAT_TO_ANTHROPIC
         else:
             request_body_mode = AttemptRequestBodyMode.PREPARED_DIRECT
         if (
@@ -1633,6 +1712,16 @@ def route_plan_for_request(
             == AttemptRequestBodyMode.CONVERT_RESPONSES_TO_CHAT
         ):
             request_conversion_steps = (WIRE_RESPONSES_TO_CHAT,)
+        elif (
+            request_body_mode
+            == AttemptRequestBodyMode.CONVERT_RESPONSES_TO_ANTHROPIC
+        ):
+            request_conversion_steps = (WIRE_RESPONSES_TO_ANTHROPIC,)
+        elif (
+            request_body_mode
+            == AttemptRequestBodyMode.CONVERT_CHAT_TO_ANTHROPIC
+        ):
+            request_conversion_steps = (WIRE_CHAT_TO_ANTHROPIC,)
         else:
             request_conversion_steps = ()
         attempt_mutations = set(base_named_mutations)

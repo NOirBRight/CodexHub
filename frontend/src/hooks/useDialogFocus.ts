@@ -15,6 +15,10 @@ export function useDialogFocus(
     function keydown(event: KeyboardEvent) {
       if (!panel.current?.contains(document.activeElement)) return;
       if (event.key === "Escape" && !event.defaultPrevented) {
+        const nested = panel.current.querySelector("[data-nested-dialog]");
+        if (nested && nested !== panel.current && nested.contains(document.activeElement)) {
+          return;
+        }
         event.preventDefault();
         event.stopPropagation();
         close.current();

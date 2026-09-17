@@ -18,6 +18,8 @@ def test_grok_e2e_covers_both_endpoints_for_each_provider() -> None:
         by_provider.setdefault(case["provider_id"], set()).add(case["inbound"])
     assert by_provider["openai"] == {"responses", "chat_completions"}
     assert by_provider["opencode-go"] == {"responses", "chat_completions"}
+    assert any(case["model"] == "union-alpha" and case["inbound"] == "responses" for case in E2E.CASES)
+    assert any(case["model"] == "union-alpha" and case["inbound"] == "chat_completions" for case in E2E.CASES)
     assert by_provider["commandcode"] == {"responses", "chat_completions"}
     paths = {case["endpoint"] for case in E2E.CASES}
     assert "/v1/providers/openai/responses" in paths

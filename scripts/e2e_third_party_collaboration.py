@@ -51,7 +51,7 @@ DEFAULT_REASONING = {
     "commandcode/meta/muse-spark-1.3-contributor": "max",
     "opencode-go/qwen3.8-flash": "xhigh",
     "opencode-go/hy4-preview": "high",
-    "opencode-go/omen-alpha": "high",
+    "opencode-go/union-alpha": "medium",
 }
 # The selected CommandCode target is an upstream model identifier, not a
 # display-name family.  Keep the match narrow enough that ``v4-flash`` and

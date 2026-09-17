@@ -212,6 +212,47 @@ fn providers_toml_roundtrip_preserves_anthropic_endpoint_selection() {
 }
 
 #[test]
+fn runtime_load_drops_retired_opencode_go_omen_alpha() {
+    let root = temp_root("providers-retired-omen");
+    let paths = test_paths(&root);
+    let providers = vec![Provider {
+        id: "opencode-go".to_string(),
+        name: "OpenCode Go".to_string(),
+        base_url: "https://opencode.ai/zen/go/v1".to_string(),
+        api_key: Some("fixture".to_string()),
+        upstream_format: Some(UpstreamFormat::Auto),
+        available_upstream_formats: None,
+        tool_protocol: None,
+        tool_surface_strategy: None,
+        reports_cached_input_tokens: None,
+        supports_developer_role: None,
+        display_prefix: Some("OC".to_string()),
+        auth_capabilities: None,
+        onboarding_hint: None,
+        discovery_policy: None,
+        sort_order: Some(7),
+        enabled: true,
+        locked: false,
+        models: vec![
+            Model {
+                id: "omen-alpha".to_string(),
+                enabled: true,
+                ..Model::default()
+            },
+            Model {
+                id: "union-alpha".to_string(),
+                enabled: true,
+                ..Model::default()
+            },
+        ],
+    }];
+    save_providers_with_paths(providers, &paths).expect("providers save");
+    let loaded = get_providers_with_paths(&paths).expect("providers load");
+    let ids: Vec<&str> = loaded[0].models.iter().map(|model| model.id.as_str()).collect();
+    assert_eq!(ids, vec!["union-alpha"]);
+}
+
+#[test]
 fn get_providers_falls_back_to_bundled_config_when_runtime_config_is_missing() {
     let root = temp_root("providers-fallback");
     let paths = test_paths(&root);

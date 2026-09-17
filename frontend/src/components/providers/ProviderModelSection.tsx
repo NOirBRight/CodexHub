@@ -1,7 +1,8 @@
 import { Brain, Cable, Check, Copy, Eye, Plus, RefreshCcw, Trash2, X } from "lucide-react";
 import type * as React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useDialogFocus } from "../../hooks/useDialogFocus";
 import { SortableList } from "../SortableList";
 import i18n from "../../i18n";
 import { cx, formatContextWindow } from "../../lib/format";
@@ -474,6 +475,8 @@ function ModelEditorOverlay({
   onRemove?: () => void;
 }) {
   const { t } = useTranslation();
+  const panel = useRef<HTMLDivElement>(null);
+  useDialogFocus(true, panel, onClose);
   const levelOptions = editorReasoningLevelOptions(catalogModel?.supported_reasoning_levels);
   const catalogDefault = catalogModel?.default_reasoning_level ?? null;
   const [draft, setDraft] = useState<Model>(() => normalizeModel(applyCatalogModelDefaults(model, catalogModel)));
@@ -528,10 +531,18 @@ function ModelEditorOverlay({
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/20 p-6">
-      <div className="grid w-full max-w-[760px] overflow-hidden rounded-overlay border border-line bg-white shadow-overlay">
+      <div
+        ref={panel}
+        data-nested-dialog=""
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="model-settings-title"
+        className="grid w-full max-w-[760px] overflow-hidden rounded-overlay border border-line bg-white shadow-overlay"
+      >
         <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
           <div className="min-w-0">
-            <h3 className="truncate text-base font-semibold">{t("providers.modelSettings")}</h3>
+            <h3 id="model-settings-title" className="truncate text-base font-semibold">{t("providers.modelSettings")}</h3>
             <p className="mt-1 truncate text-xs text-slate-500">{model.id}</p>
           </div>
           <button
