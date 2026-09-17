@@ -195,3 +195,62 @@ def test_ayaspace_reconnect_fixture_is_not_empty_disconnect_once_started() -> No
                 downstream_output_started=started,
                 visible_or_tool_output_seen=visible,
             )
+
+
+def test_compatible_sse_line_stamps_created_at_for_third_party_responses() -> None:
+    line = _sse(
+        {
+            "type": "response.created",
+            "response": {
+                "id": "resp_stamp",
+                "object": "response",
+                "status": "in_progress",
+                "output": [],
+            },
+        }
+    )
+    rewritten = gateway_compat.compatible_sse_line(line, "xai")
+    payload = json.loads(rewritten.split(b"data:", 1)[1])
+    assert isinstance(payload["response"]["created_at"], int)
+    assert gateway_compat.compatible_sse_line(line, "official") == line
+
+
+def test_compatible_response_body_stamps_created_at_and_chat_created() -> None:
+    responses = gateway_compat.compatible_response_body(
+        json.dumps(
+            {
+                "id": "resp_stamp_body",
+                "object": "response",
+                "status": "completed",
+                "output": [],
+            }
+        ).encode(),
+        "opencode-go",
+    )
+    assert isinstance(json.loads(responses)["created_at"], int)
+    chat = gateway_compat.compatible_response_body(
+        json.dumps(
+            {
+                "id": "chatcmpl_stamp_body",
+                "object": "chat.completion",
+                "choices": [],
+            }
+        ).encode(),
+        "opencode-go",
+    )
+    assert isinstance(json.loads(chat)["created"], int)
+
+
+def test_responses_failed_event_includes_created_at() -> None:
+    import gateway_errors
+
+    event = gateway_errors.responses_failed_event_for_stream_error(
+        upstream_name="opencode-go",
+        model="muse-spark-1.3-contributor",
+        status=502,
+        error="UpstreamStreamError",
+        detail="stream failed",
+        response_id="resp_failed_stamp",
+    )
+    assert event["type"] == "response.failed"
+    assert isinstance(event["response"]["created_at"], int)
