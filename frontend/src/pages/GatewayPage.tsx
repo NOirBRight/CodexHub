@@ -49,12 +49,21 @@ import type {
   GatewayStatus,
   GatewayUsageEvent,
   GatewayUsageSummary,
+  Model,
   Provider,
   RoutingOwner,
   Settings,
   TelemetryStatus,
   UsageQueryWindow,
 } from "../lib/types";
+import { OFFICIAL_ID } from "../lib/providerWorkspace/core";
+import { normalizeSettings } from "../lib/settings";
+import {
+  clientDefaultSubagentFields,
+  listDefaultSubagentOptions,
+  supportsClientDefaultSubagent,
+  withClientDefaultSubagent,
+} from "../lib/defaultSubagent";
 
 interface GatewayPageProps {
   desktopView?: "statistics" | "clients" | "service" | "diagnostics" | "hidden";
@@ -134,6 +143,7 @@ function GatewayPageImpl({
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
+  const subagentSaveGen = useRef(0);
   const running = status?.proxy_running ?? false;
   const diagnosticsEnabled = Boolean(
     appFlavor?.build.flavor === "debug" && appFlavor.build.diagnostics_enabled,
@@ -238,6 +248,17 @@ function GatewayPageImpl({
         0,
       ),
     [providers],
+  );
+  const officialModelsForSubagent = useMemo<Model[]>(
+    () =>
+      (status?.official_models ?? []).map((model) => ({
+        id: model.id,
+        display_name: model.display_name,
+        enabled: true,
+        supported_reasoning_levels: model.supported_reasoning_levels ?? null,
+        default_reasoning_level: model.default_reasoning_level ?? null,
+      })),
+    [status?.official_models],
   );
   const clientInfoById = useMemo(
     () => new Map(clientInfos.map((client) => [client.id, client])),
@@ -610,6 +631,84 @@ function GatewayPageImpl({
     }
   }
 
+  function subagentOptionsFor(clientId: string) {
+    return listDefaultSubagentOptions({
+      officialId: OFFICIAL_ID,
+      officialIncluded: Boolean(settings?.include_official_models),
+      officialModels: officialModelsForSubagent,
+      officialDisabledModels: settings?.official_disabled_models ?? [],
+      providers,
+      excludeProviderIds: clientId === "grok" ? ["xai"] : undefined,
+    });
+  }
+
+  async function persistClientDefaultSubagent(
+    clientId: string,
+    model: string,
+    effort: string,
+    options?: { stale?: boolean },
+  ) {
+    if (!settings) return;
+    const current = clientDefaultSubagentFields(settings, clientId);
+    if (current.model === model && current.effort === effort) return;
+    const next = normalizeSettings(
+      withClientDefaultSubagent(settings, clientId, model, effort),
+    );
+    const info = clientInfoById.get(clientId);
+    const name =
+      info?.name ??
+      clients.find((client) => client.id === clientId)?.name ??
+      clientId;
+    const state = connectionStateFromInfo(info);
+    const connected = state === "connected" || state === "drift";
+    const gen = ++subagentSaveGen.current;
+    const toastId = showToast({
+      dedupeKey: `default-subagent-${clientId}`,
+      text: t("workspace.savingDefaultSubagent"),
+      tone: "loading",
+    });
+    try {
+      await onApplySettings(next);
+      if (gen !== subagentSaveGen.current) return;
+      if (connected) {
+        await api.applyGatewayClientConfig(clientId, defaultModel);
+        if (gen !== subagentSaveGen.current) return;
+        await onRefreshClients({ force: true });
+      }
+      updateToast(toastId, {
+        action: null,
+        text: options?.stale
+          ? t("workspace.defaultSubagentStale", { name })
+          : connected
+            ? t("workspace.defaultSubagentSavedClient", { name })
+            : t("workspace.defaultSubagentSavedDisconnectedClient", { name }),
+        tone: "success",
+      });
+    } catch (err) {
+      if (gen !== subagentSaveGen.current) return;
+      updateToastWithError(toastId, err);
+    }
+  }
+
+  useEffect(() => {
+    if (!settings || !status) return;
+    for (const clientId of ["opencode", "zcode", "omp", "grok"]) {
+      const { model } = clientDefaultSubagentFields(settings, clientId);
+      if (!model) continue;
+      const options = subagentOptionsFor(clientId);
+      if (
+        options.length === 0 &&
+        providers.length === 0 &&
+        officialModelsForSubagent.length === 0
+      ) {
+        continue;
+      }
+      if (!options.some((option) => option.id === model)) {
+        void persistClientDefaultSubagent(clientId, "", "", { stale: true });
+      }
+    }
+  }, [settings, status, providers, officialModelsForSubagent]);
+
   return (
     <main
       data-workspace-view={desktopView}
@@ -884,6 +983,21 @@ function GatewayPageImpl({
                   info={clientInfoById.get(client.id)}
                   busy={Boolean(clientBusy?.startsWith(client.id))}
                   enabledModelCount={enabledModelCount}
+                  defaultSubagent={
+                    settings && supportsClientDefaultSubagent(client.id)
+                      ? {
+                          ...clientDefaultSubagentFields(settings, client.id),
+                          options: subagentOptionsFor(client.id),
+                          onChange: (model, effort) => {
+                            void persistClientDefaultSubagent(
+                              client.id,
+                              model,
+                              effort,
+                            );
+                          },
+                        }
+                      : undefined
+                  }
                   onRefresh={refreshGatewayClients}
                   onToggle={(connect) =>
                     handleConnectionToggle(client.id, connect)

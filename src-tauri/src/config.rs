@@ -433,6 +433,14 @@ struct SettingsDocument {
     official_provider_sort_order: Option<i32>,
     codex_default_subagent_model: Option<String>,
     codex_default_subagent_reasoning_effort: Option<String>,
+    opencode_default_subagent_model: Option<String>,
+    opencode_default_subagent_reasoning_effort: Option<String>,
+    zcode_default_subagent_model: Option<String>,
+    zcode_default_subagent_reasoning_effort: Option<String>,
+    omp_default_subagent_model: Option<String>,
+    omp_default_subagent_reasoning_effort: Option<String>,
+    grok_default_subagent_model: Option<String>,
+    grok_default_subagent_reasoning_effort: Option<String>,
     proxy_port: Option<u16>,
 }
 
@@ -523,6 +531,38 @@ impl SettingsDocument {
                 .codex_default_subagent_reasoning_effort
                 .map(sanitize_default_subagent_effort)
                 .unwrap_or(defaults.codex_default_subagent_reasoning_effort),
+            opencode_default_subagent_model: self
+                .opencode_default_subagent_model
+                .map(|value| sanitize_default_subagent_model(value, known_official_models))
+                .unwrap_or(defaults.opencode_default_subagent_model),
+            opencode_default_subagent_reasoning_effort: self
+                .opencode_default_subagent_reasoning_effort
+                .map(sanitize_default_subagent_effort)
+                .unwrap_or(defaults.opencode_default_subagent_reasoning_effort),
+            zcode_default_subagent_model: self
+                .zcode_default_subagent_model
+                .map(|value| sanitize_default_subagent_model(value, known_official_models))
+                .unwrap_or(defaults.zcode_default_subagent_model),
+            zcode_default_subagent_reasoning_effort: self
+                .zcode_default_subagent_reasoning_effort
+                .map(sanitize_default_subagent_effort)
+                .unwrap_or(defaults.zcode_default_subagent_reasoning_effort),
+            omp_default_subagent_model: self
+                .omp_default_subagent_model
+                .map(|value| sanitize_default_subagent_model(value, known_official_models))
+                .unwrap_or(defaults.omp_default_subagent_model),
+            omp_default_subagent_reasoning_effort: self
+                .omp_default_subagent_reasoning_effort
+                .map(sanitize_default_subagent_effort)
+                .unwrap_or(defaults.omp_default_subagent_reasoning_effort),
+            grok_default_subagent_model: self
+                .grok_default_subagent_model
+                .map(|value| sanitize_default_subagent_model(value, known_official_models))
+                .unwrap_or(defaults.grok_default_subagent_model),
+            grok_default_subagent_reasoning_effort: self
+                .grok_default_subagent_reasoning_effort
+                .map(sanitize_default_subagent_effort)
+                .unwrap_or(defaults.grok_default_subagent_reasoning_effort),
             proxy_port: self.proxy_port.unwrap_or(defaults.proxy_port),
         }
     }
@@ -668,7 +708,39 @@ fn sanitize_settings_for_save(
     if settings.codex_default_subagent_model.is_empty() {
         settings.codex_default_subagent_reasoning_effort.clear();
     }
+    sanitize_client_default_subagent_pair(
+        &mut settings.opencode_default_subagent_model,
+        &mut settings.opencode_default_subagent_reasoning_effort,
+        known_official_models,
+    );
+    sanitize_client_default_subagent_pair(
+        &mut settings.zcode_default_subagent_model,
+        &mut settings.zcode_default_subagent_reasoning_effort,
+        known_official_models,
+    );
+    sanitize_client_default_subagent_pair(
+        &mut settings.omp_default_subagent_model,
+        &mut settings.omp_default_subagent_reasoning_effort,
+        known_official_models,
+    );
+    sanitize_client_default_subagent_pair(
+        &mut settings.grok_default_subagent_model,
+        &mut settings.grok_default_subagent_reasoning_effort,
+        known_official_models,
+    );
     settings
+}
+
+fn sanitize_client_default_subagent_pair(
+    model: &mut String,
+    effort: &mut String,
+    known_official_models: &HashSet<String>,
+) {
+    *model = sanitize_default_subagent_model(std::mem::take(model), known_official_models);
+    *effort = sanitize_default_subagent_effort(std::mem::take(effort));
+    if model.is_empty() {
+        effort.clear();
+    }
 }
 
 const DEFAULT_SUBAGENT_EFFORTS: &[&str] =

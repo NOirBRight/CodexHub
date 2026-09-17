@@ -461,11 +461,21 @@ fn native_plan(
         readback: native_readback(&write_paths),
         write_paths,
         expected_fingerprint: None,
-        restart_required: "none".to_owned(),
+        restart_required: native_restart_required(id).to_owned(),
         activation_touched: false,
         preview: None,
         backup: target.backup_strategy(),
         no_execution: None,
+    }
+}
+
+fn native_restart_required(id: &str) -> &'static str {
+    match id {
+        "opencode" => "OpenCode",
+        "omp" => "OMP",
+        "zcode" => "ZCode",
+        "grok" => "Grok CLI",
+        _ => "none",
     }
 }
 
@@ -638,14 +648,12 @@ impl ManagedClientAdapter for GrokAdapter {
         intent: ClientIntent,
         _ctx: &AdapterCtx<'_>,
     ) -> Result<ClientMutationPlan, String> {
-        let mut plan = native_plan(
+        Ok(native_plan(
             self.metadata().id,
             intent,
             target_write_paths(_ctx, vec![detect_grok_config_path()]),
             &_ctx.target,
-        );
-        plan.restart_required = "Grok CLI".to_owned();
-        Ok(plan)
+        ))
     }
 }
 
@@ -1437,7 +1445,13 @@ mod tests {
             assert!(!plan.activation_touched, "{id} must not touch activation");
             assert_eq!(
                 plan.restart_required,
-                if id == "grok" { "Grok CLI" } else { "none" }
+                match id {
+                    "grok" => "Grok CLI",
+                    "opencode" => "OpenCode",
+                    "omp" => "OMP",
+                    "zcode" => "ZCode",
+                    _ => "none",
+                }
             );
         }
     }

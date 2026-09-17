@@ -196,7 +196,7 @@ mod isolated_managed_client_config {
         apply_gateway_client_config_isolated, isolated_client_apply_targets,
         isolated_client_preview, isolated_managed_client_ids,
         readback_gateway_client_config_isolated, route_protocol_for_selection,
-        validate_isolated_root, IsolatedClientApplyInput,
+        validate_isolated_root, IsolatedClientApplyInput, IsolatedClientRoot,
     };
     use super::{
         case_sensitive_client_export_test_providers, stable_root, unique_temp_dir, TEST_ENV_LOCK,
@@ -1986,5 +1986,460 @@ allowed_models = ["grok-4.6"]
             "home requirements.toml pin disclosure missing from status: {}",
             grok.status
         );
+    }
+
+    fn pinned_settings(effort: &str) -> Settings {
+        Settings {
+            opencode_default_subagent_model: "volc/glm-5.2".to_string(),
+            opencode_default_subagent_reasoning_effort: effort.to_string(),
+            zcode_default_subagent_model: "volc/glm-5.2".to_string(),
+            zcode_default_subagent_reasoning_effort: effort.to_string(),
+            omp_default_subagent_model: "volc/glm-5.2".to_string(),
+            omp_default_subagent_reasoning_effort: effort.to_string(),
+            grok_default_subagent_model: "volc/glm-5.2".to_string(),
+            grok_default_subagent_reasoning_effort: effort.to_string(),
+            include_official_models: false,
+            ..settings_with_port(9099)
+        }
+    }
+
+    fn restore_isolated(client_id: &str, root: &std::path::Path, isolated: &IsolatedClientRoot) {
+        let targets = isolated_client_apply_targets(isolated, client_id).unwrap();
+        let backup_roots = [stable_root(targets.backup_path().to_path_buf())];
+        super::super::with_rollback_provenance_dir_override(
+            Some(root.join("rollback-provenance")),
+            || match client_id {
+                "opencode" => super::super::restore_opencode_config_with_backup_roots(
+                    &targets.writable_paths()[0],
+                    &backup_roots,
+                ),
+                "omp" => super::super::restore_omp_config_with_paths(
+                    &targets.writable_paths()[0],
+                    &targets.writable_paths()[1],
+                    targets.backup_path(),
+                ),
+                "zcode" => {
+                    let zcode_targets =
+                        super::super::zcode_targets_from_writable(&targets).unwrap();
+                    super::super::restore_zcode_config_with_targets(
+                        &zcode_targets,
+                        targets.backup_path(),
+                    )
+                }
+                "grok" => super::super::restore_grok_config_with_backup_roots(
+                    &targets.writable_paths()[0],
+                    &backup_roots,
+                ),
+                other => panic!("unexpected isolated client {other}"),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn default_subagent_pin_writes_native_spawn_targets_and_restores_on_disconnect() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let settings = pinned_settings("high");
+        let providers = volc_provider(UpstreamFormat::Responses);
+
+        let opencode_root = fresh_root("subagent-opencode");
+        let opencode_isolated = validate_isolated_root(&opencode_root).unwrap();
+        let opencode_path = opencode_isolated.root().join("opencode").join("opencode.json");
+        fs::create_dir_all(opencode_path.parent().unwrap()).unwrap();
+        fs::write(
+            &opencode_path,
+            r#"{"model":"anthropic/claude-sonnet-4","agent":{"build":{"model":"keep-build"},"general":{"model":"foreign/keep-me"}}}"#,
+        )
+        .unwrap();
+        let opencode_inp = IsolatedClientApplyInput {
+            client_id: "opencode".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings: settings.clone(),
+            providers: providers.clone(),
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&opencode_isolated, &opencode_inp).unwrap();
+        let opencode_text = fs::read_to_string(&opencode_path).unwrap();
+        let opencode_json: serde_json::Value = serde_json::from_str(&opencode_text).unwrap();
+        assert_eq!(
+            opencode_json["agent"]["general"]["model"].as_str(),
+            Some("codexhub-volc/glm-5.2#high")
+        );
+        assert_eq!(
+            opencode_json["agent"]["explore"]["model"].as_str(),
+            Some("codexhub-volc/glm-5.2#high")
+        );
+        assert_eq!(
+            opencode_json["agent"]["scout"]["model"].as_str(),
+            Some("codexhub-volc/glm-5.2#high")
+        );
+        assert_eq!(
+            opencode_json["agent"]["build"]["model"].as_str(),
+            Some("keep-build")
+        );
+        assert_eq!(
+            opencode_json["model"].as_str(),
+            Some("anthropic/claude-sonnet-4")
+        );
+        assert!(
+            readback_gateway_client_config_isolated(&opencode_isolated, &opencode_inp)
+                .unwrap()
+                .ok
+        );
+        restore_isolated("opencode", &opencode_root, &opencode_isolated);
+        let restored = fs::read_to_string(&opencode_path).unwrap();
+        let restored_json: serde_json::Value = serde_json::from_str(&restored).unwrap();
+        assert_eq!(
+            restored_json["agent"]["general"]["model"].as_str(),
+            Some("foreign/keep-me")
+        );
+        assert!(restored_json["agent"].get("explore").is_none());
+        assert_eq!(
+            restored_json["agent"]["build"]["model"].as_str(),
+            Some("keep-build")
+        );
+        assert_eq!(
+            restored_json["model"].as_str(),
+            Some("anthropic/claude-sonnet-4")
+        );
+
+        let omp_root = fresh_root("subagent-omp");
+        let omp_isolated = validate_isolated_root(&omp_root).unwrap();
+        let omp_config = omp_isolated.root().join("omp").join("config.yml");
+        fs::create_dir_all(omp_config.parent().unwrap()).unwrap();
+        fs::write(
+            &omp_config,
+            "modelRoles:\n  default: foreign/keep-activation\ncustom:\n  keep: true\n",
+        )
+        .unwrap();
+        let omp_inp = IsolatedClientApplyInput {
+            client_id: "omp".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings: settings.clone(),
+            providers: providers.clone(),
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&omp_isolated, &omp_inp).unwrap();
+        let omp_text = fs::read_to_string(&omp_config).unwrap();
+        assert!(omp_text.contains("task:"));
+        assert!(omp_text.contains("agentModelOverrides:"));
+        assert!(omp_text.contains("codexhub-volc/glm-5.2:high"));
+        assert!(omp_text.contains("    scout:"));
+        assert!(omp_text.contains("    sonic:"));
+        assert!(
+            omp_text.contains("foreign/keep-activation"),
+            "Default subagent must not rewrite foreign modelRoles: {omp_text}"
+        );
+        restore_isolated("omp", &omp_root, &omp_isolated);
+        let omp_restored = fs::read_to_string(&omp_config).unwrap();
+        assert!(
+            !omp_restored.contains("codexhub-volc/glm-5.2:high"),
+            "disconnect left OMP pin: {omp_restored}"
+        );
+
+        let zcode_root = fresh_root("subagent-zcode");
+        let zcode_isolated = validate_isolated_root(&zcode_root).unwrap();
+        let zcode_inp = IsolatedClientApplyInput {
+            client_id: "zcode".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings: settings.clone(),
+            providers: providers.clone(),
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&zcode_isolated, &zcode_inp).unwrap();
+        let general = zcode_isolated
+            .root()
+            .join("zcode")
+            .join("agents")
+            .join("general-purpose.md");
+        let explore = zcode_isolated
+            .root()
+            .join("zcode")
+            .join("agents")
+            .join("Explore.md");
+        let general_text = fs::read_to_string(&general).unwrap();
+        let explore_text = fs::read_to_string(&explore).unwrap();
+        assert!(general_text.contains("model: codexhub-volc/glm-5.2"));
+        assert!(general_text.contains("thoughtLevel: high"));
+        assert!(general_text.contains("x-codexhub-default-subagent: true"));
+        assert!(explore_text.contains("model: codexhub-volc/glm-5.2"));
+        restore_isolated("zcode", &zcode_root, &zcode_isolated);
+        assert!(!general.exists() || !fs::read_to_string(&general).unwrap().contains("x-codexhub-default-subagent: true"));
+        assert!(!explore.exists() || !fs::read_to_string(&explore).unwrap().contains("x-codexhub-default-subagent: true"));
+
+        let grok_root = fresh_root("subagent-grok");
+        let grok_isolated = validate_isolated_root(&grok_root).unwrap();
+        let grok_path = grok_isolated.root().join("grok").join("config.toml");
+        fs::create_dir_all(grok_path.parent().unwrap()).unwrap();
+        fs::write(
+            &grok_path,
+            "[models]\ndefault = \"grok-4.6\"\n\n[subagents.roles]\nplan = \"persona-string\"\n",
+        )
+        .unwrap();
+        let grok_inp = IsolatedClientApplyInput {
+            client_id: "grok".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings: settings.clone(),
+            providers: providers.clone(),
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&grok_isolated, &grok_inp).unwrap();
+        let grok_text = fs::read_to_string(&grok_path).unwrap();
+        assert!(grok_text.contains("[models]"));
+        assert!(grok_text.contains("default = \"grok-4.6\"") || grok_text.contains("default = 'grok-4.6'"));
+        assert!(grok_text.contains("codexhub-volc-glm-5.2"));
+        assert!(grok_text.contains("reasoning_effort"));
+        let plan_shadow = grok_isolated
+            .root()
+            .join("grok")
+            .join("agents")
+            .join("plan.md");
+        assert!(plan_shadow.exists(), "non-table role should fall back to a shadow agent file");
+        assert!(fs::read_to_string(&plan_shadow).unwrap().contains("x-codexhub-default-subagent: true"));
+        restore_isolated("grok", &grok_root, &grok_isolated);
+        let grok_restored = fs::read_to_string(&grok_path).unwrap();
+        assert!(
+            !grok_restored.contains("codexhub-volc-glm-5.2"),
+            "disconnect left Grok pin: {grok_restored}"
+        );
+        assert!(!plan_shadow.exists() || !fs::read_to_string(&plan_shadow).unwrap_or_default().contains("x-codexhub-default-subagent: true"));
+    }
+
+    #[test]
+    fn default_subagent_empty_pin_preserves_foreign_spawn_targets() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let settings = Settings {
+            include_official_models: false,
+            ..settings_with_port(9099)
+        };
+        let providers = volc_provider(UpstreamFormat::Responses);
+        let root = fresh_root("subagent-empty-opencode");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let path = isolated.root().join("opencode").join("opencode.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"model":"anthropic/claude-sonnet-4","agent":{"general":{"model":"foreign/keep-me"},"build":{"model":"keep-build"}}}"#,
+        )
+        .unwrap();
+        let inp = IsolatedClientApplyInput {
+            client_id: "opencode".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings,
+            providers,
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            json["agent"]["general"]["model"].as_str(),
+            Some("foreign/keep-me")
+        );
+        assert!(json["agent"].get("explore").is_none());
+        assert_eq!(json["agent"]["build"]["model"].as_str(), Some("keep-build"));
+    }
+
+    #[test]
+    fn default_subagent_clear_while_connected_restores_backup_spawn_targets() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let providers = volc_provider(UpstreamFormat::Responses);
+        let root = fresh_root("subagent-clear-opencode");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let path = isolated.root().join("opencode").join("opencode.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"model":"anthropic/claude-sonnet-4","agent":{"general":{"model":"foreign/keep-me"}}}"#,
+        )
+        .unwrap();
+        let mut pinned = pinned_settings("high");
+        pinned.zcode_default_subagent_model.clear();
+        pinned.zcode_default_subagent_reasoning_effort.clear();
+        pinned.omp_default_subagent_model.clear();
+        pinned.omp_default_subagent_reasoning_effort.clear();
+        pinned.grok_default_subagent_model.clear();
+        pinned.grok_default_subagent_reasoning_effort.clear();
+        let mut inp = IsolatedClientApplyInput {
+            client_id: "opencode".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings: pinned,
+            providers,
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        inp.settings.opencode_default_subagent_model.clear();
+        inp.settings.opencode_default_subagent_reasoning_effort.clear();
+        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            json["agent"]["general"]["model"].as_str(),
+            Some("foreign/keep-me")
+        );
+        assert!(json["agent"].get("explore").is_none());
+    }
+
+    #[test]
+    fn default_subagent_spawn_drift_fails_readback_activation_does_not() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let settings = pinned_settings("high");
+        let providers = volc_provider(UpstreamFormat::Responses);
+        let root = fresh_root("subagent-drift-opencode");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let path = isolated.root().join("opencode").join("opencode.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"model":"anthropic/claude-sonnet-4"}"#).unwrap();
+        let inp = IsolatedClientApplyInput {
+            client_id: "opencode".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings,
+            providers,
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        let activation = written.replace("anthropic/claude-sonnet-4", "user-activation-model");
+        fs::write(&path, &activation).unwrap();
+        assert!(
+            readback_gateway_client_config_isolated(&isolated, &inp)
+                .unwrap()
+                .ok,
+            "activation edits must not count as default subagent drift"
+        );
+        let drifted = activation.replace("codexhub-volc/glm-5.2#high", "hand-edited");
+        fs::write(&path, drifted).unwrap();
+        assert!(
+            readback_gateway_client_config_isolated(&isolated, &inp).is_err(),
+            "spawn-target hand-edits must be drift"
+        );
+    }
+
+    #[test]
+    fn default_subagent_stale_catalog_slug_connects_as_cli_default() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let settings = Settings {
+            opencode_default_subagent_model: "missing/model".to_string(),
+            opencode_default_subagent_reasoning_effort: "high".to_string(),
+            include_official_models: false,
+            ..settings_with_port(9099)
+        };
+        let providers = volc_provider(UpstreamFormat::Responses);
+        let root = fresh_root("subagent-stale");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let path = isolated.root().join("opencode").join("opencode.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"model":"anthropic/claude-sonnet-4"}"#).unwrap();
+        let inp = IsolatedClientApplyInput {
+            client_id: "opencode".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings,
+            providers,
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(json.get("agent").is_none() || json["agent"].get("general").is_none());
+    }
+
+    #[test]
+    fn default_subagent_invalid_effort_fails_closed_without_native_mutation() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let settings = Settings {
+            opencode_default_subagent_model: "volc/glm-5.2".to_string(),
+            opencode_default_subagent_reasoning_effort: "nope".to_string(),
+            include_official_models: false,
+            ..settings_with_port(9099)
+        };
+        let providers = volc_provider(UpstreamFormat::Responses);
+        let root = fresh_root("subagent-invalid-effort");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let path = isolated.root().join("opencode").join("opencode.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"model":"anthropic/claude-sonnet-4","marker":true}"#).unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        let inp = IsolatedClientApplyInput {
+            client_id: "opencode".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings,
+            providers,
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        let error = apply_gateway_client_config_isolated(&isolated, &inp).unwrap_err();
+        assert!(
+            error.contains("unsupported default subagent reasoning effort"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn default_subagent_pin_is_independent_across_clients_and_skips_pi() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut settings = pinned_settings("high");
+        settings.zcode_default_subagent_model.clear();
+        settings.zcode_default_subagent_reasoning_effort.clear();
+        settings.omp_default_subagent_model.clear();
+        settings.omp_default_subagent_reasoning_effort.clear();
+        settings.grok_default_subagent_model.clear();
+        settings.grok_default_subagent_reasoning_effort.clear();
+        let providers = volc_provider(UpstreamFormat::Responses);
+        let root = fresh_root("subagent-independent");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let opencode_inp = IsolatedClientApplyInput {
+            client_id: "opencode".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings: settings.clone(),
+            providers: providers.clone(),
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&isolated, &opencode_inp).unwrap();
+        assert!(isolated.root().join("opencode").join("opencode.json").exists());
+        assert!(!isolated.root().join("grok").join("config.toml").exists());
+        assert!(!isolated.root().join("zcode").join("agents").exists());
+        let pi_inp = IsolatedClientApplyInput {
+            client_id: "pi".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings,
+            providers,
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&isolated, &pi_inp).unwrap();
+        let pi_text = fs::read_to_string(isolated.root().join("pi").join("models.json")).unwrap();
+        assert!(!pi_text.contains("default_subagent"));
+        assert!(!pi_text.contains("agentModelOverrides"));
     }
 }

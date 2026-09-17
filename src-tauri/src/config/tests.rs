@@ -516,6 +516,14 @@ fn settings_missing_file_returns_defaults_and_roundtrips_saved_values() {
         official_provider_sort_order: 3,
         codex_default_subagent_model: "gpt-5.6-luna".to_string(),
         codex_default_subagent_reasoning_effort: "max".to_string(),
+            opencode_default_subagent_model: String::new(),
+            opencode_default_subagent_reasoning_effort: String::new(),
+            zcode_default_subagent_model: String::new(),
+            zcode_default_subagent_reasoning_effort: String::new(),
+            omp_default_subagent_model: String::new(),
+            omp_default_subagent_reasoning_effort: String::new(),
+            grok_default_subagent_model: String::new(),
+            grok_default_subagent_reasoning_effort: String::new(),
         proxy_port: 4555,
     };
     let saved = save_settings_with_paths(custom.clone(), &paths).expect("settings save");
@@ -621,6 +629,14 @@ fn default_subagent_settings_normalize_official_prefix_and_effort() {
         Settings {
             codex_default_subagent_model: "openai/gpt-5.6-luna".to_string(),
             codex_default_subagent_reasoning_effort: "MAX".to_string(),
+            opencode_default_subagent_model: String::new(),
+            opencode_default_subagent_reasoning_effort: String::new(),
+            zcode_default_subagent_model: String::new(),
+            zcode_default_subagent_reasoning_effort: String::new(),
+            omp_default_subagent_model: String::new(),
+            omp_default_subagent_reasoning_effort: String::new(),
+            grok_default_subagent_model: String::new(),
+            grok_default_subagent_reasoning_effort: String::new(),
             ..Settings::default()
         },
         &paths,
@@ -641,6 +657,14 @@ fn default_subagent_settings_keep_opencode_go_flash_slug() {
         Settings {
             codex_default_subagent_model: "opencode-go/deepseek-v4.1-flash".to_string(),
             codex_default_subagent_reasoning_effort: "MAX".to_string(),
+            opencode_default_subagent_model: String::new(),
+            opencode_default_subagent_reasoning_effort: String::new(),
+            zcode_default_subagent_model: String::new(),
+            zcode_default_subagent_reasoning_effort: String::new(),
+            omp_default_subagent_model: String::new(),
+            omp_default_subagent_reasoning_effort: String::new(),
+            grok_default_subagent_model: String::new(),
+            grok_default_subagent_reasoning_effort: String::new(),
             ..Settings::default()
         },
         &paths,
@@ -998,6 +1022,14 @@ fn switch_mode_custom_forwards_default_subagent_overlay_args() {
             proxy_port: 4555,
             codex_default_subagent_model: "openai/gpt-5.6-luna".to_string(),
             codex_default_subagent_reasoning_effort: "MAX".to_string(),
+            opencode_default_subagent_model: String::new(),
+            opencode_default_subagent_reasoning_effort: String::new(),
+            zcode_default_subagent_model: String::new(),
+            zcode_default_subagent_reasoning_effort: String::new(),
+            omp_default_subagent_model: String::new(),
+            omp_default_subagent_reasoning_effort: String::new(),
+            grok_default_subagent_model: String::new(),
+            grok_default_subagent_reasoning_effort: String::new(),
             ..Settings::default()
         },
         &paths,
@@ -1030,6 +1062,14 @@ fn switch_mode_custom_forwards_opencode_go_flash_subagent_slug() {
             proxy_port: 4555,
             codex_default_subagent_model: "opencode-go/deepseek-v4.1-flash".to_string(),
             codex_default_subagent_reasoning_effort: "max".to_string(),
+            opencode_default_subagent_model: String::new(),
+            opencode_default_subagent_reasoning_effort: String::new(),
+            zcode_default_subagent_model: String::new(),
+            zcode_default_subagent_reasoning_effort: String::new(),
+            omp_default_subagent_model: String::new(),
+            omp_default_subagent_reasoning_effort: String::new(),
+            grok_default_subagent_model: String::new(),
+            grok_default_subagent_reasoning_effort: String::new(),
             ..Settings::default()
         },
         &paths,
@@ -1081,6 +1121,14 @@ fn isolated_switch_mode_writes_opencode_go_flash_default_subagent() {
             gateway_client_key: "isolated-subagent-key".to_string(),
             codex_default_subagent_model: "opencode-go/deepseek-v4.1-flash".to_string(),
             codex_default_subagent_reasoning_effort: "max".to_string(),
+            opencode_default_subagent_model: String::new(),
+            opencode_default_subagent_reasoning_effort: String::new(),
+            zcode_default_subagent_model: String::new(),
+            zcode_default_subagent_reasoning_effort: String::new(),
+            omp_default_subagent_model: String::new(),
+            omp_default_subagent_reasoning_effort: String::new(),
+            grok_default_subagent_model: String::new(),
+            grok_default_subagent_reasoning_effort: String::new(),
             ..Settings::default()
         },
         &paths,
@@ -1814,6 +1862,38 @@ fn assert_settings_eq(left: &Settings, right: &Settings) {
     assert_eq!(
         left.codex_default_subagent_reasoning_effort,
         right.codex_default_subagent_reasoning_effort
+    );
+    assert_eq!(
+        left.opencode_default_subagent_model,
+        right.opencode_default_subagent_model
+    );
+    assert_eq!(
+        left.opencode_default_subagent_reasoning_effort,
+        right.opencode_default_subagent_reasoning_effort
+    );
+    assert_eq!(
+        left.zcode_default_subagent_model,
+        right.zcode_default_subagent_model
+    );
+    assert_eq!(
+        left.zcode_default_subagent_reasoning_effort,
+        right.zcode_default_subagent_reasoning_effort
+    );
+    assert_eq!(
+        left.omp_default_subagent_model,
+        right.omp_default_subagent_model
+    );
+    assert_eq!(
+        left.omp_default_subagent_reasoning_effort,
+        right.omp_default_subagent_reasoning_effort
+    );
+    assert_eq!(
+        left.grok_default_subagent_model,
+        right.grok_default_subagent_model
+    );
+    assert_eq!(
+        left.grok_default_subagent_reasoning_effort,
+        right.grok_default_subagent_reasoning_effort
     );
     assert_eq!(left.proxy_port, right.proxy_port);
 }
