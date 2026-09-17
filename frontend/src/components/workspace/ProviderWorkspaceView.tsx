@@ -641,12 +641,13 @@ export function ProviderWorkspaceView(props: Props) {
   );
 }
 
-function DefaultSubagentPicker({
+export function DefaultSubagentPicker({
   disabled,
   model,
   effort,
   options,
   selected,
+  emptyLabel,
   onChange,
 }: {
   disabled: boolean;
@@ -654,6 +655,7 @@ function DefaultSubagentPicker({
   effort: string;
   options: DefaultSubagentOption[];
   selected?: DefaultSubagentOption;
+  emptyLabel?: string;
   onChange: (model: string, effort: string) => void;
 }) {
   const { t } = useTranslation();
@@ -668,7 +670,7 @@ function DefaultSubagentPicker({
   draftRef.current = { model: draftModel, effort: draftEffort };
   propsRef.current = { model, effort, onChange };
   openRef.current = open;
-  const fallback = t("workspace.defaultSubagentCodexDefault");
+  const fallback = emptyLabel ?? t("workspace.defaultSubagentCodexDefault");
   const activeSelected =
     options.find((option) => option.id === draftModel) ??
     (draftModel && selected?.id === draftModel ? selected : undefined);

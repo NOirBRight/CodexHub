@@ -30,6 +30,14 @@ const DEFAULT_SETTINGS: Settings = {
   official_provider_sort_order: 0,
   codex_default_subagent_model: "",
   codex_default_subagent_reasoning_effort: "",
+  opencode_default_subagent_model: "",
+  opencode_default_subagent_reasoning_effort: "",
+  zcode_default_subagent_model: "",
+  zcode_default_subagent_reasoning_effort: "",
+  omp_default_subagent_model: "",
+  omp_default_subagent_reasoning_effort: "",
+  grok_default_subagent_model: "",
+  grok_default_subagent_reasoning_effort: "",
   proxy_port: 9099,
 };
 
@@ -64,13 +72,51 @@ export function normalizeSettings(settings: LegacySettings | null | undefined): 
 }
 
 function defaultSubagentSettings(source: LegacySettings) {
-  const model = normalizeDefaultSubagentModel(source.codex_default_subagent_model);
   return {
-    codex_default_subagent_model: model,
-    codex_default_subagent_reasoning_effort: model
-      ? normalizeDefaultSubagentEffort(source.codex_default_subagent_reasoning_effort)
-      : "",
+    ...normalizeSubagentPair(
+      "codex_default_subagent_model",
+      "codex_default_subagent_reasoning_effort",
+      source.codex_default_subagent_model,
+      source.codex_default_subagent_reasoning_effort,
+    ),
+    ...normalizeSubagentPair(
+      "opencode_default_subagent_model",
+      "opencode_default_subagent_reasoning_effort",
+      source.opencode_default_subagent_model,
+      source.opencode_default_subagent_reasoning_effort,
+    ),
+    ...normalizeSubagentPair(
+      "zcode_default_subagent_model",
+      "zcode_default_subagent_reasoning_effort",
+      source.zcode_default_subagent_model,
+      source.zcode_default_subagent_reasoning_effort,
+    ),
+    ...normalizeSubagentPair(
+      "omp_default_subagent_model",
+      "omp_default_subagent_reasoning_effort",
+      source.omp_default_subagent_model,
+      source.omp_default_subagent_reasoning_effort,
+    ),
+    ...normalizeSubagentPair(
+      "grok_default_subagent_model",
+      "grok_default_subagent_reasoning_effort",
+      source.grok_default_subagent_model,
+      source.grok_default_subagent_reasoning_effort,
+    ),
   };
+}
+
+function normalizeSubagentPair<M extends string, E extends string>(
+  modelKey: M,
+  effortKey: E,
+  model: string | null | undefined,
+  effort: string | null | undefined,
+) {
+  const normalized = normalizeDefaultSubagentModel(model);
+  return {
+    [modelKey]: normalized,
+    [effortKey]: normalized ? normalizeDefaultSubagentEffort(effort) : "",
+  } as Record<M | E, string>;
 }
 
 function normalizeDefaultSubagentModel(value: string | null | undefined) {

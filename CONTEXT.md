@@ -78,3 +78,7 @@ _Avoid_: session loss, conversation reset
 **Activation**:
 Pointing a client's global default model selection at the Injected Block. Always the user's own action, never a side effect of Apply.
 _Avoid_: enabling, switching on
+
+**Default subagent**:
+A per-client pin of which CodexHub-injected model (and effort) that client's built-in child sessions use. Empty keeps the CLI default: the child inherits the parent session. Independent per client; never Activation.
+_Avoid_: child model, subagent routing, enabling
