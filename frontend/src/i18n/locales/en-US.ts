@@ -74,6 +74,7 @@ const enUS = {
   "defaultSubagentSavedClient": "Default subagent saved. Restart {{name}} to apply.",
   "defaultSubagentSavedDisconnectedClient": "Default subagent saved. It will be written to {{name}} when you connect CodexHub.",
   "defaultSubagentStale": "Default subagent for {{name}} reverted to CLI default because the model is no longer injected.",
+  "defaultSubagentStaleRestart": "Default subagent for {{name}} reverted to CLI default because the model is no longer injected. Restart {{name}} to apply.",
   "restartPending": "Restart Codex",
   "restartPendingHint": "Restart the Codex you are using. Click to dismiss this reminder.",
   "configSaved": "Connection settings saved",

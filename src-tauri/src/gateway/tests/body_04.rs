@@ -2047,7 +2047,10 @@ allowed_models = ["grok-4.6"]
 
         let opencode_root = fresh_root("subagent-opencode");
         let opencode_isolated = validate_isolated_root(&opencode_root).unwrap();
-        let opencode_path = opencode_isolated.root().join("opencode").join("opencode.json");
+        let opencode_path = opencode_isolated
+            .root()
+            .join("opencode")
+            .join("opencode.json");
         fs::create_dir_all(opencode_path.parent().unwrap()).unwrap();
         fs::write(
             &opencode_path,
@@ -2170,8 +2173,18 @@ allowed_models = ["grok-4.6"]
         assert!(general_text.contains("x-codexhub-default-subagent: true"));
         assert!(explore_text.contains("model: codexhub-volc/glm-5.2"));
         restore_isolated("zcode", &zcode_root, &zcode_isolated);
-        assert!(!general.exists() || !fs::read_to_string(&general).unwrap().contains("x-codexhub-default-subagent: true"));
-        assert!(!explore.exists() || !fs::read_to_string(&explore).unwrap().contains("x-codexhub-default-subagent: true"));
+        assert!(
+            !general.exists()
+                || !fs::read_to_string(&general)
+                    .unwrap()
+                    .contains("x-codexhub-default-subagent: true")
+        );
+        assert!(
+            !explore.exists()
+                || !fs::read_to_string(&explore)
+                    .unwrap()
+                    .contains("x-codexhub-default-subagent: true")
+        );
 
         let grok_root = fresh_root("subagent-grok");
         let grok_isolated = validate_isolated_root(&grok_root).unwrap();
@@ -2193,7 +2206,10 @@ allowed_models = ["grok-4.6"]
         apply_gateway_client_config_isolated(&grok_isolated, &grok_inp).unwrap();
         let grok_text = fs::read_to_string(&grok_path).unwrap();
         assert!(grok_text.contains("[models]"));
-        assert!(grok_text.contains("default = \"grok-4.6\"") || grok_text.contains("default = 'grok-4.6'"));
+        assert!(
+            grok_text.contains("default = \"grok-4.6\"")
+                || grok_text.contains("default = 'grok-4.6'")
+        );
         assert!(grok_text.contains("codexhub-volc-glm-5.2"));
         assert!(grok_text.contains("reasoning_effort"));
         let plan_shadow = grok_isolated
@@ -2201,15 +2217,25 @@ allowed_models = ["grok-4.6"]
             .join("grok")
             .join("agents")
             .join("plan.md");
-        assert!(plan_shadow.exists(), "non-table role should fall back to a shadow agent file");
-        assert!(fs::read_to_string(&plan_shadow).unwrap().contains("x-codexhub-default-subagent: true"));
+        assert!(
+            plan_shadow.exists(),
+            "non-table role should fall back to a shadow agent file"
+        );
+        assert!(fs::read_to_string(&plan_shadow)
+            .unwrap()
+            .contains("x-codexhub-default-subagent: true"));
         restore_isolated("grok", &grok_root, &grok_isolated);
         let grok_restored = fs::read_to_string(&grok_path).unwrap();
         assert!(
             !grok_restored.contains("codexhub-volc-glm-5.2"),
             "disconnect left Grok pin: {grok_restored}"
         );
-        assert!(!plan_shadow.exists() || !fs::read_to_string(&plan_shadow).unwrap_or_default().contains("x-codexhub-default-subagent: true"));
+        assert!(
+            !plan_shadow.exists()
+                || !fs::read_to_string(&plan_shadow)
+                    .unwrap_or_default()
+                    .contains("x-codexhub-default-subagent: true")
+        );
     }
 
     #[test]
@@ -2284,7 +2310,9 @@ allowed_models = ["grok-4.6"]
         };
         apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
         inp.settings.opencode_default_subagent_model.clear();
-        inp.settings.opencode_default_subagent_reasoning_effort.clear();
+        inp.settings
+            .opencode_default_subagent_reasoning_effort
+            .clear();
         apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -2396,7 +2424,11 @@ allowed_models = ["grok-4.6"]
         let isolated = validate_isolated_root(&root).unwrap();
         let path = isolated.root().join("opencode").join("opencode.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{"model":"anthropic/claude-sonnet-4","marker":true}"#).unwrap();
+        fs::write(
+            &path,
+            r#"{"model":"anthropic/claude-sonnet-4","marker":true}"#,
+        )
+        .unwrap();
         let before = fs::read_to_string(&path).unwrap();
         let inp = IsolatedClientApplyInput {
             client_id: "opencode".to_string(),
@@ -2439,14 +2471,18 @@ allowed_models = ["grok-4.6"]
             backup_subdir: None,
         };
         apply_gateway_client_config_isolated(&isolated, &opencode_inp).unwrap();
-        assert!(isolated.root().join("opencode").join("opencode.json").exists());
+        assert!(isolated
+            .root()
+            .join("opencode")
+            .join("opencode.json")
+            .exists());
         assert!(!isolated.root().join("grok").join("config.toml").exists());
         assert!(!isolated.root().join("zcode").join("agents").exists());
         let pi_inp = IsolatedClientApplyInput {
             client_id: "pi".to_string(),
             model: Some("volc/glm-5.2".to_string()),
-            settings,
-            providers,
+            settings: settings.clone(),
+            providers: providers.clone(),
             catalog_path: None,
             backup_subdir: None,
         };
@@ -2454,6 +2490,20 @@ allowed_models = ["grok-4.6"]
         let pi_text = fs::read_to_string(isolated.root().join("pi").join("models.json")).unwrap();
         assert!(!pi_text.contains("default_subagent"));
         assert!(!pi_text.contains("agentModelOverrides"));
+        let dsh_inp = IsolatedClientApplyInput {
+            client_id: "dsh".to_string(),
+            model: Some("volc/glm-5.2".to_string()),
+            settings,
+            providers,
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        let dsh_error = apply_gateway_client_config_isolated(&isolated, &dsh_inp).unwrap_err();
+        assert!(
+            dsh_error.contains("unknown managed client") || dsh_error.contains("unsupported"),
+            "{dsh_error}"
+        );
+        assert!(!isolated.root().join("dsh").exists());
     }
 
     #[test]
@@ -2488,7 +2538,9 @@ allowed_models = ["grok-4.6"]
         )
         .unwrap();
         inp.settings.opencode_default_subagent_model.clear();
-        inp.settings.opencode_default_subagent_reasoning_effort.clear();
+        inp.settings
+            .opencode_default_subagent_reasoning_effort
+            .clear();
         apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -2533,7 +2585,7 @@ allowed_models = ["grok-4.6"]
     }
 
     #[test]
-    fn default_subagent_grok_shadow_does_not_overwrite_unmarked_agent_files() {
+    fn default_subagent_grok_shadow_overwrites_built_in_agent_file_and_restores_on_disconnect() {
         let _guard = TEST_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -2549,7 +2601,11 @@ allowed_models = ["grok-4.6"]
             "[models]\ndefault = \"grok-4.6\"\n\n[subagents.roles]\nplan = \"persona-string\"\n",
         )
         .unwrap();
-        fs::write(&plan_shadow, "---\nname: plan\nmodel: user-plan\n---\nkeep me\n").unwrap();
+        fs::write(
+            &plan_shadow,
+            "---\nname: plan\nmodel: user-plan\n---\nkeep me\n",
+        )
+        .unwrap();
         let inp = IsolatedClientApplyInput {
             client_id: "grok".to_string(),
             model: Some("volc/glm-5.2".to_string()),
@@ -2561,12 +2617,16 @@ allowed_models = ["grok-4.6"]
         apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
         let plan_text = fs::read_to_string(&plan_shadow).unwrap();
         assert!(
-            plan_text.contains("keep me"),
-            "unmarked Grok agent files must stay user-owned: {plan_text}"
+            plan_text.contains("x-codexhub-default-subagent: true"),
+            "built-in Grok fallback must still land effort: {plan_text}"
         );
-        assert!(!plan_text.contains("x-codexhub-default-subagent: true"));
+        assert!(plan_text.contains("reasoning_effort: high"));
         restore_isolated("grok", &root, &isolated);
-        assert!(plan_shadow.exists());
-        assert!(fs::read_to_string(&plan_shadow).unwrap().contains("keep me"));
+        let restored = fs::read_to_string(&plan_shadow).unwrap();
+        assert!(
+            restored.contains("keep me"),
+            "Disconnect must restore the pre-connect agent file: {restored}"
+        );
+        assert!(!restored.contains("x-codexhub-default-subagent: true"));
     }
 }

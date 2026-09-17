@@ -678,7 +678,9 @@ function GatewayPageImpl({
       updateToast(toastId, {
         action: null,
         text: options?.stale
-          ? t("workspace.defaultSubagentStale", { name })
+          ? connected
+            ? t("workspace.defaultSubagentStaleRestart", { name })
+            : t("workspace.defaultSubagentStale", { name })
           : connected
             ? t("workspace.defaultSubagentSavedClient", { name })
             : t("workspace.defaultSubagentSavedDisconnectedClient", { name }),

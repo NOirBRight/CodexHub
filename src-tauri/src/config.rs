@@ -688,55 +688,117 @@ fn sanitize_locale(value: String) -> String {
     }
 }
 
-fn sanitize_settings_for_save(
-    mut settings: Settings,
-    known_official_models: &HashSet<String>,
-) -> Settings {
+fn sanitize_settings_for_save(mut settings: Settings, paths: &ConfigPaths) -> Settings {
+    let known_official_models = known_official_model_ids(paths);
     settings.locale = sanitize_locale(settings.locale);
     settings.gateway_fast_model_variants =
         sanitize_fast_model_variants(settings.gateway_fast_model_variants);
     settings.official_disabled_models =
-        sanitize_model_ids_with_known(settings.official_disabled_models, known_official_models);
+        sanitize_model_ids_with_known(settings.official_disabled_models, &known_official_models);
     settings.official_model_sort_order =
-        sanitize_model_ids_with_known(settings.official_model_sort_order, known_official_models);
+        sanitize_model_ids_with_known(settings.official_model_sort_order, &known_official_models);
     settings.codex_default_subagent_model = sanitize_default_subagent_model(
         settings.codex_default_subagent_model,
-        known_official_models,
+        &known_official_models,
     );
     settings.codex_default_subagent_reasoning_effort =
         sanitize_default_subagent_effort(settings.codex_default_subagent_reasoning_effort);
     if settings.codex_default_subagent_model.is_empty() {
         settings.codex_default_subagent_reasoning_effort.clear();
     }
+    let providers = get_providers_with_paths(paths).unwrap_or_default();
+    let catalog = client_projection_catalog_slugs(&settings, &known_official_models, &providers);
     sanitize_client_default_subagent_pair(
         &mut settings.opencode_default_subagent_model,
         &mut settings.opencode_default_subagent_reasoning_effort,
-        known_official_models,
+        &known_official_models,
+        &catalog,
+        None,
     );
     sanitize_client_default_subagent_pair(
         &mut settings.zcode_default_subagent_model,
         &mut settings.zcode_default_subagent_reasoning_effort,
-        known_official_models,
+        &known_official_models,
+        &catalog,
+        None,
     );
     sanitize_client_default_subagent_pair(
         &mut settings.omp_default_subagent_model,
         &mut settings.omp_default_subagent_reasoning_effort,
-        known_official_models,
+        &known_official_models,
+        &catalog,
+        None,
     );
     sanitize_client_default_subagent_pair(
         &mut settings.grok_default_subagent_model,
         &mut settings.grok_default_subagent_reasoning_effort,
-        known_official_models,
+        &known_official_models,
+        &catalog,
+        Some("xai"),
     );
     settings
+}
+
+fn client_projection_catalog_slugs(
+    settings: &Settings,
+    known_official_models: &HashSet<String>,
+    providers: &[Provider],
+) -> HashSet<String> {
+    let mut slugs = HashSet::new();
+    if settings.include_official_models {
+        for id in known_official_models {
+            let disabled = settings
+                .official_disabled_models
+                .iter()
+                .any(|item| official_catalog_key(item) == official_catalog_key(id));
+            if !disabled {
+                slugs.insert(id.clone());
+            }
+        }
+    }
+    for provider in providers {
+        if !provider.enabled {
+            continue;
+        }
+        for model in &provider.models {
+            if !model.enabled {
+                continue;
+            }
+            slugs.insert(client_projection_slug(&provider.id, &model.id));
+        }
+    }
+    slugs
+}
+
+fn official_catalog_key(value: &str) -> &str {
+    value.strip_prefix("openai/").unwrap_or(value).trim()
+}
+
+fn client_projection_slug(provider_id: &str, model_id: &str) -> String {
+    let normalized = model_id.trim();
+    if normalized.starts_with(&format!("{provider_id}/")) {
+        normalized.to_string()
+    } else {
+        format!("{provider_id}/{normalized}")
+    }
 }
 
 fn sanitize_client_default_subagent_pair(
     model: &mut String,
     effort: &mut String,
     known_official_models: &HashSet<String>,
+    catalog: &HashSet<String>,
+    skip_provider: Option<&str>,
 ) {
     *model = sanitize_default_subagent_model(std::mem::take(model), known_official_models);
+    if let Some(skip) = skip_provider {
+        if model == skip || model.starts_with(&format!("{skip}/")) {
+            model.clear();
+        }
+    }
+    if !model.is_empty() && !catalog.contains(model.as_str()) {
+        model.clear();
+    }
     *effort = sanitize_default_subagent_effort(std::mem::take(effort));
     if model.is_empty() {
         effort.clear();
@@ -1023,7 +1085,7 @@ pub(crate) fn get_settings_with_paths(paths: &ConfigPaths) -> Result<Settings, S
 }
 
 fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<Settings, String> {
-    let settings = sanitize_settings_for_save(settings, &known_official_model_ids(paths));
+    let settings = sanitize_settings_for_save(settings, paths);
     let path = paths.settings_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {

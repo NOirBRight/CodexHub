@@ -238,7 +238,9 @@ test("Clients-page cards reuse the picker for OpenCode, ZCode, OMP, and Grok onl
   assert.match(page, /applyGatewayClientConfig/);
   assert.match(page, /defaultSubagentSavedClient/);
   assert.match(page, /defaultSubagentSavedDisconnectedClient/);
-  assert.match(page, /defaultSubagentStale/);
+  assert.match(page, /defaultSubagentStaleRestart/);
+  assert.match(localesEn, /defaultSubagentStaleRestart":/);
+  assert.match(localesZh, /defaultSubagentStaleRestart":/);
   assert.doesNotMatch(page, /client.id === "pi"[\s\S]{0,80}DefaultSubagentPicker/);
   assert.match(localesEn, /defaultSubagentCliDefault": "CLI default"/);
   assert.match(localesZh, /defaultSubagentCliDefault": "维持 CLI 默认"/);
