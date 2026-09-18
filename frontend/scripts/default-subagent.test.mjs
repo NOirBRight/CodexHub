@@ -217,7 +217,58 @@ test("subagent picker keeps the menu open after model or effort changes", async 
   const start = source.indexOf("function DefaultSubagentPicker");
   const fn = source.slice(start);
   assert.match(fn, /function chooseEffort\(nextEffort: string\) \{\n    setDraftEffort\(nextEffort\);\n    setPanel\("menu"\);\n    commitIfChanged\(draftModel, nextEffort\);/);
+  assert.match(fn, /createPortal\(/);
+  assert.match(fn, /document\.body/);
   assert.doesNotMatch(fn, /dismiss\(/);
   assert.doesNotMatch(fn, /onBlur=\{/);
   assert.doesNotMatch(fn, /open \? draftModel : model/);
+});
+
+test("Clients-page cards reuse the picker for OpenCode, ZCode, OMP, and Grok only", async () => {
+  const [card, page, localesEn, localesZh, types, settings] = await Promise.all([
+    readFile(new URL("../src/components/GatewayClientCard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/pages/GatewayPage.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/i18n/locales/en-US.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/i18n/locales/zh-CN.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/types.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/settings.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(card, /DefaultSubagentPicker/);
+  assert.match(card, /defaultSubagentCliDefault/);
+  assert.match(card, /ws-client-footer/);
+  assert.match(card, /ws-client-status/);
+  assert.match(card, /connectedViaHub/);
+  assert.doesNotMatch(
+    card,
+    /className=\{labelTone\}>\{label\}/,
+  );
+  assert.match(page, /supportsClientDefaultSubagent\(client.id\)/);
+  assert.match(page, /persistClientDefaultSubagent/);
+  assert.match(page, /subagentSaveGen\.current\[clientId\]/);
+  assert.match(page, /await persistClientDefaultSubagent/);
+  assert.match(page, /applyGatewayClientConfig/);
+  assert.match(page, /defaultSubagentSavedClient/);
+  assert.match(page, /defaultSubagentSavedDisconnectedClient/);
+  assert.match(page, /defaultSubagentStaleRestart/);
+  assert.match(localesEn, /defaultSubagentStaleRestart":/);
+  assert.match(localesZh, /defaultSubagentStaleRestart":/);
+  assert.doesNotMatch(page, /client.id === "pi"[\s\S]{0,80}DefaultSubagentPicker/);
+  assert.match(localesEn, /defaultSubagentCliDefault": "CLI default"/);
+  assert.match(localesZh, /defaultSubagentCliDefault": "维持 CLI 默认"/);
+  assert.match(types, /opencode_default_subagent_model: string/);
+  assert.match(types, /zcode_default_subagent_model: string/);
+  assert.match(types, /omp_default_subagent_model: string/);
+  assert.match(types, /grok_default_subagent_model: string/);
+  assert.match(settings, /opencode_default_subagent_model: ""/);
+  assert.match(settings, /normalizeSubagentPair/);
+});
+
+test("Codex persist and restart-reminder contract stays on ProvidersPage", async () => {
+  const source = await readFile(new URL("../src/pages/ProvidersPage.tsx", import.meta.url), "utf8");
+  const start = source.indexOf("async function persistDefaultSubagent");
+  const fn = source.slice(start, source.indexOf("async function applyCodexHubConnection", start));
+  assert.match(fn, /codex_default_subagent_model/);
+  assert.doesNotMatch(fn, /opencode_default_subagent_model/);
+  assert.match(fn, /workspace\.defaultSubagentSaved/);
+  assert.doesNotMatch(fn, /defaultSubagentSavedClient/);
 });
