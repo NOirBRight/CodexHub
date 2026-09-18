@@ -1444,7 +1444,10 @@
   z-index: 34;
 }
 .ws-gateway-clients > div:nth-child(2) > div > .ws-client-card {
-  padding: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 10px 0 0;
   overflow: hidden;
   min-height: 138px;
 }
@@ -1463,7 +1466,7 @@
   flex-wrap: nowrap;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px 0;
+  padding: 0 12px;
 }
 .ws-client-heading > div {
   flex: 1;
@@ -1499,7 +1502,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 8px 12px;
+  margin: 0 12px;
   border: 1px solid var(--ws-line);
   border-radius: var(--ws-radius-small);
   background: var(--ws-inset);
@@ -1516,10 +1519,7 @@
   white-space: nowrap;
 }
 .ws-client-footer {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: auto;
+  display: contents;
 }
 .ws-client-footer > .ws-bridge-subagent {
   flex: none;
@@ -2360,13 +2360,13 @@
 .ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid > section {
   display: flex;
   flex-direction: column;
+  justify-content: space-between;
   min-height: 0;
 }
 .ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid > .ws-client-card > .ws-client-config {
-  margin-block: 6px;
   padding-block: 4px;
 }
-.ws-clients .ws-client-bottom { padding-block: 4px; }
+.ws-clients .ws-client-bottom { padding-block: 8px; }
 @media (max-width: 850px) {
   .ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
