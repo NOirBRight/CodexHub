@@ -217,6 +217,8 @@ test("subagent picker keeps the menu open after model or effort changes", async 
   const start = source.indexOf("function DefaultSubagentPicker");
   const fn = source.slice(start);
   assert.match(fn, /function chooseEffort\(nextEffort: string\) \{\n    setDraftEffort\(nextEffort\);\n    setPanel\("menu"\);\n    commitIfChanged\(draftModel, nextEffort\);/);
+  assert.match(fn, /createPortal\(/);
+  assert.match(fn, /document\.body/);
   assert.doesNotMatch(fn, /dismiss\(/);
   assert.doesNotMatch(fn, /onBlur=\{/);
   assert.doesNotMatch(fn, /open \? draftModel : model/);
@@ -233,6 +235,12 @@ test("Clients-page cards reuse the picker for OpenCode, ZCode, OMP, and Grok onl
   ]);
   assert.match(card, /DefaultSubagentPicker/);
   assert.match(card, /defaultSubagentCliDefault/);
+  assert.match(card, /ws-client-status/);
+  assert.match(card, /connectedViaHub/);
+  assert.doesNotMatch(
+    card,
+    /className=\{labelTone\}>\{label\}/,
+  );
   assert.match(page, /supportsClientDefaultSubagent\(client.id\)/);
   assert.match(page, /persistClientDefaultSubagent/);
   assert.match(page, /applyGatewayClientConfig/);

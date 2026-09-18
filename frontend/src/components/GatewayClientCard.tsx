@@ -5,7 +5,6 @@ import { api, messageFromError } from "../lib/tauri";
 import {
   MoreHorizontal,
   RefreshCcw,
-  AlertTriangle,
   FileText,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -153,17 +152,14 @@ export function GatewayClientCard({
           />
         ) : null}
         <div className="ws-client-bottom">
-          <div>
-            <span className={labelTone}>{label}</span>
-            <small>
-              <ConnectionNarrative
-                clientId={client.id}
-                enabledModelCount={enabledModelCount}
-                installed={installed}
-                state={state}
-                onRepair={() => onToggle(true)}
-              />
-            </small>
+          <div className={cx("ws-client-status", labelTone)}>
+            <ConnectionNarrative
+              clientId={client.id}
+              enabledModelCount={enabledModelCount}
+              installed={installed}
+              state={state}
+              onRepair={() => onToggle(true)}
+            />
           </div>
           <SwitchControl
             ariaLabel={t("gateway.routeMode", { name })}
@@ -284,53 +280,28 @@ function ConnectionNarrative({
 }) {
   const { t } = useTranslation();
   if (state === "busy") {
-    return (
-      <>
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
-        <span>{t("gateway.updatingClientConfig")}</span>
-      </>
-    );
+    return t("gateway.updatingClientConfig");
   }
   if (state === "drift") {
     return (
-      <>
-        <AlertTriangle className="h-3 w-3 text-amber-600" />
-        <button
-          type="button"
-          className="text-left text-amber-700 underline-offset-2 hover:underline"
-          onClick={onRepair}
-        >
-          {t("gateway.configDriftRepair")}
-        </button>
-      </>
+      <button
+        type="button"
+        className="text-left text-amber-700 underline-offset-2 hover:underline"
+        onClick={onRepair}
+      >
+        {t("gateway.configDriftRepair")}
+      </button>
     );
   }
   if (state === "unavailable" || !installed) {
-    return (
-      <>
-        <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
-        <span>{t("gateway.installToConnect")}</span>
-      </>
-    );
+    return t("gateway.installToConnect");
   }
   if (state === "connected") {
-    return (
-      <>
-        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-        <span>
-          {clientId === "dsh"
-            ? t("gateway.injectedProvider", { count: enabledModelCount ?? 0 })
-            : t("gateway.connectedViaHub")}
-        </span>
-      </>
-    );
+    return clientId === "dsh"
+      ? t("gateway.injectedProvider", { count: enabledModelCount ?? 0 })
+      : t("gateway.connectedViaHub");
   }
-  return (
-    <>
-      <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
-      <span>{t("gateway.configUnchanged")}</span>
-    </>
-  );
+  return `${t("gateway.connectionDisconnected")} · ${t("gateway.configUnchanged")}`;
 }
 
 function ClientLogo({ id, name }: { id: string; name: string }) {

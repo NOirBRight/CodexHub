@@ -86,6 +86,11 @@ test("subagent trigger and menu truncate long model names", async () => {
     workspaceCss,
     /\.ws-bridge-subagent-options \.select-option \{[\s\S]*text-overflow: ellipsis;/,
   );
+  assert.match(
+    workspaceCss,
+    /\.ws-client-card > \.ws-bridge-subagent \{[\s\S]*max-width: none;/,
+  );
+  assert.match(workspaceCss, /\.ws-bridge-subagent-menu \{[\s\S]*position: fixed;/);
 });
 
 test("scrollable workspace surfaces reserve rails before the final controls", async () => {

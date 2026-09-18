@@ -438,7 +438,7 @@
   max-width: 220px;
 }
 .ws-bridge-subagent-trigger {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 5px;
   width: 100%;
@@ -451,7 +451,9 @@
   background: var(--ws-surface);
   color: var(--ws-ink);
   font-size: 11px;
+  line-height: 16px;
   font-weight: 500;
+  text-align: left;
   white-space: nowrap;
   overflow: hidden;
   box-shadow: var(--ws-shadow-control);
@@ -459,8 +461,9 @@
 .ws-bridge-subagent-kicker {
   flex-shrink: 0;
   color: var(--ws-muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
+  line-height: 16px;
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
@@ -483,13 +486,10 @@
   transform: rotate(180deg);
 }
 .ws-bridge-subagent-menu {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 6px);
-  z-index: 40;
-  width: max(100%, 220px);
+  position: fixed;
+  z-index: 80;
   min-width: 188px;
-  max-width: min(280px, 42vw);
+  max-width: min(320px, calc(100vw - 16px));
   max-height: min(280px, 50vh);
   overflow: auto;
   padding: 4px 0;
@@ -1519,27 +1519,24 @@
   align-items: center;
   gap: 10px;
   border-top: 1px solid var(--ws-line);
-  padding: 8px 12px;
+  padding: 4px 12px;
   background: linear-gradient(
     var(--ws-surface),
     color-mix(in srgb, var(--ws-inset) 30%, var(--ws-surface))
   );
 }
-.ws-client-bottom > div > span {
-  font-size: 11px;
-}
-.ws-client-bottom small {
+.ws-client-status {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  min-width: 0;
   font-size: 11px;
-  color: var(--ws-muted);
-  margin-top: 3px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.ws-client-bottom small > span:first-child {
-  display: none;
-}
-.ws-client-card.connected .ws-client-bottom > div > span {
+.ws-client-card.connected .ws-client-status {
   color: var(--ws-green);
 }
 .workspace-root [class~="bg-surface/70"] {
@@ -2354,7 +2351,14 @@
   margin-block: 6px;
   padding-block: 4px;
 }
-.ws-clients .ws-client-bottom { padding-block: 6px; margin-top: auto; }
+.ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid > .ws-client-card > .ws-bridge-subagent {
+  flex: none;
+  max-width: none;
+  min-width: 0;
+  width: auto;
+  margin: 0 12px;
+}
+.ws-clients .ws-client-bottom { padding-block: 4px; margin-top: auto; }
 @media (max-width: 850px) {
   .ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
