@@ -129,45 +129,47 @@ export function GatewayClientCard({
             {configPath || t("common.copyOnly")}
           </code>
         </div>
-        {defaultSubagent ? (
-          <DefaultSubagentPicker
-            disabled={Boolean(busy)}
-            model={defaultSubagent.model}
-            effort={
-              defaultSubagent.model
-                ? resolveSubagentEffort(
-                    defaultSubagent.options.find(
-                      (option) => option.id === defaultSubagent.model,
-                    ),
-                    defaultSubagent.effort,
-                  )
-                : ""
-            }
-            options={defaultSubagent.options}
-            selected={defaultSubagent.options.find(
-              (option) => option.id === defaultSubagent.model,
-            )}
-            emptyLabel={t("workspace.defaultSubagentCliDefault")}
-            onChange={defaultSubagent.onChange}
-          />
-        ) : null}
-        <div className="ws-client-bottom">
-          <div className={cx("ws-client-status", labelTone)}>
-            <ConnectionNarrative
-              clientId={client.id}
-              enabledModelCount={enabledModelCount}
-              installed={installed}
-              state={state}
-              onRepair={() => onToggle(true)}
+        <div className="ws-client-footer">
+          {defaultSubagent ? (
+            <DefaultSubagentPicker
+              disabled={Boolean(busy)}
+              model={defaultSubagent.model}
+              effort={
+                defaultSubagent.model
+                  ? resolveSubagentEffort(
+                      defaultSubagent.options.find(
+                        (option) => option.id === defaultSubagent.model,
+                      ),
+                      defaultSubagent.effort,
+                    )
+                  : ""
+              }
+              options={defaultSubagent.options}
+              selected={defaultSubagent.options.find(
+                (option) => option.id === defaultSubagent.model,
+              )}
+              emptyLabel={t("workspace.defaultSubagentCliDefault")}
+              onChange={defaultSubagent.onChange}
+            />
+          ) : null}
+          <div className="ws-client-bottom">
+            <div className={cx("ws-client-status", labelTone)}>
+              <ConnectionNarrative
+                clientId={client.id}
+                enabledModelCount={enabledModelCount}
+                installed={installed}
+                state={state}
+                onRepair={() => onToggle(true)}
+              />
+            </div>
+            <SwitchControl
+              ariaLabel={t("gateway.routeMode", { name })}
+              checked={checked}
+              disabled={disabled}
+              tone={state === "drift" ? "warn" : "action"}
+              onChange={onToggle}
             />
           </div>
-          <SwitchControl
-            ariaLabel={t("gateway.routeMode", { name })}
-            checked={checked}
-            disabled={disabled}
-            tone={state === "drift" ? "warn" : "action"}
-            onChange={onToggle}
-          />
         </div>
       </section>
       <WorkspaceDialog

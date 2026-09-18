@@ -468,6 +468,7 @@
   white-space: nowrap;
 }
 .ws-bridge-subagent-value {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -479,6 +480,7 @@
 }
 .ws-bridge-subagent-chevron {
   flex-shrink: 0;
+  margin-left: auto;
   color: var(--ws-muted);
   transition: transform 0.15s ease;
 }
@@ -1513,6 +1515,19 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ws-client-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: auto;
+}
+.ws-client-footer > .ws-bridge-subagent {
+  flex: none;
+  max-width: none;
+  min-width: 0;
+  width: auto;
+  margin: 0 12px;
+}
 .ws-client-bottom {
   display: flex;
   justify-content: space-between;
@@ -2351,14 +2366,7 @@
   margin-block: 6px;
   padding-block: 4px;
 }
-.ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid > .ws-client-card > .ws-bridge-subagent {
-  flex: none;
-  max-width: none;
-  min-width: 0;
-  width: auto;
-  margin: 0 12px;
-}
-.ws-clients .ws-client-bottom { padding-block: 4px; margin-top: auto; }
+.ws-clients .ws-client-bottom { padding-block: 4px; }
 @media (max-width: 850px) {
   .ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -235,6 +235,7 @@ test("Clients-page cards reuse the picker for OpenCode, ZCode, OMP, and Grok onl
   ]);
   assert.match(card, /DefaultSubagentPicker/);
   assert.match(card, /defaultSubagentCliDefault/);
+  assert.match(card, /ws-client-footer/);
   assert.match(card, /ws-client-status/);
   assert.match(card, /connectedViaHub/);
   assert.doesNotMatch(
