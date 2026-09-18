@@ -2239,6 +2239,89 @@ allowed_models = ["grok-4.6"]
     }
 
     #[test]
+    fn default_subagent_opencode_muse_spark_writes_hash_variant() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let settings = Settings {
+            opencode_default_subagent_model: "opencode-go/muse-spark-1.3-contributor"
+                .to_string(),
+            opencode_default_subagent_reasoning_effort: "xhigh".to_string(),
+            include_official_models: false,
+            ..settings_with_port(9099)
+        };
+        let providers = vec![Provider {
+            id: "opencode-go".to_string(),
+            name: "OpenCode Go".to_string(),
+            base_url: "https://opencode.ai/zen/v1".to_string(),
+            api_key: None,
+            upstream_format: None,
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: Some("OpenCode".to_string()),
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
+            sort_order: Some(2),
+            enabled: true,
+            locked: false,
+            models: vec![Model {
+                id: "muse-spark-1.3-contributor".to_string(),
+                display_name: Some("Muse Spark 1.3 Contributor".to_string()),
+                gateway_exported: true,
+                supported_reasoning_levels: Some(vec![
+                    "low".to_string(),
+                    "medium".to_string(),
+                    "high".to_string(),
+                    "xhigh".to_string(),
+                ]),
+                default_reasoning_level: Some("xhigh".to_string()),
+                ..Model::default()
+            }],
+        }];
+        let root = fresh_root("subagent-opencode-muse");
+        let isolated = validate_isolated_root(&root).unwrap();
+        let path = isolated.root().join("opencode").join("opencode.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"model":"anthropic/claude-sonnet-4","small_model":"keep-small"}"#,
+        )
+        .unwrap();
+        let inp = IsolatedClientApplyInput {
+            client_id: "opencode".to_string(),
+            model: Some("opencode-go/muse-spark-1.3-contributor".to_string()),
+            settings,
+            providers,
+            catalog_path: None,
+            backup_subdir: None,
+        };
+        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let expected = "codexhub-opencode-go/muse-spark-1.3-contributor#xhigh";
+        assert_eq!(json["agent"]["general"]["model"].as_str(), Some(expected));
+        assert_eq!(json["agent"]["explore"]["model"].as_str(), Some(expected));
+        assert_eq!(json["agent"]["scout"]["model"].as_str(), Some(expected));
+        assert_eq!(json["model"].as_str(), Some("anthropic/claude-sonnet-4"));
+        assert_eq!(json["small_model"].as_str(), Some("keep-small"));
+        assert!(
+            json.pointer("/provider/codexhub-opencode-go/models/muse-spark-1.3-contributor/variants/xhigh")
+                .is_some(),
+            "injected catalog must expose the #xhigh variant: {json}"
+        );
+        assert!(
+            readback_gateway_client_config_isolated(&isolated, &inp)
+                .unwrap()
+                .ok
+        );
+    }
+
+    #[test]
     fn default_subagent_empty_pin_preserves_foreign_spawn_targets() {
         let _guard = TEST_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
