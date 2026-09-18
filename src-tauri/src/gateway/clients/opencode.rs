@@ -106,6 +106,18 @@ pub(in crate::gateway) fn opencode_config_text(
         .map_err(|error| format!("failed to serialize OpenCode config: {error}"))
 }
 
+pub(in crate::gateway) fn opencode_default_subagent_slice_owned(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    value
+        .as_object()
+        .is_some_and(|object| json_spawn_models_are_owned(object, OPENCODE_SPAWN_AGENTS))
+}
+
 fn apply_opencode_default_subagent(
     object: &mut Map<String, Value>,
     settings: &Settings,

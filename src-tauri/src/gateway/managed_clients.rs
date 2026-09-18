@@ -19,12 +19,13 @@ use super::clients::grok::{
     restore_grok_config_with_backup_roots,
 };
 use super::clients::omp::{
-    detect_omp_config_paths, plan_omp_apply, preview_omp_config_with_paths, publish_omp_apply,
-    restore_omp_config_with_paths,
+    detect_omp_config_paths, omp_default_subagent_slice_owned, plan_omp_apply,
+    preview_omp_config_with_paths, publish_omp_apply, restore_omp_config_with_paths,
 };
 use super::clients::opencode::{
-    detect_opencode_config_path, plan_opencode_apply, preview_opencode_config_with_path,
-    publish_opencode_apply, restore_opencode_config_with_backup_roots,
+    detect_opencode_config_path, opencode_default_subagent_slice_owned, plan_opencode_apply,
+    preview_opencode_config_with_path, publish_opencode_apply,
+    restore_opencode_config_with_backup_roots,
 };
 use super::clients::pi::{
     detect_pi_config_paths, plan_pi_apply, preview_pi_config_with_paths, publish_pi_apply,
@@ -32,7 +33,8 @@ use super::clients::pi::{
 };
 use super::clients::zcode::{
     detect_zcode_config_targets, plan_zcode_apply, preview_zcode_config_with_targets,
-    publish_zcode_apply, restore_zcode_config_with_targets, ZcodeConfigTargets,
+    publish_zcode_apply, restore_zcode_config_with_targets, zcode_default_subagent_slice_owned,
+    ZcodeConfigTargets,
 };
 use crate::injection::{self, DshLifecycleReport, MaskedSecret, ReadbackExpectation};
 use crate::Provider;
@@ -469,7 +471,7 @@ fn native_plan(
     }
 }
 
-fn native_restart_required(id: &str, ctx: &AdapterCtx<'_>) -> &'static str {
+pub(in crate::gateway) fn native_restart_required(id: &str, ctx: &AdapterCtx<'_>) -> &'static str {
     match id {
         "grok" => "Grok CLI",
         "opencode" if default_subagent_slice_changes(id, ctx) => "OpenCode",
@@ -481,10 +483,51 @@ fn native_restart_required(id: &str, ctx: &AdapterCtx<'_>) -> &'static str {
 
 fn default_subagent_slice_changes(id: &str, ctx: &AdapterCtx<'_>) -> bool {
     let model = ctx.models.first().cloned().unwrap_or_default();
-    super::resolve_client_default_subagent_pin(ctx.settings, ctx.providers, id, &model)
+    if super::resolve_client_default_subagent_pin(ctx.settings, ctx.providers, id, &model)
         .ok()
         .flatten()
         .is_some()
+    {
+        return true;
+    }
+    default_subagent_owned_live_slice(id, ctx)
+}
+
+fn default_subagent_owned_live_slice(id: &str, ctx: &AdapterCtx<'_>) -> bool {
+    match id {
+        "opencode" => target_write_paths(ctx, detect_opencode_config_path().into_iter().collect())
+            .first()
+            .is_some_and(|path| opencode_default_subagent_slice_owned(path)),
+        "omp" => {
+            let paths = detect_omp_config_paths();
+            target_write_paths(ctx, vec![paths.config_path, paths.models_path])
+                .first()
+                .is_some_and(|path| omp_default_subagent_slice_owned(path))
+        }
+        "zcode" => zcode_default_subagent_slice_owned(&zcode_targets_for(ctx)),
+        _ => false,
+    }
+}
+
+fn zcode_targets_for(ctx: &AdapterCtx<'_>) -> ZcodeConfigTargets {
+    let live = detect_zcode_config_targets();
+    let paths = target_write_paths(
+        ctx,
+        vec![
+            live.catalog_path.clone(),
+            live.v2_config_path.clone(),
+            live.v2_cache_path.clone(),
+        ],
+    );
+    if paths.len() >= 3 {
+        ZcodeConfigTargets {
+            catalog_path: paths[0].clone(),
+            v2_config_path: paths[1].clone(),
+            v2_cache_path: paths[2].clone(),
+        }
+    } else {
+        live
+    }
 }
 
 fn codex_plan(intent: ClientIntent, ctx: &AdapterCtx<'_>) -> ClientMutationPlan {

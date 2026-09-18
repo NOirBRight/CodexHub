@@ -244,6 +244,8 @@ test("Clients-page cards reuse the picker for OpenCode, ZCode, OMP, and Grok onl
   );
   assert.match(page, /supportsClientDefaultSubagent\(client.id\)/);
   assert.match(page, /persistClientDefaultSubagent/);
+  assert.match(page, /subagentSaveGen\.current\[clientId\]/);
+  assert.match(page, /await persistClientDefaultSubagent/);
   assert.match(page, /applyGatewayClientConfig/);
   assert.match(page, /defaultSubagentSavedClient/);
   assert.match(page, /defaultSubagentSavedDisconnectedClient/);

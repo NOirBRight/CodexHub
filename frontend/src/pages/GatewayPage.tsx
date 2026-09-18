@@ -143,7 +143,7 @@ function GatewayPageImpl({
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
-  const subagentSaveGen = useRef(0);
+  const subagentSaveGen = useRef<Record<string, number>>({});
   const running = status?.proxy_running ?? false;
   const diagnosticsEnabled = Boolean(
     appFlavor?.build.flavor === "debug" && appFlavor.build.diagnostics_enabled,
@@ -661,7 +661,8 @@ function GatewayPageImpl({
       clientId;
     const state = connectionStateFromInfo(info);
     const connected = state === "connected" || state === "drift";
-    const gen = ++subagentSaveGen.current;
+    const gen = (subagentSaveGen.current[clientId] =
+      (subagentSaveGen.current[clientId] ?? 0) + 1);
     const toastId = showToast({
       dedupeKey: `default-subagent-${clientId}`,
       text: t("workspace.savingDefaultSubagent"),
@@ -669,10 +670,10 @@ function GatewayPageImpl({
     });
     try {
       await onApplySettings(next);
-      if (gen !== subagentSaveGen.current) return;
+      if (gen !== subagentSaveGen.current[clientId]) return;
       if (connected) {
         await api.applyGatewayClientConfig(clientId, defaultModel);
-        if (gen !== subagentSaveGen.current) return;
+        if (gen !== subagentSaveGen.current[clientId]) return;
         await onRefreshClients({ force: true });
       }
       updateToast(toastId, {
@@ -687,28 +688,30 @@ function GatewayPageImpl({
         tone: "success",
       });
     } catch (err) {
-      if (gen !== subagentSaveGen.current) return;
+      if (gen !== subagentSaveGen.current[clientId]) return;
       updateToastWithError(toastId, err);
     }
   }
 
   useEffect(() => {
     if (!settings || !status) return;
-    for (const clientId of ["opencode", "zcode", "omp", "grok"]) {
-      const { model } = clientDefaultSubagentFields(settings, clientId);
-      if (!model) continue;
-      const options = subagentOptionsFor(clientId);
-      if (
-        options.length === 0 &&
-        providers.length === 0 &&
-        officialModelsForSubagent.length === 0
-      ) {
-        continue;
+    void (async () => {
+      for (const clientId of ["opencode", "zcode", "omp", "grok"]) {
+        const { model } = clientDefaultSubagentFields(settings, clientId);
+        if (!model) continue;
+        const options = subagentOptionsFor(clientId);
+        if (
+          options.length === 0 &&
+          providers.length === 0 &&
+          officialModelsForSubagent.length === 0
+        ) {
+          continue;
+        }
+        if (!options.some((option) => option.id === model)) {
+          await persistClientDefaultSubagent(clientId, "", "", { stale: true });
+        }
       }
-      if (!options.some((option) => option.id === model)) {
-        void persistClientDefaultSubagent(clientId, "", "", { stale: true });
-      }
-    }
+    })();
   }, [settings, status, providers, officialModelsForSubagent]);
 
   return (

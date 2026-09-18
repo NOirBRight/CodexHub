@@ -350,6 +350,12 @@ pub(in crate::gateway) fn zcode_default_subagent_files(
     Ok(files)
 }
 
+pub(in crate::gateway) fn zcode_default_subagent_slice_owned(targets: &ZcodeConfigTargets) -> bool {
+    ZCODE_SPAWN_AGENTS
+        .iter()
+        .any(|(_, filename)| zcode_agent_is_ours(&zcode_agents_dir(targets).join(filename)))
+}
+
 fn zcode_agent_is_ours(path: &Path) -> bool {
     fs::read_to_string(path)
         .ok()

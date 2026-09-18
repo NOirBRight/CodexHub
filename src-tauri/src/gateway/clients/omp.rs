@@ -90,6 +90,12 @@ fn rewrite_omp_agent_model_overrides(
     }
 }
 
+pub(in crate::gateway) fn omp_default_subagent_slice_owned(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .is_some_and(|text| omp_bundled_overrides_are_owned(&text))
+}
+
 fn omp_bundled_overrides_are_owned(text: &str) -> bool {
     let Some(block) = extract_omp_task_overrides(text) else {
         return false;

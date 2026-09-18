@@ -2300,7 +2300,8 @@ allowed_models = ["grok-4.6"]
             catalog_path: None,
             backup_subdir: None,
         };
-        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let apply = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        assert_eq!(apply.restart_required, "OpenCode");
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let expected = "codexhub-opencode-go/muse-spark-1.3-contributor#xhigh";
@@ -2349,7 +2350,8 @@ allowed_models = ["grok-4.6"]
             catalog_path: None,
             backup_subdir: None,
         };
-        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let apply = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        assert_eq!(apply.restart_required, "none");
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
@@ -2391,12 +2393,14 @@ allowed_models = ["grok-4.6"]
             catalog_path: None,
             backup_subdir: None,
         };
-        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let first = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        assert_eq!(first.restart_required, "OpenCode");
         inp.settings.opencode_default_subagent_model.clear();
         inp.settings
             .opencode_default_subagent_reasoning_effort
             .clear();
-        apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        let cleared = apply_gateway_client_config_isolated(&isolated, &inp).unwrap();
+        assert_eq!(cleared.restart_required, "OpenCode");
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
