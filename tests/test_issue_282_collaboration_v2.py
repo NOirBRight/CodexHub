@@ -943,6 +943,9 @@ def test_v2_wait_argument_parse_error_history_round_trips(native: bool) -> None:
       for name in ("spawn_agent", "list_agents", "send_message", "followup_task")],
     ("wait_agent", {"timeout_ms": 3600001}, "timeout_ms must be at most 3600000"),
     ("wait_agent", {"timeout_ms": 180001}, "timeout_ms must be at most 180000"),
+    # Codex CLI 0.155.1 records an interrupted wait as plain text in history.
+    ("wait_agent", {"timeout_ms": 120000}, "aborted by user after 104.0s"),
+    ("wait_agent", {"timeout_ms": 120000}, "aborted by user after 0.0s"),
 ])
 def test_v2_client_execution_error_history_round_trips(native, name, arguments, output) -> None:
     index = list(V2_ARGUMENTS).index(name) * 2
@@ -966,10 +969,13 @@ def test_v2_client_execution_error_history_round_trips(native, name, arguments, 
     '{"timeout_ms":3600001,"timeout_ms":3600002}',
     '{"timeout_ms":3600001,"extra":1}', '{"timeout_ms":-9223372036854775809}',
 ])
-def test_v2_timeout_error_cannot_waive_argument_structure(native, arguments) -> None:
+@pytest.mark.parametrize("output", [
+    "timeout_ms must be at most 3600000", "aborted by user after 104.0s",
+])
+def test_v2_timeout_error_cannot_waive_argument_structure(native, arguments, output) -> None:
     history = _v2_history()[10:12]
     history[0]["arguments"] = arguments
-    history[1]["output"] = "timeout_ms must be at most 3600000"
+    history[1]["output"] = output
     with pytest.raises(ToolCompatibilityError):
         _v2_plan(native=native).encode_payload({"input": history})
 
@@ -1007,6 +1013,11 @@ def test_v2_timeout_error_keeps_identity_and_result_validation(native, mutation)
     ("send_message", '{"error":"collab manager unavailable"}'),
     ("spawn_agent", '{"task_name":"worker","task_name":"other"}'),
     ("spawn_agent", '{"task_name":false}'),
+    ("spawn_agent", "aborted by user after 104.0s"),
+    ("wait_agent", "aborted by user after -1.0s"),
+    ("wait_agent", "aborted by user after NaNs"),
+    ("wait_agent", "aborted by user after 104.0s\nextra"),
+    ("wait_agent", '"aborted by user after 104.0s"'),
 ])
 def test_client_errors_do_not_relax_other_result_contracts(version, name, output) -> None:
     from collaboration_runtime_contract import CollaborationContractError, validate_collaboration_result
