@@ -398,7 +398,7 @@ name = "OpenCode Go"
 base_url = "https://opencode.ai/zen/go/v1"
 
   [[providers.models]]
-  id = "omen-alpha"
+  id = "catalog-window-fixture"
   context_window = 500000
   max_output_tokens = 128000
 
@@ -418,7 +418,7 @@ name = "OpenCode Go"
 base_url = "https://opencode.ai/zen/go/v1"
 
   [[providers.models]]
-  id = "omen-alpha"
+  id = "catalog-window-fixture"
 
   [[providers.models]]
   id = "muse-spark-1.2-contributor"
@@ -428,7 +428,7 @@ base_url = "https://opencode.ai/zen/go/v1"
     .unwrap();
 
     let loaded = get_providers_with_paths(&paths).expect("runtime providers");
-    assert_eq!(loaded[0].models[0].id, "omen-alpha");
+    assert_eq!(loaded[0].models[0].id, "catalog-window-fixture");
     assert_eq!(loaded[0].models[0].context_window, Some(500_000));
     assert_eq!(loaded[0].models[0].max_output_tokens, Some(128_000));
     assert_eq!(loaded[0].models[1].id, "muse-spark-1.2-contributor");
