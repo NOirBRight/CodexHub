@@ -293,9 +293,10 @@ use super::super::{
     is_builtin_codexhub_client_provider_id, is_exact_semver_like, is_local_gateway_url,
     is_managed_codexhub_provider_entry, latest_clean_snapshot_backup, provider_entry_base_url,
     provider_entry_has_codexhub_name, provider_entry_has_gateway_path,
-    resolve_gateway_client_model_id, route_mode_from_text_file, sanitize_text, windows_app_path,
-    write_text_replace, GatewayClientApplyResult, GatewayClientConfigPreview,
-    GatewayClientProviderGroups,
+    resolve_client_default_subagent_pin, resolve_gateway_client_model_id,
+    route_mode_from_text_file, sanitize_text, windows_app_path, write_text_replace,
+    ClientDefaultSubagentPin, GatewayClientApplyResult, GatewayClientConfigPreview,
+    GatewayClientProviderGroups, ZCODE_SPAWN_AGENTS,
 };
 use crate::app_flavor::RoutingOwner;
 use reqwest::blocking::Client;
@@ -307,6 +308,239 @@ pub(in crate::gateway) struct ZcodeConfigTargets {
     pub(in crate::gateway) catalog_path: PathBuf,
     pub(in crate::gateway) v2_config_path: PathBuf,
     pub(in crate::gateway) v2_cache_path: PathBuf,
+}
+
+const ZCODE_SUBAGENT_MARKER: &str = "x-codexhub-default-subagent: true";
+const ZCODE_RESTORE_MODEL: &str = "x-codexhub-restore-model";
+const ZCODE_RESTORE_THOUGHT: &str = "x-codexhub-restore-thoughtLevel";
+
+fn zcode_agents_dir(targets: &ZcodeConfigTargets) -> PathBuf {
+    match targets.v2_config_path.parent() {
+        Some(parent) if parent.file_name().is_some_and(|name| name == "v2") => {
+            parent.parent().unwrap_or(parent).join("agents")
+        }
+        Some(parent) => parent.join("agents"),
+        None => PathBuf::from("agents"),
+    }
+}
+
+pub(in crate::gateway) fn zcode_default_subagent_files(
+    targets: &ZcodeConfigTargets,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<Vec<(PathBuf, Option<String>)>, String> {
+    let pin = resolve_client_default_subagent_pin(settings, providers, "zcode", model)?;
+    let agents_dir = zcode_agents_dir(targets);
+    let mut files = Vec::new();
+    for (name, filename) in ZCODE_SPAWN_AGENTS {
+        let path = agents_dir.join(filename);
+        let existing = fs::read_to_string(&path).ok();
+        match &pin {
+            Some(pin) => files.push((
+                path,
+                Some(zcode_pinned_agent_text(existing.as_deref(), name, pin)),
+            )),
+            None if zcode_agent_is_ours(&path) => {
+                files.push((path, zcode_restored_agent_text(existing.as_deref())));
+            }
+            None => {}
+        }
+    }
+    Ok(files)
+}
+
+pub(in crate::gateway) fn zcode_default_subagent_slice_owned(targets: &ZcodeConfigTargets) -> bool {
+    ZCODE_SPAWN_AGENTS
+        .iter()
+        .any(|(_, filename)| zcode_agent_is_ours(&zcode_agents_dir(targets).join(filename)))
+}
+
+fn zcode_agent_is_ours(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .is_some_and(|text| text.contains(ZCODE_SUBAGENT_MARKER))
+}
+
+fn zcode_pinned_agent_text(
+    existing: Option<&str>,
+    name: &str,
+    pin: &ClientDefaultSubagentPin,
+) -> String {
+    let (mut fields, body) = parse_zcode_frontmatter(existing.unwrap_or(""));
+    if !fields
+        .iter()
+        .any(|(key, _)| key == "x-codexhub-default-subagent")
+    {
+        if existing.is_some() {
+            fields.push((
+                ZCODE_RESTORE_MODEL.to_string(),
+                frontmatter_value(&fields, "model"),
+            ));
+            fields.push((
+                ZCODE_RESTORE_THOUGHT.to_string(),
+                frontmatter_value(&fields, "thoughtLevel"),
+            ));
+        }
+        fields.push((
+            "x-codexhub-default-subagent".to_string(),
+            "true".to_string(),
+        ));
+    }
+    upsert_frontmatter(&mut fields, "name", name);
+    upsert_frontmatter(&mut fields, "model", &pin.zcode_model_id());
+    upsert_frontmatter(&mut fields, "thoughtLevel", &pin.zcode_thought_level());
+    render_zcode_frontmatter(&fields, &body)
+}
+
+fn zcode_restored_agent_text(existing: Option<&str>) -> Option<String> {
+    let existing = existing?;
+    if !existing.contains(ZCODE_SUBAGENT_MARKER) {
+        return Some(existing.to_string());
+    }
+    let (mut fields, body) = parse_zcode_frontmatter(existing);
+    let restore_model = take_frontmatter(&mut fields, ZCODE_RESTORE_MODEL);
+    let restore_thought = take_frontmatter(&mut fields, ZCODE_RESTORE_THOUGHT);
+    take_frontmatter(&mut fields, "x-codexhub-default-subagent");
+    let model = restore_model?;
+    if model.is_empty() {
+        take_frontmatter(&mut fields, "model");
+    } else {
+        upsert_frontmatter(&mut fields, "model", &model);
+    }
+    match restore_thought {
+        Some(thought) if !thought.is_empty() => {
+            upsert_frontmatter(&mut fields, "thoughtLevel", &thought);
+        }
+        _ => {
+            take_frontmatter(&mut fields, "thoughtLevel");
+        }
+    }
+    Some(render_zcode_frontmatter(&fields, &body))
+}
+
+fn parse_zcode_frontmatter(text: &str) -> (Vec<(String, String)>, String) {
+    let trimmed = text.trim_start_matches('\u{feff}');
+    if !trimmed.starts_with("---") {
+        return (Vec::new(), text.to_string());
+    }
+    let rest = trimmed.trim_start_matches("---");
+    let rest = rest.strip_prefix('\n').unwrap_or(rest);
+    let Some(end) = rest.find("\n---") else {
+        return (Vec::new(), text.to_string());
+    };
+    let header = &rest[..end];
+    let body = rest[end + 4..].trim_start_matches('\n').to_string();
+    let fields = header
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            Some((key.trim().to_string(), value.trim().to_string()))
+        })
+        .collect();
+    (fields, body)
+}
+
+fn frontmatter_value(fields: &[(String, String)], key: &str) -> String {
+    fields
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default()
+}
+
+fn upsert_frontmatter(fields: &mut Vec<(String, String)>, key: &str, value: &str) {
+    if let Some((_, current)) = fields.iter_mut().find(|(name, _)| name == key) {
+        *current = value.to_string();
+        return;
+    }
+    fields.push((key.to_string(), value.to_string()));
+}
+
+fn take_frontmatter(fields: &mut Vec<(String, String)>, key: &str) -> Option<String> {
+    fields
+        .iter()
+        .position(|(name, _)| name == key)
+        .map(|index| fields.remove(index).1)
+}
+
+fn render_zcode_frontmatter(fields: &[(String, String)], body: &str) -> String {
+    let mut text = String::from("---\n");
+    for (key, value) in fields {
+        text.push_str(key);
+        text.push(':');
+        if !value.is_empty() {
+            text.push(' ');
+            text.push_str(value);
+        }
+        text.push('\n');
+    }
+    text.push_str("---\n");
+    if !body.is_empty() {
+        text.push_str(body);
+        if !body.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+    text
+}
+
+fn publish_zcode_agent_files(files: &[(PathBuf, Option<String>)]) -> Result<(), String> {
+    for (path, content) in files {
+        match content {
+            Some(text) => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        format!("failed to create ZCode agents directory: {error}")
+                    })?;
+                }
+                write_text_replace(path, text)
+                    .map_err(|_| "failed to write ZCode default subagent file".to_string())?;
+            }
+            None if path.exists() => {
+                fs::remove_file(path).map_err(|error| {
+                    format!("failed to remove ZCode default subagent file: {error}")
+                })?;
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+fn clear_owned_zcode_agent_files(targets: &ZcodeConfigTargets) -> Result<(), String> {
+    let agents_dir = zcode_agents_dir(targets);
+    let files = ZCODE_SPAWN_AGENTS
+        .iter()
+        .map(|(_, filename)| agents_dir.join(filename))
+        .filter(|path| zcode_agent_is_ours(path))
+        .map(|path| {
+            let next = zcode_restored_agent_text(fs::read_to_string(&path).ok().as_deref());
+            (path, next)
+        })
+        .collect::<Vec<_>>();
+    publish_zcode_agent_files(&files)
+}
+
+pub(in crate::gateway) fn zcode_owned_agents_match(
+    targets: &ZcodeConfigTargets,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<bool, String> {
+    let expected = zcode_default_subagent_files(targets, settings, providers, model)?;
+    for (path, content) in expected {
+        match content {
+            Some(text) => {
+                if fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+                    return Ok(false);
+                }
+            }
+            None if path.exists() => return Ok(false),
+            None => {}
+        }
+    }
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -770,17 +1004,21 @@ pub(in crate::gateway) fn preview_zcode_config_with_targets(
     let next_config = zcode_v2_config_text(&targets.v2_config_path, settings, providers, &model)?;
     let next_catalog = zcode_catalog_text(settings, providers, &model)?;
     let next_cache = zcode_v2_cache_text(settings, providers, &model)?;
+    let agent_files = zcode_default_subagent_files(targets, settings, providers, &model)?;
     Ok(GatewayClientConfigPreview {
         client_id: "zcode".to_string(),
         can_apply: true,
         strategy: "managed_native_config".to_string(),
         config_path: Some(targets.v2_config_path.clone()),
         current_redacted: current,
-        next_redacted: sanitize_text(&combined_named_text(&[
-            ("config.json", &next_config),
-            ("codexhub.json", &next_catalog),
-            ("bots-model-cache.v2.json", &next_cache),
-        ])),
+        next_redacted: sanitize_text(&super::super::append_planned_file_previews(
+            &combined_named_text(&[
+                ("config.json", &next_config),
+                ("codexhub.json", &next_catalog),
+                ("bots-model-cache.v2.json", &next_cache),
+            ]),
+            &agent_files,
+        )),
         backup_required: targets.v2_config_path.exists()
             || targets.catalog_path.exists()
             || targets.v2_cache_path.exists(),
@@ -796,6 +1034,7 @@ pub(in crate::gateway) struct ZcodeApplyPlan {
     pub next_config: String,
     pub next_cache: String,
     pub skip_snapshot: bool,
+    pub agent_files: Vec<(PathBuf, Option<String>)>,
 }
 
 /// Pure next-text plan. Does not create backups or write the target files.
@@ -815,6 +1054,7 @@ pub(in crate::gateway) fn plan_zcode_apply(
         next_catalog,
         next_config,
         next_cache,
+        agent_files: zcode_default_subagent_files(targets, settings, providers, &model)?,
     })
 }
 
@@ -845,6 +1085,7 @@ pub(in crate::gateway) fn publish_zcode_apply(
     write_text_replace(&plan.targets.catalog_path, &plan.next_catalog)?;
     write_text_replace(&plan.targets.v2_config_path, &plan.next_config)?;
     write_text_replace(&plan.targets.v2_cache_path, &plan.next_cache)?;
+    publish_zcode_agent_files(&plan.agent_files)?;
     Ok(GatewayClientApplyResult {
         client_id: "zcode".to_string(),
         applied: true,
@@ -915,6 +1156,7 @@ pub(in crate::gateway) fn restore_zcode_config_with_targets(
             }
             removed_any |= remove_zcode_v2_codexhub_provider(&targets.v2_config_path)?;
             removed_any |= remove_zcode_coding_plan_cache(targets)?;
+            clear_owned_zcode_agent_files(targets)?;
             Ok(GatewayClientApplyResult {
                 client_id: "zcode".to_string(),
                 applied: true,
@@ -1041,6 +1283,7 @@ pub(in crate::gateway) fn restore_zcode_sanitized_snapshot_files(
         &targets.v2_cache_path,
     )?;
     remove_zcode_coding_plan_cache(targets)?;
+    clear_owned_zcode_agent_files(targets)?;
     Ok(())
 }
 

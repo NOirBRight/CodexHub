@@ -1,5 +1,13 @@
 import { readQuotaCache } from "../../lib/quotaCache";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import {
   ArrowRight,
   ChevronDown,
@@ -641,12 +649,13 @@ export function ProviderWorkspaceView(props: Props) {
   );
 }
 
-function DefaultSubagentPicker({
+export function DefaultSubagentPicker({
   disabled,
   model,
   effort,
   options,
   selected,
+  emptyLabel,
   onChange,
 }: {
   disabled: boolean;
@@ -654,21 +663,25 @@ function DefaultSubagentPicker({
   effort: string;
   options: DefaultSubagentOption[];
   selected?: DefaultSubagentOption;
+  emptyLabel?: string;
   onChange: (model: string, effort: string) => void;
 }) {
   const { t } = useTranslation();
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState<"menu" | "model" | "effort">("menu");
   const [draftModel, setDraftModel] = useState(model);
   const [draftEffort, setDraftEffort] = useState(effort);
+  const [menuBox, setMenuBox] = useState<CSSProperties>({});
   const draftRef = useRef({ model: draftModel, effort: draftEffort });
   const propsRef = useRef({ model, effort, onChange });
   const openRef = useRef(open);
   draftRef.current = { model: draftModel, effort: draftEffort };
   propsRef.current = { model, effort, onChange };
   openRef.current = open;
-  const fallback = t("workspace.defaultSubagentCodexDefault");
+  const fallback = emptyLabel ?? t("workspace.defaultSubagentCodexDefault");
   const activeSelected =
     options.find((option) => option.id === draftModel) ??
     (draftModel && selected?.id === draftModel ? selected : undefined);
@@ -707,15 +720,61 @@ function DefaultSubagentPicker({
     setPanel("menu");
   }
 
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const width = Math.min(
+        Math.max(rect.width, 220),
+        Math.min(320, window.innerWidth - 16),
+      );
+      let left = rect.left;
+      if (left + width > window.innerWidth - 8) {
+        left = Math.max(8, window.innerWidth - 8 - width);
+      }
+      if (left < 8) left = 8;
+      const openUp =
+        window.innerHeight - rect.bottom < 132 && rect.top > window.innerHeight - rect.bottom;
+      setMenuBox(
+        openUp
+          ? { left, width, bottom: window.innerHeight - rect.top + 6 }
+          : { left, width, top: rect.bottom + 6 },
+      );
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, panel]);
+
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (
+        rootRef.current?.contains(target) ||
+        menuRef.current?.contains(target)
+      ) {
+        return;
+      }
+      closeMenu();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
         closeMenu();
       }
     };
     document.addEventListener("mousedown", onPointerDown);
-    return () => document.removeEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
   }, [open]);
 
   function chooseModel(nextModel: string) {
@@ -749,6 +808,7 @@ function DefaultSubagentPicker({
       }}
     >
       <button
+        ref={triggerRef}
         type="button"
         className="ws-bridge-subagent-trigger"
         aria-haspopup="dialog"
@@ -781,12 +841,16 @@ function DefaultSubagentPicker({
           }
         />
       </button>
-      {open && (
-        <div
-          className="select-popover ws-bridge-subagent-menu"
-          role="dialog"
-          aria-label={t("workspace.defaultSubagent")}
-        >
+      {open &&
+        (menuBox.top != null || menuBox.bottom != null) &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="select-popover ws-bridge-subagent-menu"
+            role="dialog"
+            aria-label={t("workspace.defaultSubagent")}
+            style={menuBox}
+          >
           {panel === "menu" ? (
             <>
               <div className="ws-bridge-subagent-heading">
@@ -882,8 +946,9 @@ function DefaultSubagentPicker({
               </div>
             </>
           )}
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
