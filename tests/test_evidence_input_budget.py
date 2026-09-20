@@ -183,8 +183,35 @@ def test_each_protocol_uses_its_declared_output_field(tmp_path: Path) -> None:
             "responses": "/v1/responses",
             "chat_completions": "/v1/chat/completions",
         }[protocol]
-        reasoning = {"thinking": {"effort": "max"}} if protocol == "anthropic_messages" else {"reasoning": {"effort": "max"}}
+        reasoning = (
+            {"output_config": {"effort": "max"}, "thinking": {"type": "adaptive", "display": "summary"}}
+            if protocol == "anthropic_messages"
+            else {"reasoning": {"effort": "max"}}
+        )
         inputs.reserve(protocol, "POST", f"{ORIGIN}{route}", _body(**{token_field: 32, **reasoning}))
+
+
+def test_native_reasoning_uses_canonical_output_config_effort(tmp_path: Path) -> None:
+    inputs = _load(_contract(tmp_path, protocol="anthropic_messages", token_field="max_tokens"))
+    canonical = _body(
+        max_tokens=32,
+        output_config={"effort": "max"},
+        thinking={"type": "adaptive", "display": "summary"},
+    )
+    inputs.reserve("anthropic_messages", "POST", f"{ORIGIN}/v1/messages", canonical)
+
+    for body in (
+        _body(max_tokens=32, thinking={"effort": "max"}),
+        _body(max_tokens=32, output_config={"effort": "low"}, thinking={"type": "adaptive"}),
+        _body(
+            max_tokens=32,
+            output_config={"effort": "max"},
+            thinking={"effort": "low"},
+        ),
+    ):
+        with pytest.raises(BudgetRefused, match="reasoning"):
+            inputs.reserve("anthropic_messages", "POST", f"{ORIGIN}/v1/messages", body)
+    assert inputs.admission_summary()["counts"] == {"anthropic_messages": 1}
 
 
 def test_unknown_or_ambiguous_token_field_fails_closed(tmp_path: Path) -> None:

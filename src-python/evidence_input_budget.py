@@ -651,33 +651,44 @@ def _json_object(body: bytes) -> Mapping[str, Any]:
 def _validate_reasoning(leg: _Leg, payload: Mapping[str, Any], *, required: bool) -> None:
     expected = leg.reasoning_effort
     values: list[str] = []
+    exact_values: list[str] = []
     if leg.protocol == "responses" and "reasoning" in payload:
         value = payload["reasoning"]
         if not isinstance(value, Mapping) or "effort" not in value or not isinstance(value["effort"], str):
             raise BudgetRefused("reasoning selection is not explicit")
         values.append(value["effort"])
+        exact_values.append(value["effort"])
     elif leg.protocol == "chat_completions":
         if "reasoning_effort" in payload:
             value = payload["reasoning_effort"]
             if not isinstance(value, str):
                 raise BudgetRefused("reasoning selection is not explicit")
             values.append(value)
+            exact_values.append(value)
         if "reasoning" in payload:
             value = payload["reasoning"]
             if not isinstance(value, Mapping) or not isinstance(value.get("effort"), str):
                 raise BudgetRefused("reasoning selection is not explicit")
             values.append(value["effort"])
-    elif leg.protocol == "anthropic_messages" and "thinking" in payload:
-        value = payload["thinking"]
-        if not isinstance(value, Mapping):
-            raise BudgetRefused("reasoning selection is not explicit")
-        if isinstance(value.get("effort"), str):
-            values.append(value["effort"])
-        elif expected is not None:
-            raise BudgetRefused("reasoning selection is not explicit")
+            exact_values.append(value["effort"])
+    elif leg.protocol == "anthropic_messages":
+        if "output_config" in payload:
+            output_config = payload["output_config"]
+            if not isinstance(output_config, Mapping) or not isinstance(output_config.get("effort"), str):
+                raise BudgetRefused("reasoning selection is not explicit")
+            values.append(output_config["effort"])
+            exact_values.append(output_config["effort"])
+        if "thinking" in payload:
+            thinking = payload["thinking"]
+            if not isinstance(thinking, Mapping):
+                raise BudgetRefused("reasoning selection is not explicit")
+            # Legacy thinking.effort can expose ambiguity, but cannot satisfy
+            # the native binding without the observed output_config.effort.
+            if isinstance(thinking.get("effort"), str):
+                values.append(thinking["effort"])
     if len(set(values)) > 1:
         raise BudgetRefused("reasoning selection is ambiguous")
-    if expected is not None and required and not values:
+    if expected is not None and required and not exact_values:
         raise BudgetRefused("reasoning selection is absent")
-    if expected is not None and values and values[0] != expected:
+    if expected is not None and exact_values and exact_values[0] != expected:
         raise BudgetRefused("reasoning selection does not match the fixed binding")
