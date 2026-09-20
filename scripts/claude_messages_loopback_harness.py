@@ -26,8 +26,10 @@ summary. Never credential values, prompt text, or tool output.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -119,7 +121,7 @@ def _structure(body: bytes) -> dict[str, Any]:
         "tools": len(request.options.get("tools") or []),
         "options": sorted(request.options),
         "option_shapes": {name: _shape(request.options[name]) for name in sorted(request.options)},
-        "tool_ids": _tool_id_fingerprints(request),
+        "call_identity": _call_identity_fingerprints(request),
     }
 
 
@@ -145,8 +147,8 @@ def _shape(value: Any) -> Any:
     return type(value).__name__
 
 
-def _tool_id_fingerprints(request: Any) -> dict[str, list[str]]:
-    """Opaque tool ids as short hashes: proves round-trip identity without storing them."""
+def _call_identity_fingerprints(request: Any) -> dict[str, list[str]]:
+    """Call-identity fingerprints prove pairing without storing opaque values."""
 
     use: list[str] = []
     result: list[str] = []
@@ -422,12 +424,38 @@ def _cli_environment(home: Path, base_url: str, proxy_url: str, args: argparse.N
     return env
 
 
+_STRACE_IPV4 = re.compile(r'inet_addr\("([^"]+)"\)|inet_pton\(AF_INET,\s*"([^"]+)"')
+_STRACE_IPV6 = re.compile(r'inet_pton\(AF_INET6,\s*"([^"]+)"')
+
+
+def _strace_connect_is_loopback(line: str) -> bool:
+    if "AF_UNIX" in line or "AF_NETLINK" in line:
+        return True
+    if "AF_INET6" in line:
+        match = _STRACE_IPV6.search(line)
+        if not match:
+            return False
+        try:
+            address = ipaddress.ip_address(match.group(1))
+        except ValueError:
+            return False
+        return address.is_loopback or bool(getattr(address, "ipv4_mapped", None) and address.ipv4_mapped.is_loopback)
+    if "AF_INET" in line:
+        match = _STRACE_IPV4.search(line)
+        if not match:
+            return False
+        try:
+            return ipaddress.ip_address(match.group(1) or match.group(2)).is_loopback
+        except ValueError:
+            return False
+    return False
+
+
 def _strace_verdict(log_path: Path) -> dict[str, Any]:
     if not log_path.exists():
         return {"available": False}
     connects = [line for line in log_path.read_text(errors="replace").splitlines() if "connect(" in line]
-    outside = [line for line in connects if ("127.0.0.1" not in line and "AF_UNIX" not in line
-                                             and "AF_NETLINK" not in line and "AF_INET6" not in line)]
+    outside = [line for line in connects if not _strace_connect_is_loopback(line)]
     return {"available": True, "connect_calls": len(connects), "non_loopback": outside[:5]}
 
 

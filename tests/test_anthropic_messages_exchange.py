@@ -213,6 +213,17 @@ def test_request_seam_keeps_native_bytes_and_refuses_safeguards_for_conversion()
     assert refusal.fields == ("safeguards",)
 
 
+def test_malformed_text_and_tool_name_refuse_conversion_without_coercion() -> None:
+    payload = json.loads(_request())
+    payload["messages"] = [
+        {"role": "user", "content": [{"type": "text", "text": 7}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "call-1", "input": {}}]},
+    ]
+    result = prepare_upstream_request(json.dumps(payload).encode(), "chat_completions")
+    assert isinstance(result, NotForwardable)
+    assert any(field.endswith(".text") or field.endswith(".name") for field in result.fields)
+
+
 def test_json_responses_and_chat_keep_text_tool_identity_and_truthful_usage() -> None:
     response = adapt_upstream_response("responses", _responses_text())
     assert isinstance(response, AdaptedResponse)
@@ -230,6 +241,15 @@ def test_json_responses_and_chat_keep_text_tool_identity_and_truthful_usage() ->
     chat = adapt_upstream_response("chat_completions", _chat_text())
     assert isinstance(chat, AdaptedResponse)
     assert json.loads(chat.body)["content"][0]["text"] == "pong"
+
+
+def test_json_missing_usage_is_disclosed_without_fabricating_counts() -> None:
+    payload = json.loads(_responses_text())
+    payload.pop("usage")
+    result = adapt_upstream_response("responses", json.dumps(payload).encode())
+    assert isinstance(result, AdaptedResponse)
+    assert json.loads(result.body)["usage"] == {}
+    assert any(item.policy == "usage_unavailable" for item in result.adaptations)
 
 
 def test_native_response_is_byte_exact_without_chat_detour() -> None:
@@ -269,6 +289,57 @@ def test_incremental_chat_sse_keeps_text_fragments_and_usage() -> None:
     assert records[-1]["type"] == "message_stop"
 
 
+def test_responses_stream_preserves_terminal_usage() -> None:
+    result = adapt_upstream_stream("responses", [_responses_stream()])
+    assert isinstance(result, AdaptedResponse)
+    records = _events(result.body)
+    assert records[-2]["usage"] == {"input_tokens": 8, "output_tokens": 4}
+
+
+def test_chat_stream_preserves_explicit_empty_text_block() -> None:
+    chunks = [
+        {"id": "chat-empty-text", "model": "fixture-chat", "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": None}]},
+        {"id": "chat-empty-text", "model": "fixture-chat", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        "[DONE]",
+    ]
+    result = adapt_upstream_stream("chat_completions", [b"".join(_sse(None, chunk) for chunk in chunks)])
+    assert isinstance(result, AdaptedResponse)
+    starts = [record for record in _events(result.body) if record.get("type") == "content_block_start"]
+    assert starts[0]["content_block"]["text"] == ""
+
+
+def test_responses_stream_preserves_explicit_empty_text_block() -> None:
+    events = [
+        {"type": "response.created", "response": {"id": "resp-empty-text", "model": "fixture", "status": "in_progress"}},
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"id": "msg-empty", "type": "message", "status": "in_progress", "content": []},
+        },
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp-empty-text",
+                "model": "fixture",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "msg-empty",
+                        "type": "message",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": ""}],
+                    }
+                ],
+                "usage": {},
+            },
+        },
+    ]
+    result = adapt_upstream_stream("responses", [_sse(None, event) for event in events])
+    assert isinstance(result, AdaptedResponse)
+    starts = [record for record in _events(result.body) if record.get("type") == "content_block_start"]
+    assert starts[0]["content_block"]["text"] == ""
+
+
 def test_chat_stream_without_usage_reports_unavailable_instead_of_fabricating_counts() -> None:
     chunks = [
         {
@@ -290,6 +361,98 @@ def test_chat_stream_without_usage_reports_unavailable_instead_of_fabricating_co
     assert records[-2]["usage"] == {}
     assert "usage_unavailable" in result.diagnostics()[0]
     assert "input_tokens" not in json.dumps(records[-2])
+
+
+def test_native_cancellation_is_not_a_successful_empty_passthrough() -> None:
+    results = [
+        adapt_upstream_response(
+            "anthropic_messages",
+            b"native-body",
+            content_type="text/event-stream",
+            cancelled=True,
+        ),
+        adapt_upstream_stream(
+            "anthropic_messages",
+            [b"native-body"],
+            cancelled=lambda: True,
+        ),
+    ]
+    for result in results:
+        assert isinstance(result, AdaptedResponse)
+        assert result.status == 499
+        assert result.body != b"native-body"
+        error_frame = next(frame for frame in result.body.split(b"\n\n") if frame.startswith(b"event: error"))
+        error_payload = json.loads(error_frame[len(b"event: error\ndata: ") :])
+        assert error_payload["type"] == "error"
+
+
+def test_responses_stream_without_identity_is_refused_before_conversion() -> None:
+    body = _sse(None, {"type": "response.created", "response": {"model": "fixture", "status": "in_progress"}})
+    result = adapt_upstream_stream("responses", [body])
+    assert isinstance(result, NotForwardable)
+    assert result.fields == ("responses.id",)
+
+
+def test_chat_stream_does_not_emit_identity_placeholder() -> None:
+    body = b"".join(
+        _sse(None, chunk)
+        for chunk in (
+            {"choices": [{"index": 0, "delta": {"content": "x"}, "finish_reason": None}]},
+            {"id": "chat-real", "model": "fixture-chat", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        )
+    ) + b"data: [DONE]\n\n"
+    result = adapt_upstream_stream("chat_completions", [body])
+    assert isinstance(result, NotForwardable)
+    assert result.fields == ("chat.id",)
+
+
+def test_valid_cr_terminated_sse_keeps_final_chat_frame() -> None:
+    body = _chat_stream().replace(b"\n", b"\r")
+    result = adapt_upstream_stream("chat_completions", [body])
+    assert isinstance(result, AdaptedResponse)
+    assert _events(result.body)[-1]["type"] == "message_stop"
+
+
+def test_responses_and_chat_refuse_empty_success_payloads() -> None:
+    responses = adapt_upstream_response(
+        "responses",
+        json.dumps({"id": "resp-empty", "status": "completed", "model": "fixture", "output": []}).encode(),
+    )
+    chat = adapt_upstream_response(
+        "chat_completions",
+        json.dumps({"id": "chat-empty", "model": "fixture", "choices": []}).encode(),
+    )
+    missing_role = adapt_upstream_response(
+        "chat_completions",
+        json.dumps(
+            {
+                "id": "chat-role",
+                "model": "fixture",
+                "choices": [{"index": 0, "message": {"content": "x"}, "finish_reason": "stop"}],
+            }
+        ).encode(),
+    )
+    assert isinstance(responses, NotForwardable)
+    assert isinstance(chat, NotForwardable)
+    assert isinstance(missing_role, NotForwardable)
+
+
+def test_converted_errors_do_not_echo_upstream_details() -> None:
+    result = adapt_upstream_response(
+        "responses",
+        json.dumps(
+            {
+                "id": "resp-failed",
+                "status": "failed",
+                "error": {"type": "provider-secret", "message": "Bearer secret https://upstream.invalid/prompt"},
+            }
+        ).encode(),
+    )
+    assert isinstance(result, AdaptedResponse)
+    error_payload = json.loads(result.body)
+    assert error_payload["type"] == "error"
+    assert b"Bearer" not in result.body
+    assert b"upstream.invalid" not in result.body
 
 
 def test_responses_stream_without_completed_event_is_refused() -> None:
