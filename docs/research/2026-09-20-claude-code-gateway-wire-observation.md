@@ -15,7 +15,7 @@ production route.
 | Observed CLI | `2.1.278 (Claude Code)` | Local install, `/home/noirbright/.local/share/claude/versions/2.1.278`; every "observed" claim below is bound to it |
 | Documented source pin | `v2.1.207` | Public pin used by prior campaign notes; **not** observed here |
 | Historical local evidence | `2.1.201` | Prior scoped-PARTIAL spike (PR #100); not re-used as evidence |
-| Documented Facts | `code.claude.com/docs` fetched 2026-09-20 | Current public docs, no version stamp of their own |
+| External documentation claims | `code.claude.com/docs` fetch reported 2026-09-20 | Not independently verified; see source-access qualification in §4 |
 
 No historical version was installed, downgraded, or equated with this pin.
 
@@ -31,12 +31,13 @@ part of the harness, not a manual step:
 - **Own home and config**: fresh `HOME` and `CLAUDE_CONFIG_DIR` under the run
   output directory; `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` so no real memory file is
   read; `DISABLE_AUTOUPDATER=1` so the global install is never touched.
-- **Loopback only**: base URL `http://127.0.0.1:<port>`; `HTTP(S)_PROXY` also
-  point at the same loopback recorder, so any egress attempt is answered `502`
-  and recorded as `egress_guard`.
-- **Connect-level verification**: the CLI runs under
-  `strace -f -e trace=connect`; the harness fails the run if any `connect()`
-  target is not `127.0.0.1`/AF_UNIX/AF_NETLINK.
+- **Loopback configuration**: base URL `http://127.0.0.1:<port>`; `HTTP(S)_PROXY`
+  also point at the loopback recorder, which answers proxy-routed egress attempts
+  with `502` and records `egress_guard`. This relies on the client honoring proxy
+  settings; it is not an operating-system network sandbox.
+- **Connect-level audit**: the CLI runs under `strace -f -e trace=connect`; the
+  harness fails the run after observing a connect target outside
+  `127.0.0.1`/AF_UNIX/AF_NETLINK. That is detection, not preemptive containment.
 - **Pre-dispatch bounds**: `Admission` counts every would-be upstream request
   (messages, count_tokens, discovery, probe) and refuses N+1 *before* writing a
   response; every body's `max_tokens` is checked against the budget first.
@@ -125,10 +126,19 @@ with a synthetic `tool_use`; the CLI executes the tool and turn 2 carries
 - The CLI prints a client-side notice when the gateway does not implement the
   auto-mode classifier billing contract; it does not break inference.
 
-## 4. Documented facts (primary sources, current docs)
+## 4. External documentation claims (independent verification pending)
 
-Short list only; the full official-doc survey is owned by a separate
-preparation stream, so this note cites rather than duplicates it.
+Source-access qualification: the implementer reported retrieving `.md` pages
+with a shell HTTP client. The sanctioned `web_fetch` tool refuses this hostname
+because it resolves to a non-public address in this environment. These retrieved
+claims are therefore not independently confirmed primary-source evidence and
+must not authorize production behavior, relax safety controls, or close a gate.
+No further alternate-route retrieval should be attempted. §3's actual isolated
+CLI observations and the deterministic test results stand separately.
+
+The list below is retained as explicitly unverified research leads, not as an
+additional set of established facts. Revalidate through an allowed primary-source
+path or pinned runtime evidence before implementation depends on a claim.
 
 - [Gateway compatibility guide](https://code.claude.com/docs/en/llm-gateway-protocol):
   Anthropic-Messages-format endpoints `/v1/messages` and optional
@@ -200,7 +210,8 @@ ADR-0014 seam as an isolated prototype (no production import, no route):
 ./scripts/codexhub-python.sh -m pytest tests/test_anthropic_messages_prototype.py -q
 ```
 
-`run` refuses `--allow-network`: live upstream use is not authorized for #74.
+`run` refuses `--allow-network`: this harness implements loopback only. Later
+budget approval does not turn it into a live runner or supply missing enforcement.
 Raw artifacts stay outside the repository (`observation.json`, `requests.jsonl`);
 only content-free structure is recorded.
 
