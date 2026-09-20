@@ -148,7 +148,7 @@ def test_refused_leg_may_have_no_credential_and_stays_refused(tmp_path: Path) ->
     summary = inputs.redacted_summary()
     assert summary["legs"][0]["credential_present"] is False
     with pytest.raises(BudgetRefused, match="refused"):
-        inputs.reserve("responses", "POST", f"{ORIGIN}/v1/responses", _body(max_output_tokens=1))
+        inputs.reserve("responses", "POST", f"{ORIGIN}/v1/responses", _body(max_output_tokens=1, reasoning={"effort": "max"}))
 
 
 def test_expired_grant_is_refused_without_a_new_round(tmp_path: Path) -> None:
@@ -156,6 +156,11 @@ def test_expired_grant_is_refused_without_a_new_round(tmp_path: Path) -> None:
     wall = [NOW + timedelta(minutes=11)]
     inputs = _load(_contract(tmp_path), clock=clock, wall=wall)
 
+    with pytest.raises(BudgetRefused, match="expired"):
+        inputs.reserve(
+            "responses", "POST", f"{ORIGIN}/v1/responses", _body(max_output_tokens=32)
+        )
+    wall[0] = NOW
     with pytest.raises(BudgetRefused, match="expired"):
         inputs.reserve(
             "responses", "POST", f"{ORIGIN}/v1/responses", _body(max_output_tokens=32)
@@ -178,7 +183,8 @@ def test_each_protocol_uses_its_declared_output_field(tmp_path: Path) -> None:
             "responses": "/v1/responses",
             "chat_completions": "/v1/chat/completions",
         }[protocol]
-        inputs.reserve(protocol, "POST", f"{ORIGIN}{route}", _body(**{token_field: 32}))
+        reasoning = {"thinking": {"effort": "max"}} if protocol == "anthropic_messages" else {"reasoning": {"effort": "max"}}
+        inputs.reserve(protocol, "POST", f"{ORIGIN}{route}", _body(**{token_field: 32, **reasoning}))
 
 
 def test_unknown_or_ambiguous_token_field_fails_closed(tmp_path: Path) -> None:
@@ -216,11 +222,51 @@ def test_remote_plaintext_endpoint_is_rejected(tmp_path: Path) -> None:
         _load(path)
 
 
+def test_contract_and_credential_json_reject_duplicate_or_nonfinite_values(tmp_path: Path) -> None:
+    contract = _contract(tmp_path / "contract")
+    text = contract.read_text(encoding="utf-8")
+    duplicate = text.replace(
+        '"round_id": "synthetic-round-1"',
+        '"round_id": "synthetic-round-1", "round_id": "other-round"',
+        1,
+    )
+    contract.write_text(duplicate, encoding="utf-8")
+    with pytest.raises(EvidenceInputError, match="invalid evidence input JSON"):
+        EvidenceInput.load(contract)
+
+    nan_contract = _contract(tmp_path / "nan")
+    nan_text = nan_contract.read_text(encoding="utf-8")
+    nan_contract.write_text(nan_text[:-1] + ', "nonfinite": NaN}', encoding="utf-8")
+    with pytest.raises(EvidenceInputError, match="invalid evidence input JSON"):
+        EvidenceInput.load(nan_contract)
+
+    credential_contract = _contract(tmp_path / "credential")
+    credential_path = tmp_path / "credential" / "credential.json"
+    credential_text = credential_path.read_text(encoding="utf-8")
+    credential_path.write_text(
+        credential_text.replace('"secret": "never-log-me"', '"secret": "one", "secret": "two"'),
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceInputError, match="invalid explicit credential"):
+        EvidenceInput.load(credential_contract)
+
+
 def test_duplicate_json_keys_and_bool_token_limits_refuse(tmp_path: Path) -> None:
     inputs = _load(_contract(tmp_path))
     duplicate = b'{"model":"synthetic-model","max_output_tokens":1,"max_output_tokens":2}'
-    for body in (duplicate, _body(max_output_tokens=True)):
+    for body in (duplicate, _body(max_output_tokens=True), _body(max_output_tokens=32, value=float("nan"))):
         with pytest.raises(BudgetRefused, match="body|token"):
+            inputs.reserve("responses", "POST", f"{ORIGIN}/v1/responses", body)
+    assert inputs.admission_summary()["counts"] == {}
+
+
+def test_configured_reasoning_selection_is_required_on_ordinary_requests(tmp_path: Path) -> None:
+    inputs = _load(_contract(tmp_path))
+    for body in (
+        _body(max_output_tokens=32),
+        _body(max_output_tokens=32, reasoning={"effort": "low"}),
+    ):
+        with pytest.raises(BudgetRefused, match="reasoning"):
             inputs.reserve("responses", "POST", f"{ORIGIN}/v1/responses", body)
     assert inputs.admission_summary()["counts"] == {}
 
@@ -245,7 +291,7 @@ def test_model_endpoint_and_reasoning_are_bound_without_rewriting_body(tmp_path:
 
 def test_n_plus_one_is_refused_before_the_attempt(tmp_path: Path) -> None:
     inputs = _load(_contract(tmp_path, max_attempts=2))
-    body = _body(max_output_tokens=32)
+    body = _body(max_output_tokens=32, reasoning={"effort": "max"})
     for _ in range(2):
         inputs.reserve("responses", "POST", f"{ORIGIN}/v1/responses", body)
     with pytest.raises(BudgetRefused, match="attempt"):
@@ -263,7 +309,7 @@ def test_reserve_is_atomic_under_thread_race(tmp_path: Path) -> None:
         barrier.wait()
         try:
             reservation = inputs.reserve(
-                "responses", "POST", f"{ORIGIN}/v1/responses", _body(max_output_tokens=32)
+                "responses", "POST", f"{ORIGIN}/v1/responses", _body(max_output_tokens=32, reasoning={"effort": "max"})
             )
             accepted.append(reservation.attempt)
         except BudgetRefused as error:
@@ -284,7 +330,7 @@ def test_reserve_is_atomic_under_thread_race(tmp_path: Path) -> None:
 def test_deadline_is_monotonic_and_does_not_reset_after_refusal(tmp_path: Path) -> None:
     clock = [100.0]
     inputs = _load(_contract(tmp_path, deadline_seconds=2), clock=clock)
-    body = _body(max_output_tokens=32)
+    body = _body(max_output_tokens=32, reasoning={"effort": "max"})
     inputs.reserve("responses", "POST", f"{ORIGIN}/v1/responses", body)
     clock[0] = 102.0
     with pytest.raises(BudgetRefused, match="deadline"):
@@ -298,7 +344,7 @@ def test_deadline_is_monotonic_and_does_not_reset_after_refusal(tmp_path: Path) 
 def test_grant_claim_blocks_reload_in_process_and_subprocess(tmp_path: Path) -> None:
     path = _contract(tmp_path, max_attempts=2)
     inputs = _load(path)
-    inputs.reserve("responses", "POST", f"{ORIGIN}/v1/responses", _body(max_output_tokens=1))
+    inputs.reserve("responses", "POST", f"{ORIGIN}/v1/responses", _body(max_output_tokens=1, reasoning={"effort": "max"}))
 
     with pytest.raises(EvidenceInputError, match="already been claimed"):
         EvidenceInput.load(path)
@@ -322,6 +368,24 @@ def test_credential_target_mismatch_refuses(tmp_path: Path) -> None:
     path = _contract(tmp_path, credential_origin="https://other.example.test")
     with pytest.raises(EvidenceInputError, match="credential target"):
         _load(path)
+
+
+def test_owner_only_helpers_refuse_before_creating_files_without_fchmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _credential(tmp_path, secret="synthetic-only-secret")
+    destination = tmp_path / "isolated" / "credential.json"
+    destination.parent.mkdir()
+    monkeypatch.setattr(os, "fchmod", None, raising=False)
+
+    with pytest.raises(EvidenceInputError, match="owner-only"):
+        materialize_credential(source, destination)
+    assert not destination.exists()
+
+    contract = _contract(tmp_path / "contract")
+    with pytest.raises(EvidenceInputError, match="owner-only"):
+        EvidenceInput.load(contract)
+    assert not (contract.parent / "grant-responses-max_output_tokens.claim").exists()
 
 
 def test_materialize_credential_is_owner_only_and_does_not_modify_source(tmp_path: Path) -> None:

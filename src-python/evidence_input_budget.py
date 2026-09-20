@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
+from protocol_json import AmbiguousJSONError, strict_json_loads
+
 SCHEMA = "codexhub.claude-evidence-input.v1"
 GRANT_SCHEMA = "codexhub.claude-evidence-grant.v1"
 MAX_ATTEMPTS_PER_PROTOCOL = 20
@@ -110,6 +112,7 @@ class EvidenceInput:
         self._wall_clock = wall_clock
         self._deadline = monotonic() + limits.deadline_seconds
         self._deadline_reached = False
+        self._grant_expired = False
         self._counts: dict[str, int] = {}
         self._refusals: list[dict[str, str]] = []
         self._lock = threading.Lock()
@@ -126,8 +129,8 @@ class EvidenceInput:
         contract_path = _explicit_file(path, label="evidence input")
         try:
             contract_bytes = contract_path.read_bytes()
-            raw = json.loads(contract_bytes)
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raw = strict_json_loads(contract_bytes)
+        except (OSError, UnicodeError, json.JSONDecodeError, AmbiguousJSONError) as exc:
             raise EvidenceInputError("invalid evidence input JSON") from exc
         if not isinstance(raw, Mapping) or raw.get("schema") != SCHEMA:
             raise EvidenceInputError("invalid evidence input schema")
@@ -183,7 +186,7 @@ class EvidenceInput:
             if self._deadline_reached:
                 return self._refuse(protocol, "global monotonic deadline reached")
             wall_now = _as_utc(self._wall_clock(), label="wall clock")
-            status = _grant_status(self._grant, leg.id, wall_now)
+            status = self._authorization_status(leg.id, wall_now)
             if status != "approved":
                 return self._refuse(protocol, f"authorization is {status}")
             used = self._counts.get(protocol, 0)
@@ -210,38 +213,37 @@ class EvidenceInput:
 
     def redacted_summary(self) -> dict[str, Any]:
         """Return an audit-safe summary with no credential values or paths."""
-        wall_now = _as_utc(self._wall_clock(), label="wall clock")
-        return {
-            "schema": SCHEMA,
-            "source": self.source.name,
-            "grant": {
-                "round_id": self._grant.round_id,
-                "authorization": {
-                    leg_id: _grant_status(self._grant, leg_id, wall_now)
-                    for leg_id in sorted(self._grant.decisions)
+        with self._lock:
+            wall_now = _as_utc(self._wall_clock(), label="wall clock")
+            authorization = {
+                leg_id: self._authorization_status(leg_id, wall_now)
+                for leg_id in sorted(self._grant.decisions)
+            }
+            return {
+                "schema": SCHEMA,
+                "source": self.source.name,
+                "grant": {"round_id": self._grant.round_id, "authorization": authorization},
+                "limits": {
+                    "max_attempts_per_protocol": self._limits.max_attempts_per_protocol,
+                    "max_output_tokens": self._limits.max_output_tokens,
+                    "deadline_seconds": self._limits.deadline_seconds,
                 },
-            },
-            "limits": {
-                "max_attempts_per_protocol": self._limits.max_attempts_per_protocol,
-                "max_output_tokens": self._limits.max_output_tokens,
-                "deadline_seconds": self._limits.deadline_seconds,
-            },
-            "legs": [
-                {
-                    "id": leg.id,
-                    "protocol": leg.protocol,
-                    "provider": leg.provider,
-                    "model": leg.model,
-                    "reasoning_effort": leg.reasoning_effort,
-                    "token_field": leg.token_field,
-                    "endpoint": leg.endpoint,
-                    "routes": sorted(leg.routes),
-                    "authorization": _grant_status(self._grant, leg.id, wall_now),
-                    "credential_present": leg.credential is not None and leg.credential.path.is_file(),
-                }
-                for leg in self._legs
-            ],
-        }
+                "legs": [
+                    {
+                        "id": leg.id,
+                        "protocol": leg.protocol,
+                        "provider": leg.provider,
+                        "model": leg.model,
+                        "reasoning_effort": leg.reasoning_effort,
+                        "token_field": leg.token_field,
+                        "endpoint": leg.endpoint,
+                        "routes": sorted(leg.routes),
+                        "authorization": authorization[leg.id],
+                        "credential_present": leg.credential is not None and leg.credential.path.is_file(),
+                    }
+                    for leg in self._legs
+                ],
+            }
 
     def admission_summary(self) -> dict[str, Any]:
         """Return counts and refusal reasons without request bodies or URLs."""
@@ -250,6 +252,14 @@ class EvidenceInput:
                 "counts": dict(self._counts),
                 "refusals": [dict(item) for item in self._refusals],
             }
+
+    def _authorization_status(self, leg_id: str, now: datetime) -> str:
+        if self._grant_expired:
+            return "expired"
+        status = _grant_status(self._grant, leg_id, now)
+        if status == "expired":
+            self._grant_expired = True
+        return status
 
     def _validate_body(self, leg: _Leg, method: str, path: str, body: bytes) -> None:
         if type(body) is not bytes:  # exact immutable carrier, not bytearray/memoryview
@@ -284,11 +294,16 @@ class EvidenceInput:
                 self._refuse(leg.protocol, "request token limit is not a positive integer")
             if value > self._limits.max_output_tokens:
                 self._refuse(leg.protocol, "request token limit exceeds the output bound")
-        _validate_reasoning(leg, payload)
+        _validate_reasoning(leg, payload, required=not path.endswith("/count_tokens"))
 
     def _refuse(self, protocol: str, reason: str) -> Any:
         self._refusals.append({"protocol": protocol, "reason": reason})
         raise BudgetRefused(f"{protocol}: {reason}")
+
+
+def _require_owner_only_mode() -> None:
+    if not callable(getattr(os, "fchmod", None)):
+        raise EvidenceInputError("owner-only credential/claim files are unsupported on this platform")
 
 
 def materialize_credential(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> Path:
@@ -297,6 +312,7 @@ def materialize_credential(source: str | os.PathLike[str], destination: str | os
     This is intentionally a one-way byte copy: it never refreshes OAuth, writes
     the source, follows source/destination symlinks, or emits the copied value.
     """
+    _require_owner_only_mode()
     source_path = _explicit_file(source, label="credential source")
     destination_path = Path(destination)
     if not destination_path.is_absolute():
@@ -310,17 +326,17 @@ def materialize_credential(source: str | os.PathLike[str], destination: str | os
         payload = source_path.read_bytes()
         fd = os.open(destination_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
+            os.fchmod(fd, 0o600)
             view = memoryview(payload)
             while view:
                 written = os.write(fd, view)
                 if written <= 0:
                     raise OSError("credential copy made no progress")
                 view = view[written:]
-            os.fchmod(fd, 0o600)
             os.fsync(fd)
         finally:
             os.close(fd)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, AttributeError, NotImplementedError) as exc:
         try:
             destination_path.unlink(missing_ok=True)
         except OSError:
@@ -367,6 +383,7 @@ def _claim_path(value: Any) -> Path:
 
 
 def _claim_grant(grant: _Grant, contract_bytes: bytes) -> None:
+    _require_owner_only_mode()
     marker = json.dumps(
         {
             "schema": "codexhub.claude-evidence-grant-claim.v1",
@@ -382,10 +399,10 @@ def _claim_grant(grant: _Grant, contract_bytes: bytes) -> None:
     except OSError as exc:
         raise EvidenceInputError("grant claim could not be created") from exc
     try:
-        os.write(fd, marker)
         os.fchmod(fd, 0o600)
+        os.write(fd, marker)
         os.fsync(fd)
-    except OSError as exc:
+    except (OSError, AttributeError, NotImplementedError) as exc:
         raise EvidenceInputError("grant claim could not be committed") from exc
     finally:
         os.close(fd)
@@ -494,8 +511,8 @@ def _validate_credential_file(path: Path, *, schema: str, target_origin: str, se
         if path.suffix.lower() == ".toml":
             payload = tomllib.loads(text)
         else:
-            payload = json.loads(text)
-    except (OSError, UnicodeError, json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
+            payload = strict_json_loads(text)
+    except (OSError, UnicodeError, json.JSONDecodeError, AmbiguousJSONError, tomllib.TOMLDecodeError) as exc:
         raise EvidenceInputError("invalid explicit credential fixture") from exc
     if not isinstance(payload, Mapping):
         raise EvidenceInputError("credential fixture must be an object")
@@ -623,24 +640,15 @@ def _method(value: str) -> str:
 
 def _json_object(body: bytes) -> Mapping[str, Any]:
     try:
-        payload = json.loads(body, object_pairs_hook=_unique_object)
-    except (UnicodeDecodeError, json.JSONDecodeError, EvidenceInputError) as exc:
+        payload = strict_json_loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError, AmbiguousJSONError) as exc:
         raise BudgetRefused("outbound body is not an unambiguous JSON object") from exc
     if not isinstance(payload, Mapping):
         raise BudgetRefused("outbound body is not a JSON object")
     return payload
 
 
-def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise EvidenceInputError("duplicate JSON field")
-        result[key] = value
-    return result
-
-
-def _validate_reasoning(leg: _Leg, payload: Mapping[str, Any]) -> None:
+def _validate_reasoning(leg: _Leg, payload: Mapping[str, Any], *, required: bool) -> None:
     expected = leg.reasoning_effort
     values: list[str] = []
     if leg.protocol == "responses" and "reasoning" in payload:
@@ -669,5 +677,7 @@ def _validate_reasoning(leg: _Leg, payload: Mapping[str, Any]) -> None:
             raise BudgetRefused("reasoning selection is not explicit")
     if len(set(values)) > 1:
         raise BudgetRefused("reasoning selection is ambiguous")
+    if expected is not None and required and not values:
+        raise BudgetRefused("reasoning selection is absent")
     if expected is not None and values and values[0] != expected:
         raise BudgetRefused("reasoning selection does not match the fixed binding")

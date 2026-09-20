@@ -15,7 +15,8 @@ not put redirects or automatic retries below the seam. A refusal means no
 outbound attempt and does not reset or create a new round. The claim is an
 atomic owner-only marker (`O_EXCL`); reloading the same grant, including from a
 new process, is refused. A fresh round needs a new user grant, `round_id`, and
-claim path.
+claim path. Owner-only materialization/claims fail closed before file creation
+on platforms without `os.fchmod`; this helper has no Windows ACL claim.
 
 ## Input shape
 
@@ -36,7 +37,9 @@ A decision is one of `approved`, `refused`, or `undecided`. Missing, expired,
 not-yet-valid, refused, and undecided legs fail closed. An unsettled native
 Anthropic/Ollama leg is represented explicitly as `undecided`; it is not
 silently treated as approved. A leg cannot wildcard its model, origin, route,
-or token field, and duplicate protocol bindings are rejected.
+or token field, and duplicate protocol bindings are rejected. All JSON input,
+credential, and request-body boundaries use the repository strict parser:
+duplicate keys and non-finite values refuse.
 
 Credential paths are never discovered from a home directory, environment
 variable, configured provider, or personal auth store. The optional
@@ -59,8 +62,11 @@ chooses one field in its input contract; the other field, both fields, or an
 unknown token-limit field is refused. The count-token auxiliary route may omit
 an output-limit field, but unknown token-limit fields still refuse. The body
 model must equal the leg's fixed model. Reasoning selections, when present,
-must use the configured selection (`max` for the approved Responses leg) and are
-never injected, normalized, or silently changed.
+must use the configured selection (`max` for the approved Responses leg), and
+an ordinary request must carry that exact selection; missing selection refuses.
+The auxiliary count-token route may omit it. Selection is never injected,
+normalized, or silently changed. Once an expired grant is observed, it remains
+terminal even if the wall clock moves backward.
 
 `reserve` validates the protocol, method, final URL origin/path, model, body,
 credential authorization, monotonic deadline, and attempt count while holding
