@@ -37,9 +37,10 @@ A decision is one of `approved`, `refused`, or `undecided`. Missing, expired,
 not-yet-valid, refused, and undecided legs fail closed. An unsettled native
 Anthropic/Ollama leg is represented explicitly as `undecided`; it is not
 silently treated as approved. A leg cannot wildcard its model, origin, route,
-or token field, and duplicate protocol bindings are rejected. All JSON input,
-credential, and request-body boundaries use the repository strict parser:
-duplicate keys and non-finite values refuse.
+or token field, and duplicate protocol bindings are rejected. JSON contracts,
+JSON credential files, and JSON request bodies use the repository strict parser
+and reject duplicate keys/non-finite values. TOML credential files use
+`tomllib` and its TOML rules.
 
 Credential paths are never discovered from a home directory, environment
 variable, configured provider, or personal auth store. The optional
