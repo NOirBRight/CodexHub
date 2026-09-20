@@ -203,8 +203,11 @@ def test_native_reasoning_uses_canonical_output_config_effort(tmp_path: Path) ->
 
     for body in (
         _body(max_tokens=32, thinking={"effort": "max"}),
+        _body(max_tokens=32, output_config={"effort": "max"}, thinking={"type": "adaptive", "effort": 1}),
+        _body(max_tokens=32, output_config={"effort": "max"}, thinking={"type": "adaptive", "effort": None}),
         _body(max_tokens=32, output_config={"format": {"type": "text"}}, thinking={"type": "adaptive"}),
         _body(max_tokens=32, output_config={"effort": 1}, thinking={"type": "adaptive"}),
+        _body(max_tokens=32, output_config={"effort": None}, thinking={"type": "adaptive"}),
         _body(max_tokens=32, output_config={"effort": "low"}, thinking={"type": "adaptive"}),
         _body(
             max_tokens=32,
@@ -262,6 +265,15 @@ def test_count_tokens_auxiliary_body_may_omit_output_limit(tmp_path: Path) -> No
         _body(),
     )
     assert inputs.admission_summary()["counts"] == {"anthropic_messages": 1}
+
+
+def test_native_count_tokens_rejects_legacy_effort_but_allows_omission(tmp_path: Path) -> None:
+    inputs = _load(_contract(tmp_path, protocol="anthropic_messages", token_field="max_tokens"))
+    for effort in ("max", "low", 1, None):
+        body = _body(thinking={"type": "adaptive", "effort": effort})
+        with pytest.raises(BudgetRefused, match="reasoning"):
+            inputs.reserve("anthropic_messages", "POST", f"{ORIGIN}/v1/messages/count_tokens", body)
+    assert inputs.admission_summary()["counts"] == {}
 
 
 def test_remote_plaintext_endpoint_is_rejected(tmp_path: Path) -> None:
