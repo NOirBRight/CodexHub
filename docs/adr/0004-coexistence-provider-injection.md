@@ -98,9 +98,9 @@ without Activation. The Injected Block is that owned set plus the credential
 key, not necessarily a single map key. Codex's History Bucket exception is
 unchanged. Model naming and which fields are projected are ADR-0011.
 
-## Claude Code exception: explicit current-user activation (ADR-0013)
+## Claude Code exception: explicit current-user activation (ADR-0014)
 
-[ADR-0013](0013-claude-code-gateway-client.md) adds a planned Claude Code
+[ADR-0014](0014-claude-code-gateway-client.md) adds a planned Claude Code
 exception to decisions 1–2: its explicit Connect action may set current-user
 route/default-model fields after disclosure because it does not offer the
 provider-map coexistence shape. The Injected Block is the managed key set;

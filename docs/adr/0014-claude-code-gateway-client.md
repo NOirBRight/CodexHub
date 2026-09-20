@@ -1,4 +1,4 @@
-# ADR-0013: Claude Code Gateway compatibility and explicit client activation
+# ADR-0014: Claude Code Gateway compatibility and explicit client activation
 
 Status: Accepted product direction; implementation and live verification pending.
 

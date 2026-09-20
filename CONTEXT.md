@@ -52,7 +52,7 @@ Do not reset ACLs, reinstall the AppX package, or delete `.codex` as a first-lin
 ## Client integration
 
 **Provider Injection**:
-The integration mode where the Gateway joins a client configuration as one additional provider entry among the user's own, preserving every user-owned provider and setting. The standard mode for provider-map clients from 0.1.9 (ADR-0004); Claude Code has an explicit current-user Activation exception (ADR-0013).
+The integration mode where the Gateway joins a client configuration as one additional provider entry among the user's own, preserving every user-owned provider and setting. The standard mode for provider-map clients from 0.1.9 (ADR-0004); Claude Code has an explicit current-user Activation exception (ADR-0014).
 _Avoid_: incremental access, partial takeover
 
 **Managed Takeover**:
@@ -76,7 +76,7 @@ The per-provider-ID session history partitioning in Codex CLI: sessions belong t
 _Avoid_: session loss, conversation reset
 
 **Activation**:
-Pointing a client's default route or model selection at the Injected Block. User-owned; ordinary Apply does not imply Activation. Claude Code's explicitly confirmed Connect includes current-user Activation, unlike ordinary Provider Injection (ADR-0013).
+Pointing a client's default route or model selection at the Injected Block. User-owned; ordinary Apply does not imply Activation. Claude Code's explicitly confirmed Connect includes current-user Activation, unlike ordinary Provider Injection (ADR-0014).
 _Avoid_: enabling, switching on
 
 **Claude Model Mapping**:
