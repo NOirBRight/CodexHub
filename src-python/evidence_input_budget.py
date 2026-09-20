@@ -672,7 +672,7 @@ def _validate_reasoning(leg: _Leg, payload: Mapping[str, Any], *, required: bool
             values.append(value["effort"])
             exact_values.append(value["effort"])
     elif leg.protocol == "anthropic_messages":
-        if "output_config" in payload:
+        if "output_config" in payload and expected is not None:
             output_config = payload["output_config"]
             if not isinstance(output_config, Mapping) or not isinstance(output_config.get("effort"), str):
                 raise BudgetRefused("reasoning selection is not explicit")

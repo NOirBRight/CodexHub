@@ -50,6 +50,7 @@ def _contract(
     protocol: str = "responses",
     model: str = "synthetic-model",
     token_field: str = "max_output_tokens",
+    reasoning_effort: str | None = "max",
     endpoint: str = ORIGIN,
     credential_origin: str = ORIGIN,
     deadline_seconds: int = 1800,
@@ -78,7 +79,7 @@ def _contract(
                 "protocol": protocol,
                 "provider": "synthetic-provider",
                 "model": model,
-                "reasoning_effort": "max",
+                "reasoning_effort": reasoning_effort,
                 "token_field": token_field,
                 "endpoint": endpoint,
                 "routes": {
@@ -202,6 +203,8 @@ def test_native_reasoning_uses_canonical_output_config_effort(tmp_path: Path) ->
 
     for body in (
         _body(max_tokens=32, thinking={"effort": "max"}),
+        _body(max_tokens=32, output_config={"format": {"type": "text"}}, thinking={"type": "adaptive"}),
+        _body(max_tokens=32, output_config={"effort": 1}, thinking={"type": "adaptive"}),
         _body(max_tokens=32, output_config={"effort": "low"}, thinking={"type": "adaptive"}),
         _body(
             max_tokens=32,
@@ -211,6 +214,28 @@ def test_native_reasoning_uses_canonical_output_config_effort(tmp_path: Path) ->
     ):
         with pytest.raises(BudgetRefused, match="reasoning"):
             inputs.reserve("anthropic_messages", "POST", f"{ORIGIN}/v1/messages", body)
+    assert inputs.admission_summary()["counts"] == {"anthropic_messages": 1}
+
+
+def test_native_unbound_output_config_controls_are_not_rejected(tmp_path: Path) -> None:
+    inputs = _load(
+        _contract(
+            tmp_path,
+            protocol="anthropic_messages",
+            token_field="max_tokens",
+            reasoning_effort=None,
+        )
+    )
+    inputs.reserve(
+        "anthropic_messages",
+        "POST",
+        f"{ORIGIN}/v1/messages",
+        _body(
+            max_tokens=32,
+            output_config={"format": {"type": "text"}},
+            thinking={"type": "adaptive", "display": "summary"},
+        ),
+    )
     assert inputs.admission_summary()["counts"] == {"anthropic_messages": 1}
 
 
