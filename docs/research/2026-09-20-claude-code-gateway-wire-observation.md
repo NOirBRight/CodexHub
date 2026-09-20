@@ -53,9 +53,13 @@ part of the harness, not a manual step:
   `GET /v1/models?limit=1000`, sent **before** the first inference request.
   Without the variable no discovery request is sent.
 - Discovery cache written to `$CLAUDE_CONFIG_DIR/cache/gateway-models.json` as
-  `{"baseUrl", "fetchedAt", "models":[...]}`. The cache keeps *every* returned
-  entry, including `vendor/not-claude`, so the `claude`/`anthropic` substring
-  filter is applied when the picker is built, not when the response is stored.
+  `{"baseUrl", "fetchedAt", "models":[...]}`. A three-entry response
+  (`claude-synthetic-1`, `claude-codexhub-test`, `provider/gpt-test`) cached only
+  the two `claude`-containing entries and logged
+  `[gatewayDiscovery] cached 2 models`, so the substring filter runs **before**
+  the cache is written, and a non-matching id never reaches the picker. An
+  earlier run appeared to store a `vendor/not-claude` entry only because that id
+  itself contains `claude`.)
 - No `HEAD /api/hello` probe and no `POST /v1/messages/count_tokens` request were
   observed on this non-interactive path.
 

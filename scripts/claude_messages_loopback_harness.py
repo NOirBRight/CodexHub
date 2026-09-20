@@ -307,7 +307,10 @@ class _Handler(BaseHTTPRequestHandler):
             model = self.server.model_id  # type: ignore[attr-defined]
             payload = json.dumps({"data": [
                 {"id": model, "display_name": "Synthetic One", "description": "loopback scaffold"},
-                {"id": "vendor/not-claude", "display_name": "Filtered out by the CLI"},
+                # Ticket #77 asked for one matching and one non-matching id so the
+                # discovery substring filter can be observed without live access.
+                {"id": "claude-codexhub-test", "display_name": "CodexHub Test"},
+                {"id": "provider/gpt-test", "display_name": "Must not match"},
             ]}).encode()
             self._route("discovery", body, lambda: self._reply(200, payload))
             return
@@ -459,7 +462,7 @@ def command_run(args: argparse.Namespace) -> int:
     time.sleep(0.3)
 
     env = _cli_environment(home, base_url, proxy_url, args)
-    command = [args.claude_bin, "-p", "--model", args.model, "--permission-mode", "plan",
+    command = [args.claude_bin, "-p", "--debug", "--model", args.model, "--permission-mode", "plan",
                "--output-format", "json", args.prompt]
     strace = shutil.which("strace")
     connect_log = out / "connects.log"
@@ -493,6 +496,7 @@ def command_run(args: argparse.Namespace) -> int:
         "requests": records,
         "egress_attempts": len(egress_attempts),
         "connect_verdict": _strace_verdict(connect_log),
+        "discovery_debug": _discovery_debug_lines(home),
         "cli_stdout_head": stdout[:2000],
         "cli_stderr_head": stderr[:2000],
     }
@@ -504,6 +508,20 @@ def command_run(args: argparse.Namespace) -> int:
     if summary["connect_verdict"].get("non_loopback"):
         ok = False
     return 0 if ok else 1
+
+
+def _discovery_debug_lines(home: Path) -> list[str]:
+    """Only the client's own [gatewayDiscovery] status lines; no prompt content."""
+
+    debug_dir = home / ".claude" / "debug"
+    lines: list[str] = []
+    if not debug_dir.is_dir():
+        return lines
+    for path in sorted(debug_dir.glob("*.txt")):
+        for line in path.read_text(errors="replace").splitlines():
+            if "[gatewayDiscovery]" in line:
+                lines.append(line.strip()[:300])
+    return lines
 
 
 def _cli_version(claude_bin: str) -> str:
