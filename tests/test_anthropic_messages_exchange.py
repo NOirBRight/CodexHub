@@ -243,6 +243,14 @@ def test_json_responses_and_chat_keep_text_tool_identity_and_truthful_usage() ->
     assert json.loads(chat.body)["content"][0]["text"] == "pong"
 
 
+def test_chat_json_preserves_explicit_empty_text() -> None:
+    payload = json.loads(_chat_text())
+    payload["choices"][0]["message"]["content"] = ""
+    result = adapt_upstream_response("chat_completions", json.dumps(payload).encode())
+    assert isinstance(result, AdaptedResponse)
+    assert json.loads(result.body)["content"] == [{"type": "text", "text": ""}]
+
+
 def test_json_missing_usage_is_disclosed_without_fabricating_counts() -> None:
     payload = json.loads(_responses_text())
     payload.pop("usage")
@@ -250,6 +258,29 @@ def test_json_missing_usage_is_disclosed_without_fabricating_counts() -> None:
     assert isinstance(result, AdaptedResponse)
     assert json.loads(result.body)["usage"] == {}
     assert any(item.policy == "usage_unavailable" for item in result.adaptations)
+
+
+def test_json_usage_empty_or_unknown_is_unavailable_but_zero_counts_are_truthful() -> None:
+    for protocol, source in (("responses", _responses_text()), ("chat_completions", _chat_text())):
+        for unknown_usage in ({}, {"cache_read_input_tokens": 12}):
+            payload = json.loads(source)
+            payload["usage"] = unknown_usage
+            unknown = adapt_upstream_response(protocol, json.dumps(payload).encode())
+            assert isinstance(unknown, AdaptedResponse)
+            assert json.loads(unknown.body)["usage"] == {}
+            assert any(item.policy == "usage_unavailable" for item in unknown.adaptations)
+
+        zero_usage = (
+            {"input_tokens": 0, "output_tokens": 0}
+            if protocol == "responses"
+            else {"prompt_tokens": 0, "completion_tokens": 0}
+        )
+        payload = json.loads(source)
+        payload["usage"] = zero_usage
+        zero = adapt_upstream_response(protocol, json.dumps(payload).encode())
+        assert isinstance(zero, AdaptedResponse)
+        assert json.loads(zero.body)["usage"] == {"input_tokens": 0, "output_tokens": 0}
+        assert not any(item.policy == "usage_unavailable" for item in zero.adaptations)
 
 
 def test_native_response_is_byte_exact_without_chat_detour() -> None:
@@ -361,6 +392,21 @@ def test_chat_stream_without_usage_reports_unavailable_instead_of_fabricating_co
     assert records[-2]["usage"] == {}
     assert "usage_unavailable" in result.diagnostics()[0]
     assert "input_tokens" not in json.dumps(records[-2])
+
+
+def test_chat_stream_usage_empty_is_unavailable_but_zero_counts_are_truthful() -> None:
+    for usage, unavailable in (({}, True), ({"input_tokens": 0, "output_tokens": 0}, False)):
+        chunks = [
+            {"id": "chat-usage", "model": "fixture-chat", "choices": [{"index": 0, "delta": {"content": "x"}, "finish_reason": None}]},
+            {"id": "chat-usage", "model": "fixture-chat", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            {"id": "chat-usage", "model": "fixture-chat", "choices": [], "usage": usage},
+            "[DONE]",
+        ]
+        result = adapt_upstream_stream("chat_completions", [b"".join(_sse(None, chunk) for chunk in chunks)])
+        assert isinstance(result, AdaptedResponse)
+        records = _events(result.body)
+        assert records[-2]["usage"] == usage
+        assert any(item.policy == "usage_unavailable" for item in result.adaptations) is unavailable
 
 
 def test_native_cancellation_is_not_a_successful_empty_passthrough() -> None:

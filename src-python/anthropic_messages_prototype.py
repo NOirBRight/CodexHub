@@ -892,6 +892,13 @@ def _usage_for_anthropic(
     """Keep only truthful Anthropic counts and name every omitted detail."""
 
     if value is None:
+        declared.append(
+            Adaptation(
+                "usage",
+                "usage_unavailable",
+                f"{source} supplied no supported token counts; none are synthesized.",
+            )
+        )
         return {}
     if not isinstance(value, Mapping):
         raise ValueError(f"{source} usage is not an object")
@@ -951,6 +958,14 @@ def _usage_for_anthropic(
         result["input_tokens"] = input_tokens
     if output_tokens is not None:
         result["output_tokens"] = output_tokens
+    if not result:
+        declared.append(
+            Adaptation(
+                "usage",
+                "usage_unavailable",
+                f"{source} supplied no supported token counts; none are synthesized.",
+            )
+        )
     return result
 
 
@@ -1043,14 +1058,6 @@ def _responses_output_to_anthropic(
     if response_status == "completed" and not blocks:
         return _response_refusal("unsupported_upstream_response", "response.output")
 
-    if "usage" not in payload or payload["usage"] is None:
-        declared.append(
-            Adaptation(
-                "usage",
-                "usage_unavailable",
-                "The upstream response supplied no truthful token counts; none are synthesized.",
-            )
-        )
     usage = _usage_for_anthropic(payload.get("usage"), declared, source="Responses")
     response_id = payload.get("id")
     if not isinstance(response_id, str) or not response_id:
@@ -1284,7 +1291,7 @@ def _chat_chunks_to_anthropic_sse(
             usage = _usage_for_anthropic(terminal_usage, declared, source="Responses")
         except ValueError:
             return _response_refusal("unsupported_upstream_usage", "responses.usage")
-        usage_seen = terminal_usage is not None
+        usage_seen = True
 
     def start_message() -> None:
         nonlocal message_started
