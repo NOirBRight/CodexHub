@@ -50,6 +50,7 @@ def _contract(
     protocol: str = "responses",
     model: str = "synthetic-model",
     token_field: str = "max_output_tokens",
+    reasoning_effort: str | None = "max",
     endpoint: str = ORIGIN,
     credential_origin: str = ORIGIN,
     deadline_seconds: int = 1800,
@@ -78,7 +79,7 @@ def _contract(
                 "protocol": protocol,
                 "provider": "synthetic-provider",
                 "model": model,
-                "reasoning_effort": "max",
+                "reasoning_effort": reasoning_effort,
                 "token_field": token_field,
                 "endpoint": endpoint,
                 "routes": {
@@ -183,8 +184,62 @@ def test_each_protocol_uses_its_declared_output_field(tmp_path: Path) -> None:
             "responses": "/v1/responses",
             "chat_completions": "/v1/chat/completions",
         }[protocol]
-        reasoning = {"thinking": {"effort": "max"}} if protocol == "anthropic_messages" else {"reasoning": {"effort": "max"}}
+        reasoning = (
+            {"output_config": {"effort": "max"}, "thinking": {"type": "adaptive", "display": "summary"}}
+            if protocol == "anthropic_messages"
+            else {"reasoning": {"effort": "max"}}
+        )
         inputs.reserve(protocol, "POST", f"{ORIGIN}{route}", _body(**{token_field: 32, **reasoning}))
+
+
+def test_native_reasoning_uses_canonical_output_config_effort(tmp_path: Path) -> None:
+    inputs = _load(_contract(tmp_path, protocol="anthropic_messages", token_field="max_tokens"))
+    canonical = _body(
+        max_tokens=32,
+        output_config={"effort": "max"},
+        thinking={"type": "adaptive", "display": "summary"},
+    )
+    inputs.reserve("anthropic_messages", "POST", f"{ORIGIN}/v1/messages", canonical)
+
+    for body in (
+        _body(max_tokens=32, thinking={"effort": "max"}),
+        _body(max_tokens=32, output_config={"effort": "max"}, thinking={"type": "adaptive", "effort": 1}),
+        _body(max_tokens=32, output_config={"effort": "max"}, thinking={"type": "adaptive", "effort": None}),
+        _body(max_tokens=32, output_config={"format": {"type": "text"}}, thinking={"type": "adaptive"}),
+        _body(max_tokens=32, output_config={"effort": 1}, thinking={"type": "adaptive"}),
+        _body(max_tokens=32, output_config={"effort": None}, thinking={"type": "adaptive"}),
+        _body(max_tokens=32, output_config={"effort": "low"}, thinking={"type": "adaptive"}),
+        _body(
+            max_tokens=32,
+            output_config={"effort": "max"},
+            thinking={"effort": "low"},
+        ),
+    ):
+        with pytest.raises(BudgetRefused, match="reasoning"):
+            inputs.reserve("anthropic_messages", "POST", f"{ORIGIN}/v1/messages", body)
+    assert inputs.admission_summary()["counts"] == {"anthropic_messages": 1}
+
+
+def test_native_unbound_output_config_controls_are_not_rejected(tmp_path: Path) -> None:
+    inputs = _load(
+        _contract(
+            tmp_path,
+            protocol="anthropic_messages",
+            token_field="max_tokens",
+            reasoning_effort=None,
+        )
+    )
+    inputs.reserve(
+        "anthropic_messages",
+        "POST",
+        f"{ORIGIN}/v1/messages",
+        _body(
+            max_tokens=32,
+            output_config={"format": {"type": "text"}},
+            thinking={"type": "adaptive", "display": "summary"},
+        ),
+    )
+    assert inputs.admission_summary()["counts"] == {"anthropic_messages": 1}
 
 
 def test_unknown_or_ambiguous_token_field_fails_closed(tmp_path: Path) -> None:
@@ -210,6 +265,15 @@ def test_count_tokens_auxiliary_body_may_omit_output_limit(tmp_path: Path) -> No
         _body(),
     )
     assert inputs.admission_summary()["counts"] == {"anthropic_messages": 1}
+
+
+def test_native_count_tokens_rejects_legacy_effort_but_allows_omission(tmp_path: Path) -> None:
+    inputs = _load(_contract(tmp_path, protocol="anthropic_messages", token_field="max_tokens"))
+    for effort in ("max", "low", 1, None):
+        body = _body(thinking={"type": "adaptive", "effort": effort})
+        with pytest.raises(BudgetRefused, match="reasoning"):
+            inputs.reserve("anthropic_messages", "POST", f"{ORIGIN}/v1/messages/count_tokens", body)
+    assert inputs.admission_summary()["counts"] == {}
 
 
 def test_remote_plaintext_endpoint_is_rejected(tmp_path: Path) -> None:

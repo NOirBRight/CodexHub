@@ -667,14 +667,18 @@ def _validate_reasoning(leg: _Leg, payload: Mapping[str, Any], *, required: bool
             if not isinstance(value, Mapping) or not isinstance(value.get("effort"), str):
                 raise BudgetRefused("reasoning selection is not explicit")
             values.append(value["effort"])
-    elif leg.protocol == "anthropic_messages" and "thinking" in payload:
-        value = payload["thinking"]
-        if not isinstance(value, Mapping):
-            raise BudgetRefused("reasoning selection is not explicit")
-        if isinstance(value.get("effort"), str):
-            values.append(value["effort"])
-        elif expected is not None:
-            raise BudgetRefused("reasoning selection is not explicit")
+    elif leg.protocol == "anthropic_messages":
+        if "output_config" in payload and expected is not None:
+            output_config = payload["output_config"]
+            if not isinstance(output_config, Mapping) or not isinstance(output_config.get("effort"), str):
+                raise BudgetRefused("reasoning selection is not explicit")
+            values.append(output_config["effort"])
+        if "thinking" in payload:
+            thinking = payload["thinking"]
+            if not isinstance(thinking, Mapping):
+                raise BudgetRefused("reasoning selection is not explicit")
+            if expected is not None and "effort" in thinking:
+                raise BudgetRefused("legacy reasoning selection is unsupported")
     if len(set(values)) > 1:
         raise BudgetRefused("reasoning selection is ambiguous")
     if expected is not None and required and not values:

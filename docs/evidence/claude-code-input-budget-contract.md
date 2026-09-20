@@ -63,8 +63,12 @@ chooses one field in its input contract; the other field, both fields, or an
 unknown token-limit field is refused. The count-token auxiliary route may omit
 an output-limit field, but unknown token-limit fields still refuse. The body
 model must equal the leg's fixed model. Reasoning selections, when present,
-must use the configured selection (`max` for the approved Responses leg), and
-an ordinary request must carry that exact selection; missing selection refuses.
+must use the configured selection (`max` for approved fixed-effort legs), and an
+ordinary request must carry that exact selection; missing selection refuses. For
+native Anthropic Messages, the canonical field is `output_config.effort`;
+`thinking.type`/`display` are preserved and `thinking.effort` alone does not
+satisfy the binding. Legs without a fixed effort leave unrelated
+`output_config` controls (such as `format`) untouched and allowed.
 The auxiliary count-token route may omit it. Selection is never injected,
 normalized, or silently changed. Once an expired grant is observed, it remains
 terminal even if the wall clock moves backward.
