@@ -52,7 +52,7 @@ Do not reset ACLs, reinstall the AppX package, or delete `.codex` as a first-lin
 ## Client integration
 
 **Provider Injection**:
-The integration mode where the Gateway joins a client configuration as one additional provider entry among the user's own, preserving every user-owned provider and setting. The standard mode for all managed clients from 0.1.9 (ADR-0004).
+The integration mode where the Gateway joins a client configuration as one additional provider entry among the user's own, preserving every user-owned provider and setting. The standard mode for provider-map clients from 0.1.9 (ADR-0004); Claude Code has an explicit current-user Activation exception (ADR-0013).
 _Avoid_: incremental access, partial takeover
 
 **Managed Takeover**:
@@ -60,7 +60,7 @@ The legacy integration mode where CodexHub rewrote a client configuration so the
 _Avoid_: full management, ownership mode
 
 **Injected Block**:
-The exact set of entries CodexHub owns inside a client configuration under Provider Injection: DSH's one `codexhub` provider entry, or the Client Provider Groups in a client that has a provider map, plus one credential reference. Detach removes precisely this; readback validates only this.
+The exact set of entries CodexHub owns inside a client configuration under Provider Injection: DSH's one `codexhub` provider entry, or the Client Provider Groups in a client that has a provider map, plus one credential reference. For Claude Code, it is the managed route, credential, and model-setting key set rather than a provider entry. Detach removes or restores precisely this; readback validates only this.
 _Avoid_: owned fields, managed section
 
 **Client Provider Group**:
@@ -76,5 +76,11 @@ The per-provider-ID session history partitioning in Codex CLI: sessions belong t
 _Avoid_: session loss, conversation reset
 
 **Activation**:
-Pointing a client's global default model selection at the Injected Block. Always the user's own action, never a side effect of Apply.
+Pointing a client's default route or model selection at the Injected Block. User-owned; ordinary Apply does not imply Activation. Claude Code's explicitly confirmed Connect includes current-user Activation, unlike ordinary Provider Injection (ADR-0013).
 _Avoid_: enabling, switching on
+
+**Claude Model Mapping**:
+A user-selected association from a Claude Code fixed model name or role alias to one Gateway-exported model. Separate from the complete Client Projection and from explicit model selection; it does not define a second model catalog.
+
+**Compatibility Adaptation**:
+A declared transformation between a client's model protocol and an upstream model protocol. Equivalent transformations preserve meaning; best-effort transformations disclose approximations without silently losing essential content, breaking Call identity, or fabricating success.

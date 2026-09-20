@@ -1,7 +1,11 @@
 # ADR-0001: Use an AnthropicMessage representation before any Messages route
 
 Date: 2026-07-12
-Status: Accepted for a future implementation seam; no production route is authorized
+Status: Accepted for a future implementation seam; no production route is authorized.
+Compatibility policy amended by [ADR-0013](0013-claude-code-gateway-client.md):
+declared best-effort adaptation replaces blanket rejection of non-equivalent
+options; the representation and evidence gates remain. The evidence below is
+historical and does not establish three-protocol production readiness.
 
 ## Context
 
