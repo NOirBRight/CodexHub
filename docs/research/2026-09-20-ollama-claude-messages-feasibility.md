@@ -45,9 +45,28 @@ Responses. The chosen Messages path therefore needs an explicit isolated protoco
 binding; do not silently change the user's existing provider or all client routes.
 Endpoint joining must yield `/v1/messages`, never `/v1/v1/messages`.
 
-Recommend **Ollama Cloud / `glm-5.3-flash`** as the candidate to discuss, not as a
-verified working replacement. Keep Responses = Codex / Luna / max and Chat =
+Protocol candidate: **Ollama Cloud / `glm-5.3-flash`**, not a verified working or
+Free-eligible replacement. Keep Responses = Codex / Luna / max and Chat =
 CommandCode / `deepseek/deepseek-v4-flash` as already selected by the user.
+
+## Free-account qualification (user clarified the plan)
+
+The indexed [official pricing page](https://registry.ollama.com/pricing) says Free
+includes starter usage for a subset of starter models, not the full Cloud catalog.
+It does not identify that subset in the retrieved material. Buying credits unlocks
+all models; do not buy credits or upgrade the account as part of this investigation.
+The [official pricing announcement](https://ollama.com/blog/transparent-pricing)
+dated2026-08-31 confirms this distinction; older broad free-cloud recommendations
+are not evidence of present Free entitlement.
+
+Consequently no exact model can honestly be labelled **Free-account verified**
+from this research. A Cloud model-list entry, token price, or Messages example
+proves neither account access nor remaining starter allowance. `glm-5.3-flash`
+has the strongest protocol-specific example found, but its Free entitlement is
+unknown. No account-authenticated eligibility or inference probe was executed.
+The pricing full-page fetch was also blocked by non-public-address resolution;
+no alternate fetch was attempted. An account-scoped check is needed before the
+campaign selects a Free-only model, and remains separate from protocol support.
 
 `docs/agents/real-client-e2e.md:16` currently prohibits Ollama in the existing live
 release gate. Research permission does not waive that rule. Obtain explicit
