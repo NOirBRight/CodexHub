@@ -1687,7 +1687,7 @@ def _chat_completion_message_output(
                 "Cannot translate non-text Chat Completions response content to Responses without losing it.",
             )
     text = content if isinstance(content, str) else chat_content_text(content)
-    if not text:
+    if not text and content != "":
         return None
     return {
         "id": f"msg_{index}",
