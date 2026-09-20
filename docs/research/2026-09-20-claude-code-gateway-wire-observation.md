@@ -126,6 +126,13 @@ with a synthetic `tool_use`; the CLI executes the tool and turn 2 carries
 - The CLI prints a client-side notice when the gateway does not implement the
   auto-mode classifier billing contract; it does not break inference.
 
+A separate sanitized replay against the same pinned CLI `2.1.278` supplied
+`message_start.message.usage: {}` and later
+`message_delta.usage: {input_tokens: 123, output_tokens: 9}`. The CLI exited 0
+and propagated those late values to its JSON result and model-usage summary.
+This is loopback client-propagation evidence only: the counts are synthetic,
+there was no model/upstream request, and it does not prove stream timing.
+
 ## 4. External documentation claims (independent verification pending)
 
 Source-access qualification: the implementer reported retrieving `.md` pages
@@ -185,13 +192,17 @@ ADR-0014 seam as an isolated prototype (no production import, no route):
 - `output_config.effort` is *mapped* (`reasoning_effort`) so it reaches
   Responses as `reasoning.effort` instead of being dropped on the Chat leg;
 - credential/header and prompt-bearing representations keep values out of
-  `repr`, so diagnostics cannot leak them.
+  `repr`, so diagnostics cannot leak them;
+- converted Responses/Chat JSON and finite SSE fixtures now adapt through a
+  reusable response seam; the prototype buffers fixtures and therefore does
+  not establish a production incremental relay or cancellation gate;
+- native Anthropic responses remain byte-exact and never take a Chat detour.
 
 ## 6. Compatibility classification so far
 
 | Capability | Status | Evidence |
 | --- | --- | --- |
-| Text request/response, SSE incremental | preserved on native path; converted shape tested | observed loopback text stream |
+| Text request/response, SSE incremental | native path observed; converted buffered fixture shape tested | observed loopback text stream; incremental relay remains open |
 | Multi-turn history + tool call/result identity | preserved | observed two-turn loopback with matching id fingerprint |
 | Discovery `/v1/models` | request/response/cache shape observed; picker behavior not driven | this note §3 |
 | `cache_control` on system/tools | native preserved; converted = declared adaptation | prototype tests |
@@ -204,10 +215,11 @@ ADR-0014 seam as an isolated prototype (no production import, no route):
 
 ```bash
 ./scripts/codexhub-python.sh scripts/claude_messages_loopback_harness.py self-check --out /tmp/t74-selfcheck
+./scripts/codexhub-python.sh scripts/claude_messages_loopback_harness.py upstream-self-check --scenario text --out /tmp/t74-upstream-selfcheck
 ./scripts/codexhub-python.sh scripts/claude_messages_loopback_harness.py run \
   --out /tmp/t74-run --claude-bin "$(command -v claude)" \
   --scenario tool --enable-discovery --max-output-tokens 32768 --timeout 120
-./scripts/codexhub-python.sh -m pytest tests/test_anthropic_messages_prototype.py -q
+./scripts/codexhub-python.sh -m pytest tests/test_anthropic_messages_prototype.py tests/test_anthropic_messages_exchange.py tests/test_claude_messages_upstream_fixtures.py -q
 ```
 
 `run` refuses `--allow-network`: this harness implements loopback only. Later

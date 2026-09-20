@@ -45,7 +45,13 @@ require_python_313(__file__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src-python"))
 
-from anthropic_messages_prototype import parse_request  # noqa: E402
+from anthropic_messages_prototype import (  # noqa: E402
+    AdaptedResponse,
+    NotForwardable,
+    execute_exchange,
+    parse_request,
+)
+from claude_messages_upstream_fixtures import UpstreamFixtureServer  # noqa: E402
 
 DEFAULT_MAX_REQUESTS = 6
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
@@ -588,10 +594,85 @@ def command_self_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_upstream_self_check(args: argparse.Namespace) -> int:
+    """Exercise all three upstream wire formats on a loopback fixture."""
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    admission = Admission(max_requests=20, max_output_tokens=2048)
+    attempts: list[dict[str, Any]] = []
+    fixture = UpstreamFixtureServer(("127.0.0.1", 0), scenario=args.scenario)
+    thread = threading.Thread(target=fixture.serve_forever, daemon=True)
+    thread.start()
+    paths = {
+        "responses": "/v1/responses",
+        "chat_completions": "/v1/chat/completions",
+        "anthropic_messages": "/v1/messages",
+    }
+    results: list[dict[str, Any]] = []
+
+    def admit(protocol: str, method: str, final_url: str, body: bytes) -> None:
+        admission.admit(protocol, body)
+        attempts.append({"protocol": protocol, "method": method, "url": final_url, "body_bytes": len(body)})
+
+    try:
+        for protocol, path in paths.items():
+            for stream in (False, True):
+                url = f"http://127.0.0.1:{fixture.server_port}{path}"
+                request = json.dumps(
+                    {
+                        "model": "claude-synthetic-1",
+                        "max_tokens": 128,
+                        "stream": stream,
+                        "messages": [{"role": "user", "content": "synthetic"}],
+                    },
+                    separators=(",", ":"),
+                ).encode()
+                try:
+                    response = execute_exchange(
+                        request,
+                        upstream_format=protocol,
+                        url=url,
+                        admit=admit,
+                    )
+                except Exception as exc:  # noqa: BLE001 - self-check reports a bounded failure
+                    results.append({"protocol": protocol, "stream": stream, "ok": False, "error": type(exc).__name__})
+                    continue
+                ok = isinstance(response, AdaptedResponse)
+                if isinstance(response, NotForwardable):
+                    results.append({"protocol": protocol, "stream": stream, "ok": False, "error": response.reason})
+                else:
+                    results.append({
+                        "protocol": protocol,
+                        "stream": stream,
+                        "ok": ok and bool(response.body),
+                        "status": response.status,
+                        "content_type": response.content_type.split(";", 1)[0],
+                        "body_bytes": len(response.body),
+                        "adaptations": len(response.adaptations),
+                    })
+    finally:
+        fixture.shutdown()
+        thread.join(timeout=2)
+    summary = {
+        "self_check": "pass" if all(item.get("ok") for item in results) else "fail",
+        "scenario": args.scenario,
+        "streaming_gate": "buffered_fixture_conversion_only",
+        "cancellation_gate": "synthetic_terminal_checks_only",
+        "attempts": attempts,
+        "admission_counts": admission.counts,
+        "fixture_records": fixture.records,
+        "results": results,
+    }
+    (out / "upstream-observation.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps({key: summary[key] for key in ("self_check", "scenario", "streaming_gate", "cancellation_gate", "admission_counts", "results")}, indent=2))
+    return 0 if summary["self_check"] == "pass" else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("serve", "run", "self-check"):
+    for name in ("serve", "run", "self-check", "upstream-self-check"):
         child = sub.add_parser(name)
         child.add_argument("--out", default="/tmp/codexhub-t74-loopback")
         child.add_argument("--port", type=int, default=0)
@@ -620,6 +701,8 @@ def main(argv: list[str] | None = None) -> int:
         return command_serve(args)
     if args.command == "run":
         return command_run(args)
+    if args.command == "upstream-self-check":
+        return command_upstream_self_check(args)
     return command_self_check(args)
 
 
