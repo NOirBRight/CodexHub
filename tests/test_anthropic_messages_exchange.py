@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Mapping
 
 import pytest
 
@@ -16,7 +17,9 @@ from anthropic_messages_prototype import (
     adapt_upstream_stream,
     execute_exchange,
     prepare_upstream_request,
+    relay_incremental_exchange,
 )
+from gateway_sse import DownstreamStreamCommit
 
 
 def _sse(event: str | None, payload: Any) -> bytes:
@@ -45,6 +48,78 @@ def _request(*, stream: bool = False) -> bytes:
         },
         separators=(",", ":"),
     ).encode()
+
+
+class _StalledStreamHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("content-length", "0"))
+        self.rfile.read(length)
+        self.server.started.set()  # type: ignore[attr-defined]
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("connection", "keep-alive")
+        self.end_headers()
+        self.wfile.flush()
+        self.connection.settimeout(0.05)
+        while not self.server.release.is_set() and not self.server.client_closed.is_set():  # type: ignore[attr-defined]
+            try:
+                if not self.connection.recv(1):
+                    self.server.client_closed.set()  # type: ignore[attr-defined]
+            except socket.timeout:
+                continue
+            except OSError:
+                self.server.client_closed.set()  # type: ignore[attr-defined]
+
+    def log_message(self, *_args: Any) -> None:
+        pass
+
+
+class _StalledStreamServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _StalledStreamHandler)
+        self.started = threading.Event()
+        self.client_closed = threading.Event()
+        self.release = threading.Event()
+
+
+class _RecordingSink:
+    def __init__(self) -> None:
+        self.chunks: list[bytes] = []
+        self.text_delta = threading.Event()
+
+    def write(self, data: bytes) -> None:
+        self.chunks.append(data)
+        if b'"text_delta"' in data and b'"hello"' in data:
+            self.text_delta.set()
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class _Reservation:
+    def __init__(self, deadline_remaining: float) -> None:
+        self.deadline_remaining = deadline_remaining
+
+
+def _native_commit(sink: _RecordingSink | None = None) -> DownstreamStreamCommit:
+    commit = DownstreamStreamCommit(
+        sink or _RecordingSink(),
+        None,
+        "fixture",
+        inbound_format="anthropic_messages",
+        upstream_format="anthropic_messages",
+        terminal_observer=lambda event_name, _data, payload: event_name in {"message_stop", "error"}
+        or (isinstance(payload, Mapping) and payload.get("type") in {"message_stop", "error"}),
+    )
+    commit.set_ensure_headers_committed_callback(lambda: True)
+    return commit
 
 
 def _responses_text() -> bytes:
@@ -667,3 +742,291 @@ def test_execute_exchange_does_not_follow_loopback_redirect() -> None:
     assert requests == ["/first"]
     assert result.status == 302
     assert json.loads(result.body)["type"] == "error"
+
+
+def test_native_incremental_emits_text_delta_before_terminal_release() -> None:
+    prefix = b"".join(
+        _sse(name, payload)
+        for name, payload in (
+            ("message_start", {"type": "message_start", "message": {"id": "msg", "model": "fixture", "usage": {}}}),
+            ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hello"}}),
+        )
+    )
+    terminal = b"".join(
+        _sse(name, payload)
+        for name, payload in (
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}}),
+            ("message_stop", {"type": "message_stop"}),
+        )
+    )
+
+    class Response:
+        status = 200
+        code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self) -> None:
+            self._prefix = iter(prefix.splitlines(keepends=True))
+            self._terminal = iter(terminal.splitlines(keepends=True))
+            self.release = threading.Event()
+            self.blocked = threading.Event()
+            self.closed = threading.Event()
+
+        def readline(self) -> bytes:
+            try:
+                return next(self._prefix)
+            except StopIteration:
+                self.blocked.set()
+                while not self.release.wait(0.01):
+                    if self.closed.is_set():
+                        return b""
+                try:
+                    return next(self._terminal)
+                except StopIteration:
+                    return b""
+
+        def close(self) -> None:
+            self.closed.set()
+            self.release.set()
+
+    response = Response()
+    sink = _RecordingSink()
+    commit = _native_commit(sink)
+    result: list[Any] = []
+
+    def run() -> None:
+        try:
+            result.append(
+                relay_incremental_exchange(
+                    _request(stream=True),
+                    upstream_format="anthropic_messages",
+                    url="http://fixture.invalid/v1/messages",
+                    admit=lambda _protocol, _method, _url, _body: _Reservation(5.0),
+                    commit=commit,
+                    open_response=lambda _request, _timeout: response,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - failure detail
+            result.append(exc)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        assert sink.text_delta.wait(1), (sink.chunks, result)
+        assert b'"text_delta"' in b"".join(sink.chunks)
+        assert response.blocked.is_set()
+    finally:
+        response.release.set()
+        worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert result == [200]
+    assert commit.terminal_committed
+
+
+def test_native_incremental_cancellation_closes_blocked_response() -> None:
+    server = _StalledStreamServer()
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    sink = _RecordingSink()
+    cancelled = threading.Event()
+    commit = _native_commit(sink)
+    result: list[Any] = []
+
+    def run() -> None:
+        try:
+            result.append(
+                relay_incremental_exchange(
+                    _request(stream=True),
+                    upstream_format="anthropic_messages",
+                    url=f"http://127.0.0.1:{server.server_port}/v1/messages",
+                    admit=lambda _protocol, _method, _url, _body: _Reservation(5.0),
+                    commit=commit,
+                    cancelled=cancelled.is_set,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - failure detail
+            result.append(exc)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        assert server.started.wait(1)
+        cancelled.set()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert server.client_closed.wait(1)
+        assert result == [499]
+        assert b"message_stop" not in b"".join(sink.chunks)
+        assert not commit.terminal_committed
+    finally:
+        cancelled.set()
+        server.release.set()
+        worker.join(timeout=2)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+
+def test_native_incremental_hard_deadline_closes_stalled_read() -> None:
+    server = _StalledStreamServer()
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    sink = _RecordingSink()
+    commit = _native_commit(sink)
+    clock_values = iter((100.0, 100.0, 100.0, 100.6))
+    result: list[Any] = []
+
+    def run() -> None:
+        try:
+            result.append(
+                relay_incremental_exchange(
+                    _request(stream=True),
+                    upstream_format="anthropic_messages",
+                    url=f"http://127.0.0.1:{server.server_port}/v1/messages",
+                    admit=lambda _protocol, _method, _url, _body: _Reservation(0.5),
+                    commit=commit,
+                    monotonic=lambda: next(clock_values, 100.6),
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - failure detail
+            result.append(exc)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        assert server.started.wait(1)
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert server.client_closed.wait(1)
+        assert result == [504]
+        assert b"message_stop" not in b"".join(sink.chunks)
+        assert not commit.terminal_committed
+    finally:
+        server.release.set()
+        worker.join(timeout=2)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+
+def test_native_incremental_source_error_is_not_success_message_stop() -> None:
+    error_body = _sse("error", {"type": "error", "error": {"type": "api_error", "message": "synthetic"}})
+
+    class Response:
+        status = 200
+        code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self) -> None:
+            self.lines = iter(error_body.splitlines(keepends=True))
+
+        def readline(self) -> bytes:
+            return next(self.lines, b"")
+
+        def close(self) -> None:
+            return None
+
+    sink = _RecordingSink()
+    commit = _native_commit(sink)
+    result = relay_incremental_exchange(
+        _request(stream=True),
+        upstream_format="anthropic_messages",
+        url="http://fixture.invalid/v1/messages",
+        admit=lambda *_args: _Reservation(5.0),
+        commit=commit,
+        open_response=lambda _request, _timeout: Response(),
+    )
+    body = b"".join(sink.chunks)
+    assert result == 502
+    assert b"event: error" in body
+    assert b"message_stop" not in body
+    assert commit.terminal_committed
+
+
+def test_native_incremental_rejects_converted_format_before_admission() -> None:
+    admissions: list[tuple[Any, ...]] = []
+    opens: list[Any] = []
+    commit = DownstreamStreamCommit(_RecordingSink(), None, "fixture")
+    result = relay_incremental_exchange(
+        _request(stream=True),
+        upstream_format="responses",
+        url="http://fixture.invalid/v1/responses",
+        admit=lambda *args: admissions.append(args),
+        commit=commit,
+        open_response=lambda *args: opens.append(args),
+    )
+    assert isinstance(result, NotForwardable)
+    assert result.reason == "unsupported_upstream_format"
+    assert not admissions
+    assert not opens
+
+
+def test_native_incremental_rejects_nonstream_and_missing_deadline_before_open() -> None:
+    commit = DownstreamStreamCommit(_RecordingSink(), None, "fixture")
+    admissions: list[tuple[Any, ...]] = []
+    opens: list[Any] = []
+    nonstream = relay_incremental_exchange(
+        _request(),
+        upstream_format="anthropic_messages",
+        url="http://fixture.invalid/v1/messages",
+        admit=lambda *args: admissions.append(args),
+        commit=commit,
+        open_response=lambda *args: opens.append(args),
+    )
+    assert isinstance(nonstream, NotForwardable)
+    assert nonstream.reason == "incremental_requires_stream"
+    assert not admissions
+    assert not opens
+
+    for deadline in (None, float("nan"), float("inf"), -1.0):
+        streamed = relay_incremental_exchange(
+            _request(stream=True),
+            upstream_format="anthropic_messages",
+            url="http://fixture.invalid/v1/messages",
+            admit=lambda *_args, deadline=deadline: (
+                None
+                if deadline is None
+                else _Reservation(deadline)
+            ),
+            commit=DownstreamStreamCommit(_RecordingSink(), None, "fixture"),
+            open_response=lambda *args: opens.append(args),
+        )
+        assert isinstance(streamed, NotForwardable)
+        assert streamed.reason == "invalid_admission_reservation"
+    assert not opens
+
+
+def test_native_incremental_response_limit_closes_without_success() -> None:
+    class Response:
+        status = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self) -> None:
+            self.lines = iter((b"data: " + b"x" * 32 + b"\n", b"\n"))
+            self.closed = False
+
+        def readline(self) -> bytes:
+            return next(self.lines, b"")
+
+        def close(self) -> None:
+            self.closed = True
+
+    response = Response()
+    sink = _RecordingSink()
+    commit = DownstreamStreamCommit(sink, None, "fixture")
+    result = relay_incremental_exchange(
+        _request(stream=True),
+        upstream_format="anthropic_messages",
+        url="http://fixture.invalid/v1/messages",
+        admit=lambda *_args: _Reservation(5.0),
+        commit=commit,
+        max_response_bytes=16,
+        open_response=lambda _request, _timeout: response,
+    )
+    assert result == 502
+    assert response.closed
+    assert not sink.chunks
+    assert not commit.terminal_committed
