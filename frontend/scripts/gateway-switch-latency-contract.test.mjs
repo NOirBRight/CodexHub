@@ -54,7 +54,10 @@ test("gateway client switches refresh without version probes", async () => {
   const gatewaySource = await readFile(gatewayPagePath, "utf8");
 
   assert.match(gatewaySource, /async function switchClientMode/);
-  assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, mode, defaultModel\)/);
+  assert.match(
+    gatewaySource,
+    /api\.switchGatewayClientRoute\(\s*clientId,\s*owner,\s*selectedModel \|\| defaultModel/,
+  );
   assert.match(gatewaySource, /await onRefreshClients\(\);/);
   assert.doesNotMatch(gatewaySource, /await onRefreshClients\(\{ includeClientVersions: true \}\)[\s\S]*setMessage\(`\$\{clientName\} switched/);
 });

@@ -61,6 +61,17 @@ export function GatewayClientCard({
   const [claudeQuery, setClaudeQuery] = useState("");
   const [claudeDefault, setClaudeDefault] = useState(exportedModels[0]?.id ?? "");
   const [claudeConfirmed, setClaudeConfirmed] = useState(false);
+  const [claudeRoles, setClaudeRoles] = useState<Record<string, string>>({
+    haiku: "",
+    sonnet: "",
+    opus: "",
+    fable: "",
+    subagent: "",
+  });
+  const exportedIds = new Set(exportedModels.map((model) => model.id));
+  const claudeMappingInvalid = Object.values(claudeRoles).some(
+    (value) => value && !exportedIds.has(value),
+  );
   const isClaude = client.id === "claude";
   useEffect(() => {
     if (!claudeDefault && exportedModels[0]) {
@@ -181,7 +192,7 @@ export function GatewayClientCard({
             disabled={
               disabled ||
               detailBusy ||
-              (isClaude && !checked && !claudeConfirmed)
+              (isClaude && !checked && (!claudeConfirmed || claudeMappingInvalid))
             }
             onClick={() => requestToggle(!checked)}
           >
@@ -257,6 +268,44 @@ export function GatewayClientCard({
                 )}
               </select>
             </label>
+            {(
+              [
+                ["haiku", "gateway.claudeRoleHaiku"],
+                ["sonnet", "gateway.claudeRoleSonnet"],
+                ["opus", "gateway.claudeRoleOpus"],
+                ["fable", "gateway.claudeRoleFable"],
+                ["subagent", "gateway.claudeRoleSubagent"],
+              ] as const
+            ).map(([role, labelKey]) => {
+              const value = claudeRoles[role] ?? "";
+              const invalid = Boolean(value) && !exportedIds.has(value);
+              return (
+                <label key={role}>
+                  {t(labelKey)}
+                  <select
+                    value={value}
+                    aria-invalid={invalid}
+                    aria-label={t(labelKey)}
+                    onChange={(event) =>
+                      setClaudeRoles((current) => ({
+                        ...current,
+                        [role]: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">{t("gateway.claudeRoleUnmapped")}</option>
+                    {exportedModels.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.label}
+                      </option>
+                    ))}
+                  </select>
+                  {invalid ? (
+                    <small role="status">{t("gateway.claudeRoleInvalid")}</small>
+                  ) : null}
+                </label>
+              );
+            })}
             <label>
               <input
                 type="checkbox"

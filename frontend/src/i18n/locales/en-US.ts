@@ -325,6 +325,13 @@ const enUS = {
     claudeNoModels: "No exported models",
     claudeConfirmConnect:
       "I understand Connect writes the Gateway URL, local Gateway credential, and default model into my Claude Code settings.",
+    claudeRoleHaiku: "Haiku / fast",
+    claudeRoleSonnet: "Sonnet",
+    claudeRoleOpus: "Opus",
+    claudeRoleFable: "Fable",
+    claudeRoleSubagent: "Subagent",
+    claudeRoleUnmapped: "Not mapped",
+    claudeRoleInvalid: "This mapping target is not in the exported catalog.",
     updatingClientConfig: "Updating client configuration…",
     connectClient: "Connecting {{name}}…",
     connectClientDone: "Connected {{name}} — injected block written.",
