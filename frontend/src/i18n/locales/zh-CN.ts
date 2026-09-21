@@ -316,6 +316,14 @@ const zhCN = {
     connectedViaHub: "已连接 · CodexHub",
     injectedProvider: "已注入 provider · {{count}} 个 Gateway 模型",
     installToConnect: "请先安装该客户端再连接",
+    claudeConnectScope:
+      "连接会改写当前用户 Claude Code 的默认路由和默认模型，只影响新启动的会话。",
+    claudeRestartRequired: "应用后请重启 Claude Code。",
+    claudeSearchModels: "搜索已导出模型",
+    claudeDefaultModel: "默认模型",
+    claudeNoModels: "没有已导出模型",
+    claudeConfirmConnect:
+      "我理解连接会把 Gateway 地址、本地 Gateway 凭证和默认模型写入我的 Claude Code 设置。",
     updatingClientConfig: "正在更新客户端配置…",
     connectClient: "正在连接 {{name}}…",
     connectClientDone: "已连接 {{name}} — 注入块已写入。",

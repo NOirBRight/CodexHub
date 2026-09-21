@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { WorkspaceDialog } from "./workspace/WorkspaceDialog";
 import { api, messageFromError } from "../lib/tauri";
 import {
@@ -27,13 +27,19 @@ import { SwitchControl } from "./SettingsDrawer";
 export type { ClientConnectionState };
 export { connectionStateFromInfo };
 
+export interface ExportedGatewayModel {
+  id: string;
+  label: string;
+}
+
 interface GatewayClientCardProps {
   busy?: boolean;
   className?: string;
   client: GatewayClientContract;
   enabledModelCount?: number;
+  exportedModels?: ExportedGatewayModel[];
   info?: GatewayClientInfo;
-  onToggle: (connect: boolean) => void;
+  onToggle: (connect: boolean, model?: string | null) => void;
   onRefresh?: () => Promise<void>;
 }
 
@@ -42,6 +48,7 @@ export function GatewayClientCard({
   className,
   client,
   enabledModelCount,
+  exportedModels = [],
   info,
   onToggle,
   onRefresh,
@@ -51,6 +58,30 @@ export function GatewayClientCard({
   const [preview, setPreview] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
+  const [claudeQuery, setClaudeQuery] = useState("");
+  const [claudeDefault, setClaudeDefault] = useState(exportedModels[0]?.id ?? "");
+  const [claudeConfirmed, setClaudeConfirmed] = useState(false);
+  const isClaude = client.id === "claude";
+  useEffect(() => {
+    if (!claudeDefault && exportedModels[0]) {
+      setClaudeDefault(exportedModels[0].id);
+    }
+  }, [claudeDefault, exportedModels]);
+  const visibleClaudeModels = exportedModels.filter((model) => {
+    const query = claudeQuery.trim().toLowerCase();
+    if (!query) return true;
+    return (
+      model.id.toLowerCase().includes(query) ||
+      model.label.toLowerCase().includes(query)
+    );
+  });
+  function requestToggle(connect: boolean) {
+    if (isClaude && connect && !claudeConfirmed) {
+      setDetailsOpen(true);
+      return;
+    }
+    onToggle(connect, isClaude ? claudeDefault || null : null);
+  }
   async function loadPreview() {
     setDetailBusy(true);
     setDetailError(null);
@@ -127,7 +158,7 @@ export function GatewayClientCard({
                 enabledModelCount={enabledModelCount}
                 installed={installed}
                 state={state}
-                onRepair={() => onToggle(true)}
+                onRepair={() => requestToggle(true)}
               />
             </small>
           </div>
@@ -136,7 +167,7 @@ export function GatewayClientCard({
             checked={checked}
             disabled={disabled}
             tone={state === "drift" ? "warn" : "action"}
-            onChange={onToggle}
+            onChange={requestToggle}
           />
         </div>
       </section>
@@ -147,8 +178,12 @@ export function GatewayClientCard({
         actions={
           <button
             className="ws-primary"
-            disabled={disabled || detailBusy}
-            onClick={() => onToggle(!checked)}
+            disabled={
+              disabled ||
+              detailBusy ||
+              (isClaude && !checked && !claudeConfirmed)
+            }
+            onClick={() => requestToggle(!checked)}
           >
             {label} ·{" "}
             {t(checked ? "workspace.disconnect" : "workspace.connect")}
@@ -192,6 +227,46 @@ export function GatewayClientCard({
             </div>
           ) : null}
         </dl>
+        {isClaude ? (
+          <div className="ws-detail-list" style={{ display: "grid", gap: 8 }}>
+            <p>{t("gateway.claudeConnectScope")}</p>
+            <p>{t("gateway.claudeRestartRequired")}</p>
+            <label>
+              {t("gateway.claudeSearchModels")}
+              <input
+                value={claudeQuery}
+                onChange={(event) => setClaudeQuery(event.target.value)}
+                aria-label={t("gateway.claudeSearchModels")}
+              />
+            </label>
+            <label>
+              {t("gateway.claudeDefaultModel")}
+              <select
+                value={claudeDefault}
+                onChange={(event) => setClaudeDefault(event.target.value)}
+                aria-label={t("gateway.claudeDefaultModel")}
+              >
+                {visibleClaudeModels.length === 0 ? (
+                  <option value="">{t("gateway.claudeNoModels")}</option>
+                ) : (
+                  visibleClaudeModels.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.label}
+                    </option>
+                  ))
+                )}
+              </select>
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={claudeConfirmed}
+                onChange={(event) => setClaudeConfirmed(event.target.checked)}
+              />{" "}
+              {t("gateway.claudeConfirmConnect")}
+            </label>
+          </div>
+        ) : null}
         <div className="ws-actions">
           {onRefresh && (
             <button

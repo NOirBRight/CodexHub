@@ -317,6 +317,14 @@ const enUS = {
     connectedViaHub: "Connected · CodexHub",
     injectedProvider: "Injected provider · {{count}} Gateway models",
     installToConnect: "Install the client to connect",
+    claudeConnectScope:
+      "Connect changes this user's Claude Code default route and default model for newly launched sessions.",
+    claudeRestartRequired: "Restart Claude Code after applying.",
+    claudeSearchModels: "Search exported models",
+    claudeDefaultModel: "Default model",
+    claudeNoModels: "No exported models",
+    claudeConfirmConnect:
+      "I understand Connect writes the Gateway URL, local Gateway credential, and default model into my Claude Code settings.",
     updatingClientConfig: "Updating client configuration…",
     connectClient: "Connecting {{name}}…",
     connectClientDone: "Connected {{name}} — injected block written.",
