@@ -53,6 +53,8 @@ class ClientCase:
             return "responses"
         if self.api in {"openai-completions", "openai-chat-completions", "chat_completions"}:
             return "chat_completions"
+        if self.api in {"anthropic-messages", "anthropic_messages"}:
+            return "anthropic_messages"
         return self.api or "unknown"
 
 
@@ -105,6 +107,18 @@ def parse_runtime_providers_config(path: Path, *, proxy_base_url: str) -> list[C
                     display_name=str(model.get("name") or model_id),
                     api=api,
                     base_url=f"{base}/providers/{provider_id}",
+                    api_key="dummy-codexhub-e2e",
+                    source_path=str(path),
+                )
+            )
+            cases.append(
+                ClientCase(
+                    client="claude-code",
+                    provider_id=provider_id,
+                    model_id=model_id,
+                    display_name=str(model.get("name") or model_id),
+                    api="anthropic-messages",
+                    base_url=base,
                     api_key="dummy-codexhub-e2e",
                     source_path=str(path),
                 )
@@ -288,6 +302,10 @@ def endpoint_for_case(case: ClientCase) -> str:
         if base_url.endswith("/chat/completions"):
             return base_url
         return combine_url(base_url, "chat/completions", append_endpoint=True)
+    if case.endpoint_kind == "anthropic_messages":
+        if base_url.endswith("/messages"):
+            return base_url
+        return combine_url(base_url, "messages", append_endpoint=True)
     return base_url
 
 
@@ -300,6 +318,13 @@ def payload_for_case(case: ClientCase, max_output_tokens: int) -> dict[str, Any]
             "stream": True,
             "store": False,
             "max_output_tokens": max_output_tokens,
+        }
+    if case.endpoint_kind == "anthropic_messages":
+        return {
+            "model": case.selector,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": True,
+            "max_tokens": max_output_tokens,
         }
     return {
         "model": case.model_id,
@@ -319,6 +344,8 @@ def request_headers(case: ClientCase) -> dict[str, str]:
     }
     if case.api_key:
         headers["Authorization"] = f"Bearer {case.api_key}"
+    if case.endpoint_kind == "anthropic_messages":
+        headers["anthropic-version"] = "2023-06-01"
     return headers
 
 
@@ -465,6 +492,19 @@ def parse_stream(response: Any, case: ClientCase, result: CaseResult) -> None:
                     if event_type in {"response.failed", "response.incomplete", "error"}:
                         error_events.append(compact_error(json.dumps(payload, ensure_ascii=False)))
                     break
+            elif case.endpoint_kind == "anthropic_messages":
+                event_type = str(payload.get("type") or pending_event or "")
+                if event_type == "content_block_delta":
+                    delta = payload.get("delta")
+                    text = delta.get("text") if isinstance(delta, dict) else None
+                    if isinstance(text, str):
+                        text_parts.append(text)
+                        output_seen = True
+                if event_type in {"message_stop", "error"}:
+                    terminal_seen = True
+                    if event_type == "error":
+                        error_events.append(compact_error(json.dumps(payload, ensure_ascii=False)))
+                    break
             else:
                 if "error" in payload:
                     error_events.append(compact_error(json.dumps(payload, ensure_ascii=False)))
@@ -546,7 +586,11 @@ def load_cases(args: argparse.Namespace) -> list[ClientCase]:
     include_extra = bool(getattr(args, "include_extra_config_selectors", False))
     has_explicit_selector_filter = bool(getattr(args, "provider", None) or getattr(args, "model", None))
     if runtime_baseline and not include_extra and not has_explicit_selector_filter:
-        cases = [case for case in cases if case.client == "codex-app" or coverage_selector(case) in runtime_baseline]
+        cases = [
+            case
+            for case in cases
+            if case.client in {"codex-app", "claude-code"} or coverage_selector(case) in runtime_baseline
+        ]
     if args.client:
         allowed = set(args.client)
         cases = [case for case in cases if case.client in allowed]
