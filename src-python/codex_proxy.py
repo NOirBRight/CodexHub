@@ -160,12 +160,13 @@ class CodexProxyHandler(GatewayHandlerMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/models":
             catalog = gateway_catalog_runtime.current_catalog_data()
-            if self.headers.get("anthropic-version"):
-                import claude_code_projection
-
-                self._send_json(200, claude_code_projection.claude_model_list(catalog))
-            else:
-                self._send_json(200, gateway_catalog_runtime.openai_model_list(catalog))
+            self._send_json(
+                200,
+                gateway_catalog_runtime.discovery_model_list(
+                    catalog,
+                    anthropic=bool(self.headers.get("anthropic-version")),
+                ),
+            )
             return
         if parsed.path == "/v1/responses":
             if _is_websocket_upgrade(self.headers):

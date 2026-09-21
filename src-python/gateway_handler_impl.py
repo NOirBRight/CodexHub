@@ -198,6 +198,16 @@ def _event_context_with_request_kind(context: Mapping[str, Any], request_kind: s
     return payload
 
 
+def _bind_resolved_route_model(upstream: Mapping[str, Any], model: str | None, inbound_payload: Any) -> str | None:
+    resolved = upstream.get("model_id")
+    if not isinstance(resolved, str) or not resolved.strip():
+        return model
+    model = resolved.strip()
+    if isinstance(inbound_payload, dict):
+        inbound_payload["model"] = model
+    return model
+
+
 def _parse_gateway_request_input(
     handler: Any,
     *,
@@ -583,11 +593,7 @@ class GatewayHandlerMixin:
             model = request_input.model
             route_reason = request_input.route_reason
             upstream = gateway_catalog_runtime.choose_upstream(model) if model else gateway_catalog_runtime.official_upstream()
-            resolved_model = upstream.get("model_id")
-            if isinstance(resolved_model, str) and resolved_model.strip():
-                model = resolved_model.strip()
-                if isinstance(inbound_payload, dict) and inbound_payload.get("model") != model:
-                    inbound_payload["model"] = model
+            model = _bind_resolved_route_model(upstream, model, inbound_payload)
             upstream_name = upstream["name"]
             upstream_format = str(upstream.get("upstream_format", "responses"))
             reports_cached_input_tokens = bool(upstream.get("reports_cached_input_tokens"))

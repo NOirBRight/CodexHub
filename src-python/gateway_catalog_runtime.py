@@ -1020,6 +1020,14 @@ def openai_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
     return {"object": "list", "data": data}
 
 
+def discovery_model_list(catalog: Mapping[str, Any], *, anthropic: bool) -> dict[str, Any]:
+    if anthropic:
+        from claude_code_projection import claude_model_list
+
+        return claude_model_list(catalog)
+    return openai_model_list(catalog)
+
+
 def published_official_context_budgets(
     catalog_path: Path,
 ) -> dict[str, Mapping[str, Any]]:
