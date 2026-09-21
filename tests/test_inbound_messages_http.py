@@ -65,6 +65,19 @@ def test_count_tokens_returns_best_effort_estimate(harness: GatewayHarness) -> N
     assert harness.stub.captures == []
 
 
+def test_count_tokens_requires_gateway_auth(harness: GatewayHarness) -> None:
+    response = request_gateway(
+        harness.host,
+        harness.port,
+        "POST",
+        "/v1/messages/count_tokens",
+        body=_messages_body(),
+        headers={"Content-Type": "application/json", "Connection": "close"},
+        timeout=8.0,
+    )
+    assert response.status == 401
+
+
 def test_estimate_input_tokens_counts_cjk_near_one_per_char() -> None:
     import anthropic_messages
 
