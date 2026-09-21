@@ -1292,9 +1292,24 @@ class GatewayHandlerMixin:
             )
             return
         raw = self.rfile.read(content_length)
+        decoded, _, decode_error = decoded_request_body(
+            raw, self.headers.get("Content-Encoding")
+        )
+        if decode_error:
+            self._send_json_and_close(
+                400,
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "request body encoding is invalid",
+                    },
+                },
+            )
+            return
         try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
+            payload = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError):
             self._send_json_and_close(
                 400,
                 {
