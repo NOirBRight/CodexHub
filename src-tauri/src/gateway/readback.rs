@@ -1,3 +1,4 @@
+use super::clients::claude::claude_settings_text;
 use super::clients::grok::{grok_config_text, grok_injected_blocks_match};
 use super::clients::omp::{omp_config_text, omp_models_yml_text};
 use super::clients::opencode::opencode_config_text;
@@ -191,6 +192,17 @@ pub fn verify_apply_readback(
             if !grok_injected_blocks_match(&written, &expected)? {
                 return Err(
                     "readback failed: grok injected block does not match production preview"
+                        .to_string(),
+                );
+            }
+        }
+        "claude" => {
+            let written = fs::read_to_string(&target_paths[0])
+                .map_err(|error| format!("readback failed: {error}"))?;
+            let expected = claude_settings_text(Some(&written), settings, providers, model)?;
+            if written != expected {
+                return Err(
+                    "readback failed: claude managed keys do not match production preview"
                         .to_string(),
                 );
             }

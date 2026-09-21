@@ -33,6 +33,11 @@
       "id": "grok",
       "name": "Grok CLI",
       "config_path": "~/.grok/config.toml"
+    },
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "config_path": "~/.claude/settings.json"
     }
   ]
 }

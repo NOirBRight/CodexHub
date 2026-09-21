@@ -411,10 +411,11 @@ theme = "dark"
     }
 
     #[test]
-    fn managed_client_ids_cover_all_six_supported_clients() {
+    fn managed_client_ids_cover_all_supported_clients() {
         assert_eq!(
             managed_client_ids_sorted(),
             vec![
+                "claude".to_string(),
                 "codex".to_string(),
                 "grok".to_string(),
                 "omp".to_string(),

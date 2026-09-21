@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 // ----- Isolated managed-client configuration seam -----
 //
-// Headless, caller-supplied-root preview/apply/readback for the six managed
-// clients (codex, opencode, zcode, pi, omp, grok). The five native clients reuse the
+// Headless, caller-supplied-root preview/apply/readback for the managed
+// clients (codex, opencode, zcode, pi, omp, grok, claude). Native clients reuse the
 // existing Rust serializers/apply functions above without duplicating them.
 // Codex is owned by `config.rs` and the Python overlay serializer; this module
 // only builds an isolated `ConfigPaths` and delegates to it.
@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 //   relative target names, apply/readback status, and approved hashes only.
 
 pub(in crate::gateway) const ISOLATED_CLIENTS: &[&str] =
-    &["codex", "opencode", "zcode", "pi", "omp", "grok"];
+    &["codex", "opencode", "zcode", "pi", "omp", "grok", "claude"];
 
 #[derive(Debug, Clone)]
 pub struct IsolatedClientRoot {

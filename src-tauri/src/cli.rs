@@ -219,9 +219,11 @@ fn run_managed_client_config(args: &[String]) -> i32 {
     }
     let result = match request.client.as_str() {
         "codex" => run_codex_managed_client_config(&request),
-        "opencode" | "zcode" | "pi" | "omp" | "grok" => run_native_managed_client_config(&request),
+        "opencode" | "zcode" | "pi" | "omp" | "grok" | "claude" => {
+            run_native_managed_client_config(&request)
+        }
         _ => Err(format!(
-            "unknown managed client: {}; expected codex, opencode, zcode, pi, omp, or grok",
+            "unknown managed client: {}; expected codex, opencode, zcode, pi, omp, grok, or claude",
             request.client
         )),
     };
@@ -499,7 +501,7 @@ fn run_codex_managed_client_config(
 fn print_managed_client_config_usage() {
     eprintln!(
         "usage: codexhub managed-client-config <preview|apply|readback> \
-         --client <codex|opencode|zcode|pi|omp|grok> --root <fresh-isolated-root> \
+         --client <codex|opencode|zcode|pi|omp|grok|claude> --root <fresh-isolated-root> \
          [--model <id>] [--settings-path <path>] [--providers-path <path>] \
          [--catalog-path <path>] [--python-path <path>] [--backup-subdir <name>]"
     );
@@ -1084,7 +1086,7 @@ gateway_exported = true
         fn table_driven_managed_client_config_preview_accepts_all_clients() {
             let root = temp_root("mcc-table-preview");
             let (settings_path, providers_path) = write_settings_and_providers(&root);
-            for client_id in ["codex", "opencode", "zcode", "pi", "omp", "grok"] {
+            for client_id in ["codex", "opencode", "zcode", "pi", "omp", "grok", "claude"] {
                 let isolated = root.join(format!("isolated-{client_id}"));
                 let args = vec![
                     "managed-client-config".to_string(),
@@ -1114,7 +1116,7 @@ gateway_exported = true
             let (settings_path, providers_path) = write_settings_and_providers(&root);
             let catalog_path = write_candidate_official_catalog(&root);
 
-            for client_id in ["codex", "opencode", "zcode", "pi", "omp", "grok"] {
+            for client_id in ["codex", "opencode", "zcode", "pi", "omp", "grok", "claude"] {
                 let preview_root = root.join(format!("{client_id}-preview"));
                 let apply_root = root.join(format!("{client_id}-apply"));
                 for (verb, isolated) in [

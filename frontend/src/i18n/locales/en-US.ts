@@ -303,6 +303,7 @@ const enUS = {
       pi: "Compact CLI",
       omp: "Prompt runtime",
       grok: "Terminal client",
+      claude: "Terminal client",
     },
     grokAllowedModelsMayHide:
       "Injected picker keys may be hidden by allowed_models.",
