@@ -26,9 +26,12 @@ Official Codex `gpt-5.6-luna` (Responses), CommandCode
 | Discovery `/v1/models` | adapted | CLI 2.1.278 cached 2 `claude*` ids; non-matching ids dropped before cache |
 | Role mappings | adapted | Env keys written on Connect; empty mapping allowed |
 | `count_tokens` | unsupported | Explicit Anthropic 400 |
-| Images / caching / compaction / thinking | unknown or fail-closed | Not live-proven |
-| Subagents | fail-closed | CLI spawned Explore; child `haiku` is `unsupported_model` (no substitution). `tool_result.is_error` now converts. |
-| MCP | unknown | Isolated CLI `mcp_servers=[]`; no MCP server was attached |
+| Images | adapted | Valid 1×1 PNG live HTTP `end_turn`/`ok` on Luna, CommandCode, DeepSeek |
+| Prompt cache | adapted | `cache_control.ephemeral` live HTTP 200 on all three (CommandCode empty `max_tokens`) |
+| Compaction | unknown | Claude Code client-side; no Messages compact API. Not forced live. |
+| Thinking | unknown or fail-closed | DeepSeek thinking+tool_choice 400; otherwise not separately proven |
+| Subagents | adapted | Connect env maps haiku/sonnet/opus/fable. Isolated live with `ANTHROPIC_DEFAULT_HAIKU_MODEL`→Luna: Explore `spawned=1` `completed=1` `result=> ok`. Gateway still rejects unknown child ids. |
+| MCP | adapted | Chrome DevTools MCP (local binary, headless slim) connected; CLI 3-turn `result=ok` |
 | Error handling | adapted | Isolated CLI error scenario: `is_error`, HTTP 400 surfaced, no egress |
 | Cancellation | adapted | Linux DeepSeek and Windows Luna HTTP abort: `downstream_stream_closed` 499, `request_complete` 499 |
 
@@ -38,4 +41,4 @@ Live (campaign Gateway, isolated `CODEX_HOME`, no keys in git):
 - Chat/`commandcode/deepseek/deepseek-v4.1-flash`: Linux + Windows CLI `-p` `result=ok`.
 - Native Anthropic via DeepSeek `deepseek-flash`: Linux + Windows CLI `-p` `is_error=false` (Windows result `好的`).
 
-Live tool round-trip HTTP (Linux+Windows): all three identities `tool_use` then `tool_result` then `end_turn` using the tool output. DeepSeek required `thinking.type=disabled`. MCP not attached. No keys in git.
+Live tool round-trip HTTP (Linux+Windows): all three identities `tool_use` then `tool_result` then `end_turn`. Subagent mapping is CLI env, not Gateway substituting `haiku`. Chrome DevTools MCP live `result=ok`. Compaction not forced. No keys in git.
