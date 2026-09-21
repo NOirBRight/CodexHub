@@ -324,6 +324,13 @@ const zhCN = {
     claudeNoModels: "没有已导出模型",
     claudeConfirmConnect:
       "我理解连接会把 Gateway 地址、本地 Gateway 凭证和默认模型写入我的 Claude Code 设置。",
+    claudeRoleHaiku: "Haiku / 快速",
+    claudeRoleSonnet: "Sonnet",
+    claudeRoleOpus: "Opus",
+    claudeRoleFable: "Fable",
+    claudeRoleSubagent: "子代理",
+    claudeRoleUnmapped: "不映射",
+    claudeRoleInvalid: "该映射目标不在已导出目录中。",
     updatingClientConfig: "正在更新客户端配置…",
     connectClient: "正在连接 {{name}}…",
     connectClientDone: "已连接 {{name}} — 注入块已写入。",
