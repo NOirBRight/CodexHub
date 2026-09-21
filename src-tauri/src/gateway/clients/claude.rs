@@ -463,4 +463,39 @@ mod tests {
         );
         set_pending_role_mappings(BTreeMap::new());
     }
+
+    #[test]
+    fn restore_without_baseline_removes_only_managed_keys() {
+        let dir = std::env::temp_dir().join(format!(
+            "codexhub-claude-restore-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        set_pending_role_mappings(BTreeMap::from([(
+            "haiku".to_string(),
+            "gpt-5.5".to_string(),
+        )]));
+        let next = claude_settings_text(
+            Some(r#"{"env":{"EDITOR":"vim"},"theme":"dark"}"#),
+            &settings(),
+            &[],
+            "gpt-5.5",
+        )
+        .unwrap();
+        fs::write(&path, next).unwrap();
+        restore_claude_config_with_backup_roots(&path, &[]).unwrap();
+        let restored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            restored
+                .pointer("/env/EDITOR")
+                .and_then(Value::as_str),
+            Some("vim")
+        );
+        assert_eq!(restored.get("theme").and_then(Value::as_str), Some("dark"));
+        assert!(restored.pointer("/env/ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(restored.pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none());
+        set_pending_role_mappings(BTreeMap::new());
+        let _ = fs::remove_dir_all(dir);
+    }
 }
