@@ -264,6 +264,38 @@ def test_execute_exchange_same_protocol_preserves_body_identity() -> None:
     assert "relay" in trace
 
 
+def test_anthropic_to_chat_converts_before_compat_injection(monkeypatch) -> None:
+    seen: list[dict] = []
+
+    def fake_compat(body, *args, **kwargs):
+        payload = json.loads(body)
+        payload["tools"] = [{"type": "function", "function": {"name": "injected"}}]
+        seen.append(payload)
+        return json.dumps(payload).encode()
+
+    monkeypatch.setattr("gateway_compat.compatible_request_body", fake_compat)
+    body = json.dumps(
+        {
+            "model": "model",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+    ).encode()
+    trace: list[str] = []
+    attempt = _Attempt(
+        inbound=RouteProtocol.ANTHROPIC_MESSAGES,
+        outbound=RouteProtocol.CHAT_COMPLETIONS,
+        policy=MutationPolicy.GATEWAY_COMPATIBILITY,
+        trace=trace,
+    )
+    result, _seen = _run(body, attempt, trace)
+    assert result.status == 200
+    prepared = json.loads(attempt.prepared_bodies[0])
+    assert "tools" not in prepared
+    assert prepared["max_tokens"] == 8
+    assert seen and seen[0].get("tools")
+
+
 def test_execute_exchange_prepares_one_hop_attempt() -> None:
     body = json.dumps({
         "model": "model",

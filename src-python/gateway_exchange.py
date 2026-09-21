@@ -537,8 +537,15 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
     prepared_exchange: PreparedExchange | None = None
     pre_compatibility_applied = False
     caller_is_chat = request.inbound.inbound_format == "chat_completions"
+    caller_is_anthropic = request.inbound.inbound_format == "anthropic_messages"
     attempt_is_responses = attempt.selected_upstream_format == "responses"
-    if policy in (MutationPolicy.TRANSPARENT, MutationPolicy.GATEWAY_COMPATIBILITY) and caller_is_chat and attempt_is_responses:
+    convert_before_compat = (
+        caller_is_chat and attempt_is_responses
+    ) or (
+        caller_is_anthropic
+        and attempt.selected_upstream_format in {"chat_completions", "responses"}
+    )
+    if policy in (MutationPolicy.TRANSPARENT, MutationPolicy.GATEWAY_COMPATIBILITY) and convert_before_compat:
         try:
             prepared_exchange = attempt.prepare_body(conversion_body)
         except UnsupportedProtocolTranslationError as exc:
