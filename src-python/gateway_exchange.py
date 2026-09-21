@@ -600,7 +600,7 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
         prepared_exchange is not None
         or (
             not caller_is_chat
-            and attempt.selected_upstream_format in {"chat_completions", "anthropic_messages"}
+            and attempt.selected_upstream_format == "chat_completions"
         )
         or (
             caller_is_chat
@@ -640,7 +640,11 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
     if policy is MutationPolicy.OFFICIAL_PASSTHROUGH:
         payload = request.inbound_payload if attempt.selected_upstream_format == request.inbound.inbound_format and isinstance(request.inbound_payload, Mapping) else _passthrough._safe_json_mapping(body)
         return prepared_exchange, _gateway_compat.official_passthrough_request_body(body, payload, upstream, model_id=request.inbound.model, event_context=request.event_context)
-    if policy is MutationPolicy.GATEWAY_COMPATIBILITY and not pre_compatibility_applied:
+    if (
+        policy is MutationPolicy.GATEWAY_COMPATIBILITY
+        and not pre_compatibility_applied
+        and attempt.selected_upstream_format != "anthropic_messages"
+    ):
         body = _gateway_compat.compatible_request_body(body, upstream, model_id=request.inbound.model, event_context=request.event_context, inject_codex_tools=request.route_plan.tool_exposure.gateway_schema_injection, tool_protocol_override=attempt.tool_protocol, tool_surface_strategy_override=attempt.tool_surface_strategy, native_responses_tool_codec_override=attempt.native_responses_tool_codec)
     if policy is MutationPolicy.GATEWAY_COMPATIBILITY:
         body, schema_rewrites = _passthrough._normalize_transparent_tool_schema_booleans(body)
