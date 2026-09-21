@@ -619,6 +619,17 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
             "fields": list(prepared_exchange.dropped_cache_controls),
             "reason": "unverified_endpoint_capability",
         }))
+    if prepared_exchange.adaptations and observer is not None:
+        observer.record(ExchangeEvent("protocol_adaptation", {
+            "request_id": request.inbound.request_id,
+            "upstream": request.upstream_name,
+            "upstream_format": attempt.selected_upstream_format,
+            "route_attempt_index": attempt.index,
+            "adaptations": [
+                {"field": field, "policy": policy, "detail": detail}
+                for field, policy, detail in prepared_exchange.adaptations
+            ],
+        }))
     if policy is MutationPolicy.OFFICIAL_PASSTHROUGH:
         payload = request.inbound_payload if attempt.selected_upstream_format == request.inbound.inbound_format and isinstance(request.inbound_payload, Mapping) else _passthrough._safe_json_mapping(body)
         return prepared_exchange, _gateway_compat.official_passthrough_request_body(body, payload, upstream, model_id=request.inbound.model, event_context=request.event_context)

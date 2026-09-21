@@ -160,3 +160,24 @@ def test_messages_to_chat_stream_returns_anthropic_sse(harness: GatewayHarness) 
         if payload.get("type") == "content_block_delta"
     )
     assert "hello" in text
+
+
+def test_prepare_exchange_keeps_named_adaptations() -> None:
+    from protocol_translation import prepare_exchange
+
+    body = json.dumps(
+        {
+            "model": "volc/glm-5.2",
+            "max_tokens": 32,
+            "metadata": {"user_id": "synthetic"},
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+    ).encode()
+    prepared = prepare_exchange(
+        body,
+        inbound_format="anthropic_messages",
+        outbound_format="chat_completions",
+    )
+    assert prepared.adaptations
+    assert all(len(item) == 3 for item in prepared.adaptations)
+    assert "synthetic" not in repr(prepared.adaptations)

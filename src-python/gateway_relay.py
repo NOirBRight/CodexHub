@@ -983,6 +983,16 @@ def relay_upstream_response(
                 else:
                     body = adapted.body
                     status = adapted.status
+                    for item in adapted.adaptations:
+                        write_proxy_event(
+                            "protocol_adaptation",
+                            field=item.field,
+                            policy=item.policy,
+                            detail=item.detail,
+                            upstream=upstream_name,
+                            inbound_format=inbound_format,
+                            upstream_format=upstream_format,
+                        )
             elif upstream_format in {"chat_completions", "anthropic_messages"}:
                 if upstream_format == "anthropic_messages":
                     body = anthropic_messages.anthropic_message_to_chat_completion_body(body)
@@ -1276,7 +1286,7 @@ def relay_upstream_response(
                 if terminal_kind == "error":
                     return status if status >= 400 else 502
                 return status
-            emitter = anthropic_messages_prototype._ChatToAnthropicEmitter()
+            emitter = anthropic_messages_prototype.ChatToAnthropicEmitter()
             responses_converter = (
                 protocol_translation.ResponsesToChatStreamConverter()
                 if upstream_format == "responses"
@@ -1340,6 +1350,15 @@ def relay_upstream_response(
                                     return finish_downstream_stream_closed(
                                         seam.last_write_error() or OSError("downstream closed")
                                     )
+                            for item in emitter.declared:
+                                write_proxy_event(
+                                    "protocol_adaptation",
+                                    field=item.field,
+                                    policy=item.policy,
+                                    detail=item.detail,
+                                    inbound_format=inbound_format,
+                                    upstream_format=upstream_format,
+                                )
                             self.close_connection = True
                             return status
                     else:
@@ -1362,6 +1381,15 @@ def relay_upstream_response(
                                     return finish_downstream_stream_closed(
                                         seam.last_write_error() or OSError("downstream closed")
                                     )
+                            for item in emitter.declared:
+                                write_proxy_event(
+                                    "protocol_adaptation",
+                                    field=item.field,
+                                    policy=item.policy,
+                                    detail=item.detail,
+                                    inbound_format=inbound_format,
+                                    upstream_format=upstream_format,
+                                )
                             self.close_connection = True
                             return status
             except (SseFrameTooLargeError, UpstreamStreamIncompleteError):

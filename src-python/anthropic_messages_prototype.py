@@ -1,9 +1,8 @@
-"""Isolated prototype: pure Anthropic Messages representation (Tickets #74/#75).
+"""Anthropic Messages representation seam (Tickets #74/#75).
 
-Evidence-gate prototype for ADR-0001 / ADR-0014. It is deliberately NOT
-imported by production Gateway code: no route, handler, or client configuration
-uses it. It re-establishes the representation seam ADR-0001 requires so #75 can
-build on a reviewed shape instead of reviving the retired spike.
+Evidence-gate converter for ADR-0001 / ADR-0014. Production inbound
+``/v1/messages`` may import the public functions listed in ``__all__``.
+The isolated execute/relay helpers remain test/evidence-only.
 
 Three outcomes, never a silent drop:
 
@@ -64,6 +63,7 @@ __all__ = [
     "NotForwardable",
     "adapt_upstream_response",
     "adapt_upstream_stream",
+    "ChatToAnthropicEmitter",
     "classify_headers",
     "execute_exchange",
     "parse_request",
@@ -1251,7 +1251,7 @@ def _decode_sse_frames(chunks: Iterable[bytes]) -> tuple[list[Mapping[str, Any] 
     return payloads, b"".join(raw_parts)
 
 
-class _ChatToAnthropicEmitter:
+class ChatToAnthropicEmitter:
     """Emit Anthropic SSE frames as each Chat Completions chunk arrives."""
 
     def __init__(
@@ -1530,7 +1530,7 @@ def _chat_chunks_to_anthropic_sse(
     except (ValueError, UnsupportedProtocolTranslationError):
         return _response_refusal("unsupported_upstream_stream", "chat.stream")
     try:
-        emitter = _ChatToAnthropicEmitter(
+        emitter = ChatToAnthropicEmitter(
             terminal_usage=terminal_usage,
             expected_id=expected_id,
             expected_model=expected_model,
@@ -1997,7 +1997,7 @@ def relay_incremental_exchange(
         terminal_kind: str | None = None
         forwarded = 0
         reader_hung = False
-        emitter = _ChatToAnthropicEmitter() if selected != "anthropic_messages" else None
+        emitter = ChatToAnthropicEmitter() if selected != "anthropic_messages" else None
         responses_converter = ResponsesToChatStreamConverter() if selected == "responses" else None
 
         def commit_frames(frames: list[bytes]) -> bool:
