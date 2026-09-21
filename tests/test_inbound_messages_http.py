@@ -97,5 +97,13 @@ def test_messages_to_chat_upstream_converts_request(harness: GatewayHarness) -> 
     sent = json.loads(captured.body)
     assert "messages" in sent
     assert sent["messages"][0]["role"] == "user"
-    assert response.status != 404
-    assert response.status != 500
+    assert response.status == 200
+    payload = json.loads(response.body)
+    assert payload["type"] == "message"
+    assert payload["role"] == "assistant"
+    text = "".join(
+        block.get("text", "")
+        for block in payload.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+    assert "hello-chat" in text

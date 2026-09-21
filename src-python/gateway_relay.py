@@ -15,6 +15,7 @@ import http.client
 import urllib.error
 
 import anthropic_messages
+import anthropic_messages_prototype
 import collaboration_adapter
 import gateway_compat
 import gateway_errors
@@ -928,6 +929,33 @@ def relay_upstream_response(
                         mutated_body,
                         preserve_reasoning_history=preserve_reasoning_history,
                     )
+            elif inbound_format == "anthropic_messages":
+                content_type = "application/json"
+                response_headers = getattr(response, "headers", None)
+                if response_headers is not None:
+                    content_type = response_headers.get("content-type", content_type) or content_type
+                adapted = anthropic_messages_prototype.adapt_upstream_response(
+                    upstream_format,
+                    body,
+                    status=status,
+                    content_type=content_type,
+                )
+                if isinstance(adapted, anthropic_messages_prototype.NotForwardable):
+                    status = status if status >= 400 else 400
+                    body = json.dumps(
+                        {
+                            "type": "error",
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": adapted.reason,
+                            },
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                else:
+                    body = adapted.body
+                    status = adapted.status
             elif upstream_format in {"chat_completions", "anthropic_messages"}:
                 if upstream_format == "anthropic_messages":
                     body = anthropic_messages.anthropic_message_to_chat_completion_body(body)
