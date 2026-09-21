@@ -6,7 +6,8 @@ import json
 
 import pytest
 
-from tests.gateway_harness import GATEWAY_CLIENT_KEY, GatewayHarness, request_gateway
+from tests.gateway_harness import GATEWAY_CLIENT_KEY, GatewayHarness, parsed_sse_events, request_gateway
+from tests.gateway_harness.sse import event_payload
 
 
 def _auth_headers() -> dict[str, str]:
@@ -107,3 +108,55 @@ def test_messages_to_chat_upstream_converts_request(harness: GatewayHarness) -> 
         if isinstance(block, dict) and block.get("type") == "text"
     )
     assert "hello-chat" in text
+
+
+def test_messages_to_chat_stream_returns_anthropic_sse(harness: GatewayHarness) -> None:
+    first = {
+        "id": "chatcmpl_char_stream",
+        "object": "chat.completion.chunk",
+        "model": "glm-5.2",
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hello"}, "finish_reason": None}],
+    }
+    last = {
+        "id": "chatcmpl_char_stream",
+        "object": "chat.completion.chunk",
+        "model": "glm-5.2",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    harness.set_sse_response(
+        (
+            f"data: {json.dumps(first)}\n\n".encode(),
+            f"data: {json.dumps(last)}\n\n".encode(),
+            b"data: [DONE]\n\n",
+        )
+    )
+    body = json.dumps(
+        {
+            "model": "volc/glm-5.2",
+            "max_tokens": 32,
+            "stream": True,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+    ).encode()
+    response = request_gateway(
+        harness.host,
+        harness.port,
+        "POST",
+        "/v1/messages",
+        body=body,
+        headers=_auth_headers(),
+        timeout=8.0,
+    )
+    assert response.status == 200
+    events = parsed_sse_events(response.body)
+    payloads = [payload for payload in (event_payload(event) for event in events) if payload]
+    names = [payload.get("type") for payload in payloads]
+    assert "message_start" in names, (names, response.body[:500])
+    assert "content_block_delta" in names
+    assert "message_stop" in names
+    text = "".join(
+        str(payload.get("delta", {}).get("text", ""))
+        for payload in payloads
+        if payload.get("type") == "content_block_delta"
+    )
+    assert "hello" in text
