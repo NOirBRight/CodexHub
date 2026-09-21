@@ -815,6 +815,8 @@ def is_event_stream(headers: Mapping[str, str] | Any) -> bool:
     content_type = _get_header(headers, "Content-Type")
     if content_type and "text/event-stream" in content_type.lower():
         return True
+    if content_type and "json" in content_type.lower():
+        return False
     # Some upstreams (e.g. chatgpt.com/backend-api/codex) return SSE without
     # an explicit Content-Type header but do signal chunked transfer.
     transfer_encoding = _get_header(headers, "Transfer-Encoding")
