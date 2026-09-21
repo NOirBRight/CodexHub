@@ -311,8 +311,9 @@ pub fn switch_gateway_client_route(
     mode: String,
     model: Option<String>,
     force_takeover: Option<bool>,
+    role_mappings: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<gateway::GatewayClientApplyResult, String> {
-    gateway::switch_gateway_client_route(client_id, mode, model, force_takeover)
+    gateway::switch_gateway_client_route(client_id, mode, model, force_takeover, role_mappings)
 }
 
 #[tauri::command]

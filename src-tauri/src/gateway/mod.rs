@@ -44,6 +44,7 @@ use clients::codex::read_codex_auth_status;
 use clients::grok::{grok_ownership_bounded_cleanup, restore_grok_config_with_backup_roots};
 use clients::claude::{
     claude_installed, detect_claude_config_path, detect_claude_route_details, detect_claude_version,
+    set_pending_role_mappings,
 };
 use clients::grok::{
     detect_grok_config_path, detect_grok_route_details, detect_grok_version, grok_home,
@@ -1058,6 +1059,7 @@ pub fn switch_gateway_client_route(
     mode: String,
     model: Option<String>,
     force_takeover: Option<bool>,
+    role_mappings: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<GatewayClientApplyResult, String> {
     let current_app_owner = crate::app_flavor::current().routing_owner();
     let next_owner = match mode.as_str() {
@@ -1074,6 +1076,9 @@ pub fn switch_gateway_client_route(
     } else {
         model
     };
+    if normalize_client_id(&client_id) == "claude" {
+        set_pending_role_mappings(role_mappings.unwrap_or_default());
+    }
     let result = with_gateway_client_mutation_owner_gate(
         normalize_client_id(&client_id),
         force_takeover.unwrap_or(false),

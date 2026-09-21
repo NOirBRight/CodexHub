@@ -240,11 +240,26 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             let force_takeover = registry_optional_bool_arg(args, command, "force_takeover");
+            let role_mappings = args
+                .get("role_mappings")
+                .or_else(|| args.get("roleMappings"))
+                .and_then(Value::as_object)
+                .map(|object| {
+                    object
+                        .iter()
+                        .filter_map(|(key, value)| {
+                            value
+                                .as_str()
+                                .map(|mapped| (key.clone(), mapped.to_string()))
+                        })
+                        .collect::<std::collections::BTreeMap<String, String>>()
+                });
             to_value(gateway::switch_gateway_client_route(
                 client_id,
                 mode,
                 model,
                 force_takeover,
+                role_mappings,
             ))
         }
         Command::SyncGatewayClients => {
