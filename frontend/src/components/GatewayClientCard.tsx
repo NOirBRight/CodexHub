@@ -239,6 +239,12 @@ export function GatewayClientCard({
             <dt>{t("workspace.ownership")}</dt>
             <dd>{info?.route_owner || "—"}</dd>
           </div>
+          {isClaude ? (
+            <div>
+              <dt>{t("workspace.note")}</dt>
+              <dd>{t("gateway.claudeCompatibilityState")}</dd>
+            </div>
+          ) : null}
           {info?.status?.includes("allowed_models") ? (
             <div>
               <dt>{t("workspace.note")}</dt>
