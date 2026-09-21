@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Mapping
 
@@ -1030,3 +1031,111 @@ def test_native_incremental_response_limit_closes_without_success() -> None:
     assert response.closed
     assert not sink.chunks
     assert not commit.terminal_committed
+    assert commit.downstream_closed
+
+
+def test_native_incremental_preserves_complete_event_before_oversized_frame() -> None:
+    first = (
+        b"event: content_block_delta\n"
+        b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n'
+    )
+    oversized = b"data: " + (b"x" * (len(first) + 80)) + b"\n\n"
+
+    class Response:
+        status = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self) -> None:
+            self.chunks = [first + oversized]
+            self.closed = False
+
+        def readline(self) -> bytes:
+            return self.chunks.pop(0) if self.chunks else b""
+
+        def close(self) -> None:
+            self.closed = True
+
+    sink = _RecordingSink()
+    commit = _native_commit(sink)
+    result = relay_incremental_exchange(
+        _request(stream=True),
+        upstream_format="anthropic_messages",
+        url="http://fixture.invalid/v1/messages",
+        admit=lambda *_args: _Reservation(5.0),
+        commit=commit,
+        max_response_bytes=len(first) + 16,
+        open_response=lambda _request, _timeout: Response(),
+    )
+    body = b"".join(sink.chunks)
+    assert result == 502
+    assert b'"text_delta"' in body
+    assert b"hello" in body
+    assert b"message_stop" not in body
+    assert not commit.terminal_committed
+    assert commit.downstream_closed
+
+
+def test_native_incremental_eof_before_terminal_closes_commit() -> None:
+    start = (
+        b"event: message_start\n"
+        b'data: {"type":"message_start","message":{"id":"msg","model":"fixture","usage":{}}}\n\n'
+    )
+
+    class Response:
+        status = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self) -> None:
+            self.lines = iter(start.splitlines(keepends=True))
+
+        def readline(self) -> bytes:
+            return next(self.lines, b"")
+
+        def close(self) -> None:
+            return None
+
+    sink = _RecordingSink()
+    commit = _native_commit(sink)
+    result = relay_incremental_exchange(
+        _request(stream=True),
+        upstream_format="anthropic_messages",
+        url="http://fixture.invalid/v1/messages",
+        admit=lambda *_args: _Reservation(5.0),
+        commit=commit,
+        open_response=lambda _request, _timeout: Response(),
+    )
+    body = b"".join(sink.chunks)
+    assert result == 502
+    assert b"message_start" in body
+    assert b"message_stop" not in body
+    assert not commit.terminal_committed
+    assert commit.downstream_closed
+
+
+def test_native_incremental_timeout_bounds_stalled_poll() -> None:
+    server = _StalledStreamServer()
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    sink = _RecordingSink()
+    commit = _native_commit(sink)
+    started = time.monotonic()
+    try:
+        result = relay_incremental_exchange(
+            _request(stream=True),
+            upstream_format="anthropic_messages",
+            url=f"http://127.0.0.1:{server.server_port}/v1/messages",
+            admit=lambda *_args: _Reservation(5.0),
+            commit=commit,
+            timeout=0.05,
+        )
+        elapsed = time.monotonic() - started
+        assert result == 504
+        assert elapsed < 2.5
+        assert b"message_stop" not in b"".join(sink.chunks)
+        assert commit.downstream_closed
+        assert server.client_closed.wait(1)
+    finally:
+        server.release.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)

@@ -43,7 +43,13 @@ from protocol_translation import (
     decode_protocol_json,
     response_events_to_chat_stream_chunks,
 )
-from sse_events import SseAssemblerClosedError, SseEvent, SseEventAssembler, SseFrameTooLargeError
+from sse_events import (
+    DEFAULT_MAX_FRAME_BYTES,
+    SseAssemblerClosedError,
+    SseEvent,
+    SseEventAssembler,
+    SseFrameTooLargeError,
+)
 
 
 __all__ = [
@@ -1834,7 +1840,8 @@ def relay_incremental_exchange(
     if not math.isfinite(absolute_deadline):
         commit.cancel()
         return _response_refusal("invalid_admission_reservation", "deadline_remaining")
-    remaining = absolute_deadline - monotonic()
+    attempt_deadline = min(absolute_deadline, admission_started + float(timeout))
+    remaining = attempt_deadline - monotonic()
     if remaining <= 0:
         commit.cancel()
         return _response_refusal("admission_deadline_exhausted", "deadline_remaining")
@@ -1872,15 +1879,13 @@ def relay_incremental_exchange(
             cancellation_requested=cancelled,
         )
         commit.attach_upstream(lifecycle)
-        total_bytes = 0
 
         def read_lines(_response: Any, **_kwargs: Any) -> Iterable[bytes]:
-            nonlocal total_bytes
             lifecycle.start()
             while True:
                 if cancelled is not None and cancelled():
                     raise _IncrementalCancelled()
-                remaining_now = absolute_deadline - monotonic()
+                remaining_now = attempt_deadline - monotonic()
                 if remaining_now <= 0:
                     raise _IncrementalDeadlineExceeded()
                 try:
@@ -1891,26 +1896,41 @@ def relay_incremental_exchange(
                     raise value
                 if not isinstance(value, bytes):
                     raise ValueError("upstream SSE reader returned non-bytes")
-                if value:
-                    total_bytes += len(value)
-                    if total_bytes > max_response_bytes:
-                        raise _IncrementalResponseTooLarge()
                 yield value
                 if not value:
                     return
 
         def iter_events() -> Iterable[SseEvent]:
+            # Match gateway_relay.iter_upstream_sse_events, including deferred
+            # SseFrameTooLargeError after pending complete events. Copied so the
+            # isolated prototype can cap max_frame_bytes without importing the
+            # production relay stack.
             assembler = SseEventAssembler(
-                max_frame_bytes=min(MAX_BUFFERED_RESPONSE_BYTES, max_response_bytes)
+                max_frame_bytes=min(DEFAULT_MAX_FRAME_BYTES, max_response_bytes)
             )
+            pending_events: list[SseEvent] = []
             assembler_finished = False
+            deferred_size_error: SseFrameTooLargeError | None = None
+
+            def assemble_chunk(chunk: bytes) -> None:
+                nonlocal deferred_size_error
+                events: list[SseEvent] = []
+                try:
+                    assembler.feed(chunk, on_event=events.append)
+                except SseFrameTooLargeError as exc:
+                    deferred_size_error = exc
+                pending_events.extend(events)
+
             try:
                 for line in read_lines(response):
                     if not line:
                         break
-                    events: list[SseEvent] = []
-                    assembler.feed(line, on_event=events.append)
-                    yield from events
+                    assemble_chunk(line)
+                    ready = tuple(pending_events)
+                    pending_events.clear()
+                    yield from ready
+                    if deferred_size_error is not None:
+                        raise deferred_size_error
                 termination = assembler.finish()
                 assembler_finished = True
                 yield from termination.events
@@ -1925,26 +1945,46 @@ def relay_incremental_exchange(
                     except SseAssemblerClosedError:
                         pass
 
+        def fail(status: int) -> int:
+            if not commit.terminal_committed:
+                commit.cancel()
+            return status
+
         terminal_kind: str | None = None
+        forwarded = 0
+        reader_hung = False
         try:
             for event in iter_events():
                 if cancelled is not None and cancelled():
                     raise _IncrementalCancelled()
+                size = len(event.raw)
+                if forwarded + size > max_response_bytes:
+                    raise _IncrementalResponseTooLarge()
                 if not commit.commit_sse_bytes(event.raw):
-                    return 499
+                    terminal_kind = "downstream_closed"
+                    break
+                forwarded += size
                 terminal_kind = _native_terminal_kind(event)
                 if terminal_kind is not None:
                     break
         finally:
             lifecycle.close()
-            lifecycle.join(timeout=UpstreamSseReaderLifecycle.JOIN_TIMEOUT_SECONDS)
+            joined, outcome = lifecycle.join(timeout=UpstreamSseReaderLifecycle.JOIN_TIMEOUT_SECONDS)
+            reader_hung = (not joined) or outcome == "upstream_sse_reader_thread_did_not_terminate"
 
+        cancelled_now = cancelled is not None and cancelled()
+        if reader_hung:
+            return fail(499 if cancelled_now else 502)
         if terminal_kind is None:
-            return 499 if cancelled is not None and cancelled() else 502
+            return fail(499 if cancelled_now else 502)
+        if terminal_kind == "downstream_closed":
+            return fail(499)
         if terminal_kind == "error":
+            if not commit.terminal_committed:
+                commit.cancel()
             return response_status if response_status >= 400 else 502
         if not commit.terminal_committed:
-            return 502
+            return fail(502)
         return response_status
     except _IncrementalCancelled:
         commit.cancel()
