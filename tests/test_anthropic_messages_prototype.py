@@ -360,8 +360,12 @@ def test_failed_tool_result_is_not_downgraded_to_success() -> None:
     body = json.loads(observed_shape_body())
     body["messages"][2]["content"][0]["is_error"] = True
     converted = parse_request(_base(body)).to_chat_request()
-    assert isinstance(converted, NotForwardable)
-    assert converted.fields == ("messages[2].content[0].is_error",)
+    assert isinstance(converted, Adapted)
+    payload = json.loads(converted.body)
+    tool_messages = [m for m in payload["messages"] if m.get("role") == "tool"]
+    assert tool_messages
+    assert tool_messages[0]["content"].startswith("[tool_error]")
+    assert any(a.policy == "tool_error_prefixed_in_chat_content" for a in converted.adaptations)
 
 
 def test_nested_block_metadata_is_declared_not_dropped() -> None:
