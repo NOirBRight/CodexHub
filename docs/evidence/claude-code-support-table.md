@@ -1,7 +1,10 @@
 # Claude Code Gateway support table (#78)
 
 Status: **experimental**. Not a live GO. Pinned observed CLI: `2.1.278`
-(host `claude --version` matches; version-gate exit 0). Loopback harness
+(Linux host `claude --version` matches; version-gate exit 0). Windows host
+`yoga` has Claude Code **2.1.232** (`C:\Users\noirb\.local\bin\claude.exe`);
+that is version drift vs the pin, so Windows live rows are not claimed.
+Loopback harness
 `self-check` and `upstream-self-check --scenario text` passed on this SHA
 (buffered fixtures only). Isolated CLI `run --enable-discovery` on 2.1.278
 exited 0 with protocols `discovery`+`messages`, egress 0, non-loopback
