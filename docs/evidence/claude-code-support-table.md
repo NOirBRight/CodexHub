@@ -9,8 +9,9 @@ connects 0, and `gateway-models.json` keeping only `claude*` ids. A
 `--scenario tool` print-run admitted two `/v1/messages?beta=true`
 requests and exited 0. `--scenario error` admitted two messages, CLI
 exit 1 with `is_error` and `api_error_status=400`, egress 0. Live credential contract is #558. Approved identities:
-Official Codex `gpt-5.6-luna` (Responses) and CommandCode
-`deepseek/deepseek-v4.1-flash` (Chat). Native Anthropic is not approved.
+Official Codex `gpt-5.6-luna` (Responses), CommandCode
+`deepseek/deepseek-v4.1-flash` (Chat), and DeepSeek Anthropic
+`deepseek-flash` at `https://api.deepseek.com/anthropic`.
 
 | Capability | Class | Notes |
 | --- | --- | --- |
@@ -26,8 +27,8 @@ Official Codex `gpt-5.6-luna` (Responses) and CommandCode
 
 Live (campaign Gateway, isolated `CODEX_HOME`, no keys in git):
 
-- Responses/`gpt-5.6-luna`: HTTP JSON+SSE GO. Claude Code CLI 2.1.278 `-p` `is_error=false`, `result=ok`, `stop_reason=end_turn`.
-- Chat/`commandcode/deepseek/deepseek-v4.1-flash`: conversion now runs; CommandCode itself returns HTTP 400.
-- Native Anthropic: not approved, not run.
+- Responses/`gpt-5.6-luna`: HTTP JSON+SSE GO. Claude Code CLI 2.1.278 `-p` `is_error=false`, `result=ok`.
+- Chat/`commandcode/deepseek/deepseek-v4.1-flash`: HTTP JSON GO (`CODEXHUB_E2E_OK`).
+- Native Anthropic via DeepSeek `deepseek-flash`: HTTP SSE GO; Claude Code CLI `-p` `is_error=false`, `result=ok`.
 
-Experimental → stable still needs a CommandCode 400 diagnosis and native Anthropic if ever approved.
+Experimental → stable still wants tool/cancel/error live rows on each path. No keys in git.
