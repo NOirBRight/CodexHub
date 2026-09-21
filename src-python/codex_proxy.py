@@ -210,6 +210,26 @@ class CodexProxyHandler(GatewayHandlerMixin, BaseHTTPRequestHandler):
             self._proxy_post_request(inbound_format="chat_completions", provider_hint=provider_hint)
             return
 
+        if parsed.path == "/v1/messages/count_tokens":
+            self._send_json_and_close(
+                400,
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "count_tokens is not supported on this Gateway",
+                    },
+                },
+            )
+            return
+        if parsed.path == "/v1/messages":
+            self._proxy_post_request(inbound_format="anthropic_messages")
+            return
+        provider_hint = provider_scoped_path(parsed.path, "messages")
+        if provider_hint is not None:
+            self._proxy_post_request(inbound_format="anthropic_messages", provider_hint=provider_hint)
+            return
+
         upstream_image_path = official_image_upstream_path(parsed.path)
         if upstream_image_path is not None:
             self._proxy_official_image(upstream_image_path)
