@@ -617,6 +617,18 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
     else:
         prepared_exchange = replace(prepared_exchange, upstream_body=conversion_body)
     body = prepared_exchange.upstream_body
+    if attempt.selected_upstream_format == "anthropic_messages":
+        payload = _passthrough._safe_json_mapping(body)
+        upstream_model = upstream.get("upstream_model")
+        if (
+            isinstance(payload, dict)
+            and isinstance(upstream_model, str)
+            and upstream_model
+            and payload.get("model") != upstream_model
+        ):
+            payload["model"] = upstream_model
+            body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode()
+            prepared_exchange = replace(prepared_exchange, upstream_body=body)
     if prepared_exchange.dropped_cache_controls and observer is not None:
         observer.record(ExchangeEvent("cache_control_dropped", {
             "request_id": request.inbound.request_id,
