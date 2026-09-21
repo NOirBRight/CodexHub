@@ -33,6 +33,70 @@ def _anthropic_sse_terminal_kind(frame: SseEvent) -> str | None:
     return None
 
 
+def json_message_from_anthropic_sse(frames: list[SseEvent]) -> bytes | None:
+    """Assemble one Anthropic JSON message from buffered native SSE frames."""
+
+    message: dict[str, Any] | None = None
+    blocks: dict[int, dict[str, Any]] = {}
+    saw_stop = False
+    for frame in frames:
+        event_name = frame.event.decode("utf-8") if frame.event else ""
+        if not frame.data:
+            continue
+        try:
+            payload = json.loads(frame.data)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        if event_name == "message_start":
+            raw_message = payload.get("message")
+            if isinstance(raw_message, dict):
+                message = dict(raw_message)
+            continue
+        if event_name == "content_block_start":
+            index = payload.get("index") if isinstance(payload.get("index"), int) else 0
+            block = payload.get("content_block")
+            blocks[index] = dict(block) if isinstance(block, dict) else {"type": "text", "text": ""}
+            continue
+        if event_name == "content_block_delta":
+            index = payload.get("index") if isinstance(payload.get("index"), int) else 0
+            delta = payload.get("delta") if isinstance(payload.get("delta"), Mapping) else {}
+            block = blocks.setdefault(index, {"type": "text", "text": ""})
+            if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
+                block["text"] = str(block.get("text") or "") + delta["text"]
+            elif delta.get("type") == "thinking_delta" and isinstance(delta.get("thinking"), str):
+                block["type"] = "thinking"
+                block["thinking"] = str(block.get("thinking") or "") + delta["thinking"]
+            continue
+        if event_name == "message_delta":
+            if message is None:
+                continue
+            delta = payload.get("delta")
+            if isinstance(delta, Mapping):
+                for key, value in delta.items():
+                    if value is not None:
+                        message[key] = value
+            usage = payload.get("usage")
+            if isinstance(usage, Mapping):
+                message["usage"] = dict(usage)
+            continue
+        if event_name == "message_stop":
+            saw_stop = True
+    if not saw_stop or message is None:
+        return None
+    content = []
+    for index in sorted(blocks):
+        block = blocks[index]
+        if block.get("type") == "thinking" and not block.get("thinking"):
+            continue
+        content.append(block)
+    message["content"] = content
+    message.setdefault("type", "message")
+    message.setdefault("role", "assistant")
+    return json.dumps(message, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+
+
 def _commit_conversion_error(seam: Any, finish_closed: Callable[[OSError], int], handler: Any) -> int:
     adapted = anthropic_messages_prototype.adapt_upstream_response(
         "chat_completions",
