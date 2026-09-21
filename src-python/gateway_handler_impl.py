@@ -1365,6 +1365,11 @@ class GatewayHandlerMixin:
             if seam is not None:
                 seam.attach_upstream(lifecycle)
 
+        def keepalive_ready() -> bool:
+            if downstream_output_started is not None:
+                return downstream_output_started()
+            return bool(seam is not None and seam.headers_committed)
+
         context = SseLineRelayContext(
             admission=admission,
             keepalive_interval=gateway_settings.sse_keepalive_seconds(),
@@ -1387,7 +1392,7 @@ class GatewayHandlerMixin:
         return iter_upstream_sse_lines(
             response,
             context=context,
-            downstream_output_started=downstream_output_started,
+            downstream_output_started=keepalive_ready,
             line_resets_idle_timeout=line_resets_idle_timeout,
             on_line=on_line,
         )
