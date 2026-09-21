@@ -773,28 +773,39 @@ def compatible_request_body(
             **pending_tool_surface_event,
             final_tool_count=len(final_tools) if isinstance(final_tools, list) else 0,
         )
-    model_id = payload.get("model")
-    max_output_tokens, context_window_fallback = (
-        _gateway_catalog_runtime.catalog_output_limit(model_id) if isinstance(model_id, str) else (None, False)
-    )
-    if max_output_tokens is not None:
-        requested_max_output_tokens = payload.get("max_output_tokens")
-        if context_window_fallback and (
-            not isinstance(requested_max_output_tokens, int)
-            or requested_max_output_tokens >= max_output_tokens
-        ):
-            if "max_output_tokens" in payload:
-                del payload["max_output_tokens"]
-                changed = True
-        elif not isinstance(requested_max_output_tokens, int) or requested_max_output_tokens > max_output_tokens:
-            payload["max_output_tokens"] = max_output_tokens
-            changed = True
-
     if isinstance(upstream_model, str) and upstream_model and payload.get("model") != upstream_model:
         payload["model"] = upstream_model
         changed = True
 
+    model_id = payload.get("model")
+    max_output_tokens, context_window_fallback = (
+        _gateway_catalog_runtime.catalog_output_limit(model_id) if isinstance(model_id, str) else (None, False)
+    )
     upstream_format = upstream.get("upstream_format")
+    if max_output_tokens is not None:
+        if upstream_format == "chat_completions":
+            if "max_output_tokens" in payload:
+                del payload["max_output_tokens"]
+                changed = True
+            requested_max_tokens = payload.get("max_tokens")
+            if isinstance(requested_max_tokens, int) and requested_max_tokens > max_output_tokens:
+                payload["max_tokens"] = max_output_tokens
+                changed = True
+        else:
+            requested_max_output_tokens = payload.get("max_output_tokens")
+            if context_window_fallback and (
+                not isinstance(requested_max_output_tokens, int)
+                or requested_max_output_tokens >= max_output_tokens
+            ):
+                if "max_output_tokens" in payload:
+                    del payload["max_output_tokens"]
+                    changed = True
+            elif not isinstance(requested_max_output_tokens, int) or requested_max_output_tokens > max_output_tokens:
+                payload["max_output_tokens"] = max_output_tokens
+                changed = True
+    if payload.get("tools") == []:
+        del payload["tools"]
+        changed = True
     if (
         "reasoning" in payload
         and upstream_format != "chat_completions"
