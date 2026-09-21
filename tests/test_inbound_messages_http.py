@@ -47,7 +47,7 @@ def test_messages_query_variant_is_not_404(harness: GatewayHarness) -> None:
     assert response.status != 404
 
 
-def test_count_tokens_is_explicitly_unsupported(harness: GatewayHarness) -> None:
+def test_count_tokens_returns_best_effort_estimate(harness: GatewayHarness) -> None:
     response = request_gateway(
         harness.host,
         harness.port,
@@ -57,13 +57,21 @@ def test_count_tokens_is_explicitly_unsupported(harness: GatewayHarness) -> None
         headers=_auth_headers(),
         timeout=8.0,
     )
-    assert response.status == 400
+    assert response.status == 200
     payload = json.loads(response.body)
-    assert payload["type"] == "error"
-    assert payload["error"]["type"] == "invalid_request_error"
-    assert "count_tokens" in payload["error"]["message"]
+    assert payload["type"] == "message_count_tokens"
+    assert payload["input_tokens"] >= 1
     assert harness.stub is not None
     assert harness.stub.captures == []
+
+
+def test_estimate_input_tokens_counts_cjk_near_one_per_char() -> None:
+    import anthropic_messages
+
+    latin = anthropic_messages.estimate_input_tokens({"messages": [{"content": "abcd"}]})
+    cjk = anthropic_messages.estimate_input_tokens({"messages": [{"content": "你好"}]})
+    assert latin == 1
+    assert cjk == 2
 
 
 def test_messages_to_chat_upstream_converts_request(harness: GatewayHarness) -> None:
