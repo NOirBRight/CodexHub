@@ -1068,7 +1068,13 @@ def _responses_output_to_anthropic(
                 return _response_refusal("unsupported_upstream_response", f"response.output[{index}].arguments")
             blocks.append({"type": "tool_use", "id": call_id, "name": name, "input": dict(tool_input)})
             continue
-        return _response_refusal("unsupported_upstream_response", f"response.output[{index}].type")
+        declared.append(
+            Adaptation(
+                f"response.output[{index}].type",
+                "responses_output_item_omitted_for_anthropic",
+                f"Anthropic Messages has no equivalent for Responses '{item_type}'.",
+            )
+        )
     if response_status == "completed" and not blocks:
         return _response_refusal("unsupported_upstream_response", "response.output")
 
