@@ -470,6 +470,11 @@ def resolve_external_model_alias(
     return build_external_model_index(load_providers(providers_path)).get(canonical_model_id(model_id))
 
 
+def exported_gateway_model_ids(path: Path | None = None) -> tuple[str, ...]:
+    index = build_external_model_index(load_providers(path), require_api_key=False)
+    return tuple(sorted(index))
+
+
 def load_providers(path: Path | None = None) -> list[ProviderConfig]:
     if path is None:
         path = runtime_providers_path()

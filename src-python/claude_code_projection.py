@@ -48,18 +48,24 @@ def projected_model_id(canonical: str) -> str:
     return _ALIAS_PREFIX + _UNSAFE.sub("-", slug).strip("-")
 
 
-def projection_map(catalog: Mapping[str, Any]) -> dict[str, str]:
+def projection_map(
+    catalog: Mapping[str, Any], extra_slugs: tuple[str, ...] | list[str] = ()
+) -> dict[str, str]:
     mapping: dict[str, str] = {}
+    slugs: list[str] = []
     models = catalog.get("models")
-    if not isinstance(models, list):
-        return mapping
-    for model in models:
-        if not isinstance(model, Mapping):
-            continue
-        canonical = model.get("slug")
-        if not isinstance(canonical, str) or not canonical.strip():
-            continue
+    if isinstance(models, list):
+        for model in models:
+            if not isinstance(model, Mapping):
+                continue
+            canonical = model.get("slug")
+            if isinstance(canonical, str) and canonical.strip():
+                slugs.append(canonical)
+    slugs.extend(extra_slugs)
+    for canonical in slugs:
         slug = canonical_model_id(canonical)
+        if not slug:
+            continue
         projected = projected_model_id(slug)
         existing = mapping.get(projected)
         if existing is not None and existing != slug:
@@ -72,21 +78,28 @@ def projection_map(catalog: Mapping[str, Any]) -> dict[str, str]:
     return mapping
 
 
-def resolve_projected_model_id(model_id: str, catalog: Mapping[str, Any]) -> str:
+def resolve_projected_model_id(
+    model_id: str,
+    catalog: Mapping[str, Any],
+    extra_slugs: tuple[str, ...] | list[str] = (),
+) -> str:
     slug = canonical_model_id(str(model_id))
     if not slug:
         raise identity_failure("model is required", reason="unsupported_model", model_slug=slug)
-    mapping = projection_map(catalog)
+    mapping = projection_map(catalog, extra_slugs)
     return mapping.get(slug, slug)
 
 
-def claude_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
+def claude_model_list(
+    catalog: Mapping[str, Any], extra_slugs: tuple[str, ...] | list[str] = ()
+) -> dict[str, Any]:
     models = catalog.get("models")
     if not isinstance(models, list):
         models = []
-    mapping = projection_map(catalog)
+    mapping = projection_map(catalog, extra_slugs)
     reverse = {canonical: projected for projected, canonical in mapping.items()}
     data: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for model in models:
         if not isinstance(model, Mapping):
             continue
@@ -94,6 +107,7 @@ def claude_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(canonical, str) or not canonical.strip():
             continue
         slug = canonical_model_id(canonical)
+        seen.add(slug)
         metadata = model.get("codex_proxy_metadata")
         owner = metadata.get("provider") if isinstance(metadata, Mapping) else None
         data.append(
@@ -102,6 +116,19 @@ def claude_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
                 "object": "model",
                 "created": 0,
                 "owned_by": owner if isinstance(owner, str) and owner.strip() else "codexhub",
+            }
+        )
+    for raw in extra_slugs:
+        slug = canonical_model_id(raw)
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        data.append(
+            {
+                "id": reverse.get(slug, projected_model_id(slug)),
+                "object": "model",
+                "created": 0,
+                "owned_by": slug.partition("/")[0] or "codexhub",
             }
         )
     return {"object": "list", "data": data}
