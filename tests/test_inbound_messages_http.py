@@ -183,6 +183,29 @@ def test_prepare_exchange_keeps_named_adaptations() -> None:
     assert "synthetic" not in repr(prepared.adaptations)
 
 
+def test_chat_conversion_refusal_names_unmodelled_fields() -> None:
+    from protocol_translation import NonForwardable, prepare_exchange
+
+    body = json.dumps(
+        {
+            "model": "volc/glm-5.2",
+            "max_tokens": 8,
+            "mcp_servers": [],
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+    ).encode()
+    try:
+        prepare_exchange(
+            body,
+            inbound_format="anthropic_messages",
+            outbound_format="chat_completions",
+        )
+    except NonForwardable as error:
+        assert "mcp_servers" in str(error)
+        return
+    raise AssertionError("expected NonForwardable")
+
+
 def test_rewritten_messages_headers_drop_upstream_zstd() -> None:
     import gateway_request
 

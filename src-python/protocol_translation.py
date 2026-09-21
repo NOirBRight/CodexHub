@@ -4571,9 +4571,10 @@ def prepare_exchange(
 
             prepared = prepare_upstream_request(conversion_body, outbound)
             if isinstance(prepared, NotForwardable):
+                named = ",".join(prepared.fields) if prepared.fields else prepared.reason
                 raise NonForwardable(
                     prepared.reason,
-                    "Cannot convert Anthropic Messages without a lossless mapping.",
+                    f"Cannot convert Anthropic Messages without a lossless mapping: {named}",
                 )
             exchange = converted(prepared.body)
             return PreparedExchange(
