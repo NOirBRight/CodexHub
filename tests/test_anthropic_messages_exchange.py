@@ -947,13 +947,13 @@ def test_native_incremental_source_error_is_not_success_message_stop() -> None:
     assert commit.terminal_committed
 
 
-def test_native_incremental_rejects_converted_format_before_admission() -> None:
+def test_native_incremental_rejects_unknown_format_before_admission() -> None:
     admissions: list[tuple[Any, ...]] = []
     opens: list[Any] = []
     commit = DownstreamStreamCommit(_RecordingSink(), None, "fixture")
     result = relay_incremental_exchange(
         _request(stream=True),
-        upstream_format="responses",
+        upstream_format="nope",
         url="http://fixture.invalid/v1/responses",
         admit=lambda *args: admissions.append(args),
         commit=commit,
@@ -1139,3 +1139,121 @@ def test_native_incremental_timeout_bounds_stalled_poll() -> None:
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=2)
+
+
+def _gated_response(prefix: bytes, terminal: bytes) -> Any:
+    class Response:
+        status = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self) -> None:
+            self._prefix = iter(prefix.splitlines(keepends=True))
+            self._terminal = iter(terminal.splitlines(keepends=True))
+            self.release = threading.Event()
+            self.blocked = threading.Event()
+            self.closed = threading.Event()
+
+        def readline(self) -> bytes:
+            try:
+                return next(self._prefix)
+            except StopIteration:
+                self.blocked.set()
+                while not self.release.wait(0.01):
+                    if self.closed.is_set():
+                        return b""
+                try:
+                    return next(self._terminal)
+                except StopIteration:
+                    return b""
+
+        def close(self) -> None:
+            self.closed.set()
+            self.release.set()
+
+    return Response()
+
+
+def test_converted_incremental_emits_chat_text_before_terminal_release() -> None:
+    prefix = b"".join(
+        (
+            _sse(None, {"id": "chat_fixture", "object": "chat.completion.chunk", "model": "fixture-chat", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hello"}, "finish_reason": None}]}),
+        )
+    )
+    terminal = b"".join(
+        (
+            _sse(None, {"id": "chat_fixture", "object": "chat.completion.chunk", "model": "fixture-chat", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+            b"data: [DONE]\n\n",
+        )
+    )
+    response = _gated_response(prefix, terminal)
+    sink = _RecordingSink()
+    commit = _native_commit(sink)
+    result: list[Any] = []
+
+    def run() -> None:
+        result.append(
+            relay_incremental_exchange(
+                _request(stream=True),
+                upstream_format="chat_completions",
+                url="http://fixture.invalid/v1/chat/completions",
+                admit=lambda *_args: _Reservation(5.0),
+                commit=commit,
+                open_response=lambda _request, _timeout: response,
+            )
+        )
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        assert sink.text_delta.wait(1), (sink.chunks, result)
+        assert b"hello" in b"".join(sink.chunks)
+        assert response.blocked.is_set()
+        assert b"message_stop" not in b"".join(sink.chunks)
+    finally:
+        response.release.set()
+        worker.join(timeout=2)
+    assert result == [200]
+    assert commit.terminal_committed
+
+
+def test_converted_incremental_emits_responses_text_before_terminal_release() -> None:
+    prefix = b"".join(
+        (
+            _sse(None, {"type": "response.created", "response": {"id": "resp_fixture", "model": "fixture-responses", "status": "in_progress"}}),
+            _sse(None, {"type": "response.output_text.delta", "delta": "hello"}),
+        )
+    )
+    terminal = b"".join(
+        (
+            _sse(None, {"type": "response.completed", "response": {"id": "resp_fixture", "model": "fixture-responses", "status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "hello"}]}], "usage": {"input_tokens": 1, "output_tokens": 1}}}),
+        )
+    )
+    response = _gated_response(prefix, terminal)
+    sink = _RecordingSink()
+    commit = _native_commit(sink)
+    result: list[Any] = []
+
+    def run() -> None:
+        result.append(
+            relay_incremental_exchange(
+                _request(stream=True),
+                upstream_format="responses",
+                url="http://fixture.invalid/v1/responses",
+                admit=lambda *_args: _Reservation(5.0),
+                commit=commit,
+                open_response=lambda _request, _timeout: response,
+            )
+        )
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        assert sink.text_delta.wait(1), (sink.chunks, result)
+        assert b"hello" in b"".join(sink.chunks)
+        assert response.blocked.is_set()
+        assert b"message_stop" not in b"".join(sink.chunks)
+    finally:
+        response.release.set()
+        worker.join(timeout=2)
+    assert result == [200]
+    assert commit.terminal_committed
