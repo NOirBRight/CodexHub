@@ -181,3 +181,18 @@ def test_prepare_exchange_keeps_named_adaptations() -> None:
     assert prepared.adaptations
     assert all(len(item) == 3 for item in prepared.adaptations)
     assert "synthetic" not in repr(prepared.adaptations)
+
+
+def test_rewritten_messages_headers_drop_upstream_zstd() -> None:
+    import gateway_request
+
+    headers = gateway_request.filtered_response_headers(
+        {"Content-Type": "application/json", "Content-Encoding": "zstd", "Content-Length": "9"},
+        False,
+        content_length=2,
+        content_type="application/json",
+        content_encoding=None,
+    )
+    lowered = {key.lower(): value for key, value in headers}
+    assert "content-encoding" not in lowered
+    assert lowered["content-length"] == "2"

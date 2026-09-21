@@ -1229,6 +1229,7 @@ def relay_upstream_response(
                 is_event_stream,
                 content_length,
                 content_type=content_type,
+                content_encoding=None,
             ):
                 self.send_header(key, value)
             self.send_header("X-Codex-Proxy-Upstream", upstream_name)
