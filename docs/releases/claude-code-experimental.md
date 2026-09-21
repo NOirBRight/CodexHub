@@ -1,7 +1,7 @@
 # Claude Code Gateway client (experimental)
 
-Not a stable release claim. Verified observation pin: Claude Code **2.1.278**.
-Live three-protocol CLI evidence is still blocked on a dedicated credential contract.
+Not a stable release claim. Pin: Claude Code **2.1.278** (Linux verified).
+Credential contract: #558. Windows `yoga` is **2.1.232** (drift; version-gate exit 2).
 
 ## English
 
@@ -9,7 +9,7 @@ Live three-protocol CLI evidence is still blocked on a dedicated credential cont
 - Converted: Chat Completions and Responses. Native Anthropic SSE is passthrough.
 - Unsupported: `count_tokens` (explicit 400). Images/caching/compaction/subagents are not live-proven.
 - Non-Claude models are not Anthropic-endorsed.
-- Stable requires: credential-contract Issue, live CLI multi-turn/text/SSE/tools/cancel/errors on all three upstreams, and an updated support table.
+- Stable requires: Windows CLI at the same pin as Linux, plus release-operator evidence on yoga. Linux live text/tool/cancel is recorded, not a Windows GO.
 
 ## 中文
 
@@ -17,4 +17,4 @@ Live three-protocol CLI evidence is still blocked on a dedicated credential cont
 - 转换：Chat Completions 与 Responses。原生 Anthropic SSE 透传。
 - 不支持：`count_tokens`（明确 400）。图片/缓存/压缩/子代理未经 live 证明。
 - 非 Claude 模型未经 Anthropic 背书。
-- 转稳定需要：独立凭证合同 Issue、三条上游上的真实 CLI 多轮/文本/SSE/工具/取消/错误证据，以及更新后的支持表。
+- 转稳定需要：Windows CLI 与 Linux 同一 pin，以及 yoga 上的 release 操作证据。Linux live 文本/工具/取消已记录，不能代替 Windows。
