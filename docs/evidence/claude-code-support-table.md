@@ -3,7 +3,9 @@
 Status: **experimental**. Not a live GO. Pinned observed CLI: `2.1.278`
 (Linux host `claude --version` matches; version-gate exit 0). Windows host
 `yoga` upgraded `C:\Users\noirb\.local\bin\claude.exe` **2.1.232 → 2.1.278**.
-Windows live rows still wait on operator login.
+Windows live: isolated checkout `D:\Workstation\CodexHub-claude-live` SHA
+`9eb0634`, Claude Code 2.1.278 `-p` Luna `is_error=false`, `result=ok`.
+Operator worktree `D:\Workstation\CodexHub` was not used.
 Loopback harness
 `self-check` and `upstream-self-check --scenario text` passed on this SHA
 (buffered fixtures only). Isolated CLI `run --enable-discovery` on 2.1.278
@@ -30,8 +32,8 @@ Official Codex `gpt-5.6-luna` (Responses), CommandCode
 
 Live (campaign Gateway, isolated `CODEX_HOME`, no keys in git):
 
-- Responses/`gpt-5.6-luna`: HTTP JSON+SSE GO. Claude Code CLI 2.1.278 `-p` `is_error=false`, `result=ok`.
+- Responses/`gpt-5.6-luna`: Linux HTTP JSON+SSE + CLI `-p` `result=ok`. Windows CLI 2.1.278 `-p` `result=ok` (Official only; CommandCode/DeepSeek are not in yoga providers).
 - Chat/`commandcode/deepseek/deepseek-v4.1-flash`: HTTP JSON GO; Claude Code CLI `-p` `is_error=false`, `result=ok`.
 - Native Anthropic via DeepSeek `deepseek-flash`: HTTP JSON+SSE GO; Claude Code CLI `-p` `is_error=false`, `result=ok`. Invalid `max_tokens=0` returns HTTP 400.
 
-Live tool HTTP: all three identities returned `stop_reason=tool_use` with `get_weather` and `city` input. DeepSeek required `thinking.type=disabled` (`tool_choice` + thinking is 400). Cancellation still not live-proven. No keys in git.
+Live tool HTTP (Linux): all three identities returned `stop_reason=tool_use` with `get_weather`. DeepSeek required `thinking.type=disabled`. No keys in git.
