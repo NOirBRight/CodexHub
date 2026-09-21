@@ -43,6 +43,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/capture_issue_392_collaboration_runtime.py",
     "scripts/capture_issue_62_live_evidence.py",
     "scripts/check_codex_task_creation_lifecycle.py",
+    "scripts/claude_code_version_gate.py",
     "scripts/claude_messages_loopback_harness.py",
     "scripts/ci/check_python_test_partitions.py",
     "scripts/ci/ci_change_plan.py",
