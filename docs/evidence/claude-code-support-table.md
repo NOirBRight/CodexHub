@@ -2,8 +2,8 @@
 
 Status: **experimental**. Not a live GO. Pinned observed CLI: `2.1.278`
 (Linux host `claude --version` matches; version-gate exit 0). Windows host
-`yoga` has Claude Code **2.1.232** (`C:\Users\noirb\.local\bin\claude.exe`);
-that is version drift vs the pin, so Windows live rows are not claimed.
+`yoga` upgraded `C:\Users\noirb\.local\bin\claude.exe` **2.1.232 → 2.1.278**.
+Windows live rows still wait on operator login.
 Loopback harness
 `self-check` and `upstream-self-check --scenario text` passed on this SHA
 (buffered fixtures only). Isolated CLI `run --enable-discovery` on 2.1.278
