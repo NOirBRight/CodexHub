@@ -243,6 +243,25 @@ function GatewayPageImpl({
     () => new Map(clientInfos.map((client) => [client.id, client])),
     [clientInfos],
   );
+  const exportedModels = useMemo(
+    () =>
+      providers.flatMap((provider) =>
+        provider.enabled
+          ? provider.models
+              .filter(
+                (model) => model.enabled && model.gateway_exported !== false,
+              )
+              .map((model) => {
+                const id =
+                  provider.id === "openai" || provider.id === "official"
+                    ? model.id
+                    : `${provider.id}/${model.id}`;
+                return { id, label: model.display_name || id };
+              })
+          : [],
+      ),
+    [providers],
+  );
 
   useEffect(() => {
     if (!clientBusy) {
@@ -406,6 +425,7 @@ function GatewayPageImpl({
     clientId: string,
     owner: RoutingOwner,
     forceTakeover = false,
+    selectedModel?: string | null,
   ) {
     setClientBusy(`${clientId}:switch:${owner}`);
     const clientName =
@@ -431,7 +451,7 @@ function GatewayPageImpl({
           const result = await api.switchGatewayClientRoute(
             clientId,
             owner,
-            defaultModel,
+            selectedModel || defaultModel,
             shouldForceTakeover,
           );
           if (!result.applied) {
@@ -520,7 +540,11 @@ function GatewayPageImpl({
     busy === "start" || busy === "stop" || busy === "restart";
   const apiKeyCopied = copiedTarget === "gateway-api-key";
 
-  function handleConnectionToggle(clientId: string, connect: boolean) {
+  function handleConnectionToggle(
+    clientId: string,
+    connect: boolean,
+    model?: string | null,
+  ) {
     if (clientId === "dsh") {
       return void toggleDshConnection(connect);
     }
@@ -535,7 +559,12 @@ function GatewayPageImpl({
     const takeoverRequired =
       info?.route_owner !== "official" &&
       info?.managed_by_current_app === false;
-    return void switchClientMode(clientId, runtimeOwner, takeoverRequired);
+    return void switchClientMode(
+      clientId,
+      runtimeOwner,
+      takeoverRequired,
+      model,
+    );
   }
 
   async function toggleDshConnection(connect: boolean) {
@@ -884,9 +913,10 @@ function GatewayPageImpl({
                   info={clientInfoById.get(client.id)}
                   busy={Boolean(clientBusy?.startsWith(client.id))}
                   enabledModelCount={enabledModelCount}
+                  exportedModels={exportedModels}
                   onRefresh={refreshGatewayClients}
-                  onToggle={(connect) =>
-                    handleConnectionToggle(client.id, connect)
+                  onToggle={(connect, model) =>
+                    handleConnectionToggle(client.id, connect, model)
                   }
                 />
               ))}
