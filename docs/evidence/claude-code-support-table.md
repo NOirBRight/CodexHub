@@ -15,7 +15,7 @@ Official Codex `gpt-5.6-luna` (Responses) and CommandCode
 | Capability | Class | Notes |
 | --- | --- | --- |
 | Main-session text JSON | adapted / preserved | Native Anthropic passthrough; Chat/Responses converted |
-| Incremental SSE | adapted | Live Luna `POST /v1/messages?stream=true` HTTP 200, deltas `CODEXHUB_E2E_OK`, `message_stop`. Chat live conversion currently fail-closes |
+| Incremental SSE | adapted | Live Luna HTTP and Claude Code CLI 2.1.278 print-run `result=ok` |
 | Tool call/result identity | adapted | Isolated CLI tool scenario: 2 messages, `stop_reason=end_turn`, no egress |
 | Discovery `/v1/models` | adapted | CLI 2.1.278 cached 2 `claude*` ids; non-matching ids dropped before cache |
 | Role mappings | adapted | Env keys written on Connect; empty mapping allowed |
@@ -24,11 +24,10 @@ Official Codex `gpt-5.6-luna` (Responses) and CommandCode
 | Error handling | adapted | Isolated CLI error scenario: `is_error`, HTTP 400 surfaced, no egress |
 | Cancellation | unknown | Native cancel exists in prototype; not live-proven |
 
-Live HTTP (campaign Gateway, isolated `CODEX_HOME`, no keys in git):
+Live (campaign Gateway, isolated `CODEX_HOME`, no keys in git):
 
-- Responses/`gpt-5.6-luna`: streaming Messages GO.
-- Chat/`commandcode/deepseek/deepseek-v4.1-flash`: HTTP 400 `unsupported_for_chat_conversion`.
+- Responses/`gpt-5.6-luna`: HTTP JSON+SSE GO. Claude Code CLI 2.1.278 `-p` `is_error=false`, `result=ok`, `stop_reason=end_turn`.
+- Chat/`commandcode/deepseek/deepseek-v4.1-flash`: conversion now runs; CommandCode itself returns HTTP 400.
 - Native Anthropic: not approved, not run.
-- Real Claude Code CLI against the same Luna route: model rewrite to `openai/gpt-5.6-luna` observed; CLI then dropped the SSE (`DownstreamKeepaliveFailedError` / broken pipe). Not a CLI GO.
 
-Experimental → stable still needs a real-CLI pass on each approved upstream, plus a Chat conversion that does not refuse the live CommandCode body.
+Experimental → stable still needs a CommandCode 400 diagnosis and native Anthropic if ever approved.
