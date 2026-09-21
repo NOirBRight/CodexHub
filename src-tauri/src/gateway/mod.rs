@@ -42,6 +42,9 @@ pub use readback::verify_apply_readback;
 use clients::codex::read_codex_auth_status;
 #[cfg(test)]
 use clients::grok::{grok_ownership_bounded_cleanup, restore_grok_config_with_backup_roots};
+use clients::claude::{
+    claude_installed, detect_claude_config_path, detect_claude_route_details, detect_claude_version,
+};
 use clients::grok::{
     detect_grok_config_path, detect_grok_route_details, detect_grok_version, grok_home,
     grok_injected_keys_may_be_hidden, grok_installed,
@@ -807,6 +810,38 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
             .then(|| npm_latest_version("@xai-official/grok"))
             .flatten(),
     });
+    let claude_path = detect_claude_config_path();
+    let claude_installed = claude_installed();
+    let claude_route_details = detect_claude_route_details(current_owner, settings.proxy_port);
+    let claude_route_mode = route_mode_for_owner(
+        claude_route_details.0,
+        current_owner,
+        pending_sync_is_stale(
+            pending_client_ids.contains("claude"),
+            claude_route_details.0,
+            current_owner,
+        ),
+    );
+    clients.push(GatewayClientInfo {
+        id: "claude".to_string(),
+        name: "Claude Code".to_string(),
+        kind: "Terminal client".to_string(),
+        installed: claude_installed,
+        auto_apply_supported: claude_installed,
+        config_path: Some(claude_path),
+        route_owner: claude_route_details.0,
+        route_endpoint: claude_route_details.1,
+        managed_by_current_app: claude_route_details.0 == current_owner,
+        route_mode: claude_route_mode.to_string(),
+        status: if claude_installed {
+            "Connect changes this user's Claude Code default route. Restart Claude Code after applying.".to_string()
+        } else {
+            gateway_client_status(false, claude_route_mode).to_string()
+        },
+        versions_checked: include_versions && claude_installed,
+        current_version: include_versions.then(detect_claude_version).flatten(),
+        latest_version: None,
+    });
     let dsh = detect_dsh_client();
     let dsh_report = if dsh.installed {
         dsh_client_readback().ok()
@@ -1307,7 +1342,10 @@ fn gateway_client_sync_skip_reason(client: &GatewayClientInfo) -> Option<String>
 }
 
 fn gateway_client_supports_native_apply(client_id: &str) -> bool {
-    matches!(client_id, "opencode" | "pi" | "omp" | "zcode" | "grok")
+    matches!(
+        client_id,
+        "opencode" | "pi" | "omp" | "zcode" | "grok" | "claude"
+    )
 }
 
 fn with_gateway_client_mutation_owner_gate<F>(

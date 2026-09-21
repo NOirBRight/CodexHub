@@ -13,6 +13,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::clients::claude::{
+    detect_claude_config_path, plan_claude_apply, preview_claude_config_with_path,
+    publish_claude_apply, restore_claude_config_with_backup_roots,
+};
 use super::clients::codex::{codex_home, isolated_apply_unsupported, isolated_preview_text};
 use super::clients::grok::{
     detect_grok_config_path, plan_grok_apply, preview_grok_config_with_path, publish_grok_apply,
@@ -491,6 +495,7 @@ pub struct PiAdapter;
 pub struct OmpAdapter;
 pub struct ZcodeAdapter;
 pub struct GrokAdapter;
+pub struct ClaudeAdapter;
 
 impl ManagedClientAdapter for OpenCodeAdapter {
     fn metadata(&self) -> ClientMetadata {
@@ -649,6 +654,37 @@ impl ManagedClientAdapter for GrokAdapter {
     }
 }
 
+impl ManagedClientAdapter for ClaudeAdapter {
+    fn metadata(&self) -> ClientMetadata {
+        ClientMetadata {
+            id: "claude",
+            supports_native: true,
+        }
+    }
+
+    fn inspect(&self, _ctx: &AdapterCtx<'_>) -> Result<ClientSnapshot, String> {
+        Ok(native_snapshot(
+            self.metadata().id,
+            config_present_for(self.metadata().id),
+        ))
+    }
+
+    fn plan(
+        &self,
+        intent: ClientIntent,
+        _ctx: &AdapterCtx<'_>,
+    ) -> Result<ClientMutationPlan, String> {
+        let mut plan = native_plan(
+            self.metadata().id,
+            intent,
+            target_write_paths(_ctx, vec![detect_claude_config_path()]),
+            &_ctx.target,
+        );
+        plan.restart_required = "Claude Code".to_owned();
+        Ok(plan)
+    }
+}
+
 pub fn adapter_for(id: &str) -> Option<&'static dyn ManagedClientAdapter> {
     match id {
         "dsh" => Some(&DshAdapter),
@@ -658,6 +694,7 @@ pub fn adapter_for(id: &str) -> Option<&'static dyn ManagedClientAdapter> {
         "omp" => Some(&OmpAdapter),
         "zcode" => Some(&ZcodeAdapter),
         "grok" => Some(&GrokAdapter),
+        "claude" => Some(&ClaudeAdapter),
         _ => None,
     }
 }
@@ -681,6 +718,7 @@ fn config_present_for(id: &str) -> bool {
                 || targets.v2_cache_path.exists()
         }
         "grok" => detect_grok_config_path().exists(),
+        "claude" => detect_claude_config_path().exists(),
         _ => false,
     }
 }
@@ -706,6 +744,10 @@ pub enum NativeApplySpec<'a> {
         backup_root: &'a Path,
     },
     Grok {
+        path: &'a Path,
+        backup_roots: &'a [(PathBuf, super::BackupChannel)],
+    },
+    Claude {
         path: &'a Path,
         backup_roots: &'a [(PathBuf, super::BackupChannel)],
     },
@@ -799,6 +841,14 @@ pub fn apply_native_at(
             }
             Ok(result)
         }
+        NativeApplySpec::Claude { path, backup_roots } => {
+            let plan = plan_claude_apply(path, settings, providers, model)?;
+            let result = publish_claude_apply(&plan, backup_roots)?;
+            if result.applied {
+                readback_native_at("claude", &[path.to_path_buf()], settings, providers, model)?;
+            }
+            Ok(result)
+        }
     }
 }
 
@@ -810,7 +860,7 @@ pub fn readback_native_at(
     model: &str,
 ) -> Result<(), String> {
     match client_id {
-        "opencode" | "pi" | "omp" | "zcode" | "grok" => {
+        "opencode" | "pi" | "omp" | "zcode" | "grok" | "claude" => {
             super::verify_apply_readback(client_id, paths, settings, providers, model)
         }
         "codex" => Err(
@@ -933,6 +983,19 @@ pub fn apply_native(
                 model,
             )
         }
+        "claude" => {
+            let path = detect_claude_config_path();
+            let backup_roots = super::client_backup_roots_for_apply("claude");
+            apply_native_at(
+                NativeApplySpec::Claude {
+                    path: &path,
+                    backup_roots: &backup_roots,
+                },
+                settings,
+                providers,
+                model,
+            )
+        }
         "codex" => Ok(codex_apply_result()),
         "dsh" => Ok(copy_only_apply(client_id)),
         _ => Ok(copy_only_apply(client_id)),
@@ -961,6 +1024,9 @@ pub enum NativePreviewSpec<'a> {
     Grok {
         path: &'a Path,
     },
+    Claude {
+        path: &'a Path,
+    },
 }
 
 pub fn preview_native_at(
@@ -986,6 +1052,9 @@ pub fn preview_native_at(
         }
         NativePreviewSpec::Grok { path } => {
             preview_grok_config_with_path(path, settings, providers, model)
+        }
+        NativePreviewSpec::Claude { path } => {
+            preview_claude_config_with_path(path, settings, providers, model)
         }
     }
 }
@@ -1050,6 +1119,15 @@ pub fn preview_native(
                 model,
             )
         }
+        "claude" => {
+            let path = detect_claude_config_path();
+            preview_native_at(
+                NativePreviewSpec::Claude { path: &path },
+                settings,
+                providers,
+                model,
+            )
+        }
         "codex" => Ok(codex_preview()),
         "dsh" => copy_only_preview(client_id, settings, providers, model),
         _ => copy_only_preview(client_id, settings, providers, model),
@@ -1087,6 +1165,10 @@ pub fn restore_native(
         "grok" => {
             let path = detect_grok_config_path();
             restore_grok_config_with_backup_roots(&path, backup_roots)
+        }
+        "claude" => {
+            let path = detect_claude_config_path();
+            restore_claude_config_with_backup_roots(&path, backup_roots)
         }
         "codex" => Ok(codex_restore_result()),
         _ => Ok(copy_only_restore(client_id)),
@@ -1161,6 +1243,17 @@ pub fn preview_native_isolated(
                 .first()
                 .ok_or_else(|| "grok isolated targets are missing files".to_string())?;
             preview_native_at(NativePreviewSpec::Grok { path }, settings, providers, model)
+        }
+        "claude" => {
+            let path = writable_paths
+                .first()
+                .ok_or_else(|| "claude isolated targets are missing files".to_string())?;
+            preview_native_at(
+                NativePreviewSpec::Claude { path },
+                settings,
+                providers,
+                model,
+            )
         }
         "codex" => Ok(codex_preview()),
         _ => Err(format!(
@@ -1261,6 +1354,25 @@ pub fn apply_native_isolated(
             }
             apply_native_at(
                 NativeApplySpec::Grok { path, backup_roots },
+                settings,
+                providers,
+                model,
+            )
+        }
+        "claude" => {
+            let path = writable_paths
+                .first()
+                .ok_or_else(|| "claude isolated targets are missing files".to_string())?;
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("failed to create claude dir: {error}"))?;
+            }
+            if !path.exists() {
+                fs::write(path, "{}")
+                    .map_err(|error| format!("failed to seed claude settings: {error}"))?;
+            }
+            apply_native_at(
+                NativeApplySpec::Claude { path, backup_roots },
                 settings,
                 providers,
                 model,
@@ -1373,7 +1485,7 @@ mod tests {
 
     #[test]
     fn has_existing_config_matches_adapter_config_present() {
-        for id in ["codex", "opencode", "pi", "omp", "zcode", "grok", "dsh"] {
+        for id in ["codex", "opencode", "pi", "omp", "zcode", "grok", "claude", "dsh"] {
             let adapter = adapter_for(id).expect("registered adapter");
             assert_eq!(
                 has_existing_config(id),
@@ -1421,13 +1533,17 @@ mod tests {
             adapter_for("codex").map(|adapter| adapter.metadata().id),
             Some("codex")
         );
+        assert_eq!(
+            adapter_for("claude").map(|adapter| adapter.metadata().id),
+            Some("claude")
+        );
         assert!(adapter_for("unknown").is_none());
     }
 
     #[test]
     fn native_adapters_plan_without_touching_activation() {
         let (_settings, ctx) = test_ctx();
-        for id in ["codex", "opencode", "pi", "omp", "zcode", "grok"] {
+        for id in ["codex", "opencode", "pi", "omp", "zcode", "grok", "claude"] {
             let adapter = adapter_for(id).expect("native adapter");
             let snapshot = adapter.inspect(&ctx).expect("inspect");
             assert_eq!(snapshot.client_id, id);
@@ -1437,7 +1553,11 @@ mod tests {
             assert!(!plan.activation_touched, "{id} must not touch activation");
             assert_eq!(
                 plan.restart_required,
-                if id == "grok" { "Grok CLI" } else { "none" }
+                match id {
+                    "grok" => "Grok CLI",
+                    "claude" => "Claude Code",
+                    _ => "none",
+                }
             );
         }
     }

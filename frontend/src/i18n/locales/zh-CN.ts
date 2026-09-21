@@ -303,6 +303,7 @@ const zhCN = {
       pi: "轻量 CLI",
       omp: "提示词运行时",
       grok: "终端客户端",
+      claude: "终端客户端",
     },
     grokAllowedModelsMayHide: "注入的选择器可能被 allowed_models 隐藏。",
     connected: "已连接",
