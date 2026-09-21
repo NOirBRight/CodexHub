@@ -1,7 +1,7 @@
 # Claude Code Gateway client (experimental)
 
 Not a stable release claim. Pin: Claude Code **2.1.278** (Linux verified).
-Credential contract: #558. Windows `yoga` is **2.1.232** (drift; version-gate exit 2).
+Credential contract: #558. Windows `yoga` CLI is now **2.1.278**; live rows wait on login.
 
 ## English
 
