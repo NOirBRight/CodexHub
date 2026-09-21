@@ -217,16 +217,7 @@ class CodexProxyHandler(GatewayHandlerMixin, BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/v1/messages/count_tokens":
-            self._send_json_and_close(
-                400,
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "invalid_request_error",
-                        "message": "count_tokens is not supported on this Gateway",
-                    },
-                },
-            )
+            self._handle_count_tokens()
             return
         if parsed.path == "/v1/messages":
             self._proxy_post_request(inbound_format="anthropic_messages")

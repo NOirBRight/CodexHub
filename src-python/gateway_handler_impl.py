@@ -18,6 +18,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
+import anthropic_messages
 import collaboration_adapter as _collaboration_adapter_module
 import gateway_admission
 import gateway_catalog_runtime
@@ -1267,6 +1268,67 @@ class GatewayHandlerMixin:
             return False
         self.close_connection = True
         return True
+
+    def _handle_count_tokens(self) -> None:
+        request_context = request_context_from_headers(self.headers)
+        if not _local_request_authorized(self.headers, request_context):
+            self._send_json_and_close(401, _local_gateway_auth_error_payload())
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            self._send_json_and_close(400, {"error": "invalid Content-Length"})
+            return
+        if content_length <= 0:
+            self._send_json_and_close(
+                400,
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "request body is required",
+                    },
+                },
+            )
+            return
+        raw = self.rfile.read(content_length)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            self._send_json_and_close(
+                400,
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "request body is not JSON",
+                    },
+                },
+            )
+            return
+        if not isinstance(payload, dict):
+            self._send_json_and_close(
+                400,
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "request body must be an object",
+                    },
+                },
+            )
+            return
+        tokens = anthropic_messages.estimate_input_tokens(payload)
+        gateway_events.write_proxy_event(
+            "count_tokens_estimated",
+            model=payload.get("model"),
+            input_tokens=tokens,
+            **request_context,
+        )
+        self._send_json_and_close(
+            200,
+            {"type": "message_count_tokens", "input_tokens": tokens},
+        )
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = _json_response_bytes(payload)

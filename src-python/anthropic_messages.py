@@ -63,6 +63,41 @@ CHAT_IMAGE_URL_FIELDS = {"url", "detail"}
 CHAT_CONTENT_PART_FIELDS = {"type", "text", "image_url"}
 
 
+def estimate_input_tokens(payload: Mapping[str, Any]) -> int:
+    """Best-effort stand-in for POST /v1/messages/count_tokens.
+
+    # ponytail: CJK~1 token, else ~4 chars; swap for a real tokenizer if
+    # Claude Code preflight drift starts rejecting requests.
+    """
+    texts: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            texts.append(value)
+        elif isinstance(value, Mapping):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(payload)
+    joined = "\n".join(texts)
+    tokens = 0
+    latin = 0
+    for char in joined:
+        if ord(char) > 0x2E80:
+            if latin:
+                tokens += max(1, (latin + 3) // 4)
+                latin = 0
+            tokens += 1
+        else:
+            latin += 1
+    if latin:
+        tokens += max(1, (latin + 3) // 4)
+    return max(1, tokens)
+
+
 def sse_event_resets_idle_timeout(event: SseEvent) -> bool:
     name = event.event.decode("utf-8") if event.event else ""
     return name in {
