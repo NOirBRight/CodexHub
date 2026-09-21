@@ -818,7 +818,13 @@ def choose_upstream(model_id: str) -> UpstreamFacts:
         raise ValueError("model is required")
     import claude_code_projection
 
-    slug = claude_code_projection.resolve_projected_model_id(slug, current_catalog_data())
+    from providers_config import exported_gateway_model_ids
+
+    slug = claude_code_projection.resolve_projected_model_id(
+        slug,
+        current_catalog_data(),
+        extra_slugs=exported_gateway_model_ids(),
+    )
     policy = _policy_reader(_facts().policy_path)
     official_fast = _official_fast_variant(slug, policy)
     if official_fast is not None:
@@ -1023,8 +1029,9 @@ def openai_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
 def discovery_model_list(catalog: Mapping[str, Any], *, anthropic: bool) -> dict[str, Any]:
     if anthropic:
         from claude_code_projection import claude_model_list
+        from providers_config import exported_gateway_model_ids
 
-        return claude_model_list(catalog)
+        return claude_model_list(catalog, extra_slugs=exported_gateway_model_ids())
     return openai_model_list(catalog)
 
 

@@ -40,6 +40,15 @@ def test_projected_id_passes_claude_filter_and_round_trips() -> None:
     assert "volc/glm-5.2" not in ids
 
 
+def test_extra_slugs_round_trip_projected_ids() -> None:
+    extra = ("deepseek-anthropic/deepseek-flash",)
+    projected = projected_model_id(extra[0])
+    assert CLAUDE_DISCOVERY_RE.search(projected)
+    assert resolve_projected_model_id(projected, {"models": []}, extra_slugs=extra) == extra[0]
+    ids = [row["id"] for row in claude_model_list({"models": []}, extra_slugs=extra)["data"]]
+    assert projected in ids
+
+
 def test_projection_map_fails_closed_on_collision() -> None:
     catalog = {
         "models": [
