@@ -23,12 +23,18 @@ produces the Responses request.
 from __future__ import annotations
 
 import json
+import math
+import queue
+import socket
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping
 
 from gateway_errors import UpstreamStreamIncompleteError
+from gateway_sse import DownstreamStreamCommit
+from gateway_transport import UpstreamSseReaderLifecycle
 from protocol_translation import (
     UnsupportedProtocolTranslationError,
     chat_completion_to_response_body,
@@ -37,7 +43,13 @@ from protocol_translation import (
     decode_protocol_json,
     response_events_to_chat_stream_chunks,
 )
-from sse_events import SseEventAssembler
+from sse_events import (
+    DEFAULT_MAX_FRAME_BYTES,
+    SseAssemblerClosedError,
+    SseEvent,
+    SseEventAssembler,
+    SseFrameTooLargeError,
+)
 
 
 __all__ = [
@@ -55,6 +67,7 @@ __all__ = [
     "execute_exchange",
     "parse_request",
     "prepare_upstream_request",
+    "relay_incremental_exchange",
 ]
 
 ANTHROPIC_VERSION = "2023-06-01"
@@ -1652,6 +1665,342 @@ def adapt_upstream_stream(
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
         return None
+
+
+class _IncrementalCancelled(Exception):
+    pass
+
+
+class _IncrementalDeadlineExceeded(TimeoutError):
+    pass
+
+
+class _IncrementalResponseTooLarge(ValueError):
+    pass
+
+
+def _native_terminal_kind(event: SseEvent) -> str | None:
+    event_name = (
+        event.event.decode("utf-8", errors="replace").strip()
+        if event.event is not None
+        else ""
+    )
+    payload: Any = None
+    if event.data:
+        try:
+            payload = decode_protocol_json(event.data)
+        except (UnicodeError, json.JSONDecodeError, UnsupportedProtocolTranslationError):
+            payload = None
+    payload_type = payload.get("type") if isinstance(payload, Mapping) else None
+    if event_name == "error" or payload_type == "error":
+        return "error"
+    if event_name == "message_stop" or payload_type == "message_stop":
+        return "success"
+    return None
+
+
+def _close_incremental_response(response: Any) -> None:
+    """Abort the underlying socket before closing a blocked stdlib response."""
+    for name in ("cancel",):
+        action = getattr(response, name, None)
+        if callable(action):
+            try:
+                action()
+            except Exception:
+                pass
+    candidates = (
+        getattr(response, "_sock", None),
+        getattr(getattr(response, "fp", None), "_sock", None),
+        getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
+        getattr(getattr(response, "connection", None), "sock", None),
+        getattr(getattr(getattr(response, "_response", None), "connection", None), "sock", None),
+    )
+    seen: set[int] = set()
+    for candidate in candidates:
+        if candidate is None or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        shutdown = getattr(candidate, "shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        close_socket = getattr(candidate, "close", None)
+        if callable(close_socket):
+            try:
+                close_socket()
+            except OSError:
+                pass
+    close = getattr(response, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+class _AbortableNativeResponse:
+    """Give the shared reader lifecycle a bounded socket-abort close seam."""
+
+    def __init__(self, response: Any) -> None:
+        self._response = response
+
+    def readline(self) -> bytes:
+        return self._response.readline()
+
+    def close(self) -> None:
+        _close_incremental_response(self._response)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._response, name)
+
+
+def _open_native_response(request: urllib.request.Request, timeout: float) -> Any:
+    """Open exactly one no-redirect, no-retry native attempt."""
+    return urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout)
+
+
+def relay_incremental_exchange(
+    request_body: bytes,
+    *,
+    upstream_format: str,
+    url: str,
+    admit: Callable[[str, str, str, bytes], Any],
+    commit: DownstreamStreamCommit,
+    timeout: float = 30.0,
+    headers: Mapping[str, str] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    max_response_bytes: int = MAX_BUFFERED_RESPONSE_BYTES,
+    open_response: Callable[[urllib.request.Request, float], Any] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> int | NotForwardable:
+    """Relay one native Anthropic SSE attempt without buffering.
+
+    ``commit`` must already be configured with the native terminal observer and
+    header callback.  Its successful write/flush and ``terminal_committed`` state
+    are authoritative; this function does not maintain a second commitment ledger
+    or instruct a caller to rewrite an HTTP status that may already be committed.
+    Converted incremental formats are refused before admission.  The default
+    opener makes one no-redirect attempt and never uses Gateway retry policy.
+    """
+
+    selected = str(upstream_format or "").strip().lower()
+    if selected != "anthropic_messages":
+        return _response_refusal("unsupported_upstream_format", selected or "missing")
+    prepared = prepare_upstream_request(request_body, selected)
+    if isinstance(prepared, NotForwardable):
+        return prepared
+    try:
+        payload = decode_protocol_json(prepared.body)
+    except (UnicodeError, json.JSONDecodeError, UnsupportedProtocolTranslationError):
+        payload = None
+    if not isinstance(payload, Mapping) or payload.get("stream") is not True:
+        return _response_refusal("incremental_requires_stream", "stream")
+    if (
+        isinstance(max_response_bytes, bool)
+        or not isinstance(max_response_bytes, int)
+        or max_response_bytes <= 0
+    ):
+        return _response_refusal("invalid_response_limit", "max_response_bytes")
+    try:
+        timeout_is_finite = math.isfinite(timeout)
+    except (OverflowError, TypeError):
+        timeout_is_finite = False
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not timeout_is_finite
+        or timeout <= 0
+    ):
+        return _response_refusal("invalid_timeout", "timeout")
+    if cancelled is not None and cancelled():
+        commit.cancel()
+        return 499
+
+    method = "POST"
+    request_headers = {"content-type": "application/json", "accept": "text/event-stream"}
+    request_headers.update(headers or {})
+    admission_started = monotonic()
+    reservation = admit(selected, method, url, prepared.body)
+    deadline_remaining = getattr(reservation, "deadline_remaining", None)
+    try:
+        deadline_is_finite = math.isfinite(deadline_remaining)
+    except (OverflowError, TypeError):
+        deadline_is_finite = False
+    if (
+        isinstance(deadline_remaining, bool)
+        or not isinstance(deadline_remaining, (int, float))
+        or not deadline_is_finite
+        or deadline_remaining < 0
+    ):
+        commit.cancel()
+        return _response_refusal("invalid_admission_reservation", "deadline_remaining")
+    absolute_deadline = admission_started + float(deadline_remaining)
+    if not math.isfinite(absolute_deadline):
+        commit.cancel()
+        return _response_refusal("invalid_admission_reservation", "deadline_remaining")
+    attempt_deadline = min(absolute_deadline, admission_started + float(timeout))
+    remaining = attempt_deadline - monotonic()
+    if remaining <= 0:
+        commit.cancel()
+        return _response_refusal("admission_deadline_exhausted", "deadline_remaining")
+
+    request = urllib.request.Request(
+        url,
+        data=prepared.body,
+        headers=request_headers,
+        method=method,
+    )
+    opener = open_response or _open_native_response
+    response: Any | None = None
+    lifecycle: UpstreamSseReaderLifecycle | None = None
+    try:
+        try:
+            response = opener(request, min(float(timeout), remaining))
+        except urllib.error.HTTPError as error:
+            response = error
+        except (OSError, TimeoutError, urllib.error.URLError):
+            commit.cancel()
+            return 502
+        try:
+            response_status = int(getattr(response, "status", None) or getattr(response, "code", 200) or 200)
+        except (TypeError, ValueError):
+            commit.cancel()
+            return 502
+        response_headers = getattr(response, "headers", {})
+        response_type = response_headers.get("content-type", "") if response_headers is not None else ""
+        if not isinstance(response_type, str) or not _content_type_is_sse(response_type):
+            _close_incremental_response(response)
+            return _response_refusal("unsupported_incremental_response", "content_type")
+
+        lifecycle = UpstreamSseReaderLifecycle(
+            _AbortableNativeResponse(response),
+            cancellation_requested=cancelled,
+        )
+        commit.attach_upstream(lifecycle)
+
+        def read_lines(_response: Any, **_kwargs: Any) -> Iterable[bytes]:
+            lifecycle.start()
+            while True:
+                if cancelled is not None and cancelled():
+                    raise _IncrementalCancelled()
+                remaining_now = attempt_deadline - monotonic()
+                if remaining_now <= 0:
+                    raise _IncrementalDeadlineExceeded()
+                try:
+                    kind, value = lifecycle.get(timeout=min(0.1, remaining_now))
+                except queue.Empty:
+                    continue
+                if kind == "error":
+                    raise value
+                if not isinstance(value, bytes):
+                    raise ValueError("upstream SSE reader returned non-bytes")
+                yield value
+                if not value:
+                    return
+
+        def iter_events() -> Iterable[SseEvent]:
+            # Match gateway_relay.iter_upstream_sse_events, including deferred
+            # SseFrameTooLargeError after pending complete events. Copied so the
+            # isolated prototype can cap max_frame_bytes without importing the
+            # production relay stack.
+            assembler = SseEventAssembler(
+                max_frame_bytes=min(DEFAULT_MAX_FRAME_BYTES, max_response_bytes)
+            )
+            pending_events: list[SseEvent] = []
+            assembler_finished = False
+            deferred_size_error: SseFrameTooLargeError | None = None
+
+            def assemble_chunk(chunk: bytes) -> None:
+                nonlocal deferred_size_error
+                events: list[SseEvent] = []
+                try:
+                    assembler.feed(chunk, on_event=events.append)
+                except SseFrameTooLargeError as exc:
+                    deferred_size_error = exc
+                pending_events.extend(events)
+
+            try:
+                for line in read_lines(response):
+                    if not line:
+                        break
+                    assemble_chunk(line)
+                    ready = tuple(pending_events)
+                    pending_events.clear()
+                    yield from ready
+                    if deferred_size_error is not None:
+                        raise deferred_size_error
+                termination = assembler.finish()
+                assembler_finished = True
+                yield from termination.events
+                if termination.disposition == "incomplete":
+                    raise UpstreamStreamIncompleteError(
+                        "Upstream SSE stream ended with an incomplete pending frame"
+                    )
+            finally:
+                if not assembler_finished:
+                    try:
+                        assembler.cancel()
+                    except SseAssemblerClosedError:
+                        pass
+
+        def fail(status: int) -> int:
+            if not commit.terminal_committed:
+                commit.cancel()
+            return status
+
+        terminal_kind: str | None = None
+        forwarded = 0
+        reader_hung = False
+        try:
+            for event in iter_events():
+                if cancelled is not None and cancelled():
+                    raise _IncrementalCancelled()
+                size = len(event.raw)
+                if forwarded + size > max_response_bytes:
+                    raise _IncrementalResponseTooLarge()
+                if not commit.commit_sse_bytes(event.raw):
+                    terminal_kind = "downstream_closed"
+                    break
+                forwarded += size
+                terminal_kind = _native_terminal_kind(event)
+                if terminal_kind is not None:
+                    break
+        finally:
+            lifecycle.close()
+            joined, outcome = lifecycle.join(timeout=UpstreamSseReaderLifecycle.JOIN_TIMEOUT_SECONDS)
+            reader_hung = (not joined) or outcome == "upstream_sse_reader_thread_did_not_terminate"
+
+        cancelled_now = cancelled is not None and cancelled()
+        if reader_hung:
+            return fail(499 if cancelled_now else 502)
+        if terminal_kind is None:
+            return fail(499 if cancelled_now else 502)
+        if terminal_kind == "downstream_closed":
+            return fail(499)
+        if terminal_kind == "error":
+            if not commit.terminal_committed:
+                commit.cancel()
+            return response_status if response_status >= 400 else 502
+        if not commit.terminal_committed:
+            return fail(502)
+        return response_status
+    except _IncrementalCancelled:
+        commit.cancel()
+        return 499
+    except _IncrementalDeadlineExceeded:
+        commit.cancel()
+        return 504
+    except (_IncrementalResponseTooLarge, SseFrameTooLargeError, UpstreamStreamIncompleteError, OSError, TimeoutError, urllib.error.URLError, ValueError):
+        commit.cancel()
+        return 502
+    finally:
+        if response is not None:
+            # The reader lifecycle owns normal response closure; this is only a
+            # fallback for failures before the lifecycle was attached.
+            if lifecycle is None:
+                _close_incremental_response(response)
 
 
 def execute_exchange(
