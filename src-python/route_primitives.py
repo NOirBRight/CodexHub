@@ -37,6 +37,9 @@ WIRE_RESPONSES_TO_CHAT = "responses_to_chat"
 WIRE_CHAT_TO_RESPONSES = "chat_to_responses"
 WIRE_RESPONSES_TO_ANTHROPIC = "responses_to_anthropic"
 WIRE_CHAT_TO_ANTHROPIC = "chat_to_anthropic"
+WIRE_ANTHROPIC_TO_RESPONSES = "anthropic_to_responses"
+WIRE_ANTHROPIC_TO_CHAT = "anthropic_to_chat"
+WIRE_UNSUPPORTED = "unsupported"
 
 CODEX_SEMANTIC_EXTERNAL_ADAPTER = "codex_app_external_adapter"
 CODEX_SEMANTIC_NONE = "none"
@@ -80,6 +83,8 @@ class AttemptRequestBodyMode(str, Enum):
     CONVERT_CHAT_TO_RESPONSES = "convert_chat_to_responses"
     CONVERT_RESPONSES_TO_ANTHROPIC = "convert_responses_to_anthropic"
     CONVERT_CHAT_TO_ANTHROPIC = "convert_chat_to_anthropic"
+    CONVERT_ANTHROPIC_TO_RESPONSES = "convert_anthropic_to_responses"
+    CONVERT_ANTHROPIC_TO_CHAT = "convert_anthropic_to_chat"
 
 
 class CallerRequestBodyMode(str, Enum):
