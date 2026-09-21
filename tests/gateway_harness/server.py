@@ -206,7 +206,12 @@ class GatewayHarness:
         }
 
     def _choose_upstream(self, model_id: str) -> dict[str, Any]:
-        slug = str(model_id)
+        import claude_code_projection
+
+        slug = claude_code_projection.resolve_projected_model_id(
+            str(model_id),
+            gateway_catalog_runtime.current_catalog_data(),
+        )
         if slug in {"gpt-5.5", "openai/gpt-5.5"}:
             return {
                 "name": "official",

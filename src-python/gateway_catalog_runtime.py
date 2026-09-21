@@ -816,6 +816,9 @@ def choose_upstream(model_id: str) -> UpstreamFacts:
     slug = canonical_model_id(str(model_id))
     if not slug:
         raise ValueError("model is required")
+    import claude_code_projection
+
+    slug = claude_code_projection.resolve_projected_model_id(slug, current_catalog_data())
     policy = _policy_reader(_facts().policy_path)
     official_fast = _official_fast_variant(slug, policy)
     if official_fast is not None:
