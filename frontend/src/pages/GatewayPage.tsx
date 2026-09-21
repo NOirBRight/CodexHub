@@ -243,25 +243,30 @@ function GatewayPageImpl({
     () => new Map(clientInfos.map((client) => [client.id, client])),
     [clientInfos],
   );
-  const exportedModels = useMemo(
-    () =>
-      providers.flatMap((provider) =>
-        provider.enabled
-          ? provider.models
-              .filter(
-                (model) => model.enabled && model.gateway_exported !== false,
-              )
-              .map((model) => {
-                const id =
-                  provider.id === "openai" || provider.id === "official"
-                    ? model.id
-                    : `${provider.id}/${model.id}`;
-                return { id, label: model.display_name || id };
-              })
-          : [],
-      ),
-    [providers],
-  );
+  const exportedModels = useMemo(() => {
+    const gatewayCatalog = status?.official_models ?? [];
+    if (gatewayCatalog.length > 0) {
+      return gatewayCatalog.map((model) => ({
+        id: model.id,
+        label: model.display_name || model.id,
+      }));
+    }
+    return providers.flatMap((provider) =>
+      provider.enabled
+        ? provider.models
+            .filter(
+              (model) => model.enabled && model.gateway_exported !== false,
+            )
+            .map((model) => {
+              const id =
+                provider.id === "openai" || provider.id === "official"
+                  ? model.id
+                  : `${provider.id}/${model.id}`;
+              return { id, label: model.display_name || id };
+            })
+        : [],
+    );
+  }, [providers, status?.official_models]);
 
   useEffect(() => {
     if (!clientBusy) {
