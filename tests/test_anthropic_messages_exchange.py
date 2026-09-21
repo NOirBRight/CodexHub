@@ -1439,3 +1439,30 @@ def test_converted_incremental_refuses_responses_without_identity() -> None:
     assert result.reason == "unsupported_upstream_stream"
     assert b"chatcmpl_" not in body_out
     assert b"message_start" not in body_out
+
+
+def test_json_message_from_anthropic_sse_keeps_text_after_thinking_and_ping() -> None:
+    from gateway_relay_anthropic import json_message_from_anthropic_sse
+    from sse_events import SseEvent
+
+    def frame(event: str, payload: dict[str, Any]) -> SseEvent:
+        data = json.dumps(payload, separators=(",", ":")).encode()
+        return SseEvent(raw=b"", lines=(), data=data, event=event.encode(), id=None, retry=None)
+
+    body = json_message_from_anthropic_sse(
+        [
+            frame("message_start", {"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "model": "deepseek-flash", "content": []}}),
+            frame("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}),
+            frame("ping", {"type": "ping"}),
+            frame("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            frame("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}),
+            frame("content_block_delta", {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "CODEXHUB_E2E_OK"}}),
+            frame("content_block_stop", {"type": "content_block_stop", "index": 1}),
+            frame("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 4}}),
+            frame("message_stop", {"type": "message_stop"}),
+        ]
+    )
+    assert body is not None
+    payload = json.loads(body)
+    assert payload["content"] == [{"type": "text", "text": "CODEXHUB_E2E_OK"}]
+    assert payload["stop_reason"] == "end_turn"

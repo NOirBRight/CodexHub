@@ -801,12 +801,16 @@ def relay_upstream_response(
             # Buffer the full SSE stream into a list of events.
             events: list[Mapping[str, Any]] = []
             chat_chunks: list[Mapping[str, Any] | str] = []
+            anthropic_sse_frames: list[Any] = []
             incomplete_frame = False
+            native_anthropic_json = (
+                want_anthropic_output and upstream_format == "anthropic_messages"
+            )
 
             try:
                 anthropic_converter = (
                     anthropic_messages.AnthropicToChatStreamConverter()
-                    if upstream_format == "anthropic_messages"
+                    if upstream_format == "anthropic_messages" and not native_anthropic_json
                     else None
                 )
                 for frame in iter_upstream_sse_events(
@@ -825,6 +829,9 @@ def relay_upstream_response(
                         frame,
                         verified_source_format=None if upstream_format == "anthropic_messages" else verified_source_format,
                     )
+                    if native_anthropic_json:
+                        anthropic_sse_frames.append(frame)
+                        continue
                     if payload is None:
                         continue
                     if anthropic_converter is not None:
@@ -849,11 +856,21 @@ def relay_upstream_response(
             # Reconstruct a Responses-format body from the events.
             if not converted_stream_failure:
                 try:
-                    if incomplete_frame:
+                    if native_anthropic_json:
+                        assembled = gateway_relay_anthropic.json_message_from_anthropic_sse(
+                            anthropic_sse_frames
+                        )
+                        if assembled:
+                            body = assembled
+                        else:
+                            raise UpstreamStreamIncompleteError(
+                                "Upstream SSE stream ended with an incomplete pending frame"
+                            )
+                    elif incomplete_frame:
                         raise UpstreamStreamIncompleteError(
                             "Upstream SSE stream ended with an incomplete pending frame"
                         )
-                    if (
+                    elif (
                         upstream_format in {"chat_completions", "anthropic_messages"}
                         and not want_chat_output
                     ):
