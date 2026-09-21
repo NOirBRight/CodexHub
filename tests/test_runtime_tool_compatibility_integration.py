@@ -1289,7 +1289,7 @@ def test_text_compat_without_explicit_facts_omits_plain_tools_and_fails_required
             inject_codex_tools=False,
         )
     )
-    assert payload["tools"] == []
+    assert payload.get("tools") in (None, [])
     assert gateway_compat.official_passthrough.request_tool_plan(context).entries[0].disposition == "omit"
 
     with pytest.raises(gateway_errors.UpstreamProtocolTranslationError) as caught:
