@@ -17,7 +17,7 @@ Official Codex `gpt-5.6-luna` (Responses), CommandCode
 | --- | --- | --- |
 | Main-session text JSON | adapted / preserved | Native Anthropic passthrough; Chat/Responses converted |
 | Incremental SSE | adapted | Live Luna HTTP and Claude Code CLI 2.1.278 print-run `result=ok` |
-| Tool call/result identity | adapted | Isolated CLI tool scenario: 2 messages, `stop_reason=end_turn`, no egress |
+| Tool call/result identity | adapted | Live HTTP `tool_use` `get_weather` on Luna, CommandCode, and DeepSeek (thinking disabled) |
 | Discovery `/v1/models` | adapted | CLI 2.1.278 cached 2 `claude*` ids; non-matching ids dropped before cache |
 | Role mappings | adapted | Env keys written on Connect; empty mapping allowed |
 | `count_tokens` | unsupported | Explicit Anthropic 400 |
@@ -31,4 +31,4 @@ Live (campaign Gateway, isolated `CODEX_HOME`, no keys in git):
 - Chat/`commandcode/deepseek/deepseek-v4.1-flash`: HTTP JSON GO; Claude Code CLI `-p` `is_error=false`, `result=ok`.
 - Native Anthropic via DeepSeek `deepseek-flash`: HTTP JSON+SSE GO; Claude Code CLI `-p` `is_error=false`, `result=ok`. Invalid `max_tokens=0` returns HTTP 400.
 
-Experimental → stable still wants tool/cancel/error live rows on each path. No keys in git.
+Live tool HTTP: all three identities returned `stop_reason=tool_use` with `get_weather` and `city` input. DeepSeek required `thinking.type=disabled` (`tool_choice` + thinking is 400). Cancellation still not live-proven. No keys in git.
