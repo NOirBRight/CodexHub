@@ -9,7 +9,9 @@ import pytest
 
 from claude_code_projection import (
     CLAUDE_DISCOVERY_RE,
+    bind_role_mappings,
     claude_model_list,
+    client_environment,
     projected_model_id,
     projection_map,
     resolve_projected_model_id,
@@ -47,6 +49,62 @@ def test_projection_map_fails_closed_on_collision() -> None:
     }
     with pytest.raises(Exception, match="collision"):
         projection_map(catalog)
+
+
+def _catalog(*slugs: str) -> dict[str, object]:
+    return {"models": [{"slug": slug} for slug in slugs]}
+
+
+def test_catalog_change_republishes_projection() -> None:
+    before = claude_model_list(_catalog("volc/glm-5.2"))
+    after_add = claude_model_list(_catalog("volc/glm-5.2", "xai/grok-4.6"))
+    after_remove = claude_model_list(_catalog("xai/grok-4.6"))
+    assert projected_model_id("volc/glm-5.2") in [row["id"] for row in before["data"]]
+    assert projected_model_id("xai/grok-4.6") in [row["id"] for row in after_add["data"]]
+    assert projected_model_id("volc/glm-5.2") not in [row["id"] for row in after_remove["data"]]
+
+
+def test_empty_mappings_still_export_default_model() -> None:
+    env, bindings = client_environment(
+        _catalog("volc/glm-5.2"),
+        default_model="volc/glm-5.2",
+        mappings={},
+    )
+    assert bindings == ()
+    assert env == {"ANTHROPIC_MODEL": projected_model_id("volc/glm-5.2")}
+
+
+def test_removed_mapping_target_is_invalid_not_substituted() -> None:
+    bindings = bind_role_mappings(
+        _catalog("volc/glm-5.2"),
+        {"haiku": "xai/grok-4.6"},
+    )
+    assert len(bindings) == 1
+    assert bindings[0].valid is False
+    assert "xai/grok-4.6" in (bindings[0].diagnostic or "")
+    env, _ = client_environment(
+        _catalog("volc/glm-5.2"),
+        default_model="volc/glm-5.2",
+        mappings={"haiku": "xai/grok-4.6"},
+    )
+    assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in env
+    assert env["ANTHROPIC_MODEL"] == projected_model_id("volc/glm-5.2")
+
+
+def test_unknown_role_fails_closed() -> None:
+    with pytest.raises(Exception, match="unknown Claude Code role"):
+        bind_role_mappings(_catalog("volc/glm-5.2"), {"background": "volc/glm-5.2"})
+
+
+def test_valid_role_mapping_projects_env_alias() -> None:
+    env, bindings = client_environment(
+        _catalog("volc/glm-5.2", "xai/grok-4.6"),
+        default_model="volc/glm-5.2",
+        mappings={"haiku": "xai/grok-4.6", "subagent": "volc/glm-5.2"},
+    )
+    assert all(binding.valid for binding in bindings)
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == projected_model_id("xai/grok-4.6")
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == projected_model_id("volc/glm-5.2")
 
 
 @pytest.fixture
