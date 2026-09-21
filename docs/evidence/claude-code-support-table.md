@@ -25,12 +25,12 @@ Official Codex `gpt-5.6-luna` (Responses), CommandCode
 | Tool call/result identity | adapted | Linux+Windows HTTP `tool_use` then `tool_result` (`sunny, 18C`) `end_turn` on all three |
 | Discovery `/v1/models` | adapted | CLI 2.1.278 cached 2 `claude*` ids; non-matching ids dropped before cache |
 | Role mappings | adapted | Env keys written on Connect; empty mapping allowed |
-| `count_tokens` | unsupported | Explicit Anthropic 400 |
-| Images | adapted | Valid 1×1 PNG live HTTP `end_turn`/`ok` on Luna, CommandCode, DeepSeek |
-| Prompt cache | adapted | `cache_control.ephemeral` live HTTP 200 on all three (CommandCode empty `max_tokens`) |
+| `count_tokens` | adapted | Best-effort local estimate (`message_count_tokens`). Live `input_tokens=8`. Not a billed tokenizer. |
+| Images | adapted | Linux+Windows 1×1 PNG HTTP `ok` on all three |
+| Prompt cache | adapted | Linux+Windows `cache_control.ephemeral` HTTP 200 on all three |
 | Compaction | unknown | Claude Code client-side; no Messages compact API. Not forced live. |
-| Thinking | unknown or fail-closed | DeepSeek thinking+tool_choice 400; otherwise not separately proven |
-| Subagents | adapted | Connect env maps haiku/sonnet/opus/fable. Isolated live with `ANTHROPIC_DEFAULT_HAIKU_MODEL`→Luna: Explore `spawned=1` `completed=1` `result=> ok`. Gateway still rejects unknown child ids. |
+| Thinking | adapted / upstream-limited | DeepSeek thinking-only HTTP has `thinking`+`text`. `tool_choice` with thinking is DeepSeek 400, not Gateway. |
+| Subagents | adapted | Linux+Windows Explore `completed=1` when DEFAULT_* maps to Luna (`resolvedModel` Luna). |
 | MCP | adapted | Chrome DevTools MCP (local binary, headless slim) connected; CLI 3-turn `result=ok` |
 | Error handling | adapted | Isolated CLI error scenario: `is_error`, HTTP 400 surfaced, no egress |
 | Cancellation | adapted | Linux DeepSeek and Windows Luna HTTP abort: `downstream_stream_closed` 499, `request_complete` 499 |
