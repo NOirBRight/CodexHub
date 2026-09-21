@@ -1257,3 +1257,73 @@ def test_converted_incremental_emits_responses_text_before_terminal_release() ->
         worker.join(timeout=2)
     assert result == [200]
     assert commit.terminal_committed
+
+
+def test_converted_incremental_cancellation_closes_blocked_response() -> None:
+    server = _StalledStreamServer()
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    sink = _RecordingSink()
+    cancelled = threading.Event()
+    commit = _native_commit(sink)
+    result: list[Any] = []
+
+    def run() -> None:
+        result.append(
+            relay_incremental_exchange(
+                _request(stream=True),
+                upstream_format="chat_completions",
+                url=f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                admit=lambda *_args: _Reservation(5.0),
+                commit=commit,
+                cancelled=cancelled.is_set,
+            )
+        )
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        assert server.started.wait(1)
+        cancelled.set()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+        assert server.client_closed.wait(1)
+        assert result == [499]
+        assert b"message_stop" not in b"".join(sink.chunks)
+        assert commit.downstream_closed
+    finally:
+        cancelled.set()
+        server.release.set()
+        worker.join(timeout=2)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+
+def test_converted_incremental_hard_deadline_closes_stalled_read() -> None:
+    server = _StalledStreamServer()
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    sink = _RecordingSink()
+    commit = _native_commit(sink)
+    started = time.monotonic()
+    try:
+        result = relay_incremental_exchange(
+            _request(stream=True),
+            upstream_format="responses",
+            url=f"http://127.0.0.1:{server.server_port}/v1/responses",
+            admit=lambda *_args: _Reservation(5.0),
+            commit=commit,
+            timeout=0.05,
+        )
+        elapsed = time.monotonic() - started
+        assert result == 504
+        assert elapsed < 2.5
+        assert b"message_stop" not in b"".join(sink.chunks)
+        assert commit.downstream_closed
+        assert server.client_closed.wait(1)
+    finally:
+        server.release.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
