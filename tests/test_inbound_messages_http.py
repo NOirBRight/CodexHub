@@ -1,0 +1,65 @@
+"""Public HTTP dispatch for inbound Anthropic Messages."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from tests.gateway_harness import GATEWAY_CLIENT_KEY, GatewayHarness, request_gateway
+
+
+def _auth_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {GATEWAY_CLIENT_KEY}",
+        "Content-Type": "application/json",
+        "Connection": "close",
+    }
+
+
+def _messages_body() -> bytes:
+    return json.dumps(
+        {
+            "model": "volc/glm-5.2",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+    ).encode()
+
+
+@pytest.fixture
+def harness() -> GatewayHarness:
+    with GatewayHarness() as running:
+        yield running
+
+
+def test_messages_query_variant_is_not_404(harness: GatewayHarness) -> None:
+    response = request_gateway(
+        harness.host,
+        harness.port,
+        "POST",
+        "/v1/messages?beta=true",
+        body=_messages_body(),
+        headers=_auth_headers(),
+        timeout=8.0,
+    )
+    assert response.status != 404
+
+
+def test_count_tokens_is_explicitly_unsupported(harness: GatewayHarness) -> None:
+    response = request_gateway(
+        harness.host,
+        harness.port,
+        "POST",
+        "/v1/messages/count_tokens",
+        body=_messages_body(),
+        headers=_auth_headers(),
+        timeout=8.0,
+    )
+    assert response.status == 400
+    payload = json.loads(response.body)
+    assert payload["type"] == "error"
+    assert payload["error"]["type"] == "invalid_request_error"
+    assert "count_tokens" in payload["error"]["message"]
+    assert harness.stub is not None
+    assert harness.stub.captures == []
