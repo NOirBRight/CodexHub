@@ -29,6 +29,6 @@ Live (campaign Gateway, isolated `CODEX_HOME`, no keys in git):
 
 - Responses/`gpt-5.6-luna`: HTTP JSON+SSE GO. Claude Code CLI 2.1.278 `-p` `is_error=false`, `result=ok`.
 - Chat/`commandcode/deepseek/deepseek-v4.1-flash`: HTTP JSON GO; Claude Code CLI `-p` `is_error=false`, `result=ok`.
-- Native Anthropic via DeepSeek `deepseek-flash`: HTTP SSE GO; Claude Code CLI `-p` `is_error=false`, `result=ok`.
+- Native Anthropic via DeepSeek `deepseek-flash`: HTTP JSON+SSE GO; Claude Code CLI `-p` `is_error=false`, `result=ok`. Invalid `max_tokens=0` returns HTTP 400.
 
 Experimental → stable still wants tool/cancel/error live rows on each path. No keys in git.
