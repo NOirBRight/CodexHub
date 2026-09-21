@@ -23,7 +23,7 @@ Official Codex `gpt-5.6-luna` (Responses), CommandCode
 | `count_tokens` | unsupported | Explicit Anthropic 400 |
 | Images / caching / compaction / subagents / thinking | unknown or fail-closed | Not live-proven |
 | Error handling | adapted | Isolated CLI error scenario: `is_error`, HTTP 400 surfaced, no egress |
-| Cancellation | unknown | Native cancel exists in prototype; not live-proven |
+| Cancellation | adapted | Live HTTP abort on DeepSeek SSE: `downstream_stream_closed` status 499, `request_complete` 499, no fabricated success |
 
 Live (campaign Gateway, isolated `CODEX_HOME`, no keys in git):
 
