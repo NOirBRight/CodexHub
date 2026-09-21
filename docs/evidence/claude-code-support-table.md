@@ -1,7 +1,10 @@
 # Claude Code Gateway support table (#78)
 
-Status: **experimental**. Not a live GO. Pinned observed CLI: `2.1.278`.
-Live credential-contract Issue is still missing, so no live matrix rows.
+Status: **experimental**. Not a live GO. Pinned observed CLI: `2.1.278`
+(host `claude --version` matches; version-gate exit 0). Loopback harness
+`self-check` and `upstream-self-check --scenario text` passed on this SHA
+(buffered fixtures only). Live credential-contract Issue is still missing,
+so no live matrix rows.
 
 | Capability | Class | Notes |
 | --- | --- | --- |
