@@ -44,6 +44,22 @@ def _anthropic_sse_terminal_observer(event_name: str | None, _data: bytes, paylo
     )
 
 
+def _anthropic_sse_terminal_kind(frame: SseEvent) -> str | None:
+    event_name = frame.event.decode("utf-8") if frame.event else ""
+    payload: Any = None
+    if frame.data:
+        try:
+            payload = json.loads(frame.data)
+        except json.JSONDecodeError:
+            payload = None
+    payload_type = payload.get("type") if isinstance(payload, Mapping) else None
+    if event_name == "error" or payload_type == "error":
+        return "error"
+    if event_name == "message_stop" or payload_type == "message_stop":
+        return "success"
+    return None
+
+
 def _should_suppress_chat_reasoning_extensions(
     upstream_name: str,
     *,
@@ -1233,6 +1249,7 @@ def relay_upstream_response(
                     seam.last_write_error() or OSError("downstream closed")
                 )
             if upstream_format == "anthropic_messages":
+                terminal_kind: str | None = None
                 try:
                     for frame in iter_upstream_sse_events(
                         response,
@@ -1241,13 +1258,23 @@ def relay_upstream_response(
                         on_chunk=observe_diagnostic_sse_line,
                     ):
                         if frame.raw and not seam.commit_sse_bytes(frame.raw):
+                            if seam.terminal_committed:
+                                break
                             return finish_downstream_stream_closed(
                                 seam.last_write_error() or OSError("downstream closed")
                             )
+                        terminal_kind = _anthropic_sse_terminal_kind(frame)
+                        if terminal_kind is not None:
+                            break
                 except (SseFrameTooLargeError, UpstreamStreamIncompleteError):
                     seam.cancel()
                     return 502
+                if terminal_kind is None or not seam.terminal_committed:
+                    seam.cancel()
+                    return 502
                 self.close_connection = True
+                if terminal_kind == "error":
+                    return status if status >= 400 else 502
                 return status
             emitter = anthropic_messages_prototype._ChatToAnthropicEmitter()
             responses_converter = (
