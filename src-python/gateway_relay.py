@@ -323,6 +323,9 @@ def iter_upstream_sse_lines(
                     lifecycle.close()
                     raise context.idle_timeout_error(model_event_timeout_seconds, "model_event")
                 if keepalive_interval > 0:
+                    if downstream_output_started is not None and not downstream_output_started():
+                        last_keepalive_at = time.monotonic()
+                        continue
                     if not context.write_keepalive():
                         lifecycle.close()
                         raise context.keepalive_failure_error("downstream keepalive write failed")

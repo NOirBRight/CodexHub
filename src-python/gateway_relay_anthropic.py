@@ -32,6 +32,21 @@ def _anthropic_sse_terminal_kind(frame: SseEvent) -> str | None:
         return "success"
     return None
 
+
+def _commit_conversion_error(seam: Any, finish_closed: Callable[[OSError], int], handler: Any) -> int:
+    adapted = anthropic_messages_prototype.adapt_upstream_response(
+        "chat_completions",
+        b'{"error":{"type":"invalid_request_error"}}',
+        status=400,
+    )
+    body = adapted.body if isinstance(adapted, anthropic_messages_prototype.AdaptedResponse) else b""
+    event = b"event: error\ndata: " + body + b"\n\n" if body else b""
+    if event and not seam.commit_sse_bytes(event):
+        return finish_closed(seam.last_write_error() or OSError("downstream closed"))
+    handler.close_connection = True
+    return 400
+
+
 def relay_inbound_anthropic_sse(
     *,
     handler: Any,
@@ -126,8 +141,7 @@ def relay_inbound_anthropic_sse(
                 for chunk in chat_chunks:
                     frames = emitter.feed(chunk)
                     if isinstance(frames, anthropic_messages_prototype.NotForwardable):
-                        seam.cancel()
-                        return 400
+                        return _commit_conversion_error(seam, finish_closed, handler)
                     for item in frames:
                         if not seam.commit_sse_bytes(item):
                             return finish_closed(
@@ -136,8 +150,7 @@ def relay_inbound_anthropic_sse(
                 if payload.get("type") == "response.completed":
                     frames = emitter.finish(require_done=False)
                     if isinstance(frames, anthropic_messages_prototype.NotForwardable):
-                        seam.cancel()
-                        return 400
+                        return _commit_conversion_error(seam, finish_closed, handler)
                     for item in frames:
                         if not seam.commit_sse_bytes(item):
                             return finish_closed(
@@ -157,8 +170,7 @@ def relay_inbound_anthropic_sse(
             else:
                 frames = emitter.feed(payload)
                 if isinstance(frames, anthropic_messages_prototype.NotForwardable):
-                    seam.cancel()
-                    return 400
+                    return _commit_conversion_error(seam, finish_closed, handler)
                 for item in frames:
                     if not seam.commit_sse_bytes(item):
                         return finish_closed(
@@ -167,8 +179,7 @@ def relay_inbound_anthropic_sse(
                 if payload == "[DONE]":
                     frames = emitter.finish(require_done=True)
                     if isinstance(frames, anthropic_messages_prototype.NotForwardable):
-                        seam.cancel()
-                        return 400
+                        return _commit_conversion_error(seam, finish_closed, handler)
                     for item in frames:
                         if not seam.commit_sse_bytes(item):
                             return finish_closed(

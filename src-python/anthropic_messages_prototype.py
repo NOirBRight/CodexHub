@@ -1149,6 +1149,18 @@ def adapt_upstream_response(
         return _response_refusal("invalid_upstream_response", "json")
     if not isinstance(payload, Mapping):
         return _response_refusal("invalid_upstream_response", "json")
+    if status >= 400:
+        return AdaptedResponse(
+            body=_anthropic_error_body(status, payload, default="Upstream request failed"),
+            status=status,
+            adaptations=(
+                Adaptation(
+                    "upstream.error",
+                    "upstream_error_mapped_to_anthropic_error",
+                    "An upstream failure is never presented as a successful message.",
+                ),
+            ),
+        )
     try:
         if selected == "chat_completions":
             if payload.get("error") is None:

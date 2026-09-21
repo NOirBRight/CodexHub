@@ -559,6 +559,28 @@ def test_responses_and_chat_refuse_empty_success_payloads() -> None:
     assert isinstance(missing_role, NotForwardable)
 
 
+def test_chat_http_errors_map_to_anthropic_error_json() -> None:
+    result = adapt_upstream_response(
+        "chat_completions",
+        json.dumps(
+            {
+                "error": {
+                    "message": "Bearer secret https://upstream.invalid/prompt",
+                    "type": "invalid_request_error",
+                }
+            }
+        ).encode(),
+        status=400,
+    )
+    assert isinstance(result, AdaptedResponse)
+    assert result.status == 400
+    payload = json.loads(result.body)
+    assert payload["type"] == "error"
+    assert payload["error"]["type"] == "invalid_request_error"
+    assert b"Bearer" not in result.body
+    assert b"upstream.invalid" not in result.body
+
+
 def test_converted_errors_do_not_echo_upstream_details() -> None:
     result = adapt_upstream_response(
         "responses",
