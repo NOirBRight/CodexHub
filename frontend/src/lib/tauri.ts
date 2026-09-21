@@ -314,6 +314,7 @@ export const api = {
     mode: RoutingOwner | "hub",
     model?: string | null,
     forceTakeover = false,
+    roleMappings?: Record<string, string> | null,
   ) =>
     call<GatewayClientApplyResult>(COMMANDS.switchGatewayClientRoute, {
       clientId,
@@ -321,6 +322,8 @@ export const api = {
       model: model ?? null,
       forceTakeover,
       force_takeover: forceTakeover,
+      roleMappings: roleMappings ?? null,
+      role_mappings: roleMappings ?? null,
     }),
   syncGatewayClients: (model?: string | null) =>
     call<GatewayClientSyncSummary>(COMMANDS.syncGatewayClients, { model: model ?? null }),

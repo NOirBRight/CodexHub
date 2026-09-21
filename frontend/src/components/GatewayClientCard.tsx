@@ -39,7 +39,11 @@ interface GatewayClientCardProps {
   enabledModelCount?: number;
   exportedModels?: ExportedGatewayModel[];
   info?: GatewayClientInfo;
-  onToggle: (connect: boolean, model?: string | null) => void;
+  onToggle: (
+    connect: boolean,
+    model?: string | null,
+    roleMappings?: Record<string, string> | null,
+  ) => void;
   onRefresh?: () => Promise<void>;
 }
 
@@ -91,7 +95,11 @@ export function GatewayClientCard({
       setDetailsOpen(true);
       return;
     }
-    onToggle(connect, isClaude ? claudeDefault || null : null);
+    onToggle(
+      connect,
+      isClaude ? claudeDefault || null : null,
+      isClaude ? claudeRoles : null,
+    );
   }
   async function loadPreview() {
     setDetailBusy(true);

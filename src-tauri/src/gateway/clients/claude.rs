@@ -6,16 +6,42 @@ use super::super::{
 use crate::app_flavor::RoutingOwner;
 use crate::{Provider, Settings};
 use serde_json::{json, Map, Value};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const CLIENT_ID: &str = "claude";
+const ROLE_ENV: &[(&str, &str)] = &[
+    ("haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+    ("sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+    ("opus", "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+    ("fable", "ANTHROPIC_DEFAULT_FABLE_MODEL"),
+    ("subagent", "CLAUDE_CODE_SUBAGENT_MODEL"),
+];
 pub(in crate::gateway) const MANAGED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_MODEL",
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
 ];
+
+thread_local! {
+    static PENDING_ROLE_MAPPINGS: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+pub(in crate::gateway) fn set_pending_role_mappings(mappings: BTreeMap<String, String>) {
+    PENDING_ROLE_MAPPINGS.with(|slot| *slot.borrow_mut() = mappings);
+}
+
+fn pending_role_mappings() -> BTreeMap<String, String> {
+    PENDING_ROLE_MAPPINGS.with(|slot| slot.borrow().clone())
+}
 
 pub(in crate::gateway) fn claude_home() -> PathBuf {
     if let Some(path) = std::env::var_os("CODEXHUB_CLAUDE_HOME")
@@ -175,6 +201,21 @@ pub(in crate::gateway) fn claude_settings_text(
         "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".to_string(),
         Value::String("1".to_string()),
     );
+    let role_map: BTreeMap<&str, &str> = ROLE_ENV.iter().copied().collect();
+    for (role, canonical) in pending_role_mappings() {
+        let Some(env_key) = role_map.get(role.as_str()) else {
+            return Err(format!("unknown Claude Code role: {role}"));
+        };
+        if canonical.trim().is_empty() {
+            env_map.remove(*env_key);
+            continue;
+        }
+        let resolved = resolve_gateway_client_model_id(settings, providers, &canonical)?;
+        env_map.insert(
+            (*env_key).to_string(),
+            Value::String(projected_claude_model_id(&resolved)),
+        );
+    }
     serde_json::to_string_pretty(&root)
         .map_err(|error| format!("failed to serialize Claude settings.json: {error}"))
 }
@@ -395,8 +436,31 @@ mod tests {
             env.get("ANTHROPIC_MODEL").and_then(Value::as_str),
             Some("claude-codexhub-gpt-5.5")
         );
-        for key in MANAGED_ENV_KEYS {
-            assert!(env.contains_key(*key), "{key}");
+        for key in [
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_MODEL",
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+        ] {
+            assert!(env.contains_key(key), "{key}");
         }
+        assert!(!env.contains_key("ANTHROPIC_DEFAULT_HAIKU_MODEL"));
+    }
+
+    #[test]
+    fn role_mappings_write_projected_env_keys() {
+        set_pending_role_mappings(BTreeMap::from([(
+            "haiku".to_string(),
+            "gpt-5.5".to_string(),
+        )]));
+        let next = claude_settings_text(None, &settings(), &[], "gpt-5.5").unwrap();
+        let value: Value = serde_json::from_str(&next).unwrap();
+        let env = value.get("env").unwrap().as_object().unwrap();
+        assert_eq!(
+            env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-codexhub-gpt-5.5")
+        );
+        set_pending_role_mappings(BTreeMap::new());
     }
 }

@@ -426,6 +426,7 @@ function GatewayPageImpl({
     owner: RoutingOwner,
     forceTakeover = false,
     selectedModel?: string | null,
+    roleMappings?: Record<string, string> | null,
   ) {
     setClientBusy(`${clientId}:switch:${owner}`);
     const clientName =
@@ -453,6 +454,7 @@ function GatewayPageImpl({
             owner,
             selectedModel || defaultModel,
             shouldForceTakeover,
+            roleMappings,
           );
           if (!result.applied) {
             throw new Error(result.message);
@@ -544,6 +546,7 @@ function GatewayPageImpl({
     clientId: string,
     connect: boolean,
     model?: string | null,
+    roleMappings?: Record<string, string> | null,
   ) {
     if (clientId === "dsh") {
       return void toggleDshConnection(connect);
@@ -564,6 +567,7 @@ function GatewayPageImpl({
       runtimeOwner,
       takeoverRequired,
       model,
+      roleMappings,
     );
   }
 
@@ -915,8 +919,13 @@ function GatewayPageImpl({
                   enabledModelCount={enabledModelCount}
                   exportedModels={exportedModels}
                   onRefresh={refreshGatewayClients}
-                  onToggle={(connect, model) =>
-                    handleConnectionToggle(client.id, connect, model)
+                  onToggle={(connect, model, roleMappings) =>
+                    handleConnectionToggle(
+                      client.id,
+                      connect,
+                      model,
+                      roleMappings,
+                    )
                   }
                 />
               ))}
