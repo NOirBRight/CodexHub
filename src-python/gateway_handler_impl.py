@@ -583,6 +583,11 @@ class GatewayHandlerMixin:
             model = request_input.model
             route_reason = request_input.route_reason
             upstream = gateway_catalog_runtime.choose_upstream(model) if model else gateway_catalog_runtime.official_upstream()
+            resolved_model = upstream.get("model_id")
+            if isinstance(resolved_model, str) and resolved_model.strip():
+                model = resolved_model.strip()
+                if isinstance(inbound_payload, dict) and inbound_payload.get("model") != model:
+                    inbound_payload["model"] = model
             upstream_name = upstream["name"]
             upstream_format = str(upstream.get("upstream_format", "responses"))
             reports_cached_input_tokens = bool(upstream.get("reports_cached_input_tokens"))
