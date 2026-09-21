@@ -219,3 +219,46 @@ def test_rewritten_messages_headers_drop_upstream_zstd() -> None:
     lowered = {key.lower(): value for key, value in headers}
     assert "content-encoding" not in lowered
     assert lowered["content-length"] == "2"
+
+
+def test_tool_result_is_error_prefixes_chat_content() -> None:
+    from anthropic_messages_prototype import Adapted, prepare_upstream_request
+
+    body = json.dumps(
+        {
+            "model": "volc/glm-5.2",
+            "max_tokens": 8,
+            "messages": [
+                {"role": "user", "content": "run"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "Task",
+                            "input": {"prompt": "ok"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "is_error": True,
+                            "content": "Explore failed",
+                        }
+                    ],
+                },
+            ],
+        }
+    ).encode()
+    prepared = prepare_upstream_request(body, "chat_completions")
+    assert isinstance(prepared, Adapted)
+    payload = json.loads(prepared.body)
+    tool_messages = [m for m in payload["messages"] if m.get("role") == "tool"]
+    assert tool_messages
+    assert tool_messages[0]["content"].startswith("[tool_error]")
+    assert any(a.policy == "tool_error_prefixed_in_chat_content" for a in prepared.adaptations)

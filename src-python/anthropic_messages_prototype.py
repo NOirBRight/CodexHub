@@ -715,10 +715,6 @@ def _tool_result_message(block: ContentBlock, declared: _Declared, *, label: str
     tool_use_id = block.data.get("tool_use_id")
     if not isinstance(tool_use_id, str) or not tool_use_id:
         declared.refuse(f"{label}.tool_use_id")
-    if block.data.get("is_error") is True:
-        # A failed tool result must never reach an upstream as an ordinary
-        # successful result that carries no error signal.
-        declared.refuse(f"{label}.is_error")
     _declare_block_extras(
         block, {"type", "tool_use_id", "content", "is_error"}, label=label, declared=declared
     )
@@ -730,6 +726,13 @@ def _tool_result_message(block: ContentBlock, declared: _Declared, *, label: str
     else:
         declared.refuse(f"{label}.content")
         text = ""
+    if block.data.get("is_error") is True:
+        declared.adapt(
+            f"{label}.is_error",
+            "tool_error_prefixed_in_chat_content",
+            "Chat Completions has no tool-result error flag; prefix the content.",
+        )
+        text = f"[tool_error] {text}"
     return {"tool_call_id": tool_use_id, "content": text}
 
 
