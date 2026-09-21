@@ -319,6 +319,15 @@ def test_json_responses_and_chat_keep_text_tool_identity_and_truthful_usage() ->
     assert json.loads(chat.body)["content"][0]["text"] == "pong"
 
 
+def test_responses_reasoning_items_are_omitted_not_refused() -> None:
+    payload = json.loads(_responses_text())
+    payload["output"].insert(0, {"type": "reasoning", "id": "rs_1", "summary": []})
+    result = adapt_upstream_response("responses", json.dumps(payload).encode())
+    assert isinstance(result, AdaptedResponse)
+    assert json.loads(result.body)["content"] == [{"type": "text", "text": "pong"}]
+    assert any(item.policy == "responses_output_item_omitted_for_anthropic" for item in result.adaptations)
+
+
 def test_chat_json_preserves_explicit_empty_text() -> None:
     payload = json.loads(_chat_text())
     payload["choices"][0]["message"]["content"] = ""
