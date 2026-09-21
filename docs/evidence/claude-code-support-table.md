@@ -22,13 +22,15 @@ Official Codex `gpt-5.6-luna` (Responses), CommandCode
 | --- | --- | --- |
 | Main-session text JSON | adapted / preserved | Native Anthropic passthrough; Chat/Responses converted |
 | Incremental SSE | adapted | Live Luna HTTP and Claude Code CLI 2.1.278 print-run `result=ok` |
-| Tool call/result identity | adapted | Live HTTP `tool_use` `get_weather` on Luna, CommandCode, and DeepSeek (thinking disabled) |
+| Tool call/result identity | adapted | Linux+Windows HTTP `tool_use` then `tool_result` (`sunny, 18C`) `end_turn` on all three |
 | Discovery `/v1/models` | adapted | CLI 2.1.278 cached 2 `claude*` ids; non-matching ids dropped before cache |
 | Role mappings | adapted | Env keys written on Connect; empty mapping allowed |
 | `count_tokens` | unsupported | Explicit Anthropic 400 |
-| Images / caching / compaction / subagents / thinking | unknown or fail-closed | Not live-proven |
+| Images / caching / compaction / thinking | unknown or fail-closed | Not live-proven |
+| Subagents | fail-closed | CLI spawned Explore; child `haiku` is `unsupported_model` (no substitution). `tool_result.is_error` now converts. |
+| MCP | unknown | Isolated CLI `mcp_servers=[]`; no MCP server was attached |
 | Error handling | adapted | Isolated CLI error scenario: `is_error`, HTTP 400 surfaced, no egress |
-| Cancellation | adapted | Live HTTP abort on DeepSeek SSE: `downstream_stream_closed` status 499, `request_complete` 499, no fabricated success |
+| Cancellation | adapted | Linux DeepSeek and Windows Luna HTTP abort: `downstream_stream_closed` 499, `request_complete` 499 |
 
 Live (campaign Gateway, isolated `CODEX_HOME`, no keys in git):
 
@@ -36,4 +38,4 @@ Live (campaign Gateway, isolated `CODEX_HOME`, no keys in git):
 - Chat/`commandcode/deepseek/deepseek-v4.1-flash`: Linux + Windows CLI `-p` `result=ok`.
 - Native Anthropic via DeepSeek `deepseek-flash`: Linux + Windows CLI `-p` `is_error=false` (Windows result `好的`).
 
-Live tool HTTP (Linux): all three identities returned `stop_reason=tool_use` with `get_weather`. DeepSeek required `thinking.type=disabled`. No keys in git.
+Live tool round-trip HTTP (Linux+Windows): all three identities `tool_use` then `tool_result` then `end_turn` using the tool output. DeepSeek required `thinking.type=disabled`. MCP not attached. No keys in git.
