@@ -1327,3 +1327,84 @@ def test_converted_incremental_hard_deadline_closes_stalled_read() -> None:
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=2)
+
+def test_converted_incremental_refuses_chat_annotations() -> None:
+    payload = _sse(
+        None,
+        {
+            "id": "chat_fixture",
+            "object": "chat.completion.chunk",
+            "model": "fixture-chat",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": "hello", "annotations": [{"type": "url_citation"}]},
+                    "finish_reason": None,
+                }
+            ],
+        },
+    )
+
+    class Response:
+        status = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self) -> None:
+            self.lines = iter(payload.splitlines(keepends=True))
+
+        def readline(self) -> bytes:
+            return next(self.lines, b"")
+
+        def close(self) -> None:
+            return None
+
+    sink = _RecordingSink()
+    commit = _native_commit(sink)
+    result = relay_incremental_exchange(
+        _request(stream=True),
+        upstream_format="chat_completions",
+        url="http://fixture.invalid/v1/chat/completions",
+        admit=lambda *_args: _Reservation(5.0),
+        commit=commit,
+        open_response=lambda _request, _timeout: Response(),
+    )
+    assert isinstance(result, NotForwardable)
+    assert result.reason == "unsupported_upstream_stream"
+    assert b"hello" not in b"".join(sink.chunks)
+    assert b"message_stop" not in b"".join(sink.chunks)
+
+
+def test_converted_incremental_refuses_responses_without_identity() -> None:
+    payload = _sse(
+        None,
+        {"type": "response.created", "response": {"model": "fixture-responses", "status": "in_progress"}},
+    )
+
+    class Response:
+        status = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self) -> None:
+            self.lines = iter(payload.splitlines(keepends=True))
+
+        def readline(self) -> bytes:
+            return next(self.lines, b"")
+
+        def close(self) -> None:
+            return None
+
+    sink = _RecordingSink()
+    commit = _native_commit(sink)
+    result = relay_incremental_exchange(
+        _request(stream=True),
+        upstream_format="responses",
+        url="http://fixture.invalid/v1/responses",
+        admit=lambda *_args: _Reservation(5.0),
+        commit=commit,
+        open_response=lambda _request, _timeout: Response(),
+    )
+    body_out = b"".join(sink.chunks)
+    assert isinstance(result, NotForwardable)
+    assert result.reason == "unsupported_upstream_stream"
+    assert b"chatcmpl_" not in body_out
+    assert b"message_start" not in body_out

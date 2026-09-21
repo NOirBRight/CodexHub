@@ -1360,7 +1360,17 @@ class _ChatToAnthropicEmitter:
             raw_delta = choice.get("delta", {})
             if not isinstance(raw_delta, Mapping):
                 return _response_refusal("unsupported_upstream_stream", "chat.delta")
-            if any(name in raw_delta for name in ("reasoning", "reasoning_content", "reasoning_details", "refusal", "audio")):
+            if any(
+                name in raw_delta
+                for name in (
+                    "reasoning",
+                    "reasoning_content",
+                    "reasoning_details",
+                    "refusal",
+                    "audio",
+                    "annotations",
+                )
+            ):
                 return _response_refusal("unsupported_upstream_stream", "chat.delta")
             content = raw_delta.get("content")
             if content is not None and not isinstance(content, str):
@@ -2057,6 +2067,17 @@ def relay_incremental_exchange(
                         if not isinstance(payload, Mapping):
                             raise ValueError("responses.event")
                         chat_chunks = responses_converter.chunks_for_event(payload) if responses_converter is not None else []
+                        if responses_converter is not None and (
+                            not isinstance(responses_converter.response_id, str)
+                            or not responses_converter.response_id
+                            or not isinstance(responses_converter.model, str)
+                            or not responses_converter.model
+                        ):
+                            missing = _response_refusal("unsupported_upstream_stream", "responses.identity")
+                            if forwarded == 0:
+                                commit.cancel()
+                                return missing
+                            raise ValueError(missing.reason)
                         for chunk in chat_chunks:
                             frames = emitter.feed(chunk) if emitter is not None else []
                             if isinstance(frames, NotForwardable):
