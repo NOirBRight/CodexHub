@@ -1232,6 +1232,23 @@ def relay_upstream_response(
                 return finish_downstream_stream_closed(
                     seam.last_write_error() or OSError("downstream closed")
                 )
+            if upstream_format == "anthropic_messages":
+                try:
+                    for frame in iter_upstream_sse_events(
+                        response,
+                        read_lines=self._iter_upstream_sse_lines,
+                        event_resets_idle_timeout=lambda _event: True,
+                        on_chunk=observe_diagnostic_sse_line,
+                    ):
+                        if frame.raw and not seam.commit_sse_bytes(frame.raw):
+                            return finish_downstream_stream_closed(
+                                seam.last_write_error() or OSError("downstream closed")
+                            )
+                except (SseFrameTooLargeError, UpstreamStreamIncompleteError):
+                    seam.cancel()
+                    return 502
+                self.close_connection = True
+                return status
             emitter = anthropic_messages_prototype._ChatToAnthropicEmitter()
             responses_converter = (
                 protocol_translation.ResponsesToChatStreamConverter()
