@@ -15,6 +15,7 @@ import http.client
 import urllib.error
 
 import anthropic_messages
+import anthropic_messages_prototype
 import collaboration_adapter
 import gateway_compat
 import gateway_errors
@@ -35,6 +36,12 @@ from route_primitives import MutationPolicy, StreamingPolicy, UsagePolicy
 
 
 RelayResponse = UpstreamResponseLike
+
+
+def _anthropic_sse_terminal_observer(event_name: str | None, _data: bytes, payload: Any) -> bool:
+    return event_name in {"message_stop", "error"} or (
+        isinstance(payload, Mapping) and payload.get("type") in {"message_stop", "error"}
+    )
 
 
 def _should_suppress_chat_reasoning_extensions(
@@ -522,11 +529,14 @@ def relay_upstream_response(
     # When the caller spoke Chat Completions, the response must be converted
     # back to Chat Completions format regardless of the upstream wire format.
     want_chat_output = inbound_format == "chat_completions"
+    want_anthropic_output = inbound_format == "anthropic_messages"
     request_scoped_seam = _handler_downstream_stream_commit(self)
     seam: DownstreamStreamCommit | None = request_scoped_seam
     if request_scoped_seam is not None:
         request_scoped_seam.set_terminal_observer(
-            gateway_stream_semantics._chat_terminal_observer
+            _anthropic_sse_terminal_observer
+            if want_anthropic_output
+            else gateway_stream_semantics._chat_terminal_observer
             if want_chat_output
             else gateway_stream_semantics._responses_terminal_observer
         )
@@ -550,7 +560,9 @@ def relay_upstream_response(
             inbound_format=inbound_format,
             upstream_format=upstream_format,
             terminal_observer=(
-                gateway_stream_semantics._chat_terminal_observer
+                _anthropic_sse_terminal_observer
+                if want_anthropic_output
+                else gateway_stream_semantics._chat_terminal_observer
                 if want_chat_output
                 else gateway_stream_semantics._responses_terminal_observer
             ),
@@ -928,6 +940,33 @@ def relay_upstream_response(
                         mutated_body,
                         preserve_reasoning_history=preserve_reasoning_history,
                     )
+            elif inbound_format == "anthropic_messages":
+                content_type = "application/json"
+                response_headers = getattr(response, "headers", None)
+                if response_headers is not None:
+                    content_type = response_headers.get("content-type", content_type) or content_type
+                adapted = anthropic_messages_prototype.adapt_upstream_response(
+                    upstream_format,
+                    body,
+                    status=status,
+                    content_type=content_type,
+                )
+                if isinstance(adapted, anthropic_messages_prototype.NotForwardable):
+                    status = status if status >= 400 else 400
+                    body = json.dumps(
+                        {
+                            "type": "error",
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": adapted.reason,
+                            },
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                else:
+                    body = adapted.body
+                    status = adapted.status
             elif upstream_format in {"chat_completions", "anthropic_messages"}:
                 if upstream_format == "anthropic_messages":
                     body = anthropic_messages.anthropic_message_to_chat_completion_body(body)
@@ -1188,6 +1227,121 @@ def relay_upstream_response(
             )
 
     if is_event_stream:
+        if want_anthropic_output:
+            if not send_downstream_response_headers_once():
+                return finish_downstream_stream_closed(
+                    seam.last_write_error() or OSError("downstream closed")
+                )
+            if upstream_format == "anthropic_messages":
+                try:
+                    for frame in iter_upstream_sse_events(
+                        response,
+                        read_lines=self._iter_upstream_sse_lines,
+                        event_resets_idle_timeout=lambda _event: True,
+                        on_chunk=observe_diagnostic_sse_line,
+                    ):
+                        if frame.raw and not seam.commit_sse_bytes(frame.raw):
+                            return finish_downstream_stream_closed(
+                                seam.last_write_error() or OSError("downstream closed")
+                            )
+                except (SseFrameTooLargeError, UpstreamStreamIncompleteError):
+                    seam.cancel()
+                    return 502
+                self.close_connection = True
+                return status
+            emitter = anthropic_messages_prototype._ChatToAnthropicEmitter()
+            responses_converter = (
+                protocol_translation.ResponsesToChatStreamConverter()
+                if upstream_format == "responses"
+                else None
+            )
+            try:
+                for frame in iter_upstream_sse_events(
+                    response,
+                    read_lines=self._iter_upstream_sse_lines,
+                    event_resets_idle_timeout=lambda _event: True,
+                    on_chunk=observe_diagnostic_sse_line,
+                ):
+                    data = frame.data.strip() if frame.data else b""
+                    if data == b"[DONE]":
+                        payload: Any = "[DONE]"
+                    elif not data:
+                        continue
+                    else:
+                        try:
+                            payload = protocol_translation.decode_protocol_json(data)
+                        except (UnicodeError, json.JSONDecodeError, protocol_translation.UnsupportedProtocolTranslationError):
+                            continue
+                    frames: list[bytes] | anthropic_messages_prototype.NotForwardable
+                    if responses_converter is not None:
+                        if not isinstance(payload, Mapping):
+                            continue
+                        if payload.get("type") in {"error", "response.failed", "response.incomplete"}:
+                            error_bytes = anthropic_messages_prototype.adapt_upstream_response(
+                                "responses",
+                                json.dumps(payload).encode(),
+                                status=status if status >= 400 else 502,
+                                content_type="application/json",
+                            )
+                            body_bytes = error_bytes.body if isinstance(error_bytes, anthropic_messages_prototype.AdaptedResponse) else b""
+                            if body_bytes and not seam.commit_sse_bytes(body_bytes):
+                                return finish_downstream_stream_closed(
+                                    seam.last_write_error() or OSError("downstream closed")
+                                )
+                            self.close_connection = True
+                            return status if status >= 400 else 502
+                        chat_chunks = responses_converter.chunks_for_event(payload)
+                        if not isinstance(responses_converter.response_id, str) or not responses_converter.response_id:
+                            continue
+                        for chunk in chat_chunks:
+                            frames = emitter.feed(chunk)
+                            if isinstance(frames, anthropic_messages_prototype.NotForwardable):
+                                seam.cancel()
+                                return 400
+                            for item in frames:
+                                if not seam.commit_sse_bytes(item):
+                                    return finish_downstream_stream_closed(
+                                        seam.last_write_error() or OSError("downstream closed")
+                                    )
+                        if payload.get("type") == "response.completed":
+                            frames = emitter.finish(require_done=False)
+                            if isinstance(frames, anthropic_messages_prototype.NotForwardable):
+                                seam.cancel()
+                                return 400
+                            for item in frames:
+                                if not seam.commit_sse_bytes(item):
+                                    return finish_downstream_stream_closed(
+                                        seam.last_write_error() or OSError("downstream closed")
+                                    )
+                            self.close_connection = True
+                            return status
+                    else:
+                        frames = emitter.feed(payload)
+                        if isinstance(frames, anthropic_messages_prototype.NotForwardable):
+                            seam.cancel()
+                            return 400
+                        for item in frames:
+                            if not seam.commit_sse_bytes(item):
+                                return finish_downstream_stream_closed(
+                                    seam.last_write_error() or OSError("downstream closed")
+                                )
+                        if payload == "[DONE]":
+                            frames = emitter.finish(require_done=True)
+                            if isinstance(frames, anthropic_messages_prototype.NotForwardable):
+                                seam.cancel()
+                                return 400
+                            for item in frames:
+                                if not seam.commit_sse_bytes(item):
+                                    return finish_downstream_stream_closed(
+                                        seam.last_write_error() or OSError("downstream closed")
+                                    )
+                            self.close_connection = True
+                            return status
+            except (SseFrameTooLargeError, UpstreamStreamIncompleteError):
+                seam.cancel()
+                return 502
+            seam.cancel()
+            return 502
         if (
             streaming_policy == StreamingPolicy.TRANSPARENT_CONVERTED
             and want_chat_output

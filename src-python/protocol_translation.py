@@ -4564,6 +4564,16 @@ def prepare_exchange(
                 return converted(anthropic_messages.chat_request_to_anthropic_body(chat_body))
             if inbound == "chat_completions":
                 return converted(anthropic_messages.chat_request_to_anthropic_body(conversion_body))
+        if inbound == "anthropic_messages" and outbound in {"responses", "chat_completions"}:
+            from anthropic_messages_prototype import NotForwardable, prepare_upstream_request
+
+            prepared = prepare_upstream_request(conversion_body, outbound)
+            if isinstance(prepared, NotForwardable):
+                raise NonForwardable(
+                    prepared.reason,
+                    "Cannot convert Anthropic Messages without a lossless mapping.",
+                )
+            return converted(prepared.body)
         if inbound == outbound:
             stream = bool(
                 re.search(rb'"stream"\s*:\s*true\b', request_body, flags=re.IGNORECASE)

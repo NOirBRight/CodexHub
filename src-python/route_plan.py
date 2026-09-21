@@ -573,6 +573,22 @@ class RouteAttemptPlan:
                 RouteProtocol.CHAT_COMPLETIONS.value,
                 RouteProtocol.ANTHROPIC_MESSAGES.value,
             )
+        if (
+            self.request_body_mode
+            == AttemptRequestBodyMode.CONVERT_ANTHROPIC_TO_RESPONSES
+        ):
+            return (
+                RouteProtocol.ANTHROPIC_MESSAGES.value,
+                RouteProtocol.RESPONSES.value,
+            )
+        if (
+            self.request_body_mode
+            == AttemptRequestBodyMode.CONVERT_ANTHROPIC_TO_CHAT
+        ):
+            return (
+                RouteProtocol.ANTHROPIC_MESSAGES.value,
+                RouteProtocol.CHAT_COMPLETIONS.value,
+            )
         if self.request_body_mode == AttemptRequestBodyMode.PREPARED_DIRECT:
             protocol = self.upstream_protocol.value
             return protocol, protocol
