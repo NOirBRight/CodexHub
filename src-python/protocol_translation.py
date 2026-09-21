@@ -4473,6 +4473,7 @@ class PreparedExchange:
     upstream_body: bytes
     stream: bool
     dropped_cache_controls: tuple[str, ...] = ()
+    adaptations: tuple[tuple[str, str, str], ...] = ()
 
 
 class NonForwardable(UnsupportedProtocolTranslationError):
@@ -4522,6 +4523,7 @@ def prepare_exchange(
                 upstream,
                 bool(payload.get("stream")),
                 dropped_cache_controls=dropped_cache_controls,
+                adaptations=(),
             )
 
         if inbound == "responses" and outbound == "chat_completions":
@@ -4573,7 +4575,17 @@ def prepare_exchange(
                     prepared.reason,
                     "Cannot convert Anthropic Messages without a lossless mapping.",
                 )
-            return converted(prepared.body)
+            exchange = converted(prepared.body)
+            return PreparedExchange(
+                exchange.inbound_format,
+                exchange.outbound_format,
+                exchange.upstream_body,
+                exchange.stream,
+                dropped_cache_controls=exchange.dropped_cache_controls,
+                adaptations=tuple(
+                    (item.field, item.policy, item.detail) for item in prepared.adaptations
+                ),
+            )
         if inbound == outbound:
             stream = bool(
                 re.search(rb'"stream"\s*:\s*true\b', request_body, flags=re.IGNORECASE)
