@@ -14,6 +14,10 @@ from threading import Barrier, Thread
 
 import pytest
 
+pytestmark = pytest.mark.skipif(
+    os.name != "posix", reason="Evidence grants require POSIX owner-only file permissions"
+)
+
 from evidence_input_budget import (
     BudgetRefused,
     EvidenceInput,

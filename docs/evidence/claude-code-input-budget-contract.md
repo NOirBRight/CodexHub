@@ -16,7 +16,9 @@ outbound attempt and does not reset or create a new round. The claim is an
 atomic owner-only marker (`O_EXCL`); reloading the same grant, including from a
 new process, is refused. A fresh round needs a new user grant, `round_id`, and
 claim path. Owner-only materialization/claims fail closed before file creation
-on platforms without `os.fchmod`; this helper has no Windows ACL claim.
+on non-POSIX platforms or platforms without `os.fchmod`; this helper has no
+Windows ACL support. Windows Python can expose `fchmod` without enforcing
+owner-only ACLs, so API availability alone is not sufficient.
 
 ## Input shape
 

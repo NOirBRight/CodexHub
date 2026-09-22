@@ -302,7 +302,7 @@ class EvidenceInput:
 
 
 def _require_owner_only_mode() -> None:
-    if not callable(getattr(os, "fchmod", None)):
+    if os.name != "posix" or not callable(getattr(os, "fchmod", None)):
         raise EvidenceInputError("owner-only credential/claim files are unsupported on this platform")
 
 
