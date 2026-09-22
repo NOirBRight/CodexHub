@@ -564,6 +564,14 @@ export interface Settings {
   official_provider_sort_order: number;
   codex_default_subagent_model: string;
   codex_default_subagent_reasoning_effort: string;
+  opencode_default_subagent_model: string;
+  opencode_default_subagent_reasoning_effort: string;
+  zcode_default_subagent_model: string;
+  zcode_default_subagent_reasoning_effort: string;
+  omp_default_subagent_model: string;
+  omp_default_subagent_reasoning_effort: string;
+  grok_default_subagent_model: string;
+  grok_default_subagent_reasoning_effort: string;
   proxy_port: number;
 }
 

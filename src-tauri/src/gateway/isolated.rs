@@ -1,4 +1,7 @@
-use super::managed_clients::{apply_native_isolated, preview_native_isolated, readback_native_at};
+use super::managed_clients::{
+    apply_native_isolated, native_restart_required, preview_native_isolated, readback_native_at,
+    AdapterCtx, AdapterTarget,
+};
 use super::*;
 use crate::{Provider, Settings};
 use serde::Serialize;
@@ -257,6 +260,7 @@ pub struct IsolatedClientApplyResult {
     pub route_protocol: String,
     pub target_names: Vec<String>,
     pub backup_dir_relative: Option<String>,
+    pub restart_required: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -440,6 +444,21 @@ pub fn apply_gateway_client_config_isolated_with_provenance(
             backup_root.display()
         )
     })?;
+    let restart_required = native_restart_required(
+        &client_id,
+        &AdapterCtx {
+            settings: &input.settings,
+            providers: &input.providers,
+            base_url: String::new(),
+            models: vec![model.clone()],
+            target: AdapterTarget::Isolated {
+                writable_paths: targets.writable_paths().to_vec(),
+                backup_root: backup_root.clone(),
+                backup_roots: Vec::new(),
+            },
+        },
+    )
+    .to_string();
     let applied = with_rollback_provenance_dir_override(
         provenance_root,
         || -> Result<GatewayClientApplyResult, String> {
@@ -470,6 +489,7 @@ pub fn apply_gateway_client_config_isolated_with_provenance(
         route_protocol: protocol,
         target_names,
         backup_dir_relative,
+        restart_required,
     })
 }
 

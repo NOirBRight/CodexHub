@@ -1,4 +1,8 @@
-use super::super::gateway_client_provider_groups;
+use super::super::{
+    gateway_client_provider_groups, json_spawn_models_are_owned, pin_json_agent_models,
+    resolve_client_default_subagent_pin, restore_json_agent_models, rollback_file_text,
+    OPENCODE_PARENT_AGENTS, OPENCODE_SPAWN_AGENTS,
+};
 use crate::{Provider, Settings};
 use serde_json::{json, Map, Value};
 
@@ -91,6 +95,7 @@ pub(in crate::gateway) fn opencode_config_text(
     } else {
         object.insert("provider".to_string(), Value::Object(provider_map));
     }
+    apply_opencode_default_subagent(object, settings, providers, model, current)?;
     serde_json::to_string_pretty(&base)
         .map(|text| {
             format!(
@@ -99,6 +104,42 @@ pub(in crate::gateway) fn opencode_config_text(
             )
         })
         .map_err(|error| format!("failed to serialize OpenCode config: {error}"))
+}
+
+pub(in crate::gateway) fn opencode_default_subagent_slice_owned(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    value
+        .as_object()
+        .is_some_and(|object| json_spawn_models_are_owned(object, OPENCODE_SPAWN_AGENTS))
+}
+
+fn apply_opencode_default_subagent(
+    object: &mut Map<String, Value>,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+    current: Option<&str>,
+) -> Result<(), String> {
+    let pin = resolve_client_default_subagent_pin(settings, providers, "opencode", model)?;
+    let baseline_text = rollback_file_text("opencode", "opencode.json", current);
+    let baseline: Option<Value> = baseline_text
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+        .and_then(|text| serde_json::from_str(text).ok());
+    if let Some(pin) = pin {
+        pin_json_agent_models(object, OPENCODE_SPAWN_AGENTS, &pin.opencode_model_id());
+    } else if json_spawn_models_are_owned(object, OPENCODE_SPAWN_AGENTS) {
+        restore_json_agent_models(object, baseline.as_ref(), OPENCODE_SPAWN_AGENTS);
+    }
+    debug_assert!(OPENCODE_SPAWN_AGENTS
+        .iter()
+        .all(|name| !OPENCODE_PARENT_AGENTS.contains(name)));
+    Ok(())
 }
 
 use super::super::{

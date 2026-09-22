@@ -1,11 +1,12 @@
 use super::clients::claude::claude_settings_text;
-use super::clients::grok::{grok_config_text, grok_injected_blocks_match};
-use super::clients::omp::{omp_config_text, omp_models_yml_text};
+use super::clients::grok::{grok_config_text, grok_injected_blocks_match, grok_owned_shadows_match};
+use super::clients::omp::{apply_omp_default_subagent_slice, omp_config_text, omp_models_yml_text};
 use super::clients::opencode::opencode_config_text;
 use super::clients::pi::pi_models_text;
 use super::clients::zcode::{
-    persisted_zcode_collection_timestamp, zcode_provider_collection_text_with_now,
-    zcode_v2_config_text, ZcodeProviderFileKind,
+    persisted_zcode_collection_timestamp, zcode_owned_agents_match,
+    zcode_provider_collection_text_with_now, zcode_v2_config_text, ZcodeConfigTargets,
+    ZcodeProviderFileKind,
 };
 use super::{
     gateway_client_model_selector, gateway_exported_model_default_reasoning_effort,
@@ -111,12 +112,18 @@ pub fn verify_apply_readback(
             };
             let reasoning =
                 gateway_exported_model_default_reasoning_effort(settings, providers, model);
-            let expected_config = omp_config_text(
+            let expected_config = apply_omp_default_subagent_slice(
+                &omp_config_text(
+                    Some(&written_config),
+                    &selector,
+                    vision,
+                    reasoning.as_deref(),
+                ),
                 Some(&written_config),
-                &selector,
-                vision,
-                reasoning.as_deref(),
-            );
+                settings,
+                providers,
+                model,
+            )?;
             // `models.yml` is a provider-injection document: the published
             // CodexHub blocks are regenerated, while every foreign provider
             // block is preserved.  Readback must therefore plan from the
@@ -184,6 +191,17 @@ pub fn verify_apply_readback(
                         .to_string(),
                 );
             }
+            let zcode_targets = ZcodeConfigTargets {
+                catalog_path: target_paths[0].clone(),
+                v2_config_path: target_paths[1].clone(),
+                v2_cache_path: target_paths[2].clone(),
+            };
+            if !zcode_owned_agents_match(&zcode_targets, settings, providers, model)? {
+                return Err(
+                    "readback failed: zcode default subagent files do not match production preview"
+                        .to_string(),
+                );
+            }
         }
         "grok" => {
             let written = fs::read_to_string(&target_paths[0])
@@ -192,6 +210,12 @@ pub fn verify_apply_readback(
             if !grok_injected_blocks_match(&written, &expected)? {
                 return Err(
                     "readback failed: grok injected block does not match production preview"
+                        .to_string(),
+                );
+            }
+            if !grok_owned_shadows_match(&target_paths[0], settings, providers, model)? {
+                return Err(
+                    "readback failed: grok shadow agent files do not match production preview"
                         .to_string(),
                 );
             }

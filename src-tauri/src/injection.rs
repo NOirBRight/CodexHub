@@ -1319,6 +1319,13 @@ mod tests {
         assert!(connected.block_present);
         assert!(connected.config_path.starts_with(&root));
         assert!(connected.credential_path.starts_with(&root));
+        let connected_config = read_file(&connected.config_path);
+        assert!(
+            !connected_config.contains("default_subagent"),
+            "DSH must not grow Default subagent keys: {connected_config}"
+        );
+        assert!(!connected_config.contains("agentModelOverrides"));
+        assert!(!connected_config.contains("x-codexhub-default-subagent"));
 
         let disconnected = dsh_disconnect(&root, &expectation).unwrap();
         assert!(!disconnected.connected);

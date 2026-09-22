@@ -84,3 +84,6 @@ A user-selected association from a Claude Code fixed model name or role alias to
 
 **Compatibility Adaptation**:
 A declared transformation between a client's model protocol and an upstream model protocol. Equivalent transformations preserve meaning; best-effort transformations disclose approximations without silently losing essential content, breaking Call identity, or fabricating success.
+**Default subagent**:
+A per-client pin of which CodexHub-injected model (and effort) that client's built-in child sessions use. Empty keeps the CLI default: the child inherits the parent session. Independent per client; never Activation.
+_Avoid_: child model, subagent routing, enabling

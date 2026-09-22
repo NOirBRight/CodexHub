@@ -1,6 +1,7 @@
 use super::super::{
-    gateway_client_provider_groups, is_any_top_level_yaml_key, is_top_level_yaml_key, yaml_scalar,
-    GatewayClientProviderModel,
+    gateway_client_provider_groups, is_any_top_level_yaml_key, is_codexhub_client_model_selector,
+    is_top_level_yaml_key, resolve_client_default_subagent_pin, rollback_file_text, yaml_scalar,
+    GatewayClientProviderModel, OMP_BUNDLED_AGENTS,
 };
 use super::pi::pi_thinking_level_map;
 use crate::{Provider, Settings};
@@ -57,6 +58,276 @@ pub(in crate::gateway) fn omp_config_text(
         output.extend(block);
     }
     format!("{}\n", output.join("\n"))
+}
+
+pub(in crate::gateway) fn apply_omp_default_subagent_slice(
+    text: &str,
+    current: Option<&str>,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<String, String> {
+    let pin = resolve_client_default_subagent_pin(settings, providers, "omp", model)?;
+    let baseline = rollback_file_text("omp", "config.yml", current);
+    Ok(rewrite_omp_agent_model_overrides(
+        text,
+        baseline.as_deref(),
+        pin.as_ref().map(|pin| pin.omp_selector()),
+    ))
+}
+
+fn rewrite_omp_agent_model_overrides(
+    text: &str,
+    baseline: Option<&str>,
+    selector: Option<String>,
+) -> String {
+    match selector {
+        Some(selector) => write_omp_agent_model_overrides(text, &selector),
+        None if omp_bundled_overrides_are_owned(text) => {
+            restore_omp_agent_model_overrides(text, baseline)
+        }
+        None => text.to_string(),
+    }
+}
+
+pub(in crate::gateway) fn omp_default_subagent_slice_owned(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .is_some_and(|text| omp_bundled_overrides_are_owned(&text))
+}
+
+fn omp_bundled_overrides_are_owned(text: &str) -> bool {
+    let Some(block) = extract_omp_task_overrides(text) else {
+        return false;
+    };
+    block.iter().any(|line| {
+        let trimmed = line.trim_start();
+        let Some((key, value)) = trimmed.split_once(':') else {
+            return false;
+        };
+        OMP_BUNDLED_AGENTS.contains(&key.trim())
+            && is_codexhub_client_model_selector(value.trim().trim_matches(['"', '\'']))
+    })
+}
+
+fn omp_agent_overrides_block(selector: &str) -> Vec<String> {
+    let mut block = vec!["task:".to_string(), "  agentModelOverrides:".to_string()];
+    for name in OMP_BUNDLED_AGENTS {
+        block.push(format!("    {name}: {selector}"));
+    }
+    block
+}
+
+fn write_omp_agent_model_overrides(text: &str, selector: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(ToOwned::to_owned).collect();
+    if let Some(task_start) = lines
+        .iter()
+        .position(|line| is_top_level_yaml_key(line, "task"))
+    {
+        let task_end = (task_start + 1..lines.len())
+            .find(|index| is_any_top_level_yaml_key(&lines[*index]))
+            .unwrap_or(lines.len());
+        if let Some(rel) = lines[task_start + 1..task_end]
+            .iter()
+            .position(|line| line.trim_start().starts_with("agentModelOverrides:"))
+        {
+            let override_start = task_start + 1 + rel;
+            let override_end = (override_start + 1..task_end)
+                .find(|index| {
+                    let trimmed = lines[*index].trim_start();
+                    !trimmed.is_empty()
+                        && !trimmed.starts_with('#')
+                        && lines[*index].chars().take_while(|ch| *ch == ' ').count() <= 2
+                })
+                .unwrap_or(task_end);
+            let mut replacement = vec!["  agentModelOverrides:".to_string()];
+            let mut seen = std::collections::HashSet::new();
+            for name in OMP_BUNDLED_AGENTS {
+                replacement.push(format!("    {name}: {selector}"));
+                seen.insert(*name);
+            }
+            for line in &lines[override_start + 1..override_end] {
+                let trimmed = line.trim_start();
+                if let Some((key, _)) = trimmed.split_once(':') {
+                    if seen.contains(key.trim()) {
+                        continue;
+                    }
+                }
+                if !trimmed.is_empty() {
+                    replacement.push(line.clone());
+                }
+            }
+            lines.splice(override_start..override_end, replacement);
+        } else {
+            let insert_at = task_start + 1;
+            let replacement: Vec<String> = std::iter::once("  agentModelOverrides:".to_string())
+                .chain(
+                    OMP_BUNDLED_AGENTS
+                        .iter()
+                        .map(|name| format!("    {name}: {selector}")),
+                )
+                .collect();
+            lines.splice(insert_at..insert_at, replacement);
+        }
+    } else {
+        if !lines.is_empty() && lines.last().is_some_and(|line| !line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.extend(omp_agent_overrides_block(selector));
+    }
+    join_yaml_lines(text, &lines)
+}
+
+fn restore_omp_agent_model_overrides(text: &str, baseline: Option<&str>) -> String {
+    let Some(baseline) = baseline else {
+        return strip_codexhub_omp_bundled_overrides(text);
+    };
+    let baseline_block = extract_omp_task_overrides(baseline);
+    let mut lines: Vec<String> = text.lines().map(ToOwned::to_owned).collect();
+    if let Some(task_start) = lines
+        .iter()
+        .position(|line| is_top_level_yaml_key(line, "task"))
+    {
+        let task_end = (task_start + 1..lines.len())
+            .find(|index| is_any_top_level_yaml_key(&lines[*index]))
+            .unwrap_or(lines.len());
+        if let Some(rel) = lines[task_start + 1..task_end]
+            .iter()
+            .position(|line| line.trim_start().starts_with("agentModelOverrides:"))
+        {
+            let override_start = task_start + 1 + rel;
+            let override_end = (override_start + 1..task_end)
+                .find(|index| {
+                    let trimmed = lines[*index].trim_start();
+                    !trimmed.is_empty()
+                        && !trimmed.starts_with('#')
+                        && lines[*index].chars().take_while(|ch| *ch == ' ').count() <= 2
+                })
+                .unwrap_or(task_end);
+            match baseline_block {
+                Some(block) => {
+                    lines.splice(override_start..override_end, block);
+                }
+                None => {
+                    lines.drain(override_start..override_end);
+                }
+            };
+            if task_end > task_start + 1 {
+                let remaining = (task_start + 1..lines.len())
+                    .find(|index| is_any_top_level_yaml_key(&lines[*index]))
+                    .unwrap_or(lines.len());
+                if remaining == task_start + 1 {
+                    lines.remove(task_start);
+                }
+            }
+        }
+    } else if let Some(block) = baseline_block {
+        if !lines.is_empty() && lines.last().is_some_and(|line| !line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push("task:".to_string());
+        lines.extend(block);
+    }
+    join_yaml_lines(text, &lines)
+}
+
+fn strip_codexhub_omp_bundled_overrides(text: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(ToOwned::to_owned).collect();
+    let Some(task_start) = lines
+        .iter()
+        .position(|line| is_top_level_yaml_key(line, "task"))
+    else {
+        return text.to_string();
+    };
+    let task_end = (task_start + 1..lines.len())
+        .find(|index| is_any_top_level_yaml_key(&lines[*index]))
+        .unwrap_or(lines.len());
+    let Some(rel) = lines[task_start + 1..task_end]
+        .iter()
+        .position(|line| line.trim_start().starts_with("agentModelOverrides:"))
+    else {
+        return text.to_string();
+    };
+    let override_start = task_start + 1 + rel;
+    let override_end = (override_start + 1..task_end)
+        .find(|index| {
+            let trimmed = lines[*index].trim_start();
+            !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && lines[*index].chars().take_while(|ch| *ch == ' ').count() <= 2
+        })
+        .unwrap_or(task_end);
+    let mut kept = vec!["  agentModelOverrides:".to_string()];
+    for line in &lines[override_start + 1..override_end] {
+        let trimmed = line.trim_start();
+        if let Some((key, value)) = trimmed.split_once(':') {
+            let key = key.trim();
+            let value = value.trim().trim_matches(['"', '\'']);
+            if OMP_BUNDLED_AGENTS.contains(&key) && is_codexhub_client_model_selector(value) {
+                continue;
+            }
+        }
+        kept.push(line.clone());
+    }
+    if kept.len() == 1 {
+        lines.drain(override_start..override_end);
+        let remaining = (task_start + 1..lines.len())
+            .find(|index| is_any_top_level_yaml_key(&lines[*index]))
+            .unwrap_or(lines.len());
+        if remaining == task_start + 1 {
+            lines.remove(task_start);
+        }
+    } else {
+        lines.splice(override_start..override_end, kept);
+    }
+    join_yaml_lines(text, &lines)
+}
+
+fn extract_omp_task_overrides(text: &str) -> Option<Vec<String>> {
+    let lines: Vec<&str> = text.lines().collect();
+    let task_start = lines
+        .iter()
+        .position(|line| is_top_level_yaml_key(line, "task"))?;
+    let task_end = (task_start + 1..lines.len())
+        .find(|index| is_any_top_level_yaml_key(lines[*index]))
+        .unwrap_or(lines.len());
+    let rel = lines[task_start + 1..task_end]
+        .iter()
+        .position(|line| line.trim_start().starts_with("agentModelOverrides:"))?;
+    let override_start = task_start + 1 + rel;
+    let override_end = (override_start + 1..task_end)
+        .find(|index| {
+            let trimmed = lines[*index].trim_start();
+            !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && lines[*index].chars().take_while(|ch| *ch == ' ').count() <= 2
+        })
+        .unwrap_or(task_end);
+    Some(
+        lines[override_start..override_end]
+            .iter()
+            .map(|line| (*line).to_string())
+            .collect(),
+    )
+}
+
+fn join_yaml_lines(original: &str, lines: &[String]) -> String {
+    let newline = if original.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut output = lines.join(newline);
+    if original.ends_with('\n') && !output.ends_with('\n') {
+        output.push_str(newline);
+    }
+    if output.is_empty() {
+        String::new()
+    } else if !output.ends_with('\n') {
+        format!("{output}\n")
+    } else {
+        output
+    }
 }
 
 /// Keep user-owned OMP roles untouched, except for selectors that point at a
@@ -248,10 +519,9 @@ fn omp_thinking_level_map_yaml(model: &GatewayClientProviderModel) -> String {
 use super::super::{
     combined_current_preview, combined_named_text, create_snapshot_backup,
     gateway_client_model_selector, gateway_exported_model_default_reasoning_effort,
-    gateway_exported_model_supports_image, is_codexhub_client_model_selector,
-    is_codexhub_client_provider_id, is_local_gateway_url, resolve_gateway_client_model_id,
-    restore_latest_snapshot_backup, route_owner_from_endpoint, sanitize_text, write_text_replace,
-    GatewayClientApplyResult, GatewayClientConfigPreview,
+    gateway_exported_model_supports_image, is_codexhub_client_provider_id, is_local_gateway_url,
+    resolve_gateway_client_model_id, restore_latest_snapshot_backup, route_owner_from_endpoint,
+    sanitize_text, write_text_replace, GatewayClientApplyResult, GatewayClientConfigPreview,
 };
 use crate::app_flavor::RoutingOwner;
 use std::fs;
@@ -433,12 +703,18 @@ pub(in crate::gateway) fn preview_omp_config_with_paths(
     };
     let default_reasoning_effort =
         gateway_exported_model_default_reasoning_effort(settings, providers, &model);
-    let next_config = omp_config_text(
+    let next_config = apply_omp_default_subagent_slice(
+        &omp_config_text(
+            current_config.as_deref(),
+            &selector,
+            vision_selector,
+            default_reasoning_effort.as_deref(),
+        ),
         current_config.as_deref(),
-        &selector,
-        vision_selector,
-        default_reasoning_effort.as_deref(),
-    );
+        settings,
+        providers,
+        &model,
+    )?;
     let next_models = omp_models_yml_text(current_models.as_deref(), settings, providers, &model)?;
     let mut message =
         "Apply will snapshot OMP config/models, then route OMP through CodexHub Gateway."
@@ -492,12 +768,18 @@ pub(in crate::gateway) fn plan_omp_apply(
     };
     let default_reasoning_effort =
         gateway_exported_model_default_reasoning_effort(settings, providers, &model);
-    let next_config = omp_config_text(
+    let next_config = apply_omp_default_subagent_slice(
+        &omp_config_text(
+            Some(&current_config),
+            &selector,
+            vision_selector,
+            default_reasoning_effort.as_deref(),
+        ),
         Some(&current_config),
-        &selector,
-        vision_selector,
-        default_reasoning_effort.as_deref(),
-    );
+        settings,
+        providers,
+        &model,
+    )?;
     let next_models = omp_models_yml_text(Some(&current_models), settings, providers, &model)?;
     Ok(OmpApplyPlan {
         config_path: config_path.to_path_buf(),

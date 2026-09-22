@@ -124,6 +124,8 @@ subject to the Messages evidence gate.
   switch); no separate "active/pointing" indicator is surfaced.
 - Byte-compare readback remains in force for not-yet-migrated clients; the
   two readback semantics coexist during the campaign.
+- Default subagent pins on OpenCode, ZCode, OMP, and Grok CLI are a connected
+  sibling owned slice, not Injected Block and not Activation (ADR-0013).
 
 ## Campaign status (architecture candidate)
 

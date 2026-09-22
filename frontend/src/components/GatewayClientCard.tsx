@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { WorkspaceDialog } from "./workspace/WorkspaceDialog";
+import { DefaultSubagentPicker } from "./workspace/ProviderWorkspaceView";
 import { api, messageFromError } from "../lib/tauri";
 import {
   MoreHorizontal,
   RefreshCcw,
-  AlertTriangle,
   FileText,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -23,6 +23,10 @@ import {
 } from "../lib/clientConnectionState";
 import type { GatewayClientContract, GatewayClientInfo } from "../lib/types";
 import { SwitchControl } from "./SettingsDrawer";
+import {
+  resolveSubagentEffort,
+  type DefaultSubagentOption,
+} from "../lib/defaultSubagent";
 
 export type { ClientConnectionState };
 export { connectionStateFromInfo };
@@ -39,6 +43,12 @@ interface GatewayClientCardProps {
   enabledModelCount?: number;
   exportedModels?: ExportedGatewayModel[];
   info?: GatewayClientInfo;
+  defaultSubagent?: {
+    model: string;
+    effort: string;
+    options: DefaultSubagentOption[];
+    onChange: (model: string, effort: string) => void;
+  };
   onToggle: (
     connect: boolean,
     model?: string | null,
@@ -54,6 +64,7 @@ export function GatewayClientCard({
   enabledModelCount,
   exportedModels = [],
   info,
+  defaultSubagent,
   onToggle,
   onRefresh,
 }: GatewayClientCardProps) {
@@ -168,10 +179,31 @@ export function GatewayClientCard({
             {configPath || t("common.copyOnly")}
           </code>
         </div>
-        <div className="ws-client-bottom">
-          <div>
-            <span className={labelTone}>{label}</span>
-            <small>
+        <div className="ws-client-footer">
+          {defaultSubagent ? (
+            <DefaultSubagentPicker
+              disabled={Boolean(busy)}
+              model={defaultSubagent.model}
+              effort={
+                defaultSubagent.model
+                  ? resolveSubagentEffort(
+                      defaultSubagent.options.find(
+                        (option) => option.id === defaultSubagent.model,
+                      ),
+                      defaultSubagent.effort,
+                    )
+                  : ""
+              }
+              options={defaultSubagent.options}
+              selected={defaultSubagent.options.find(
+                (option) => option.id === defaultSubagent.model,
+              )}
+              emptyLabel={t("workspace.defaultSubagentCliDefault")}
+              onChange={defaultSubagent.onChange}
+            />
+          ) : null}
+          <div className="ws-client-bottom">
+            <div className={cx("ws-client-status", labelTone)}>
               <ConnectionNarrative
                 clientId={client.id}
                 enabledModelCount={enabledModelCount}
@@ -179,15 +211,15 @@ export function GatewayClientCard({
                 state={state}
                 onRepair={() => requestToggle(true)}
               />
-            </small>
+            </div>
+            <SwitchControl
+              ariaLabel={t("gateway.routeMode", { name })}
+              checked={checked}
+              disabled={disabled}
+              tone={state === "drift" ? "warn" : "action"}
+              onChange={requestToggle}
+            />
           </div>
-          <SwitchControl
-            ariaLabel={t("gateway.routeMode", { name })}
-            checked={checked}
-            disabled={disabled}
-            tone={state === "drift" ? "warn" : "action"}
-            onChange={requestToggle}
-          />
         </div>
       </section>
       <WorkspaceDialog
@@ -388,53 +420,28 @@ function ConnectionNarrative({
 }) {
   const { t } = useTranslation();
   if (state === "busy") {
-    return (
-      <>
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
-        <span>{t("gateway.updatingClientConfig")}</span>
-      </>
-    );
+    return t("gateway.updatingClientConfig");
   }
   if (state === "drift") {
     return (
-      <>
-        <AlertTriangle className="h-3 w-3 text-amber-600" />
-        <button
-          type="button"
-          className="text-left text-amber-700 underline-offset-2 hover:underline"
-          onClick={onRepair}
-        >
-          {t("gateway.configDriftRepair")}
-        </button>
-      </>
+      <button
+        type="button"
+        className="text-left text-amber-700 underline-offset-2 hover:underline"
+        onClick={onRepair}
+      >
+        {t("gateway.configDriftRepair")}
+      </button>
     );
   }
   if (state === "unavailable" || !installed) {
-    return (
-      <>
-        <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
-        <span>{t("gateway.installToConnect")}</span>
-      </>
-    );
+    return t("gateway.installToConnect");
   }
   if (state === "connected") {
-    return (
-      <>
-        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-        <span>
-          {clientId === "dsh"
-            ? t("gateway.injectedProvider", { count: enabledModelCount ?? 0 })
-            : t("gateway.connectedViaHub")}
-        </span>
-      </>
-    );
+    return clientId === "dsh"
+      ? t("gateway.injectedProvider", { count: enabledModelCount ?? 0 })
+      : t("gateway.connectedViaHub");
   }
-  return (
-    <>
-      <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
-      <span>{t("gateway.configUnchanged")}</span>
-    </>
-  );
+  return `${t("gateway.connectionDisconnected")} · ${t("gateway.configUnchanged")}`;
 }
 
 function ClientLogo({ id, name }: { id: string; name: string }) {

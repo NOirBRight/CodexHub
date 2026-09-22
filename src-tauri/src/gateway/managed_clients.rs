@@ -23,12 +23,13 @@ use super::clients::grok::{
     restore_grok_config_with_backup_roots,
 };
 use super::clients::omp::{
-    detect_omp_config_paths, plan_omp_apply, preview_omp_config_with_paths, publish_omp_apply,
-    restore_omp_config_with_paths,
+    detect_omp_config_paths, omp_default_subagent_slice_owned, plan_omp_apply,
+    preview_omp_config_with_paths, publish_omp_apply, restore_omp_config_with_paths,
 };
 use super::clients::opencode::{
-    detect_opencode_config_path, plan_opencode_apply, preview_opencode_config_with_path,
-    publish_opencode_apply, restore_opencode_config_with_backup_roots,
+    detect_opencode_config_path, opencode_default_subagent_slice_owned, plan_opencode_apply,
+    preview_opencode_config_with_path, publish_opencode_apply,
+    restore_opencode_config_with_backup_roots,
 };
 use super::clients::pi::{
     detect_pi_config_paths, plan_pi_apply, preview_pi_config_with_paths, publish_pi_apply,
@@ -36,7 +37,8 @@ use super::clients::pi::{
 };
 use super::clients::zcode::{
     detect_zcode_config_targets, plan_zcode_apply, preview_zcode_config_with_targets,
-    publish_zcode_apply, restore_zcode_config_with_targets, ZcodeConfigTargets,
+    publish_zcode_apply, restore_zcode_config_with_targets, zcode_default_subagent_slice_owned,
+    ZcodeConfigTargets,
 };
 use crate::injection::{self, DshLifecycleReport, MaskedSecret, ReadbackExpectation};
 use crate::Provider;
@@ -457,7 +459,7 @@ fn native_plan(
     id: &'static str,
     intent: ClientIntent,
     write_paths: Vec<PathBuf>,
-    target: &AdapterTarget,
+    ctx: &AdapterCtx<'_>,
 ) -> ClientMutationPlan {
     ClientMutationPlan {
         client_id: id.to_owned(),
@@ -465,11 +467,70 @@ fn native_plan(
         readback: native_readback(&write_paths),
         write_paths,
         expected_fingerprint: None,
-        restart_required: "none".to_owned(),
+        restart_required: native_restart_required(id, ctx).to_owned(),
         activation_touched: false,
         preview: None,
-        backup: target.backup_strategy(),
+        backup: ctx.target.backup_strategy(),
         no_execution: None,
+    }
+}
+
+pub(in crate::gateway) fn native_restart_required(id: &str, ctx: &AdapterCtx<'_>) -> &'static str {
+    match id {
+        "grok" => "Grok CLI",
+        "opencode" if default_subagent_slice_changes(id, ctx) => "OpenCode",
+        "omp" if default_subagent_slice_changes(id, ctx) => "OMP",
+        "zcode" if default_subagent_slice_changes(id, ctx) => "ZCode",
+        _ => "none",
+    }
+}
+
+fn default_subagent_slice_changes(id: &str, ctx: &AdapterCtx<'_>) -> bool {
+    let model = ctx.models.first().cloned().unwrap_or_default();
+    if super::resolve_client_default_subagent_pin(ctx.settings, ctx.providers, id, &model)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return true;
+    }
+    default_subagent_owned_live_slice(id, ctx)
+}
+
+fn default_subagent_owned_live_slice(id: &str, ctx: &AdapterCtx<'_>) -> bool {
+    match id {
+        "opencode" => target_write_paths(ctx, detect_opencode_config_path().into_iter().collect())
+            .first()
+            .is_some_and(|path| opencode_default_subagent_slice_owned(path)),
+        "omp" => {
+            let paths = detect_omp_config_paths();
+            target_write_paths(ctx, vec![paths.config_path, paths.models_path])
+                .first()
+                .is_some_and(|path| omp_default_subagent_slice_owned(path))
+        }
+        "zcode" => zcode_default_subagent_slice_owned(&zcode_targets_for(ctx)),
+        _ => false,
+    }
+}
+
+fn zcode_targets_for(ctx: &AdapterCtx<'_>) -> ZcodeConfigTargets {
+    let live = detect_zcode_config_targets();
+    let paths = target_write_paths(
+        ctx,
+        vec![
+            live.catalog_path.clone(),
+            live.v2_config_path.clone(),
+            live.v2_cache_path.clone(),
+        ],
+    );
+    if paths.len() >= 3 {
+        ZcodeConfigTargets {
+            catalog_path: paths[0].clone(),
+            v2_config_path: paths[1].clone(),
+            v2_cache_path: paths[2].clone(),
+        }
+    } else {
+        live
     }
 }
 
@@ -478,7 +539,7 @@ fn codex_plan(intent: ClientIntent, ctx: &AdapterCtx<'_>) -> ClientMutationPlan 
         "codex",
         intent,
         target_write_paths(ctx, vec![codex_home().join("config.toml")]),
-        &ctx.target,
+        ctx,
     );
     plan.preview = Some(ClientPreview {
         strategy: "overlay".to_owned(),
@@ -521,7 +582,7 @@ impl ManagedClientAdapter for OpenCodeAdapter {
             self.metadata().id,
             intent,
             target_write_paths(_ctx, detect_opencode_config_path().into_iter().collect()),
-            &_ctx.target,
+            _ctx,
         ))
     }
 }
@@ -551,7 +612,7 @@ impl ManagedClientAdapter for PiAdapter {
             self.metadata().id,
             intent,
             target_write_paths(_ctx, vec![paths.settings_path, paths.models_path]),
-            &_ctx.target,
+            _ctx,
         ))
     }
 }
@@ -581,7 +642,7 @@ impl ManagedClientAdapter for OmpAdapter {
             self.metadata().id,
             intent,
             target_write_paths(_ctx, vec![paths.config_path, paths.models_path]),
-            &_ctx.target,
+            _ctx,
         ))
     }
 }
@@ -618,7 +679,7 @@ impl ManagedClientAdapter for ZcodeAdapter {
                     targets.v2_cache_path,
                 ],
             ),
-            &_ctx.target,
+            _ctx,
         ))
     }
 }
@@ -643,14 +704,12 @@ impl ManagedClientAdapter for GrokAdapter {
         intent: ClientIntent,
         _ctx: &AdapterCtx<'_>,
     ) -> Result<ClientMutationPlan, String> {
-        let mut plan = native_plan(
+        Ok(native_plan(
             self.metadata().id,
             intent,
             target_write_paths(_ctx, vec![detect_grok_config_path()]),
-            &_ctx.target,
-        );
-        plan.restart_required = "Grok CLI".to_owned();
-        Ok(plan)
+            _ctx,
+        ))
     }
 }
 
@@ -678,7 +737,7 @@ impl ManagedClientAdapter for ClaudeAdapter {
             self.metadata().id,
             intent,
             target_write_paths(_ctx, vec![detect_claude_config_path()]),
-            &_ctx.target,
+            _ctx,
         );
         plan.restart_required = "Claude Code".to_owned();
         Ok(plan)
