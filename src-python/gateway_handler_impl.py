@@ -288,8 +288,6 @@ class GatewayHandlerMixin:
         status = 500
         try:
             admission.raise_if_cancelled()
-            upstream = gateway_catalog_runtime.official_upstream()
-            upstream_name = str(upstream["name"])
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
             except (TypeError, ValueError):
@@ -311,6 +309,11 @@ class GatewayHandlerMixin:
 
             body = self.rfile.read(content_length)
             admission.raise_if_cancelled()
+            # Read the bounded body before resolving routing configuration:
+            # an early lookup failure otherwise closes with unread bytes and
+            # can reset Windows clients instead of delivering our JSON error.
+            upstream = gateway_catalog_runtime.official_upstream()
+            upstream_name = str(upstream["name"])
             operational_authentication = gateway_transport.materialize_operational_authentication(
                 self.headers,
                 upstream,
