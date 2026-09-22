@@ -411,3 +411,16 @@ test("merge upgrades text-only official rows to catalog vision without dropping 
   assert.equal(merged[0].default_reasoning_level, "medium");
   assert.equal(merged[1].id, "qwen/qwen3.8-max");
 });
+
+test("a reasoning model without effort grades clears stale family grades", () => {
+  const preset = makeProvider({
+    id: "opencode-go",
+    models: [{ id: "mimo-v2.6-flash", thinking_mode: "always_on", supported_reasoning_levels: [], default_reasoning_level: null, input_modalities: ["text", "image"] }],
+  });
+  const [model] = applyPresetReasoningDefaults([
+    { id: "mimo-v2.6-flash", supported_reasoning_levels: ["low", "medium", "xhigh"], default_reasoning_level: "xhigh" },
+  ], preset);
+  assert.deepEqual(model.supported_reasoning_levels, []);
+  assert.equal(model.default_reasoning_level, null);
+  assert.equal(model.thinking_mode, "always_on");
+});

@@ -72,13 +72,16 @@ function mergeOfficialModelDefaults(model: Model, official: Model): Model {
     catalogLevels.length > 0 &&
     isCodexFiveLevelFill(currentLevels) &&
     !isCodexFiveLevelFill(catalogLevels);
-  const useCatalogLevels = catalogLevels.length > 0 && (currentLevels.length === 0 || replaceGenericFill);
+  const noEffortGrades = official.thinking_mode != null &&
+    official.supported_reasoning_levels != null && catalogLevels.length === 0;
+  const useCatalogLevels = noEffortGrades ||
+    (catalogLevels.length > 0 && (currentLevels.length === 0 || replaceGenericFill));
   const nextLevels = useCatalogLevels ? catalogLevels : currentLevels.length ? currentLevels : catalogLevels;
   return {
     ...model,
-    supported_reasoning_levels: nextLevels.length ? nextLevels : model.supported_reasoning_levels,
+    supported_reasoning_levels: useCatalogLevels ? nextLevels : model.supported_reasoning_levels,
     default_reasoning_level: useCatalogLevels
-      ? official.default_reasoning_level ?? model.default_reasoning_level ?? null
+      ? official.default_reasoning_level ?? null
       : model.default_reasoning_level ?? official.default_reasoning_level ?? null,
     thinking_mode: model.thinking_mode ?? official.thinking_mode ?? null,
     input_modalities: (official.input_modalities ?? []).includes("image") &&

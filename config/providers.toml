@@ -1231,6 +1231,18 @@ sort_order = 7
 enabled = true
 
   [[providers.models]]
+  id = "grok-4.7"
+  display_name = "Grok 4.7"
+  context_window = 500000
+  max_output_tokens = 500000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 1
+  enabled = true
+
+  [[providers.models]]
   id = "grok-4.6"
   display_name = "Grok 4.6"
   context_window = 500000
@@ -1239,7 +1251,7 @@ enabled = true
   supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 1
+  sort_order = 2
   enabled = true
 
   [[providers.models]]
@@ -1251,7 +1263,7 @@ enabled = true
   supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 2
+  sort_order = 3
   enabled = true
 
   [[providers.models]]
@@ -1263,7 +1275,7 @@ enabled = true
   supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 3
+  sort_order = 4
   enabled = true
 
   [[providers.models]]
@@ -1275,7 +1287,7 @@ enabled = true
   supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
   default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
-  sort_order = 4
+  sort_order = 5
   enabled = true
 
   [[providers.models]]
@@ -1287,7 +1299,7 @@ enabled = true
   supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
   default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
-  sort_order = 5
+  sort_order = 6
   enabled = true
 
   [[providers.models]]
@@ -1299,7 +1311,7 @@ enabled = true
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 6
+  sort_order = 7
   enabled = true
 
   [[providers.models]]
@@ -1311,7 +1323,7 @@ enabled = true
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 7
+  sort_order = 8
   enabled = true
 
   [[providers.models]]
@@ -1323,7 +1335,7 @@ enabled = true
   supported_reasoning_levels = ["high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 8
+  sort_order = 9
   enabled = true
 
   [[providers.models]]
@@ -1335,7 +1347,7 @@ enabled = true
   supported_reasoning_levels = ["high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 9
+  sort_order = 10
   enabled = true
 
   [[providers.models]]
@@ -1344,8 +1356,9 @@ enabled = true
   context_window = 202752
   max_output_tokens = 131072
   input_modalities = ["text"]
+  supported_reasoning_levels = []
   thinking_mode = "toggle"
-  sort_order = 10
+  sort_order = 11
   enabled = true
 
   [[providers.models]]
@@ -1357,7 +1370,7 @@ enabled = true
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 11
+  sort_order = 12
   enabled = true
 
   [[providers.models]]
@@ -1366,8 +1379,9 @@ enabled = true
   context_window = 262144
   max_output_tokens = 262144
   input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
-  sort_order = 12
+  sort_order = 13
   enabled = true
 
   [[providers.models]]
@@ -1376,8 +1390,9 @@ enabled = true
   context_window = 262144
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
   thinking_mode = "toggle"
-  sort_order = 13
+  sort_order = 14
   enabled = true
 
   [[providers.models]]
@@ -1389,7 +1404,7 @@ enabled = true
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "toggle"
-  sort_order = 14
+  sort_order = 15
   enabled = true
 
   [[providers.models]]
@@ -1398,8 +1413,9 @@ enabled = true
   context_window = 1000000
   max_output_tokens = 131072
   input_modalities = ["text"]
+  supported_reasoning_levels = []
   thinking_mode = "toggle"
-  sort_order = 15
+  sort_order = 16
   enabled = true
 
   [[providers.models]]
@@ -1411,7 +1427,19 @@ enabled = true
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 16
+  sort_order = 17
+  enabled = true
+
+  [[providers.models]]
+  id = "deepseek-v4.1-flash"
+  display_name = "DeepSeek V4.1 Flash"
+  context_window = 1000000
+  max_output_tokens = 384000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 18
   enabled = true
 
   [[providers.models]]
@@ -1423,7 +1451,7 @@ enabled = true
   supported_reasoning_levels = ["low", "high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 17
+  sort_order = 19
   enabled = true
 
   [[providers.models]]
@@ -1435,7 +1463,7 @@ enabled = true
   supported_reasoning_levels = ["high", "max"]
   default_reasoning_level = "max"
   thinking_mode = "always_on"
-  sort_order = 18
+  sort_order = 20
   enabled = true
 
   [[providers.models]]
@@ -1444,10 +1472,31 @@ enabled = true
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "xhigh"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
-  sort_order = 19
+  sort_order = 21
+  enabled = true
+
+  [[providers.models]]
+  id = "mimo-v2.6-flash"
+  display_name = "MiMo V2.6 Flash"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 22
+  enabled = true
+
+  [[providers.models]]
+  id = "mimo-v2.6-pro"
+  display_name = "MiMo V2.6 Pro"
+  context_window = 1048576
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 23
   enabled = true
 
   [[providers.models]]
@@ -1456,10 +1505,9 @@ enabled = true
   context_window = 1048576
   max_output_tokens = 128000
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "xhigh"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
-  sort_order = 20
+  sort_order = 24
   enabled = true
 
   [[providers.models]]
@@ -1468,10 +1516,9 @@ enabled = true
   context_window = 1048576
   max_output_tokens = 131072
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "xhigh"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
-  sort_order = 21
+  sort_order = 25
   enabled = true
 
   [[providers.models]]
@@ -1480,10 +1527,9 @@ enabled = true
   context_window = 262144
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "xhigh"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
-  sort_order = 22
+  sort_order = 26
   enabled = true
 
   [[providers.models]]
@@ -1495,7 +1541,7 @@ enabled = true
   supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 23
+  sort_order = 27
   enabled = true
 
   [[providers.models]]
@@ -1507,7 +1553,7 @@ enabled = true
   supported_reasoning_levels = ["low", "medium", "high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 24
+  sort_order = 28
   enabled = true
 
   [[providers.models]]
@@ -1519,7 +1565,7 @@ enabled = true
   supported_reasoning_levels = ["high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 25
+  sort_order = 29
   enabled = true
 
   [[providers.models]]
@@ -1528,8 +1574,9 @@ enabled = true
   context_window = 1000000
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
   thinking_mode = "toggle"
-  sort_order = 26
+  sort_order = 30
   enabled = true
 
   [[providers.models]]
@@ -1538,8 +1585,9 @@ enabled = true
   context_window = 204800
   max_output_tokens = 131072
   input_modalities = ["text"]
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
-  sort_order = 27
+  sort_order = 31
   enabled = true
 
   [[providers.models]]
@@ -1548,8 +1596,9 @@ enabled = true
   context_window = 196608
   max_output_tokens = 131072
   input_modalities = ["text"]
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
-  sort_order = 28
+  sort_order = 32
   enabled = true
 
   [[providers.models]]
@@ -1561,7 +1610,7 @@ enabled = true
   supported_reasoning_levels = ["low", "medium", "xhigh"]
   default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
-  sort_order = 29
+  sort_order = 33
   enabled = true
 
   [[providers.models]]
@@ -1573,7 +1622,7 @@ enabled = true
   supported_reasoning_levels = ["low", "medium", "xhigh"]
   default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
-  sort_order = 30
+  sort_order = 34
   enabled = true
 
   [[providers.models]]
@@ -1582,8 +1631,9 @@ enabled = true
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text"]
+  supported_reasoning_levels = []
   thinking_mode = "toggle"
-  sort_order = 31
+  sort_order = 35
   enabled = true
 
   [[providers.models]]
@@ -1592,8 +1642,9 @@ enabled = true
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
   thinking_mode = "toggle"
-  sort_order = 32
+  sort_order = 36
   enabled = true
 
   [[providers.models]]
@@ -1602,8 +1653,9 @@ enabled = true
   context_window = 1000000
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
   thinking_mode = "toggle"
-  sort_order = 33
+  sort_order = 37
   enabled = true
 
   [[providers.models]]
@@ -1615,7 +1667,7 @@ enabled = true
   supported_reasoning_levels = ["high"]
   default_reasoning_level = "high"
   thinking_mode = "always_on"
-  sort_order = 34
+  sort_order = 38
   enabled = true
 
   [[providers.models]]
@@ -1627,7 +1679,7 @@ enabled = true
   supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
   default_reasoning_level = "medium"
   thinking_mode = "always_on"
-  sort_order = 35
+  sort_order = 39
   enabled = true
 
 [[providers]]

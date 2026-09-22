@@ -20,6 +20,25 @@ from maintained_catalog import (
 
 
 class MaintainedCatalogTests(unittest.TestCase):
+    def test_opencode_go_current_vision_and_reasoning_capabilities(self):
+        expected = {
+            "deepseek-v4.1-flash": ("low", "high", "max"),
+            "grok-4.7": ("low", "medium", "high", "xhigh"),
+            "mimo-v2.6-flash": (),
+            "mimo-v2.6-pro": (),
+        }
+        for model_id, levels in expected.items():
+            with self.subTest(model=model_id):
+                model = resolve_model("opencode-go", model_id)
+                self.assertIsNotNone(model)
+                self.assertIn("image", model.input_modalities)
+                self.assertEqual(model.thinking_mode, "always_on")
+                self.assertEqual(model.reasoning_levels, levels)
+                self.assertGreater(model.context_window, 0)
+        for model in official_models("opencode-go"):
+            if model.id.startswith("mimo-"):
+                self.assertEqual(model.reasoning_levels, ())
+
     def test_kimi_k3_defaults_to_max_on_three_levels(self):
         model = resolve_model("kimi", "kimi-k3")
         assert model is not None
@@ -164,8 +183,8 @@ class MaintainedCatalogTests(unittest.TestCase):
         mimo_pro = resolve_model("opencode-go", "mimo-v2.5-pro")
         assert mimo_pro is not None
         self.assertEqual(mimo_pro.family, "mimo")
-        self.assertEqual(mimo_pro.reasoning_levels, ("low", "medium", "xhigh"))
-        self.assertEqual(mimo_pro.default_reasoning_level, "xhigh")
+        self.assertEqual(mimo_pro.reasoning_levels, ())
+        self.assertIsNone(mimo_pro.default_reasoning_level)
         hy3 = resolve_model("opencode-go", "hy3")
         assert hy3 is not None
         self.assertEqual(hy3.reasoning_levels, ("low", "medium", "high"))

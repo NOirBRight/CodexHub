@@ -235,7 +235,11 @@ export function ModelSection({
           onTest={onTestModel ? () => void runModelTest(model) : undefined}
         />
         <div
-          onClick={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            if ((event.target as HTMLElement).closest("label,button,input")) {
+              event.stopPropagation();
+            }
+          }}
           onKeyDown={(event) => event.stopPropagation()}
         >
           {actions}
@@ -503,6 +507,9 @@ function ModelEditorOverlay({
             : levels[0] ?? null;
       return {
         ...current,
+        thinking_mode: enabled
+          ? model.thinking_mode === "always_on" ? "always_on" : "toggle"
+          : "none",
         supported_reasoning_levels: enabled ? levels : [],
         default_reasoning_level: enabled
           ? current.default_reasoning_level && levels.includes(current.default_reasoning_level)

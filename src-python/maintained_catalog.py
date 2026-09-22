@@ -475,7 +475,10 @@ def _commandcode_rows() -> tuple[MaintainedModel, ...]:
 
 
 def _opencode_rows() -> tuple[MaintainedModel, ...]:
+    # OpenCode's provider-specific models.dev catalog, checked 2026-09-22.
+    # MiMo reports reasoning, but no configurable effort grades on this endpoint.
     specs: tuple[tuple[str, str, int, int, bool, str | None], ...] = (
+        ("grok-4.7", "Grok 4.7", 500_000, 500_000, True, "high"),
         ("grok-4.6", "Grok 4.6", 500_000, 500_000, True, "high"),
         ("grok-4.5", "Grok 4.5", 500_000, 500_000, True, "high"),
         ("gpt-5.6-luna", "GPT 5.6 Luna", 1_050_000, 128_000, True, "max"),
@@ -492,9 +495,12 @@ def _opencode_rows() -> tuple[MaintainedModel, ...]:
         ("kimi-k2.5", "Kimi K2.5", 262_144, 65_536, True, None),
         ("longcat-2.0", "LongCat 2.0", 1_000_000, 131_072, False, None),
         ("deepseek-v4-pro", "DeepSeek V4 Pro", 1_000_000, 384_000, False, "max"),
+        ("deepseek-v4.1-flash", "DeepSeek V4.1 Flash", 1_000_000, 384_000, True, "max"),
         ("deepseek-v4-flash", "DeepSeek V4 Flash", 1_000_000, 384_000, False, "max"),
         ("deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision Exp", 1_000_000, 384_000, True, "max"),
         ("mimo-v2.5", "MiMo V2.5", 1_000_000, 128_000, True, None),
+        ("mimo-v2.6-flash", "MiMo V2.6 Flash", 1_048_576, 131_072, True, None),
+        ("mimo-v2.6-pro", "MiMo V2.6 Pro", 1_048_576, 131_072, True, None),
         ("mimo-v2.5-pro", "MiMo V2.5 Pro", 1_048_576, 128_000, False, None),
         ("mimo-v2-pro", "MiMo V2 Pro", 1_048_576, 131_072, False, None),
         ("mimo-v2-omni", "MiMo V2 Omni", 262_144, 65_536, True, None),
@@ -515,6 +521,7 @@ def _opencode_rows() -> tuple[MaintainedModel, ...]:
     extra_levels = {
         "muse-spark-1.3-contributor": _FOUR,
         "deepseek-v4-pro": _LOW_HIGH_MAX,
+        "deepseek-v4.1-flash": _LOW_HIGH_MAX,
         "deepseek-v4-flash": _LOW_HIGH_MAX,
         "union-alpha": _ALL,
     }
@@ -530,7 +537,7 @@ def _opencode_rows() -> tuple[MaintainedModel, ...]:
                 index,
                 input_modalities=_VISION if vision else _TEXT,
                 default_reasoning_level=default,
-                reasoning_levels=extra_levels.get(model_id),
+                reasoning_levels=() if model_id.startswith("mimo-") else extra_levels.get(model_id),
             )
         )
     return tuple(rows)
