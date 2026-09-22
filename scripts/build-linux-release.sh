@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build signed Linux AppImage + deb artifacts for one CodexHub flavor.
 # Usage: scripts/build-linux-release.sh [--flavor normal|debug] [--skip-frontend] [--notes TEXT]
+# Unsigned finalization: scripts/build-linux-release.sh --repack-only APPDIR OUTPUT
 set -euo pipefail
 
 flavor="normal"
@@ -28,6 +29,17 @@ build_appimage_with_pinned_runtime() {
     echo "AppImage fallback cannot find the prepared AppDir: $app_dir" >&2
     return 1
   fi
+  local gtk_hook="$app_dir/apprun-hooks/linuxdeploy-plugin-gtk.sh"
+  if [[ ! -f "$gtk_hook" ]]; then
+    echo "AppImage GTK startup hook is missing: $gtk_hook" >&2
+    return 1
+  fi
+  # linuxdeploy's historical X11 workaround overrides even explicit Wayland.
+  # Preserve the caller's choice and allow GTK's normal backend fallback.
+  sed -i 's/^export GDK_BACKEND=x11.*$/export GDK_BACKEND="${GDK_BACKEND:-wayland,x11}"/' "$gtk_hook"
+  # EGL/Mesa comes from the host; use its matching Wayland libraries too.
+  # Bundling Ubuntu's libwayland with Arch's EGL causes EGL_BAD_PARAMETER.
+  rm -f "$app_dir"/usr/lib/libwayland-{client,cursor,egl,server}.so*
   if [[ ! -x "$plugin_path" && ! -x "$linuxdeploy_path" ]]; then
     echo "AppImage fallback cannot find Tauri's linuxdeploy toolchain" >&2
     return 1
@@ -56,6 +68,7 @@ build_appimage_with_pinned_runtime() {
       echo "AppImage fallback could not extract appimagetool" >&2
       exit 1
     fi
+    rm -f "$appimage_path.sig"
     "$appimagetool_path" --runtime-file "$runtime_path" "$app_dir" "$appimage_path"
   )
   rm -rf "$fallback_dir"
@@ -67,6 +80,12 @@ has_prepared_appimage_dir() {
     [[ -f "$app_dir/AppRun" ]] && \
     [[ -f "$app_dir/usr/share/applications/CodexHub.desktop" ]]
 }
+
+if [[ "${1:-}" == "--repack-only" ]]; then
+  [[ "$#" -eq 3 ]] || { echo "usage: $0 --repack-only APPDIR OUTPUT" >&2; exit 2; }
+  build_appimage_with_pinned_runtime "$(realpath "$2")" "$(realpath -m "$3")"
+  exit 0
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -161,7 +180,7 @@ if ! (
   # Verbose Tauri output preserves the appimagetool marker. Only recover that
   # exact failure after linuxdeploy has completed the AppDir.
   if ! grep -Fq "Failed to download runtime file" "$bundle_log" || \
-    ! has_prepared_appimage_dir "$bundle_root/CodexHub.AppDir"; then
+    ! has_prepared_appimage_dir "$bundle_root/appimage/CodexHub.AppDir"; then
     cat "$bundle_log" >&2
     rm -f "$bundle_log"
     exit 1
@@ -177,7 +196,7 @@ if ! (
     cargo "${tauri_deb_args[@]}"
   )
   build_appimage_with_pinned_runtime \
-    "$bundle_root/CodexHub.AppDir" \
+    "$bundle_root/appimage/CodexHub.AppDir" \
     "$bundle_root/appimage/$appimageName"
   (
     cd "$repo_root/src-tauri"
@@ -213,6 +232,13 @@ fi
 if [[ "$deb_src" != "$deb_dst" ]]; then
   mv -f "$deb_src" "$deb_dst"
 fi
+
+# Finalize the GTK backend hook before signing the actual shipped bytes.
+build_appimage_with_pinned_runtime "$bundle_root/appimage/CodexHub.AppDir" "$appimage_dst"
+(
+  cd "$repo_root/src-tauri"
+  cargo tauri signer sign --private-key-path "$private_key_path" "$appimage_dst"
+)
 
 deb_version="$(dpkg-deb -f "$deb_dst" Version)"
 if [[ "$deb_version" != "$version" ]]; then

@@ -102,11 +102,28 @@ It exercises real Wayland pointer input and tray lifecycle actions; the
 operator's pointer is untouched. The normal bridge port must be free.
 It complements the existing Xvfb and GNOME gates.
 
-Building an AppImage on current Arch is not yet qualified: linuxdeploy's
-bundled strip rejects SHT_RELR (the release script now disables stripping),
-and its GTK plugin expects the removed GdkPixbuf loader directory on a
-Glycin-based host. Use the native portable build for local testing; do not
-label an incomplete AppDir as a distributable AppImage. See
+Build AppImages in the Ubuntu 24.04 environment defined by
+`scripts/linux-appimage.Dockerfile`, using the same release SHA and Rust/Node
+toolchain. Current Arch's Glycin-based GdkPixbuf layout is incompatible with
+linuxdeploy's GTK loader-directory assumptions. Keep the signing key outside
+the build container.
+
+The release builder finalizes the AppDir before signing: it preserves an
+explicit `GDK_BACKEND`, otherwise allows `wayland,x11`, and excludes bundled
+Wayland libraries so host EGL/Mesa uses its matching libraries. Python child
+processes also exclude AppImage library paths, avoiding a bundled older
+OpenSSL overriding the host interpreter's SSL module.
+
+When bundling unsigned in the container and signing on the release host, run:
+
+```bash
+./scripts/build-linux-release.sh --repack-only \
+  <target>/release/bundle/appimage/CodexHub.AppDir \
+  <target>/release/bundle/appimage/CodexHub_<version>_amd64.AppImage
+```
+
+This uses the pinned AppImage runtime and invalidates any previous `.sig`.
+Sign and verify the final bytes afterward. See
 [measured Omarchy results](../evidence/omarchy/README.md).
 
 ## Linux E2E

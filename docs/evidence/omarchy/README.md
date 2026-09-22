@@ -1,5 +1,13 @@
 # Omarchy installation and E2E evidence
 
+**Follow-up 0.2.24:** The AppImage construction and startup blockers below were
+resolved using the checked-in Ubuntu build environment, Wayland-library
+finalization, and Python child library isolation. Native AppImage lifecycle
+E2E now passes all 10 checks. The native portable also passes at 125% scale;
+GNOME first-launch/portable-upgrade tests pass. Muse was waived by the
+operator. The original results below remain historical evidence for 0.2.21.
+Final release hashes and source revision belong to the release manifests.
+
 Measured on 2026-09-22, Omarchy 4.0.4 / Hyprland 0.56.2, GTK 3.24.52,
 WebKitGTK 2.52.6, GdkPixbuf 2.44.7. Source baseline `7185c1a1`, branch
 `compat/omarchy`; working-tree changes are not a published release.

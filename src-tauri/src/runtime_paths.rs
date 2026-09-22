@@ -39,6 +39,22 @@ pub(crate) fn configure_python_command(command: &mut Command) {
     ] {
         command.env_remove(name);
     }
+    #[cfg(target_os = "linux")]
+    if let (Some(appdir), Some(libraries)) = (
+        std::env::var_os("APPDIR").filter(|value| !value.is_empty()),
+        std::env::var_os("LD_LIBRARY_PATH"),
+    ) {
+        // AppImage's GTK/OpenSSL dependencies must not replace the host
+        // Python's libraries (e.g. Arch _ssl needs newer OpenSSL symbols).
+        let host_paths: Vec<_> = std::env::split_paths(&libraries)
+            .filter(|path| !path.starts_with(Path::new(&appdir)))
+            .collect();
+        if host_paths.is_empty() {
+            command.env_remove("LD_LIBRARY_PATH");
+        } else if let Ok(value) = std::env::join_paths(host_paths) {
+            command.env("LD_LIBRARY_PATH", value);
+        }
+    }
     configure_no_window(command);
 }
 
@@ -140,6 +156,10 @@ fn resource_root_candidates() -> Vec<PathBuf> {
         if let Some(exe_dir) = exe.parent() {
             candidates.push(exe_dir.join("resources"));
             candidates.push(exe_dir.to_path_buf());
+            #[cfg(target_os = "linux")]
+            if let Some(prefix) = exe_dir.parent() {
+                candidates.push(prefix.join("lib").join(crate::app_flavor::current().product_name()));
+            }
         }
     }
 
