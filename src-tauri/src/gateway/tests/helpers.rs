@@ -1,10 +1,10 @@
-static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+pub(super) static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Keep Gateway client export tests independent from the developer's current
 /// Codex subscription cache.  The production exporter intentionally treats
 /// that cache as the Official membership authority, so a host with a newer or
 /// older model list must not change these tests' expected gpt-5.4 assertions.
-struct OfficialModelsTestHome {
+pub(super) struct OfficialModelsTestHome {
     root: PathBuf,
     previous_codex_home: Option<std::ffi::OsString>,
     previous_runtime_home: Option<std::ffi::OsString>,
@@ -84,7 +84,7 @@ impl Drop for OfficialModelsTestHome {
     }
 }
 
-fn isolated_official_models_home() -> OfficialModelsTestHome {
+pub(super) fn isolated_official_models_home() -> OfficialModelsTestHome {
     OfficialModelsTestHome::new()
 }
 

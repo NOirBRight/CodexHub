@@ -12,6 +12,7 @@ require_python_313(__file__)
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -45,15 +46,44 @@ def version_at_least(found: tuple[int, ...], floor: tuple[int, ...]) -> bool:
     return padded_found >= padded_floor
 
 
-def dpkg_version(package: str) -> str | None:
-    result = subprocess.run(
-        ["dpkg-query", "-W", "-f=${Version}", package],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    value = (result.stdout or "").strip()
-    return value or None
+def installed_package(executable: Path | None) -> tuple[str | None, str | None]:
+    """Read the installed owner of the selected executable without launching it."""
+    if executable is None:
+        return None, None
+    path = str(executable.resolve())
+    if shutil.which("pacman"):
+        command = ["pacman", "-Qo", "--quiet", path]
+        version_command = ["pacman", "-Q"]
+    elif shutil.which("dpkg-query"):
+        command = ["dpkg-query", "-S", path]
+        version_command = ["dpkg-query", "-W", "-f=${Version}"]
+    else:
+        return None, None
+    try:
+        owner = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        if owner.returncode:
+            return None, None
+        package = owner.stdout.strip()
+        if command[0] == "dpkg-query":
+            package = package.rsplit(": ", 1)[0]
+        if not package or "\n" in package:
+            return None, None
+        result = subprocess.run(
+            [*version_command, package], capture_output=True, text=True, timeout=5
+        )
+        if result.returncode:
+            return None, None
+        value = result.stdout.strip()
+        if command[0] == "pacman":
+            fields = value.split()
+            if len(fields) != 2 or fields[0] != package:
+                return None, None
+            value = fields[1]
+        # Distribution epochs and package revisions are not upstream versions.
+        value = value.split(":", 1)[-1].split("-", 1)[0]
+        return package, value if value and value[0].isdigit() else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
 
 
 def first_existing(paths: list[Path]) -> Path | None:
@@ -67,15 +97,18 @@ def detect_desktop() -> dict[str, object]:
     env_path = os.environ.get("CODEXHUB_CODEX_DESKTOP")
     candidates = [Path(env_path)] if env_path else []
     candidates.extend(
+        Path(path) for name in ("chatgpt", "Codex") if (path := shutil.which(name))
+    )
+    candidates.extend(
         [Path("/usr/bin/chatgpt"), Path("/usr/lib/chatgpt/codex-launcher")]
     )
     exe = first_existing(candidates)
-    version = dpkg_version("chatgpt")
+    package, version = installed_package(exe)
     parsed = parse_version(version or "")
     return {
         "client": "codex-desktop",
         "product_name": "Codex Desktop",
-        "package": "chatgpt",
+        "package": package,
         "executable": str(exe) if exe else None,
         "version": version,
         "meets_floor": bool(version) and version_at_least(parsed, DESKTOP_FLOOR),
@@ -86,14 +119,17 @@ def detect_desktop() -> dict[str, object]:
 def detect_zcode() -> dict[str, object]:
     env_path = os.environ.get("CODEXHUB_ZCODE_EXE")
     candidates = [Path(env_path)] if env_path else []
+    candidates.extend(
+        Path(path) for name in ("zcode", "ZCode") if (path := shutil.which(name))
+    )
     candidates.extend([Path("/opt/ZCode/zcode"), Path("/usr/bin/zcode")])
     exe = first_existing(candidates)
-    version = dpkg_version("zcode")
+    package, version = installed_package(exe)
     parsed = parse_version(version or "")
     return {
         "client": "zcode",
         "product_name": "ZCode",
-        "package": "zcode",
+        "package": package,
         "executable": str(exe) if exe else None,
         "version": version,
         "meets_floor": bool(version) and version_at_least(parsed, ZCODE_FLOOR),
@@ -233,18 +269,18 @@ def launch_isolated(executable: str, name: str, work: Path) -> dict[str, object]
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    started = time.time()
+    started = time.monotonic()
     try:
-        while time.time() - started < LAUNCH_WAIT_SECONDS:
+        while time.monotonic() - started < LAUNCH_WAIT_SECONDS:
             code = process.poll()
-            if code is None:
-                return {"ok": True, "pid": process.pid, "home": str(home)}
-            return {
-                "ok": False,
-                "pid": process.pid,
-                "error": f"process exited immediately with {code}",
-            }
-        return {"ok": False, "pid": process.pid, "error": "process did not stay running"}
+            if code is not None:
+                return {
+                    "ok": False,
+                    "pid": process.pid,
+                    "error": f"process exited during startup with {code}",
+                }
+            time.sleep(0.05)
+        return {"ok": True, "pid": process.pid, "home": str(home)}
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
@@ -256,11 +292,17 @@ def launch_isolated(executable: str, name: str, work: Path) -> dict[str, object]
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Linux Codex Desktop + ZCode GUI E2E preflight")
+    parser = argparse.ArgumentParser(
+        description="Linux Codex Desktop + ZCode GUI E2E preflight"
+    )
     parser.add_argument(
         "--bin",
         default=str(
-            Path(__file__).resolve().parents[1] / "src-tauri" / "target" / "debug" / "codexhub"
+            Path(__file__).resolve().parents[1]
+            / "src-tauri"
+            / "target"
+            / "debug"
+            / "codexhub"
         ),
     )
     parser.add_argument("--output", default="test-results/linux-gui-e2e.json")
@@ -282,6 +324,8 @@ def main(argv: list[str]) -> int:
             continue
         if not client.get("executable"):
             failures.append(f"{key}: executable not found")
+        elif not client.get("version"):
+            failures.append(f"{key}: version unknown for selected executable")
         elif not client.get("meets_floor"):
             failures.append(
                 f"{key}: version {client.get('version')} below floor {client.get('floor')}"
@@ -296,21 +340,43 @@ def main(argv: list[str]) -> int:
                 work = Path(temp)
                 report["codex_apply"] = isolated_apply(bin_path, "codex", work)
                 report["zcode_apply"] = isolated_apply(bin_path, "zcode", work)
-                if not report["codex_apply"]["apply"]["ok"] or not report["codex_apply"]["readback"]["ok"]:
+                if (
+                    not report["codex_apply"]["apply"]["ok"]
+                    or not report["codex_apply"]["readback"]["ok"]
+                ):
                     failures.append("codex isolated apply/readback failed")
-                if not report["zcode_apply"]["apply"]["ok"] or not report["zcode_apply"]["readback"]["ok"]:
+                if (
+                    not report["zcode_apply"]["apply"]["ok"]
+                    or not report["zcode_apply"]["readback"]["ok"]
+                ):
                     failures.append("zcode isolated apply/readback failed")
                 if not args.skip_launch:
-                    desktop_exe = report["desktop"].get("executable") if isinstance(report["desktop"], dict) else None
-                    zcode_exe = report["zcode"].get("executable") if isinstance(report["zcode"], dict) else None
+                    desktop_exe = (
+                        report["desktop"].get("executable")
+                        if isinstance(report["desktop"], dict)
+                        else None
+                    )
+                    zcode_exe = (
+                        report["zcode"].get("executable")
+                        if isinstance(report["zcode"], dict)
+                        else None
+                    )
                     if desktop_exe:
-                        report["desktop_launch"] = launch_isolated(str(desktop_exe), "desktop", work)
+                        report["desktop_launch"] = launch_isolated(
+                            str(desktop_exe), "desktop", work
+                        )
                         if not report["desktop_launch"]["ok"]:
-                            failures.append(f"desktop launch: {report['desktop_launch'].get('error')}")
+                            failures.append(
+                                f"desktop launch: {report['desktop_launch'].get('error')}"
+                            )
                     if zcode_exe:
-                        report["zcode_launch"] = launch_isolated(str(zcode_exe), "zcode", work)
+                        report["zcode_launch"] = launch_isolated(
+                            str(zcode_exe), "zcode", work
+                        )
                         if not report["zcode_launch"]["ok"]:
-                            failures.append(f"zcode launch: {report['zcode_launch'].get('error')}")
+                            failures.append(
+                                f"zcode launch: {report['zcode_launch'].get('error')}"
+                            )
 
     report["failures"] = failures
     report["ok"] = not failures

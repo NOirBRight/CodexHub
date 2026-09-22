@@ -81,6 +81,34 @@ Windows installers embed CPython. Linux packages currently use a host Python
 3.13+ interpreter unless `src-tauri/resources/python/bin/python` is prepared
 and copied into the artifact. Gateway discovery already looks for that path.
 
+## Omarchy / Arch runtime
+
+The native portable candidate has been exercised on Omarchy 4 / Hyprland
+0.56 with GTK 3 and WebKitGTK 4.1. Install `webkit2gtk-4.1`,
+`libayatana-appindicator`, `lsof`, and Python 3.13+ on the runtime host.
+`lsof` is required for Gateway listener ownership, including start/stop/restart.
+No Hyprland configuration overrides are required.
+
+For native Wayland qualification, run the following from a Hyprland session
+with a StatusNotifierWatcher, `grim`, and `wlrctl` available:
+
+```bash
+./scripts/codexhub-python.sh scripts/e2e_linux_hyprland.py \
+  --bin /path/to/portable/CodexHub
+```
+
+This creates a separate headless compositor and isolated application data.
+It exercises real Wayland pointer input and tray lifecycle actions; the
+operator's pointer is untouched. The normal bridge port must be free.
+It complements the existing Xvfb and GNOME gates.
+
+Building an AppImage on current Arch is not yet qualified: linuxdeploy's
+bundled strip rejects SHT_RELR (the release script now disables stripping),
+and its GTK plugin expects the removed GdkPixbuf loader directory on a
+Glycin-based host. Use the native portable build for local testing; do not
+label an incomplete AppDir as a distributable AppImage. See
+[measured Omarchy results](../evidence/omarchy/README.md).
+
 ## Linux E2E
 
 Every complete Linux candidate runs `./scripts/verify-linux.sh`. Its mandatory,

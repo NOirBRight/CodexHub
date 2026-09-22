@@ -34,10 +34,10 @@ test("Gateway connect toggle maps foreign ownership to takeover without a segmen
 
   assert.doesNotMatch(card, /SegmentedSwitch/);
   assert.match(card, /<SwitchControl/);
-  assert.match(card, /onToggle: \(connect: boolean\) => void/);
+  assert.match(card, /onToggle:\s*\(\s*connect: boolean,\s*model\?: string \| null,\s*roleMappings\?: Record<string, string> \| null,\s*\) => void/);
   assert.doesNotMatch(page, /TakeoverSummaryDialog/);
   assert.match(page, /takeoverRequired/);
-  assert.match(page, /switchClientMode\(clientId, runtimeOwner, takeoverRequired\)/);
+  assert.match(page, /switchClientMode\(\s*clientId,\s*runtimeOwner,\s*takeoverRequired,\s*model,\s*roleMappings,\s*\)/);
   assert.match(page, /if \(!result\.applied\)/);
   assert.match(page, /onRefreshClients\(\{ force: true \}\)/);
   assert.match(page, /listReachedClientBusyTarget/);

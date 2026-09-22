@@ -1,0 +1,90 @@
+{
+  "runs": [
+    {
+      "scope": "initial eight-case run, before lifecycle fix",
+      "ok": false,
+      "cases": [
+        {
+          "case_id": "codex-openai",
+          "live_ok": true,
+          "returncode": 0,
+          "timed_out": false
+        },
+        {
+          "case_id": "codex-opencode-go",
+          "live_ok": false,
+          "returncode": 1,
+          "timed_out": false
+        },
+        {
+          "case_id": "opencode-openai",
+          "live_ok": true,
+          "returncode": 0,
+          "timed_out": false
+        },
+        {
+          "case_id": "opencode-opencode-go",
+          "live_ok": false,
+          "returncode": null,
+          "timed_out": true
+        },
+        {
+          "case_id": "pi-openai",
+          "live_ok": true,
+          "returncode": 0,
+          "timed_out": false
+        },
+        {
+          "case_id": "pi-opencode-go",
+          "live_ok": true,
+          "returncode": 0,
+          "timed_out": false
+        },
+        {
+          "case_id": "omp-openai",
+          "live_ok": true,
+          "returncode": 0,
+          "timed_out": false
+        },
+        {
+          "case_id": "omp-opencode-go",
+          "live_ok": false,
+          "returncode": 1,
+          "timed_out": false
+        }
+      ]
+    },
+    {
+      "scope": "fixed installed binary, Official subset only",
+      "ok": true,
+      "cases": [
+        {
+          "case_id": "codex-openai",
+          "live_ok": true,
+          "returncode": 0,
+          "timed_out": false
+        },
+        {
+          "case_id": "opencode-openai",
+          "live_ok": true,
+          "returncode": 0,
+          "timed_out": false
+        },
+        {
+          "case_id": "pi-openai",
+          "live_ok": true,
+          "returncode": 0,
+          "timed_out": false
+        },
+        {
+          "case_id": "omp-openai",
+          "live_ok": true,
+          "returncode": 0,
+          "timed_out": false
+        }
+      ]
+    }
+  ],
+  "opencode_go_blocker": "429 GoUsageLimitError: Go usage limit exceeded. OpenCode leg timed out; other three clients returned 429.",
+  "final_binary_sha256": "0b9d49332013cb66fbcb09ba15edec074063e0ff92a30d1cf9c8505c524b427c"
+}

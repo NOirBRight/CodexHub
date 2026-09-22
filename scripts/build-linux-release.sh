@@ -137,6 +137,10 @@ if [[ "$skip_frontend" -eq 0 ]]; then
   )
 fi
 
+# linuxdeploy's bundled strip cannot read modern Arch SHT_RELR sections.
+# Keep dependency binaries intact; Cargo still builds an optimized executable.
+export NO_STRIP=1
+
 export TAURI_SIGNING_PRIVATE_KEY="$private_key_path"
 export CODEXHUB_BUILD_FLAVOR="$flavor"
 export TAURI_CONFIG="$generated_config"

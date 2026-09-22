@@ -535,6 +535,11 @@ mod tests {
 
     #[test]
     fn settings_merge_preserves_foreign_keys_and_masks_token() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
         let current = r#"{"env":{"EDITOR":"vim","ANTHROPIC_AUTH_TOKEN":"old","OPENAI_API_KEY":"sk-user"},"theme":"dark"}"#;
         let next = claude_settings_text(Some(current), &settings(), &[], "gpt-5.5").unwrap();
         assert!(next.contains("\"EDITOR\": \"vim\""));
@@ -550,6 +555,11 @@ mod tests {
 
     #[test]
     fn empty_mappings_are_not_required_to_write_settings() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
         let next = claude_settings_text(None, &settings(), &[], "gpt-5.5").unwrap();
         let value: Value = serde_json::from_str(&next).unwrap();
         let env = value.get("env").unwrap().as_object().unwrap();
@@ -575,6 +585,11 @@ mod tests {
 
     #[test]
     fn role_mappings_write_projected_env_keys() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
         set_pending_role_mappings(BTreeMap::from([(
             "haiku".to_string(),
             "gpt-5.5".to_string(),
@@ -592,6 +607,11 @@ mod tests {
 
     #[test]
     fn restore_without_baseline_removes_only_managed_keys() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
         let dir = std::env::temp_dir().join(format!(
             "codexhub-claude-restore-{}",
             std::process::id()
@@ -633,6 +653,11 @@ mod tests {
 
     #[test]
     fn concurrent_edit_fails_closed_before_write() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
         let dir = std::env::temp_dir().join(format!(
             "codexhub-claude-concurrent-{}",
             std::process::id()
