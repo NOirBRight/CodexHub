@@ -716,6 +716,7 @@ def test_execute_exchange_admits_exact_attempt_before_loopback_http() -> None:
 def test_execute_exchange_bounds_http_error_body_before_adaptation() -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
+            self.rfile.read(int(self.headers.get("content-length", "0")))
             body = b"x" * 20
             self.send_response(503)
             self.send_header("content-type", "application/json")
@@ -749,6 +750,7 @@ def test_execute_exchange_does_not_follow_loopback_redirect() -> None:
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
+            self.rfile.read(int(self.headers.get("content-length", "0")))
             requests.append(self.path)
             self.send_response(302)
             self.send_header("location", "/other")
