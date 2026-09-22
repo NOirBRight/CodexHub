@@ -85,3 +85,8 @@ test("Codex keeps connected surfaces visible for a foreign owner and takes over 
   assert.match(providers, /!pendingMode && connected[\s\S]*bg-emerald-600 text-white/);
   assert.match(providers, /connectedToHubChannel/);
 });
+
+test("Codex connection work runs outside the desktop event thread", async () => {
+  const handlers = await source("../../src-tauri/src/desktop_commands/handlers.rs");
+  assert.match(handlers, /#\[tauri::command\(async\)\]\s*pub fn switch_mode\(/);
+});
