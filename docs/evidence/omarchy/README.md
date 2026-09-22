@@ -81,7 +81,7 @@ printing or committing it. Three Muse clients returned HTTP 429 /
 `GoUsageLimitError: Go usage limit exceeded`; OpenCode timed out after 90s.
 All eight configuration apply/readback steps succeeded. The final repeat ran
 only the four Official cases, explicitly not a substitute for the eight-case
-gate. Resume Muse validation when the account quota is available.
+gate. On 2026-09-22 the operator explicitly waived further Muse testing for this release. This is a waiver, not a passing result.
 
 AppImage construction on this Arch host remains blocked by linuxdeploy's GTK
 plugin, which unconditionally copies the absent
