@@ -501,7 +501,7 @@ export function ProviderDetail({
 
         {xaiSubscriptionAuth && !desktopTab ? null : (
           <div className="grid grid-cols-2 gap-2">
-            <Field label={t("common.name")}>
+            <Field label={t("common.name")} className={xaiSubscriptionAuth ? "col-span-2" : undefined}>
               <input
                 className="field field-compact"
                 value={draft.name}
@@ -510,14 +510,16 @@ export function ProviderDetail({
                 }
               />
             </Field>
-            <Field label={t("common.apiKey")}>
-              <ApiKeyInput
-                value={draft.api_key ?? ""}
-                onChange={(apiKey) =>
-                  setDraft({ ...draft, api_key: apiKey || null })
-                }
-              />
-            </Field>
+            {!xaiSubscriptionAuth && (
+              <Field label={t("common.apiKey")}>
+                <ApiKeyInput
+                  value={draft.api_key ?? ""}
+                  onChange={(apiKey) =>
+                    setDraft({ ...draft, api_key: apiKey || null })
+                  }
+                />
+              </Field>
+            )}
             <Field label={t("common.baseUrl")}>
               <input
                 className="field field-compact"

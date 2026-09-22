@@ -86,6 +86,7 @@ pub fn provider_usage_blocking(provider_id: String) -> Result<Value, String> {
         return Err("Quota requires the official provider endpoint".into());
     }
     let key = crate::models::resolve_provider_discovery_api_key(
+        base,
         provider.api_key.as_deref().unwrap_or(""),
         None,
     )?;

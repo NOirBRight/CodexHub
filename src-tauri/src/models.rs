@@ -195,7 +195,7 @@ pub fn discover_provider_models(
     api_key: &str,
     provider_id: Option<&str>,
 ) -> Result<Vec<Model>, String> {
-    let credential = resolve_provider_discovery_api_key(api_key, provider_id)?;
+    let credential = resolve_provider_discovery_api_key(base_url, api_key, provider_id)?;
     let mut models =
         discover_provider_models_with_timeout(base_url, &credential, DISCOVERY_TIMEOUT)?;
     if let Some(id) = provider_id.filter(|id| id.eq_ignore_ascii_case("opencode-go")) {
@@ -205,16 +205,44 @@ pub fn discover_provider_models(
 }
 
 pub(crate) fn resolve_provider_discovery_api_key(
+    base_url: &str,
     api_key: &str,
     provider_id: Option<&str>,
 ) -> Result<String, String> {
-    if let Some(key) = resolve_api_key(api_key)? {
-        return Ok(key);
+    resolve_provider_api_key_with_subscription(api_key, provider_id, || {
+        if !is_xai_api_base_url(base_url) {
+            return Err("xAI subscription credentials require https://api.x.ai".to_string());
+        }
+        crate::xai_auth::xai_access_token_blocking()
+    })
+}
+
+fn resolve_provider_api_key_with_subscription(
+    api_key: &str,
+    provider_id: Option<&str>,
+    subscription_token: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    let subscription = provider_id.is_some_and(|id| id.eq_ignore_ascii_case("xai"));
+    // A legacy env placeholder is optional for subscription providers. Literal
+    // API keys and successfully resolved env keys retain their existing priority.
+    let placeholder = env_placeholder_name(api_key.trim())?.is_some();
+    match resolve_api_key(api_key) {
+        Ok(Some(key)) => Ok(key),
+        Ok(None) if subscription => subscription_token(),
+        Err(_) if subscription && placeholder => subscription_token(),
+        Err(error) => Err(error),
+        Ok(None) => Ok(String::new()),
     }
-    if provider_id.is_some_and(|id| id.eq_ignore_ascii_case("xai")) {
-        return crate::xai_auth::xai_access_token_blocking();
-    }
-    Ok(String::new())
+}
+
+fn is_xai_api_base_url(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url.trim()).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some("api.x.ai")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port_or_known_default() == Some(443)
+    })
 }
 
 pub fn probe_upstream_format(
@@ -2168,6 +2196,9 @@ fn resolve_gateway_api_key_for_settings(
     api_key: &str,
     gateway_settings: Option<&Settings>,
 ) -> Result<Option<String>, String> {
+    if is_xai_api_base_url(base_url) {
+        return resolve_provider_discovery_api_key(base_url, api_key, Some("xai")).map(Some);
+    }
     if let Some(api_key) = resolve_api_key(api_key)? {
         return Ok(Some(api_key));
     }
@@ -5987,13 +6018,56 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn subscription_discovery_ignores_missing_legacy_env_key_but_not_auth_errors() {
+        let placeholder = "{env:CODEXHUB_TEST_UNSET_XAI_LEGACY_KEY_94817}";
+        assert!(std::env::var("CODEXHUB_TEST_UNSET_XAI_LEGACY_KEY_94817").is_err());
+        for key in ["", placeholder] {
+            assert_eq!(
+                super::resolve_provider_api_key_with_subscription(key, Some("xai"), || Ok(
+                    "session-fixture".into()
+                ))
+                .unwrap(),
+                "session-fixture"
+            );
+        }
+        assert!(super::resolve_provider_api_key_with_subscription(
+            placeholder,
+            Some("other"),
+            || panic!("not a subscription")
+        )
+        .unwrap_err()
+        .contains("is not set"));
+        assert_eq!(
+            super::resolve_provider_api_key_with_subscription(placeholder, Some("xai"), || Err(
+                "sign in required".into()
+            ))
+            .unwrap_err(),
+            "sign in required"
+        );
+        for url in [
+            "http://api.x.ai/v1",
+            "https://api.x.ai.evil.test/v1",
+            "https://user@api.x.ai/v1",
+            "https://api.x.ai:444/v1",
+        ] {
+            assert!(
+                resolve_provider_discovery_api_key(url, placeholder, Some("xai"))
+                    .unwrap_err()
+                    .contains("require https://api.x.ai")
+            );
+        }
+    }
+
+    #[test]
     fn resolve_provider_discovery_api_key_keeps_explicit_secret() {
         assert_eq!(
-            resolve_provider_discovery_api_key(" secret ", Some("xai")).expect("key"),
+            resolve_provider_discovery_api_key("https://api.x.ai/v1", " secret ", Some("xai"))
+                .expect("key"),
             "secret"
         );
         assert_eq!(
-            resolve_provider_discovery_api_key("  ", None).expect("blank"),
+            resolve_provider_discovery_api_key("https://example.test/v1", "  ", None)
+                .expect("blank"),
             ""
         );
     }

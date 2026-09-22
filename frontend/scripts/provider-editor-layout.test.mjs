@@ -54,7 +54,11 @@ test("ProviderDetail and AddProviderPanel share a two-column connection grid ins
     assert.match(grid, /common\.apiKey/);
     assert.match(grid, /common\.baseUrl/);
     assert.match(grid, /EndpointSelectionPanel/);
-    assert.doesNotMatch(grid, /col-span-2/);
+    // Subscription login replaces the key field, so only its Name spans both columns.
+    assert.doesNotMatch(grid.replace('xaiSubscriptionAuth ? "col-span-2" : undefined', 'undefined'), /col-span-2/);
+    if (name === "ProviderDetail") {
+      assert.match(grid, /!xaiSubscriptionAuth && \(\s*<Field label=\{t\("common\.apiKey"\)\}/);
+    }
     assert.doesNotMatch(
       grid,
       /baseUrl["'`][^>]{0,80}className="col-span-2"/,
