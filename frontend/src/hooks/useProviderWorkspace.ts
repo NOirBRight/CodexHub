@@ -66,7 +66,7 @@ export type ProviderWorkspaceHandle = {
   }) => Promise<ProviderWorkspaceOutcome>;
   saveProvider: (provider: Provider, options?: { successMessage?: string }) => Promise<ProviderWorkspaceOutcome>;
   saveAddForm: (form: AddProviderForm, targetId?: string) => Promise<ProviderWorkspaceOutcome>;
-  discoverProviderModels: (providerId: string) => Promise<ProviderWorkspaceOutcome>;
+  discoverProviderModels: (providerId: string, draft?: Provider) => Promise<ProviderWorkspaceOutcome>;
   discoverForForm: (form?: AddProviderForm) => Promise<ProviderWorkspaceOutcome>;
   probeProvider: (input: {
     baseUrl: string;
@@ -94,7 +94,7 @@ type ProviderActionIntent =
   | { type: "saveSettings"; settings: Settings; regenerateCatalog?: boolean; successMessage?: string; toastId?: string }
   | { type: "saveProvider"; provider: Provider; successMessage?: string }
   | { type: "saveAddForm"; form: import("../lib/providerForm").AddProviderForm; targetId?: string }
-  | { type: "discoverProviderModels"; providerId: string }
+  | { type: "discoverProviderModels"; providerId: string; draft?: Provider }
   | { type: "discoverForForm"; form?: import("../lib/providerForm").AddProviderForm }
   | { type: "probe"; baseUrl: string; apiKey: string; model?: string | null; providerId?: string; toastId?: string }
   | { type: "refreshOfficialModels"; quiet?: boolean; throwOnError?: boolean }
@@ -369,8 +369,9 @@ export function useProviderWorkspace(options: {
         case "discoverProviderModels": {
           const currentProviders = sourceRef.current.providers;
           const pending = state.pendingNewProvider;
-          const provider =
-            pending?.id === intent.providerId
+          const provider = intent.draft?.id === intent.providerId
+            ? intent.draft
+            : pending?.id === intent.providerId
               ? pending
               : currentProviders.find((p) => p.id === intent.providerId);
           if (!provider) {
@@ -383,10 +384,9 @@ export function useProviderWorkspace(options: {
             const bundled = await api.getBundledProviders().catch(() => [] as Provider[]);
             const preset = bundled.find((b) => b.id === provider.id) ?? null;
             const isPending = pending?.id === provider.id;
-            const baseProvider = isPending ? state.pendingNewProvider : provider;
             const retainIntersection = preset?.discovery_policy === "retain-intersection";
             const result = applyDiscoveredModelsForProvider(
-              baseProvider ?? provider,
+              provider,
               models,
               preset,
               retainIntersection,
@@ -645,7 +645,7 @@ export function useProviderWorkspace(options: {
   );
 
   const discoverProviderModels = useCallback(
-    (providerId: string) => runAction({ type: "discoverProviderModels", providerId }),
+    (providerId: string, draft?: Provider) => runAction({ type: "discoverProviderModels", providerId, draft }),
     [runAction],
   );
 

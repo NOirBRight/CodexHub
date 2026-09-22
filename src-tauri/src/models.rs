@@ -2178,6 +2178,13 @@ fn resolve_api_key(api_key: &str) -> Result<Option<String>, String> {
         return Ok(Some(api_key.to_string()));
     };
     let value = std::env::var(&env_name)
+        .or_else(|error| {
+            if env_name == "MOONSHOT_CN_API_KEY" {
+                std::env::var("MOONSHOT_API_KEY")
+            } else {
+                Err(error)
+            }
+        })
         .map_err(|_| format!("{env_name} is not set"))?
         .trim()
         .to_string();
@@ -6170,6 +6177,25 @@ for line in sys.stdin:
                 .unwrap(),
             "https://example.test/api/coding/v3/chat/completions"
         );
+    }
+
+    #[test]
+    fn kimi_cn_env_fallback_matches_gateway_credentials() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous_cn = std::env::var_os("MOONSHOT_CN_API_KEY");
+        let previous_global = std::env::var_os("MOONSHOT_API_KEY");
+        std::env::remove_var("MOONSHOT_CN_API_KEY");
+        std::env::set_var("MOONSHOT_API_KEY", "global-fixture");
+        let fallback = super::resolve_api_key("{env:MOONSHOT_CN_API_KEY}");
+        std::env::set_var("MOONSHOT_CN_API_KEY", "cn-fixture");
+        let dedicated = super::resolve_api_key("{env:MOONSHOT_CN_API_KEY}");
+        std::env::set_var("MOONSHOT_CN_API_KEY", "");
+        let empty = super::resolve_api_key("{env:MOONSHOT_CN_API_KEY}");
+        restore_env("MOONSHOT_CN_API_KEY", previous_cn);
+        restore_env("MOONSHOT_API_KEY", previous_global);
+        assert_eq!(fallback.unwrap().as_deref(), Some("global-fixture"));
+        assert_eq!(dedicated.unwrap().as_deref(), Some("cn-fixture"));
+        assert!(empty.unwrap_err().contains("is empty"));
     }
 
     #[test]

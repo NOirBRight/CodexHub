@@ -112,12 +112,14 @@ test('restart notice is required for a connected Codex regardless of Desktop', a
 // The reducer dispatch log observes the same busy state consumed by the page.
 import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
-test('discovered-model save keeps editing locked until publication finishes', async () => {
+test('discovery uses the current draft and keeps editing locked until publication finishes', async () => {
   const source = await readFile(new URL('../src/hooks/useProviderWorkspace.ts', import.meta.url), 'utf8');
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   let finishPersist, finishPublish;
   let busy;
-  const provider = { id: 'p', name: 'P', base_url: 'local', models: [] };
+  const provider = { id: 'p', name: 'P', base_url: 'https://old.test', api_key: '{env:OLD_KEY}', models: [] };
+  const draft = { ...provider, name: 'Edited', base_url: 'https://new.test', api_key: 'fixture-key' };
+  let discoveryArgs, savedProviders;
   const state = { providers: [provider], settings: {}, selectedId: 'p', form: {}, pendingNewProvider: null };
   const react = {
     useRef: current => ({ current }),
@@ -128,12 +130,12 @@ test('discovered-model save keeps editing locked until publication finishes', as
   };
   const core = {
     selectSelectedProvider: () => provider,
-    applyDiscoveredModelsForProvider: () => ({ provider, addedCount: 1 }),
+    applyDiscoveredModelsForProvider: base => ({ provider: base, addedCount: 1 }),
   };
   const backend = {
-    discoverProviderModels: async () => [{ id: 'new' }],
+    discoverProviderModels: async (...args) => { discoveryArgs = args; return [{ id: 'new' }]; },
     getBundledProviders: async () => [],
-    saveProviders: () => new Promise(resolve => { finishPersist = resolve; }),
+    saveProviders: providers => { savedProviders = providers; return new Promise(resolve => { finishPersist = resolve; }); },
     generateCatalog: () => new Promise(resolve => { finishPublish = resolve; }),
     getStatus: async () => ({ mode: 'official' }),
   };
@@ -152,10 +154,12 @@ test('discovered-model save keeps editing locked until publication finishes', as
     toast: { showToast: () => 'toast', updateToast: () => {} },
     t: key => key, tr: key => key,
   });
-  const pending = workspace.discoverProviderModels('p');
+  const pending = workspace.discoverProviderModels('p', draft);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(busy, 'save');
-  finishPersist([provider]);
+  assert.deepEqual(discoveryArgs, [draft.base_url, draft.api_key, draft.id]);
+  assert.deepEqual(savedProviders, [draft]);
+  finishPersist([draft]);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(busy, 'save');
   finishPublish([]);
