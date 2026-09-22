@@ -106,7 +106,7 @@ def _wrap_chat_function_tools(payload: dict[str, Any]) -> bool:
     return changed
 
 
-_WEB_SEARCH_TOOL_TYPES = frozenset({"web_search", "web_search_preview"})
+_WEB_SEARCH_TOOL_TYPES = frozenset({"web_search", "web_search_preview", "web_search_preview_2025_03_11"})
 _WEB_SEARCH_PREVIEW_TOOL_TYPES = frozenset(
     {"web_search_preview", "web_search_preview_2025_03_11"}
 )
@@ -114,35 +114,50 @@ _CONSOLE_GO_PREVIEW_ONLY_SEARCH_FIELDS = ("search_content_types", "image_setting
 
 
 def _drop_third_party_web_search_external_web_access(payload: dict[str, Any]) -> bool:
-    """Drop hosted web_search.external_web_access when the provider cannot honor it.
+    """Disable optional cache-only search without enabling live network access.
 
-    Codex Desktop 0.153+ puts this flag on hosted web_search. Official accepts
-    it. xAI and other non-OpenAI Responses endpoints 400 with
-    "Argument not supported: external_web_access". true is lossless to drop
-    (those providers already search live). false is cache-only and must fail
-    closed — dropping it would silently enable live fetches. Same for
-    web_search_preview: third-parties still execute live search.
+    Third-party search cannot honor OpenAI's cache-only mode. An optional
+    declaration must not block ordinary Codex turns; forced search still fails
+    closed. Tell the model about the missing capability instead of pretending
+    search succeeded or silently substituting live search.
     """
-
     tools = payload.get("tools")
     if not isinstance(tools, list):
         return False
     changed = False
+    disabled = False
+    next_tools = []
     for tool in tools:
         if not isinstance(tool, dict) or tool.get("type") not in _WEB_SEARCH_TOOL_TYPES:
+            next_tools.append(tool)
             continue
-        if "external_web_access" not in tool:
-            continue
-        value = tool.get("external_web_access")
-        if value is False:
-            raise UpstreamProtocolTranslationError(
-                UnsupportedProtocolTranslationError(
-                    "unsupported_protocol_semantics",
-                    "Cannot honor web_search external_web_access=false on a third-party route.",
+        if tool.get("external_web_access") is False:
+            if payload.get("tool_choice") not in (None, "auto", "none"):
+                raise UpstreamProtocolTranslationError(
+                    UnsupportedProtocolTranslationError(
+                        "unsupported_protocol_semantics",
+                        "Cannot honor required web_search external_web_access=false on a third-party route.",
+                    )
                 )
-            )
-        tool.pop("external_web_access", None)
-        changed = True
+            disabled = changed = True
+            continue
+        if "external_web_access" in tool:
+            tool = {key: value for key, value in tool.items() if key != "external_web_access"}
+            changed = True
+        next_tools.append(tool)
+    if changed:
+        payload["tools"] = next_tools
+    if disabled:
+        notice = (
+            "Cache-only web search is unavailable on this provider and has been disabled. "
+            "Do not substitute live web access or claim to have searched. "
+            "If answering requires web search, explain this limitation to the user."
+        )
+        if isinstance(payload.get("messages"), list):
+            payload["messages"] = [{"role": "system", "content": notice}, *payload["messages"]]
+        else:
+            instructions = payload.get("instructions") or ""
+            payload["instructions"] = f"{instructions}\n\n{notice}".strip()
     return changed
 
 
@@ -284,6 +299,8 @@ def compatible_request_body(
     )
 
     changed = host._normalize_responses_message_input_items(payload)
+    if upstream_name != "official" and _drop_third_party_web_search_external_web_access(payload):
+        changed = True
     if upstream_name == "official":
         if host._sanitize_official_reasoning_items(payload):
             changed = True
@@ -839,7 +856,7 @@ def compatible_request_body(
         changed = True
 
     if upstream_name != "official":
-        if payload.get("tool_choice") not in (None, "auto"):
+        if payload.get("tool_choice") not in (None, "auto", "none"):
             payload["tool_choice"] = "auto"
             changed = True
         native_v2_namespace = bool(
@@ -859,8 +876,6 @@ def compatible_request_body(
                 payload = json.loads(flattened.decode("utf-8"))
                 changed = True
         if isinstance(payload.get("messages"), list) and _wrap_chat_function_tools(payload):
-            changed = True
-        if _drop_third_party_web_search_external_web_access(payload):
             changed = True
         if sanitize_opencode_go_responses_fields(payload, upstream):
             changed = True

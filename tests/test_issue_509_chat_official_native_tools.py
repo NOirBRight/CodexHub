@@ -537,7 +537,8 @@ def test_third_party_chat_tools_still_omits_hosted_web_search() -> None:
         )
     )
     assert prepared.get("tools") in ([], None)
-    assert gateway_compat.official_passthrough.request_tool_plan(context).entries[0].disposition == "omit"
+    assert gateway_compat.official_passthrough.request_tool_plan(context).entries == ()
+    assert "Cache-only web search is unavailable" in prepared["instructions"]
 
 
 def test_collapse_third_party_hosted_search_for_chat_inbound() -> None:
