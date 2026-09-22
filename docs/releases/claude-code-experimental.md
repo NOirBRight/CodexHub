@@ -1,20 +1,28 @@
 # Claude Code Gateway client (experimental)
 
-Not a stable release claim. Pin: Claude Code **2.1.278** (Linux verified).
-Credential contract: #558. Windows `yoga` CLI is now **2.1.278**; live rows wait on login.
+Not a stable release claim. Pin: Claude Code **2.1.278** (Linux and Windows
+CLI pin match). Credential contract: #558. Full release-operator GO remains
+issue #78; see `docs/evidence/claude-code-support-table.md`.
 
 ## English
 
 - Scope: inbound `/v1/messages`, discovery aliases, Connect into `~/.claude/settings.json`.
 - Converted: Chat Completions and Responses. Native Anthropic SSE is passthrough.
-- `count_tokens`: adapted best-effort local estimate (not a billed tokenizer). Images/caching/compaction/subagents are not live-proven.
+- `count_tokens`: adapted best-effort local estimate (not a billed tokenizer).
+- Images, prompt cache, subagents, MCP, tool round-trips, and cancellation have
+  recorded Linux+Windows live/HTTP evidence in the support table. Compaction is
+  client-side and not forced live.
 - Non-Claude models are not Anthropic-endorsed.
-- Stable requires: Windows CLI at the same pin as Linux, plus release-operator evidence on yoga. Linux live text/tool/cancel is recorded, not a Windows GO.
+- Experimental ship is allowed with the support table evidence. Promoting to a
+  stable client claim still needs an explicit #78 release-operator GO.
 
 ## 中文
 
 - 范围：入站 `/v1/messages`、发现别名、Connect 写入 `~/.claude/settings.json`。
 - 转换：Chat Completions 与 Responses。原生 Anthropic SSE 透传。
-- `count_tokens`：本地 best-effort 估算（非计费 tokenizer）。图片/缓存/压缩/子代理未经 live 证明。
+- `count_tokens`：本地 best-effort 估算（非计费 tokenizer）。
+- 图片、prompt cache、子代理、MCP、工具往返与取消的 Linux+Windows live/HTTP
+  证据见 support table。Compaction 为客户端行为，未强制 live。
 - 非 Claude 模型未经 Anthropic 背书。
-- 转稳定需要：Windows CLI 与 Linux 同一 pin，以及 yoga 上的 release 操作证据。Linux live 文本/工具/取消已记录，不能代替 Windows。
+- 可按 support table 作为 experimental 交付；升为稳定客户端声明仍需 #78 的
+  release-operator GO。
