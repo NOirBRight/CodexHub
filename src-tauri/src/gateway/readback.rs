@@ -223,7 +223,13 @@ pub fn verify_apply_readback(
         "claude" => {
             let written = fs::read_to_string(&target_paths[0])
                 .map_err(|error| format!("readback failed: {error}"))?;
-            let expected = claude_settings_text(Some(&written), settings, providers, model)?;
+            let expected = claude_settings_text(
+                Some(&written),
+                settings,
+                providers,
+                model,
+                &std::collections::BTreeMap::new(),
+            )?;
             if written != expected {
                 return Err(
                     "readback failed: claude managed keys do not match production preview"

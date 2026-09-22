@@ -809,6 +809,7 @@ pub enum NativeApplySpec<'a> {
     Claude {
         path: &'a Path,
         backup_roots: &'a [(PathBuf, super::BackupChannel)],
+        role_mappings: std::collections::BTreeMap<String, String>,
     },
 }
 
@@ -900,8 +901,8 @@ pub fn apply_native_at(
             }
             Ok(result)
         }
-        NativeApplySpec::Claude { path, backup_roots } => {
-            let plan = plan_claude_apply(path, settings, providers, model)?;
+        NativeApplySpec::Claude { path, backup_roots, role_mappings } => {
+            let plan = plan_claude_apply(path, settings, providers, model, role_mappings)?;
             let result = publish_claude_apply(&plan, backup_roots)?;
             if result.applied {
                 readback_native_at("claude", &[path.to_path_buf()], settings, providers, model)?;
@@ -972,7 +973,11 @@ pub fn apply_native(
     settings: &Settings,
     providers: &[Provider],
     model: &str,
+    role_mappings: std::collections::BTreeMap<String, String>,
 ) -> Result<super::GatewayClientApplyResult, String> {
+    if client_id != "claude" {
+        let _ = &role_mappings;
+    }
     match client_id.as_str() {
         "opencode" => {
             let path = detect_opencode_config_path()
@@ -1049,6 +1054,7 @@ pub fn apply_native(
                 NativeApplySpec::Claude {
                     path: &path,
                     backup_roots: &backup_roots,
+                    role_mappings,
                 },
                 settings,
                 providers,
@@ -1113,7 +1119,13 @@ pub fn preview_native_at(
             preview_grok_config_with_path(path, settings, providers, model)
         }
         NativePreviewSpec::Claude { path } => {
-            preview_claude_config_with_path(path, settings, providers, model)
+            preview_claude_config_with_path(
+                path,
+                settings,
+                providers,
+                model,
+                &std::collections::BTreeMap::new(),
+            )
         }
     }
 }
@@ -1431,7 +1443,11 @@ pub fn apply_native_isolated(
                     .map_err(|error| format!("failed to seed claude settings: {error}"))?;
             }
             apply_native_at(
-                NativeApplySpec::Claude { path, backup_roots },
+                NativeApplySpec::Claude {
+                    path,
+                    backup_roots,
+                    role_mappings: std::collections::BTreeMap::new(),
+                },
                 settings,
                 providers,
                 model,
@@ -1499,12 +1515,24 @@ mod tests {
     #[test]
     fn apply_native_unknown_client_is_copy_only() {
         let settings = Settings::default();
-        let result = apply_native("unknown".to_owned(), &settings, &[], "gpt-5.6-luna")
+        let result = apply_native(
+            "unknown".to_owned(),
+            &settings,
+            &[],
+            "gpt-5.6-luna",
+            std::collections::BTreeMap::new(),
+        )
             .expect("copy-only result");
         assert!(!result.applied);
         assert_eq!(result.client_id, "unknown");
         assert!(result.message.contains("copy-only"));
-        let dsh = apply_native("dsh".to_owned(), &settings, &[], "gpt-5.6-luna")
+        let dsh = apply_native(
+            "dsh".to_owned(),
+            &settings,
+            &[],
+            "gpt-5.6-luna",
+            std::collections::BTreeMap::new(),
+        )
             .expect("dsh is not native apply");
         assert!(!dsh.applied);
         assert_eq!(dsh.client_id, "dsh");

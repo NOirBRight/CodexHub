@@ -120,6 +120,9 @@ fn wait_for_browser_launcher(mut command: Command, timeout: Duration) -> Result<
     let mut child = command
         .spawn()
         .map_err(|error| format!("failed to open xAI verification page: {error}"))?;
+    // Launchers may exit quickly (xdg-open) or keep the browser process attached
+    // (omarchy-launch-browser). Only fail on a fast non-zero exit; a still-running
+    // child after the observation window is treated as a successful handoff.
     let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -132,13 +135,14 @@ fn wait_for_browser_launcher(mut command: Command, timeout: Duration) -> Result<
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(25));
             }
-            result => {
+            Ok(None) => {
+                // Detach: do not kill a live browser/helper process.
+                return Ok(());
+            }
+            Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(match result {
-                    Err(error) => format!("failed to check browser launcher: {error}"),
-                    _ => "browser launcher did not finish within the time limit; check your browser window".to_string(),
-                });
+                return Err(format!("failed to check browser launcher: {error}"));
             }
         }
     }
@@ -337,13 +341,12 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn hung_browser_launcher_is_bounded_and_reaped() {
+    fn long_lived_browser_launcher_is_treated_as_handoff() {
         let mut command = std::process::Command::new("sh");
         command.args(["-c", "exec sleep 5"]);
         let started = std::time::Instant::now();
-        let error = super::wait_for_browser_launcher(command, std::time::Duration::from_millis(50))
-            .unwrap_err();
-        assert!(error.contains("time limit"), "{error}");
+        super::wait_for_browser_launcher(command, std::time::Duration::from_millis(50))
+            .expect("still-running launcher is a successful browser handoff");
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 

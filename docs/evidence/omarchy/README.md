@@ -1,12 +1,24 @@
 # Omarchy installation and E2E evidence
 
-**Follow-up 0.2.24:** The AppImage construction and startup blockers below were
-resolved using the checked-in Ubuntu build environment, Wayland-library
-finalization, and Python child library isolation. Native AppImage lifecycle
-E2E now passes all 10 checks. The native portable also passes at 125% scale;
-GNOME first-launch/portable-upgrade tests pass. Muse was waived by the
-operator. The original results below remain historical evidence for 0.2.21.
-Final release hashes and source revision belong to the release manifests.
+**Follow-up 0.2.24:** AppImage construction/startup blockers for the Ubuntu
+build environment, Wayland-library finalization, and Python child library
+isolation are fixed in source (`d99f3f7f` and later). Native portable Wayland
+lifecycle E2E historically recorded below remains the checked-in tray/window
+evidence (baseline SHA in `native-wayland.json`). Fresh release artifact hashes
+and AppImage qualification belong to the release manifests produced at publish
+time, not this historical folder. Muse was waived by the operator.
+
+Desktop install on Omarchy: portable/AppImage install places a `.desktop` entry
+so Super+Space (app launcher) can find CodexHub after install; icon assets use
+a transparent background. Super+Space binding itself is an Omarchy/Hyprland
+default, not a CodexHub config change.
+
+Post-0.2.24 source fixes on this branch also cover Codex Connect local-catalog
+apply, OpenCode Go capability edits, Omarchy browser focus for OAuth,
+xAI subscription-without-key discovery, provider draft discovery, and
+third-party optional cache-only web_search compatibility. Those are covered by
+unit/fixture tests and operator retest notes rather than this 0.2.21 lifecycle
+JSON.
 
 Measured on 2026-09-22, Omarchy 4.0.4 / Hyprland 0.56.2, GTK 3.24.52,
 WebKitGTK 2.52.6, GdkPixbuf 2.44.7. Source baseline `7185c1a1`, branch
@@ -91,7 +103,7 @@ All eight configuration apply/readback steps succeeded. The final repeat ran
 only the four Official cases, explicitly not a substitute for the eight-case
 gate. On 2026-09-22 the operator explicitly waived further Muse testing for this release. This is a waiver, not a passing result.
 
-AppImage construction on this Arch host remains blocked by linuxdeploy's GTK
+AppImage construction on this Arch host was historically blocked by linuxdeploy's GTK
 plugin, which unconditionally copies the absent
 `/usr/lib/gdk-pixbuf-2.0/2.10.0` tree. The strip fix revealed this second
 failure. No system GTK directories were fabricated and no incomplete AppDir

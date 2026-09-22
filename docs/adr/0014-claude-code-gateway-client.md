@@ -1,6 +1,6 @@
 # ADR-0014: Claude Code Gateway compatibility and explicit client activation
 
-Status: Accepted product direction; implementation and live verification pending.
+Status: Accepted. Native Claude Code client adapter, Connect UI, and protocol path ship in 0.2.24 experimental form; full live matrix remains gated by issue #78 evidence.
 
 ## Context
 

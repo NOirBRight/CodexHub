@@ -6,7 +6,6 @@ use super::super::{
 use crate::app_flavor::RoutingOwner;
 use crate::{Provider, Settings};
 use serde_json::{json, Map, Value};
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,18 +32,6 @@ pub(in crate::gateway) const MANAGED_ENV_KEYS: &[&str] = &[
     "CLAUDE_CODE_SUBAGENT_MODEL",
     "CODEXHUB_MANAGED_CLIENT",
 ];
-
-thread_local! {
-    static PENDING_ROLE_MAPPINGS: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
-}
-
-pub(in crate::gateway) fn set_pending_role_mappings(mappings: BTreeMap<String, String>) {
-    PENDING_ROLE_MAPPINGS.with(|slot| *slot.borrow_mut() = mappings);
-}
-
-fn pending_role_mappings() -> BTreeMap<String, String> {
-    PENDING_ROLE_MAPPINGS.with(|slot| slot.borrow().clone())
-}
 
 pub(in crate::gateway) fn claude_home() -> PathBuf {
     if let Some(path) = std::env::var_os("CODEXHUB_CLAUDE_HOME")
@@ -239,6 +226,7 @@ pub(in crate::gateway) fn claude_settings_text(
     settings: &Settings,
     providers: &[Provider],
     model: &str,
+    role_mappings: &BTreeMap<String, String>,
 ) -> Result<String, String> {
     let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let mut root = match current.map(str::trim).filter(|text| !text.is_empty()) {
@@ -278,7 +266,7 @@ pub(in crate::gateway) fn claude_settings_text(
         Value::String(MANAGED_MARKER_VALUE.to_string()),
     );
     let role_map: BTreeMap<&str, &str> = ROLE_ENV.iter().copied().collect();
-    for (role, canonical) in pending_role_mappings() {
+    for (role, canonical) in role_mappings {
         let Some(env_key) = role_map.get(role.as_str()) else {
             return Err(format!("unknown Claude Code role: {role}"));
         };
@@ -301,9 +289,10 @@ pub(in crate::gateway) fn preview_claude_config_with_path(
     settings: &Settings,
     providers: &[Provider],
     model: &str,
+    role_mappings: &BTreeMap<String, String>,
 ) -> Result<GatewayClientConfigPreview, String> {
     let current = fs::read_to_string(config_path).ok();
-    let next = claude_settings_text(current.as_deref(), settings, providers, model)?;
+    let next = claude_settings_text(current.as_deref(), settings, providers, model, role_mappings)?;
     Ok(GatewayClientConfigPreview {
         client_id: CLIENT_ID.to_string(),
         can_apply: true,
@@ -339,6 +328,7 @@ pub(in crate::gateway) fn plan_claude_apply(
     settings: &Settings,
     providers: &[Provider],
     model: &str,
+    role_mappings: BTreeMap<String, String>,
 ) -> Result<ClaudeApplyPlan, String> {
     let current = if config_path.exists() {
         Some(
@@ -351,7 +341,13 @@ pub(in crate::gateway) fn plan_claude_apply(
     let skip_snapshot = current
         .as_deref()
         .is_none_or(|text| text.trim().is_empty() || is_claude_codexhub_config(text));
-    let next = claude_settings_text(current.as_deref(), settings, providers, model)?;
+    let next = claude_settings_text(
+        current.as_deref(),
+        settings,
+        providers,
+        model,
+        &role_mappings,
+    )?;
     Ok(ClaudeApplyPlan {
         config_path: config_path.to_path_buf(),
         expected_current: current,
@@ -405,7 +401,6 @@ pub(in crate::gateway) fn publish_claude_apply(
     )?;
     write_text_replace(&plan.config_path, &plan.next)
         .map_err(|_| "failed to write managed Claude settings.json".to_string())?;
-    set_pending_role_mappings(BTreeMap::new());
     Ok(GatewayClientApplyResult {
         client_id: CLIENT_ID.to_string(),
         applied: true,
@@ -450,7 +445,6 @@ pub(in crate::gateway) fn restore_claude_from_baseline(
         managed.as_ref(),
     )?;
     write_restored_settings(config_path, &next)?;
-    set_pending_role_mappings(BTreeMap::new());
     Ok(GatewayClientApplyResult {
         client_id: CLIENT_ID.to_string(),
         applied: true,
@@ -541,7 +535,7 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
         let current = r#"{"env":{"EDITOR":"vim","ANTHROPIC_AUTH_TOKEN":"old","OPENAI_API_KEY":"sk-user"},"theme":"dark"}"#;
-        let next = claude_settings_text(Some(current), &settings(), &[], "gpt-5.5").unwrap();
+        let next = claude_settings_text(Some(current), &settings(), &[], "gpt-5.5", &BTreeMap::new()).unwrap();
         assert!(next.contains("\"EDITOR\": \"vim\""));
         assert!(next.contains("\"theme\": \"dark\""));
         assert!(next.contains("gateway-secret-key"));
@@ -560,7 +554,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
-        let next = claude_settings_text(None, &settings(), &[], "gpt-5.5").unwrap();
+        let next = claude_settings_text(None, &settings(), &[], "gpt-5.5", &BTreeMap::new()).unwrap();
         let value: Value = serde_json::from_str(&next).unwrap();
         let env = value.get("env").unwrap().as_object().unwrap();
         assert_eq!(
@@ -590,11 +584,11 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
-        set_pending_role_mappings(BTreeMap::from([(
+        let mappings = BTreeMap::from([(
             "haiku".to_string(),
             "gpt-5.5".to_string(),
-        )]));
-        let next = claude_settings_text(None, &settings(), &[], "gpt-5.5").unwrap();
+        )]);
+        let next = claude_settings_text(None, &settings(), &[], "gpt-5.5", &mappings).unwrap();
         let value: Value = serde_json::from_str(&next).unwrap();
         let env = value.get("env").unwrap().as_object().unwrap();
         assert_eq!(
@@ -602,8 +596,7 @@ mod tests {
                 .and_then(Value::as_str),
             Some("claude-codexhub-gpt-5.5")
         );
-        set_pending_role_mappings(BTreeMap::new());
-    }
+        }
 
     #[test]
     fn restore_without_baseline_removes_only_managed_keys() {
@@ -618,15 +611,16 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
-        set_pending_role_mappings(BTreeMap::from([(
+        let mappings = BTreeMap::from([(
             "haiku".to_string(),
             "gpt-5.5".to_string(),
-        )]));
+        )]);
         let next = claude_settings_text(
             Some(r#"{"env":{"EDITOR":"vim"},"theme":"dark"}"#),
             &settings(),
             &[],
             "gpt-5.5",
+            &mappings,
         )
         .unwrap();
         fs::write(&path, next).unwrap();
@@ -641,8 +635,7 @@ mod tests {
         assert_eq!(restored.get("theme").and_then(Value::as_str), Some("dark"));
         assert!(restored.pointer("/env/ANTHROPIC_AUTH_TOKEN").is_none());
         assert!(restored.pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none());
-        set_pending_role_mappings(BTreeMap::new());
-        let _ = fs::remove_dir_all(dir);
+            let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -665,7 +658,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
         fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
-        let plan = plan_claude_apply(&path, &settings(), &[], "gpt-5.5").unwrap();
+        let plan = plan_claude_apply(&path, &settings(), &[], "gpt-5.5", BTreeMap::new()).unwrap();
         fs::write(&path, r#"{"theme":"light"}"#).unwrap();
         let backup = dir.join("backup");
         let error = publish_claude_apply(&plan, &[(backup, BackupChannel::Stable)])

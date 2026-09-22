@@ -46,7 +46,6 @@ use clients::codex::read_codex_auth_status;
 use clients::grok::{grok_ownership_bounded_cleanup, restore_grok_config_with_backup_roots};
 use clients::claude::{
     claude_installed, detect_claude_config_path, detect_claude_route_details, detect_claude_version,
-    set_pending_role_mappings,
 };
 use clients::grok::{
     detect_grok_config_path, detect_grok_route_details, detect_grok_version, grok_home,
@@ -920,7 +919,7 @@ pub fn apply_gateway_client_config(
         });
     }
     let result = with_gateway_client_mutation_owner_gate(id, false, move |id, _| {
-        apply_gateway_client_config_locked(id, model)
+        apply_gateway_client_config_locked(id, model, std::collections::BTreeMap::new())
     })?;
     clear_pending_sync_after_successful_apply(result)
 }
@@ -928,6 +927,7 @@ pub fn apply_gateway_client_config(
 fn apply_gateway_client_config_locked(
     client_id: String,
     model: Option<String>,
+    role_mappings: std::collections::BTreeMap<String, String>,
 ) -> Result<GatewayClientApplyResult, String> {
     let _guard = gateway_client_config_write_lock()
         .lock()
@@ -935,7 +935,7 @@ fn apply_gateway_client_config_locked(
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
     let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    managed_clients::apply_native(client_id, &settings, &providers, &model)
+    managed_clients::apply_native(client_id, &settings, &providers, &model, role_mappings)
 }
 
 pub fn restore_gateway_client_config(
@@ -1078,9 +1078,7 @@ pub fn switch_gateway_client_route(
     } else {
         model
     };
-    if normalize_client_id(&client_id) == "claude" {
-        set_pending_role_mappings(role_mappings.unwrap_or_default());
-    }
+    let role_mappings = role_mappings.unwrap_or_default();
     let result = with_gateway_client_mutation_owner_gate(
         normalize_client_id(&client_id),
         force_takeover.unwrap_or(false),
@@ -1088,7 +1086,7 @@ pub fn switch_gateway_client_route(
             if next_owner == RoutingOwner::Official {
                 restore_gateway_client_config_locked(id, current_target_owner)
             } else if next_owner == current_app_owner {
-                apply_gateway_client_config_locked(id, model)
+                apply_gateway_client_config_locked(id, model, role_mappings.clone())
             } else {
                 Err(format!(
                     "{} builds can only apply {} routes.",
