@@ -2896,7 +2896,7 @@ def normalize_official_model_id(model_id: str) -> str | None:
     return value
 
 
-def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
+def sync_catalog(*, max_age_seconds: int = 0, offline: bool = False) -> dict[str, Any]:
     if catalog_cache_is_fresh(max_age_seconds):
         state = load_cached_state(GENERATED_STATE_PATH)
         state["cache_status"] = "fresh"
@@ -2931,7 +2931,14 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
     )
     fallback_models = load_fallback_catalog_models(OLLAMA_FALLBACK_PATH)
     client_version = read_client_version(OFFICIAL_SEED_PATH, OLLAMA_FALLBACK_PATH)
-    discovered_ids, discovery_source, discovery_status, discovery_detail = discover_ollama_ids()
+    if offline:
+        # Connecting applies the local projection; remote discovery belongs to
+        # explicit refresh, not the configuration writer's critical section.
+        cached_state = load_cached_state(GENERATED_STATE_PATH)
+        discovered_ids = cached_state.get("discovered_ollama_models", []) or model_ids_from_catalog(OLLAMA_FALLBACK_PATH)
+        discovery_source, discovery_status, discovery_detail = "cache", "offline", "using local model information"
+    else:
+        discovered_ids, discovery_source, discovery_status, discovery_detail = discover_ollama_ids()
     providers = load_providers()
     ollama_runtime_configured, runtime_ollama_models = catalog_visible_ollama_cloud_models(
         providers,
@@ -2953,7 +2960,14 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
             if should_include_model(str(slug), policy)
         ]
     )
-    ollama_model_metadata, metadata_detail = discover_ollama_model_metadata(visible_ollama_slugs)
+    if offline:
+        ollama_model_metadata = {
+            slug: metadata for slug, metadata in cached_state.get("ollama_model_metadata", {}).items()
+            if slug in visible_ollama_slugs
+        }
+        metadata_detail = "using cached metadata"
+    else:
+        ollama_model_metadata, metadata_detail = discover_ollama_model_metadata(visible_ollama_slugs)
     if ollama_runtime_configured:
         ollama_model_metadata.update(ollama_provider_model_metadata(runtime_ollama_models))
 
@@ -3021,6 +3035,7 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sync Codex proxy model catalog from Ollama discovery.")
     parser.add_argument("--sync", action="store_true", help="discover models and write generated catalog/state files")
+    parser.add_argument("--offline", action="store_true", help="rebuild from local configuration and cached discovery without network requests")
     parser.add_argument(
         "--max-age-seconds",
         type=int,
@@ -3033,7 +3048,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 2
 
-    state = sync_catalog(max_age_seconds=args.max_age_seconds)
+    state = sync_catalog(max_age_seconds=args.max_age_seconds, offline=args.offline)
     diff = state["diff"]
     print(f"catalog={GENERATED_CATALOG_PATH}")
     print(f"state={GENERATED_STATE_PATH}")

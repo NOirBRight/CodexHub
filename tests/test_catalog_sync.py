@@ -14,6 +14,42 @@ from providers_config import ModelConfig, ProviderConfig
 
 
 class CatalogSyncTests(unittest.TestCase):
+    def test_offline_connection_rebuilds_catalog_without_remote_discovery(self):
+        from contextlib import ExitStack
+
+        with tempfile.TemporaryDirectory() as tmpdir, ExitStack() as stack:
+            root = Path(tmpdir)
+            for key, name in {
+                "GENERATED_CATALOG_PATH": "catalog.json",
+                "MANAGED_CATALOG_BASELINE_PATH": "baseline.json",
+                "CATALOG_OVERRIDES_PATH": "overrides.json",
+                "GENERATED_STATE_PATH": "state.json",
+            }.items():
+                stack.enter_context(patch.object(catalog_sync, key, root / name))
+            stack.enter_context(patch.object(catalog_sync, "_CATALOG_OWNER_SECRET_CACHE", None))
+            cached = {
+                "discovered_ollama_models": ["glm-5.2"],
+                "ollama_model_metadata": {"glm-5.2": {"context_window": 123456}},
+            }
+            (root / "state.json").write_text(json.dumps(cached))
+            for key, value in {
+                "load_policy": self.policy,
+                "load_include_official_models": False,
+                "load_providers": [],
+                "load_fallback_catalog_models": [],
+                "load_previous_visible_models": [],
+            }.items():
+                stack.enter_context(patch.object(catalog_sync, key, return_value=value))
+            network = stack.enter_context(patch.object(catalog_sync, "urlopen", side_effect=AssertionError("Connect must not query remote models")))
+            state = catalog_sync.sync_catalog(offline=True)
+            network.assert_not_called()
+            self.assertIn("glm-5.2", state["visible_models"])
+            self.assertEqual(state["ollama_model_metadata"], cached["ollama_model_metadata"])
+            self.assertTrue((root / "catalog.json").is_file())
+            (root / "state.json").unlink()
+            catalog_sync.sync_catalog(offline=True)
+            network.assert_not_called()
+
     def setUp(self):
         self.policy = CatalogPolicy(
             denied_models={"glm-5.1"},
@@ -3719,4 +3755,3 @@ class CatalogSyncTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
