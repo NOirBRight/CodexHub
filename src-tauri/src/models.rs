@@ -1715,6 +1715,7 @@ fn subscription_models_to_metadata_models(
                 .clone()
                 .or_else(|| defaults.and_then(|model| model.default_reasoning_level.clone())),
             thinking_mode: defaults.and_then(|model| model.thinking_mode.clone()),
+            capabilities_edited: defaults.is_some_and(|model| model.capabilities_edited),
             pricing: defaults.and_then(|model| model.pricing.clone()),
             metadata_provenance: Some(MetadataProvenance {
                 source: "codex_subscription".to_string(),
@@ -3208,6 +3209,7 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
             .default_reasoning_level
             .or(base.default_reasoning_level.take()),
         thinking_mode: override_model.thinking_mode.or(base.thinking_mode.take()),
+        capabilities_edited: override_model.capabilities_edited || base.capabilities_edited,
         pricing: override_model.pricing.or(base.pricing.take()),
         metadata_provenance: override_model.metadata_provenance,
         sort_order: override_model.sort_order.or(base.sort_order),
@@ -3546,6 +3548,10 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
             .get("default_reasoning_level")
             .and_then(Value::as_str)
             .and_then(nonblank),
+        capabilities_edited: object
+            .get("capabilities_edited")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         thinking_mode: object
             .get("thinking_mode")
             .and_then(Value::as_str)

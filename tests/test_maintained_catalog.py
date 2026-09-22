@@ -20,6 +20,29 @@ from maintained_catalog import (
 
 
 class MaintainedCatalogTests(unittest.TestCase):
+    def test_commandcode_endpoint_capabilities_do_not_inherit_family_guesses(self):
+        for model_id, vision, levels in (
+            ("xiaomi/mimo-v2.5-pro", False, ()),
+            ("stepfun/step-3.7-flash", True, ()),
+            ("sakana/fugu-ultra", True, ("high", "xhigh")),
+            ("deepseek/deepseek-v4.1-flash", True, ("low", "high", "max")),
+            ("minimaxai/minimax-m3", True, ("low", "medium", "high")),
+            ("xai/grok-4.7", True, ("low", "medium", "high", "xhigh")),
+        ):
+            with self.subTest(model=model_id):
+                model = resolve_model("commandcode", model_id)
+                self.assertIsNotNone(model)
+                self.assertEqual("image" in model.input_modalities, vision)
+                self.assertEqual(model.reasoning_levels, levels)
+                self.assertGreater(model.context_window, 0)
+
+    def test_commandcode_m3_effort_uses_endpoint_contract(self):
+        controls = thinking_payload("commandcode", "minimaxai/minimax-m3", effort="medium")
+        self.assertEqual(controls.reasoning_effort, "medium")
+        self.assertFalse(controls.drop_reasoning_effort)
+        self.assertIsNone(controls.thinking)
+        self.assertTrue(thinking_payload("minimax-cn", "MiniMax-M3").drop_reasoning_effort)
+
     def test_opencode_go_current_vision_and_reasoning_capabilities(self):
         expected = {
             "deepseek-v4.1-flash": ("low", "high", "max"),

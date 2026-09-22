@@ -20,6 +20,7 @@ export interface Model {
   input_modalities?: string[] | null;
   supported_reasoning_levels?: string[] | null;
   default_reasoning_level?: string | null;
+  capabilities_edited?: boolean;
   thinking_mode?: "none" | "always_on" | "toggle" | null;
   pricing?: ModelPricing | null;
   metadata_provenance?: MetadataProvenance | null;

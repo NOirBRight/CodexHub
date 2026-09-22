@@ -23,6 +23,30 @@ from providers_config import (
 
 
 class ProvidersConfigTests(unittest.TestCase):
+    def test_edited_capabilities_survive_disk_and_catalog_projection(self):
+        from catalog import CatalogPolicy
+        from catalog_sync import build_external_provider_model, build_ollama_model, ollama_provider_model_metadata
+
+        for provider_id, model_id in (("opencode-go", "grok-4.7"), ("commandcode", "sakana/fugu-ultra"), ("ollama-cloud", "qwen3.5:397b")):
+            with self.subTest(provider=provider_id), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "providers.toml"
+                edited = ModelConfig(id=model_id, input_modalities=("text",), thinking_mode="none", capabilities_edited=True)
+                save_providers([ProviderConfig(id=provider_id, name=provider_id, base_url="https://example.test/v1", api_key="fixture", models=[edited])], path)
+                providers = load_providers(path)
+                self.assertTrue(providers[0].models[0].capabilities_edited)
+                policy = CatalogPolicy(denied_models=set(), denied_substrings=set(), display_names={}, official_models=(), allowed_ollama_cloud_models=(), allowed_provider_models=())
+                if provider_id == "ollama-cloud":
+                    index = build_ollama_cloud_model_index(providers, require_api_key=False)
+                    metadata = ollama_provider_model_metadata(index[1].values())
+                    model = build_ollama_model(model_id, policy, {}, None, metadata)
+                else:
+                    index = build_external_model_index(providers, require_api_key=False)
+                    model = build_external_provider_model(next(iter(index.values())), policy, None)
+                self.assertEqual(model["input_modalities"], ["text"])
+                self.assertEqual(model["supported_reasoning_levels"], [])
+                self.assertNotIn("default_reasoning_level", model)
+                self.assertEqual(model["codex_proxy_metadata"]["thinking_mode"], "none")
+
     def test_external_models_default_to_v2_for_existing_runtime_configs(self):
         selected = {
             "xai": ["grok-4.6"],

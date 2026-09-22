@@ -507,6 +507,7 @@ function ModelEditorOverlay({
             : levels[0] ?? null;
       return {
         ...current,
+        capabilities_edited: true,
         thinking_mode: enabled
           ? model.thinking_mode === "always_on" ? "always_on" : "toggle"
           : "none",
@@ -525,6 +526,7 @@ function ModelEditorOverlay({
       const levels = toggleReasoningLevel(current.supported_reasoning_levels ?? [], level, checked);
       return {
         ...current,
+        capabilities_edited: true,
         supported_reasoning_levels: levels,
         default_reasoning_level:
           current.default_reasoning_level && levels.includes(current.default_reasoning_level)
@@ -613,6 +615,7 @@ function ModelEditorOverlay({
                     onChange={(event) =>
                       setDraft({
                         ...draft,
+                        capabilities_edited: true,
                         input_modalities: event.target.checked ? ["text", "image"] : ["text"],
                       })
                     }
@@ -664,7 +667,7 @@ function ModelEditorOverlay({
                       className="field h-9"
                       value={draft.default_reasoning_level ?? ""}
                       onChange={(event) =>
-                        setDraft({ ...draft, default_reasoning_level: event.target.value || null })
+                        setDraft({ ...draft, capabilities_edited: true, default_reasoning_level: event.target.value || null })
                       }
                     >
                       {(draft.supported_reasoning_levels ?? []).map((level) => (

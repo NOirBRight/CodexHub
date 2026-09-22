@@ -10,18 +10,8 @@ export function isRetiredMaintainedModel(providerId: string | undefined, modelId
   return Boolean(providerId && RETIRED_MAINTAINED_MODELS.has(`${providerId}/${modelId}`));
 }
 
-function sameLevelSet(left: string[] | null | undefined, right: string[] | null | undefined): boolean {
-  const a = [...(left ?? [])].sort();
-  const b = [...(right ?? [])].sort();
-  return a.length === b.length && a.every((value, index) => value === b[index]);
-}
-
-function isCodexFiveLevelFill(levels: string[] | null | undefined): boolean {
-  return sameLevelSet(levels, CODEX_FIVE_LEVEL_FILL);
-}
-
 export function editorReasoningLevelOptions(catalogLevels?: string[] | null): string[] {
-  return catalogLevels && catalogLevels.length > 0 ? catalogLevels : CODEX_FIVE_LEVEL_FILL;
+  return catalogLevels ?? CODEX_FIVE_LEVEL_FILL;
 }
 
 export function bundledPresetFor(providerId: string, presets: Provider[]): Provider | undefined {
@@ -66,30 +56,26 @@ function keepLimit(current?: number | null, catalog?: number | null) {
 }
 
 function mergeOfficialModelDefaults(model: Model, official: Model): Model {
-  const currentLevels = model.supported_reasoning_levels ?? [];
-  const catalogLevels = official.supported_reasoning_levels ?? [];
-  const replaceGenericFill =
-    catalogLevels.length > 0 &&
-    isCodexFiveLevelFill(currentLevels) &&
-    !isCodexFiveLevelFill(catalogLevels);
-  const noEffortGrades = official.thinking_mode != null &&
-    official.supported_reasoning_levels != null && catalogLevels.length === 0;
-  const useCatalogLevels = noEffortGrades ||
-    (catalogLevels.length > 0 && (currentLevels.length === 0 || replaceGenericFill));
-  const nextLevels = useCatalogLevels ? catalogLevels : currentLevels.length ? currentLevels : catalogLevels;
+  if (model.capabilities_edited) {
+    return {
+      ...model,
+      context_window: keepLimit(model.context_window, official.context_window),
+      max_context_window: keepLimit(model.max_context_window, official.max_context_window),
+      max_output_tokens: keepLimit(model.max_output_tokens, official.max_output_tokens),
+    };
+  }
   return {
     ...model,
-    supported_reasoning_levels: useCatalogLevels ? nextLevels : model.supported_reasoning_levels,
-    default_reasoning_level: useCatalogLevels
-      ? official.default_reasoning_level ?? null
-      : model.default_reasoning_level ?? official.default_reasoning_level ?? null,
-    thinking_mode: model.thinking_mode ?? official.thinking_mode ?? null,
-    input_modalities: (official.input_modalities ?? []).includes("image") &&
-      !(model.input_modalities ?? []).includes("image")
-      ? official.input_modalities
-      : model.input_modalities?.length
-        ? model.input_modalities
-        : official.input_modalities ?? model.input_modalities,
+    supported_reasoning_levels: official.supported_reasoning_levels ?? model.supported_reasoning_levels,
+    default_reasoning_level: official.supported_reasoning_levels != null
+      ? model.default_reasoning_level &&
+        JSON.stringify(model.supported_reasoning_levels) === JSON.stringify(official.supported_reasoning_levels) &&
+        official.supported_reasoning_levels.includes(model.default_reasoning_level)
+        ? model.default_reasoning_level
+        : official.default_reasoning_level ?? null
+      : model.default_reasoning_level,
+    thinking_mode: official.thinking_mode ?? model.thinking_mode ?? null,
+    input_modalities: official.input_modalities ?? model.input_modalities,
     context_window: keepLimit(model.context_window, official.context_window),
     max_context_window: keepLimit(model.max_context_window, official.max_context_window),
     max_output_tokens: keepLimit(model.max_output_tokens, official.max_output_tokens),

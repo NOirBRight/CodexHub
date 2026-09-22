@@ -661,8 +661,7 @@ enabled = true
   context_window = 200000
   max_output_tokens = 64000
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
-  default_reasoning_level = "max"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
   sort_order = 8
   enabled = true
@@ -817,8 +816,7 @@ enabled = true
   context_window = 262144
   max_output_tokens = 32768
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "high", "max"]
-  default_reasoning_level = "max"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
   sort_order = 21
   enabled = true
@@ -829,8 +827,7 @@ enabled = true
   context_window = 262144
   max_output_tokens = 32768
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "high", "max"]
-  default_reasoning_level = "max"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
   sort_order = 22
   enabled = true
@@ -841,8 +838,7 @@ enabled = true
   context_window = 262144
   max_output_tokens = 32768
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "high", "max"]
-  default_reasoning_level = "max"
+  supported_reasoning_levels = []
   thinking_mode = "toggle"
   sort_order = 23
   enabled = true
@@ -853,8 +849,7 @@ enabled = true
   context_window = 262144
   max_output_tokens = 65536
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "high", "max"]
-  default_reasoning_level = "max"
+  supported_reasoning_levels = []
   thinking_mode = "toggle"
   sort_order = 24
   enabled = true
@@ -901,8 +896,7 @@ enabled = true
   context_window = 204800
   max_output_tokens = 131072
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "xhigh"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
   sort_order = 28
   enabled = true
@@ -913,8 +907,7 @@ enabled = true
   context_window = 204800
   max_output_tokens = 131072
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "xhigh"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
   sort_order = 29
   enabled = true
@@ -924,9 +917,8 @@ enabled = true
   display_name = "MiMo V2.5 Pro"
   context_window = 1048576
   max_output_tokens = 128000
-  input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "xhigh"
+  input_modalities = ["text"]
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
   sort_order = 30
   enabled = true
@@ -937,8 +929,7 @@ enabled = true
   context_window = 1000000
   max_output_tokens = 128000
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "xhigh"]
-  default_reasoning_level = "xhigh"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
   sort_order = 31
   enabled = true
@@ -996,9 +987,8 @@ enabled = true
   display_name = "Step 3.7 Flash"
   context_window = 256000
   max_output_tokens = 64000
-  input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high"]
-  default_reasoning_level = "high"
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
   sort_order = 36
   enabled = true
@@ -1009,8 +999,7 @@ enabled = true
   context_window = 256000
   max_output_tokens = 64000
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high"]
-  default_reasoning_level = "high"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
   sort_order = 37
   enabled = true
@@ -1021,8 +1010,7 @@ enabled = true
   context_window = 256000
   max_output_tokens = 64000
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high"]
-  default_reasoning_level = "high"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
   sort_order = 38
   enabled = true
@@ -1033,8 +1021,7 @@ enabled = true
   context_window = 256000
   max_output_tokens = 64000
   input_modalities = ["text"]
-  supported_reasoning_levels = ["low", "medium", "high"]
-  default_reasoning_level = "high"
+  supported_reasoning_levels = []
   thinking_mode = "always_on"
   sort_order = 39
   enabled = true
@@ -1128,7 +1115,7 @@ enabled = true
   display_name = "Fugu Ultra"
   context_window = 256000
   max_output_tokens = 64000
-  input_modalities = ["text"]
+  input_modalities = ["text", "image"]
   supported_reasoning_levels = ["high", "xhigh"]
   default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
@@ -1189,8 +1176,8 @@ enabled = true
   context_window = 1048576
   max_output_tokens = 131072
   input_modalities = ["text", "image"]
-  supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
-  default_reasoning_level = "max"
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "xhigh"
   thinking_mode = "always_on"
   sort_order = 52
   enabled = true
@@ -1217,6 +1204,256 @@ enabled = true
   default_reasoning_level = "high"
   thinking_mode = "always_on"
   sort_order = 54
+  enabled = true
+
+  [[providers.models]]
+  id = "deepseek/deepseek-v4.1-flash"
+  display_name = "DeepSeek V4.1 Flash"
+  context_window = 1000000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 55
+  enabled = true
+
+  [[providers.models]]
+  id = "z-ai/glm-5.3-flashx"
+  display_name = "GLM-5.3 FlashX"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "high", "max"]
+  default_reasoning_level = "max"
+  thinking_mode = "always_on"
+  sort_order = 56
+  enabled = true
+
+  [[providers.models]]
+  id = "zai-org/glm-5.2-fast"
+  display_name = "GLM-5.2 Fast"
+  context_window = 1000000
+  input_modalities = ["text"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 57
+  enabled = true
+
+  [[providers.models]]
+  id = "zai-org/glm-5.1"
+  display_name = "GLM-5.1"
+  context_window = 200000
+  input_modalities = ["text"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 58
+  enabled = true
+
+  [[providers.models]]
+  id = "zai-org/glm-5"
+  display_name = "GLM-5"
+  context_window = 200000
+  input_modalities = ["text"]
+  supported_reasoning_levels = []
+  thinking_mode = "toggle"
+  sort_order = 59
+  enabled = true
+
+  [[providers.models]]
+  id = "minimaxai/minimax-m3"
+  display_name = "MiniMax M3"
+  context_window = 1000000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "toggle"
+  sort_order = 60
+  enabled = true
+
+  [[providers.models]]
+  id = "minimaxai/minimax-m2.7"
+  display_name = "MiniMax M2.7"
+  context_window = 200000
+  input_modalities = ["text"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 61
+  enabled = true
+
+  [[providers.models]]
+  id = "xiaomi/mimo-v2.6-pro"
+  display_name = "MiMo V2.6 Pro"
+  context_window = 1048576
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 62
+  enabled = true
+
+  [[providers.models]]
+  id = "xiaomi/mimo-v2.6-pro-ultraspeed"
+  display_name = "MiMo V2.6 Pro UltraSpeed"
+  context_window = 1048576
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 63
+  enabled = true
+
+  [[providers.models]]
+  id = "xiaomi/mimo-v2.6-flash"
+  display_name = "MiMo V2.6 Flash"
+  context_window = 1048576
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 64
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen/qwen3.8-omni-flash"
+  display_name = "Qwen 3.8 Omni Flash"
+  context_window = 1000000
+  max_output_tokens = 131072
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "xhigh"]
+  default_reasoning_level = "xhigh"
+  thinking_mode = "always_on"
+  sort_order = 65
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen/qwen3.7-max"
+  display_name = "Qwen 3.7 Max"
+  context_window = 1000000
+  input_modalities = ["text"]
+  supported_reasoning_levels = []
+  thinking_mode = "toggle"
+  sort_order = 66
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen/qwen3.7-plus"
+  display_name = "Qwen 3.7 Plus"
+  context_window = 1000000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
+  thinking_mode = "toggle"
+  sort_order = 67
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen/qwen3.7-flash"
+  display_name = "Qwen 3.7 Flash"
+  context_window = 1000000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
+  thinking_mode = "toggle"
+  sort_order = 68
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen/qwen3.6-max-preview"
+  display_name = "Qwen 3.6 Max Preview"
+  context_window = 200000
+  input_modalities = ["text"]
+  supported_reasoning_levels = []
+  thinking_mode = "toggle"
+  sort_order = 69
+  enabled = true
+
+  [[providers.models]]
+  id = "qwen/qwen3.6-plus"
+  display_name = "Qwen 3.6 Plus"
+  context_window = 200000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
+  thinking_mode = "toggle"
+  sort_order = 70
+  enabled = true
+
+  [[providers.models]]
+  id = "meituan/longcat-2.0"
+  display_name = "LongCat 2.0"
+  context_window = 1048576
+  input_modalities = ["text"]
+  supported_reasoning_levels = []
+  thinking_mode = "toggle"
+  sort_order = 71
+  enabled = true
+
+  [[providers.models]]
+  id = "stepfun/step-5-preview"
+  display_name = "Step 5 Preview"
+  context_window = 1000000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 72
+  enabled = true
+
+  [[providers.models]]
+  id = "nvidia/nemotron-3-ultra-550b-a55b"
+  display_name = "Nemotron 3 Ultra"
+  context_window = 1000000
+  input_modalities = ["text"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 73
+  enabled = true
+
+  [[providers.models]]
+  id = "thinkingmachines/inkling"
+  display_name = "Inkling"
+  context_window = 256000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 74
+  enabled = true
+
+  [[providers.models]]
+  id = "thinkingmachines/inkling-small"
+  display_name = "Inkling Small"
+  context_window = 1000000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 75
+  enabled = true
+
+  [[providers.models]]
+  id = "poolside/laguna-s-2.1-free"
+  display_name = "Laguna S 2.1"
+  context_window = 256000
+  max_output_tokens = 32768
+  input_modalities = ["text"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 76
+  enabled = true
+
+  [[providers.models]]
+  id = "inclusionai/ling-3.0-flash-sante:free"
+  display_name = "Ling 3.0 Flash Sante"
+  context_window = 262144
+  max_output_tokens = 32768
+  input_modalities = ["text"]
+  supported_reasoning_levels = []
+  thinking_mode = "always_on"
+  sort_order = 77
+  enabled = true
+
+  [[providers.models]]
+  id = "xai/grok-4.7"
+  display_name = "Grok 4.7"
+  context_window = 500000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 78
   enabled = true
 
 [[providers]]
@@ -1696,6 +1933,18 @@ onboarding_hint = "providers.catalogProviderSubscriptionHint"
 discovery_policy = "retain-intersection"
 sort_order = 8
 enabled = true
+
+  [[providers.models]]
+  id = "grok-4.7"
+  display_name = "Grok 4.7"
+  context_window = 500000
+  max_output_tokens = 500000
+  input_modalities = ["text", "image"]
+  supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+  default_reasoning_level = "high"
+  thinking_mode = "always_on"
+  sort_order = 0
+  enabled = true
 
   [[providers.models]]
   id = "grok-4.6"

@@ -275,3 +275,13 @@ test("inconclusive probe preserves existing endpoint capabilities", async () => 
   assert.deepEqual(applyProviderProbeResult(provider, rateLimited), provider);
   assert.deepEqual(applyAddProviderProbeResult(form, rateLimited), form);
 });
+
+test("rediscovery preserves explicit disabled capabilities", async () => {
+  const { mergeDiscoveredModels } = await readFormatModule();
+  const existing = { id: "grok-4.7", enabled: true, capabilities_edited: true, input_modalities: ["text"], thinking_mode: "none", supported_reasoning_levels: [], default_reasoning_level: null };
+  const discovered = { id: "grok-4.7", enabled: true, input_modalities: ["text", "image"], thinking_mode: "always_on", supported_reasoning_levels: ["high"], default_reasoning_level: "high" };
+  const merged = mergeDiscoveredModels([existing], [discovered])[0];
+  for (const key of ["capabilities_edited", "input_modalities", "thinking_mode", "supported_reasoning_levels", "default_reasoning_level"]) {
+    assert.deepEqual(merged[key], existing[key], key);
+  }
+});

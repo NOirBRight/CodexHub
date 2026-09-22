@@ -1919,6 +1919,10 @@ def ollama_provider_model_metadata(ollama_models: Iterable[dict[str, Any]]) -> d
             entry["max_output_tokens"] = max_output_tokens
             entry["max_output_source"] = "providers_toml"
 
+        if model.get("capabilities_edited") is True:
+            for key in ("capabilities_edited", "supported_reasoning_levels", "default_reasoning_level", "thinking_mode"):
+                entry[key] = model.get(key)
+
         input_modalities = model.get("input_modalities")
         if isinstance(input_modalities, (list, tuple)) and input_modalities:
             entry["input_modalities"] = [str(value) for value in input_modalities if str(value)]
@@ -2431,6 +2435,18 @@ def build_ollama_model(
     )
     if maintained is not None:
         safe_metadata["thinking_mode"] = maintained.thinking_mode
+    edited = (model_metadata or {}).get(slug, {})
+    if edited.get("capabilities_edited") is True:
+        model["supported_reasoning_levels"] = complete_third_party_reasoning_levels(
+            edited.get("supported_reasoning_levels"), fill_missing=False
+        )
+        efforts = [item["effort"] for item in model["supported_reasoning_levels"]]
+        if efforts:
+            configured = edited.get("default_reasoning_level")
+            model["default_reasoning_level"] = configured if configured in efforts else efforts[0]
+        else:
+            model.pop("default_reasoning_level", None)
+        safe_metadata["thinking_mode"] = edited.get("thinking_mode")
     model["codex_proxy_metadata"] = safe_metadata
     _disable_responses_only_capabilities_for_chat(
         model,
@@ -2562,14 +2578,15 @@ def build_external_provider_model(
     provider_alias = str(external_model.get("provider_alias") or "")
     upstream_model = str(external_model.get("upstream_model") or "")
     maintained = maintained_catalog.resolve_model(provider_alias, upstream_model)
-    if maintained is not None and model["input_modalities"] == ["text"]:
+    capabilities_edited = external_model.get("capabilities_edited") is True
+    if not capabilities_edited and maintained is not None and model["input_modalities"] == ["text"]:
         model["input_modalities"] = list(maintained.input_modalities)
 
     explicit_reasoning_levels = external_model.get("supported_reasoning_levels")
     has_explicit_reasoning_levels = (
         isinstance(explicit_reasoning_levels, (list, tuple)) and bool(explicit_reasoning_levels)
     )
-    if has_explicit_reasoning_levels:
+    if has_explicit_reasoning_levels or capabilities_edited:
         reasoning_levels_source = explicit_reasoning_levels
         fill_missing = False
     elif maintained is not None:
@@ -2605,9 +2622,9 @@ def build_external_provider_model(
                 normalized_default = supported_efforts[0]
         model["default_reasoning_level"] = normalized_default
 
-    if maintained is not None:
+    if maintained is not None or capabilities_edited:
         proxy_thinking = dict(model.get("codex_proxy_metadata") or {})
-        proxy_thinking["thinking_mode"] = maintained.thinking_mode
+        proxy_thinking["thinking_mode"] = external_model.get("thinking_mode") if capabilities_edited else maintained.thinking_mode
         model["codex_proxy_metadata"] = proxy_thinking
 
     context_window = external_model.get("context_window")
