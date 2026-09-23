@@ -529,7 +529,7 @@ def usage_evidence(
     assert isinstance(request_id, str) and _SAFE_REQUEST_ID.fullmatch(request_id), (
         f"Usage Statistics has no safe request ID for {case}"
     )
-    assert event.get("usage_source") == "upstream", (
+    assert event.get("usage_source") in {"upstream", "upstream_async"}, (
         f"Usage Statistics did not record upstream usage for {case}"
     )
     token_fields = ("input_tokens", "output_tokens", "total_tokens")
@@ -570,10 +570,12 @@ def wait_for_usage_evidence(
     timeout_seconds: int = 20,
 ) -> tuple[dict[str, object], dict[str, object]]:
     deadline = time.monotonic() + timeout_seconds
+    last_snapshot: dict[str, object] | None = None
     while time.monotonic() < deadline:
         response = invoke(bridge_port, "gateway_usage_snapshot", {"limit": 500})
         if response.get("ok") is True and isinstance(response.get("value"), dict):
             snapshot = response["value"]
+            last_snapshot = snapshot
             try:
                 row = usage_evidence(
                     snapshot, case=case, model=model, provider=provider,
@@ -583,8 +585,17 @@ def wait_for_usage_evidence(
             except AssertionError:
                 pass
         time.sleep(0.25)
+    observed = [
+        {name: item.get(name) for name in (
+            "request_id", "model", "upstream", "status", "usage_source",
+            "usage_missing_reason", "input_tokens", "output_tokens", "total_tokens",
+        )}
+        for item in (last_snapshot or {}).get("events", [])
+        if isinstance(item, dict) and item.get("request_id") in gateway_request_ids
+    ]
     raise AssertionError(
-        f"Usage Statistics snapshot did not persist complete {provider}/{model} usage"
+        f"Usage Statistics snapshot did not persist complete {provider}/{model} usage; "
+        f"sanitized matching rows={json.dumps(observed, separators=(',', ':'))}"
     )
 
 
@@ -753,8 +764,22 @@ def run_packaged_usage_statistics_window(
         expected_input = re.sub(r"[^0-9]", "", str(row["input_tokens"]))
         expected_output = re.sub(r"[^0-9]", "", str(row["output_tokens"]))
         expected_provider = "claudesubscription"
+        row_y = min(460, max(0, app_height - 1))
+        row_height = min(170, app_height - row_y)
+        row_width = min(1024, app_width)
         while time.monotonic() < deadline:
-            rendered = capture_text()
+            capture_text()
+            subprocess.run(
+                ["convert", str(screenshot), "-crop",
+                 f"{row_width}x{row_height}+0+{row_y}",
+                 "-resize", "400%", "-colorspace", "Gray", "-threshold", "75%",
+                 str(details_crop)],
+                check=True, capture_output=True, timeout=10,
+            )
+            rendered = subprocess.run(
+                ["tesseract", str(details_crop), "stdout", "--psm", "6"],
+                check=True, capture_output=True, text=True, timeout=20,
+            ).stdout
             normalized = re.sub(r"[^a-z0-9]", "", rendered.lower())
             if all(value in normalized for value in (
                 expected_model, expected_input, expected_output, expected_provider, "recorded", "200",
@@ -1447,7 +1472,7 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     )
                     row, usage_summary = wait_for_usage_evidence(
                         bridge_port, case="responses-luna", model="gpt-6-luna",
-                        provider="official", gateway_request_ids=gateway_request_ids,
+                        provider="openai", gateway_request_ids=gateway_request_ids,
                     )
                     usage_rows.append(row)
                     print(

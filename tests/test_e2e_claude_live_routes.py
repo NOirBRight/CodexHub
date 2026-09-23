@@ -157,6 +157,29 @@ def test_usage_evidence_requires_complete_actual_usage_from_public_snapshot() ->
     assert evidence["request_id"] == "synthetic-private-id"
 
 
+def test_usage_evidence_accepts_official_async_upstream_usage() -> None:
+    snapshot = {
+        "summary": {"requests": 1, "total_tokens": 19},
+        "events": [{
+            "request_id": "synthetic-luna-id",
+            "model": "openai/gpt-6-luna",
+            "upstream": "openai",
+            "status": 200,
+            "usage_source": "upstream_async",
+            "input_tokens": 15,
+            "output_tokens": 4,
+            "total_tokens": 19,
+        }],
+        "telemetry_status": {"backfill_pending": False},
+    }
+
+    evidence = usage_evidence(
+        snapshot, case="responses-luna", model="gpt-6-luna",
+        provider="openai", gateway_request_ids=["synthetic-luna-id"],
+    )
+    assert evidence["usage_source"] == "upstream_async"
+
+
 def test_usage_evidence_preserves_official_deepseek_identity_and_tokens() -> None:
     snapshot = {
         "summary": {
@@ -214,7 +237,7 @@ def test_usage_evidence_preserves_official_deepseek_identity_and_tokens() -> Non
             "synthetic-deepseek-messages-id", 38, 9,
         ),
         (
-            "responses-luna", "gpt-6-luna", "official",
+            "responses-luna", "gpt-6-luna", "openai",
             "synthetic-luna-responses-id", 42, 11,
         ),
     ],
@@ -243,7 +266,7 @@ def test_usage_evidence_correlates_messages_and_responses_routes(
         },
         "events": [{
             "request_id": request_id,
-            "model": model,
+            "model": f"openai/{model}" if case == "responses-luna" else model,
             "upstream": provider,
             "client_id": "claude" if case == "claude-deepseek" else "codexhub",
             "status": 200,
@@ -268,7 +291,7 @@ def test_usage_evidence_correlates_messages_and_responses_routes(
 
     assert evidence["case"] == case
     assert evidence["request_id"] == request_id
-    assert evidence["model"] == model
+    assert evidence["model"] == (f"openai/{model}" if case == "responses-luna" else model)
     assert evidence["provider"] == provider
     assert evidence["input_tokens"] == input_tokens
     assert evidence["output_tokens"] == output_tokens
