@@ -1094,7 +1094,7 @@ pub(crate) fn read_usage_events_from_sqlite_path_with_window(
                   'local_responses_websocket_fast_reject'
               )
               AND NOT (
-                  method = 'POST'
+                  COALESCE(method, '') = 'POST'
                   AND inbound_format = 'anthropic_messages'
                   AND (path = '/v1/messages/count_tokens'
                        OR path LIKE '/v1/messages/count_tokens?%')
