@@ -221,12 +221,16 @@ def normalize_usage_for_event(
             "usage_source": "missing",
             "usage_missing_reason": "upstream_usage_unrecognized",
         }
-    if anthropic_messages and (input_tokens is None or output_tokens is None):
+    if anthropic_messages and (
+        input_tokens is None
+        or output_tokens is None
+        or missing_reason != "upstream_missing_usage"
+    ):
         fields["usage_source"] = "partial"
         fields["usage_missing_reason"] = (
-            "upstream_partial_usage"
-            if missing_reason == "upstream_missing_usage"
-            else missing_reason
+            missing_reason
+            if missing_reason != "upstream_missing_usage"
+            else "upstream_partial_usage"
         )
     return fields
 

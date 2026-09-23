@@ -559,13 +559,15 @@ def relay_transparent_upstream_response(
         if write_error is None and seam.terminal_committed:
             # Stopped only because a terminal event was already committed.
             return 502 if native_anthropic and anthropic_terminal_kind == "error" and status < 400 else status
-        if native_anthropic:
-            _capture_usage(
-                usage_capture,
-                None,
-                missing_reason="downstream_cancelled",
-                upstream_format="anthropic_messages",
-            )
+        if native_anthropic and is_event_stream:
+            if anthropic_terminal_kind == "success":
+                capture_anthropic_usage()
+            else:
+                capture_anthropic_usage(
+                    "upstream_stream_error"
+                    if anthropic_terminal_kind == "error"
+                    else "downstream_cancelled"
+                )
         exc = write_error if write_error is not None else OSError("downstream closed")
         event_fields = _bounded_failure_event_context(event_context)
         for key in (
@@ -691,6 +693,8 @@ def relay_transparent_upstream_response(
 
     def _handle_cancellation() -> int:
         seam.cancel()
+        if native_anthropic:
+            capture_anthropic_usage("gateway_shutdown")
         _emit_stream_closed(
             status_code=503,
             error="GatewayUserRequestedShutdown",
@@ -889,12 +893,7 @@ def relay_transparent_upstream_response(
             )
             return 499
         if native_anthropic:
-            _capture_usage(
-                usage_capture,
-                None,
-                missing_reason="stream_incomplete",
-                upstream_format="anthropic_messages",
-            )
+            capture_anthropic_usage("stream_incomplete")
             stream_failure_detail = safe_upstream_error_detail(
                 exc, redact_identity=relay_redact_identity
             )

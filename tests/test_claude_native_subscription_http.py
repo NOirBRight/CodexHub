@@ -8,7 +8,9 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import gateway_catalog_runtime
+import gateway_exchange_bindings
 import gateway_events
+import gateway_transport
 import pytest
 from tests.gateway_harness import GATEWAY_CLIENT_KEY, GatewayHarness, request_gateway
 
@@ -246,9 +248,158 @@ def test_native_incomplete_sse_preserves_partial_usage_and_marks_failure(tmp_pat
     assert b"hello" not in event_log.read_bytes()
 
 
+def test_native_sse_without_message_stop_marks_known_usage_incomplete(tmp_path) -> None:
+    frames = (
+        b'event: message_start\ndata: {"type":"message_start","message":{"type":"message","model":"claude-opus-5-5","usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":0}}}\n\n'
+        b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":3}}\n\n'
+    )
+    with _isolated_event_log(tmp_path / "codex") as event_log:
+        with GatewayHarness() as harness:
+            assert harness.stub is not None
+            harness.set_sse_response(tuple(frames.splitlines(keepends=True)))
+            with _route_native_requests_to_stub(harness):
+                response = request_gateway(
+                    harness.host,
+                    harness.port,
+                    "POST",
+                    "/v1/messages",
+                    body=json.dumps(
+                        {
+                            "model": NATIVE_MODEL,
+                            "max_tokens": 16,
+                            "stream": True,
+                            "messages": [{"role": "user", "content": "hello"}],
+                        }
+                    ).encode(),
+                    headers=_native_headers(),
+                    timeout=8.0,
+                )
+            assert len(harness.stub.captures) == 1
+
+    assert response.status == 200
+    complete = _request_complete_events(event_log)
+    assert len(complete) == 1
+    assert complete[0]["status"] == 502
+    assert complete[0]["usage_source"] == "partial"
+    assert complete[0]["usage_missing_reason"] == "stream_incomplete"
+    assert complete[0]["usage_input_tokens"] == 12
+    assert complete[0]["usage_cached_input_tokens"] == 4
+    assert complete[0]["usage_cache_write_input_tokens"] == 2
+    assert complete[0]["usage_output_tokens"] == 3
+
+
+def test_native_sse_read_failure_preserves_known_usage_as_partial(tmp_path) -> None:
+    frames = (
+        b'event: message_start\ndata: {"type":"message_start","message":{"type":"message","model":"claude-opus-5-5","usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":0}}}\n\n'
+        b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":3}}\n\n'
+    )
+    original_readline = gateway_transport.UpstreamSseReaderLifecycle.readline
+
+    def interrupt_after_usage(reader):
+        if getattr(reader, "_interrupt_after_usage", False):
+            raise OSError("synthetic upstream read failure")
+        line = original_readline(reader)
+        if line.startswith(b"data:") and b'"type":"message_delta"' in line:
+            reader._interrupt_after_usage = True
+        return line
+
+    with _isolated_event_log(tmp_path / "codex") as event_log:
+        with GatewayHarness() as harness:
+            assert harness.stub is not None
+            harness.set_sse_response(tuple(frames.splitlines(keepends=True)))
+            with _route_native_requests_to_stub(harness):
+                with patch.object(
+                    gateway_transport.UpstreamSseReaderLifecycle,
+                    "readline",
+                    interrupt_after_usage,
+                ):
+                    response = request_gateway(
+                        harness.host,
+                        harness.port,
+                        "POST",
+                        "/v1/messages",
+                        body=json.dumps(
+                            {
+                                "model": NATIVE_MODEL,
+                                "max_tokens": 16,
+                                "stream": True,
+                                "messages": [{"role": "user", "content": "hello"}],
+                            }
+                        ).encode(),
+                        headers=_native_headers(),
+                        timeout=8.0,
+                    )
+            assert len(harness.stub.captures) == 1
+
+    assert response.status == 200
+    complete = _request_complete_events(event_log)
+    assert len(complete) == 1
+    assert complete[0]["status"] == 502
+    assert complete[0]["usage_source"] == "partial"
+    assert complete[0]["usage_missing_reason"] == "stream_incomplete"
+    assert complete[0]["usage_input_tokens"] == 12
+    assert complete[0]["usage_cached_input_tokens"] == 4
+    assert complete[0]["usage_cache_write_input_tokens"] == 2
+    assert complete[0]["usage_output_tokens"] == 3
+
+
+def test_native_sse_downstream_cancel_preserves_known_usage_as_partial(tmp_path) -> None:
+    frames = (
+        b'event: message_start\ndata: {"type":"message_start","message":{"type":"message","model":"claude-opus-5-5","usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":0}}}\n\n'
+        b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":3}}\n\n'
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+    original_write = gateway_exchange_bindings._HandlerDownstreamIO.write
+
+    def disconnect_on_message_delta(downstream, data: bytes) -> None:
+        if b'"type":"message_delta"' in data:
+            raise OSError("synthetic downstream disconnect")
+        original_write(downstream, data)
+
+    with _isolated_event_log(tmp_path / "codex") as event_log:
+        with GatewayHarness() as harness:
+            assert harness.stub is not None
+            harness.set_sse_response(tuple(frames.splitlines(keepends=True)))
+            with _route_native_requests_to_stub(harness):
+                with patch.object(
+                    gateway_exchange_bindings._HandlerDownstreamIO,
+                    "write",
+                    disconnect_on_message_delta,
+                ):
+                    response = request_gateway(
+                        harness.host,
+                        harness.port,
+                        "POST",
+                        "/v1/messages",
+                        body=json.dumps(
+                            {
+                                "model": NATIVE_MODEL,
+                                "max_tokens": 16,
+                                "stream": True,
+                                "messages": [{"role": "user", "content": "hello"}],
+                            }
+                        ).encode(),
+                        headers=_native_headers(),
+                        timeout=8.0,
+                    )
+            assert len(harness.stub.captures) == 1
+
+    assert response.status == 200
+    complete = _request_complete_events(event_log)
+    assert len(complete) == 1
+    assert complete[0]["status"] == 499
+    assert complete[0]["usage_source"] == "partial"
+    assert complete[0]["usage_missing_reason"] == "downstream_cancelled"
+    assert complete[0]["usage_input_tokens"] == 12
+    assert complete[0]["usage_cached_input_tokens"] == 4
+    assert complete[0]["usage_cache_write_input_tokens"] == 2
+    assert complete[0]["usage_output_tokens"] == 3
+
+
 def test_native_sse_error_keeps_partial_usage_and_marks_failure(tmp_path) -> None:
     frames = (
         b'event: message_start\ndata: {"type":"message_start","message":{"type":"message","model":"claude-opus-5-5","usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":0}}}\n\n'
+        b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":3}}\n\n'
         b'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"busy"}}\n\n'
     )
     with _isolated_event_log(tmp_path / "codex") as event_log:
@@ -280,7 +431,7 @@ def test_native_sse_error_keeps_partial_usage_and_marks_failure(tmp_path) -> Non
     assert complete[0]["usage_source"] == "partial"
     assert complete[0]["usage_missing_reason"] == "upstream_stream_error"
     assert complete[0]["usage_input_tokens"] == 12
-    assert "usage_output_tokens" not in complete[0]
+    assert complete[0]["usage_output_tokens"] == 3
 
 
 @pytest.mark.parametrize("local_key", [None, "wrong-local-key"])
