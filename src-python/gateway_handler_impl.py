@@ -518,7 +518,6 @@ class GatewayHandlerMixin:
                 finish_downstream_write_failure=finish_downstream_write_failure,
             )
 
-
         def send_user_requested_shutdown() -> None:
             gateway_events.record_user_requested_shutdown()
             if not self._send_user_requested_shutdown_outcome(
