@@ -44,6 +44,45 @@ _SAFE_ERROR_CLASSES = frozenset({
     "TimeoutError", "UpstreamStreamErrorEvent", "UpstreamStreamIncompleteError",
     "URLError", "ValueError",
 })
+PACKAGED_UI_ISOLATION_ENV = "CODEXHUB_CLAUDE_LIVE_E2E_UI_SANDBOX"
+PACKAGED_UI_ISOLATION_VALUE = "dbus-run-session+xvfb-run-v1"
+
+
+class PackagedUIVerificationError(AssertionError):
+    def __init__(self, failure_class: str, detail: str) -> None:
+        self.failure_class = failure_class
+        super().__init__(detail)
+
+
+def validate_packaged_ui_isolation(environ: dict[str, str] | None = None) -> None:
+    values = os.environ if environ is None else environ
+    if values.get(PACKAGED_UI_ISOLATION_ENV) != PACKAGED_UI_ISOLATION_VALUE:
+        raise SystemExit(
+            "--packaged-ui requires the runner to be wrapped by dbus-run-session -- xvfb-run"
+        )
+    if not values.get("DBUS_SESSION_BUS_ADDRESS") or not values.get("DISPLAY"):
+        raise SystemExit("--packaged-ui requires isolated D-Bus and Xvfb session variables")
+    if any(shutil.which(command) is None for command in ("dbus-run-session", "xvfb-run")):
+        raise SystemExit("--packaged-ui requires dbus-run-session and xvfb-run")
+    if any(shutil.which(command) is None for command in (
+        "import", "convert", "tesseract", "xwininfo", "xprop",
+    )):
+        raise SystemExit("--packaged-ui requires ImageMagick import/convert, tesseract, xwininfo, and xprop")
+
+
+def packaged_ui_stderr_failure_class(stderr: str, return_code: int | None) -> str:
+    lower = stderr.lower()
+    if any(marker in lower for marker in ("cannot open display", "failed to open display")):
+        return "display_backend_unavailable"
+    if any(marker in lower for marker in ("failed to connect to the session bus", "unable to autolaunch")):
+        return "session_bus_unavailable"
+    if any(marker in lower for marker in ("singleinstance", "single-instance", "name already taken")):
+        return "desktop_single_instance_collision"
+    if "webkit" in lower or "webview" in lower:
+        return "webview_runtime_failure"
+    if return_code is None:
+        return "window_not_found"
+    return "process_exited_before_window"
 
 
 def _deepseek_key_from_provider_toml(path: Path) -> str:
@@ -244,19 +283,93 @@ def matching_gateway_route_events(
     return matching
 
 
-def gateway_route_request_count(
+def gateway_route_request_ids(
     bridge_port: int, *, model: str, inbound: str, outbound: str,
-) -> int:
-    """Count distinct Gateway request IDs for a route (one upstream call each here)."""
-    request_ids = {
+) -> list[str]:
+    """Return the distinct bounded Gateway request IDs observed for one route."""
+    return sorted({
         event.get("request_id")
         for event in matching_gateway_route_events(
             bridge_port, model=model, inbound=inbound, outbound=outbound,
         )
         if isinstance(event.get("request_id"), str)
         and _SAFE_REQUEST_ID.fullmatch(event["request_id"])
+    })
+
+
+def gateway_route_request_count(
+    bridge_port: int, *, model: str, inbound: str, outbound: str,
+) -> int:
+    """Count distinct Gateway request IDs for a route."""
+    return len(gateway_route_request_ids(
+        bridge_port, model=model, inbound=inbound, outbound=outbound,
+    ))
+
+
+def upsert_route_request_count(
+    rows: list[dict[str, object]],
+    *,
+    case: str,
+    model: str,
+    inbound: str,
+    outbound: str,
+    request_ids: list[str],
+    successful_gateway_route_observed: bool = False,
+) -> None:
+    safe_ids = sorted({value for value in request_ids if _SAFE_REQUEST_ID.fullmatch(value)})
+    row: dict[str, object] = {
+        "case": case,
+        "model": model,
+        "inbound_format": inbound,
+        "upstream_format": outbound,
+        "observed_gateway_request_ids": len(safe_ids),
+        "gateway_request_id_values": safe_ids,
+        "successful_gateway_route_observed": successful_gateway_route_observed,
     }
-    return len(request_ids)
+    previous_index = next(
+        (index for index, previous in enumerate(rows) if previous.get("case") == case),
+        None,
+    )
+    if previous_index is None:
+        rows.append(row)
+        return
+    previous = rows[previous_index]
+    previous_ids = previous.get("gateway_request_id_values")
+    if isinstance(previous_ids, list):
+        merged_ids = sorted({
+            value
+            for value in (*previous_ids, *safe_ids)
+            if isinstance(value, str) and _SAFE_REQUEST_ID.fullmatch(value)
+        })
+        row["gateway_request_id_values"] = merged_ids
+        row["observed_gateway_request_ids"] = len(merged_ids)
+    row["successful_gateway_route_observed"] = (
+        previous.get("successful_gateway_route_observed") is True
+        or successful_gateway_route_observed
+    )
+    rows[previous_index] = row
+
+
+def total_observed_gateway_request_ids(rows: list[dict[str, object]]) -> int:
+    return len({
+        request_id
+        for row in rows
+        for request_id in row.get("gateway_request_id_values", [])
+        if isinstance(request_id, str) and _SAFE_REQUEST_ID.fullmatch(request_id)
+    })
+
+
+def route_case_acceptance_status(
+    rows: list[dict[str, object]], failures: list[str], *, case: str,
+) -> str:
+    if any(
+        row.get("case") == case and row.get("successful_gateway_route_observed") is True
+        for row in rows
+    ):
+        return "verified"
+    if any(item.startswith(f"{case}:") for item in failures):
+        return "failed"
+    return "unverified"
 
 
 def gateway_route_diagnostics(
@@ -461,6 +574,7 @@ def run_packaged_usage_statistics_window(
     row: dict[str, object],
     evidence_out: Path | None,
 ) -> tuple[bool, str | None]:
+    validate_packaged_ui_isolation()
     if not os.environ.get("DISPLAY"):
         return False, "DISPLAY is unavailable; packaged window UI was not observed"
     required = ("import", "tesseract", "xwininfo", "xprop")
@@ -478,6 +592,7 @@ def run_packaged_usage_statistics_window(
     if evidence_out is None:
         return False, "no private output path is available for the packaged UI screenshot"
     screenshot = evidence_out.with_name(evidence_out.stem + "-packaged-usage.png")
+    details_crop = screenshot.with_name(screenshot.stem + "-details.png")
     if screenshot.exists():
         raise AssertionError("packaged usage screenshot path already exists")
     screenshot.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -486,10 +601,21 @@ def run_packaged_usage_statistics_window(
         name: value for name, value in env.items()
         if name != "DEEPSEEK_API_KEY"
     }
+    for name in (
+        "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "SWAYSOCK",
+        "XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "GDMSESSION",
+    ):
+        app_env.pop(name, None)
+    app_env["XDG_SESSION_TYPE"] = "x11"
     app_env["GDK_BACKEND"] = "x11"
+    app_env["GTK_USE_PORTAL"] = "0"
+    stderr_path = root / "packaged-usage-ui.stderr"
+    navigation_crop = screenshot.with_name(screenshot.stem + "-navigation.png")
+    stderr_descriptor = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    stderr_output = os.fdopen(stderr_descriptor, "wb")
     app = subprocess.Popen(
         [str(binary)], cwd=root, env=app_env, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, start_new_session=True,
+        stderr=stderr_output, start_new_session=True,
     )
     x11 = None
     try:
@@ -498,26 +624,25 @@ def run_packaged_usage_statistics_window(
         window_id = None
         while time.monotonic() < deadline:
             if app.poll() is not None:
-                raise AssertionError("packaged CodexHub window exited before rendering")
+                stderr_output.flush()
+                stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+                failure_class = packaged_ui_stderr_failure_class(stderr, app.returncode)
+                raise PackagedUIVerificationError(
+                    failure_class, "packaged CodexHub window exited before rendering",
+                )
             window_id = find_codexhub_window()
             if window_id is not None:
                 break
             time.sleep(0.2)
         if window_id is None:
-            raise AssertionError("packaged CodexHub window did not appear")
+            stderr_output.flush()
+            stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+            failure_class = packaged_ui_stderr_failure_class(stderr, app.poll())
+            raise PackagedUIVerificationError(
+                failure_class, "packaged CodexHub window did not appear",
+            )
 
-        source_root = Path(__file__).resolve().parents[1]
-        fit_stage = (source_root / "frontend/src/components/FitStage.tsx").read_text(encoding="utf-8")
-        scale_match = re.search(r"FIT_STAGE_SCALE\s*=\s*([0-9.]+)", fit_stage)
-        if not scale_match:
-            raise AssertionError("cannot determine the current packaged UI scale")
-        shadow_match = re.search(r"NATIVE_SHADOW_INSET\s*=\s*([0-9.]+)", fit_stage)
-        ui_scale = float(scale_match.group(1))
-        shadow_inset = float(shadow_match.group(1)) if shadow_match else 0
-        app_x, app_y, _, _ = window_geometry(window_id)
-        stats_x = round((shadow_inset + 22 + (96 + 8) + 48) * ui_scale)
-        navigation_y = round((shadow_inset + 45 + 23) * ui_scale)
-        x11.click(app_x + stats_x, app_y + navigation_y)
+        app_x, app_y, app_width, app_height = window_geometry(window_id)
 
         def capture_text() -> str:
             screenshot.unlink(missing_ok=True)
@@ -531,28 +656,76 @@ def run_packaged_usage_statistics_window(
             )
             return result.stdout
 
+        nav_x = 0
+        nav_y = min(50, max(0, app_height - 1))
+        nav_width = min(900, app_width - nav_x)
+        nav_height = min(70, app_height - nav_y)
+        navigation_crop.unlink(missing_ok=True)
+        deadline = time.monotonic() + 15
+        usage_tab = None
+        while time.monotonic() < deadline:
+            capture_text()
+            subprocess.run(
+                ["convert", str(screenshot), "-crop",
+                 f"{nav_width}x{nav_height}+{nav_x}+{nav_y}",
+                 "-resize", "300%", str(navigation_crop)],
+                check=True, capture_output=True, timeout=10,
+            )
+            tsv = subprocess.run(
+                ["tesseract", str(navigation_crop), "stdout", "--psm", "6", "tsv"],
+                check=True, capture_output=True, text=True, timeout=20,
+            ).stdout
+            detected = _ocr_phrase_center(tsv, "usage")
+            if detected is not None:
+                usage_tab = (round(detected[0] / 3), nav_y + round(detected[1] / 3))
+                break
+            time.sleep(0.5)
+        if usage_tab is None:
+            raise PackagedUIVerificationError(
+                "usage_navigation_control_missing",
+                "packaged window did not expose the Usage navigation control",
+            )
+        x11.click(app_x + usage_tab[0], app_y + usage_tab[1])
         deadline = time.monotonic() + 15
         rendered = ""
         while time.monotonic() < deadline:
             rendered = capture_text()
             lower = rendered.lower()
-            if "usage" in lower and "usage & cost" in lower:
+            if "usage & cost" in lower:
                 break
             time.sleep(0.5)
         if "usage & cost" not in rendered.lower():
-            raise AssertionError("packaged window did not render the Usage Statistics page")
+            raise PackagedUIVerificationError(
+                "usage_statistics_page_missing",
+                "packaged window did not render the Usage Statistics page",
+            )
 
-        # Keyboard navigation is anchored at the chart section, avoiding a
-        # hard-coded screen coordinate for a control whose width is localized.
-        # Tesseract gives the physical center of the rendered Request details control.
+        # A tight high-contrast crop keeps the smaller Request details label legible to OCR.
+        details_x = 0
+        details_y = min(200, max(0, app_height - 1))
+        details_width = min(600, app_width - details_x)
+        details_height = min(120, app_height - details_y)
+        subprocess.run(
+            ["convert", str(screenshot), "-crop",
+             f"{details_width}x{details_height}+{details_x}+{details_y}",
+             "-resize", "400%", "-colorspace", "Gray", "-threshold", "75%",
+             str(details_crop)],
+            check=True, capture_output=True, timeout=10,
+        )
         tsv = subprocess.run(
-            ["tesseract", str(screenshot), "stdout", "--psm", "6", "tsv"],
+            ["tesseract", str(details_crop), "stdout", "--psm", "6", "tsv"],
             check=True, capture_output=True, text=True, timeout=20,
         ).stdout
         request_details = _ocr_phrase_center(tsv, "request details")
         if request_details is None:
-            raise AssertionError("packaged Usage page did not expose Request details")
-        x11.click(app_x + request_details[0], app_y + request_details[1])
+            raise PackagedUIVerificationError(
+                "request_details_control_missing",
+                "packaged Usage page did not expose Request details",
+            )
+        x11.click(
+            app_x + details_x + round(request_details[0] / 4),
+            app_y + details_y + round(request_details[1] / 4),
+        )
         deadline = time.monotonic() + 15
         normalized = ""
         expected_model = re.sub(r"[^a-z0-9]", "", str(row["model"]).lower())
@@ -570,13 +743,20 @@ def run_packaged_usage_statistics_window(
         if not all(value in normalized for value in (
             expected_model, expected_input, expected_output, expected_provider, "recorded", "200",
         )):
-            raise AssertionError("packaged Usage details did not render Claude Subscription and complete token/status data")
+            raise PackagedUIVerificationError(
+                "subscription_usage_details_missing",
+                "packaged Usage details did not render Claude Subscription and complete token/status data",
+            )
         return True, str(screenshot)
     finally:
         if x11 is not None:
             x11.close()
         if app.poll() is None:
             terminate_process_group(app)
+        stderr_output.flush()
+        stderr_output.close()
+        navigation_crop.unlink(missing_ok=True)
+        details_crop.unlink(missing_ok=True)
 
 
 def _ocr_phrase_center(tsv: str, phrase: str) -> tuple[int, int] | None:
@@ -588,14 +768,20 @@ def _ocr_phrase_center(tsv: str, phrase: str) -> tuple[int, int] | None:
         key = (fields[2], fields[3], fields[4])
         left, top, width, height = map(int, fields[6:10])
         words.setdefault(key, []).append((left, top, width, height, fields[11].strip()))
+    phrase_words = [re.sub(r"[^a-z0-9]", "", word.lower()) for word in phrase.split()]
     for line in words.values():
         line.sort(key=lambda word: word[0])
-        text = " ".join(word[4] for word in line).lower()
-        if phrase in text:
-            left = min(word[0] for word in line)
-            top = min(word[1] for word in line)
-            right = max(word[0] + word[2] for word in line)
-            bottom = max(word[1] + word[3] for word in line)
+        normalized = [re.sub(r"[^a-z0-9]", "", word[4].lower()) for word in line]
+        match = next((
+            line[index:index + len(phrase_words)]
+            for index in range(len(line) - len(phrase_words) + 1)
+            if normalized[index:index + len(phrase_words)] == phrase_words
+        ), None)
+        if match:
+            left = min(word[0] for word in match)
+            top = min(word[1] for word in match)
+            right = max(word[0] + word[2] for word in match)
+            bottom = max(word[1] + word[3] for word in match)
             return (left + right) // 2, (top + bottom) // 2
     return None
 
@@ -792,7 +978,8 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
         source_fingerprints: dict[str, tuple[Path, str]] | None = None,
         candidate_sha: str | None = None,
         evidence_out: Path | None = None,
-        claude_version: str | None = None) -> None:
+        claude_version: str | None = None,
+        packaged_ui: bool = False) -> None:
     if not 1 <= max_attempts <= MAX_LIVE_GENERATION_ATTEMPTS:
         raise AssertionError("live generation-attempt cap must be between 1 and 16")
     if not 1 <= case_timeout_seconds <= MAX_CASE_TIMEOUT_SECONDS:
@@ -939,15 +1126,16 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                 outbound: str,
             ) -> None:
                 failures.append(f"{case}: {error}")
-                route_request_counts.append({
-                    "case": case,
-                    "model": model,
-                    "inbound_format": inbound,
-                    "upstream_format": outbound,
-                    "observed_gateway_request_ids": gateway_route_request_count(
+                upsert_route_request_count(
+                    route_request_counts,
+                    case=case,
+                    model=model,
+                    inbound=inbound,
+                    outbound=outbound,
+                    request_ids=gateway_route_request_ids(
                         bridge_port, model=model, inbound=inbound, outbound=outbound,
                     ),
-                })
+                )
                 observed = gateway_route_diagnostics(
                     bridge_port, model=model, inbound=inbound, outbound=outbound,
                 )
@@ -999,34 +1187,60 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                             model=model, timeout_seconds=timeout_seconds,
                         )
                         wait_for_event(bridge_port, model, "anthropic_messages", "anthropic_messages")
-                        route_request_counts.append({
-                            "case": "claude-native-haiku",
-                            "model": model,
-                            "inbound_format": "anthropic_messages",
-                            "upstream_format": "anthropic_messages",
-                            "observed_gateway_request_ids": gateway_route_request_count(
+                        upsert_route_request_count(
+                            route_request_counts,
+                            case="claude-native-haiku",
+                            model=model,
+                            inbound="anthropic_messages",
+                            outbound="anthropic_messages",
+                            request_ids=gateway_route_request_ids(
                                 bridge_port, model=model,
                                 inbound="anthropic_messages", outbound="anthropic_messages",
                             ),
-                        })
+                            successful_gateway_route_observed=True,
+                        )
                         row, usage_summary = wait_for_usage_evidence(
                             bridge_port, case="claude-native-haiku", model=model,
                             provider="claude_subscription",
                         )
                         usage_rows.append(row)
-                        packaged_usage_ui_verified, packaged_usage_ui_screenshot = (
-                            run_packaged_usage_statistics_window(
-                                binary, client_env, root, row, evidence_out,
-                            )
-                        )
                         print(
                             "PASS: native Claude Haiku -> persisted Usage Statistics row",
                             flush=True,
                         )
+                        if packaged_ui:
+                            try:
+                                packaged_usage_ui_verified, packaged_usage_ui_screenshot = (
+                                    run_packaged_usage_statistics_window(
+                                        binary, client_env, root, row, evidence_out,
+                                    )
+                                )
+                            except (AssertionError, OSError, TimeoutError, subprocess.SubprocessError) as error:
+                                failure_class = (
+                                    error.failure_class
+                                    if isinstance(error, PackagedUIVerificationError)
+                                    else "ui_verification_failed"
+                                )
+                                failures.append(f"packaged-usage-ui: {failure_class}")
+                                failure_diagnostics.append({
+                                    "event": "packaged_usage_ui",
+                                    "case": "claude-native-haiku",
+                                    "error_category": "packaged_ui",
+                                    "failure_class": failure_class,
+                                })
+                                print(
+                                    f"FAIL: packaged Usage page verification ({failure_class})",
+                                    flush=True,
+                                )
+                        else:
+                            print("UNVERIFIED: packaged Usage page was not requested", flush=True)
                         if packaged_usage_ui_verified:
                             print("PASS: packaged CodexHub Usage page shows Claude Subscription token row", flush=True)
-                        else:
-                            print(f"UNVERIFIED: packaged Usage page: {packaged_usage_ui_screenshot}", flush=True)
+                        elif packaged_ui:
+                            print(
+                                f"UNVERIFIED: packaged Usage page: {packaged_usage_ui_screenshot}",
+                                flush=True,
+                            )
                 except (AssertionError, HTTPError) as error:
                     record_route_failure(
                         "claude-native-haiku", error, model=model,
@@ -1116,16 +1330,18 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     run_chat(gateway_port, gateway_key, "DEEPSEEK_CHAT_LIVE_OK", timeout_seconds)
                     wait_for_event(bridge_port, "deepseek/deepseek-flash",
                                    "chat_completions", "chat_completions")
-                    route_request_counts.append({
-                        "case": "deepseek-chat",
-                        "model": "deepseek/deepseek-flash",
-                        "inbound_format": "chat_completions",
-                        "upstream_format": "chat_completions",
-                        "observed_gateway_request_ids": gateway_route_request_count(
+                    upsert_route_request_count(
+                        route_request_counts,
+                        case="deepseek-chat",
+                        model="deepseek/deepseek-flash",
+                        inbound="chat_completions",
+                        outbound="chat_completions",
+                        request_ids=gateway_route_request_ids(
                             bridge_port, model="deepseek/deepseek-flash",
                             inbound="chat_completions", outbound="chat_completions",
                         ),
-                    })
+                        successful_gateway_route_observed=True,
+                    )
                     row, usage_summary = wait_for_usage_evidence(
                         bridge_port, case="deepseek-chat",
                         model="deepseek/deepseek-flash", provider="deepseek",
@@ -1223,32 +1439,39 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                 if not candidate_sha or not re.fullmatch(r"[0-9a-f]{40}", candidate_sha):
                     raise AssertionError("live evidence requires the exact 40-character candidate SHA")
                 artifact = {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "candidate_sha": candidate_sha,
                     "claude_cli_version": claude_version,
                     "status": "failed" if failures else "passed",
+                    "packaged_usage_ui_requested": packaged_ui,
+                    "packaged_usage_ui_session": (
+                        "dbus-run-session+xvfb-run" if packaged_ui else "not-requested"
+                    ),
                     "bounds": {
                         "max_live_generation_attempts": max_attempts,
                         "live_generation_attempts": used_attempts,
+                        "generation_attempt_budget_scope": (
+                            "runner-level CLI generation invocation reservations; this is not a hard cap "
+                            "on Gateway request IDs or retries performed internally by a client"
+                        ),
                         "per_generation_timeout_seconds": case_timeout_seconds,
                         "overall_timeout_seconds": overall_timeout_seconds,
                         "max_output_tokens": CLAUDE_OUTPUT_TOKEN_CAP,
                     },
                     "verified_routes": usage_rows,
                     "route_request_counts": route_request_counts,
-                    "total_observed_gateway_request_ids": sum(
-                        int(item["observed_gateway_request_ids"])
-                        for item in route_request_counts
+                    "total_observed_gateway_request_ids": total_observed_gateway_request_ids(
+                        route_request_counts
                     ),
                     "usage_statistics_snapshot": usage_summary,
                     "failure_diagnostics": failure_diagnostics,
                     "rendered_packaged_usage_statistics_ui_verified": packaged_usage_ui_verified,
-                    "packaged_usage_screenshot": packaged_usage_ui_screenshot,
+                        "packaged_usage_screenshot": packaged_usage_ui_screenshot,
                     "acceptance_status": {
                         "native_haiku_through_gateway": (
-                            "failed" if any(item.startswith("claude-native-haiku:") for item in failures)
-                            else "verified" if any(row.get("case") == "claude-native-haiku" for row in usage_rows)
-                            else "unverified"
+                            route_case_acceptance_status(
+                                route_request_counts, failures, case="claude-native-haiku",
+                            )
                         ),
                         "native_haiku_persisted_usage": (
                             "verified" if any(row.get("case") == "claude-native-haiku" for row in usage_rows)
@@ -1256,7 +1479,12 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                             else "unverified"
                         ),
                         "packaged_usage_statistics_ui": (
-                            "verified" if packaged_usage_ui_verified else "unverified"
+                            "verified" if packaged_usage_ui_verified
+                            else "failed" if any(
+                                item.get("error_category") == "packaged_ui"
+                                for item in failure_diagnostics
+                            )
+                            else "unverified"
                         ),
                         "picker_coexistence": "unverified",
                         "resumed_session_switching": "unverified",
@@ -1315,6 +1543,14 @@ def main() -> None:
     parser.add_argument("--evidence-out", type=Path, help="new private path for sanitized E2E evidence")
     parser.add_argument("--preflight-only", action="store_true",
                         help="verify isolated configuration without external model requests")
+    parser.add_argument(
+        "--packaged-ui",
+        action="store_true",
+        help=(
+            "verify the packaged Usage page; requires dbus-run-session -- xvfb-run and "
+            f"{PACKAGED_UI_ISOLATION_ENV}={PACKAGED_UI_ISOLATION_VALUE}"
+        ),
+    )
     parser.add_argument("--catalog", type=Path,
                         default=home / ".codex" / "model-catalogs" / "codexhub-model-catalog.json")
     parser.add_argument("--case", action="append", choices=(
@@ -1323,7 +1559,13 @@ def main() -> None:
         "responses-deepseek", "responses-luna", "claude-native-haiku",
     ))
     args = parser.parse_args()
+    if args.packaged_ui:
+        validate_packaged_ui_isolation()
+        if args.preflight_only:
+            raise SystemExit("--packaged-ui requires a live case and sanitized evidence output")
     selected = set(args.case or ("claude-native-haiku",))
+    if args.packaged_ui and "claude-native-haiku" not in selected:
+        raise SystemExit("--packaged-ui currently requires the claude-native-haiku case")
     if not 1 <= args.overall_timeout_seconds <= MAX_OVERALL_TIMEOUT_SECONDS:
         raise SystemExit("--overall-timeout-seconds must be between 1 and 600")
     if not 1 <= args.case_timeout_seconds <= MAX_CASE_TIMEOUT_SECONDS:
@@ -1372,7 +1614,8 @@ def main() -> None:
         source_fingerprints,
         candidate_sha=args.candidate_sha,
         evidence_out=args.evidence_out.resolve() if args.evidence_out else None,
-        claude_version=version)
+        claude_version=version,
+        packaged_ui=args.packaged_ui)
 
 
 if __name__ == "__main__":

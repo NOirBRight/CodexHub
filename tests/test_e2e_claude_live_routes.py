@@ -229,6 +229,72 @@ def test_usage_evidence_rejects_noncomplete_upstream_usage(usage_source: str) ->
         )
 
 
+def test_route_request_count_and_total_deduplicate_gateway_request_ids() -> None:
+    rows: list[dict[str, object]] = []
+    live_routes.upsert_route_request_count(
+        rows,
+        case="claude-native-haiku",
+        model="claude-haiku-4-5-20251001",
+        inbound="anthropic_messages",
+        outbound="anthropic_messages",
+        request_ids=["request-1", "request-1"],
+        successful_gateway_route_observed=True,
+    )
+    live_routes.upsert_route_request_count(
+        rows,
+        case="claude-native-haiku",
+        model="claude-haiku-4-5-20251001",
+        inbound="anthropic_messages",
+        outbound="anthropic_messages",
+        request_ids=["request-1"],
+    )
+    live_routes.upsert_route_request_count(
+        rows,
+        case="deepseek-chat",
+        model="deepseek/deepseek-flash",
+        inbound="chat_completions",
+        outbound="chat_completions",
+        request_ids=["request-1", "request-2"],
+        successful_gateway_route_observed=True,
+    )
+
+    assert len(rows) == 2
+    assert rows[0]["observed_gateway_request_ids"] == 1
+    assert rows[0]["successful_gateway_route_observed"] is True
+    assert live_routes.total_observed_gateway_request_ids(rows) == 2
+
+
+def test_ui_failure_does_not_downgrade_a_successful_gateway_route() -> None:
+    rows = [{
+        "case": "claude-native-haiku",
+        "successful_gateway_route_observed": True,
+    }]
+
+    assert live_routes.route_case_acceptance_status(
+        rows,
+        ["claude-native-haiku: packaged UI did not open"],
+        case="claude-native-haiku",
+    ) == "verified"
+
+
+def test_packaged_ui_isolation_fails_closed_without_wrapper_marker() -> None:
+    with pytest.raises(SystemExit, match="dbus-run-session -- xvfb-run"):
+        live_routes.validate_packaged_ui_isolation({
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/synthetic-bus",
+            "DISPLAY": ":99",
+        })
+
+
+def test_ocr_phrase_center_targets_only_the_requested_navigation_words() -> None:
+    tsv = (
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+        "5\t1\t1\t1\t1\t0\t10\t10\t40\t20\t95\tUsage\n"
+        "5\t1\t1\t1\t1\t1\t100\t10\t60\t20\t95\tProvider\n"
+    )
+
+    assert live_routes._ocr_phrase_center(tsv, "usage") == (30, 20)
+
+
 def test_candidate_binding_checks_source_head_portable_name_and_resources(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -410,3 +476,28 @@ def test_preflight_verifies_candidate_binding_before_launch(
 
     assert calls == [(binary, resource_root, source_root, candidate_sha)]
     assert len(launches) == 1
+
+
+def test_packaged_ui_without_isolated_wrapper_starts_no_candidate_or_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary = tmp_path / "candidate"
+    monkeypatch.setattr(
+        live_routes.sys,
+        "argv",
+        ["e2e_claude_live_routes.py", "--bin", str(binary), "--packaged-ui"],
+    )
+    monkeypatch.delenv(live_routes.PACKAGED_UI_ISOLATION_ENV, raising=False)
+    monkeypatch.setattr(
+        live_routes,
+        "verify_candidate_binding",
+        lambda *args: pytest.fail("candidate binding must not run without an isolated UI wrapper"),
+    )
+    monkeypatch.setattr(
+        live_routes,
+        "run",
+        lambda *args, **kwargs: pytest.fail("candidate process or model request must not start"),
+    )
+
+    with pytest.raises(SystemExit, match="dbus-run-session -- xvfb-run"):
+        live_routes.main()
