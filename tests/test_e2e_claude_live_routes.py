@@ -156,6 +156,54 @@ def test_usage_evidence_requires_complete_actual_usage_from_public_snapshot() ->
     assert "request_id" not in evidence
 
 
+def test_usage_evidence_preserves_official_deepseek_identity_and_tokens() -> None:
+    snapshot = {
+        "summary": {
+            "requests": 1,
+            "successful_requests": 1,
+            "missing_usage_requests": 0,
+            "partial_usage_requests": 0,
+            "input_tokens": 24,
+            "output_tokens": 7,
+            "total_tokens": 31,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "cache_hit_rate": 0,
+        },
+        "events": [{
+            "request_id": "synthetic-deepseek-request-id",
+            "model": "deepseek/deepseek-flash",
+            "upstream": "deepseek",
+            "client_id": "codexhub",
+            "status": 200,
+            "duration_ms": 1200,
+            "usage_source": "upstream",
+            "input_tokens": 24,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 7,
+            "total_tokens": 31,
+        }],
+        "telemetry_status": {"backfill_pending": False, "lag_bytes": 0},
+    }
+
+    evidence = usage_evidence(
+        snapshot,
+        case="deepseek-chat",
+        model="deepseek/deepseek-flash",
+        provider="deepseek",
+    )
+
+    assert evidence["model"] == "deepseek/deepseek-flash"
+    assert evidence["provider"] == "deepseek"
+    assert evidence["input_tokens"] == 24
+    assert evidence["output_tokens"] == 7
+    assert evidence["total_tokens"] == 31
+    assert evidence["cached_input_tokens"] == 0
+    assert evidence["cache_write_input_tokens"] == 0
+    assert "request_id" not in evidence
+
+
 @pytest.mark.parametrize("usage_source", ["missing", "partial"])
 def test_usage_evidence_rejects_noncomplete_upstream_usage(usage_source: str) -> None:
     snapshot = {

@@ -1116,7 +1116,26 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     run_chat(gateway_port, gateway_key, "DEEPSEEK_CHAT_LIVE_OK", timeout_seconds)
                     wait_for_event(bridge_port, "deepseek/deepseek-flash",
                                    "chat_completions", "chat_completions")
-                    print("PASS: Chat Completions endpoint -> DeepSeek Official V4.1 Flash", flush=True)
+                    route_request_counts.append({
+                        "case": "deepseek-chat",
+                        "model": "deepseek/deepseek-flash",
+                        "inbound_format": "chat_completions",
+                        "upstream_format": "chat_completions",
+                        "observed_gateway_request_ids": gateway_route_request_count(
+                            bridge_port, model="deepseek/deepseek-flash",
+                            inbound="chat_completions", outbound="chat_completions",
+                        ),
+                    })
+                    row, usage_summary = wait_for_usage_evidence(
+                        bridge_port, case="deepseek-chat",
+                        model="deepseek/deepseek-flash", provider="deepseek",
+                    )
+                    usage_rows.append(row)
+                    print(
+                        "PASS: Chat Completions -> DeepSeek Official V4.1 Flash "
+                        "-> persisted Usage Statistics row",
+                        flush=True,
+                    )
                 except AssertionError as error:
                     record_route_failure(
                         "deepseek-chat", error, model="deepseek/deepseek-flash",
@@ -1243,6 +1262,13 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                         "resumed_session_switching": "unverified",
                         "explicit_native_opus_5_5_identity": "unverified",
                         "deepseek_chat_messages_usage_ui": "unverified",
+                        "deepseek_chat_persisted_usage": (
+                            "verified"
+                            if any(row.get("case") == "deepseek-chat" for row in usage_rows)
+                            else "failed"
+                            if any(item.startswith("deepseek-chat:") for item in failures)
+                            else "unverified"
+                        ),
                         "codex_luna_responses_usage_ui": "unverified",
                         "tools_compression_cancellation_cache_hit_reuse": "unverified",
                     },
