@@ -1,0 +1,759 @@
+{
+  "cli_version": "2.1.280 (Claude Code)",
+  "candidate_sha": "313deb69d7f8d6367b1632513075e64c4d940590",
+  "platform": "Linux-7.2.5-4-omarchy-x86_64-with-glibc2.44",
+  "network_namespace_isolated": true,
+  "credential_handling": {
+    "access_token_snapshot_only": true,
+    "refresh_token_copied": false,
+    "expires_in_seconds_at_start": 642,
+    "source_credentials_unchanged": true
+  },
+  "bounds": {
+    "max_requests": 96,
+    "max_output_tokens": 128000,
+    "per_cli_timeout_seconds": 35,
+    "overall_timeout_seconds": 300,
+    "mock_output_tokens_per_success": 2,
+    "live_provider_calls": 0,
+    "requests_observed": 49,
+    "duration_seconds": 7.07
+  },
+  "credential_observations": {
+    "valid_oauth_and_local_key_on_same_messages_request": true,
+    "missing_and_wrong_local_keys_rejected_even_with_saved_oauth": true,
+    "oauth_beta_present": true,
+    "external_provider_requests": 0,
+    "external_provider_boundary": "not exercised by this Claude-client harness"
+  },
+  "discovery": {
+    "enabled_in_cli": true,
+    "requests": 0,
+    "custom_picker_used": true,
+    "credential_source": "saved Claude OAuth plus ANTHROPIC_CUSTOM_HEADERS",
+    "custom_header_authenticated_discovery": false
+  },
+  "egress_guard": {
+    "attempts": 33,
+    "all_blocked": true,
+    "destinations": [
+      "api.anthropic.com",
+      "platform.claude.com"
+    ]
+  },
+  "cases": [
+    {
+      "case": "mapped_opus",
+      "passed": true,
+      "exit_code": 0,
+      "message_statuses": [
+        200
+      ],
+      "models": [
+        "codexhub/opus"
+      ],
+      "expected_model": "codexhub/opus",
+      "request_count": 3
+    },
+    {
+      "case": "mapped_sonnet",
+      "passed": true,
+      "exit_code": 0,
+      "message_statuses": [
+        200
+      ],
+      "models": [
+        "codexhub/sonnet"
+      ],
+      "expected_model": "codexhub/sonnet",
+      "request_count": 3
+    },
+    {
+      "case": "mapped_haiku",
+      "passed": true,
+      "exit_code": 0,
+      "message_statuses": [
+        200
+      ],
+      "models": [
+        "codexhub/haiku"
+      ],
+      "expected_model": "codexhub/haiku",
+      "request_count": 3
+    },
+    {
+      "case": "mapped_fable",
+      "passed": true,
+      "exit_code": 0,
+      "message_statuses": [
+        200
+      ],
+      "models": [
+        "codexhub/fable"
+      ],
+      "expected_model": "codexhub/fable",
+      "request_count": 3
+    },
+    {
+      "case": "unmapped_haiku",
+      "passed": true,
+      "exit_code": 0,
+      "message_statuses": [
+        200
+      ],
+      "models": [
+        "claude-haiku-4-5-20251001"
+      ],
+      "expected_model": "claude-haiku-4-5-20251001",
+      "request_count": 3
+    },
+    {
+      "case": "explicit_opus_55",
+      "passed": true,
+      "exit_code": 0,
+      "message_statuses": [
+        200
+      ],
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "expected_model": "claude-opus-5-5",
+      "request_count": 3
+    },
+    {
+      "case": "native_session_initial",
+      "passed": true,
+      "exit_code": 0,
+      "message_statuses": [
+        200
+      ],
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "expected_model": "claude-opus-5-5",
+      "request_count": 3
+    },
+    {
+      "case": "native_session_resume",
+      "passed": false,
+      "exit_code": 0,
+      "message_statuses": [
+        200
+      ],
+      "models": [
+        "codexhub/opus"
+      ],
+      "expected_model": "claude-opus-5-5",
+      "request_count": 3,
+      "status": "potential_contradiction",
+      "qualification_limit": "The seed turn used print-mode --model; interactive /model persistence remains unverified."
+    },
+    {
+      "case": "default_opus_alias",
+      "passed": true,
+      "exit_code": 0,
+      "message_statuses": [
+        200
+      ],
+      "models": [
+        "codexhub/opus"
+      ],
+      "expected_model": "codexhub/opus",
+      "request_count": 3
+    },
+    {
+      "case": "opusplan_plan_phase",
+      "passed": true,
+      "exit_code": 0,
+      "message_statuses": [
+        200
+      ],
+      "models": [
+        "codexhub/opus"
+      ],
+      "expected_model": "codexhub/opus",
+      "request_count": 3
+    },
+    {
+      "case": "opusplan_execution_phase",
+      "passed": true,
+      "exit_code": 0,
+      "message_statuses": [
+        200
+      ],
+      "models": [
+        "codexhub/sonnet"
+      ],
+      "expected_model": "codexhub/sonnet",
+      "request_count": 3
+    },
+    {
+      "case": "missing_local_credential",
+      "passed": true,
+      "exit_code": 1,
+      "message_statuses": [
+        401,
+        401
+      ],
+      "models": [
+        "claude-opus-5-5",
+        "claude-opus-5-5"
+      ],
+      "expected_model": null,
+      "request_count": 5
+    },
+    {
+      "case": "wrong_local_credential",
+      "passed": true,
+      "exit_code": 1,
+      "message_statuses": [
+        401,
+        401
+      ],
+      "models": [
+        "claude-opus-5-5",
+        "claude-opus-5-5"
+      ],
+      "expected_model": null,
+      "request_count": 5
+    },
+    {
+      "case": "oauth_only_discovery",
+      "passed": true,
+      "exit_code": 0,
+      "message_statuses": [
+        200
+      ],
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "expected_model": "claude-opus-5-5",
+      "request_count": 3
+    },
+    {
+      "case": "oauth_only_discovery_skipped",
+      "passed": true,
+      "request_count": 0
+    },
+    {
+      "case": "picker_append_rows",
+      "native_default_visible": false,
+      "native_opus_visible": false,
+      "gateway_option_visible": false,
+      "native_full_id_option_visible": false,
+      "status": "unknown",
+      "reason": "The bounded PTY session did not expose the model picker rows.",
+      "configured": true
+    },
+    {
+      "case": "subagent_inherited_and_pinned_models",
+      "status": "unknown",
+      "reason": "Tool execution is disabled in this bounded HTTP harness."
+    }
+  ],
+  "requests": [
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "mapped_opus"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "mapped_opus"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "model": "codexhub/opus",
+      "max_tokens": 32000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": true,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "mapped_opus"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "mapped_sonnet"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "mapped_sonnet"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "model": "codexhub/sonnet",
+      "max_tokens": 32000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": true,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "mapped_sonnet"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "mapped_haiku"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "mapped_haiku"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "model": "codexhub/haiku",
+      "max_tokens": 32000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": true,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "mapped_haiku"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "mapped_fable"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "mapped_fable"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "model": "codexhub/fable",
+      "max_tokens": 32000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": true,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "mapped_fable"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "unmapped_haiku"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "unmapped_haiku"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "model": "claude-haiku-4-5-20251001",
+      "max_tokens": 32000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": true,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "unmapped_haiku"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "explicit_opus_55"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "explicit_opus_55"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "model": "claude-opus-5-5",
+      "max_tokens": 128000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": true,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "explicit_opus_55"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "native_session_initial"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "native_session_initial"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "model": "claude-opus-5-5",
+      "max_tokens": 128000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": true,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "native_session_initial"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "native_session_resume"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "native_session_resume"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "model": "codexhub/opus",
+      "max_tokens": 32000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": true,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "native_session_resume"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "default_opus_alias"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "default_opus_alias"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "model": "codexhub/opus",
+      "max_tokens": 32000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": true,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "default_opus_alias"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "opusplan_plan_phase"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "opusplan_plan_phase"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "model": "codexhub/opus",
+      "max_tokens": 32000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": true,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "opusplan_plan_phase"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "opusplan_execution_phase"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "opusplan_execution_phase"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "model": "codexhub/sonnet",
+      "max_tokens": 32000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": true,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "opusplan_execution_phase"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "missing_local_credential"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "missing_local_credential"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 401,
+      "model": "claude-opus-5-5",
+      "max_tokens": 128000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": false,
+      "local_key_matches": false,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "missing_local_credential"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "missing_local_credential"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 401,
+      "model": "claude-opus-5-5",
+      "max_tokens": 128000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": false,
+      "local_key_matches": false,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "missing_local_credential"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "wrong_local_credential"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "wrong_local_credential"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 401,
+      "model": "claude-opus-5-5",
+      "max_tokens": 128000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": false,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "wrong_local_credential"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "wrong_local_credential"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 401,
+      "model": "claude-opus-5-5",
+      "max_tokens": 128000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": false,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "wrong_local_credential"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "oauth_only_discovery"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "oauth_only_discovery"
+    },
+    {
+      "protocol": "messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "model": "claude-opus-5-5",
+      "max_tokens": 128000,
+      "stream": true,
+      "oauth_bearer_matches_saved_access_token": true,
+      "authorization_present": true,
+      "x_api_key_present": false,
+      "local_key_present": true,
+      "local_key_matches": true,
+      "oauth_beta_present": true,
+      "anthropic_version_present": true,
+      "case": "oauth_only_discovery"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "picker_append_rows"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "api.anthropic.com",
+      "status": 502,
+      "case": "picker_append_rows"
+    },
+    {
+      "protocol": "egress",
+      "method": "CONNECT",
+      "destination_host": "platform.claude.com",
+      "status": 502,
+      "case": "picker_append_rows"
+    }
+  ]
+}
