@@ -207,7 +207,7 @@ pub(in crate::gateway) fn detect_claude_route_details(
 fn env_key_looks_secret(key: &str) -> bool {
     let key = key.to_ascii_uppercase();
     key.contains("TOKEN")
-        || key.contains("HEADERS")
+        || key.contains("HEADER")
         || key.contains("SECRET")
         || key.contains("PASSWORD")
         || key.contains("CREDENTIAL")
