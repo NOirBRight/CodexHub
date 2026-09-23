@@ -359,7 +359,7 @@ const enUS = {
     claudeRoleUnmapped: "Not mapped",
     claudeRoleInvalid: "This mapping target is not in the exported catalog.",
     claudeCompatibilityState:
-      "Experimental. Text/SSE/tools are converted; count_tokens is unsupported. Not Anthropic-endorsed for non-Claude models.",
+      "Experimental. Text/SSE/tools are converted; count_tokens is a local estimate, not billed usage. Not Anthropic-endorsed for non-Claude models.",
     updatingClientConfig: "Updating client configuration…",
     connectClient: "Connecting {{name}}…",
     connectClientDone: "Connected {{name}} — injected block written.",

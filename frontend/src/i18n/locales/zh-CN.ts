@@ -358,7 +358,7 @@ const zhCN = {
     claudeRoleUnmapped: "不映射",
     claudeRoleInvalid: "该映射目标不在已导出目录中。",
     claudeCompatibilityState:
-      "实验性。文本/SSE/工具会转换；count_tokens 不支持。非 Claude 模型未经 Anthropic 背书。",
+      "实验性。文本/SSE/工具会转换；count_tokens 是本地估算，不是计费用量。非 Claude 模型未经 Anthropic 背书。",
     updatingClientConfig: "正在更新客户端配置…",
     connectClient: "正在连接 {{name}}…",
     connectClientDone: "已连接 {{name}} — 注入块已写入。",
