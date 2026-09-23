@@ -133,9 +133,16 @@ def chat_chunks_for_sse_event(
     return [payload]
 
 
-def bind_request_headers(headers: Mapping[str, str], endpoint_url: str) -> dict[str, str]:
+def bind_request_headers(
+    headers: Mapping[str, str],
+    endpoint_url: str,
+    *,
+    preserve_oauth: bool = False,
+) -> dict[str, str]:
     """Use Anthropic's x-api-key on ``/messages`` without dropping Bearer."""
 
+    if preserve_oauth:
+        return {key: value for key, value in headers.items() if key.lower() != "x-api-key"}
     path = urlsplit(endpoint_url).path.rstrip("/").lower()
     if not path.endswith("/messages"):
         return dict(headers)

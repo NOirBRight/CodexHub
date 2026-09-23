@@ -637,6 +637,7 @@ class GatewayHandlerMixin:
                 upstream,
                 request_context,
                 inbound_format=inbound_format,
+                inbound_path=self.path,
                 provider_hint=provider_hint,
                 collaboration_protocol=collaboration_protocol,
                 model_requested=model_requested,

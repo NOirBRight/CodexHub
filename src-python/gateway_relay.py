@@ -623,6 +623,34 @@ def relay_upstream_response(
         if isinstance(response_id, str) and response_id:
             response_lifecycle_state["response_id"] = response_id
 
+    if upstream_name == "anthropic_native" and 300 <= status < 400:
+        self.close_connection = True
+        write_proxy_event(
+            "request_error",
+            request_id=request_id,
+            model=model,
+            upstream=upstream_name,
+            status=502,
+            error="AnthropicRedirectBlocked",
+            detail="Claude subscription redirects are not followed or relayed.",
+        )
+        gateway_events.capture_usage(
+            usage_capture,
+            None,
+            missing_reason="native_redirect_refused",
+        )
+        self._send_json(
+            502,
+            {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": "Claude subscription redirects are blocked by Gateway.",
+                },
+            },
+        )
+        return 502
+
     if (
         streaming_policy == StreamingPolicy.TRANSPARENT
         and upstream_format == inbound_format

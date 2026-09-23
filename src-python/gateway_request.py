@@ -650,7 +650,14 @@ def local_request_authorized(
     if expected_key is None:
         return True
     token = _bearer_token(headers)
-    return bool(token and hmac.compare_digest(token, expected_key))
+    claude_gateway_key = _get_header(headers, "x-codexhub-gateway-key")
+    return bool(
+        (token and hmac.compare_digest(token, expected_key))
+        or (
+            claude_gateway_key
+            and hmac.compare_digest(claude_gateway_key.strip(), expected_key)
+        )
+    )
 _local_request_authorized = local_request_authorized
 
 

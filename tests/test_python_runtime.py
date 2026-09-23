@@ -53,6 +53,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/e2e_codex_catalog_roundtrip.py",
     "scripts/e2e_claude_client_settings.py",
     "scripts/e2e_claude_live_routes.py",
+    "scripts/e2e_claude_coexistence_qualification.py",
     "scripts/e2e_catalog_connection_recovery.py",
     "scripts/e2e_gateway_client_matrix.py",
     "scripts/e2e_grok_provider_compat.py",

@@ -539,6 +539,23 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
     caller_is_chat = request.inbound.inbound_format == "chat_completions"
     caller_is_anthropic = request.inbound.inbound_format == "anthropic_messages"
     attempt_is_responses = attempt.selected_upstream_format == "responses"
+    if policy is MutationPolicy.CLAUDE_NATIVE_PASSTHROUGH:
+        if not caller_is_anthropic or attempt.selected_upstream_format != "anthropic_messages":
+            raise UpstreamProtocolTranslationError(
+                UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Claude subscription requests require native Anthropic Messages.",
+                )
+            )
+        prepared_exchange = attempt.prepare_body(conversion_body)
+        if prepared_exchange.upstream_body != conversion_body:
+            raise UpstreamProtocolTranslationError(
+                UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Claude subscription request could not be preserved byte for byte.",
+                )
+            )
+        return prepared_exchange, conversion_body
     convert_before_compat = (
         caller_is_chat and attempt_is_responses
     ) or (
