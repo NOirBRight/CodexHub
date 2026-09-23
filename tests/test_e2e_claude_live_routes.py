@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
 import time
@@ -87,8 +88,9 @@ def test_claude_subscription_snapshot_omits_refresh_and_private_metadata(tmp_pat
     }
     assert "refreshToken" not in destination.read_text(encoding="utf-8")
     assert "private-account-id" not in destination.read_text(encoding="utf-8")
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
-    assert stat.S_IMODE(destination.parent.stat().st_mode) == 0o700
+    if os.name == "posix":
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+        assert stat.S_IMODE(destination.parent.stat().st_mode) == 0o700
     assert source.is_file()
 
 
@@ -522,7 +524,7 @@ def test_failure_diagnostics_allowlist_omits_upstream_detail_and_headers(
     assert "headers" not in encoded
 
 
-def test_private_failure_evidence_is_exclusive_and_mode_0600(tmp_path: Path) -> None:
+def test_private_failure_evidence_is_exclusive_and_mode_0600_on_posix(tmp_path: Path) -> None:
     destination = tmp_path / "private" / "failed-e2e.json"
     artifact = {
         "status": "failed",
@@ -536,7 +538,8 @@ def test_private_failure_evidence_is_exclusive_and_mode_0600(tmp_path: Path) -> 
 
     live_routes.write_private_evidence(destination, artifact)
 
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    if os.name == "posix":
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o600
     assert json.loads(destination.read_text(encoding="utf-8")) == artifact
     with pytest.raises(FileExistsError):
         live_routes.write_private_evidence(destination, artifact)
