@@ -503,16 +503,32 @@ def usage_evidence(
     case: str,
     model: str,
     provider: str,
+    gateway_request_ids: list[str],
 ) -> dict[str, object]:
     events = snapshot.get("events")
     assert isinstance(events, list), "Usage Statistics snapshot has no event list"
     accepted_models = {model, f"anthropic/{model}", f"openai/{model}"}
-    event = next((item for item in events
-                  if isinstance(item, dict)
-                  and item.get("model") in accepted_models
-                  and item.get("upstream") == provider
-                  and item.get("status") == 200), None)
+    observed_request_ids = {
+        value for value in gateway_request_ids
+        if isinstance(value, str) and _SAFE_REQUEST_ID.fullmatch(value)
+    }
+    assert observed_request_ids, f"Gateway observed no safe request ID for {case}"
+    matching_events = [
+        item for item in events
+        if isinstance(item, dict)
+        and item.get("model") in accepted_models
+        and item.get("upstream") == provider
+        and item.get("status") == 200
+    ]
+    event = next((item for item in matching_events
+                  if item.get("request_id") in observed_request_ids), None)
+    if event is None and matching_events:
+        raise AssertionError(f"Usage Statistics request ID does not match the {case} Gateway route")
     assert event is not None, f"Usage Statistics has no successful {provider} row for {model}"
+    request_id = event.get("request_id")
+    assert isinstance(request_id, str) and _SAFE_REQUEST_ID.fullmatch(request_id), (
+        f"Usage Statistics has no safe request ID for {case}"
+    )
     assert event.get("usage_source") == "upstream", (
         f"Usage Statistics did not record upstream usage for {case}"
     )
@@ -530,6 +546,7 @@ def usage_evidence(
     assert telemetry.get("backfill_pending") is not True, "Usage Statistics persistence is still pending"
     return {
         "case": case,
+        "request_id": request_id,
         "model": event.get("model"),
         "provider": event.get("upstream"),
         "client": event.get("client_id"),
@@ -549,6 +566,7 @@ def wait_for_usage_evidence(
     case: str,
     model: str,
     provider: str,
+    gateway_request_ids: list[str],
     timeout_seconds: int = 20,
 ) -> tuple[dict[str, object], dict[str, object]]:
     deadline = time.monotonic() + timeout_seconds
@@ -557,7 +575,10 @@ def wait_for_usage_evidence(
         if response.get("ok") is True and isinstance(response.get("value"), dict):
             snapshot = response["value"]
             try:
-                row = usage_evidence(snapshot, case=case, model=model, provider=provider)
+                row = usage_evidence(
+                    snapshot, case=case, model=model, provider=provider,
+                    gateway_request_ids=gateway_request_ids,
+                )
                 return row, _usage_summary_evidence(snapshot)
             except AssertionError:
                 pass
@@ -1187,21 +1208,23 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                             model=model, timeout_seconds=timeout_seconds,
                         )
                         wait_for_event(bridge_port, model, "anthropic_messages", "anthropic_messages")
+                        gateway_request_ids = gateway_route_request_ids(
+                            bridge_port, model=model,
+                            inbound="anthropic_messages", outbound="anthropic_messages",
+                        )
                         upsert_route_request_count(
                             route_request_counts,
                             case="claude-native-haiku",
                             model=model,
                             inbound="anthropic_messages",
                             outbound="anthropic_messages",
-                            request_ids=gateway_route_request_ids(
-                                bridge_port, model=model,
-                                inbound="anthropic_messages", outbound="anthropic_messages",
-                            ),
+                            request_ids=gateway_request_ids,
                             successful_gateway_route_observed=True,
                         )
                         row, usage_summary = wait_for_usage_evidence(
                             bridge_port, case="claude-native-haiku", model=model,
                             provider="claude_subscription",
+                            gateway_request_ids=gateway_request_ids,
                         )
                         usage_rows.append(row)
                         print(
@@ -1312,10 +1335,35 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                                model=model,
                                timeout_seconds=timeout_seconds)
                     wait_for_event(bridge_port, model, "anthropic_messages", outbound)
+                    if label == "deepseek":
+                        gateway_request_ids = gateway_route_request_ids(
+                            bridge_port, model="deepseek/deepseek-flash",
+                            inbound="anthropic_messages", outbound="anthropic_messages",
+                        )
+                        upsert_route_request_count(
+                            route_request_counts,
+                            case="claude-deepseek",
+                            model="deepseek/deepseek-flash",
+                            inbound="anthropic_messages",
+                            outbound="anthropic_messages",
+                            request_ids=gateway_request_ids,
+                            successful_gateway_route_observed=True,
+                        )
+                        row, usage_summary = wait_for_usage_evidence(
+                            bridge_port, case="claude-deepseek",
+                            model="deepseek/deepseek-flash", provider="deepseek",
+                            gateway_request_ids=gateway_request_ids,
+                        )
+                        usage_rows.append(row)
+                        print(
+                            "PASS: Claude Messages -> DeepSeek Official -> persisted Usage Statistics row",
+                            flush=True,
+                        )
                     print(f"PASS: Claude Code -> Anthropic Messages -> {label} {outbound}", flush=True)
                 except (AssertionError, HTTPError) as error:
                     record_route_failure(
-                        label, error, model=model,
+                        "claude-deepseek" if label == "deepseek" else label,
+                        error, model=model,
                         inbound="anthropic_messages", outbound=outbound,
                     )
 
@@ -1330,21 +1378,23 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     run_chat(gateway_port, gateway_key, "DEEPSEEK_CHAT_LIVE_OK", timeout_seconds)
                     wait_for_event(bridge_port, "deepseek/deepseek-flash",
                                    "chat_completions", "chat_completions")
+                    gateway_request_ids = gateway_route_request_ids(
+                        bridge_port, model="deepseek/deepseek-flash",
+                        inbound="chat_completions", outbound="chat_completions",
+                    )
                     upsert_route_request_count(
                         route_request_counts,
                         case="deepseek-chat",
                         model="deepseek/deepseek-flash",
                         inbound="chat_completions",
                         outbound="chat_completions",
-                        request_ids=gateway_route_request_ids(
-                            bridge_port, model="deepseek/deepseek-flash",
-                            inbound="chat_completions", outbound="chat_completions",
-                        ),
+                        request_ids=gateway_request_ids,
                         successful_gateway_route_observed=True,
                     )
                     row, usage_summary = wait_for_usage_evidence(
                         bridge_port, case="deepseek-chat",
                         model="deepseek/deepseek-flash", provider="deepseek",
+                        gateway_request_ids=gateway_request_ids,
                     )
                     usage_rows.append(row)
                     print(
@@ -1382,10 +1432,31 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     run_responses(gateway_port, gateway_key, "LUNA_MAX_RESPONSES_OK",
                                   timeout_seconds=timeout_seconds)
                     wait_for_event(bridge_port, "gpt-6-luna", "responses", "responses")
-                    print("PASS: Responses endpoint -> Codex Luna max", flush=True)
+                    gateway_request_ids = gateway_route_request_ids(
+                        bridge_port, model="gpt-6-luna",
+                        inbound="responses", outbound="responses",
+                    )
+                    upsert_route_request_count(
+                        route_request_counts,
+                        case="responses-luna",
+                        model="gpt-6-luna",
+                        inbound="responses",
+                        outbound="responses",
+                        request_ids=gateway_request_ids,
+                        successful_gateway_route_observed=True,
+                    )
+                    row, usage_summary = wait_for_usage_evidence(
+                        bridge_port, case="responses-luna", model="gpt-6-luna",
+                        provider="official", gateway_request_ids=gateway_request_ids,
+                    )
+                    usage_rows.append(row)
+                    print(
+                        "PASS: Responses endpoint -> Codex Luna max -> persisted Usage Statistics row",
+                        flush=True,
+                    )
                 except AssertionError as error:
                     record_route_failure(
-                        "luna-max-responses", error, model="gpt-6-luna",
+                        "responses-luna", error, model="gpt-6-luna",
                         inbound="responses", outbound="responses",
                     )
             if "responses-deepseek" in selected and not preflight_only:
@@ -1495,6 +1566,20 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                             if any(row.get("case") == "deepseek-chat" for row in usage_rows)
                             else "failed"
                             if any(item.startswith("deepseek-chat:") for item in failures)
+                            else "unverified"
+                        ),
+                        "deepseek_messages_persisted_usage": (
+                            "verified"
+                            if any(row.get("case") == "claude-deepseek" for row in usage_rows)
+                            else "failed"
+                            if any(item.startswith("claude-deepseek:") for item in failures)
+                            else "unverified"
+                        ),
+                        "codex_luna_responses_persisted_usage": (
+                            "verified"
+                            if any(row.get("case") == "responses-luna" for row in usage_rows)
+                            else "failed"
+                            if any(item.startswith("responses-luna:") for item in failures)
                             else "unverified"
                         ),
                         "codex_luna_responses_usage_ui": "unverified",

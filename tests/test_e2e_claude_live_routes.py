@@ -149,11 +149,12 @@ def test_usage_evidence_requires_complete_actual_usage_from_public_snapshot() ->
         case="claude-native-haiku",
         model="claude-haiku-4-5-20251001",
         provider="claude_subscription",
+        gateway_request_ids=["synthetic-private-id"],
     )
 
     assert evidence["provider"] == "claude_subscription"
     assert evidence["total_tokens"] == 19
-    assert "request_id" not in evidence
+    assert evidence["request_id"] == "synthetic-private-id"
 
 
 def test_usage_evidence_preserves_official_deepseek_identity_and_tokens() -> None:
@@ -192,6 +193,7 @@ def test_usage_evidence_preserves_official_deepseek_identity_and_tokens() -> Non
         case="deepseek-chat",
         model="deepseek/deepseek-flash",
         provider="deepseek",
+        gateway_request_ids=["synthetic-deepseek-request-id"],
     )
 
     assert evidence["model"] == "deepseek/deepseek-flash"
@@ -201,7 +203,103 @@ def test_usage_evidence_preserves_official_deepseek_identity_and_tokens() -> Non
     assert evidence["total_tokens"] == 31
     assert evidence["cached_input_tokens"] == 0
     assert evidence["cache_write_input_tokens"] == 0
-    assert "request_id" not in evidence
+    assert evidence["request_id"] == "synthetic-deepseek-request-id"
+
+
+@pytest.mark.parametrize(
+    ("case", "model", "provider", "request_id", "input_tokens", "output_tokens"),
+    [
+        (
+            "claude-deepseek", "deepseek/deepseek-flash", "deepseek",
+            "synthetic-deepseek-messages-id", 38, 9,
+        ),
+        (
+            "responses-luna", "gpt-6-luna", "official",
+            "synthetic-luna-responses-id", 42, 11,
+        ),
+    ],
+)
+def test_usage_evidence_correlates_messages_and_responses_routes(
+    case: str,
+    model: str,
+    provider: str,
+    request_id: str,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    total_tokens = input_tokens + output_tokens
+    snapshot = {
+        "summary": {
+            "requests": 1,
+            "successful_requests": 1,
+            "missing_usage_requests": 0,
+            "partial_usage_requests": 0,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "cached_input_tokens": 6,
+            "cache_write_input_tokens": 0,
+            "cache_hit_rate": 12,
+        },
+        "events": [{
+            "request_id": request_id,
+            "model": model,
+            "upstream": provider,
+            "client_id": "claude" if case == "claude-deepseek" else "codexhub",
+            "status": 200,
+            "duration_ms": 900,
+            "usage_source": "upstream",
+            "input_tokens": input_tokens,
+            "cached_input_tokens": 6,
+            "cache_write_input_tokens": 0,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }],
+        "telemetry_status": {"backfill_pending": False, "lag_bytes": 0},
+    }
+
+    evidence = usage_evidence(
+        snapshot,
+        case=case,
+        model=model,
+        provider=provider,
+        gateway_request_ids=[request_id],
+    )
+
+    assert evidence["case"] == case
+    assert evidence["request_id"] == request_id
+    assert evidence["model"] == model
+    assert evidence["provider"] == provider
+    assert evidence["input_tokens"] == input_tokens
+    assert evidence["output_tokens"] == output_tokens
+    assert evidence["total_tokens"] == total_tokens
+    assert evidence["cached_input_tokens"] == 6
+
+
+def test_usage_evidence_rejects_request_id_from_another_gateway_route() -> None:
+    snapshot = {
+        "summary": {"requests": 1, "total_tokens": 7},
+        "events": [{
+            "request_id": "snapshot-request-id",
+            "model": "gpt-6-luna",
+            "upstream": "official",
+            "status": 200,
+            "usage_source": "upstream",
+            "input_tokens": 4,
+            "output_tokens": 3,
+            "total_tokens": 7,
+        }],
+        "telemetry_status": {"backfill_pending": False},
+    }
+
+    with pytest.raises(AssertionError, match="does not match"):
+        usage_evidence(
+            snapshot,
+            case="responses-luna",
+            model="gpt-6-luna",
+            provider="official",
+            gateway_request_ids=["other-request-id"],
+        )
 
 
 @pytest.mark.parametrize("usage_source", ["missing", "partial"])
@@ -209,6 +307,7 @@ def test_usage_evidence_rejects_noncomplete_upstream_usage(usage_source: str) ->
     snapshot = {
         "summary": {"requests": 1, "total_tokens": 7},
         "events": [{
+            "request_id": "synthetic-incomplete-usage-id",
             "model": "claude-haiku-4-5-20251001",
             "upstream": "claude_subscription",
             "status": 200,
@@ -226,6 +325,7 @@ def test_usage_evidence_rejects_noncomplete_upstream_usage(usage_source: str) ->
             case="claude-native-haiku",
             model="claude-haiku-4-5-20251001",
             provider="claude_subscription",
+            gateway_request_ids=["synthetic-incomplete-usage-id"],
         )
 
 
