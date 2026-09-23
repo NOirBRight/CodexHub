@@ -596,6 +596,10 @@ def dispatch_proxy_post_exception(exc: BaseException, live: PostRequestLiveState
                 "request_id": request_id,
                 "model": canonical_model_id(model) if model else None,
                 "behavior_profile": behavior_profile,
+                "native_anthropic_subscription": (
+                    isinstance(upstream, Mapping)
+                    and upstream.get("native_anthropic_subscription") is True
+                ),
                 **proxy_request_context,
             }
             if isinstance(previous_retry_identity, str) and previous_retry_identity:
