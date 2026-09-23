@@ -177,10 +177,12 @@ pub struct GatewayUsageSummary {
     pub requests: u64,
     pub successful_requests: u64,
     pub missing_usage_requests: u64,
+    pub partial_usage_requests: u64,
     pub total_tokens: Option<u64>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
     pub cache_hit_rate: Option<f64>,
     pub estimated_cost_usd: Option<f64>,
     pub cost_label: String,
@@ -203,6 +205,7 @@ pub struct GatewayUsageEvent {
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
 }
 

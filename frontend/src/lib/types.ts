@@ -306,10 +306,12 @@ export interface GatewayUsageSummary {
   requests: number;
   successful_requests: number;
   missing_usage_requests: number;
+  partial_usage_requests?: number | null;
   total_tokens?: number | null;
   input_tokens?: number | null;
   output_tokens?: number | null;
   cached_input_tokens?: number | null;
+  cache_write_input_tokens?: number | null;
   cache_hit_rate?: number | null;
   estimated_cost_usd?: number | null;
   cost_label: string;
@@ -331,6 +333,7 @@ export interface GatewayUsageEvent {
   output_tokens?: number | null;
   total_tokens?: number | null;
   cached_input_tokens?: number | null;
+  cache_write_input_tokens?: number | null;
   reasoning_tokens?: number | null;
 }
 

@@ -1071,7 +1071,16 @@ def relay_upstream_response(
             gateway_events.capture_usage(usage_capture, None, missing_reason="async_usage_pending")
             gateway_events.offer_usage_observed_body(usage_context, upstream_body_for_usage)
         else:
-            gateway_events.capture_usage(usage_capture, gateway_events._usage_from_json_body(body))
+            usage_body = (
+                upstream_body_for_usage
+                if upstream_format == "anthropic_messages"
+                else body
+            )
+            gateway_events.capture_usage(
+                usage_capture,
+                gateway_events._usage_from_json_body(usage_body),
+                upstream_format=upstream_format,
+            )
             if status < 400:
                 lifecycle_issue = gateway_stream_semantics._response_body_lifecycle_final_issue(
                     body, event_context, request_kind
@@ -1295,6 +1304,7 @@ def relay_upstream_response(
                 upstream_format=upstream_format,
                 inbound_format=inbound_format,
                 status=status,
+                usage_capture=usage_capture,
             )
         if (
             streaming_policy == StreamingPolicy.TRANSPARENT_CONVERTED

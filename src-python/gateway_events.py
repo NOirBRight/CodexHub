@@ -157,6 +157,7 @@ def normalize_usage_for_event(
     usage: Mapping[str, Any] | None,
     *,
     missing_reason: str = "upstream_missing_usage",
+    upstream_format: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(usage, Mapping):
         return {
@@ -177,6 +178,23 @@ def normalize_usage_for_event(
     cache_write_input_tokens = _usage_nested_int(usage, "input_tokens_details", "cache_write_tokens")
     if cache_write_input_tokens is None:
         cache_write_input_tokens = _usage_nested_int(usage, "prompt_tokens_details", "cache_write_tokens")
+    anthropic_messages = upstream_format == "anthropic_messages"
+    anthropic_cached_input_tokens = _usage_int(usage.get("cache_read_input_tokens"))
+    anthropic_cache_write_input_tokens = _usage_int(usage.get("cache_creation_input_tokens"))
+    anthropic_usage_present = any(
+        _usage_int(usage.get(key)) is not None
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        )
+    )
+    if anthropic_messages and anthropic_usage_present:
+        cached_input_tokens = anthropic_cached_input_tokens or 0
+        cache_write_input_tokens = anthropic_cache_write_input_tokens or 0
+        if input_tokens is not None:
+            input_tokens += cached_input_tokens + cache_write_input_tokens
     reasoning_tokens = _usage_nested_int(usage, "output_tokens_details", "reasoning_tokens")
     if reasoning_tokens is None:
         reasoning_tokens = _usage_nested_int(usage, "completion_tokens_details", "reasoning_tokens")
@@ -186,7 +204,9 @@ def normalize_usage_for_event(
         fields["usage_input_tokens"] = input_tokens
     if output_tokens is not None:
         fields["usage_output_tokens"] = output_tokens
-    if total_tokens is not None:
+    if anthropic_messages and input_tokens is not None and output_tokens is not None:
+        fields["usage_total_tokens"] = input_tokens + output_tokens
+    elif total_tokens is not None:
         fields["usage_total_tokens"] = total_tokens
     elif input_tokens is not None and output_tokens is not None:
         fields["usage_total_tokens"] = input_tokens + output_tokens
@@ -201,7 +221,36 @@ def normalize_usage_for_event(
             "usage_source": "missing",
             "usage_missing_reason": "upstream_usage_unrecognized",
         }
+    if anthropic_messages and (input_tokens is None or output_tokens is None):
+        fields["usage_source"] = "partial"
+        fields["usage_missing_reason"] = (
+            "upstream_partial_usage"
+            if missing_reason == "upstream_missing_usage"
+            else missing_reason
+        )
     return fields
+
+
+def merge_anthropic_usage_snapshot(
+    target: dict[str, Any],
+    usage: Mapping[str, Any] | None,
+    *,
+    include_output: bool = True,
+) -> None:
+    """Merge cumulative Anthropic Messages usage snapshots by field."""
+
+    if not isinstance(usage, Mapping):
+        return
+    keys = (
+        "input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "output_tokens",
+    )
+    for key in (keys if include_output else keys[:-1]):
+        value = _usage_int(usage.get(key))
+        if value is not None:
+            target[key] = value
 
 
 def usage_from_payload(payload: Any) -> Mapping[str, Any] | None:
@@ -232,13 +281,25 @@ def capture_usage(
     usage: Mapping[str, Any] | None,
     *,
     missing_reason: str = "upstream_missing_usage",
+    upstream_format: str | None = None,
 ) -> None:
     if usage_capture is None:
         return
-    if usage_capture.get("usage_source") == "upstream":
+    current_source = usage_capture.get("usage_source")
+    if current_source == "upstream" and usage is None:
+        return
+    if current_source == "partial" and usage is None:
+        if missing_reason != "upstream_missing_usage":
+            usage_capture["usage_missing_reason"] = missing_reason
         return
     usage_capture.clear()
-    usage_capture.update(normalize_usage_for_event(usage, missing_reason=missing_reason))
+    usage_capture.update(
+        normalize_usage_for_event(
+            usage,
+            missing_reason=missing_reason,
+            upstream_format=upstream_format,
+        )
+    )
 
 
 _FAILURE_EVENT_CONTEXT_FIELD_ALLOWLIST = frozenset(
@@ -344,7 +405,14 @@ def write_usage_observed_event(
             return
         usage_fields = normalize_usage_for_event(None, missing_reason=missing_reason)
     else:
-        usage_fields = normalize_usage_for_event(usage)
+        usage_fields = normalize_usage_for_event(
+            usage,
+            upstream_format=(
+                "anthropic_messages"
+                if context.get("upstream_format") == "anthropic_messages"
+                else None
+            ),
+        )
     write_proxy_event(
         "usage_observed",
         request_id=context.get("request_id"),
@@ -352,7 +420,7 @@ def write_usage_observed_event(
         model_requested=context.get("model_requested"),
         model_canonical=context.get("model_canonical"),
         upstream=context.get("upstream"),
-        provider_id=context.get("provider_id") or context.get("upstream"),
+        provider_id=context.get("provider_id") or usage_provider_id(context.get("upstream")),
         upstream_format=context.get("upstream_format"),
         inbound_format=context.get("inbound_format"),
         route_mode=context.get("route_mode"),
@@ -369,6 +437,17 @@ def write_usage_observed_body_event(context: Mapping[str, Any], body: bytes) -> 
         usage,
         missing_reason="upstream_missing_usage",
     )
+
+
+def usage_provider_id(upstream_name: Any, upstream: Mapping[str, Any] | None = None) -> str | None:
+    if upstream_name == "anthropic_native" or (
+        isinstance(upstream, Mapping)
+        and upstream.get("native_anthropic_subscription") is True
+    ):
+        return "claude_subscription"
+    if isinstance(upstream, Mapping) and isinstance(upstream.get("provider_id"), str):
+        return upstream["provider_id"]
+    return upstream_name if isinstance(upstream_name, str) else None
 
 
 OFFICIAL_PASSTHROUGH_USAGE_QUEUE: queue.Queue[tuple[dict[str, Any], bytes]] = queue.Queue(maxsize=2048)

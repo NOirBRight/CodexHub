@@ -600,7 +600,9 @@ def _upsert_request(connection: sqlite3.Connection, payload: Mapping[str, Any], 
         if existing_usage_source and existing_usage_source != "missing":
             values.pop("usage_source", None)
             values.pop("usage_missing_reason", None)
-    clear_usage_missing_reason = bool(incoming_usage_source and incoming_usage_source != "missing")
+    clear_usage_missing_reason = bool(
+        incoming_usage_source and incoming_usage_source not in {"missing", "partial"}
+    )
     values["updated_at"] = now
 
     assignments = []

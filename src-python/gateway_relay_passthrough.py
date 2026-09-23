@@ -12,6 +12,7 @@ import urllib.error
 
 import gateway_errors
 import gateway_events
+import gateway_relay_anthropic
 import gateway_request
 import gateway_sse
 import gateway_stream_semantics
@@ -197,6 +198,13 @@ def relay_official_passthrough_sse_response(
             return _handle_downstream_header_failure()
 
     def _handle_cancellation() -> int:
+        if native_anthropic:
+            _capture_usage(
+                usage_capture,
+                None,
+                missing_reason="downstream_cancelled",
+                upstream_format="anthropic_messages",
+            )
         seam.cancel()
         _emit_stream_closed(
             status_code=503,
@@ -221,7 +229,7 @@ def relay_official_passthrough_sse_response(
             sse_fields = seam.stats()
             if usage_capture is not None:
                 usage_capture.update(sse_fields)
-            return status
+            return 502 if native_anthropic and anthropic_terminal_kind == "error" and status < 400 else status
         return _handle_cancellation()
 
     lifecycle = _UpstreamSseReaderLifecycle(
@@ -391,6 +399,55 @@ def relay_transparent_upstream_response(
 
     status = getattr(response, "status", None) or getattr(response, "code", 502)
     is_event_stream = _is_event_stream(response.headers)
+    native_anthropic = upstream_format == "anthropic_messages"
+    anthropic_usage: dict[str, Any] = {}
+    anthropic_event_name: str | None = None
+    anthropic_terminal_kind: str | None = None
+
+    def capture_anthropic_usage(missing_reason: str = "upstream_missing_usage") -> None:
+        _capture_usage(
+            usage_capture,
+            anthropic_usage or None,
+            missing_reason=missing_reason,
+            upstream_format="anthropic_messages",
+        )
+
+    def observe_anthropic_sse_line(line: bytes) -> None:
+        nonlocal anthropic_event_name, anthropic_terminal_kind
+        if line.startswith(b"event:"):
+            anthropic_event_name = line[6:].strip().decode("utf-8", errors="replace")
+            return
+        if not line.startswith(b"data:"):
+            if line in {b"\n", b"\r\n"}:
+                anthropic_event_name = None
+            return
+        payload_bytes = _sse_payload_bytes(line)
+        if payload_bytes is None:
+            return
+        try:
+            payload = json.loads(payload_bytes.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, Mapping):
+            return
+        payload_type = payload.get("type")
+        event_type = payload_type or anthropic_event_name
+        if event_type == "message_start":
+            message = payload.get("message")
+            if isinstance(message, Mapping):
+                gateway_events.merge_anthropic_usage_snapshot(
+                    anthropic_usage, message.get("usage"), include_output=False
+                )
+        elif event_type == "message_delta":
+            gateway_events.merge_anthropic_usage_snapshot(
+                anthropic_usage, payload.get("usage")
+            )
+        if event_type == "message_stop":
+            anthropic_terminal_kind = "success"
+        elif payload_type == "error" or anthropic_event_name == "error":
+            anthropic_terminal_kind = "error"
+        capture_anthropic_usage()
+
     usage_context = _usage_observed_context(
         event_context,
         request_id=request_id,
@@ -420,7 +477,11 @@ def relay_transparent_upstream_response(
     )
     if request_scoped_seam is not None:
         request_scoped_seam.set_terminal_observer(
-            _chat_terminal_observer if chat_mode else _responses_terminal_observer
+            gateway_relay_anthropic._anthropic_sse_terminal_observer
+            if native_anthropic
+            else _chat_terminal_observer
+            if chat_mode
+            else _responses_terminal_observer
         )
         request_scoped_seam.set_output_observer(
             None
@@ -428,7 +489,9 @@ def relay_transparent_upstream_response(
             else (lambda event: _responses_event_commits_downstream_output(event, ""))
         )
         request_scoped_seam.set_usage_line_callback(
-            lambda context, line: _offer_usage_observed_sse_line(
+            None
+            if native_anthropic
+            else lambda context, line: _offer_usage_observed_sse_line(
                 context, line, upstream_format=upstream_format
             )
         )
@@ -450,20 +513,36 @@ def relay_transparent_upstream_response(
             inbound_format=inbound_format,
             upstream_format=upstream_format,
             terminal_observer=(
-                _chat_terminal_observer if chat_mode else _responses_terminal_observer
+                gateway_relay_anthropic._anthropic_sse_terminal_observer
+                if native_anthropic
+                else _chat_terminal_observer
+                if chat_mode
+                else _responses_terminal_observer
             ),
             output_observer=(
                 None
                 if chat_mode
                 else (lambda event: _responses_event_commits_downstream_output(event, ""))
             ),
-            usage_line_callback=lambda context, line: _offer_usage_observed_sse_line(
-                context, line, upstream_format=upstream_format
+            usage_line_callback=(
+                None
+                if native_anthropic
+                else lambda context, line: _offer_usage_observed_sse_line(
+                    context, line, upstream_format=upstream_format
+                )
             ),
             synthetic_terminal_failure_callback=synthetic_terminal_failure_callback,
             redact_identity=relay_redact_identity,
         )
-    _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
+    if native_anthropic:
+        _capture_usage(
+            usage_capture,
+            None,
+            missing_reason="upstream_usage_pending",
+            upstream_format="anthropic_messages",
+        )
+    else:
+        _capture_usage(usage_capture, None, missing_reason="async_usage_pending")
 
     def _handle_write_failure() -> int:
         """Emit downstream_stream_closed using the actual OSError when available.
@@ -475,7 +554,14 @@ def relay_transparent_upstream_response(
         write_error = seam.last_write_error()
         if write_error is None and seam.terminal_committed:
             # Stopped only because a terminal event was already committed.
-            return status
+            return 502 if native_anthropic and anthropic_terminal_kind == "error" and status < 400 else status
+        if native_anthropic:
+            _capture_usage(
+                usage_capture,
+                None,
+                missing_reason="downstream_cancelled",
+                upstream_format="anthropic_messages",
+            )
         exc = write_error if write_error is not None else OSError("downstream closed")
         event_fields = _bounded_failure_event_context(event_context)
         for key in (
@@ -649,7 +735,12 @@ def relay_transparent_upstream_response(
                 detail=sanitized_detail,
                 **route_failure_event_fields,
             )
-        if inbound_format == "chat_completions":
+        if native_anthropic:
+            terminal_payload = {
+                "type": "error",
+                "error": {"type": "api_error", "message": sanitized_detail},
+            }
+        elif inbound_format == "chat_completions":
             terminal_payload = _chat_completion_error_payload(
                 upstream_name=upstream_name,
                 status=status_code,
@@ -684,6 +775,13 @@ def relay_transparent_upstream_response(
                     break
                 body += chunk
         except (IncompleteRead, TimeoutError, OSError, URLError) as exc:
+            if native_anthropic:
+                _capture_usage(
+                    usage_capture,
+                    gateway_events._usage_from_json_body(body),
+                    missing_reason="upstream_body_incomplete",
+                    upstream_format="anthropic_messages",
+                )
             if seam.terminal_committed:
                 return status
             if admission is not None and admission.cancelled:
@@ -724,6 +822,12 @@ def relay_transparent_upstream_response(
                 b"[retry_identity_redacted]",
             )
         content_encoding = None if drop_content_encoding else _UNSET_CONTENT_ENCODING
+        if native_anthropic:
+            _capture_usage(
+                usage_capture,
+                gateway_events._usage_from_json_body(body),
+                upstream_format="anthropic_messages",
+            )
         if not send_downstream_headers_once(
             content_length=len(body),
             content_encoding=content_encoding,
@@ -731,7 +835,8 @@ def relay_transparent_upstream_response(
             return _handle_write_failure()
         if not self._write_non_streaming_body_relay(body):
             return _handle_write_failure()
-        _offer_usage_observed_body(usage_context, body)
+        if not native_anthropic:
+            _offer_usage_observed_body(usage_context, body)
         self.close_connection = True
         return status
 
@@ -779,6 +884,39 @@ def relay_transparent_upstream_response(
                 synthetic_terminal_write_detail=None,
             )
             return 499
+        if native_anthropic:
+            _capture_usage(
+                usage_capture,
+                None,
+                missing_reason="stream_incomplete",
+                upstream_format="anthropic_messages",
+            )
+            stream_failure_detail = safe_upstream_error_detail(
+                exc, redact_identity=relay_redact_identity
+            )
+            if defer_stream_errors and not headers_sent:
+                return _send_terminal_json_error(
+                    502,
+                    stream_failure_detail,
+                    error_type="upstream_protocol_error",
+                    telemetry_event="transparent_stream_closed",
+                    telemetry_error=type(exc).__name__,
+                )
+            self.close_connection = True
+            _emit_stream_closed(
+                status_code=502,
+                error=type(exc).__name__,
+                detail=stream_failure_detail,
+                failure_phase="stream_body",
+                failure_side="upstream_read",
+                failure_class=getattr(exc, "classification", "upstream_stream_interrupted"),
+                client_disconnected=False,
+                synthetic_terminal_event_sent=False,
+                synthetic_terminal_event_type=None,
+                synthetic_terminal_write_error=None,
+                synthetic_terminal_write_detail=None,
+            )
+            return 502
         (
             synthetic_terminal_event_sent,
             synthetic_terminal_write_error,
@@ -838,6 +976,8 @@ def relay_transparent_upstream_response(
             if not line:
                 break
             _observe_gateway_diagnostic("observe_sse_line", request_id, len(line))
+            if native_anthropic:
+                observe_anthropic_sse_line(line)
             if defer_stream_errors and not headers_sent:
                 pending_lines.append(line)
                 payload_bytes = _sse_payload_bytes(line)
@@ -876,6 +1016,27 @@ def relay_transparent_upstream_response(
             if not _commit_pending_lines():
                 return _handle_write_failure()
         self.close_connection = True
+        if native_anthropic:
+            if anthropic_terminal_kind == "error":
+                capture_anthropic_usage("upstream_stream_error")
+                return status if status >= 400 else 502
+            if anthropic_terminal_kind != "success" or not seam.terminal_committed:
+                capture_anthropic_usage("stream_incomplete")
+                _emit_stream_closed(
+                    status_code=502,
+                    error="UpstreamStreamIncompleteError",
+                    detail="Anthropic stream ended before message_stop.",
+                    failure_phase="stream_body",
+                    failure_side="upstream_read",
+                    failure_class="upstream_stream_incomplete",
+                    client_disconnected=False,
+                    synthetic_terminal_event_sent=False,
+                    synthetic_terminal_event_type=None,
+                    synthetic_terminal_write_error=None,
+                    synthetic_terminal_write_detail=None,
+                )
+                return 502
+            capture_anthropic_usage()
         sse_fields = seam.stats()
         if usage_capture is not None:
             usage_capture.update(sse_fields)

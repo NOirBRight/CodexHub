@@ -624,7 +624,6 @@ class ProxyEventLoggingTests(TestCase):
                 connection.commit()
             finally:
                 connection.close()
-
             proxy_telemetry.write_event_to_sqlite(
                 db_path,
                 {
@@ -647,6 +646,36 @@ class ProxyEventLoggingTests(TestCase):
                         ("req-migrate",),
                     ).fetchone(),
                     (200, 12),
+                )
+            finally:
+                connection.close()
+
+    def test_sqlite_keeps_partial_usage_missing_reason(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import proxy_telemetry
+
+            db_path = Path(tmpdir) / "codex-proxy-telemetry.sqlite"
+            proxy_telemetry.write_event_to_sqlite(
+                db_path,
+                {
+                    "ts": "2026-07-03T01:00:00Z",
+                    "event": "request_complete",
+                    "request_id": "req-partial-usage",
+                    "status": 502,
+                    "usage_source": "partial",
+                    "usage_missing_reason": "stream_incomplete",
+                    "usage_input_tokens": 12,
+                },
+            )
+
+            connection = sqlite3.connect(db_path)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT usage_source, usage_missing_reason, usage_input_tokens FROM gateway_requests WHERE request_id = ?",
+                        ("req-partial-usage",),
+                    ).fetchone(),
+                    ("partial", "stream_incomplete", 12),
                 )
             finally:
                 connection.close()
