@@ -1,7 +1,8 @@
 # ADR-0015: Claude subscription coexistence, family mapping and metering
 
-Date: 2026-09-23. Status: Accepted product and architecture direction; the exact
-local authentication wire contract remains gated by isolated verification.
+Date: 2026-09-23. Status: Accepted product and architecture direction. The local
+authentication carrier was qualified with Claude Code 2.1.280 in #560; rendered
+picker and resume behavior remain part of combined candidate evidence in #564.
 Published specification: [#559](https://github.com/NOirBRight/CodexHub/issues/559).
 
 Claude Code's saved subscription authentication remains active while its model
@@ -25,9 +26,13 @@ This decision does not import history or add a subscription quota dashboard.
 
 ## Credential boundary and consequences
 
-- Local Gateway authorization must coexist with Claude-owned OAuth without
-  replacing it. The specific carrier must pass the isolated client/auth matrix
-  before it is selected for production.
+- Claude Code 2.1.280 carries the local Gateway credential in
+  `ANTHROPIC_CUSTOM_HEADERS` as `x-codexhub-gateway-key`, alongside its saved
+  OAuth bearer and OAuth beta header. CodexHub must consume and validate that
+  local header without replacing subscription authentication. The same probe
+  showed OAuth-only model discovery is skipped, so the managed client projection
+  is published additively through `modelPicker.options`; the built-in lineup is
+  left in place.
 - Subscription credentials remain client-carried and can reach only the official
   Anthropic destination. External provider dispatch strips incoming credentials.
   Tokens do not enter telemetry, configuration backups or persisted usage data.

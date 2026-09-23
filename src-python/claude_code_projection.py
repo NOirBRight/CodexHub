@@ -1,9 +1,7 @@
-"""Claude Code discovery aliases for Gateway-exported models.
+"""Claude Code model-picker aliases for Gateway-exported models.
 
-Claude Code 2.1.278 keeps GET /v1/models entries only when the id matches
-``claude|anthropic``. Project a stable alias for every other exported slug so
-the picker lists the whole catalog. Canonical ``provider/model`` remains the
-routing identity.
+Keep Gateway selections in a reserved namespace so external Claude-named
+models cannot collide with Claude subscription model IDs.
 """
 
 from __future__ import annotations
@@ -43,8 +41,6 @@ def projected_model_id(canonical: str) -> str:
     slug = canonical_model_id(canonical)
     if not slug:
         raise identity_failure("model is required", reason="unsupported_model", model_slug=slug)
-    if CLAUDE_DISCOVERY_RE.search(slug):
-        return slug
     return _ALIAS_PREFIX + _UNSAFE.sub("-", slug).strip("-")
 
 

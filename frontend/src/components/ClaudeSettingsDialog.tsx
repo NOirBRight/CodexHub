@@ -3,9 +3,12 @@ import { useTranslation } from "react-i18next";
 import { WorkspaceDialog } from "./workspace/WorkspaceDialog";
 import { api, messageFromError } from "../lib/tauri";
 import {
+  aliasDefaultChanges,
   claudeDraft,
   claudeDraftChanged,
   claudeDraftValid,
+  claudeClearDefault,
+  claudePreserveDefault,
   claudeRoles,
   filterClaudeModels,
   rebaseClaudeDraft,
@@ -62,7 +65,12 @@ export function ClaudeSettingsDialog({
   const dirty = claudeDraftChanged(draft, saved);
   const conflicts = info?.claude_settings?.conflicts ?? [];
   const unavailable = !info?.installed || !info?.claude_settings;
-  const invalid = !claudeDraftValid(draft, ids);
+  const invalid = !claudeDraftValid(draft, ids, saved);
+  const aliasChanges = aliasDefaultChanges(
+    info?.claude_settings?.default_model ?? "",
+    saved.roles,
+    draft.roles,
+  );
   const locked = Boolean(busy || previewBusy);
   const needsActivation = !connected || !info?.managed_by_current_app;
   const canApply =
@@ -85,7 +93,7 @@ export function ClaudeSettingsDialog({
       const result = await api.previewGatewayClientConfig(
         "claude",
         draft.model,
-        draft.roles,
+        { ...draft.roles, subagent: draft.subagent },
       );
       setPreview({
         text: result.next_redacted,
@@ -163,7 +171,12 @@ export function ClaudeSettingsDialog({
           <button
             className="ws-primary"
             disabled={!canApply}
-            onClick={() => onToggle(true, draft.model, draft.roles)}
+            onClick={() =>
+              onToggle(true, draft.model, {
+                ...draft.roles,
+                subagent: draft.subagent,
+              })
+            }
           >
             {busy
               ? t("gateway.connectionUpdating")
@@ -216,11 +229,30 @@ export function ClaudeSettingsDialog({
             onChange={(event) => setQuery(event.target.value)}
           />
         </label>
-        {picker(
-          draft.model,
-          (model) => update({ ...draft, model }),
-          t("gateway.claudeDefaultModel"),
-        )}
+        <label className="ws-claude-field">
+          <span>{t("gateway.claudeDefaultModel")}</span>
+          <select
+            value={draft.model}
+            disabled={locked}
+            onChange={(event) => update({ ...draft, model: event.target.value })}
+          >
+            <option value={claudePreserveDefault}>
+              {t("gateway.claudeKeepDefault", {
+                model:
+                  info?.claude_settings?.default_model ||
+                  t("gateway.claudeCliDefault"),
+              })}
+            </option>
+            <option value={claudeClearDefault}>
+              {t("gateway.claudeUseCliDefault")}
+            </option>
+            {filterClaudeModels(models, query, draft.model).map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <details className="ws-claude-catalog">
           <summary>
             {t("gateway.claudeCatalog", { count: models.length })}
@@ -257,6 +289,25 @@ export function ClaudeSettingsDialog({
             </div>
           ))}
         </div>
+        {aliasChanges.length > 0 && (
+          <ul className="ws-claude-note" role="status">
+            {aliasChanges.map(({ alias, from, to }) => (
+              <li key={`${alias}:${from}:${to}`}>
+                {t("gateway.claudeAliasDefaultPreview", { alias, from, to })}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      <section className="ws-claude-section">
+        <h3>{t("gateway.claudeSubagentTitle")}</h3>
+        <p className="ws-claude-note">{t("gateway.claudeSubagentHelp")}</p>
+        {picker(
+          draft.subagent,
+          (subagent) => update({ ...draft, subagent }),
+          t("gateway.claudeRoleSubagent"),
+          true,
+        )}
       </section>
       {needsActivation && (
         <section className="ws-claude-section">

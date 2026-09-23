@@ -269,7 +269,7 @@ function GatewayPageImpl({
     if (gatewayCatalog.length > 0) {
       return gatewayCatalog.map((model) => ({
         id: model.id,
-        label: model.display_name || model.id,
+        label: `${model.display_name || model.id} · ${model.source}`,
       }));
     }
     return providers.flatMap((provider) =>
@@ -283,7 +283,7 @@ function GatewayPageImpl({
                 provider.id === "openai" || provider.id === "official"
                   ? model.id
                   : `${provider.id}/${model.id}`;
-              return { id, label: model.display_name || id };
+              return { id, label: `${model.display_name || id} · ${provider.name}` };
             })
         : [],
     );

@@ -19,7 +19,7 @@ from claude_code_projection import (
 from tests.gateway_harness import GATEWAY_CLIENT_KEY, GatewayHarness, request_gateway
 
 
-def test_projected_id_passes_claude_filter_and_round_trips() -> None:
+def test_projected_id_passes_claude_filter_and_keeps_gateway_identity_distinct() -> None:
     catalog = {
         "models": [
             {"slug": "volc/glm-5.2", "codex_proxy_metadata": {"provider": "volc"}},
@@ -29,14 +29,16 @@ def test_projected_id_passes_claude_filter_and_round_trips() -> None:
     glm = projected_model_id("volc/glm-5.2")
     assert CLAUDE_DISCOVERY_RE.search(glm)
     assert glm != "volc/glm-5.2"
-    assert projected_model_id("claude-sonnet") == "claude-sonnet"
+    claude_named = projected_model_id("claude-sonnet")
+    assert claude_named.startswith("claude-codexhub-")
     mapping = projection_map(catalog)
     assert mapping[glm] == "volc/glm-5.2"
     assert resolve_projected_model_id(glm, catalog) == "volc/glm-5.2"
     assert resolve_projected_model_id("volc/glm-5.2", catalog) == "volc/glm-5.2"
     ids = [row["id"] for row in claude_model_list(catalog)["data"]]
     assert glm in ids
-    assert "claude-sonnet" in ids
+    assert claude_named in ids
+    assert resolve_projected_model_id(claude_named, catalog) == "claude-sonnet"
     assert "volc/glm-5.2" not in ids
 
 
@@ -47,6 +49,13 @@ def test_extra_slugs_round_trip_projected_ids() -> None:
     assert resolve_projected_model_id(projected, {"models": []}, extra_slugs=extra) == extra[0]
     ids = [row["id"] for row in claude_model_list({"models": []}, extra_slugs=extra)["data"]]
     assert projected in ids
+
+
+def test_claude_named_external_model_cannot_enter_native_subscription_route() -> None:
+    catalog = _catalog("anthropic/claude-opus-5-5")
+    projected = projected_model_id("anthropic/claude-opus-5-5")
+    assert projected.startswith("claude-codexhub-")
+    assert resolve_projected_model_id(projected, catalog) == "anthropic/claude-opus-5-5"
 
 
 def test_projection_map_fails_closed_on_collision() -> None:
