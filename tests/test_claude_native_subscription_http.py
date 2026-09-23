@@ -3,15 +3,38 @@
 from __future__ import annotations
 
 import json
+import os
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import gateway_catalog_runtime
+import gateway_events
 import pytest
 from tests.gateway_harness import GATEWAY_CLIENT_KEY, GatewayHarness, request_gateway
 
 
 NATIVE_MODEL = "claude-opus-5-5"
 CLAUDE_OAUTH = "synthetic-claude-oauth"
+
+
+@contextmanager
+def _isolated_event_log(codex_home):
+    with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}, clear=False):
+        gateway_events.refresh_runtime_paths()
+        try:
+            yield gateway_events.PROXY_EVENT_LOG_PATH
+        finally:
+            gateway_events.flush_proxy_event_writer()
+    gateway_events.refresh_runtime_paths()
+
+
+def _request_complete_events(event_log):
+    return [
+        event
+        for line in event_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+        if (event := json.loads(line)).get("event") == "request_complete"
+    ]
 
 
 def _native_upstream(base_url: str) -> dict[str, object]:
@@ -95,6 +118,169 @@ def test_native_message_keeps_oauth_separate_and_preserves_wire_contract() -> No
     assert captured.headers["anthropic-version"] == "2023-06-01"
     assert captured.headers["anthropic-beta"] == "oauth-2025-04-20, interleaved-thinking-2025-05-14"
     assert json.loads(captured.body)["model"] == NATIVE_MODEL
+
+
+def test_native_json_usage_is_recorded_once_with_cache_input_breakdown(tmp_path) -> None:
+    upstream_body = json.dumps(
+        {
+            "type": "message",
+            "model": NATIVE_MODEL,
+            "content": [],
+            "usage": {
+                "input_tokens": 7,
+                "cache_read_input_tokens": 3,
+                "cache_creation_input_tokens": 2,
+                "output_tokens": 5,
+            },
+        }
+    ).encode()
+    with _isolated_event_log(tmp_path / "codex") as event_log:
+        with GatewayHarness() as harness:
+            harness.set_json_response(upstream_body)
+            with _route_native_requests_to_stub(harness):
+                response = request_gateway(
+                    harness.host,
+                    harness.port,
+                    "POST",
+                    "/v1/messages",
+                    body=json.dumps(
+                        {
+                            "model": NATIVE_MODEL,
+                            "max_tokens": 16,
+                            "messages": [{"role": "user", "content": "hello"}],
+                        }
+                    ).encode(),
+                    headers=_native_headers(),
+                    timeout=8.0,
+                )
+
+    assert response.status == 200
+    assert response.body == upstream_body
+    complete = _request_complete_events(event_log)
+    assert len(complete) == 1
+    assert complete[0]["provider_id"] == "claude_subscription"
+    assert complete[0]["model"] == NATIVE_MODEL
+    assert complete[0]["usage_source"] == "upstream", complete[0]
+    assert complete[0]["usage_input_tokens"] == 12, complete[0]
+    assert complete[0]["usage_cached_input_tokens"] == 3
+    assert complete[0]["usage_cache_write_input_tokens"] == 2
+    assert complete[0]["usage_output_tokens"] == 5
+    assert complete[0]["usage_total_tokens"] == 17
+
+
+def test_native_sse_usage_merges_snapshots_without_repeated_token_sums(tmp_path) -> None:
+    frames = (
+        b'event: message_start\ndata: {"type":"message_start","message":{"type":"message","model":"claude-opus-5-5","usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":0}}}\n\n'
+        b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"cache_creation_input_tokens":2,"output_tokens":3}}\n\n'
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+    with _isolated_event_log(tmp_path / "codex") as event_log:
+        with GatewayHarness() as harness:
+            harness.set_sse_response(tuple(frames.splitlines(keepends=True)))
+            with _route_native_requests_to_stub(harness):
+                response = request_gateway(
+                    harness.host,
+                    harness.port,
+                    "POST",
+                    "/v1/messages",
+                    body=json.dumps(
+                        {
+                            "model": NATIVE_MODEL,
+                            "max_tokens": 16,
+                            "stream": True,
+                            "messages": [{"role": "user", "content": "hello"}],
+                        }
+                    ).encode(),
+                    headers=_native_headers(),
+                    timeout=8.0,
+                )
+
+    assert response.status == 200
+    assert response.body == frames
+    complete = _request_complete_events(event_log)
+    assert len(complete) == 1
+    assert complete[0].get("usage_input_tokens") == 12, complete[0]
+    assert complete[0]["usage_cached_input_tokens"] == 4
+    assert complete[0]["usage_cache_write_input_tokens"] == 2
+    assert complete[0]["usage_output_tokens"] == 3
+    assert complete[0]["usage_total_tokens"] == 15
+
+
+def test_native_incomplete_sse_preserves_partial_usage_and_marks_failure(tmp_path) -> None:
+    frames = (
+        b'event: message_start\ndata: {"type":"message_start","message":{"type":"message","model":"claude-opus-5-5","usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":0}}}\n\n'
+        b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+    )
+    with _isolated_event_log(tmp_path / "codex") as event_log:
+        with GatewayHarness() as harness:
+            harness.set_sse_response(tuple(frames.splitlines(keepends=True)))
+            with _route_native_requests_to_stub(harness):
+                response = request_gateway(
+                    harness.host,
+                    harness.port,
+                    "POST",
+                    "/v1/messages",
+                    body=json.dumps(
+                        {
+                            "model": NATIVE_MODEL,
+                            "max_tokens": 16,
+                            "stream": True,
+                            "messages": [{"role": "user", "content": "hello"}],
+                        }
+                    ).encode(),
+                    headers=_native_headers(),
+                    timeout=8.0,
+                )
+
+    assert response.status == 200
+    assert response.body == frames
+    complete = _request_complete_events(event_log)
+    assert len(complete) == 1
+    assert complete[0]["status"] == 502
+    assert complete[0]["usage_source"] == "partial"
+    assert complete[0]["usage_missing_reason"] == "stream_incomplete"
+    assert complete[0]["usage_input_tokens"] == 12
+    assert complete[0]["usage_cached_input_tokens"] == 4
+    assert complete[0]["usage_cache_write_input_tokens"] == 2
+    assert "usage_output_tokens" not in complete[0]
+    assert b"hello" not in event_log.read_bytes()
+
+
+def test_native_sse_error_keeps_partial_usage_and_marks_failure(tmp_path) -> None:
+    frames = (
+        b'event: message_start\ndata: {"type":"message_start","message":{"type":"message","model":"claude-opus-5-5","usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":0}}}\n\n'
+        b'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"busy"}}\n\n'
+    )
+    with _isolated_event_log(tmp_path / "codex") as event_log:
+        with GatewayHarness() as harness:
+            harness.set_sse_response(tuple(frames.splitlines(keepends=True)))
+            with _route_native_requests_to_stub(harness):
+                response = request_gateway(
+                    harness.host,
+                    harness.port,
+                    "POST",
+                    "/v1/messages",
+                    body=json.dumps(
+                        {
+                            "model": NATIVE_MODEL,
+                            "max_tokens": 16,
+                            "stream": True,
+                            "messages": [{"role": "user", "content": "hello"}],
+                        }
+                    ).encode(),
+                    headers=_native_headers(),
+                    timeout=8.0,
+                )
+
+    assert response.status == 200
+    assert response.body == frames
+    complete = _request_complete_events(event_log)
+    assert len(complete) == 1
+    assert complete[0]["status"] == 502
+    assert complete[0]["usage_source"] == "partial"
+    assert complete[0]["usage_missing_reason"] == "upstream_stream_error"
+    assert complete[0]["usage_input_tokens"] == 12
+    assert "usage_output_tokens" not in complete[0]
 
 
 @pytest.mark.parametrize("local_key", [None, "wrong-local-key"])

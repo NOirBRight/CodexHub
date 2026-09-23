@@ -761,7 +761,7 @@ class GatewayHandlerMixin:
                     model_requested=model_requested,
                     model_canonical=model_canonical,
                     upstream=upstream_name,
-                    provider_id=upstream_name,
+                    provider_id=gateway_events.usage_provider_id(upstream_name, upstream),
                     provider_hint=provider_hint,
                     upstream_format=upstream_format,
                     reports_cached_input_tokens=reports_cached_input_tokens,
@@ -786,6 +786,9 @@ class GatewayHandlerMixin:
                 "request_id": request_id,
                 "model": model_canonical,
                 "behavior_profile": behavior_profile,
+                "native_anthropic_subscription": (
+                    upstream.get("native_anthropic_subscription") is True
+                ),
                 **proxy_request_context,
                 "_caller_wire_format": inbound_format,
             }
