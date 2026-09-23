@@ -626,8 +626,31 @@ def test_packaged_ui_without_isolated_wrapper_starts_no_candidate_or_request(
         live_routes.main()
 
 
-def test_native_opus_live_requires_isolated_subscription_credential(
+def test_resume_invocation_passes_explicit_native_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command, 0, stdout='{"is_error":false,"result":"OK"}', stderr="",
+        )
+
+    monkeypatch.setattr(live_routes.subprocess, "run", fake_run)
+    live_routes.run_claude(
+        tmp_path / "claude", {}, tmp_path, "OK",
+        resume="session-id", model="claude-opus-5-5",
+    )
+    command = commands[0]
+    assert command[command.index("--resume") + 1] == "session-id"
+    assert command[command.index("--model") + 1] == "claude-opus-5-5"
+    assert command.index("--resume") < command.index("--model")
+
+
+@pytest.mark.parametrize("native_case", ["claude-native-opus-5-5", "claude-native-opus-5-5-resume"])
+def test_native_opus_live_requires_isolated_subscription_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_case: str,
 ) -> None:
     binary = tmp_path / "candidate"
     binary.write_bytes(b"candidate")
@@ -636,7 +659,7 @@ def test_native_opus_live_requires_isolated_subscription_credential(
             "e2e_claude_live_routes.py", "--bin", str(binary),
             "--claude-bin", str(binary),
             "--resource-root", str(tmp_path), "--candidate-sha", "a" * 40,
-            "--case", "claude-native-opus-5-5", "--evidence-out", str(tmp_path / "evidence.json"),
+            "--case", native_case, "--evidence-out", str(tmp_path / "evidence.json"),
         ],
     )
     monkeypatch.setattr(live_routes, "verify_candidate_binding", lambda *args: None)

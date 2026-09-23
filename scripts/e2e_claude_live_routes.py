@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import tomllib
+import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -844,10 +845,10 @@ def run_claude(
     extra_args: tuple[str, ...] = (),
 ) -> dict[str, object]:
     command = [str(claude_bin), "-p", "--max-turns", "1"]
-    if model:
-        command.extend(("--model", model))
     if resume:
         command.extend(("--resume", resume))
+    if model:
+        command.extend(("--model", model))
     command.extend(("--permission-mode", "plan", "--output-format", "json", *extra_args,
                     f"Reply with exactly {sentinel}."))
     result = subprocess.run(
@@ -1205,6 +1206,7 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
             native_cases = {
                 "claude-native-haiku": ("claude-haiku-4-5-20251001", "CLAUDE_NATIVE_HAIKU_LIVE_OK"),
                 "claude-native-opus-5-5": ("claude-opus-5-5", "CLAUDE_NATIVE_OPUS_5_5_LIVE_OK"),
+                "claude-native-opus-5-5-resume": ("claude-opus-5-5", "CLAUDE_NATIVE_OPUS_RESUME_INITIAL_OK"),
             }
             selected_native = [case for case in native_cases if case in selected]
             if selected_native:
@@ -1235,9 +1237,14 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                         )
                         client_env = {name: value for name, value in env.items()
                                       if name != "DEEPSEEK_API_KEY"}
+                        resume_probe = native_case == "claude-native-opus-5-5-resume"
+                        session_id = str(uuid.uuid4()) if resume_probe else None
+                        if resume_probe:
+                            client_env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "claude-haiku-4-5-20251001"
                         run_claude(
                             claude_bin, client_env, root, sentinel,
                             model=model, timeout_seconds=timeout_seconds,
+                            extra_args=("--session-id", session_id) if session_id else (),
                         )
                         wait_for_event(bridge_port, model, "anthropic_messages", "anthropic_messages")
                         gateway_request_ids = gateway_route_request_ids(
@@ -1263,6 +1270,57 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                             f"PASS: native Claude {model} -> persisted Usage Statistics row",
                             flush=True,
                         )
+                        if resume_probe and session_id:
+                            before_opus = set(gateway_request_ids)
+                            before_haiku = set(gateway_route_request_ids(
+                                bridge_port, model="claude-haiku-4-5-20251001",
+                                inbound="anthropic_messages", outbound="anthropic_messages",
+                            ))
+                            used_attempts, timeout_seconds = reserve_generation_budget(
+                                case="claude-native-opus-5-5-resume-followup", attempts=1,
+                                used_attempts=used_attempts, max_attempts=max_attempts,
+                                case_timeout_seconds=case_timeout_seconds,
+                                overall_deadline=overall_deadline,
+                            )
+                            run_claude(
+                                claude_bin, client_env, root, "CLAUDE_NATIVE_OPUS_RESUME_FOLLOWUP_OK",
+                                resume=session_id, model=model, timeout_seconds=timeout_seconds,
+                            )
+                            resumed_opus = set(gateway_route_request_ids(
+                                bridge_port, model=model,
+                                inbound="anthropic_messages", outbound="anthropic_messages",
+                            )) - before_opus
+                            resumed_haiku = set(gateway_route_request_ids(
+                                bridge_port, model="claude-haiku-4-5-20251001",
+                                inbound="anthropic_messages", outbound="anthropic_messages",
+                            )) - before_haiku
+                            if not resumed_opus or resumed_haiku:
+                                failure_diagnostics.append({
+                                    "event": "resume_identity",
+                                    "case": native_case,
+                                    "expected_model": model,
+                                    "observed_models": sorted(
+                                        ([model] if resumed_opus else [])
+                                        + (["claude-haiku-4-5-20251001"] if resumed_haiku else [])
+                                    ),
+                                })
+                                raise AssertionError("resume with explicit Opus model changed model identity")
+                            resumed_ids = sorted(resumed_opus)
+                            upsert_route_request_count(
+                                route_request_counts,
+                                case="claude-native-opus-5-5-resume-followup",
+                                model=model,
+                                inbound="anthropic_messages", outbound="anthropic_messages",
+                                request_ids=resumed_ids,
+                                successful_gateway_route_observed=True,
+                            )
+                            resumed_row, usage_summary = wait_for_usage_evidence(
+                                bridge_port, case="claude-native-opus-5-5-resume-followup",
+                                model=model, provider="claude_subscription",
+                                gateway_request_ids=resumed_ids,
+                            )
+                            usage_rows.append(resumed_row)
+                            print("PASS: resume with explicit Opus model retained native identity", flush=True)
                         if packaged_ui:
                             try:
                                 packaged_usage_ui_verified, packaged_usage_ui_screenshot = (
@@ -1591,9 +1649,19 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                         ),
                         "picker_coexistence": "unverified",
                         "resumed_session_switching": "unverified",
+                        "explicit_model_resume": (
+                            "verified" if any(
+                                row.get("case") == "claude-native-opus-5-5-resume-followup"
+                                for row in usage_rows
+                            ) else "failed" if any(
+                                item.startswith("claude-native-opus-5-5-resume:") for item in failures
+                            ) else "unverified"
+                        ),
                         "explicit_native_opus_5_5_identity": (
                             "verified" if any(
-                                row.get("case") == "claude-native-opus-5-5"
+                                row.get("case") in {
+                                    "claude-native-opus-5-5", "claude-native-opus-5-5-resume",
+                                }
                                 and row.get("model") == "claude-opus-5-5"
                                 for row in usage_rows
                             ) else "failed" if any(
@@ -1682,7 +1750,7 @@ def main() -> None:
         "claude-deepseek", "claude-luna", "claude-launcher-deepseek",
         "claude-launcher-luna", "chat-deepseek", "tools-deepseek",
         "responses-deepseek", "responses-luna", "claude-native-haiku",
-        "claude-native-opus-5-5",
+        "claude-native-opus-5-5", "claude-native-opus-5-5-resume",
     ))
     args = parser.parse_args()
     if args.packaged_ui:
@@ -1692,7 +1760,8 @@ def main() -> None:
     selected = set(args.case or ("claude-native-haiku",))
     if args.packaged_ui and "claude-native-haiku" not in selected:
         raise SystemExit("--packaged-ui currently requires the claude-native-haiku case")
-    if {"claude-native-haiku", "claude-native-opus-5-5"} <= selected:
+    native_choices = {"claude-native-haiku", "claude-native-opus-5-5", "claude-native-opus-5-5-resume"}
+    if len(native_choices & selected) > 1:
         raise SystemExit("run native model cases in separate isolated invocations")
     if not 1 <= args.overall_timeout_seconds <= MAX_OVERALL_TIMEOUT_SECONDS:
         raise SystemExit("--overall-timeout-seconds must be between 1 and 600")
@@ -1710,7 +1779,7 @@ def main() -> None:
     if not args.preflight_only:
         if args.claude_bin is None:
             raise SystemExit("Claude Code is not available on PATH; pass --claude-bin")
-        if {"claude-native-haiku", "claude-native-opus-5-5"} & selected and args.claude_subscription_source is None:
+        if native_choices & selected and args.claude_subscription_source is None:
             raise SystemExit("native Claude E2E requires --claude-subscription-source")
     if not args.preflight_only and args.evidence_out is None:
         raise SystemExit("live E2E requires --evidence-out for the sanitized result")

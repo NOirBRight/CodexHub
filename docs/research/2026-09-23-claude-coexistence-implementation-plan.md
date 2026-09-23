@@ -14,9 +14,11 @@ an isolated checkout before building another candidate.
   Choosing a native model preserves its identity and subscription authentication,
   while its model requests traverse Gateway for forwarding and measurement.
 - Family mappings use the native client's alias-resolution settings. Mapping
-  `opus` must not replace an explicitly selected `claude-opus-5-5`, including
-  that full ID retained by an existing conversation. Gateway performs no second
-  family-name rewrite of complete IDs.
+  `opus` must not replace an explicitly supplied `claude-opus-5-5` on the
+  current invocation. To retain an old conversation's native identity, resume
+  with `claude --resume --model <original-full-id>`; plain `--resume` follows
+  Claude Code's current default/family mapping. Gateway performs no second
+  family-name rewrite of complete IDs and cannot infer earlier selections.
 - Preserve all native choices; mapped family entries and explicit subscription
   version entries must remain distinguishable. External entries use the existing
   Client Projection and Flat Label concepts, with the actual source identified.
@@ -48,7 +50,7 @@ the native route and credential contract it configures work.
 ## Stage A: facts that must be established before implementation choices freeze
 
 1. Confirm native family variables resolve aliases without changing explicit
-   full IDs in `/model`, `--model`, default settings and resumed conversations.
+   full IDs in `/model`, `--model`, and explicitly modeled resume invocations.
    Cover the four supported families, unset mapping, `opusplan`, inherited and
    explicitly pinned subagents. Use deterministic fixtures for the broad matrix.
 2. Verify mapped built-in rows and appended native full-ID entries coexist in

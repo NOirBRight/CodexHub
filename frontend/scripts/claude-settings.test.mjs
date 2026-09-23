@@ -6,6 +6,7 @@ import {
   claudeDraftChanged,
   claudeDraftValid,
   claudePreserveDefault,
+  claudeResumeCommand,
   filterClaudeModels,
   rebaseClaudeDraft,
 } from "../src/lib/claudeSettings.ts";
@@ -13,6 +14,11 @@ const models = [
   { id: "one", label: "One" },
   { id: "two", label: "Two" },
 ];
+test("resume command requires a complete native model ID", () => {
+  assert.equal(claudeResumeCommand(" claude-opus-5-5 "), "claude --resume --model claude-opus-5-5");
+  assert.equal(claudeResumeCommand("opus"), "");
+  assert.equal(claudeResumeCommand("claude-opus-5-5;echo unsafe"), "");
+});
 test("Claude settings preserve the existing default and keep subagent separate", () => {
   const saved = claudeDraft(
     {

@@ -7,6 +7,13 @@ export const claudeRoles = [
 export const claudePreserveDefault = "__codexhub_preserve_claude_default__";
 export const claudeClearDefault = "__codexhub_clear_claude_default__";
 
+export function claudeResumeCommand(modelId: string): string {
+  const id = modelId.trim();
+  return /^claude-[a-zA-Z0-9._-]+$/.test(id)
+    ? `claude --resume --model ${id}`
+    : "";
+}
+
 export interface ClaudeSettings {
   default_model: string;
   role_mappings: Record<string, string>;

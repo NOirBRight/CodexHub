@@ -2,7 +2,8 @@
 
 Date: 2026-09-23. Status: Accepted product and architecture direction. The local
 authentication carrier was qualified with Claude Code 2.1.280 in #560; rendered
-picker and resume behavior remain part of combined candidate evidence in #564.
+picker and explicit-model resume behavior remain part of combined candidate
+evidence in #564.
 Published specification: [#559](https://github.com/NOirBRight/CodexHub/issues/559).
 
 Claude Code's saved subscription authentication remains active while its model
@@ -12,9 +13,15 @@ credentials. This preserves subscription choices and lets the existing Usage
 Statistics pipeline observe both routes. It replaces ADR-0014's Gateway-token
 requirement and launcher-only coexistence recommendation for this connection mode.
 
-Family mappings operate through the client's native alias resolution. Explicit
-full native IDs, including those retained by old conversations, are never
-rewritten by matching their family names. Connect preserves the default model;
+Family mappings operate through the client's native alias resolution. A full
+native ID explicitly supplied for the current invocation is never rewritten
+by matching its family name. Claude Code 2.1.280 can re-resolve a resumed
+conversation through the current default/family mapping when `--resume` is used
+alone, even if it began with an explicit full ID. To preserve an old session's
+native model, the user resumes with `claude --resume --model <original-full-id>`
+(or supplies its session ID after `--resume`). CodexHub displays a copyable
+command after the user enters that ID; it cannot safely infer the old choice
+from the request arriving at Gateway. Connect preserves the default model;
 editing a family mapping deliberately changes the effective target of defaults
 using that alias, with the change disclosed in preview. Main-model selection and
 Default subagent remain separate from family mapping.

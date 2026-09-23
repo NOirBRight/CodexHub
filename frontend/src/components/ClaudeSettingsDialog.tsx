@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { WorkspaceDialog } from "./workspace/WorkspaceDialog";
+import { useToasts } from "./PageToast";
 import { api, messageFromError } from "../lib/tauri";
 import {
   aliasDefaultChanges,
@@ -9,6 +10,7 @@ import {
   claudeDraftValid,
   claudeClearDefault,
   claudePreserveDefault,
+  claudeResumeCommand,
   claudeRoles,
   filterClaudeModels,
   rebaseClaudeDraft,
@@ -39,6 +41,7 @@ export function ClaudeSettingsDialog({
   ) => void;
 }) {
   const { t } = useTranslation();
+  const toast = useToasts();
   const fallback = connected ? "" : (models[0]?.id ?? "");
   const saved = useMemo(
     () => claudeDraft(info?.claude_settings, fallback),
@@ -53,6 +56,7 @@ export function ClaudeSettingsDialog({
     setPreview(null);
   }, [saved]);
   const [query, setQuery] = useState("");
+  const [resumeModelId, setResumeModelId] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [preview, setPreview] = useState<{
     text: string;
@@ -72,6 +76,7 @@ export function ClaudeSettingsDialog({
     draft.roles,
   );
   const locked = Boolean(busy || previewBusy);
+  const resumeCommand = claudeResumeCommand(resumeModelId);
   const needsActivation = !connected || !info?.managed_by_current_app;
   const canApply =
     !locked &&
@@ -309,6 +314,34 @@ export function ClaudeSettingsDialog({
           true,
         )}
       </section>
+      {connected && (
+        <section className="ws-claude-section">
+          <h3>{t("gateway.claudeResumeTitle")}</h3>
+          <p className="ws-claude-note">{t("gateway.claudeResumeHelp")}</p>
+          <label className="ws-claude-field">
+            <span>{t("gateway.claudeResumeModelId")}</span>
+            <input
+              value={resumeModelId}
+              placeholder="claude-opus-5-5"
+              spellCheck={false}
+              aria-invalid={Boolean(resumeModelId) && !resumeCommand}
+              onChange={(event) => setResumeModelId(event.target.value)}
+            />
+          </label>
+          {resumeCommand && <code className="ws-claude-path">{resumeCommand}</code>}
+          <button
+            className="ws-button"
+            disabled={!resumeCommand}
+            onClick={() =>
+              void navigator.clipboard.writeText(resumeCommand)
+                .then(() => toast.showToast(t("common.copied"), "success"))
+                .catch((error) => toast.showToast(messageFromError(error), "error"))
+            }
+          >
+            {t("gateway.claudeCopyResumeCommand")}
+          </button>
+        </section>
+      )}
       {needsActivation && (
         <section className="ws-claude-section">
           <p className="ws-claude-note">{t("gateway.claudeConnectScope")}</p>

@@ -20,12 +20,13 @@ Gateway authentication, billing, or live-provider behavior.
 | Session-only picker selection | Selecting `Claude Opus 5.5` in `/model` with `s` (session only) sent `claude-opus-5-5` to the mock. |
 | Resume after picker selection | After sending a request with the picker-selected native Opus 5.5, resuming that session without a model override sent `codexhub/opus` under the same family mapping. |
 
-The resume result conflicts with #559's intended behavior that a manually
-selected full native ID remains native when an existing conversation resumes.
-It is a concrete contradiction to resolve before claiming that acceptance
-case passes. The diagnostic used `--bare` and synthetic API authentication,
-not Claude subscription OAuth, so it does not establish whether OAuth-backed
-sessions behave the same way.
+The user accepted an explicit-model resume contract after this observation:
+`claude --resume --model <original-full-id>` is required to preserve an old
+session's native model. Plain `--resume` follows Claude Code's current default
+or family mapping, and Gateway must not guess the earlier selection. The
+diagnostic used `--bare` and synthetic API authentication, not Claude
+subscription OAuth; the explicit-model command still needs a live isolated
+subscription check on the final candidate.
 
 Two identical native Messages requests were observed during the picker
 selection run; their cause is unknown. The complete native → external → native
