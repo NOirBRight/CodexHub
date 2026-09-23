@@ -883,6 +883,9 @@ def build_upstream_headers(
         operational_authentication=operational_authentication,
         authentication_strategy=authentication_strategy,
     )
+    native_anthropic_subscription = (
+        upstream.get("native_anthropic_subscription") is True
+    )
     outgoing: dict[str, str] = {}
     adapter = credential_for(auth_mode)
     drop_incoming_header = (
@@ -901,6 +904,7 @@ def build_upstream_headers(
                 "authorization",
                 "x-codexhub-gateway-key",
             }
+            or (native_anthropic_subscription and lowered == "accept-encoding")
             or (
                 lowered == "x-api-key"
                 and (
@@ -935,6 +939,10 @@ def build_upstream_headers(
             if key.lower() != "user-agent"
         }
         outgoing["User-Agent"] = UPSTREAM_USER_AGENT
+
+    if native_anthropic_subscription:
+        # The native SSE relay parses upstream bytes before forwarding them.
+        outgoing["Accept-Encoding"] = "identity"
 
     if adapter is not None:
         outgoing["Authorization"] = _subscription_authorization(

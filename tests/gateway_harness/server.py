@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import threading
 from contextlib import ExitStack, contextmanager
@@ -39,6 +40,7 @@ class StubUpstream:
     response_body: bytes = b"{}"
     response_headers: dict[str, str] = field(default_factory=dict)
     stream_chunks: tuple[bytes, ...] | None = None
+    gzip_sse_when_accepted: bool = False
     hold_after_headers: threading.Event | None = None
     headers_sent: threading.Event = field(default_factory=threading.Event)
 
@@ -76,8 +78,16 @@ class _StubHandler(BaseHTTPRequestHandler):
     def _write_response(self, stub: StubUpstream) -> None:
         chunks = stub.stream_chunks
         if chunks is not None:
+            compressed = (
+                stub.gzip_sse_when_accepted
+                and "gzip" in self.headers.get("Accept-Encoding", "").lower()
+            )
+            if compressed:
+                chunks = (gzip.compress(b"".join(chunks)),)
             self.send_response(stub.response_status)
             self.send_header("Content-Type", "text/event-stream")
+            if compressed:
+                self.send_header("Content-Encoding", "gzip")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "close")
             self.end_headers()

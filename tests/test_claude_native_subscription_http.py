@@ -536,6 +536,7 @@ def test_external_provider_uses_its_own_credential_and_discards_claude_secrets()
                 "x-api-key": "caller-api-key",
                 "anthropic-version": "2023-06-01",
                 "anthropic-beta": "oauth-2025-04-20",
+                "accept-encoding": "gzip",
                 "content-type": "application/json",
                 "connection": "close",
             },
@@ -546,6 +547,7 @@ def test_external_provider_uses_its_own_credential_and_discards_claude_secrets()
     assert len(stub.captures) == 1
     captured = stub.captures[0]
     assert captured.headers["authorization"] == "Bearer volc-test-token"
+    assert captured.headers["accept-encoding"] == "gzip"
     assert "x-codexhub-gateway-key" not in captured.headers
     assert "x-api-key" not in captured.headers
     assert CLAUDE_OAUTH not in repr(captured.headers)
@@ -588,6 +590,48 @@ def test_native_message_stream_is_forwarded_incrementally_without_oauth_key_rewr
     assert len(stub.captures) == 1
     assert stub.captures[0].headers["authorization"] == f"Bearer {CLAUDE_OAUTH}"
     assert "x-api-key" not in stub.captures[0].headers
+
+
+def test_native_gzip_sse_negotiates_identity_before_gateway_parsing(tmp_path) -> None:
+    frames = (
+        b'event: message_start\ndata: {"type":"message_start","message":{"type":"message","model":"claude-opus-5-5","usage":{"input_tokens":2,"output_tokens":0}}}\n\n'
+        b'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n'
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+    with _isolated_event_log(tmp_path / "codex") as event_log:
+        with GatewayHarness() as harness:
+            assert harness.stub is not None
+            stub = harness.stub
+            harness.set_sse_response(tuple(frames.splitlines(keepends=True)))
+            stub.gzip_sse_when_accepted = True
+            with _route_native_requests_to_stub(harness):
+                response = request_gateway(
+                    harness.host,
+                    harness.port,
+                    "POST",
+                    "/v1/messages",
+                    body=json.dumps(
+                        {
+                            "model": NATIVE_MODEL,
+                            "max_tokens": 16,
+                            "stream": True,
+                            "messages": [{"role": "user", "content": "hello"}],
+                        }
+                    ).encode(),
+                    headers=_native_headers() | {"Accept-Encoding": "gzip"},
+                    timeout=8.0,
+                )
+
+    assert response.status == 200
+    complete = _request_complete_events(event_log)
+    assert len(complete) == 1
+    assert complete[0]["status"] == 200
+    assert response.body == frames
+    assert len(stub.captures) == 1
+    assert stub.captures[0].headers["accept-encoding"] == "identity"
+    assert stub.captures[0].headers["anthropic-beta"] == (
+        "oauth-2025-04-20, interleaved-thinking-2025-05-14"
+    )
 
 
 def test_native_upstream_error_status_and_body_are_preserved() -> None:
