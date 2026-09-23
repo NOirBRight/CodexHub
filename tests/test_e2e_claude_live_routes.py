@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import json
 import stat
+import subprocess
 import time
 from pathlib import Path
+from shutil import copy2
 
 import pytest
 
-from scripts.e2e_claude_live_routes import deepseek_key, snapshot_claude_subscription
+from scripts.e2e_claude_live_routes import (
+    deepseek_key,
+    snapshot_claude_subscription,
+    usage_evidence,
+    verify_candidate_binding,
+)
 
 
 def test_deepseek_provider_source_extracts_only_official_key_in_memory(tmp_path: Path) -> None:
@@ -103,3 +110,109 @@ def test_claude_subscription_snapshot_fails_before_copy_when_expiring(tmp_path: 
     with pytest.raises(AssertionError, match="expires before"):
         snapshot_claude_subscription(source, destination, minimum_remaining_seconds=900)
     assert not destination.exists()
+
+
+def test_usage_evidence_requires_complete_actual_usage_from_public_snapshot() -> None:
+    snapshot = {
+        "summary": {
+            "requests": 1,
+            "successful_requests": 1,
+            "missing_usage_requests": 0,
+            "partial_usage_requests": 0,
+            "input_tokens": 15,
+            "output_tokens": 4,
+            "total_tokens": 19,
+            "cached_input_tokens": 3,
+            "cache_write_input_tokens": 2,
+            "cache_hit_rate": 20,
+        },
+        "events": [{
+            "request_id": "synthetic-private-id",
+            "model": "claude-haiku-4-5-20251001",
+            "upstream": "claude_subscription",
+            "client_id": "claude",
+            "status": 200,
+            "duration_ms": 1200,
+            "usage_source": "upstream",
+            "input_tokens": 15,
+            "cached_input_tokens": 3,
+            "cache_write_input_tokens": 2,
+            "output_tokens": 4,
+            "total_tokens": 19,
+        }],
+        "telemetry_status": {"backfill_pending": False, "lag_bytes": 0},
+    }
+
+    evidence = usage_evidence(
+        snapshot,
+        case="claude-native-haiku",
+        model="claude-haiku-4-5-20251001",
+        provider="claude_subscription",
+    )
+
+    assert evidence["provider"] == "claude_subscription"
+    assert evidence["total_tokens"] == 19
+    assert "request_id" not in evidence
+
+
+@pytest.mark.parametrize("usage_source", ["missing", "partial"])
+def test_usage_evidence_rejects_noncomplete_upstream_usage(usage_source: str) -> None:
+    snapshot = {
+        "summary": {"requests": 1, "total_tokens": 7},
+        "events": [{
+            "model": "claude-haiku-4-5-20251001",
+            "upstream": "claude_subscription",
+            "status": 200,
+            "usage_source": usage_source,
+            "input_tokens": 4,
+            "output_tokens": 3,
+            "total_tokens": 7,
+        }],
+        "telemetry_status": {"backfill_pending": False},
+    }
+
+    with pytest.raises(AssertionError, match="did not record upstream usage"):
+        usage_evidence(
+            snapshot,
+            case="claude-native-haiku",
+            model="claude-haiku-4-5-20251001",
+            provider="claude_subscription",
+        )
+
+
+def test_candidate_binding_checks_source_head_portable_name_and_resources(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    resources = (
+        "config/providers.toml",
+        "src-python/codex_proxy.py",
+        "src-python/gateway_events.py",
+        "src-python/gateway_relay_anthropic.py",
+    )
+    for relative in resources:
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"synthetic resource {relative}\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", "synthetic candidate"], check=True)
+    candidate_sha = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    portable = tmp_path / f"CodexHub_0.0.0_debug_linux_portable_{candidate_sha[:8]}"
+    portable.mkdir()
+    binary = portable / "codexhub"
+    binary.write_bytes(b"synthetic binary")
+    for relative in resources:
+        target = portable / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        copy2(source / relative, target)
+
+    verify_candidate_binding(binary, portable, source, candidate_sha)
+
+    (portable / "src-python" / "gateway_events.py").write_text("wrong candidate resource", encoding="utf-8")
+    with pytest.raises(AssertionError, match="resource differs"):
+        verify_candidate_binding(binary, portable, source, candidate_sha)
