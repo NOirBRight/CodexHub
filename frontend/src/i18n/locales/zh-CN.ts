@@ -335,7 +335,8 @@ const zhCN = {
     claudeOverrideScope: "仅检查当前用户设置及 CodexHub 进程环境。项目设置和其他终端的环境变量仍可能覆盖这些设置。",
     claudeConnectScope:
       "连接会改写当前用户 Claude Code 的默认路由和默认模型，只影响新启动的会话。",
-    claudeRestartRequired: "应用后请重启 Claude Code。",
+    claudeRestartRequired:
+      "要保留全部 Claude 订阅模型，请勿使用全局连接。先运行 codexhub-claude-gateway --list，再用 codexhub-claude-gateway MODEL 启动独立的 Gateway 会话。恢复的会话和 --model 会保留原先选定的模型。",
     claudeSearchModels: "搜索已导出模型",
     claudeDefaultModel: "默认模型",
     claudeNoModels: "没有已导出模型",

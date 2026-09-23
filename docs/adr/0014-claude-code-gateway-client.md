@@ -121,3 +121,15 @@ work under the repository verification policy; this documentation change is fast
   experience or full model picker. Current-user activation is explicit and
   reversible rather than silently extending activation to every managed client.
 - ACP/session hosting is a different product and is not part of this campaign.
+
+## 2026-09-23 addendum: preserve native subscription models
+
+Global Connect is still an explicit, reversible setting, but it replaces Claude
+Code's native route for new sessions. For users who need all subscription models
+alongside Gateway models, a process-scoped launcher is the preferred path:
+ordinary `claude` keeps the original subscription configuration, while
+`codexhub-claude-gateway MODEL` validates an exported Gateway model and supplies
+Gateway environment variables only to that process. Do not silently map a
+concrete native model such as `claude-opus-5-5` to a different provider. A
+resumed native session can pin its model even after a Gateway default is set;
+report that conflict and require a new Gateway session.

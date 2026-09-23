@@ -110,6 +110,24 @@ def run_claude(claude_bin: Path, env: dict[str, str], root: Path, sentinel: str)
     assert sentinel in str(payload.get("result", "")), "Claude Code response missed sentinel"
 
 
+def run_claude_launcher(launcher: Path, model: str, env: dict[str, str],
+                        root: Path, sentinel: str) -> None:
+    result = subprocess.run(
+        [str(launcher), model, "-p", "--permission-mode", "plan",
+         "--output-format", "json", f"Reply with exactly {sentinel}."],
+        cwd=root, env=env, capture_output=True, text=True, timeout=180,
+    )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        payload = {}
+    assert result.returncode == 0 and payload.get("is_error") is False, (
+        f"isolated Claude launcher failed: exit={result.returncode}, "
+        f"subtype={payload.get('subtype', 'no-json')}"
+    )
+    assert sentinel in str(payload.get("result", "")), "Claude launcher response missed sentinel"
+
+
 def run_chat(gateway_port: int, key: str, sentinel: str) -> None:
     request = Request(
         f"http://127.0.0.1:{gateway_port}/v1/providers/deepseek/chat/completions",
@@ -323,6 +341,30 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                 print("PASS: candidate DeepSeek official balance query", flush=True)
 
             failures: list[str] = []
+            launcher = resource_root / "scripts" / "codexhub-claude-gateway.sh"
+            for model, outbound, label in (
+                ("claude-codexhub-deepseek-deepseek-flash", "anthropic_messages", "deepseek"),
+                ("claude-codexhub-gpt-6-luna", "responses", "luna"),
+            ):
+                if f"claude-launcher-{label}" not in selected:
+                    continue
+                try:
+                    assert launcher.is_file(), "candidate Claude launcher is missing"
+                    client_env = {name: value for name, value in env.items()
+                                  if name != "DEEPSEEK_API_KEY"}
+                    client_env["CODEXHUB_GATEWAY_SETTINGS"] = str(runtime / "proxy" / "settings.json")
+                    if not preflight_only:
+                        run_claude_launcher(launcher, model, client_env, root,
+                                            f"CLAUDE_LAUNCHER_{label.upper()}_OK")
+                        wait_for_event(bridge_port,
+                                       "deepseek/deepseek-flash" if label == "deepseek" else "gpt-6-luna",
+                                       "anthropic_messages", outbound)
+                    assert json.loads((config / "settings.json").read_text()) == {"theme": "dark"}
+                    print(f"PASS: isolated launcher -> {label}; native Claude settings unchanged",
+                          flush=True)
+                except (AssertionError, HTTPError) as error:
+                    failures.append(f"launcher-{label}: {error}")
+                    print(f"FAIL: launcher-{label}: {error}", flush=True)
             for model, outbound, label in (
                 ("deepseek/deepseek-flash", "anthropic_messages", "deepseek"),
                 ("gpt-6-luna", "responses", "luna"),
@@ -416,7 +458,9 @@ def main() -> None:
     parser.add_argument("--catalog", type=Path,
                         default=home / ".codex" / "model-catalogs" / "codexhub-model-catalog.json")
     parser.add_argument("--case", action="append", choices=(
-        "claude-deepseek", "claude-luna", "chat-deepseek", "tools-deepseek", "responses-deepseek", "responses-luna",
+        "claude-deepseek", "claude-luna", "claude-launcher-deepseek",
+        "claude-launcher-luna", "chat-deepseek", "tools-deepseek",
+        "responses-deepseek", "responses-luna",
     ))
     args = parser.parse_args()
     selected = set(args.case or (

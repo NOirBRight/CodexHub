@@ -312,7 +312,10 @@ def dispatch_proxy_post_exception(exc: BaseException, live: PostRequestLiveState
             return
         error_code = "model_identity_error"
         identity = _retry_identity_from_context(adapter_event_context)
-        detail = safe_upstream_error_detail(exc, redact_identity=identity)
+        detail = gateway_errors.model_identity_error_detail(
+            exc, inbound_format=inbound_format
+        )
+        detail = _redact_identity_in_text(detail, identity)
         detail = _redact_identity_in_text(detail, exc.model_slug)
         write_proxy_event(
             "request_error",

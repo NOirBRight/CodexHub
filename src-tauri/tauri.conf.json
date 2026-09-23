@@ -41,6 +41,7 @@
       "../src-python/gateway_compat/*.py": "src-python/gateway_compat",
       "../src-python/vendor/*.whl": "src-python/vendor",
       "../scripts/xai_device_login.py": "scripts/xai_device_login.py",
+      "../scripts/codexhub-claude-gateway.sh": "scripts/codexhub-claude-gateway.sh",
       "resources/python/*": "python"
     },
     "icon": [

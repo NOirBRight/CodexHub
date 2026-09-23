@@ -186,3 +186,33 @@ def test_messages_accepts_projected_model_id(harness: GatewayHarness) -> None:
     assert harness.stub is not None
     sent = json.loads(harness.stub.captures[0].body)
     assert sent["model"] == "glm-5.2"
+
+
+def test_stale_claude_session_model_reports_how_to_select_gateway_model(
+    harness: GatewayHarness,
+) -> None:
+    response = request_gateway(
+        harness.host,
+        harness.port,
+        "POST",
+        "/v1/messages",
+        body=json.dumps(
+            {
+                "model": "claude-opus-5-5",
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "compact this"}],
+            }
+        ).encode(),
+        headers={
+            "Authorization": f"Bearer {GATEWAY_CLIENT_KEY}",
+            "Content-Type": "application/json",
+            "Connection": "close",
+        },
+        timeout=8.0,
+    )
+    assert response.status == 400
+    payload = json.loads(response.body)
+    assert payload["codexhub_error"]["code"] == "gateway.model_resolution"
+    assert payload["codexhub_error"]["details"]["reason"] == "unsupported_model"
+    assert "Claude Code model is not exported" in payload["error"]
+    assert "/model" in payload["error"]

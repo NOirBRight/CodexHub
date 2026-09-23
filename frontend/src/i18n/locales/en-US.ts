@@ -336,7 +336,8 @@ const enUS = {
     claudeOverrideScope: "Checks cover current-user settings and the CodexHub process environment. Project settings and other terminals may still override them.",
     claudeConnectScope:
       "Connect changes this user's Claude Code default route and default model for newly launched sessions.",
-    claudeRestartRequired: "Restart Claude Code after applying.",
+    claudeRestartRequired:
+      "To keep all Claude subscription models, leave global Connect off. Use codexhub-claude-gateway --list, then codexhub-claude-gateway MODEL for a separate Gateway session. Resumed sessions and --model keep their selected model.",
     claudeSearchModels: "Search exported models",
     claudeDefaultModel: "Default model",
     claudeNoModels: "No exported models",
