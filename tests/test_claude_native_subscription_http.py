@@ -12,6 +12,7 @@ import gateway_exchange_bindings
 import gateway_events
 import gateway_transport
 import pytest
+from scripts import e2e_claude_live_routes as live_e2e
 from tests.gateway_harness import GATEWAY_CLIENT_KEY, GatewayHarness, request_gateway
 
 
@@ -208,7 +209,7 @@ def test_native_sse_usage_merges_snapshots_without_repeated_token_sums(tmp_path)
     assert complete[0]["usage_total_tokens"] == 15
 
 
-def test_native_incomplete_sse_preserves_partial_usage_and_marks_failure(tmp_path) -> None:
+def test_native_incomplete_sse_preserves_partial_usage_and_marks_failure(tmp_path, monkeypatch) -> None:
     frames = (
         b'event: message_start\ndata: {"type":"message_start","message":{"type":"message","model":"claude-opus-5-5","usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":0}}}\n\n'
         b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
@@ -255,6 +256,32 @@ def test_native_incomplete_sse_preserves_partial_usage_and_marks_failure(tmp_pat
         and event.get("request_id") == complete[0]["request_id"]
         for event in records
     ), "native partial usage must remain one downstream request without retry accounting"
+
+    public_events = [
+        {
+            field: record[field]
+            for field in (
+                "event", "request_id", "model", "upstream", "inbound_format",
+                "upstream_format", "status", "error", "failure_class", "detail",
+            )
+            if field in record
+        } | {"category": "proxy"}
+        for record in records
+    ]
+    monkeypatch.setattr(live_e2e, "events", lambda _port: public_events)
+    diagnostics = live_e2e.gateway_route_diagnostics(
+        12345,
+        model=NATIVE_MODEL,
+        inbound="anthropic_messages",
+        outbound="anthropic_messages",
+    )
+    incomplete = next(row for row in diagnostics if row.get("failure_class") == "upstream_stream_incomplete")
+    assert incomplete["event"] == "transparent_stream_closed"
+    assert incomplete["http_status"] == 502
+    assert incomplete["error_class"] == "UpstreamStreamIncompleteError"
+    assert "upstream_http_status" not in incomplete
+    assert "detail" not in incomplete
+    assert "hello" not in json.dumps(diagnostics)
     assert b"hello" not in event_log.read_bytes()
 
 

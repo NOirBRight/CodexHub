@@ -37,6 +37,13 @@ MAX_LIVE_GENERATION_ATTEMPTS = 16
 MAX_CASE_TIMEOUT_SECONDS = 120
 MAX_OVERALL_TIMEOUT_SECONDS = 600
 CLAUDE_OUTPUT_TOKEN_CAP = 128
+_SAFE_DIAGNOSTIC_LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,79}\Z")
+_SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_SAFE_ERROR_CLASSES = frozenset({
+    "HTTPError", "IncompleteRead", "OSError", "SseFrameTooLargeError",
+    "TimeoutError", "UpstreamStreamErrorEvent", "UpstreamStreamIncompleteError",
+    "URLError", "ValueError",
+})
 
 
 def _deepseek_key_from_provider_toml(path: Path) -> str:
@@ -201,6 +208,127 @@ def events(bridge_port: int) -> list[dict[str, object]]:
     return response["value"]
 
 
+def matching_gateway_route_events(
+    bridge_port: int, *, model: str, inbound: str, outbound: str,
+) -> list[dict[str, object]]:
+    accepted_models = {model, f"openai/{model}"}
+    recent = events(bridge_port)
+
+    def expected_format(value: object, expected: str) -> bool:
+        return value is None or value == expected
+
+    def request_id(value: object) -> bool:
+        return isinstance(value, str) and _SAFE_REQUEST_ID.fullmatch(value) is not None
+
+    matching_request_ids = {
+        event.get("request_id")
+        for event in recent
+        if isinstance(event.get("model"), str) and event["model"] in accepted_models
+        and expected_format(event.get("inbound_format"), inbound)
+        and expected_format(event.get("upstream_format"), outbound)
+        and request_id(event.get("request_id"))
+    }
+    matching: list[dict[str, object]] = []
+    for event in recent:
+        observed_model = event.get("model")
+        request_id = event.get("request_id")
+        model_matches = isinstance(observed_model, str) and observed_model in accepted_models
+        request_matches = observed_model is None and request_id in matching_request_ids
+        if (
+            (not model_matches and not request_matches)
+            or not expected_format(event.get("inbound_format"), inbound)
+            or not expected_format(event.get("upstream_format"), outbound)
+        ):
+            continue
+        matching.append(event)
+    return matching
+
+
+def gateway_route_request_count(
+    bridge_port: int, *, model: str, inbound: str, outbound: str,
+) -> int:
+    """Count distinct Gateway request IDs for a route (one upstream call each here)."""
+    request_ids = {
+        event.get("request_id")
+        for event in matching_gateway_route_events(
+            bridge_port, model=model, inbound=inbound, outbound=outbound,
+        )
+        if isinstance(event.get("request_id"), str)
+        and _SAFE_REQUEST_ID.fullmatch(event["request_id"])
+    }
+    return len(request_ids)
+
+
+def gateway_route_diagnostics(
+    bridge_port: int,
+    *,
+    model: str,
+    inbound: str,
+    outbound: str,
+) -> list[dict[str, object]]:
+    """Project recent Gateway events to a small, body-free diagnostic allowlist."""
+    diagnostics: list[dict[str, object]] = []
+    for event in matching_gateway_route_events(
+        bridge_port, model=model, inbound=inbound, outbound=outbound,
+    ):
+        observed_model = event.get("model")
+        request_id = event.get("request_id")
+        model_matches = isinstance(observed_model, str)
+        event_name = event.get("event")
+        if not isinstance(event_name, str) or not _SAFE_DIAGNOSTIC_LABEL.fullmatch(event_name):
+            continue
+        row: dict[str, object] = {"event": event_name}
+        if isinstance(request_id, str) and _SAFE_REQUEST_ID.fullmatch(request_id):
+            row["request_id"] = request_id
+        row["model"] = observed_model if model_matches else model
+        for name, source in (
+            ("upstream", "upstream"),
+            ("inbound_format", "inbound_format"),
+            ("upstream_format", "upstream_format"),
+        ):
+            value = event.get(source)
+            if isinstance(value, str) and _SAFE_DIAGNOSTIC_LABEL.fullmatch(value):
+                row[name] = value
+        status = event.get("status")
+        if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+            row["http_status"] = status
+        category = event.get("category")
+        if isinstance(category, str) and category in {
+            "recovery", "streaming", "tool_call_subagent", "codex_auth",
+            "model_id", "external_upstream", "proxy",
+        }:
+            row["error_category"] = category
+        error = event.get("error")
+        if isinstance(error, str) and error in _SAFE_ERROR_CLASSES:
+            row["error_class"] = error
+        failure_class = event.get("failure_class")
+        if isinstance(failure_class, str) and _SAFE_DIAGNOSTIC_LABEL.fullmatch(failure_class):
+            row["failure_class"] = failure_class
+        terminal_kind = event.get("terminal_kind")
+        if isinstance(terminal_kind, str) and terminal_kind in {
+            "success", "error", "missing", "incomplete",
+        }:
+            row["sse_terminal_kind"] = terminal_kind
+        if (
+            event_name == "request_error"
+            and row.get("error_class") == "HTTPError"
+            and "http_status" in row
+        ):
+            row["upstream_http_status"] = row["http_status"]
+        diagnostics.append(row)
+        if len(diagnostics) >= 12:
+            break
+    return diagnostics
+
+
+def write_private_evidence(path: Path, artifact: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        json.dump(artifact, output, ensure_ascii=True, indent=2)
+        output.write("\n")
+
+
 def reserve_generation_budget(
     *,
     case: str,
@@ -233,10 +361,13 @@ def wait_for_event(bridge_port: int, model: str, inbound: str,
         if matching:
             return
         time.sleep(0.2)
-    summary = [(event.get("model"), event.get("inbound_format"),
-                event.get("upstream_format"), event.get("status"))
-               for event in events(bridge_port)[:12]]
-    raise AssertionError(f"missing successful {inbound}->{outbound} event for {model}: {summary}")
+    diagnostics = gateway_route_diagnostics(
+        bridge_port, model=model, inbound=inbound, outbound=outbound,
+    )
+    raise AssertionError(
+        f"missing successful {inbound}->{outbound} event for {model}; "
+        f"sanitized diagnostics={json.dumps(diagnostics, separators=(',', ':'))}"
+    )
 
 
 def _usage_summary_evidence(snapshot: dict[str, object]) -> dict[str, object]:
@@ -796,6 +927,42 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                 print("PASS: candidate DeepSeek official balance query", flush=True)
 
             failures: list[str] = []
+            failure_diagnostics: list[dict[str, object]] = []
+            route_request_counts: list[dict[str, object]] = []
+
+            def record_route_failure(
+                case: str,
+                error: BaseException,
+                *,
+                model: str,
+                inbound: str,
+                outbound: str,
+            ) -> None:
+                failures.append(f"{case}: {error}")
+                route_request_counts.append({
+                    "case": case,
+                    "model": model,
+                    "inbound_format": inbound,
+                    "upstream_format": outbound,
+                    "observed_gateway_request_ids": gateway_route_request_count(
+                        bridge_port, model=model, inbound=inbound, outbound=outbound,
+                    ),
+                })
+                observed = gateway_route_diagnostics(
+                    bridge_port, model=model, inbound=inbound, outbound=outbound,
+                )
+                failure_diagnostics.extend(observed)
+                if not observed:
+                    failure_diagnostics.append({
+                        "case": case,
+                        "model": model,
+                        "inbound_format": inbound,
+                        "upstream_format": outbound,
+                        "error_category": "no_matching_gateway_event",
+                        "failure_class": "request_not_observed",
+                    })
+                print(f"FAIL: {case}: {error}", flush=True)
+
             usage_rows: list[dict[str, object]] = []
             usage_summary: dict[str, object] | None = None
             packaged_usage_ui_verified = False
@@ -832,6 +999,16 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                             model=model, timeout_seconds=timeout_seconds,
                         )
                         wait_for_event(bridge_port, model, "anthropic_messages", "anthropic_messages")
+                        route_request_counts.append({
+                            "case": "claude-native-haiku",
+                            "model": model,
+                            "inbound_format": "anthropic_messages",
+                            "upstream_format": "anthropic_messages",
+                            "observed_gateway_request_ids": gateway_route_request_count(
+                                bridge_port, model=model,
+                                inbound="anthropic_messages", outbound="anthropic_messages",
+                            ),
+                        })
                         row, usage_summary = wait_for_usage_evidence(
                             bridge_port, case="claude-native-haiku", model=model,
                             provider="claude_subscription",
@@ -851,8 +1028,10 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                         else:
                             print(f"UNVERIFIED: packaged Usage page: {packaged_usage_ui_screenshot}", flush=True)
                 except (AssertionError, HTTPError) as error:
-                    failures.append(f"claude-native-haiku: {error}")
-                    print(f"FAIL: claude-native-haiku: {error}", flush=True)
+                    record_route_failure(
+                        "claude-native-haiku", error, model=model,
+                        inbound="anthropic_messages", outbound="anthropic_messages",
+                    )
             for model, outbound, label in (
                 ("claude-codexhub-deepseek-deepseek-flash", "anthropic_messages", "deepseek"),
                 ("claude-codexhub-gpt-6-luna", "responses", "luna"),
@@ -881,8 +1060,11 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     print(f"PASS: isolated launcher -> {label}; native Claude settings unchanged",
                           flush=True)
                 except (AssertionError, HTTPError) as error:
-                    failures.append(f"launcher-{label}: {error}")
-                    print(f"FAIL: launcher-{label}: {error}", flush=True)
+                    record_route_failure(
+                        f"launcher-{label}", error,
+                        model="deepseek/deepseek-flash" if label == "deepseek" else "gpt-6-luna",
+                        inbound="anthropic_messages", outbound=outbound,
+                    )
             for model, outbound, label in (
                 ("deepseek/deepseek-flash", "anthropic_messages", "deepseek"),
                 ("gpt-6-luna", "responses", "luna"),
@@ -918,10 +1100,10 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     wait_for_event(bridge_port, model, "anthropic_messages", outbound)
                     print(f"PASS: Claude Code -> Anthropic Messages -> {label} {outbound}", flush=True)
                 except (AssertionError, HTTPError) as error:
-                    if label.startswith("deepseek") and "429" in str(error):
-                        wait_for_event(bridge_port, model, "anthropic_messages", outbound, 429)
-                    failures.append(f"{label}: {error}")
-                    print(f"FAIL: {label}: {error}", flush=True)
+                    record_route_failure(
+                        label, error, model=model,
+                        inbound="anthropic_messages", outbound=outbound,
+                    )
 
             if "chat-deepseek" in selected and not preflight_only:
                 try:
@@ -936,8 +1118,10 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                                    "chat_completions", "chat_completions")
                     print("PASS: Chat Completions endpoint -> DeepSeek Official V4.1 Flash", flush=True)
                 except AssertionError as error:
-                    failures.append(f"deepseek-chat: {error}")
-                    print(f"FAIL: deepseek-chat: {error}", flush=True)
+                    record_route_failure(
+                        "deepseek-chat", error, model="deepseek/deepseek-flash",
+                        inbound="chat_completions", outbound="chat_completions",
+                    )
             if "tools-deepseek" in selected and not preflight_only:
                 try:
                     used_attempts, timeout_seconds = reserve_generation_budget(
@@ -948,8 +1132,10 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     )
                     run_deepseek_tools(gateway_port, gateway_key, timeout_seconds)
                 except AssertionError as error:
-                    failures.append(f"deepseek-tools: {error}")
-                    print(f"FAIL: deepseek-tools: {error}", flush=True)
+                    record_route_failure(
+                        "deepseek-tools", error, model="deepseek/deepseek-flash",
+                        inbound="chat_completions", outbound="chat_completions",
+                    )
             if "responses-luna" in selected and not preflight_only:
                 try:
                     used_attempts, timeout_seconds = reserve_generation_budget(
@@ -963,8 +1149,10 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     wait_for_event(bridge_port, "gpt-6-luna", "responses", "responses")
                     print("PASS: Responses endpoint -> Codex Luna max", flush=True)
                 except AssertionError as error:
-                    failures.append(f"luna-max-responses: {error}")
-                    print(f"FAIL: luna-max-responses: {error}", flush=True)
+                    record_route_failure(
+                        "luna-max-responses", error, model="gpt-6-luna",
+                        inbound="responses", outbound="responses",
+                    )
             if "responses-deepseek" in selected and not preflight_only:
                 try:
                     used_attempts, timeout_seconds = reserve_generation_budget(
@@ -978,14 +1166,40 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     wait_for_event(bridge_port, "deepseek/deepseek-flash", "responses", "responses")
                     print("PASS: Responses endpoint -> DeepSeek Official V4.1 Flash", flush=True)
                 except AssertionError as error:
-                    failures.append(f"deepseek-responses: {error}")
-                    print(f"FAIL: deepseek-responses: {error}", flush=True)
+                    record_route_failure(
+                        "deepseek-responses", error, model="deepseek/deepseek-flash",
+                        inbound="responses", outbound="responses",
+                    )
             detached = invoke(bridge_port, "switch_gateway_client_route", {
                 "client_id": "claude", "mode": "official", "role_mappings": {},
             })
-            assert detached.get("ok") is True and claude_info(bridge_port)["route_mode"] == "official"
-            assert json.loads((config / "settings.json").read_text()) == {"theme": "dark"}
-            assert not failures, "; ".join(failures)
+            if detached.get("ok") is not True or claude_info(bridge_port)["route_mode"] != "official":
+                failures.append("Claude route did not restore to official mode")
+                failure_diagnostics.append({
+                    "event": "route_restore",
+                    "error_category": "isolated_configuration",
+                    "failure_class": "official_route_not_restored",
+                })
+            if json.loads((config / "settings.json").read_text()) != {"theme": "dark"}:
+                failures.append("isolated Claude settings changed during E2E")
+                failure_diagnostics.append({
+                    "event": "settings_integrity",
+                    "error_category": "isolated_configuration",
+                    "failure_class": "isolated_settings_changed",
+                })
+            changed_sources = [
+                name
+                for name, (path, before) in (source_fingerprints or {}).items()
+                if credential_fingerprint(path) != before
+            ]
+            if changed_sources:
+                failures.append("source credential files changed during isolated E2E")
+                failure_diagnostics.append({
+                    "event": "source_credential_check",
+                    "error_category": "credential_integrity",
+                    "failure_class": "source_file_changed",
+                    "changed_source_count": len(changed_sources),
+                })
             if not preflight_only and evidence_out is not None:
                 if not candidate_sha or not re.fullmatch(r"[0-9a-f]{40}", candidate_sha):
                     raise AssertionError("live evidence requires the exact 40-character candidate SHA")
@@ -993,7 +1207,7 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     "schema_version": 1,
                     "candidate_sha": candidate_sha,
                     "claude_cli_version": claude_version,
-                    "status": "passed",
+                    "status": "failed" if failures else "passed",
                     "bounds": {
                         "max_live_generation_attempts": max_attempts,
                         "live_generation_attempts": used_attempts,
@@ -1002,13 +1216,29 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                         "max_output_tokens": CLAUDE_OUTPUT_TOKEN_CAP,
                     },
                     "verified_routes": usage_rows,
+                    "route_request_counts": route_request_counts,
+                    "total_observed_gateway_request_ids": sum(
+                        int(item["observed_gateway_request_ids"])
+                        for item in route_request_counts
+                    ),
                     "usage_statistics_snapshot": usage_summary,
+                    "failure_diagnostics": failure_diagnostics,
                     "rendered_packaged_usage_statistics_ui_verified": packaged_usage_ui_verified,
                     "packaged_usage_screenshot": packaged_usage_ui_screenshot,
                     "acceptance_status": {
-                        "native_haiku_through_gateway": "verified" if "claude-native-haiku" in selected else "unverified",
-                        "native_haiku_persisted_usage": "verified" if usage_rows else "unverified",
-                        "packaged_usage_statistics_ui": "verified" if packaged_usage_ui_verified else "unverified",
+                        "native_haiku_through_gateway": (
+                            "failed" if any(item.startswith("claude-native-haiku:") for item in failures)
+                            else "verified" if any(row.get("case") == "claude-native-haiku" for row in usage_rows)
+                            else "unverified"
+                        ),
+                        "native_haiku_persisted_usage": (
+                            "verified" if any(row.get("case") == "claude-native-haiku" for row in usage_rows)
+                            else "failed" if any(item.startswith("claude-native-haiku:") for item in failures)
+                            else "unverified"
+                        ),
+                        "packaged_usage_statistics_ui": (
+                            "verified" if packaged_usage_ui_verified else "unverified"
+                        ),
                         "picker_coexistence": "unverified",
                         "resumed_session_switching": "unverified",
                         "explicit_native_opus_5_5_identity": "unverified",
@@ -1017,12 +1247,12 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                         "tools_compression_cancellation_cache_hit_reuse": "unverified",
                     },
                 }
-                evidence_out.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                descriptor = os.open(evidence_out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-                    json.dump(artifact, output, ensure_ascii=True, indent=2)
-                    output.write("\n")
-                print(f"PASS: sanitized evidence saved to {evidence_out}", flush=True)
+                write_private_evidence(evidence_out, artifact)
+                print(
+                    f"Saved sanitized E2E evidence ({artifact['status']}): {evidence_out}",
+                    flush=True,
+                )
+            assert not failures, "; ".join(failures)
         finally:
             if gateway_started:
                 invoke(bridge_port, "stop_proxy", {})
@@ -1032,16 +1262,6 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
             except subprocess.TimeoutExpired:
                 bridge.kill()
                 bridge.wait(timeout=5)
-            changed_sources = [
-                name
-                for name, (path, before) in (source_fingerprints or {}).items()
-                if credential_fingerprint(path) != before
-            ]
-            if changed_sources:
-                raise AssertionError(
-                    "source credential files changed during isolated E2E: "
-                    + ", ".join(sorted(changed_sources))
-                )
 
 
 def main() -> None:

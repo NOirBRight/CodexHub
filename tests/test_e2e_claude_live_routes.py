@@ -219,6 +219,92 @@ def test_candidate_binding_checks_source_head_portable_name_and_resources(tmp_pa
         verify_candidate_binding(binary, portable, source, candidate_sha)
 
 
+def test_failure_diagnostics_allowlist_omits_upstream_detail_and_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture_events = [{
+        "event": "request_error",
+        "request_id": "req-safe-123",
+        "model": "claude-haiku-4-5-20251001",
+        "upstream": "claude_subscription",
+        "inbound_format": "anthropic_messages",
+        "upstream_format": "anthropic_messages",
+        "status": 502,
+        "error": "HTTPError",
+        "failure_class": "quick_transient",
+        "category": "external_upstream",
+        "terminal_kind": "error",
+        "detail": "Bearer do-not-record; prompt do-not-record; raw upstream response",
+        "headers": {"authorization": "do-not-record"},
+    }, {
+        "event": "request_error",
+        "request_id": "req-safe-124",
+        "model": "claude-haiku-4-5-20251001",
+        "upstream": "claude_subscription",
+        "inbound_format": "anthropic_messages",
+        "upstream_format": "anthropic_messages",
+        "status": 502,
+        "error": "raw error detail must not pass this label filter",
+        "detail": "another private response body",
+    }, {
+        "event": "request_error",
+        "request_id": "req-safe-123",
+        "model": None,
+        "upstream": "claude_subscription",
+        "status": 502,
+        "error": "HTTPError",
+        "category": "external_upstream",
+        "detail": "body omitted from the public event projection",
+    }]
+    monkeypatch.setattr(live_routes, "events", lambda _port: fixture_events)
+
+    diagnostics = live_routes.gateway_route_diagnostics(
+        12345,
+        model="claude-haiku-4-5-20251001",
+        inbound="anthropic_messages",
+        outbound="anthropic_messages",
+    )
+    encoded = json.dumps(diagnostics)
+
+    assert diagnostics[0]["upstream_http_status"] == 502
+    assert diagnostics[0]["error_category"] == "external_upstream"
+    assert diagnostics[0]["failure_class"] == "quick_transient"
+    assert diagnostics[0]["sse_terminal_kind"] == "error"
+    assert "error_class" not in diagnostics[1]
+    assert diagnostics[2]["request_id"] == "req-safe-123"
+    assert diagnostics[2]["model"] == "claude-haiku-4-5-20251001"
+    assert "inbound_format" not in diagnostics[2]
+    assert live_routes.gateway_route_request_count(
+        12345,
+        model="claude-haiku-4-5-20251001",
+        inbound="anthropic_messages",
+        outbound="anthropic_messages",
+    ) == 2
+    assert "do-not-record" not in encoded
+    assert "private response body" not in encoded
+    assert "headers" not in encoded
+
+
+def test_private_failure_evidence_is_exclusive_and_mode_0600(tmp_path: Path) -> None:
+    destination = tmp_path / "private" / "failed-e2e.json"
+    artifact = {
+        "status": "failed",
+        "failure_diagnostics": [{
+            "event": "request_error",
+            "model": "claude-haiku-4-5-20251001",
+            "http_status": 502,
+            "error_category": "external_upstream",
+        }],
+    }
+
+    live_routes.write_private_evidence(destination, artifact)
+
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert json.loads(destination.read_text(encoding="utf-8")) == artifact
+    with pytest.raises(FileExistsError):
+        live_routes.write_private_evidence(destination, artifact)
+
+
 def test_preflight_requires_candidate_sha_and_portable_resource_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
