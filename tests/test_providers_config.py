@@ -1484,8 +1484,14 @@ enabled = true
 
         self.assertEqual(
             [provider.id for provider in providers],
-            ["ollama-cloud", "volc", "minimax-cn", "kimi-cn", "kimi", "commandcode", "opencode-go", "xai"],
+            ["ollama-cloud", "volc", "minimax-cn", "kimi-cn", "kimi", "commandcode", "opencode-go", "xai", "deepseek"],
         )
+        deepseek = next(provider for provider in providers if provider.id == "deepseek")
+        self.assertEqual(deepseek.upstream_format, "auto")
+        self.assertEqual(deepseek.available_upstream_formats,
+                         ("responses", "chat_completions", "anthropic_messages"))
+        self.assertEqual([model.id for model in deepseek.models],
+                         ["deepseek-flash", "deepseek-v4-pro"])
         xai = next(provider for provider in providers if provider.id == "xai")
         grok46 = next(model for model in xai.models if model.id == "grok-4.6")
         grok45 = next(model for model in xai.models if model.id == "grok-4.5")

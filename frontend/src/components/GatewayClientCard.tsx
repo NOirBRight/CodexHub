@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { ClaudeSettingsDialog } from "./ClaudeSettingsDialog";
+import claudeIcon from "../assets/claude-code-icon.svg";
+import { useState } from "react";
 import { WorkspaceDialog } from "./workspace/WorkspaceDialog";
 import { DefaultSubagentPicker } from "./workspace/ProviderWorkspaceView";
 import { api, messageFromError } from "../lib/tauri";
@@ -73,44 +75,13 @@ export function GatewayClientCard({
   const [preview, setPreview] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
-  const [claudeQuery, setClaudeQuery] = useState("");
-  const [claudeDefault, setClaudeDefault] = useState(exportedModels[0]?.id ?? "");
-  const [claudeConfirmed, setClaudeConfirmed] = useState(false);
-  const [claudeRoles, setClaudeRoles] = useState<Record<string, string>>({
-    haiku: "",
-    sonnet: "",
-    opus: "",
-    fable: "",
-    subagent: "",
-  });
-  const exportedIds = new Set(exportedModels.map((model) => model.id));
-  const claudeMappingInvalid = Object.values(claudeRoles).some(
-    (value) => value && !exportedIds.has(value),
-  );
   const isClaude = client.id === "claude";
-  useEffect(() => {
-    if (!claudeDefault && exportedModels[0]) {
-      setClaudeDefault(exportedModels[0].id);
-    }
-  }, [claudeDefault, exportedModels]);
-  const visibleClaudeModels = exportedModels.filter((model) => {
-    const query = claudeQuery.trim().toLowerCase();
-    if (!query) return true;
-    return (
-      model.id.toLowerCase().includes(query) ||
-      model.label.toLowerCase().includes(query)
-    );
-  });
   function requestToggle(connect: boolean) {
-    if (isClaude && connect && !claudeConfirmed) {
+    if (isClaude && connect) {
       setDetailsOpen(true);
       return;
     }
-    onToggle(
-      connect,
-      isClaude ? claudeDefault || null : null,
-      isClaude ? claudeRoles : null,
-    );
+    onToggle(connect);
   }
   async function loadPreview() {
     setDetailBusy(true);
@@ -222,185 +193,116 @@ export function GatewayClientCard({
           </div>
         </div>
       </section>
-      <WorkspaceDialog
-        open={detailsOpen}
-        title={t("workspace.clientDetails", { name })}
-        onClose={() => setDetailsOpen(false)}
-        actions={
-          <button
-            className="ws-primary"
-            disabled={
-              disabled ||
-              detailBusy ||
-              (isClaude && !checked && (!claudeConfirmed || claudeMappingInvalid))
+      {isClaude ? (
+        detailsOpen && (
+          <ClaudeSettingsDialog
+            info={info}
+            models={exportedModels}
+            busy={busy}
+            connected={
+              switchCheckedFromState(connectionStateFromInfo(info)) ||
+              Boolean(info?.managed_by_current_app && info.route_mode === "stale")
             }
-            onClick={() => requestToggle(!checked)}
-          >
-            {label} ·{" "}
-            {t(checked ? "workspace.disconnect" : "workspace.connect")}
-          </button>
-        }
-      >
-        <div className="ws-client-detail-heading">
-          <ClientLogo id={client.id} name={name} />
-          <div>
-            <b>{name}</b>
-            <small>{kindLabel}</small>
-          </div>
-        </div>
-        <dl className="ws-detail-list">
-          <div>
-            <dt>{t("workspace.connectionState")}</dt>
-            <dd>{label}</dd>
-          </div>
-          <div>
-            <dt>{t("workspace.configPath")}</dt>
-            <dd>
-              <code>{configPath || "—"}</code>
-            </dd>
-          </div>
-          <div>
-            <dt>{t("workspace.installedVersion")}</dt>
-            <dd>{info?.current_version || t("common.unknown")}</dd>
-          </div>
-          <div>
-            <dt>{t("workspace.latestVersion")}</dt>
-            <dd>{info?.latest_version || t("workspace.notChecked")}</dd>
-          </div>
-          <div>
-            <dt>{t("workspace.ownership")}</dt>
-            <dd>{info?.route_owner || "—"}</dd>
-          </div>
-          {isClaude ? (
+            onClose={() => setDetailsOpen(false)}
+            onToggle={onToggle}
+            onRefresh={onRefresh}
+          />
+        )
+      ) : (
+        <WorkspaceDialog
+          open={detailsOpen}
+          title={t("workspace.clientDetails", { name })}
+          onClose={() => setDetailsOpen(false)}
+          actions={
+            <button
+              className="ws-primary"
+              disabled={disabled || detailBusy}
+              onClick={() => requestToggle(!checked)}
+            >
+              {label} ·{" "}
+              {t(checked ? "workspace.disconnect" : "workspace.connect")}
+            </button>
+          }
+        >
+          <div className="ws-client-detail-heading">
+            <ClientLogo id={client.id} name={name} />
             <div>
-              <dt>{t("workspace.note")}</dt>
-              <dd>{t("gateway.claudeCompatibilityState")}</dd>
+              <b>{name}</b>
+              <small>{kindLabel}</small>
             </div>
-          ) : null}
-          {info?.status?.includes("allowed_models") ? (
+          </div>
+          <dl className="ws-detail-list">
             <div>
-              <dt>{t("workspace.note")}</dt>
-              <dd>{t("gateway.grokAllowedModelsMayHide")}</dd>
+              <dt>{t("workspace.connectionState")}</dt>
+              <dd>{label}</dd>
             </div>
-          ) : null}
-        </dl>
-        {isClaude ? (
-          <div className="ws-detail-list" style={{ display: "grid", gap: 8 }}>
-            <p>{t("gateway.claudeConnectScope")}</p>
-            <p>{t("gateway.claudeRestartRequired")}</p>
-            <label>
-              {t("gateway.claudeSearchModels")}
-              <input
-                value={claudeQuery}
-                onChange={(event) => setClaudeQuery(event.target.value)}
-                aria-label={t("gateway.claudeSearchModels")}
-              />
-            </label>
-            <label>
-              {t("gateway.claudeDefaultModel")}
-              <select
-                value={claudeDefault}
-                onChange={(event) => setClaudeDefault(event.target.value)}
-                aria-label={t("gateway.claudeDefaultModel")}
+            <div>
+              <dt>{t("workspace.configPath")}</dt>
+              <dd>
+                <code>{configPath || "—"}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>{t("workspace.installedVersion")}</dt>
+              <dd>{info?.current_version || t("common.unknown")}</dd>
+            </div>
+            <div>
+              <dt>{t("workspace.latestVersion")}</dt>
+              <dd>{info?.latest_version || t("workspace.notChecked")}</dd>
+            </div>
+            <div>
+              <dt>{t("workspace.ownership")}</dt>
+              <dd>{info?.route_owner || "—"}</dd>
+            </div>
+            {info?.status?.includes("allowed_models") ? (
+              <div>
+                <dt>{t("workspace.note")}</dt>
+                <dd>{t("gateway.grokAllowedModelsMayHide")}</dd>
+              </div>
+            ) : null}
+          </dl>
+          <div className="ws-actions">
+            {onRefresh && (
+              <button
+                className="ws-button"
+                disabled={detailBusy}
+                onClick={async () => {
+                  setDetailBusy(true);
+                  try {
+                    await onRefresh();
+                  } finally {
+                    setDetailBusy(false);
+                  }
+                }}
               >
-                {visibleClaudeModels.length === 0 ? (
-                  <option value="">{t("gateway.claudeNoModels")}</option>
-                ) : (
-                  visibleClaudeModels.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.label}
-                    </option>
-                  ))
-                )}
-              </select>
-            </label>
-            {(
-              [
-                ["haiku", "gateway.claudeRoleHaiku"],
-                ["sonnet", "gateway.claudeRoleSonnet"],
-                ["opus", "gateway.claudeRoleOpus"],
-                ["fable", "gateway.claudeRoleFable"],
-                ["subagent", "gateway.claudeRoleSubagent"],
-              ] as const
-            ).map(([role, labelKey]) => {
-              const value = claudeRoles[role] ?? "";
-              const invalid = Boolean(value) && !exportedIds.has(value);
-              return (
-                <label key={role}>
-                  {t(labelKey)}
-                  <select
-                    value={value}
-                    aria-invalid={invalid}
-                    aria-label={t(labelKey)}
-                    onChange={(event) =>
-                      setClaudeRoles((current) => ({
-                        ...current,
-                        [role]: event.target.value,
-                      }))
-                    }
-                  >
-                    <option value="">{t("gateway.claudeRoleUnmapped")}</option>
-                    {exportedModels.map((model) => (
-                      <option key={model.id} value={model.id}>
-                        {model.label}
-                      </option>
-                    ))}
-                  </select>
-                  {invalid ? (
-                    <small role="status">{t("gateway.claudeRoleInvalid")}</small>
-                  ) : null}
-                </label>
-              );
-            })}
-            <label>
-              <input
-                type="checkbox"
-                checked={claudeConfirmed}
-                onChange={(event) => setClaudeConfirmed(event.target.checked)}
-              />{" "}
-              {t("gateway.claudeConfirmConnect")}
-            </label>
-          </div>
-        ) : null}
-        <div className="ws-actions">
-          {onRefresh && (
+                <RefreshCcw size={12} />
+                {t("gateway.refreshClients")}
+              </button>
+            )}
             <button
               className="ws-button"
               disabled={detailBusy}
-              onClick={async () => {
-                setDetailBusy(true);
-                try {
-                  await onRefresh();
-                } finally {
-                  setDetailBusy(false);
-                }
-              }}
+              onClick={() =>
+                preview !== null ? setPreview(null) : void loadPreview()
+              }
             >
-              <RefreshCcw size={12} />
-              {t("gateway.refreshClients")}
+              {t(
+                preview !== null
+                  ? "workspace.hidePreview"
+                  : "workspace.configPreview",
+              )}
             </button>
+          </div>
+          {detailError && (
+            <p className="text-danger" role="alert">
+              {detailError}
+            </p>
           )}
-          <button
-            className="ws-button"
-            disabled={detailBusy}
-            onClick={() =>
-              preview !== null ? setPreview(null) : void loadPreview()
-            }
-          >
-            {t(
-              preview !== null
-                ? "workspace.hidePreview"
-                : "workspace.configPreview",
-            )}
-          </button>
-        </div>
-        {detailError && (
-          <p className="text-danger" role="alert">
-            {detailError}
-          </p>
-        )}
-        {preview !== null && <pre className="ws-config-preview">{preview}</pre>}
-      </WorkspaceDialog>
+          {preview !== null && (
+            <pre className="ws-config-preview">{preview}</pre>
+          )}
+        </WorkspaceDialog>
+      )}
     </>
   );
 }
@@ -483,6 +385,8 @@ function clientIcon(id: string) {
       return piIcon;
     case "omp":
       return ompIcon;
+    case "claude":
+      return claudeIcon;
     case "grok":
       return grokIcon;
     default:
@@ -494,7 +398,7 @@ function clientIconClass(id: string) {
   if (id === "codex" || id === "dsh") {
     return "h-8 w-8 object-contain";
   }
-  if (id === "grok") {
+  if (id === "grok" || id === "claude") {
     return "h-6 w-6 object-contain";
   }
   if (id === "pi") {

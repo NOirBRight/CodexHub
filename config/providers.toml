@@ -1969,3 +1969,32 @@ enabled = true
   thinking_mode = "always_on"
   sort_order = 2
   enabled = true
+
+[[providers]]
+id = "deepseek"
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+api_key = "{env:DEEPSEEK_API_KEY}"
+display_prefix = "DeepSeek"
+upstream_format = "auto"
+available_upstream_formats = ["responses", "chat_completions", "anthropic_messages"]
+sort_order = 9
+enabled = true
+
+  [[providers.models]]
+  id = "deepseek-flash"
+  display_name = "DeepSeek V4.1 Flash"
+  context_window = 1048576
+  max_output_tokens = 393216
+  input_modalities = ["text", "image"]
+  sort_order = 1
+  enabled = true
+
+  [[providers.models]]
+  id = "deepseek-v4-pro"
+  display_name = "DeepSeek V4 Pro"
+  context_window = 1048576
+  max_output_tokens = 393216
+  input_modalities = ["text"]
+  sort_order = 2
+  enabled = true

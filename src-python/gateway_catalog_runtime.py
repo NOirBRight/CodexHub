@@ -959,6 +959,7 @@ def _external_upstream(
         "api_key": external_model["api_key"],
         "upstream_model": external_model["upstream_model"],
         "upstream_format": external_model.get("upstream_format", "responses"),
+        "available_upstream_formats": external_model.get("available_upstream_formats", ()),
         "tool_protocol": external_model.get("tool_protocol", "auto"),
         "tool_surface_strategy": external_model.get("tool_surface_strategy", "eager"),
         "native_responses_tool_codec": external_model.get(

@@ -1,10 +1,11 @@
 use super::super::{
-    endpoints, ensure_rollback_baseline, executable_version, is_this_app_gateway_url,
+    ensure_rollback_baseline, executable_version, is_this_app_gateway_url,
     resolve_gateway_client_model_id, route_owner_from_endpoint, sanitize_text, write_text_replace,
     BackupChannel, BaselineFile, GatewayClientApplyResult, GatewayClientConfigPreview,
 };
 use crate::app_flavor::RoutingOwner;
 use crate::{Provider, Settings};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -32,6 +33,65 @@ pub(in crate::gateway) const MANAGED_ENV_KEYS: &[&str] = &[
     "CLAUDE_CODE_SUBAGENT_MODEL",
     "CODEXHUB_MANAGED_CLIENT",
 ];
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeClientSettings {
+    pub default_model: String,
+    pub role_mappings: BTreeMap<String, String>,
+    pub conflicts: Vec<String>,
+}
+
+pub(in crate::gateway) fn read_claude_settings(
+    path: &Path,
+    settings: &Settings,
+    providers: &[Provider],
+) -> ClaudeClientSettings {
+    let current = match fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => {
+            return ClaudeClientSettings {
+                default_model: String::new(),
+                role_mappings: BTreeMap::new(),
+                conflicts: vec!["Cannot read Claude settings.json".into()],
+            }
+        }
+    };
+    let value = match current
+        .as_deref()
+        .map(serde_json::from_str::<Value>)
+        .transpose()
+    {
+        Ok(value) => value.unwrap_or_else(|| json!({})),
+        Err(_) => {
+            return ClaudeClientSettings {
+                default_model: String::new(),
+                role_mappings: BTreeMap::new(),
+                conflicts: vec!["Cannot parse Claude settings.json".into()],
+            }
+        }
+    };
+    let exported = super::super::gateway_models_from_config(settings, providers);
+    let canonical = |key: &str| {
+        let raw = value
+            .pointer(&format!("/env/{key}"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        exported
+            .iter()
+            .find(|model| projected_claude_model_id(&model.id) == raw)
+            .map(|model| model.id.clone())
+            .unwrap_or_else(|| raw.to_string())
+    };
+    ClaudeClientSettings {
+        default_model: canonical("ANTHROPIC_MODEL"),
+        role_mappings: ROLE_ENV
+            .iter()
+            .map(|(role, key)| (role.to_string(), canonical(key)))
+            .collect(),
+        conflicts: claude_override_conflicts(Some(&value), settings),
+    }
+}
 
 pub(in crate::gateway) fn claude_home() -> PathBuf {
     if let Some(path) = std::env::var_os("CODEXHUB_CLAUDE_HOME")
@@ -158,31 +218,75 @@ fn mask_env_secrets(text: &str) -> String {
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| sanitize_text(text))
 }
 
-fn claude_override_conflicts() -> Vec<String> {
+fn claude_override_conflicts(current: Option<&Value>, settings: &Settings) -> Vec<String> {
     let mut conflicts = Vec::new();
     for key in [
         "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_BASE_URL",
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
     ] {
-        if std::env::var(key).ok().is_some_and(|value| !value.is_empty()) {
+        let process = std::env::var(key).ok();
+        let configured = current
+            .and_then(|value| value.get("env"))
+            .and_then(|env| env.get(key))
+            .and_then(Value::as_str);
+        if process
+            .as_deref()
+            .into_iter()
+            .chain(configured)
+            .any(|value| {
+                !value.is_empty()
+                    && (key == "ANTHROPIC_API_KEY" || (value != "0" && value != "false"))
+            })
+        {
             conflicts.push(format!(
-                "process environment {key} overrides user settings and was not modified"
+                "{key} conflicts with Gateway routing; remove the override before connecting."
             ));
         }
     }
-    if Path::new(".claude/settings.json").is_file() {
+    for (key, expected) in [
+        ("ANTHROPIC_AUTH_TOKEN", settings.gateway_client_key.clone()),
+        (
+            "ANTHROPIC_BASE_URL",
+            claude_gateway_base_url(settings.proxy_port),
+        ),
+    ] {
+        if std::env::var(key)
+            .ok()
+            .is_some_and(|value| !value.is_empty() && value != expected)
+        {
+            conflicts.push(format!(
+                "Process environment {key} conflicts with Gateway routing."
+            ));
+        }
+    }
+    if current
+        .and_then(|value| value.get("apiKeyHelper"))
+        .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
+    {
         conflicts.push(
-            "project .claude/settings.json may override user settings and was not modified"
-                .to_string(),
+            "apiKeyHelper conflicts with Gateway authentication; remove it before connecting."
+                .into(),
         );
+    }
+    if current.is_some_and(|value| {
+        !value.is_object() || value.get("env").is_some_and(|env| !env.is_object())
+    }) {
+        conflicts.push("Claude settings.json and env must be JSON objects.".into());
     }
     conflicts
 }
 
-fn apply_managed_env(current: Option<&str>, managed: Option<&Map<String, Value>>) -> Result<String, String> {
+fn claude_gateway_base_url(port: u16) -> String {
+    // Claude Code appends /v1 to ANTHROPIC_BASE_URL itself.
+    format!("http://127.0.0.1:{port}")
+}
+
+fn apply_managed_env(
+    current: Option<&str>,
+    managed: Option<&Map<String, Value>>,
+) -> Result<String, String> {
     let mut root = match current.map(str::trim).filter(|text| !text.is_empty()) {
         Some(text) => serde_json::from_str::<Value>(text)
             .map_err(|error| format!("failed to parse Claude settings.json: {error}"))?,
@@ -221,6 +325,21 @@ fn apply_managed_env(current: Option<&str>, managed: Option<&Map<String, Value>>
         .map_err(|error| format!("failed to serialize Claude settings.json: {error}"))
 }
 
+fn resolve_claude_model(
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<String, String> {
+    let resolved = resolve_gateway_client_model_id(settings, providers, model)?;
+    if !super::super::gateway_models_from_config(settings, providers)
+        .iter()
+        .any(|model| model.id == resolved)
+    {
+        return Err(format!("Gateway model is not exported: {model}"));
+    }
+    Ok(resolved)
+}
+
 pub(in crate::gateway) fn claude_settings_text(
     current: Option<&str>,
     settings: &Settings,
@@ -228,7 +347,7 @@ pub(in crate::gateway) fn claude_settings_text(
     model: &str,
     role_mappings: &BTreeMap<String, String>,
 ) -> Result<String, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    let model = resolve_claude_model(settings, providers, model)?;
     let mut root = match current.map(str::trim).filter(|text| !text.is_empty()) {
         Some(text) => serde_json::from_str::<Value>(text)
             .map_err(|error| format!("failed to parse Claude settings.json: {error}"))?,
@@ -247,7 +366,7 @@ pub(in crate::gateway) fn claude_settings_text(
         .ok_or_else(|| "Claude settings.json env must be an object".to_string())?;
     env_map.insert(
         "ANTHROPIC_BASE_URL".to_string(),
-        Value::String(endpoints(settings.proxy_port).base_url),
+        Value::String(claude_gateway_base_url(settings.proxy_port)),
     );
     env_map.insert(
         "ANTHROPIC_AUTH_TOKEN".to_string(),
@@ -274,11 +393,27 @@ pub(in crate::gateway) fn claude_settings_text(
             env_map.remove(*env_key);
             continue;
         }
-        let resolved = resolve_gateway_client_model_id(settings, providers, &canonical)?;
+        let resolved = resolve_claude_model(settings, providers, canonical)?;
         env_map.insert(
             (*env_key).to_string(),
             Value::String(projected_claude_model_id(&resolved)),
         );
+    }
+    // Republish preserves mappings, but a removed target must never pass silently.
+    let exported = super::super::gateway_models_from_config(settings, providers);
+    for (_, key) in ROLE_ENV {
+        if let Some(value) = env_map
+            .get(*key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            if !exported
+                .iter()
+                .any(|model| model.id == value || projected_claude_model_id(&model.id) == value)
+            {
+                return Err(format!("Claude mapping {key} is not exported: {value}"));
+            }
+        }
     }
     serde_json::to_string_pretty(&root)
         .map_err(|error| format!("failed to serialize Claude settings.json: {error}"))
@@ -292,10 +427,20 @@ pub(in crate::gateway) fn preview_claude_config_with_path(
     role_mappings: &BTreeMap<String, String>,
 ) -> Result<GatewayClientConfigPreview, String> {
     let current = fs::read_to_string(config_path).ok();
-    let next = claude_settings_text(current.as_deref(), settings, providers, model, role_mappings)?;
+    let next = claude_settings_text(
+        current.as_deref(),
+        settings,
+        providers,
+        model,
+        role_mappings,
+    )?;
+    let value = current
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let conflicts = claude_override_conflicts(value.as_ref(), settings);
     Ok(GatewayClientConfigPreview {
         client_id: CLIENT_ID.to_string(),
-        can_apply: true,
+        can_apply: conflicts.is_empty(),
         strategy: "managed_key_set".to_string(),
         config_path: Some(config_path.to_path_buf()),
         current_redacted: current.as_deref().map(mask_env_secrets),
@@ -306,7 +451,6 @@ pub(in crate::gateway) fn preview_claude_config_with_path(
                 .is_none_or(|text| !is_claude_codexhub_config(text)),
         message: {
             let mut message = "Connect changes this user's Claude Code default route and default model for newly launched sessions. Restart Claude Code after applying.".to_string();
-            let conflicts = claude_override_conflicts();
             if !conflicts.is_empty() {
                 message.push(' ');
                 message.push_str(&conflicts.join(" "));
@@ -338,6 +482,13 @@ pub(in crate::gateway) fn plan_claude_apply(
     } else {
         None
     };
+    let value = current
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let conflicts = claude_override_conflicts(value.as_ref(), settings);
+    if !conflicts.is_empty() {
+        return Err(conflicts.join(" "));
+    }
     let skip_snapshot = current
         .as_deref()
         .is_none_or(|text| text.trim().is_empty() || is_claude_codexhub_config(text));
@@ -369,9 +520,7 @@ pub(in crate::gateway) fn publish_claude_apply(
         None
     };
     if on_disk.as_deref() != plan.expected_current.as_deref() {
-        return Err(
-            "Claude settings.json changed while applying; retry Connect".to_string(),
-        );
+        return Err("Claude settings.json changed while applying; retry Connect".to_string());
     }
     let (backup_root, _) = backup_roots
         .first()
@@ -406,7 +555,9 @@ pub(in crate::gateway) fn publish_claude_apply(
         applied: true,
         config_path: Some(plan.config_path.clone()),
         backup_path,
-        message: "Claude Code now routes new sessions through the CodexHub Gateway. Restart Claude Code.".to_string(),
+        message:
+            "Claude Code now routes new sessions through the CodexHub Gateway. Restart Claude Code."
+                .to_string(),
     })
 }
 
@@ -440,10 +591,7 @@ pub(in crate::gateway) fn restore_claude_from_baseline(
         }
         BaselineFile::Absent => None,
     };
-    let next = apply_managed_env(
-        current.as_deref(),
-        managed.as_ref(),
-    )?;
+    let next = apply_managed_env(current.as_deref(), managed.as_ref())?;
     write_restored_settings(config_path, &next)?;
     Ok(GatewayClientApplyResult {
         client_id: CLIENT_ID.to_string(),
@@ -489,8 +637,9 @@ pub(in crate::gateway) fn restore_claude_config_with_backup_roots(
                     format!("failed to remove managed Claude settings.json: {error}")
                 })?;
             } else {
-                let next = serde_json::to_string_pretty(&value)
-                    .map_err(|error| format!("failed to serialize Claude settings.json: {error}"))?;
+                let next = serde_json::to_string_pretty(&value).map_err(|error| {
+                    format!("failed to serialize Claude settings.json: {error}")
+                })?;
                 write_text_replace(config_path, &next)
                     .map_err(|_| "failed to restore Claude settings.json".to_string())?;
             }
@@ -519,6 +668,99 @@ mod tests {
     }
 
     #[test]
+    fn preview_apply_and_readback_use_the_same_draft() {
+        let dir = std::env::temp_dir().join(format!(
+            "codexhub-claude-regression-1-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"env":{"EDITOR":"vim"},"theme":"dark"}"#).unwrap();
+        let mappings = BTreeMap::from([("haiku".into(), "gpt-5.5".into())]);
+        let preview =
+            preview_claude_config_with_path(&path, &settings(), &[], "gpt-5.5", &mappings).unwrap();
+        let plan = plan_claude_apply(&path, &settings(), &[], "gpt-5.5", mappings).unwrap();
+        assert_eq!(preview.next_redacted, mask_env_secrets(&plan.next));
+        publish_claude_apply(&plan, &[(dir.join("backup"), BackupChannel::Stable)]).unwrap();
+        let saved = read_claude_settings(&path, &settings(), &[]);
+        assert_eq!(saved.default_model, "gpt-5.5");
+        assert_eq!(saved.role_mappings["haiku"], "gpt-5.5");
+        assert!(!serde_json::to_string(&saved)
+            .unwrap()
+            .contains("gateway-secret-key"));
+        let cleared = BTreeMap::from([("haiku".into(), String::new())]);
+        let plan = plan_claude_apply(&path, &settings(), &[], "gpt-5.5", cleared).unwrap();
+        assert!(!plan.next.contains("ANTHROPIC_DEFAULT_HAIKU_MODEL"));
+        assert!(plan.next.contains("EDITOR"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn credential_conflicts_block_preview_and_apply_without_writing() {
+        let dir = std::env::temp_dir().join(format!(
+            "codexhub-claude-regression-2-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        for current in [
+            r#"{"env":{"ANTHROPIC_API_KEY":"user-secret"}}"#,
+            r#"{"apiKeyHelper":"credential-command"}"#,
+        ] {
+            fs::write(&path, current).unwrap();
+            let preview = preview_claude_config_with_path(
+                &path,
+                &settings(),
+                &[],
+                "gpt-5.5",
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            assert!(!preview.can_apply);
+            assert!(preview.message.contains("conflicts"));
+            assert!(
+                plan_claude_apply(&path, &settings(), &[], "gpt-5.5", BTreeMap::new()).is_err()
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), current);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn removed_models_fail_without_changing_settings() {
+        let dir = std::env::temp_dir().join(format!(
+            "codexhub-claude-regression-3-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        assert!(
+            plan_claude_apply(&path, &settings(), &[], "removed/model", BTreeMap::new()).is_err()
+        );
+        let result = plan_claude_apply(
+            &path,
+            &settings(),
+            &[],
+            "gpt-5.5",
+            BTreeMap::from([("haiku".into(), "removed/model".into())]),
+        );
+        assert!(result.is_err());
+        assert!(!path.exists());
+        fs::write(
+            &path,
+            r#"{"env":{"ANTHROPIC_DEFAULT_HAIKU_MODEL":"claude-codexhub-removed-model"}}"#,
+        )
+        .unwrap();
+        assert!(plan_claude_apply(&path, &settings(), &[], "gpt-5.5", BTreeMap::new()).is_err());
+        let saved = read_claude_settings(&path, &settings(), &[]);
+        assert_eq!(
+            saved.role_mappings["haiku"],
+            "claude-codexhub-removed-model"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn projected_ids_match_claude_filter() {
         assert_eq!(
             projected_claude_model_id("volc/glm-5.2"),
@@ -535,11 +777,20 @@ mod tests {
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
         let current = r#"{"env":{"EDITOR":"vim","ANTHROPIC_AUTH_TOKEN":"old","OPENAI_API_KEY":"sk-user"},"theme":"dark"}"#;
-        let next = claude_settings_text(Some(current), &settings(), &[], "gpt-5.5", &BTreeMap::new()).unwrap();
+        let next =
+            claude_settings_text(Some(current), &settings(), &[], "gpt-5.5", &BTreeMap::new())
+                .unwrap();
         assert!(next.contains("\"EDITOR\": \"vim\""));
         assert!(next.contains("\"theme\": \"dark\""));
         assert!(next.contains("gateway-secret-key"));
         assert!(next.contains("ANTHROPIC_BASE_URL"));
+        let value: Value = serde_json::from_str(&next).unwrap();
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            Some("http://127.0.0.1:18789")
+        );
         assert!(next.contains("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"));
         let masked = mask_env_secrets(&next);
         assert!(!masked.contains("gateway-secret-key"));
@@ -554,7 +805,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
-        let next = claude_settings_text(None, &settings(), &[], "gpt-5.5", &BTreeMap::new()).unwrap();
+        let next =
+            claude_settings_text(None, &settings(), &[], "gpt-5.5", &BTreeMap::new()).unwrap();
         let value: Value = serde_json::from_str(&next).unwrap();
         let env = value.get("env").unwrap().as_object().unwrap();
         assert_eq!(
@@ -584,10 +836,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
-        let mappings = BTreeMap::from([(
-            "haiku".to_string(),
-            "gpt-5.5".to_string(),
-        )]);
+        let mappings = BTreeMap::from([("haiku".to_string(), "gpt-5.5".to_string())]);
         let next = claude_settings_text(None, &settings(), &[], "gpt-5.5", &mappings).unwrap();
         let value: Value = serde_json::from_str(&next).unwrap();
         let env = value.get("env").unwrap().as_object().unwrap();
@@ -596,7 +845,7 @@ mod tests {
                 .and_then(Value::as_str),
             Some("claude-codexhub-gpt-5.5")
         );
-        }
+    }
 
     #[test]
     fn restore_without_baseline_removes_only_managed_keys() {
@@ -605,16 +854,11 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
-        let dir = std::env::temp_dir().join(format!(
-            "codexhub-claude-restore-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("codexhub-claude-restore-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
-        let mappings = BTreeMap::from([(
-            "haiku".to_string(),
-            "gpt-5.5".to_string(),
-        )]);
+        let mappings = BTreeMap::from([("haiku".to_string(), "gpt-5.5".to_string())]);
         let next = claude_settings_text(
             Some(r#"{"env":{"EDITOR":"vim"},"theme":"dark"}"#),
             &settings(),
@@ -627,15 +871,15 @@ mod tests {
         restore_claude_config_with_backup_roots(&path, &[]).unwrap();
         let restored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
-            restored
-                .pointer("/env/EDITOR")
-                .and_then(Value::as_str),
+            restored.pointer("/env/EDITOR").and_then(Value::as_str),
             Some("vim")
         );
         assert_eq!(restored.get("theme").and_then(Value::as_str), Some("dark"));
         assert!(restored.pointer("/env/ANTHROPIC_AUTH_TOKEN").is_none());
-        assert!(restored.pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none());
-            let _ = fs::remove_dir_all(dir);
+        assert!(restored
+            .pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL")
+            .is_none());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -651,18 +895,15 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
-        let dir = std::env::temp_dir().join(format!(
-            "codexhub-claude-concurrent-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("codexhub-claude-concurrent-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
         fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
         let plan = plan_claude_apply(&path, &settings(), &[], "gpt-5.5", BTreeMap::new()).unwrap();
         fs::write(&path, r#"{"theme":"light"}"#).unwrap();
         let backup = dir.join("backup");
-        let error = publish_claude_apply(&plan, &[(backup, BackupChannel::Stable)])
-            .unwrap_err();
+        let error = publish_claude_apply(&plan, &[(backup, BackupChannel::Stable)]).unwrap_err();
         assert!(error.contains("changed"), "{error}");
         assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"theme":"light"}"#);
         let _ = fs::remove_dir_all(dir);

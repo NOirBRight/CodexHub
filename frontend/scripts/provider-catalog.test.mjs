@@ -94,6 +94,23 @@ test("complete provider is left unchanged", () => {
   assert.equal(applyCatalogPresetDefaults(existing, catalogXai), existing);
 });
 
+test("saved official DeepSeek provider inherits the new Anthropic endpoint without changing preference", () => {
+  const existing = makeProvider({
+    id: "deepseek", base_url: "https://api.deepseek.com",
+    upstream_format: "responses",
+    available_upstream_formats: ["responses", "chat_completions"],
+  });
+  const preset = makeProvider({
+    id: "deepseek", base_url: "https://api.deepseek.com",
+    upstream_format: "auto",
+    available_upstream_formats: ["responses", "chat_completions", "anthropic_messages"],
+  });
+  const filled = applyCatalogPresetDefaults(existing, preset);
+  assert.equal(filled.upstream_format, "responses");
+  assert.deepEqual(filled.available_upstream_formats,
+    ["responses", "chat_completions", "anthropic_messages"]);
+});
+
 test("subscription auth is declared on the preset, not by provider id", () => {
   assert.equal(usesSubscriptionAuth(makeProvider()), false);
   assert.equal(subscriptionAuthAdapter(makeProvider()), null);

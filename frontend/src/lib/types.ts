@@ -441,6 +441,7 @@ export type GatewayClientRouteMode =
   | "unknown";
 
 export interface GatewayClientInfo {
+  claude_settings?: import("./claudeSettings").ClaudeSettings | null;
   id: string;
   name: string;
   kind: string;

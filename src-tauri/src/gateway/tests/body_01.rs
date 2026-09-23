@@ -526,6 +526,7 @@ fn sync_test_client(
         _ => crate::app_flavor::RoutingOwner::UnknownExternal,
     };
     super::GatewayClientInfo {
+        claude_settings: None,
         id: id.to_string(),
         name: name.to_string(),
         kind: "Test".to_string(),
@@ -3274,4 +3275,17 @@ fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
             .and_then(|model| model.get("name")),
         Some(&serde_json::json!("CC deepseek-v4.1-flash"))
     );
+}
+
+#[test]
+fn claude_sync_keeps_its_saved_default_instead_of_the_global_model() {
+    let mut client = sync_test_client("claude", "Claude Code", true, true, "hub");
+    client.claude_settings = Some(super::clients::claude::ClaudeClientSettings {
+        default_model: "chosen/model".into(), role_mappings: Default::default(), conflicts: vec![],
+    });
+    let summary = super::sync_gateway_clients_from_infos(vec![client], Some("global/model".into()), |client_id, model| {
+        assert_eq!(model.as_deref(), Some("chosen/model"));
+        Ok(super::GatewayClientApplyResult { client_id, applied: true, config_path: None, backup_path: None, message: String::new() })
+    });
+    assert_eq!(summary.applied, 1);
 }
