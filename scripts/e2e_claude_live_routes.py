@@ -1084,18 +1084,18 @@ def main() -> None:
         raise SystemExit("--case-timeout-seconds must be between 1 and 120")
     if not 1 <= args.max_attempts <= MAX_LIVE_GENERATION_ATTEMPTS:
         raise SystemExit("--max-attempts must be between 1 and 16")
+    if not args.candidate_sha or not re.fullmatch(r"[0-9a-f]{40}", args.candidate_sha):
+        raise SystemExit("E2E requires --candidate-sha with the built candidate's full SHA")
+    if args.resource_root is None:
+        raise SystemExit("E2E requires --resource-root set to the portable candidate directory")
+    verify_candidate_binding(
+        args.bin, args.resource_root, args.source_root, args.candidate_sha,
+    )
     if not args.preflight_only:
-        if not args.candidate_sha or not re.fullmatch(r"[0-9a-f]{40}", args.candidate_sha):
-            raise SystemExit("live E2E requires --candidate-sha with the built candidate's full SHA")
-        if args.resource_root is None:
-            raise SystemExit("live E2E requires --resource-root set to the portable candidate directory")
         if args.claude_bin is None:
             raise SystemExit("Claude Code is not available on PATH; pass --claude-bin")
         if "claude-native-haiku" in selected and args.claude_subscription_source is None:
             raise SystemExit("native Haiku E2E requires --claude-subscription-source")
-        verify_candidate_binding(
-            args.bin, args.resource_root, args.source_root, args.candidate_sha,
-        )
     if not args.preflight_only and args.evidence_out is None:
         raise SystemExit("live E2E requires --evidence-out for the sanitized result")
     key = deepseek_key(args.deepseek_key_file, args.deepseek_provider_source) if any(

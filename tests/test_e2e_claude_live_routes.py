@@ -9,6 +9,7 @@ from shutil import copy2
 
 import pytest
 
+from scripts import e2e_claude_live_routes as live_routes
 from scripts.e2e_claude_live_routes import (
     deepseek_key,
     snapshot_claude_subscription,
@@ -216,3 +217,62 @@ def test_candidate_binding_checks_source_head_portable_name_and_resources(tmp_pa
     (portable / "src-python" / "gateway_events.py").write_text("wrong candidate resource", encoding="utf-8")
     with pytest.raises(AssertionError, match="resource differs"):
         verify_candidate_binding(binary, portable, source, candidate_sha)
+
+
+def test_preflight_requires_candidate_sha_and_portable_resource_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary = tmp_path / "codexhub"
+    binary.write_bytes(b"candidate")
+    monkeypatch.setattr(
+        live_routes.sys,
+        "argv",
+        ["e2e_claude_live_routes.py", "--bin", str(binary), "--preflight-only"],
+    )
+
+    with pytest.raises(SystemExit, match="E2E requires --candidate-sha"):
+        live_routes.main()
+
+
+def test_preflight_verifies_candidate_binding_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary = tmp_path / "CodexHub_0.0.0_debug_linux_portable_aaaaaaaa" / "codexhub"
+    binary.parent.mkdir()
+    binary.write_bytes(b"candidate")
+    claude_cli = tmp_path / "claude"
+    claude_cli.write_bytes(b"claude")
+    resource_root = binary.parent
+    source_root = tmp_path / "source"
+    candidate_sha = "a" * 40
+    calls: list[tuple[Path, Path, Path, str]] = []
+    launches: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        live_routes.sys,
+        "argv",
+        [
+            "e2e_claude_live_routes.py",
+            "--bin", str(binary),
+            "--resource-root", str(resource_root),
+            "--claude-bin", str(claude_cli),
+            "--source-root", str(source_root),
+            "--candidate-sha", candidate_sha,
+            "--preflight-only",
+        ],
+    )
+    monkeypatch.setattr(
+        live_routes,
+        "verify_candidate_binding",
+        lambda *args: calls.append(args),
+    )
+    monkeypatch.setattr(
+        live_routes,
+        "run",
+        lambda *args, **kwargs: launches.append((args, kwargs)),
+    )
+
+    live_routes.main()
+
+    assert calls == [(binary, resource_root, source_root, candidate_sha)]
+    assert len(launches) == 1
