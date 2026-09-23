@@ -213,8 +213,10 @@ def test_native_incomplete_sse_preserves_partial_usage_and_marks_failure(tmp_pat
         b'event: message_start\ndata: {"type":"message_start","message":{"type":"message","model":"claude-opus-5-5","usage":{"input_tokens":6,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"output_tokens":0}}}\n\n'
         b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
     )
+    upstream_attempt_count = 0
     with _isolated_event_log(tmp_path / "codex") as event_log:
         with GatewayHarness() as harness:
+            assert harness.stub is not None
             harness.set_sse_response(tuple(frames.splitlines(keepends=True)))
             with _route_native_requests_to_stub(harness):
                 response = request_gateway(
@@ -233,9 +235,11 @@ def test_native_incomplete_sse_preserves_partial_usage_and_marks_failure(tmp_pat
                     headers=_native_headers(),
                     timeout=8.0,
                 )
+            upstream_attempt_count = len(harness.stub.captures)
 
     assert response.status == 200
     assert response.body == frames
+    assert upstream_attempt_count == 1, "native partial usage must not replay the upstream request"
     complete = _request_complete_events(event_log)
     assert len(complete) == 1
     assert complete[0]["status"] == 502
@@ -245,6 +249,12 @@ def test_native_incomplete_sse_preserves_partial_usage_and_marks_failure(tmp_pat
     assert complete[0]["usage_cached_input_tokens"] == 4
     assert complete[0]["usage_cache_write_input_tokens"] == 2
     assert "usage_output_tokens" not in complete[0]
+    records = [json.loads(line) for line in event_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert not any(
+        event.get("event") in {"upstream_retry", "upstream_retry_suppressed"}
+        and event.get("request_id") == complete[0]["request_id"]
+        for event in records
+    ), "native partial usage must remain one downstream request without retry accounting"
     assert b"hello" not in event_log.read_bytes()
 
 
