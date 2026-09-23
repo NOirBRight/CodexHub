@@ -823,6 +823,18 @@ def materialize_operational_authentication(
             strategy,
             authorization=read_header(incoming_headers, "Authorization"),
         )
+    if strategy == AuthenticationStrategy.ANTHROPIC_OAUTH:
+        authorization = read_header(incoming_headers, "Authorization")
+        return OperationalAuthentication(
+            strategy,
+            authorization=(
+                authorization
+                if isinstance(authorization, str)
+                and authorization.strip().lower().startswith("bearer ")
+                and authorization.strip()[7:].strip()
+                else None
+            ),
+        )
     if strategy == AuthenticationStrategy.OLLAMA_API_KEY:
         api_key = (
             ollama_api_key()
@@ -877,12 +889,25 @@ def build_upstream_headers(
         getattr(adapter, "drop_incoming_header", None) if adapter is not None else None
     )
     model_id_for_adapter = str(upstream.get("upstream_model") or model_id or "")
+    claude_gateway_key = read_header(
+        incoming_headers, "x-codexhub-gateway-key"
+    )
 
     for key, value in items(incoming_headers):
         lowered = key.lower()
         if (
             lowered in resolved_facts.hop_by_hop_request_headers
-            or lowered == "authorization"
+            or lowered in {
+                "authorization",
+                "x-codexhub-gateway-key",
+            }
+            or (
+                lowered == "x-api-key"
+                and (
+                    auth_mode != "incoming"
+                    or bool(claude_gateway_key)
+                )
+            )
         ):
             continue
         if drop_incoming_header is not None and drop_incoming_header(
@@ -952,8 +977,23 @@ def build_upstream_headers(
             if operational_authentication is not None
             else read_header(incoming_headers, "Authorization")
         )
+        if claude_gateway_key:
+            incoming_auth = None
         if incoming_auth:
             outgoing["Authorization"] = incoming_auth
+    elif auth_mode == "anthropic_oauth":
+        authorization = (
+            operational_authentication.authorization
+            if operational_authentication is not None
+            else read_header(incoming_headers, "Authorization")
+        )
+        if (
+            not isinstance(authorization, str)
+            or not authorization.strip().lower().startswith("bearer ")
+            or not authorization.strip()[7:].strip()
+        ):
+            raise ValueError("Claude subscription OAuth bearer is missing")
+        outgoing["Authorization"] = authorization
     elif auth_mode == "ollama_api_key":
         if operational_authentication is not None:
             authorization = operational_authentication.authorization
@@ -2415,6 +2455,9 @@ def bind_route_plan_operational_authentication(
                         request_headers.to_dict(), attempt.endpoint_url, prompt_cache_key,
                     ),
                     attempt.endpoint_url,
+                    preserve_oauth=(
+                        upstream.get("native_anthropic_subscription") is True
+                    ),
                 ),
                 materialized=True,
             ))
