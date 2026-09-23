@@ -43,7 +43,7 @@ pub use readback::verify_apply_readback;
 
 use clients::claude::{
     claude_installed, detect_claude_config_path, detect_claude_route_details,
-    detect_claude_version, read_claude_settings,
+    detect_claude_version, read_claude_settings, PRESERVE_DEFAULT_MODEL,
 };
 use clients::codex::read_codex_auth_status;
 #[cfg(test)]
@@ -911,8 +911,14 @@ pub fn preview_gateway_client_config(
 ) -> Result<GatewayClientConfigPreview, String> {
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
-    let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let id = normalize_client_id(&client_id);
+    let model = model.unwrap_or_else(|| {
+        if id == "claude" {
+            PRESERVE_DEFAULT_MODEL.to_string()
+        } else {
+            DEFAULT_MODEL.to_string()
+        }
+    });
     managed_clients::preview_native(
         &id,
         &settings,
@@ -952,7 +958,13 @@ fn apply_gateway_client_config_locked(
         .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
-    let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model = model.unwrap_or_else(|| {
+        if client_id == "claude" {
+            PRESERVE_DEFAULT_MODEL.to_string()
+        } else {
+            DEFAULT_MODEL.to_string()
+        }
+    });
     managed_clients::apply_native(client_id, &settings, &providers, &model, role_mappings)
 }
 
@@ -1093,11 +1105,7 @@ pub fn switch_gateway_client_route(
         let settings = config::get_settings()?;
         let providers = config::get_providers()?;
         Some(if normalize_client_id(&client_id) == "claude" {
-            resolve_gateway_client_model_id(
-                &settings,
-                &providers,
-                model.as_deref().ok_or("Select a Claude default model")?,
-            )?
+            model.unwrap_or_else(|| PRESERVE_DEFAULT_MODEL.to_string())
         } else {
             gateway_client_route_model(model, &settings, &providers)?
         })
@@ -1166,13 +1174,7 @@ where
         }
 
         let client_model = if client.id == "claude" {
-            Some(
-                client
-                    .claude_settings
-                    .as_ref()
-                    .map(|saved| saved.default_model.clone())
-                    .unwrap_or_default(),
-            )
+            Some(PRESERVE_DEFAULT_MODEL.to_string())
         } else {
             model.clone()
         };

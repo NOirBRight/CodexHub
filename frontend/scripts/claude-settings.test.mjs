@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  aliasDefaultChanges,
   claudeDraft,
   claudeDraftChanged,
   claudeDraftValid,
+  claudePreserveDefault,
   filterClaudeModels,
   rebaseClaudeDraft,
 } from "../src/lib/claudeSettings.ts";
@@ -11,13 +13,19 @@ const models = [
   { id: "one", label: "One" },
   { id: "two", label: "Two" },
 ];
-test("Claude settings reopen from persisted selections and clearing a role is a change", () => {
+test("Claude settings preserve the existing default and keep subagent separate", () => {
   const saved = claudeDraft(
-    { default_model: "two", role_mappings: { haiku: "one" }, conflicts: [] },
+    {
+      default_model: "claude-opus-5-5",
+      role_mappings: { haiku: "one" },
+      default_subagent_model: "two",
+      conflicts: [],
+    },
     "one",
   );
-  assert.equal(saved.model, "two");
+  assert.equal(saved.model, claudePreserveDefault);
   assert.equal(saved.roles.haiku, "one");
+  assert.equal(saved.subagent, "two");
   assert.equal(claudeDraftChanged(saved, saved), false);
   assert.equal(
     claudeDraftChanged(
@@ -27,23 +35,44 @@ test("Claude settings reopen from persisted selections and clearing a role is a 
     true,
   );
 });
-test("removed default or mapped models block apply without falling back", () => {
+test("stale saved mappings remain visible while new invalid choices block apply", () => {
   const draft = claudeDraft(
-    { default_model: "removed", role_mappings: {}, conflicts: [] },
+    {
+      default_model: "claude-opus-5-5",
+      role_mappings: { haiku: "removed" },
+      default_subagent_model: "",
+      conflicts: [],
+    },
     "one",
   );
-  assert.equal(draft.model, "removed");
-  assert.equal(claudeDraftValid(draft, new Set(["one"])), false);
+  assert.equal(draft.model, claudePreserveDefault);
+  assert.equal(claudeDraftValid(draft, new Set(["one"]), draft), true);
   assert.equal(
     claudeDraftValid(
-      { model: "one", roles: { haiku: "removed" } },
+      { ...draft, roles: { ...draft.roles, haiku: "new-removed" } },
       new Set(["one"]),
+      draft,
     ),
     false,
   );
   assert.equal(
-    claudeDraftValid({ model: "one", roles: { haiku: "" } }, new Set(["one"])),
+    claudeDraftValid(
+      { ...draft, roles: { ...draft.roles, haiku: "" } },
+      new Set(["one"]),
+      draft,
+    ),
     true,
+  );
+});
+
+test("editing a family mapping previews the effect on its default alias", () => {
+  assert.deepEqual(
+    aliasDefaultChanges("opus", { opus: "native-opus" }, { opus: "provider/model" }),
+    [{ alias: "opus", from: "native-opus", to: "provider/model" }],
+  );
+  assert.deepEqual(
+    aliasDefaultChanges("claude-opus-5-5", { opus: "one" }, { opus: "two" }),
+    [],
   );
 });
 test("search retains selected model in picker but not read-only search results", () => {
@@ -53,7 +82,7 @@ test("search retains selected model in picker but not read-only search results",
 
 test("refresh updates clean Claude fields while preserving edits", () => {
   const baseline = claudeDraft(
-    { default_model: "one", role_mappings: { haiku: "one" }, conflicts: [] },
+    { default_model: "one", role_mappings: { haiku: "one" }, default_subagent_model: "", conflicts: [] },
     "",
   );
   const incoming = {
