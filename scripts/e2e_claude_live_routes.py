@@ -1202,15 +1202,22 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
             packaged_usage_ui_verified = False
             packaged_usage_ui_screenshot: str | None = None
             launcher = resource_root / "scripts" / "codexhub-claude-gateway.sh"
-            if "claude-native-haiku" in selected:
-                model = "claude-haiku-4-5-20251001"
+            native_cases = {
+                "claude-native-haiku": ("claude-haiku-4-5-20251001", "CLAUDE_NATIVE_HAIKU_LIVE_OK"),
+                "claude-native-opus-5-5": ("claude-opus-5-5", "CLAUDE_NATIVE_OPUS_5_5_LIVE_OK"),
+            }
+            selected_native = [case for case in native_cases if case in selected]
+            if selected_native:
+                assert len(selected_native) == 1, "run native model cases in separate isolated invocations"
+                native_case = selected_native[0]
+                model, sentinel = native_cases[native_case]
                 try:
                     original_default = claude_info(bridge_port)["claude_settings"]["default_model"]
                     applied = invoke(bridge_port, "switch_gateway_client_route", {
                         "client_id": "claude", "mode": "hub", "role_mappings": {},
                     })
                     assert applied.get("ok") is True, (
-                        f"Claude Connect failed for native Haiku: {applied.get('error')}"
+                        f"Claude Connect failed for {model}: {applied.get('error')}"
                     )
                     assert claude_info(bridge_port)["claude_settings"]["default_model"] == original_default, (
                         "Claude Connect changed the existing default model"
@@ -1219,9 +1226,9 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                         print("PASS: native Claude connection preserves its existing default", flush=True)
                     else:
                         if claude_subscription_source is None:
-                            raise AssertionError("native Haiku requires an isolated Claude subscription snapshot")
+                            raise AssertionError("native Claude requires an isolated subscription snapshot")
                         used_attempts, timeout_seconds = reserve_generation_budget(
-                            case="claude-native-haiku", attempts=1,
+                            case=native_case, attempts=1,
                             used_attempts=used_attempts, max_attempts=max_attempts,
                             case_timeout_seconds=case_timeout_seconds,
                             overall_deadline=overall_deadline,
@@ -1229,7 +1236,7 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                         client_env = {name: value for name, value in env.items()
                                       if name != "DEEPSEEK_API_KEY"}
                         run_claude(
-                            claude_bin, client_env, root, "CLAUDE_NATIVE_HAIKU_LIVE_OK",
+                            claude_bin, client_env, root, sentinel,
                             model=model, timeout_seconds=timeout_seconds,
                         )
                         wait_for_event(bridge_port, model, "anthropic_messages", "anthropic_messages")
@@ -1239,7 +1246,7 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                         )
                         upsert_route_request_count(
                             route_request_counts,
-                            case="claude-native-haiku",
+                            case=native_case,
                             model=model,
                             inbound="anthropic_messages",
                             outbound="anthropic_messages",
@@ -1247,13 +1254,13 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                             successful_gateway_route_observed=True,
                         )
                         row, usage_summary = wait_for_usage_evidence(
-                            bridge_port, case="claude-native-haiku", model=model,
+                            bridge_port, case=native_case, model=model,
                             provider="claude_subscription",
                             gateway_request_ids=gateway_request_ids,
                         )
                         usage_rows.append(row)
                         print(
-                            "PASS: native Claude Haiku -> persisted Usage Statistics row",
+                            f"PASS: native Claude {model} -> persisted Usage Statistics row",
                             flush=True,
                         )
                         if packaged_ui:
@@ -1272,7 +1279,7 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                                 failures.append(f"packaged-usage-ui: {failure_class}")
                                 failure_diagnostics.append({
                                     "event": "packaged_usage_ui",
-                                    "case": "claude-native-haiku",
+                                    "case": native_case,
                                     "error_category": "packaged_ui",
                                     "failure_class": failure_class,
                                 })
@@ -1291,7 +1298,7 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                             )
                 except (AssertionError, HTTPError) as error:
                     record_route_failure(
-                        "claude-native-haiku", error, model=model,
+                        native_case, error, model=model,
                         inbound="anthropic_messages", outbound="anthropic_messages",
                     )
             for model, outbound, label in (
@@ -1584,7 +1591,15 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                         ),
                         "picker_coexistence": "unverified",
                         "resumed_session_switching": "unverified",
-                        "explicit_native_opus_5_5_identity": "unverified",
+                        "explicit_native_opus_5_5_identity": (
+                            "verified" if any(
+                                row.get("case") == "claude-native-opus-5-5"
+                                and row.get("model") == "claude-opus-5-5"
+                                for row in usage_rows
+                            ) else "failed" if any(
+                                item.startswith("claude-native-opus-5-5:") for item in failures
+                            ) else "unverified"
+                        ),
                         "deepseek_chat_messages_usage_ui": "unverified",
                         "deepseek_chat_persisted_usage": (
                             "verified"
@@ -1667,6 +1682,7 @@ def main() -> None:
         "claude-deepseek", "claude-luna", "claude-launcher-deepseek",
         "claude-launcher-luna", "chat-deepseek", "tools-deepseek",
         "responses-deepseek", "responses-luna", "claude-native-haiku",
+        "claude-native-opus-5-5",
     ))
     args = parser.parse_args()
     if args.packaged_ui:
@@ -1676,6 +1692,8 @@ def main() -> None:
     selected = set(args.case or ("claude-native-haiku",))
     if args.packaged_ui and "claude-native-haiku" not in selected:
         raise SystemExit("--packaged-ui currently requires the claude-native-haiku case")
+    if {"claude-native-haiku", "claude-native-opus-5-5"} <= selected:
+        raise SystemExit("run native model cases in separate isolated invocations")
     if not 1 <= args.overall_timeout_seconds <= MAX_OVERALL_TIMEOUT_SECONDS:
         raise SystemExit("--overall-timeout-seconds must be between 1 and 600")
     if not 1 <= args.case_timeout_seconds <= MAX_CASE_TIMEOUT_SECONDS:
@@ -1692,8 +1710,8 @@ def main() -> None:
     if not args.preflight_only:
         if args.claude_bin is None:
             raise SystemExit("Claude Code is not available on PATH; pass --claude-bin")
-        if "claude-native-haiku" in selected and args.claude_subscription_source is None:
-            raise SystemExit("native Haiku E2E requires --claude-subscription-source")
+        if {"claude-native-haiku", "claude-native-opus-5-5"} & selected and args.claude_subscription_source is None:
+            raise SystemExit("native Claude E2E requires --claude-subscription-source")
     if not args.preflight_only and args.evidence_out is None:
         raise SystemExit("live E2E requires --evidence-out for the sanitized result")
     key = deepseek_key(args.deepseek_key_file, args.deepseek_provider_source) if any(

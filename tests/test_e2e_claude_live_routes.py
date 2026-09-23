@@ -624,3 +624,24 @@ def test_packaged_ui_without_isolated_wrapper_starts_no_candidate_or_request(
 
     with pytest.raises(SystemExit, match="dbus-run-session -- xvfb-run"):
         live_routes.main()
+
+
+def test_native_opus_live_requires_isolated_subscription_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary = tmp_path / "candidate"
+    binary.write_bytes(b"candidate")
+    monkeypatch.setattr(
+        live_routes.sys, "argv", [
+            "e2e_claude_live_routes.py", "--bin", str(binary),
+            "--claude-bin", str(binary),
+            "--resource-root", str(tmp_path), "--candidate-sha", "a" * 40,
+            "--case", "claude-native-opus-5-5", "--evidence-out", str(tmp_path / "evidence.json"),
+        ],
+    )
+    monkeypatch.setattr(live_routes, "verify_candidate_binding", lambda *args: None)
+    monkeypatch.setattr(
+        live_routes, "run", lambda *args, **kwargs: pytest.fail("native request must not start"),
+    )
+    with pytest.raises(SystemExit, match="requires --claude-subscription-source"):
+        live_routes.main()
