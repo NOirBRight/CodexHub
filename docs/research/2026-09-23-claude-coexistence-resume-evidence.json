@@ -1,0 +1,109 @@
+{
+  "cli_version": "2.1.280",
+  "tests": [
+    {
+      "case": "base_url_only_synthetic",
+      "exit": 0,
+      "is_error": false,
+      "subtype": "success",
+      "result_present": true,
+      "requests": 1
+    },
+    {
+      "case": "gateway_token_synthetic",
+      "exit": 0,
+      "is_error": false,
+      "subtype": "success",
+      "result_present": true,
+      "requests": 2
+    },
+    {
+      "case": "live_subscription_haiku",
+      "exit": 0,
+      "is_error": false,
+      "subtype": "success",
+      "result_present": true,
+      "requests": 1
+    },
+    {
+      "case": "resume_same_session_deepseek",
+      "exit": 0,
+      "is_error": false,
+      "subtype": "success",
+      "result_present": true,
+      "requests": 1
+    },
+    {
+      "case": "resume_same_session_subscription",
+      "exit": 0,
+      "is_error": false,
+      "subtype": "success",
+      "result_present": true,
+      "requests": 1
+    }
+  ],
+  "requests": [
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "live": false,
+      "path": "/v1/messages",
+      "oauth_auth": true,
+      "synthetic_auth": false,
+      "oauth_beta": true,
+      "messages": 1
+    },
+    {
+      "method": "GET",
+      "path": "/v1/models"
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "live": false,
+      "path": "/v1/messages",
+      "oauth_auth": false,
+      "synthetic_auth": true,
+      "oauth_beta": false,
+      "messages": 1
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "live": true,
+      "path": "/v1/messages",
+      "oauth_auth": true,
+      "synthetic_auth": false,
+      "oauth_beta": true,
+      "messages": 1,
+      "destination": "api.anthropic.com",
+      "status": 200
+    },
+    {
+      "model": "claude-codexhub-deepseek-deepseek-flash",
+      "live": true,
+      "path": "/v1/messages",
+      "oauth_auth": true,
+      "synthetic_auth": false,
+      "oauth_beta": true,
+      "messages": 5,
+      "destination": "isolated_gateway",
+      "oauth_forwarded": false,
+      "status": 200
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "live": true,
+      "path": "/v1/messages",
+      "oauth_auth": true,
+      "synthetic_auth": false,
+      "oauth_beta": true,
+      "messages": 5,
+      "destination": "api.anthropic.com",
+      "status": 200
+    }
+  ],
+  "same_session_resume_marker_preserved": true,
+  "host_files_unchanged": {
+    "/home/noirbright/.claude/settings.json": true,
+    "/home/noirbright/.claude/.credentials.json": true,
+    "/home/noirbright/.claude.json": true
+  }
+}

@@ -2,6 +2,11 @@
 
 Status: Accepted. Native Claude Code client adapter, Connect UI, and protocol path ship in 0.2.24 experimental form; full live matrix remains gated by issue #78 evidence.
 
+Amended by [ADR-0015](0015-claude-subscription-coexistence-and-metering.md):
+subscription-preserving coexistence supersedes this document's Gateway-token
+requirement, Connect default-selection behavior and separate-launcher addendum
+for that mode. Other compatibility, identity and configuration safeguards remain.
+
 ## Context
 
 The user confirmed Claude Code as a downstream CodexHub Gateway client, not an
@@ -123,6 +128,8 @@ work under the repository verification policy; this documentation change is fast
 - ACP/session hosting is a different product and is not part of this campaign.
 
 ## 2026-09-23 addendum: preserve native subscription models
+
+Historical recommendation, superseded for coexistence by ADR-0015.
 
 Global Connect is still an explicit, reversible setting, but it replaces Claude
 Code's native route for new sessions. For users who need all subscription models

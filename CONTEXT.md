@@ -80,7 +80,7 @@ Pointing a client's default route or model selection at the Injected Block. User
 _Avoid_: enabling, switching on
 
 **Claude Model Mapping**:
-A user-selected association from a Claude Code fixed model name or role alias to one Gateway-exported model. Separate from the complete Client Projection and from explicit model selection; it does not define a second model catalog.
+A user-selected association from a Claude Code model-family alias to one Gateway-exported model. It does not replace an explicitly selected complete native model ID and is separate from the default model, Default subagent, and complete Client Projection.
 
 **Compatibility Adaptation**:
 A declared transformation between a client's model protocol and an upstream model protocol. Equivalent transformations preserve meaning; best-effort transformations disclose approximations without silently losing essential content, breaking Call identity, or fabricating success.
