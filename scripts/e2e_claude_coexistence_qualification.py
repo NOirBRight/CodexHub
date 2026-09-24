@@ -349,7 +349,10 @@ def _picker_transcript(binary: str, env: dict[str, str], cwd: Path,
             visible = re.sub(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))", b" ", output)
             lower = visible.lower()
             if not sent_trust and (b"trust" in lower and b"directory" in lower):
-                os.write(master, b"\r")
+                os.write(master, b"\x1b[B\r")
+                sent_trust = True
+            elif not sent_trust and b"yes, i trust this folder" in lower:
+                os.write(master, b"\x1b[B\r")
                 sent_trust = True
             elif not sent_picker and (b"welcome" in lower or b"what should" in lower or b"claude code" in lower
                                       or time.monotonic() >= deadline - timeout + 2):
