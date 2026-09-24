@@ -349,7 +349,7 @@ def _picker_transcript(binary: str, env: dict[str, str], cwd: Path,
             visible = re.sub(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))", b" ", output)
             lower = visible.lower()
             if not sent_trust and (b"trust" in lower and b"directory" in lower):
-                os.write(master, b"1\r")
+                os.write(master, b"\r")
                 sent_trust = True
             elif not sent_picker and (b"welcome" in lower or b"what should" in lower or b"claude code" in lower
                                       or time.monotonic() >= deadline - timeout + 2):
@@ -433,13 +433,13 @@ def qualify(binary: str, credential_file: Path, output: Path) -> dict[str, Any]:
                                      ["--model", "claude-opus-5-5", "--session-id", session_id],
                                      "claude-opus-5-5", preserve_session=True))
             resume_result = _run_case(binary, alias_env, work, state, "native_session_resume",
-                                      ["--resume", session_id], "claude-opus-5-5", preserve_session=True)
-            if not resume_result.get("passed") and "codexhub/opus" in resume_result.get("models", []):
-                resume_result["status"] = "potential_contradiction"
-                resume_result["qualification_limit"] = (
-                    "The seed turn used print-mode --model; interactive /model persistence remains unverified."
-                )
+                                      ["--resume", session_id], "codexhub/opus", preserve_session=True)
             results.append(resume_result)
+            results.append(_run_case(
+                binary, alias_env, work, state, "native_session_explicit_model_resume",
+                ["--resume", session_id, "--model", "claude-opus-5-5"],
+                "claude-opus-5-5", preserve_session=True,
+            ))
             results.append(_run_case(binary, alias_env, work, state, "default_opus_alias",
                                      [], "codexhub/opus"))
             results.append(_run_case(binary, alias_env, work, state, "opusplan_plan_phase",
