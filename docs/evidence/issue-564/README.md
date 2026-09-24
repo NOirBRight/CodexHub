@@ -67,14 +67,25 @@ interactive deadline. Claude Code's interactive model selection changed only
 the temporary settings file; the fixture was restored before the outer
 settings-integrity check. Source account data remained unchanged.
 
-[Automatic-compaction probe](auto-compaction-not-triggered-c97d0889.json)
-remains **failed/unverified**. Four real Haiku turns with a temporary
-`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=0.5`, a 1024-token output cap and a
-360-second interactive deadline reached about 10k upstream input tokens and
-retained the marker, but the isolated Claude Code transcript contained no
-`compact_boundary` with `trigger=auto`. An earlier 128-token-cap attempt
-failed with a client output-limit error. Neither retained context nor extra
-Gateway requests prove that automatic compaction happened. Do not mark this
-case passed until a bounded client run records the automatic boundary and its
-associated usage. Every subscription version and Windows live subscription
-traffic also remain unverified.
+[Automatic-compaction evidence](auto-compaction-c97d0889.json) and
+[Gateway/usage evidence](auto-compaction-gateway-c97d0889.json) now **pass**
+on the same packaged code SHA and Claude Code 2.1.280. Four print-mode
+invocations used one isolated session, explicit native Haiku selection and the
+public `--autocompact 100k` option. The third invocation produced a
+`compact_boundary` with `trigger=auto`, `preTokens=175032` and
+`postTokens=2478`; its two Gateway requests and all five requests in the
+run returned HTTP 200 with complete persisted upstream usage. A subsequent
+reply recalled the original synthetic marker. Bounds were four CLI
+invocations, at most 650,000 prompt characters per invocation, 2,048 output
+tokens per request, 120 seconds per invocation and 600 seconds overall.
+Credentials were snapshotted without the refresh token; source files and the
+installed app were untouched.
+
+The earlier [small-context probe](auto-compaction-not-triggered-c97d0889.json)
+is retained as a failed diagnostic, not a product failure. Its approximately
+10k-token context was well below the real trigger observed above; the private
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` did not establish a passing automatic
+boundary. The first attempt also used a 128-token cap that interrupted an
+internal reply. The follow-up uses the public CLI option and asserts the
+actual client boundary. Every subscription version and Windows live
+subscription traffic remain unverified.
