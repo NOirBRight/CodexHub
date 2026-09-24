@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import time
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -488,7 +490,10 @@ def test_native_message_rejects_missing_or_wrong_local_key_even_with_oauth(
                     {
                         "model": NATIVE_MODEL,
                         "max_tokens": 16,
-                        "messages": [{"role": "user", "content": "hello"}],
+                        "messages": [{
+                            "role": "user",
+                            "content": "x" * 131_072 if local_key else "hello",
+                        }],
                     }
                 ).encode(),
                 headers=_native_headers(local_key=local_key),
@@ -497,6 +502,24 @@ def test_native_message_rejects_missing_or_wrong_local_key_even_with_oauth(
 
     assert response.status == 401
     assert stub.captures == []
+
+
+def test_native_auth_rejection_returns_401_with_unread_request_body() -> None:
+    with GatewayHarness() as harness:
+        connection = http.client.HTTPConnection(harness.host, harness.port, timeout=8)
+        try:
+            connection.putrequest("POST", "/v1/messages")
+            connection.putheader("Content-Length", "131072")
+            connection.putheader("Authorization", f"Bearer {CLAUDE_OAUTH}")
+            connection.putheader("x-codexhub-gateway-key", "wrong-local-key")
+            connection.endheaders()
+            connection.send(b"x" * 1024)
+            time.sleep(0.1)
+            response = connection.getresponse()
+            assert response.status == 401
+            assert json.loads(response.read())["error"] == "unauthorized"
+        finally:
+            connection.close()
 
 
 def test_external_provider_uses_its_own_credential_and_discards_claude_secrets() -> None:

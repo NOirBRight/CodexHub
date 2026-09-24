@@ -260,6 +260,7 @@ class GatewayHandlerMixin:
             self._send_json_and_close(503, user_requested_shutdown_payload("responses"))
 
         if not _local_request_authorized(self.headers, request_context):
+            self._drain_rejected_request_body()
             gateway_events.write_proxy_event(
                 "request_error",
                 request_id=request_id,
@@ -280,7 +281,7 @@ class GatewayHandlerMixin:
         shutdown_controller = _gateway_shutdown_controller_for_handler(self)
         admission = shutdown_controller.admit()
         if admission is None:
-            self._drain_rejected_shutdown_body()
+            self._drain_rejected_request_body()
             send_user_requested_shutdown()
             return
         previous_admission = gateway_admission.activate_gateway_request(admission)
@@ -435,6 +436,7 @@ class GatewayHandlerMixin:
         started_at = time.monotonic()
         request_context = request_context_from_headers(self.headers)
         if not _local_request_authorized(self.headers, request_context):
+            self._drain_rejected_request_body()
             gateway_events.write_proxy_event(
                 "request_error",
                 request_id=request_id,
@@ -535,7 +537,7 @@ class GatewayHandlerMixin:
         shutdown_controller = _gateway_shutdown_controller_for_handler(self)
         admission = shutdown_controller.admit()
         if admission is None:
-            self._drain_rejected_shutdown_body()
+            self._drain_rejected_request_body()
             send_user_requested_shutdown()
             return
         previous_admission = gateway_admission.activate_gateway_request(admission)
@@ -1224,7 +1226,7 @@ class GatewayHandlerMixin:
             )
             self._safe_send_json(502, {"error": type(exc).__name__, "detail": detail}, request_id)
 
-    def _drain_rejected_shutdown_body(self) -> None:
+    def _drain_rejected_request_body(self) -> None:
         # HTTPConnection sends headers and body separately. Closing with unread
         # bytes can reset the socket on Windows and discard our structured 503.
         # Drain only within a short deadline: shutdown must not wait for a slow
@@ -1278,6 +1280,7 @@ class GatewayHandlerMixin:
     def _handle_count_tokens(self) -> None:
         request_context = request_context_from_headers(self.headers)
         if not _local_request_authorized(self.headers, request_context):
+            self._drain_rejected_request_body()
             self._send_json_and_close(401, _local_gateway_auth_error_payload())
             return
         try:
