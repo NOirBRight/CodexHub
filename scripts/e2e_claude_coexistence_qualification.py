@@ -323,7 +323,7 @@ def _picker_transcript(binary: str, env: dict[str, str], cwd: Path,
     import pty
 
     master, slave = pty.openpty()
-    process = subprocess.Popen([binary], cwd=cwd, env=env, stdin=slave, stdout=slave,
+    process = subprocess.Popen([binary, "--bare"], cwd=cwd, env=env, stdin=slave, stdout=slave,
                                stderr=slave, close_fds=True, start_new_session=True)
     os.close(slave)
     output = bytearray()
@@ -454,13 +454,14 @@ def qualify(binary: str, credential_file: Path, output: Path) -> dict[str, Any]:
             state.current_case = "picker_append_rows"
             picker = _picker_transcript(binary, env, work,
                                         timeout=min(12, max(0.1, state.deadline - time.monotonic())))
+            picker_passed = "Opus via CodexHub" in picker and "Claude Opus 5.5" in picker
             picker_result = {"case": "picker_append_rows", "configured": True,
                              "native_default_visible": "Default" in picker,
                              "native_opus_visible": bool(re.search(r"Opus", picker)),
                              "gateway_option_visible": "Opus via CodexHub" in picker,
                              "native_full_id_option_visible": "Claude Opus 5.5" in picker,
-                             "status": "unknown",
-                             "reason": "The bounded PTY session did not expose the model picker rows."}
+                             "passed": picker_passed,
+                             "status": "passed" if picker_passed else "unknown"}
             results.append(picker_result)
         finally:
             gateway.shutdown()
