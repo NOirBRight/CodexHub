@@ -1,7 +1,8 @@
 # Claude Code Gateway client (experimental)
 
-Candidate code SHA: `c97d08897bdae3f56de6e3ce51235150356d8a43`.
-Verified Claude Code version: **2.1.280** on Linux. This is candidate evidence,
+Candidate code SHA: `fae658a2c523ec8431ba0959bf4da22756903bb3`.
+Verified Claude Code versions: **2.1.280** for subscription, picker, switching
+and compaction; **2.1.281** for the live external-provider routes on Linux. This is candidate evidence,
 not a stable release or the release-operator GO in #78. Earlier 2.1.278
 compatibility results remain in the [support table](../evidence/claude-code-support-table.md).
 
@@ -22,14 +23,16 @@ compatibility results remain in the [support table](../evidence/claude-code-supp
 - The isolated Linux packaged candidate passed real subscription Haiku through
   Gateway, persisted usage and the rendered Usage page. Creating and explicitly
   resuming an Opus 5.5 session retained `claude-opus-5-5` and recorded both
-  requests. Official DeepSeek Flash Messages/Chat and Codex Luna Responses were
-  exercised on an earlier candidate. The final code SHA passed Linux and
+  requests. Official DeepSeek Flash Messages/Chat, balance and Codex Luna
+  Responses with max effort passed on this candidate. The candidate code SHA passed Linux and
   Windows language suites and produced Linux and Windows portable builds.
 - A full native → external → native switch in one Claude Code 2.1.280 terminal
-  process later passed on this same code SHA. A separate bounded session
+  process passed on this code SHA. A separate bounded session
   recorded an automatic `compact_boundary`, complete persisted usage for
-  five native requests and marker recall after compaction. Every subscription
-  model/version and Windows live subscription use remain unverified.
+  five native requests and marker recall after compaction. Manual `/compact`
+  also retained native Haiku, persisted summary usage and recalled the marker.
+  Too-long recovery and inherited/pinned subagent selection remain unverified,
+  as do every subscription model/version and Windows live subscription use.
   Non-Claude routes are experimental compatibility, not Anthropic-endorsed
   support.
 
@@ -49,11 +52,14 @@ model identities, test bounds and unsupported/unverified distinctions.
   前提是上游返回用量。`count_tokens` 仍是本地估算，不是计费用量。
 - Linux 隔离候选包已通过真实订阅 Haiku → Gateway → 持久化 → 打包版用量页面；
   创建并显式恢复 Opus 5.5 会话时，两次请求均保留 `claude-opus-5-5` 并记录用量。
-  官方 DeepSeek Flash 的 Messages/Chat 和 Codex Luna Responses 在较早候选版验证。
+  官方 DeepSeek Flash 的 Messages/Chat、余额查询及 Codex Luna Responses max effort
+  也在此候选版验证。
   最终代码 SHA 通过 Linux/Windows 语言测试，并生成两平台 portable 包。
 - 后续在同一代码 SHA 上，Claude Code 2.1.280 的单进程原生 → 外部 → 原生
   交互切换已通过。另一组有界会话记录了自动 `compact_boundary`、五次原生请求
-  的完整持久化用量及压缩后的标记回忆。全部订阅模型/版本和 Windows 真实订阅
-  调用仍未验证。非 Claude 路由仍属实验性兼容，不代表 Anthropic 官方支持。
+  的完整持久化用量及压缩后的标记回忆。手动 `/compact` 也保留原生 Haiku、记录摘要
+  用量并找回标记。超长恢复、继承/固定子代理模型、
+  全部订阅模型/版本和 Windows 真实订阅调用仍未验证。非 Claude 路由仍属实验性
+  兼容，不代表 Anthropic 官方支持。
 
 具体模型、测试上限及未验证范围见[候选证据](../evidence/issue-564/README.md)。
