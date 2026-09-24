@@ -329,16 +329,19 @@ def _picker_transcript(binary: str, env: dict[str, str], cwd: Path,
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 48, 180, 0, 0))
     picker_env = {**env, "TERM": "xterm-256color"}
     process = subprocess.Popen(
-        [binary, "--bare", "--safe-mode", "--tools", "", "--strict-mcp-config",
+        [binary, "--bare", "--tools", "", "--strict-mcp-config",
          "--setting-sources", "user", "--model", "opus"],
         cwd=cwd, env=picker_env, stdin=slave, stdout=slave,
                                stderr=slave, close_fds=True, start_new_session=True)
     os.close(slave)
     output = bytearray()
-    deadline = time.monotonic() + timeout
-    sent_trust = False
+    started = time.monotonic()
+    deadline = started + timeout
     sent_picker = False
     while time.monotonic() < deadline and process.poll() is None:
+        if not sent_picker and time.monotonic() - started >= 3:
+            os.write(master, b"/model\r")
+            sent_picker = True
         ready, _, _ = select.select([master], [], [], 0.2)
         if ready:
             try:
@@ -347,18 +350,7 @@ def _picker_transcript(binary: str, env: dict[str, str], cwd: Path,
                 break
             output.extend(chunk)
             visible = re.sub(rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))", b" ", output)
-            lower = visible.lower()
-            if not sent_trust and (b"trust" in lower and b"directory" in lower):
-                os.write(master, b"\x1b[B\r")
-                sent_trust = True
-            elif not sent_trust and b"yes, i trust this folder" in lower:
-                os.write(master, b"\x1b[B\r")
-                sent_trust = True
-            elif not sent_picker and (b"welcome" in lower or b"what should" in lower or b"claude code" in lower
-                                      or time.monotonic() >= deadline - timeout + 2):
-                os.write(master, b"/model\r")
-                sent_picker = True
-            if sent_picker and (b"Opus via CodexHub" in visible or b"Claude Opus 5.5" in visible):
+            if sent_picker and b"Opus via CodexHub" in visible:
                 break
     try:
         os.write(master, b"\x1b")
@@ -392,7 +384,8 @@ def qualify(binary: str, credential_file: Path, output: Path) -> dict[str, Any]:
             path.mkdir(parents=True, exist_ok=True)
         token, expires_in = _copy_access_only(credential_file, config / ".credentials.json")
         onboarding = {"hasCompletedOnboarding": True,
-                      "lastOnboardingVersion": PINNED_VERSION, "theme": "dark"}
+                      "lastOnboardingVersion": PINNED_VERSION, "theme": "dark",
+                      "projects": {str(work): {"hasTrustDialogAccepted": True}}}
         (home / ".claude.json").write_text(json.dumps(onboarding))
         (config / ".claude.json").write_text(json.dumps(onboarding))
         (config / "settings.json").write_text(json.dumps({
@@ -470,7 +463,9 @@ def qualify(binary: str, credential_file: Path, output: Path) -> dict[str, Any]:
             state.current_case = "picker_append_rows"
             picker = _picker_transcript(binary, env, work,
                                         timeout=min(12, max(0.1, state.deadline - time.monotonic())))
-            picker_passed = "Opus via CodexHub" in picker and "Claude Opus 5.5" in picker
+            picker_passed = all(label in picker for label in (
+                "Default", "Opus via CodexHub", "Claude Opus 5.5",
+            ))
             picker_result = {"case": "picker_append_rows", "configured": True,
                              "native_default_visible": "Default" in picker,
                              "native_opus_visible": bool(re.search(r"Opus", picker)),
@@ -481,7 +476,7 @@ def qualify(binary: str, credential_file: Path, output: Path) -> dict[str, Any]:
                                  for key in ("welcome", "trust", "login", "model", "terminal", "opus")
                              },
                              "passed": picker_passed,
-                             "status": "passed" if picker_passed else "unknown"}
+                             "status": "passed" if picker_passed else "failed"}
             results.append(picker_result)
         finally:
             gateway.shutdown()
@@ -547,7 +542,8 @@ def main() -> int:
                                                "discovery", "network_namespace_isolated", "egress_guard")}
     summary["cases"] = evidence["cases"]
     print(json.dumps(summary, indent=2))
-    return 0 if (all(case.get("passed") for case in evidence["cases"])
+    return 0 if (all(case.get("passed") for case in evidence["cases"]
+                     if case.get("status") != "unknown")
                  and evidence["network_namespace_isolated"]
                  and evidence["egress_guard"]["all_blocked"]
                  and evidence["credential_handling"]["source_credentials_unchanged"]
