@@ -20,10 +20,10 @@ from anthropic_messages_ir import (
     AdaptedResponse,
     ChatToAnthropicEmitter,
     NotForwardable,
-    _anthropic_error_body,
-    _anthropic_error_sse,
-    _content_type_is_sse,
-    _response_refusal,
+    anthropic_error_body,
+    anthropic_error_sse,
+    content_type_is_sse,
+    response_refusal,
     adapt_upstream_response,
     adapt_upstream_stream,
     prepare_upstream_request,
@@ -168,7 +168,7 @@ def relay_incremental_exchange(
 
     selected = str(upstream_format or "").strip().lower()
     if selected not in UPSTREAM_FORMATS:
-        return _response_refusal("unsupported_upstream_format", selected or "missing")
+        return response_refusal("unsupported_upstream_format", selected or "missing")
     prepared = prepare_upstream_request(request_body, selected)
     if isinstance(prepared, NotForwardable):
         return prepared
@@ -177,13 +177,13 @@ def relay_incremental_exchange(
     except (UnicodeError, json.JSONDecodeError, UnsupportedProtocolTranslationError):
         payload = None
     if not isinstance(payload, Mapping) or payload.get("stream") is not True:
-        return _response_refusal("incremental_requires_stream", "stream")
+        return response_refusal("incremental_requires_stream", "stream")
     if (
         isinstance(max_response_bytes, bool)
         or not isinstance(max_response_bytes, int)
         or max_response_bytes <= 0
     ):
-        return _response_refusal("invalid_response_limit", "max_response_bytes")
+        return response_refusal("invalid_response_limit", "max_response_bytes")
     try:
         timeout_is_finite = math.isfinite(timeout)
     except (OverflowError, TypeError):
@@ -194,7 +194,7 @@ def relay_incremental_exchange(
         or not timeout_is_finite
         or timeout <= 0
     ):
-        return _response_refusal("invalid_timeout", "timeout")
+        return response_refusal("invalid_timeout", "timeout")
     if cancelled is not None and cancelled():
         commit.cancel()
         return 499
@@ -216,16 +216,16 @@ def relay_incremental_exchange(
         or deadline_remaining < 0
     ):
         commit.cancel()
-        return _response_refusal("invalid_admission_reservation", "deadline_remaining")
+        return response_refusal("invalid_admission_reservation", "deadline_remaining")
     absolute_deadline = admission_started + float(deadline_remaining)
     if not math.isfinite(absolute_deadline):
         commit.cancel()
-        return _response_refusal("invalid_admission_reservation", "deadline_remaining")
+        return response_refusal("invalid_admission_reservation", "deadline_remaining")
     attempt_deadline = min(absolute_deadline, admission_started + float(timeout))
     remaining = attempt_deadline - monotonic()
     if remaining <= 0:
         commit.cancel()
-        return _response_refusal("admission_deadline_exhausted", "deadline_remaining")
+        return response_refusal("admission_deadline_exhausted", "deadline_remaining")
 
     request = urllib.request.Request(
         url,
@@ -251,9 +251,9 @@ def relay_incremental_exchange(
             return 502
         response_headers = getattr(response, "headers", {})
         response_type = response_headers.get("content-type", "") if response_headers is not None else ""
-        if not isinstance(response_type, str) or not _content_type_is_sse(response_type):
+        if not isinstance(response_type, str) or not content_type_is_sse(response_type):
             _close_incremental_response(response)
-            return _response_refusal("unsupported_incremental_response", "content_type")
+            return response_refusal("unsupported_incremental_response", "content_type")
 
         lifecycle = UpstreamSseReaderLifecycle(
             _AbortableNativeResponse(response),
@@ -358,10 +358,10 @@ def relay_incremental_exchange(
             try:
                 payload = decode_protocol_json(data)
             except (UnicodeError, json.JSONDecodeError, UnsupportedProtocolTranslationError):
-                return _response_refusal("invalid_upstream_stream", "sse.data")
+                return response_refusal("invalid_upstream_stream", "sse.data")
             if isinstance(payload, Mapping):
                 return payload
-            return _response_refusal("invalid_upstream_stream", "sse.data")
+            return response_refusal("invalid_upstream_stream", "sse.data")
 
         try:
             for event in iter_events():
@@ -390,7 +390,7 @@ def relay_incremental_exchange(
                     event.event == b"error" or payload.get("type") == "error" or payload.get("error") is not None
                     or payload.get("type") in {"response.failed", "response.incomplete"}
                 ):
-                    error_bytes = _anthropic_error_sse(
+                    error_bytes = anthropic_error_sse(
                         response_status if response_status >= 400 else 502,
                         payload,
                         default="Upstream stream failed",
@@ -410,7 +410,7 @@ def relay_incremental_exchange(
                             or not isinstance(responses_converter.model, str)
                             or not responses_converter.model
                         ):
-                            missing = _response_refusal("unsupported_upstream_stream", "responses.identity")
+                            missing = response_refusal("unsupported_upstream_stream", "responses.identity")
                             if forwarded == 0:
                                 commit.cancel()
                                 return missing
@@ -460,7 +460,7 @@ def relay_incremental_exchange(
                 except UnsupportedProtocolTranslationError as exc:
                     if forwarded == 0:
                         commit.cancel()
-                        return _response_refusal("unsupported_upstream_stream", getattr(exc, "reason", "stream"))
+                        return response_refusal("unsupported_upstream_stream", getattr(exc, "reason", "stream"))
                     raise ValueError("unsupported_upstream_stream") from exc
                 if terminal_kind is not None:
                     break
@@ -533,7 +533,7 @@ def execute_exchange(
     stream_requested = isinstance(prepared_payload, Mapping) and prepared_payload.get("stream") is True
     request_headers["accept"] = "text/event-stream" if stream_requested else "application/json"
     if max_response_bytes <= 0:
-        return _response_refusal("invalid_response_limit", "max_response_bytes")
+        return response_refusal("invalid_response_limit", "max_response_bytes")
     request_headers.update(headers or {})
     admit(selected, method, url, prepared.body)
     request = urllib.request.Request(url, data=prepared.body, headers=request_headers, method=method)
@@ -550,7 +550,7 @@ def execute_exchange(
                     break
                 total_bytes += len(piece)
                 if total_bytes > max_response_bytes:
-                    return _response_refusal("upstream_response_too_large", "response.bytes")
+                    return response_refusal("upstream_response_too_large", "response.bytes")
                 pieces.append(piece)
                 if cancelled is not None and cancelled():
                     return adapt_upstream_response(
@@ -568,7 +568,7 @@ def execute_exchange(
                     content_type=response_type,
                     cancelled=True,
                 )
-            if _content_type_is_sse(response_type):
+            if content_type_is_sse(response_type):
                 return adapt_upstream_stream(
                     selected,
                     pieces,
@@ -586,18 +586,18 @@ def execute_exchange(
         response_type = error.headers.get("content-type", "application/json") if error.headers else "application/json"
         body = error.read(max_response_bytes + 1)
         if len(body) > max_response_bytes:
-            return _response_refusal("upstream_response_too_large", "error.bytes")
+            return response_refusal("upstream_response_too_large", "error.bytes")
         if not body:
-            if _content_type_is_sse(response_type):
+            if content_type_is_sse(response_type):
                 return AdaptedResponse(
-                    body=_anthropic_error_sse(error.code, None, default="Upstream HTTP request failed"),
+                    body=anthropic_error_sse(error.code, None, default="Upstream HTTP request failed"),
                     status=error.code,
                     content_type="text/event-stream",
                 )
             return AdaptedResponse(
-                body=_anthropic_error_body(error.code, None, default="Upstream HTTP request failed"),
+                body=anthropic_error_body(error.code, None, default="Upstream HTTP request failed"),
                 status=error.code,
             )
-        if _content_type_is_sse(response_type):
+        if content_type_is_sse(response_type):
             return adapt_upstream_stream(selected, (body,), status=error.code, content_type=response_type)
         return adapt_upstream_response(selected, body, status=error.code, content_type=response_type)
