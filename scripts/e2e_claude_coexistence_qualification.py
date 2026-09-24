@@ -320,10 +320,15 @@ def _run_case(binary: str, env: dict[str, str], cwd: Path, state: HarnessState,
 def _picker_transcript(binary: str, env: dict[str, str], cwd: Path,
                        timeout: float = 12) -> str:
     """Open the real /model picker in a PTY and return its terminal text."""
+    import fcntl
     import pty
+    import struct
+    import termios
 
     master, slave = pty.openpty()
-    process = subprocess.Popen([binary, "--bare"], cwd=cwd, env=env, stdin=slave, stdout=slave,
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 48, 180, 0, 0))
+    picker_env = {**env, "TERM": "xterm-256color"}
+    process = subprocess.Popen([binary, "--bare"], cwd=cwd, env=picker_env, stdin=slave, stdout=slave,
                                stderr=slave, close_fds=True, start_new_session=True)
     os.close(slave)
     output = bytearray()
@@ -343,7 +348,8 @@ def _picker_transcript(binary: str, env: dict[str, str], cwd: Path,
             if not sent_trust and (b"trust" in lower and b"directory" in lower):
                 os.write(master, b"1\r")
                 sent_trust = True
-            elif not sent_picker and (b"welcome" in lower or b"what should" in lower or b"claude code" in lower):
+            elif not sent_picker and (b"welcome" in lower or b"what should" in lower or b"claude code" in lower
+                                      or time.monotonic() >= deadline - timeout + 2):
                 os.write(master, b"/model\r")
                 sent_picker = True
             if sent_picker and (b"Opus via CodexHub" in visible or b"Claude Opus 5.5" in visible):
@@ -460,6 +466,10 @@ def qualify(binary: str, credential_file: Path, output: Path) -> dict[str, Any]:
                              "native_opus_visible": bool(re.search(r"Opus", picker)),
                              "gateway_option_visible": "Opus via CodexHub" in picker,
                              "native_full_id_option_visible": "Claude Opus 5.5" in picker,
+                             "screen_indicators": {
+                                 key: key in picker.lower()
+                                 for key in ("welcome", "trust", "login", "model", "terminal", "opus")
+                             },
                              "passed": picker_passed,
                              "status": "passed" if picker_passed else "unknown"}
             results.append(picker_result)
