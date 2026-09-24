@@ -328,7 +328,10 @@ def _picker_transcript(binary: str, env: dict[str, str], cwd: Path,
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 48, 180, 0, 0))
     picker_env = {**env, "TERM": "xterm-256color"}
-    process = subprocess.Popen([binary, "--bare"], cwd=cwd, env=picker_env, stdin=slave, stdout=slave,
+    process = subprocess.Popen(
+        [binary, "--bare", "--safe-mode", "--tools", "", "--strict-mcp-config",
+         "--setting-sources", "user", "--model", "opus"],
+        cwd=cwd, env=picker_env, stdin=slave, stdout=slave,
                                stderr=slave, close_fds=True, start_new_session=True)
     os.close(slave)
     output = bytearray()
@@ -385,6 +388,10 @@ def qualify(binary: str, credential_file: Path, output: Path) -> dict[str, Any]:
         for path in (config, home / "tmp", work):
             path.mkdir(parents=True, exist_ok=True)
         token, expires_in = _copy_access_only(credential_file, config / ".credentials.json")
+        onboarding = {"hasCompletedOnboarding": True,
+                      "lastOnboardingVersion": PINNED_VERSION, "theme": "dark"}
+        (home / ".claude.json").write_text(json.dumps(onboarding))
+        (config / ".claude.json").write_text(json.dumps(onboarding))
         (config / "settings.json").write_text(json.dumps({
             "model": "opus",
             "modelPicker": {"options": [
