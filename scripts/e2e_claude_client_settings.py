@@ -184,6 +184,18 @@ def run(binary: Path, claude_bin: Path | None, browser: bool) -> None:
         settings_path = runtime / "proxy" / "settings.json"
         for path in (config, fake_bin, providers_path.parent, root / "codex"):
             path.mkdir(parents=True)
+        # The coexistence contract assumes an existing Claude subscription login.
+        # Keep this synthetic credential inside the loopback-only test home.
+        credentials = config / ".credentials.json"
+        credentials.write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-ant-oat01-codexhub-fixture",
+            "expiresAt": int((time.time() + 3600) * 1000),
+            "subscriptionType": "pro",
+            "rateLimitTier": "default_claude_ai",
+            "scopes": ["user:inference"],
+        }}))
+        credentials.chmod(0o600)
+        credential_snapshot = credentials.read_bytes()
         claude_path = config / "settings.json"
         claude_path.write_text(json.dumps({"theme": "dark", "env": {"EDITOR": "vim"}}))
         providers_path.write_text('''[[providers]]
@@ -337,6 +349,7 @@ enabled = true
                 "ANTHROPIC_DEFAULT_SONNET_MODEL",
             } for key in restored["env"])
             assert claude_info(port)["route_mode"] == "official"
+            assert credentials.read_bytes() == credential_snapshot
             print("PASS: isolated Claude bridge preview, connect, edit, readback, invalid target, conflict, disconnect"
                   + ("; real Claude Code text roundtrip" if claude_bin else ""))
         finally:

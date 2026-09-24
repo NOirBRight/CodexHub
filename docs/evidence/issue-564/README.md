@@ -25,6 +25,13 @@ errors; its advisory findings did not gate this candidate.
   explicit-model resume, `opusplan`, local credential rejection and the native
   plus Gateway `/model` rows passed. Tool execution was disabled, so inherited
   and pinned subagent selection is **unknown** in this probe.
+- [Combined settings flow](combined-settings-fae658a2.json): the packaged
+  binary, isolated web bridge, real Chromium UI and Claude Code 2.1.280 passed
+  preview, Connect, family/default edits, readback, invalid-target/conflict
+  handling, loopback external-default generation and Disconnect. This fixture
+  used a synthetic saved OAuth token and made no official Provider call. Its
+  initial run without a saved-login fixture failed client model recognition;
+  the corrected fixture passed without changing product code.
 - [Real native Opus 5.5 resume](explicit-model-resume-fae658a2.json): creation
   and `--resume --model claude-opus-5-5` both reached the native subscription
   route with the exact ID and persisted upstream usage.
@@ -61,9 +68,11 @@ bounded requests, output and wall time recorded in each JSON. The interactive
 switch allowed three generation turns, 128 output tokens and 360 seconds. The
 automatic compaction run allowed four CLI invocations, 2,048 output tokens per
 request, at most 650,000 prompt characters per invocation and 600 seconds.
-Too-long recovery, pinned/inherited subagents, every native
-subscription version and Windows live subscription traffic are **not yet
-verified** on this candidate. Historical evidence below describes earlier
+Too-long recovery, pinned/inherited subagents, live tool/cancellation/error
+paths, real cache-hit reuse, every native subscription version and Windows
+live subscription traffic are **not yet verified** on this candidate.
+Deterministic token/accounting edge cases are covered by the local test suites,
+not by these live records. Historical evidence below describes earlier
 builds and must not be read as evidence for `fae658a2`.
 
 `explicit-model-resume-a5b783cd.json` is a sanitized, bounded qualification
@@ -80,12 +89,12 @@ subscription route with the original model identity and persisted complete
 usage rows. The resumed request recorded 23,055 input tokens, 36 output tokens,
 22,730 cache-read tokens and 323 cache-write tokens. `explicit_model_resume`
 is verified for this candidate; plain `--resume`, same-session native/external
-switching and the packaged Usage UI were not verified by this run. The final
-code SHA has separate candidate evidence below.
+switching and the packaged Usage UI were not verified by this run. The reviewed
+`fae658a2` candidate has separate evidence above.
 
 ## Earlier packaged candidate `c97d0889`
 
-The final code SHA is `c97d08897bdae3f56de6e3ce51235150356d8a43`.
+This earlier code SHA is `c97d08897bdae3f56de6e3ce51235150356d8a43`.
 The Linux debug portable archive SHA256 is
 `72050ed47656ae556202a35ef3a9e6bd102de51803f5f9b23aeb9de2315321de`;
 the isolated Windows debug portable archive SHA256 is
@@ -113,7 +122,7 @@ credentials were unchanged. The Opus run reserved two CLI generation attempts,
 generation attempt, 90 seconds and 180 seconds overall; Claude Code itself can
 send more than one Gateway request during an invocation.
 
-The final code SHA also passed Linux Python (3260), Windows Python (3385),
+This earlier candidate also passed Linux Python (3260), Windows Python (3385),
 Windows synthetic real-client contract (152), Windows serial Rust (774),
 Windows clippy, frontend build and UI contract checks. Earlier DeepSeek
 official Messages/Chat, balance and Codex Luna Responses results were obtained
