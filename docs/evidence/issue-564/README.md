@@ -49,9 +49,32 @@ send more than one Gateway request during an invocation.
 
 The final code SHA also passed Linux Python (3260), Windows Python (3385),
 Windows synthetic real-client contract (152), Windows serial Rust (774),
-Windows clippy, frontend build and UI contract checks. Same-session
-native → external → native switching, automatic compaction, every subscription
-version and Windows live subscription traffic are still unverified on this
-candidate. Earlier DeepSeek official Messages/Chat, balance and Codex Luna
-Responses results were obtained on precursor `154af624`, not repeated on
-`c97d0889`.
+Windows clippy, frontend build and UI contract checks. Earlier DeepSeek
+official Messages/Chat, balance and Codex Luna Responses results were obtained
+on precursor `154af624`, not repeated on `c97d0889`.
+
+## Follow-up interactive qualification on the same code SHA
+
+[Interactive evidence](interactive-native-external-native-c97d0889.json) and
+[Gateway/usage evidence](interactive-routes-c97d0889.json) used Claude Code
+2.1.280 in one isolated terminal process. The user-visible `/model` command
+selected native Haiku → official DeepSeek Flash → native Haiku. Three assistant
+replies in the isolated session transcript recalled the same synthetic marker;
+the corresponding Gateway requests were HTTP 200 and persisted under
+`claude_subscription`, `deepseek`, then `claude_subscription`. The runner
+reserved three generation turns, a 128-token output cap and a 360-second
+interactive deadline. Claude Code's interactive model selection changed only
+the temporary settings file; the fixture was restored before the outer
+settings-integrity check. Source account data remained unchanged.
+
+[Automatic-compaction probe](auto-compaction-not-triggered-c97d0889.json)
+remains **failed/unverified**. Four real Haiku turns with a temporary
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=0.5`, a 1024-token output cap and a
+360-second interactive deadline reached about 10k upstream input tokens and
+retained the marker, but the isolated Claude Code transcript contained no
+`compact_boundary` with `trigger=auto`. An earlier 128-token-cap attempt
+failed with a client output-limit error. Neither retained context nor extra
+Gateway requests prove that automatic compaction happened. Do not mark this
+case passed until a bounded client run records the automatic boundary and its
+associated usage. Every subscription version and Windows live subscription
+traffic also remain unverified.

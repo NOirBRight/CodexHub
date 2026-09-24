@@ -1,0 +1,82 @@
+{
+  "candidate_sha": "c97d08897bdae3f56de6e3ce51235150356d8a43",
+  "cli_version": "2.1.280 (Claude Code)",
+  "case": "interactive_native_auto_compaction",
+  "bound": {
+    "generation_turns": 4,
+    "overall_seconds": 360,
+    "max_output_tokens": 1024,
+    "auto_compact_percent_override": 0.5
+  },
+  "turns": [
+    {
+      "label": "native_initial",
+      "selected": "claude-haiku-4-5-20251001",
+      "canonical_model": "claude-haiku-4-5-20251001",
+      "provider": "claude_subscription",
+      "request_id": "a85eec044006",
+      "status": 200,
+      "input_tokens": 915,
+      "output_tokens": 16,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": 0,
+      "marker_in_assistant_transcript": true,
+      "assistant_models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    },
+    {
+      "label": "native_threshold",
+      "selected": "claude-haiku-4-5-20251001",
+      "canonical_model": "claude-haiku-4-5-20251001",
+      "provider": "claude_subscription",
+      "request_id": "dd8b3ab702bc",
+      "status": 200,
+      "input_tokens": 12274,
+      "output_tokens": 123,
+      "cached_input_tokens": 7538,
+      "cache_write_input_tokens": 4726,
+      "marker_in_assistant_transcript": true,
+      "assistant_models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    },
+    {
+      "label": "native_cross_threshold",
+      "selected": "claude-haiku-4-5-20251001",
+      "canonical_model": "claude-haiku-4-5-20251001",
+      "provider": "claude_subscription",
+      "request_id": "d80fc70d7f19",
+      "status": 200,
+      "input_tokens": 13944,
+      "output_tokens": 78,
+      "cached_input_tokens": 12264,
+      "cache_write_input_tokens": 1670,
+      "marker_in_assistant_transcript": true,
+      "assistant_models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    },
+    {
+      "label": "native_after_compact",
+      "selected": "claude-haiku-4-5-20251001",
+      "canonical_model": "claude-haiku-4-5-20251001",
+      "provider": "claude_subscription",
+      "request_id": "1591570b1013",
+      "status": 200,
+      "input_tokens": 14073,
+      "output_tokens": 60,
+      "cached_input_tokens": 13934,
+      "cache_write_input_tokens": 129,
+      "marker_in_assistant_transcript": true,
+      "assistant_models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    }
+  ],
+  "status": "failed",
+  "compaction_boundaries": [],
+  "failure": "AssertionError: no automatic compact_boundary in isolated transcript",
+  "source_account_unchanged": true,
+  "interactive_selection_changed_isolated_settings": false
+}

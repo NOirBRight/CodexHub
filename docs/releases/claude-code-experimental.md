@@ -25,10 +25,12 @@ compatibility results remain in the [support table](../evidence/claude-code-supp
   requests. Official DeepSeek Flash Messages/Chat and Codex Luna Responses were
   exercised on an earlier candidate. The final code SHA passed Linux and
   Windows language suites and produced Linux and Windows portable builds.
-- A full native → external → native interactive switch, automatic compaction,
-  every subscription model/version and Windows live subscription use remain
-  unverified on this candidate. Non-Claude routes are experimental compatibility,
-  not Anthropic-endorsed support.
+- A full native → external → native switch in one Claude Code 2.1.280 terminal
+  process later passed on this same code SHA. Automatic compaction did not
+  trigger in the bounded follow-up probe and remains unverified. Every
+  subscription model/version and Windows live subscription use also remain
+  unverified. Non-Claude routes are experimental compatibility, not
+  Anthropic-endorsed support.
 
 See [bounded candidate evidence](../evidence/issue-564/README.md) for the exact
 model identities, test bounds and unsupported/unverified distinctions.
@@ -48,8 +50,9 @@ model identities, test bounds and unsupported/unverified distinctions.
   创建并显式恢复 Opus 5.5 会话时，两次请求均保留 `claude-opus-5-5` 并记录用量。
   官方 DeepSeek Flash 的 Messages/Chat 和 Codex Luna Responses 在较早候选版验证。
   最终代码 SHA 通过 Linux/Windows 语言测试，并生成两平台 portable 包。
-- 原生 → 外部 → 原生的完整交互切换、自动压缩、全部订阅模型/版本，以及
-  Windows 真实订阅调用尚未在此候选版验证。非 Claude 路由仍属实验性兼容，
+- 后续在同一代码 SHA 上，Claude Code 2.1.280 的单进程原生 → 外部 → 原生
+  交互切换已通过。自动压缩在有界探针中没有触发，仍未验证；全部订阅模型/版本
+  和 Windows 真实订阅调用也尚未验证。非 Claude 路由仍属实验性兼容，
   不代表 Anthropic 官方支持。
 
 具体模型、测试上限及未验证范围见[候选证据](../evidence/issue-564/README.md)。
