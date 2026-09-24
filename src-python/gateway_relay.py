@@ -15,7 +15,9 @@ import http.client
 import urllib.error
 
 import anthropic_messages
+import anthropic_messages_prototype
 import collaboration_adapter
+import gateway_relay_anthropic
 import gateway_compat
 import gateway_errors
 import gateway_events
@@ -321,6 +323,9 @@ def iter_upstream_sse_lines(
                     lifecycle.close()
                     raise context.idle_timeout_error(model_event_timeout_seconds, "model_event")
                 if keepalive_interval > 0:
+                    if downstream_output_started is not None and not downstream_output_started():
+                        last_keepalive_at = time.monotonic()
+                        continue
                     if not context.write_keepalive():
                         lifecycle.close()
                         raise context.keepalive_failure_error("downstream keepalive write failed")
@@ -522,11 +527,14 @@ def relay_upstream_response(
     # When the caller spoke Chat Completions, the response must be converted
     # back to Chat Completions format regardless of the upstream wire format.
     want_chat_output = inbound_format == "chat_completions"
+    want_anthropic_output = inbound_format == "anthropic_messages"
     request_scoped_seam = _handler_downstream_stream_commit(self)
     seam: DownstreamStreamCommit | None = request_scoped_seam
     if request_scoped_seam is not None:
         request_scoped_seam.set_terminal_observer(
-            gateway_stream_semantics._chat_terminal_observer
+            gateway_relay_anthropic._anthropic_sse_terminal_observer
+            if want_anthropic_output
+            else gateway_stream_semantics._chat_terminal_observer
             if want_chat_output
             else gateway_stream_semantics._responses_terminal_observer
         )
@@ -550,7 +558,9 @@ def relay_upstream_response(
             inbound_format=inbound_format,
             upstream_format=upstream_format,
             terminal_observer=(
-                gateway_stream_semantics._chat_terminal_observer
+                gateway_relay_anthropic._anthropic_sse_terminal_observer
+                if want_anthropic_output
+                else gateway_stream_semantics._chat_terminal_observer
                 if want_chat_output
                 else gateway_stream_semantics._responses_terminal_observer
             ),
@@ -791,12 +801,16 @@ def relay_upstream_response(
             # Buffer the full SSE stream into a list of events.
             events: list[Mapping[str, Any]] = []
             chat_chunks: list[Mapping[str, Any] | str] = []
+            anthropic_sse_frames: list[Any] = []
             incomplete_frame = False
+            native_anthropic_json = (
+                want_anthropic_output and upstream_format == "anthropic_messages"
+            )
 
             try:
                 anthropic_converter = (
                     anthropic_messages.AnthropicToChatStreamConverter()
-                    if upstream_format == "anthropic_messages"
+                    if upstream_format == "anthropic_messages" and not native_anthropic_json
                     else None
                 )
                 for frame in iter_upstream_sse_events(
@@ -815,6 +829,9 @@ def relay_upstream_response(
                         frame,
                         verified_source_format=None if upstream_format == "anthropic_messages" else verified_source_format,
                     )
+                    if native_anthropic_json:
+                        anthropic_sse_frames.append(frame)
+                        continue
                     if payload is None:
                         continue
                     if anthropic_converter is not None:
@@ -839,11 +856,21 @@ def relay_upstream_response(
             # Reconstruct a Responses-format body from the events.
             if not converted_stream_failure:
                 try:
-                    if incomplete_frame:
+                    if native_anthropic_json:
+                        assembled = gateway_relay_anthropic.json_message_from_anthropic_sse(
+                            anthropic_sse_frames
+                        )
+                        if assembled:
+                            body = assembled
+                        else:
+                            raise UpstreamStreamIncompleteError(
+                                "Upstream SSE stream ended with an incomplete pending frame"
+                            )
+                    elif incomplete_frame:
                         raise UpstreamStreamIncompleteError(
                             "Upstream SSE stream ended with an incomplete pending frame"
                         )
-                    if (
+                    elif (
                         upstream_format in {"chat_completions", "anthropic_messages"}
                         and not want_chat_output
                     ):
@@ -928,6 +955,43 @@ def relay_upstream_response(
                         mutated_body,
                         preserve_reasoning_history=preserve_reasoning_history,
                     )
+            elif inbound_format == "anthropic_messages":
+                content_type = "application/json"
+                response_headers = getattr(response, "headers", None)
+                if response_headers is not None:
+                    content_type = response_headers.get("content-type", content_type) or content_type
+                adapted = anthropic_messages_prototype.adapt_upstream_response(
+                    upstream_format,
+                    body,
+                    status=status,
+                    content_type=content_type,
+                )
+                if isinstance(adapted, anthropic_messages_prototype.NotForwardable):
+                    status = status if status >= 400 else 400
+                    body = json.dumps(
+                        {
+                            "type": "error",
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": adapted.reason,
+                            },
+                        },
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                else:
+                    body = adapted.body
+                    status = adapted.status
+                    for item in adapted.adaptations:
+                        write_proxy_event(
+                            "protocol_adaptation",
+                            field=item.field,
+                            policy=item.policy,
+                            detail=item.detail,
+                            upstream=upstream_name,
+                            inbound_format=inbound_format,
+                            upstream_format=upstream_format,
+                        )
             elif upstream_format in {"chat_completions", "anthropic_messages"}:
                 if upstream_format == "anthropic_messages":
                     body = anthropic_messages.anthropic_message_to_chat_completion_body(body)
@@ -1165,6 +1229,7 @@ def relay_upstream_response(
                 is_event_stream,
                 content_length,
                 content_type=content_type,
+                content_encoding=None,
             ):
                 self.send_header(key, value)
             self.send_header("X-Codex-Proxy-Upstream", upstream_name)
@@ -1188,6 +1253,21 @@ def relay_upstream_response(
             )
 
     if is_event_stream:
+        if want_anthropic_output:
+            return gateway_relay_anthropic.relay_inbound_anthropic_sse(
+                handler=self,
+                response=response,
+                read_lines=self._iter_upstream_sse_lines,
+                iter_events=iter_upstream_sse_events,
+                seam=seam,
+                send_headers=send_downstream_response_headers_once,
+                finish_closed=finish_downstream_stream_closed,
+                write_proxy_event=write_proxy_event,
+                observe_line=observe_diagnostic_sse_line,
+                upstream_format=upstream_format,
+                inbound_format=inbound_format,
+                status=status,
+            )
         if (
             streaming_policy == StreamingPolicy.TRANSPARENT_CONVERTED
             and want_chat_output

@@ -420,7 +420,7 @@ def test_grok_xai_drops_web_search_external_web_access():
     assert "external_web_access" not in web_search
 
 
-def test_grok_xai_rejects_cache_only_web_search():
+def test_grok_xai_disables_optional_cache_only_web_search():
     payload = {
         **_GROK_RESPONSES,
         "tools": [
@@ -431,8 +431,9 @@ def test_grok_xai_rejects_cache_only_web_search():
             }
         ],
     }
-    with pytest.raises(UpstreamProtocolTranslationError, match="external_web_access=false"):
-        _mutate(payload, _RESPONSES_PROVIDERS[4]["upstream"])
+    transformed = _mutate(payload, _RESPONSES_PROVIDERS[4]["upstream"])
+    assert transformed["tools"] == []
+    assert "Cache-only web search is unavailable" in transformed["instructions"]
 
 
 @pytest.mark.parametrize("case", _CHAT_PROVIDERS, ids=lambda case: case["id"])

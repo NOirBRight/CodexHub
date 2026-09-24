@@ -537,8 +537,15 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
     prepared_exchange: PreparedExchange | None = None
     pre_compatibility_applied = False
     caller_is_chat = request.inbound.inbound_format == "chat_completions"
+    caller_is_anthropic = request.inbound.inbound_format == "anthropic_messages"
     attempt_is_responses = attempt.selected_upstream_format == "responses"
-    if policy in (MutationPolicy.TRANSPARENT, MutationPolicy.GATEWAY_COMPATIBILITY) and caller_is_chat and attempt_is_responses:
+    convert_before_compat = (
+        caller_is_chat and attempt_is_responses
+    ) or (
+        caller_is_anthropic
+        and attempt.selected_upstream_format in {"chat_completions", "responses"}
+    )
+    if policy in (MutationPolicy.TRANSPARENT, MutationPolicy.GATEWAY_COMPATIBILITY) and convert_before_compat:
         try:
             prepared_exchange = attempt.prepare_body(conversion_body)
         except UnsupportedProtocolTranslationError as exc:
@@ -593,7 +600,7 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
         prepared_exchange is not None
         or (
             not caller_is_chat
-            and attempt.selected_upstream_format in {"chat_completions", "anthropic_messages"}
+            and attempt.selected_upstream_format == "chat_completions"
         )
         or (
             caller_is_chat
@@ -610,6 +617,18 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
     else:
         prepared_exchange = replace(prepared_exchange, upstream_body=conversion_body)
     body = prepared_exchange.upstream_body
+    if attempt.selected_upstream_format == "anthropic_messages":
+        payload = _passthrough._safe_json_mapping(body)
+        upstream_model = upstream.get("upstream_model")
+        if (
+            isinstance(payload, dict)
+            and isinstance(upstream_model, str)
+            and upstream_model
+            and payload.get("model") != upstream_model
+        ):
+            payload["model"] = upstream_model
+            body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode()
+            prepared_exchange = replace(prepared_exchange, upstream_body=body)
     if prepared_exchange.dropped_cache_controls and observer is not None:
         observer.record(ExchangeEvent("cache_control_dropped", {
             "request_id": request.inbound.request_id,
@@ -619,10 +638,25 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
             "fields": list(prepared_exchange.dropped_cache_controls),
             "reason": "unverified_endpoint_capability",
         }))
+    if prepared_exchange.adaptations and observer is not None:
+        observer.record(ExchangeEvent("protocol_adaptation", {
+            "request_id": request.inbound.request_id,
+            "upstream": request.upstream_name,
+            "upstream_format": attempt.selected_upstream_format,
+            "route_attempt_index": attempt.index,
+            "adaptations": [
+                {"field": field, "policy": policy, "detail": detail}
+                for field, policy, detail in prepared_exchange.adaptations
+            ],
+        }))
     if policy is MutationPolicy.OFFICIAL_PASSTHROUGH:
         payload = request.inbound_payload if attempt.selected_upstream_format == request.inbound.inbound_format and isinstance(request.inbound_payload, Mapping) else _passthrough._safe_json_mapping(body)
         return prepared_exchange, _gateway_compat.official_passthrough_request_body(body, payload, upstream, model_id=request.inbound.model, event_context=request.event_context)
-    if policy is MutationPolicy.GATEWAY_COMPATIBILITY and not pre_compatibility_applied:
+    if (
+        policy is MutationPolicy.GATEWAY_COMPATIBILITY
+        and not pre_compatibility_applied
+        and attempt.selected_upstream_format != "anthropic_messages"
+    ):
         body = _gateway_compat.compatible_request_body(body, upstream, model_id=request.inbound.model, event_context=request.event_context, inject_codex_tools=request.route_plan.tool_exposure.gateway_schema_injection, tool_protocol_override=attempt.tool_protocol, tool_surface_strategy_override=attempt.tool_surface_strategy, native_responses_tool_codec_override=attempt.native_responses_tool_codec)
     if policy is MutationPolicy.GATEWAY_COMPATIBILITY:
         body, schema_rewrites = _passthrough._normalize_transparent_tool_schema_booleans(body)

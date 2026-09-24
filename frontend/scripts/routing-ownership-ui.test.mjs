@@ -34,10 +34,10 @@ test("Gateway connect toggle maps foreign ownership to takeover without a segmen
 
   assert.doesNotMatch(card, /SegmentedSwitch/);
   assert.match(card, /<SwitchControl/);
-  assert.match(card, /onToggle: \(connect: boolean\) => void/);
+  assert.match(card, /onToggle: \(\s*connect: boolean,[\s\S]*?roleMappings\?: Record<string, string> \| null,\s*\) => void/);
   assert.doesNotMatch(page, /TakeoverSummaryDialog/);
   assert.match(page, /takeoverRequired/);
-  assert.match(page, /switchClientMode\(clientId, runtimeOwner, takeoverRequired\)/);
+  assert.match(page, /switchClientMode\(\s*clientId,\s*runtimeOwner,\s*takeoverRequired,\s*model,\s*roleMappings,/);
   assert.match(page, /if \(!result\.applied\)/);
   assert.match(page, /onRefreshClients\(\{ force: true \}\)/);
   assert.match(page, /listReachedClientBusyTarget/);
@@ -84,4 +84,9 @@ test("Codex keeps connected surfaces visible for a foreign owner and takes over 
   assert.match(providers, /foreignOwner[\s\S]*bg-emerald-100 text-emerald-700/);
   assert.match(providers, /!pendingMode && connected[\s\S]*bg-emerald-600 text-white/);
   assert.match(providers, /connectedToHubChannel/);
+});
+
+test("Codex connection work runs outside the desktop event thread", async () => {
+  const handlers = await source("../../src-tauri/src/desktop_commands/handlers.rs");
+  assert.match(handlers, /#\[tauri::command\(async\)\]\s*pub fn switch_mode\(/);
 });

@@ -42,6 +42,8 @@ pub(crate) enum InjectionShape {
     SingleBlock,
     /// Provider entries split across per-upstream files (Pi, OMP).
     PerUpstreamProvider,
+    /// Owned env/settings keys in one JSON object (Claude Code).
+    ManagedKeySet,
 }
 
 /// Isolated-root file layout for a managed client. Paths are relative to the
@@ -87,6 +89,11 @@ pub(crate) const ISOLATED_MANAGED_CLIENTS: &[IsolatedManagedClient] = &[
         id: "codex",
         shape: InjectionShape::SingleBlock,
         files: &["codex-target/config.toml"],
+    },
+    IsolatedManagedClient {
+        id: "claude",
+        shape: InjectionShape::ManagedKeySet,
+        files: &["claude/settings.json"],
     },
 ];
 
@@ -1147,6 +1154,13 @@ mod tests {
         assert_eq!(opencode.files, &["opencode/opencode.json"]);
     }
 
+    #[test]
+    fn claude_isolated_layout_is_managed_key_set() {
+        let claude = isolated_managed_client("claude").expect("claude layout");
+        assert_eq!(claude.shape, InjectionShape::ManagedKeySet);
+        assert_eq!(claude.files, &["claude/settings.json"]);
+    }
+
     /// serde_yaml has no JSON-pointer; walk "/a/b/c" path segments instead.
     fn at<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
         let mut node = value;
@@ -1305,6 +1319,13 @@ mod tests {
         assert!(connected.block_present);
         assert!(connected.config_path.starts_with(&root));
         assert!(connected.credential_path.starts_with(&root));
+        let connected_config = read_file(&connected.config_path);
+        assert!(
+            !connected_config.contains("default_subagent"),
+            "DSH must not grow Default subagent keys: {connected_config}"
+        );
+        assert!(!connected_config.contains("agentModelOverrides"));
+        assert!(!connected_config.contains("x-codexhub-default-subagent"));
 
         let disconnected = dsh_disconnect(&root, &expectation).unwrap();
         assert!(!disconnected.connected);

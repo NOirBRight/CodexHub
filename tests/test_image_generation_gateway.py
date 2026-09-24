@@ -332,21 +332,41 @@ def test_image_generation_cancellation_during_upstream_body_read_uses_shutdown_o
 
 
 def test_image_generation_official_lookup_failure_completes_admission_and_returns_error() -> None:
+    lookup_started = threading.Event()
+
+    def fail_lookup():
+        lookup_started.set()
+        raise RuntimeError("controlled routing config failure")
+
     with (
         patch.object(gateway_settings, "gateway_client_key", return_value="local-client-key"),
         patch.object(
             gateway_catalog_runtime,
             "official_upstream",
-            side_effect=RuntimeError("controlled routing config failure"),
+            side_effect=fail_lookup,
         ),
         _http_server(codex_proxy.CodexProxyHandler) as gateway,
     ):
-        status, headers, body = _request_official_image(
-            gateway,
-            b'{"fixture":"lookup-failure"}',
-        )
+        # Deliberately separate headers from the body, as real HTTP clients do.
+        # Returning the routing error during this gap can produce a TCP reset.
+        request_body = b'{"fixture":"lookup-failure"}'
+        connection = http.client.HTTPConnection("127.0.0.1", gateway.server_port, timeout=5)
+        try:
+            connection.putrequest("POST", "/v1/images/generations")
+            connection.putheader("Authorization", "Bearer local-client-key")
+            connection.putheader("Content-Length", str(len(request_body)))
+            connection.endheaders()
+            premature_lookup = lookup_started.wait(0.1)
+            connection.send(request_body)
+            response = connection.getresponse()
+            status = response.status
+            headers = {key.lower(): value for key, value in response.getheaders()}
+            body = response.read()
+        finally:
+            connection.close()
         admission_drained = gateway.gateway_shutdown_controller.wait_for_active_requests()  # type: ignore[attr-defined]
 
+    assert premature_lookup is False
     assert status == 500
     assert headers["connection"] == "close"
     payload = json.loads(body)

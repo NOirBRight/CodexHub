@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 mod backup;
 mod clients;
+mod default_subagent;
 mod inject;
 mod isolated;
 mod managed_clients;
@@ -20,6 +21,7 @@ mod providers;
 mod readback;
 
 pub(in crate::gateway) use backup::*;
+pub(in crate::gateway) use default_subagent::*;
 pub(in crate::gateway) use inject::*;
 #[allow(unused_imports)]
 pub use isolated::{
@@ -39,15 +41,19 @@ pub use clients::dsh::{
 pub use providers::provider_probe_upstream_format;
 pub use readback::verify_apply_readback;
 
+use clients::claude::{
+    claude_installed, detect_claude_config_path, detect_claude_route_details,
+    detect_claude_version, read_claude_settings,
+};
 use clients::codex::read_codex_auth_status;
 #[cfg(test)]
-use clients::grok::{grok_ownership_bounded_cleanup, restore_grok_config_with_backup_roots};
+use clients::grok::grok_config_text;
 use clients::grok::{
     detect_grok_config_path, detect_grok_route_details, detect_grok_version, grok_home,
     grok_injected_keys_may_be_hidden, grok_installed,
 };
 #[cfg(test)]
-use clients::grok::grok_config_text;
+use clients::grok::{grok_ownership_bounded_cleanup, restore_grok_config_with_backup_roots};
 #[cfg(test)]
 use clients::omp::{
     apply_omp_config_with_paths, omp_config_text, omp_models_yml_text, omp_route_mode,
@@ -259,6 +265,8 @@ pub struct GatewayClientConfig {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayClientInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_settings: Option<clients::claude::ClaudeClientSettings>,
     pub id: String,
     pub name: String,
     pub kind: String,
@@ -578,6 +586,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         || opencode_executable.is_some();
     let generic_route_owner = current_owner;
     let mut clients = vec![GatewayClientInfo {
+        claude_settings: None,
         id: "generic".to_string(),
         name: "Generic OpenAI-compatible".to_string(),
         kind: "Copy-only".to_string(),
@@ -617,6 +626,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         ),
     );
     clients.push(GatewayClientInfo {
+        claude_settings: None,
         id: "opencode".to_string(),
         name: "OpenCode".to_string(),
         kind: "Terminal client".to_string(),
@@ -671,6 +681,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         );
     let zcode_route_mode = route_mode_for_owner(zcode_route_details.0, current_owner, zcode_stale);
     clients.push(GatewayClientInfo {
+        claude_settings: None,
         id: "zcode".to_string(),
         name: "ZCode".to_string(),
         kind: "IDE extension".to_string(),
@@ -714,6 +725,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         ),
     );
     clients.push(GatewayClientInfo {
+        claude_settings: None,
         id: "pi".to_string(),
         name: "Pi".to_string(),
         kind: "Compact CLI".to_string(),
@@ -753,6 +765,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         ),
     );
     clients.push(GatewayClientInfo {
+        claude_settings: None,
         id: "omp".to_string(),
         name: "OMP".to_string(),
         kind: "Prompt runtime".to_string(),
@@ -790,6 +803,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         grok_status.push_str(" Injected picker keys may be hidden by allowed_models.");
     }
     clients.push(GatewayClientInfo {
+        claude_settings: None,
         id: "grok".to_string(),
         name: "Grok CLI".to_string(),
         kind: "Terminal client".to_string(),
@@ -806,6 +820,39 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         latest_version: (include_versions && grok_installed)
             .then(|| npm_latest_version("@xai-official/grok"))
             .flatten(),
+    });
+    let claude_path = detect_claude_config_path();
+    let claude_installed = claude_installed();
+    let claude_route_details = detect_claude_route_details(current_owner, settings.proxy_port);
+    let claude_route_mode = route_mode_for_owner(
+        claude_route_details.0,
+        current_owner,
+        pending_sync_is_stale(
+            pending_client_ids.contains("claude"),
+            claude_route_details.0,
+            current_owner,
+        ),
+    );
+    clients.push(GatewayClientInfo {
+        claude_settings: Some(read_claude_settings(&claude_path, &settings, &providers)),
+        id: "claude".to_string(),
+        name: "Claude Code".to_string(),
+        kind: "Terminal client".to_string(),
+        installed: claude_installed,
+        auto_apply_supported: claude_installed,
+        config_path: Some(claude_path),
+        route_owner: claude_route_details.0,
+        route_endpoint: claude_route_details.1,
+        managed_by_current_app: claude_route_details.0 == current_owner,
+        route_mode: claude_route_mode.to_string(),
+        status: if claude_installed {
+            "Connect changes this user's Claude Code default route. Restart Claude Code after applying.".to_string()
+        } else {
+            gateway_client_status(false, claude_route_mode).to_string()
+        },
+        versions_checked: include_versions && claude_installed,
+        current_version: include_versions.then(detect_claude_version).flatten(),
+        latest_version: None,
     });
     let dsh = detect_dsh_client();
     let dsh_report = if dsh.installed {
@@ -834,6 +881,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         dsh_status_parts.extend(report.drift_details.iter().cloned());
     }
     clients.push(GatewayClientInfo {
+        claude_settings: None,
         id: "dsh".to_owned(),
         name: "DeepSeek Harness".to_owned(),
         kind: "Agent runtime".to_owned(),
@@ -859,12 +907,19 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
 pub fn preview_gateway_client_config(
     client_id: String,
     model: Option<String>,
+    role_mappings: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<GatewayClientConfigPreview, String> {
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
     let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let id = normalize_client_id(&client_id);
-    managed_clients::preview_native(&id, &settings, &providers, &model)
+    managed_clients::preview_native(
+        &id,
+        &settings,
+        &providers,
+        &model,
+        &role_mappings.unwrap_or_default(),
+    )
 }
 
 pub fn apply_gateway_client_config(
@@ -882,7 +937,7 @@ pub fn apply_gateway_client_config(
         });
     }
     let result = with_gateway_client_mutation_owner_gate(id, false, move |id, _| {
-        apply_gateway_client_config_locked(id, model)
+        apply_gateway_client_config_locked(id, model, std::collections::BTreeMap::new())
     })?;
     clear_pending_sync_after_successful_apply(result)
 }
@@ -890,6 +945,7 @@ pub fn apply_gateway_client_config(
 fn apply_gateway_client_config_locked(
     client_id: String,
     model: Option<String>,
+    role_mappings: std::collections::BTreeMap<String, String>,
 ) -> Result<GatewayClientApplyResult, String> {
     let _guard = gateway_client_config_write_lock()
         .lock()
@@ -897,7 +953,7 @@ fn apply_gateway_client_config_locked(
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
     let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    managed_clients::apply_native(client_id, &settings, &providers, &model)
+    managed_clients::apply_native(client_id, &settings, &providers, &model, role_mappings)
 }
 
 pub fn restore_gateway_client_config(
@@ -1023,6 +1079,7 @@ pub fn switch_gateway_client_route(
     mode: String,
     model: Option<String>,
     force_takeover: Option<bool>,
+    role_mappings: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<GatewayClientApplyResult, String> {
     let current_app_owner = crate::app_flavor::current().routing_owner();
     let next_owner = match mode.as_str() {
@@ -1035,10 +1092,19 @@ pub fn switch_gateway_client_route(
     let model = if next_owner == current_app_owner {
         let settings = config::get_settings()?;
         let providers = config::get_providers()?;
-        Some(gateway_client_route_model(model, &settings, &providers)?)
+        Some(if normalize_client_id(&client_id) == "claude" {
+            resolve_gateway_client_model_id(
+                &settings,
+                &providers,
+                model.as_deref().ok_or("Select a Claude default model")?,
+            )?
+        } else {
+            gateway_client_route_model(model, &settings, &providers)?
+        })
     } else {
         model
     };
+    let role_mappings = role_mappings.unwrap_or_default();
     let result = with_gateway_client_mutation_owner_gate(
         normalize_client_id(&client_id),
         force_takeover.unwrap_or(false),
@@ -1046,7 +1112,7 @@ pub fn switch_gateway_client_route(
             if next_owner == RoutingOwner::Official {
                 restore_gateway_client_config_locked(id, current_target_owner)
             } else if next_owner == current_app_owner {
-                apply_gateway_client_config_locked(id, model)
+                apply_gateway_client_config_locked(id, model, role_mappings.clone())
             } else {
                 Err(format!(
                     "{} builds can only apply {} routes.",
@@ -1099,7 +1165,18 @@ where
             continue;
         }
 
-        match apply_client(client.id.clone(), model.clone()) {
+        let client_model = if client.id == "claude" {
+            Some(
+                client
+                    .claude_settings
+                    .as_ref()
+                    .map(|saved| saved.default_model.clone())
+                    .unwrap_or_default(),
+            )
+        } else {
+            model.clone()
+        };
+        match apply_client(client.id.clone(), client_model) {
             Ok(result) => {
                 if result.applied {
                     applied = applied.saturating_add(1);
@@ -1307,7 +1384,10 @@ fn gateway_client_sync_skip_reason(client: &GatewayClientInfo) -> Option<String>
 }
 
 fn gateway_client_supports_native_apply(client_id: &str) -> bool {
-    matches!(client_id, "opencode" | "pi" | "omp" | "zcode" | "grok")
+    matches!(
+        client_id,
+        "opencode" | "pi" | "omp" | "zcode" | "grok" | "claude"
+    )
 }
 
 fn with_gateway_client_mutation_owner_gate<F>(
@@ -1857,9 +1937,8 @@ mod tests {
     use super::{
         apply_opencode_config_with_paths, gateway_client_provider_groups_from_exported,
         gateway_models_from_config, gateway_models_from_sources, grok_config_text,
-        official_gateway_reasoning_levels,
-        official_models_from_metadata, omp_models_yml_text, opencode_config_text,
-        opencode_reasoning_variants, pi_models_text, pi_settings_text,
+        official_gateway_reasoning_levels, official_models_from_metadata, omp_models_yml_text,
+        opencode_config_text, opencode_reasoning_variants, pi_models_text, pi_settings_text,
         read_usage_events_from_sqlite_path, read_usage_events_from_text,
         read_usage_summary_from_sqlite_path_with_pricing, read_usage_summary_from_text,
         read_usage_summary_from_text_with_pricing, restore_latest_backup, runtime_proxy_dir,

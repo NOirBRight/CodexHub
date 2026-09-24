@@ -98,6 +98,17 @@ without Activation. The Injected Block is that owned set plus the credential
 key, not necessarily a single map key. Codex's History Bucket exception is
 unchanged. Model naming and which fields are projected are ADR-0011.
 
+## Claude Code exception: explicit current-user activation (ADR-0014)
+
+[ADR-0014](0014-claude-code-gateway-client.md) adds a planned Claude Code
+exception to decisions 1–2: its explicit Connect action may set current-user
+route/default-model fields after disclosure because it does not offer the
+provider-map coexistence shape. The Injected Block is the managed key set;
+backup, atomic publication, conflict detection, and surgical restore remain
+mandatory. This supersedes the earlier claim that Codex is the sole activation
+exception, not the no-activation rule for other clients. Implementation remains
+subject to the Messages evidence gate.
+
 ## Consequences
 
 - Users can run the Gateway alongside their own providers in the same client;
@@ -113,6 +124,8 @@ unchanged. Model naming and which fields are projected are ADR-0011.
   switch); no separate "active/pointing" indicator is surfaced.
 - Byte-compare readback remains in force for not-yet-migrated clients; the
   two readback semantics coexist during the campaign.
+- Default subagent pins on OpenCode, ZCode, OMP, and Grok CLI are a connected
+  sibling owned slice, not Injected Block and not Activation (ADR-0013).
 
 ## Campaign status (architecture candidate)
 

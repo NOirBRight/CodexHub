@@ -1,0 +1,434 @@
+"""Run real Claude Code through an isolated candidate Gateway and live upstreams."""
+
+from __future__ import annotations
+
+try:
+    from scripts.python_runtime_contract import require_python_313
+except ModuleNotFoundError:
+    from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
+import argparse
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from e2e_claude_client_settings import claude_info, free_port, invoke
+
+DEEPSEEK_MODEL = "deepseek-flash"  # Official alias currently served by DeepSeek V4.1 Flash.
+
+
+def deepseek_key(path: Path | None) -> str:
+    value = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if not value and path is not None:
+        source = path.read_text().strip()
+        if path.suffix == ".json":
+            data = json.loads(source)
+            value = str(data.get("DEEPSEEK_API_KEY") or data.get("api_key") or "").strip()
+        elif "DEEPSEEK_API_KEY=" in source:
+            value = next((line.split("=", 1)[1].strip().strip('"\'') for line in source.splitlines()
+                          if line.startswith("DEEPSEEK_API_KEY=")), "")
+        else:
+            value = source
+    assert value and not any(character.isspace() for character in value), (
+        "DeepSeek official API credential is unavailable or malformed"
+    )
+    return value
+
+
+def provider_fixture() -> str:
+    return '''[[providers]]
+id = "deepseek"
+name = "DeepSeek Official"
+base_url = "https://api.deepseek.com"
+api_key = "{env:DEEPSEEK_API_KEY}"
+upstream_format = "auto"
+available_upstream_formats = ["responses", "chat_completions", "anthropic_messages"]
+enabled = true
+
+  [[providers.models]]
+  id = "deepseek-flash"
+  display_name = "DeepSeek V4.1 Flash"
+  context_window = 200000
+  max_output_tokens = 8192
+  enabled = true
+
+'''
+
+
+def events(bridge_port: int) -> list[dict[str, object]]:
+    response = invoke(bridge_port, "gateway_recent_events", {"limit": 100})
+    assert response.get("ok") is True, "Gateway event read failed"
+    return response["value"]
+
+
+def wait_for_event(bridge_port: int, model: str, inbound: str,
+                   outbound: str, status: int = 200) -> None:
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        matching = [event for event in events(bridge_port)
+                    if event.get("model") in {model, f"openai/{model}"}
+                    and event.get("inbound_format") == inbound
+                    and event.get("upstream_format") == outbound
+                    and event.get("status") == status]
+        if matching:
+            return
+        time.sleep(0.2)
+    summary = [(event.get("model"), event.get("inbound_format"),
+                event.get("upstream_format"), event.get("status"))
+               for event in events(bridge_port)[:12]]
+    raise AssertionError(f"missing successful {inbound}->{outbound} event for {model}: {summary}")
+
+
+def run_claude(claude_bin: Path, env: dict[str, str], root: Path, sentinel: str) -> None:
+    result = subprocess.run(
+        [str(claude_bin), "-p", "--permission-mode", "plan", "--output-format", "json",
+         f"Reply with exactly {sentinel}."],
+        cwd=root, env=env, capture_output=True, text=True, timeout=180,
+    )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        payload = {}
+    if result.returncode != 0 or payload.get("is_error") is not False:
+        status = re.search(r"\b[45]\d\d\b", str(payload.get("result", "")))
+        raise AssertionError(
+            f"Claude Code request failed: exit={result.returncode}, "
+            f"subtype={payload.get('subtype', 'no-json')}, "
+            f"error_type={payload.get('error_type')}, http_status={status.group() if status else 'unknown'}"
+        )
+    assert sentinel in str(payload.get("result", "")), "Claude Code response missed sentinel"
+
+
+def run_chat(gateway_port: int, key: str, sentinel: str) -> None:
+    request = Request(
+        f"http://127.0.0.1:{gateway_port}/v1/providers/deepseek/chat/completions",
+        json.dumps({"model": DEEPSEEK_MODEL, "stream": False,
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": f"Reply with exactly {sentinel}."}]}).encode(),
+        {"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urlopen(request, timeout=180) as response:
+            assert response.status == 200
+            payload = json.load(response)
+    except HTTPError as error:
+        try:
+            body = json.load(error)
+            issue = body.get("error", {})
+            detail = issue.get("message", "") if isinstance(issue, dict) else ""
+        except (ValueError, OSError):
+            detail = ""
+        lower = str(detail).lower()
+        reason = next((name for marker, name in (
+            ("insufficient balance", "insufficient balance"),
+            ("invalid api key", "invalid API key"),
+            ("model not found", "model not found"),
+            ("rate limit", "rate limited"),
+        ) if marker in lower), "upstream rejected request")
+        raise AssertionError(f"Chat Completions endpoint returned HTTP {error.code}: {reason}") from None
+    content = payload["choices"][0]["message"]["content"]
+    assert sentinel in str(content), "Chat Completions response missed sentinel"
+
+
+def run_deepseek_tools(gateway_port: int, key: str) -> None:
+    tool = {"name": "emit_marker", "description": "Record a marker", "input_schema": {
+        "type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}
+    cases = (
+        ("providers/deepseek/chat/completions", {
+            "model": "deepseek/deepseek-flash", "stream": False, "max_tokens": 256,
+            "thinking": {"type": "disabled"},
+            "messages": [{"role": "user", "content": "Call emit_marker with value ready."}],
+            "tools": [{"type": "function", "function": {"name": "emit_marker",
+                       "description": tool["description"], "parameters": tool["input_schema"]}}],
+            "tool_choice": {"type": "function", "function": {"name": "emit_marker"}},
+        }, lambda body: any(call.get("function", {}).get("name") == "emit_marker"
+                            for call in body.get("choices", [{}])[0].get("message", {}).get("tool_calls", []))),
+        ("chat/completions", {
+            "model": "deepseek/deepseek-flash", "stream": False, "max_tokens": 256,
+            "thinking": {"type": "disabled"},
+            "messages": [{"role": "user", "content": "Call emit_marker with value ready."}],
+            "tools": [{"type": "function", "function": {"name": "emit_marker",
+                       "description": tool["description"], "parameters": tool["input_schema"]}}],
+            "tool_choice": {"type": "function", "function": {"name": "emit_marker"}},
+        }, lambda body: any(call.get("function", {}).get("name") == "emit_marker"
+                            for call in body.get("choices", [{}])[0].get("message", {}).get("tool_calls", []))),
+        ("messages", {
+            "model": "deepseek/deepseek-flash", "stream": False, "max_tokens": 256,
+            "thinking": {"type": "disabled"},
+            "messages": [{"role": "user", "content": "Call emit_marker with value ready."}],
+            "tools": [tool], "tool_choice": {"type": "tool", "name": "emit_marker"},
+        }, lambda body: any(block.get("type") == "tool_use" and block.get("name") == "emit_marker"
+                            for block in body.get("content", []))),
+    )
+    for path, payload, expected in cases:
+        request = Request(
+            f"http://127.0.0.1:{gateway_port}/v1/{path}", json.dumps(payload).encode(),
+            {"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+        )
+        try:
+            with urlopen(request, timeout=180) as response:
+                assert response.status == 200
+                body = json.load(response)
+        except HTTPError as error:
+            try:
+                issue = json.load(error).get("error", {})
+                detail = issue.get("message", "") if isinstance(issue, dict) else ""
+            except (ValueError, OSError):
+                detail = ""
+            detail = str(detail).replace(key, "[REDACTED]")
+            detail = detail.replace(os.environ.get("DEEPSEEK_API_KEY", "\0"), "[REDACTED]")
+            raise AssertionError(
+                f"DeepSeek {path} tool call returned HTTP {error.code}: {detail[:200]}"
+            ) from None
+        assert expected(body), f"DeepSeek {path} response missed emit_marker tool call"
+        print(f"PASS: DeepSeek {path} tool call", flush=True)
+
+
+def run_responses(gateway_port: int, key: str, sentinel: str, model: str = "gpt-6-luna") -> None:
+    request = Request(
+        f"http://127.0.0.1:{gateway_port}/v1/responses",
+        json.dumps({"model": model, "stream": False,
+                    **({"reasoning": {"effort": "max"}} if model == "gpt-6-luna" else {}),
+                    "max_output_tokens": 256,
+                    "input": f"Reply with exactly {sentinel}."}).encode(),
+        {"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urlopen(request, timeout=180) as response:
+            assert response.status == 200
+            payload = json.load(response)
+    except HTTPError as error:
+        raise AssertionError(f"Responses endpoint returned HTTP {error.code}") from None
+    text = " ".join(
+        content.get("text", "")
+        for item in payload.get("output", []) if item.get("type") == "message"
+        for content in item.get("content", []) if content.get("type") == "output_text"
+    )
+    assert sentinel in text, "Responses output missed sentinel"
+
+
+def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog: Path,
+        key: str, selected: set[str], preflight_only: bool) -> None:
+    for path in (binary, claude_bin, auth, catalog):
+        assert path.is_file(), f"missing E2E input: {path}"
+    for path in (resource_root / "src-python" / "codex_proxy.py",
+                 resource_root / "config" / "providers.toml"):
+        assert path.is_file(), f"missing E2E resource: {path}"
+    with tempfile.TemporaryDirectory(prefix="codexhub-claude-live-") as directory:
+        root = Path(directory)
+        runtime = root / "runtime"
+        codex = root / "codex"
+        config = root / ".claude"
+        proxy_config = runtime / "proxy" / "config"
+        model_catalog = runtime / "model-catalogs"
+        for path in (codex, config, proxy_config, model_catalog):
+            path.mkdir(parents=True)
+        (config / "settings.json").write_text('{"theme":"dark"}')
+        shutil.copy2(auth, codex / "auth.json")
+        (proxy_config / "providers.toml").write_text(provider_fixture())
+        shutil.copy2(catalog, model_catalog / "codexhub-model-catalog.json")
+        gateway_port = free_port()
+        bridge_port = free_port()
+        gateway_key = secrets.token_hex(32)
+        (runtime / "proxy" / "settings.json").write_text(json.dumps({
+            "auto_start_gateway": False,
+            "auto_sync_clients": False,
+            "gateway_bind_address": "127.0.0.1",
+            "gateway_client_key": gateway_key,
+            "gateway_enable_models": True,
+            "gateway_enable_responses": True,
+            "gateway_enable_chat_completions": True,
+            "include_official_models": True,
+            "official_disabled_models": [],
+            "proxy_port": gateway_port,
+        }))
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "CODEXHUB_CLAUDE_"))}
+        env.update({
+            "HOME": str(root),
+            "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_CACHE_HOME": str(root / "cache"),
+            "XDG_DATA_HOME": str(root / "data"),
+            "CODEX_HOME": str(codex),
+            "CLAUDE_CONFIG_DIR": str(config),
+            "CODEXHUB_CLAUDE_HOME": str(config),
+            "CODEXHUB_RUNTIME_HOME": str(runtime),
+            "CODEXHUB_ROLLBACK_PROVENANCE_DIR": str(root / "rollback"),
+            "CODEXHUB_RESOURCE_ROOT": str(resource_root),
+            "CODEXHUB_PYTHON": sys.executable,
+            "CODEXHUB_PROXY_PYTHON": sys.executable,
+            "DEEPSEEK_API_KEY": key,
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "DISABLE_TELEMETRY": "1",
+            "DISABLE_AUTOUPDATER": "1",
+            "DISABLE_ERROR_REPORTING": "1",
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
+            "PATH": f"{claude_bin.parent}{os.pathsep}{os.environ.get('PATH', '')}",
+        })
+        bridge = subprocess.Popen(
+            [str(binary), "web-bridge", "--port", str(bridge_port)],
+            cwd=root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        gateway_started = False
+        try:
+            deadline = time.monotonic() + 20
+            while True:
+                assert bridge.poll() is None, "candidate web bridge exited"
+                try:
+                    listed = invoke(bridge_port, "list_gateway_clients", {"include_versions": False})
+                    assert listed.get("ok") is True, listed.get("error")
+                    info = next(client for client in listed["value"] if client["id"] == "claude")
+                    break
+                except (URLError, ConnectionError, TimeoutError):
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("candidate web bridge did not become ready") from None
+                    time.sleep(0.1)
+            assert info["installed"] and info["route_mode"] == "official", (
+                info["installed"], info["route_mode"], info["config_path"]
+            )
+            started = invoke(bridge_port, "start_proxy", {})
+            assert started.get("ok") is True, "isolated Gateway failed to start"
+            gateway_started = True
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    with urlopen(f"http://127.0.0.1:{gateway_port}/health", timeout=1) as response:
+                        if response.status == 200:
+                            break
+                except (URLError, TimeoutError):
+                    pass
+                if time.monotonic() >= deadline:
+                    raise AssertionError("isolated Gateway did not become healthy")
+                time.sleep(0.1)
+
+            if not preflight_only and any("deepseek" in case for case in selected):
+                balance = invoke(bridge_port, "provider_usage", {"provider_id": "deepseek"})
+                assert balance.get("ok") is True, "candidate DeepSeek balance query failed"
+                quota = balance["value"]
+                assert quota.get("currency") in {"CNY", "USD"}
+                assert isinstance(quota.get("balance"), (int, float)) and quota["balance"] >= 0
+                print("PASS: candidate DeepSeek official balance query", flush=True)
+
+            failures: list[str] = []
+            for model, outbound, label in (
+                ("deepseek/deepseek-flash", "anthropic_messages", "deepseek"),
+                ("gpt-6-luna", "responses", "luna"),
+            ):
+                if f"claude-{label}" not in selected:
+                    continue
+                try:
+                    applied = invoke(bridge_port, "switch_gateway_client_route", {
+                        "client_id": "claude", "mode": "hub", "model": model,
+                        "role_mappings": {},
+                    })
+                    assert applied.get("ok") is True, (
+                        f"Claude Connect failed for {label}: {applied.get('error')}"
+                    )
+                    assert claude_info(bridge_port)["claude_settings"]["default_model"] == model
+                    if preflight_only:
+                        print(f"PASS: isolated Claude Code settings for {label}", flush=True)
+                        continue
+                    client_env = {name: value for name, value in env.items()
+                                  if name != "DEEPSEEK_API_KEY"}
+                    run_claude(claude_bin, client_env, root,
+                               f"CLAUDE_LIVE_{label.upper().replace('-', '_')}_OK")
+                    wait_for_event(bridge_port, model, "anthropic_messages", outbound)
+                    print(f"PASS: Claude Code -> Anthropic Messages -> {label} {outbound}", flush=True)
+                except (AssertionError, HTTPError) as error:
+                    if label.startswith("deepseek") and "429" in str(error):
+                        wait_for_event(bridge_port, model, "anthropic_messages", outbound, 429)
+                    failures.append(f"{label}: {error}")
+                    print(f"FAIL: {label}: {error}", flush=True)
+
+            if "chat-deepseek" in selected and not preflight_only:
+                try:
+                    run_chat(gateway_port, gateway_key, "DEEPSEEK_CHAT_LIVE_OK")
+                    wait_for_event(bridge_port, "deepseek/deepseek-flash",
+                                   "chat_completions", "chat_completions")
+                    print("PASS: Chat Completions endpoint -> DeepSeek Official V4.1 Flash", flush=True)
+                except AssertionError as error:
+                    failures.append(f"deepseek-chat: {error}")
+                    print(f"FAIL: deepseek-chat: {error}", flush=True)
+            if "tools-deepseek" in selected and not preflight_only:
+                try:
+                    run_deepseek_tools(gateway_port, gateway_key)
+                except AssertionError as error:
+                    failures.append(f"deepseek-tools: {error}")
+                    print(f"FAIL: deepseek-tools: {error}", flush=True)
+            if "responses-luna" in selected and not preflight_only:
+                try:
+                    run_responses(gateway_port, gateway_key, "LUNA_MAX_RESPONSES_OK")
+                    wait_for_event(bridge_port, "gpt-6-luna", "responses", "responses")
+                    print("PASS: Responses endpoint -> Codex Luna max", flush=True)
+                except AssertionError as error:
+                    failures.append(f"luna-max-responses: {error}")
+                    print(f"FAIL: luna-max-responses: {error}", flush=True)
+            if "responses-deepseek" in selected and not preflight_only:
+                try:
+                    run_responses(gateway_port, gateway_key, "DEEPSEEK_RESPONSES_LIVE_OK",
+                                  "deepseek/deepseek-flash")
+                    wait_for_event(bridge_port, "deepseek/deepseek-flash", "responses", "responses")
+                    print("PASS: Responses endpoint -> DeepSeek Official V4.1 Flash", flush=True)
+                except AssertionError as error:
+                    failures.append(f"deepseek-responses: {error}")
+                    print(f"FAIL: deepseek-responses: {error}", flush=True)
+            detached = invoke(bridge_port, "switch_gateway_client_route", {
+                "client_id": "claude", "mode": "official", "role_mappings": {},
+            })
+            assert detached.get("ok") is True and claude_info(bridge_port)["route_mode"] == "official"
+            assert json.loads((config / "settings.json").read_text()) == {"theme": "dark"}
+            assert not failures, "; ".join(failures)
+        finally:
+            if gateway_started:
+                invoke(bridge_port, "stop_proxy", {})
+            bridge.terminate()
+            try:
+                bridge.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                bridge.kill()
+                bridge.wait(timeout=5)
+
+
+def main() -> None:
+    home = Path.home()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--bin", type=Path, required=True)
+    parser.add_argument("--resource-root", type=Path,
+                        help="candidate resource directory; defaults to the checkout")
+    parser.add_argument("--claude-bin", type=Path, default=shutil.which("claude"))
+    parser.add_argument("--auth", type=Path, default=home / ".codex" / "auth.json")
+    parser.add_argument("--deepseek-key-file", type=Path)
+    parser.add_argument("--preflight-only", action="store_true",
+                        help="verify isolated configuration without external model requests")
+    parser.add_argument("--catalog", type=Path,
+                        default=home / ".codex" / "model-catalogs" / "codexhub-model-catalog.json")
+    parser.add_argument("--case", action="append", choices=(
+        "claude-deepseek", "claude-luna", "chat-deepseek", "tools-deepseek", "responses-deepseek", "responses-luna",
+    ))
+    args = parser.parse_args()
+    selected = set(args.case or (
+        "claude-deepseek", "claude-luna", "chat-deepseek", "tools-deepseek", "responses-deepseek", "responses-luna",
+    ))
+    key = deepseek_key(args.deepseek_key_file) if any(
+        "deepseek" in case for case in selected
+    ) else ""
+    run(args.bin.resolve(), (args.resource_root or Path(__file__).resolve().parents[1]).resolve(),
+        args.claude_bin.resolve(), args.auth.resolve(),
+        args.catalog.resolve(), key, selected, args.preflight_only)
+
+
+if __name__ == "__main__":
+    main()

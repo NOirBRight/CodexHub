@@ -2274,6 +2274,33 @@ class ProtocolTranslationTests(unittest.TestCase):
             {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
         )
 
+    def test_chat_completion_accepts_positional_tool_index_from_deepseek(self):
+        payload = {"id": "chat_1", "model": "deepseek-flash", "choices": [{
+            "index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None, "tool_calls": [{
+                    "index": 0, "id": "call_1", "type": "function",
+                    "function": {"name": "emit_marker", "arguments": "{\"value\":\"ready\"}"},
+                }],
+            },
+        }]}
+        result = json.loads(protocol_translation.chat_completion_to_response_body(
+            json.dumps(payload).encode()))
+        self.assertEqual(result["output"][0]["type"], "function_call")
+        self.assertEqual(result["output"][0]["call_id"], "call_1")
+        history = {"model": "deepseek-flash", "messages": [
+            {"role": "user", "content": "Run the tool"},
+            payload["choices"][0]["message"],
+            {"role": "tool", "tool_call_id": "call_1", "content": "ready"},
+        ]}
+        translated = json.loads(protocol_translation.chat_completions_request_to_responses_body(
+            json.dumps(history).encode()))
+        self.assertTrue(any(item.get("type") == "function_call" for item in translated["input"]))
+        payload["choices"][0]["message"]["tool_calls"][0]["index"] = 1
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
+            protocol_translation.chat_completion_to_response_body(json.dumps(payload).encode())
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
+            protocol_translation.chat_completions_request_to_responses_body(json.dumps(history).encode())
+
     def test_chat_completion_to_response_maps_commandcode_reasoning_details(self):
         body = json.dumps(
             {

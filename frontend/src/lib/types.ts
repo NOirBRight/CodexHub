@@ -20,6 +20,7 @@ export interface Model {
   input_modalities?: string[] | null;
   supported_reasoning_levels?: string[] | null;
   default_reasoning_level?: string | null;
+  capabilities_edited?: boolean;
   thinking_mode?: "none" | "always_on" | "toggle" | null;
   pricing?: ModelPricing | null;
   metadata_provenance?: MetadataProvenance | null;
@@ -440,6 +441,7 @@ export type GatewayClientRouteMode =
   | "unknown";
 
 export interface GatewayClientInfo {
+  claude_settings?: import("./claudeSettings").ClaudeSettings | null;
   id: string;
   name: string;
   kind: string;
@@ -564,6 +566,14 @@ export interface Settings {
   official_provider_sort_order: number;
   codex_default_subagent_model: string;
   codex_default_subagent_reasoning_effort: string;
+  opencode_default_subagent_model: string;
+  opencode_default_subagent_reasoning_effort: string;
+  zcode_default_subagent_model: string;
+  zcode_default_subagent_reasoning_effort: string;
+  omp_default_subagent_model: string;
+  omp_default_subagent_reasoning_effort: string;
+  grok_default_subagent_model: string;
+  grok_default_subagent_reasoning_effort: string;
   proxy_port: number;
 }
 
@@ -575,7 +585,7 @@ export interface AutostartStatus {
 
 export type TabId = "codexhub" | "gateway";
 
-export type GatewayClientId = "opencode" | "dsh" | "zcode" | "pi" | "omp" | "grok";
+export type GatewayClientId = "opencode" | "dsh" | "zcode" | "pi" | "omp" | "grok" | "claude";
 
 export interface DshLifecycleReport {
   client_id: string;

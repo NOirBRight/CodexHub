@@ -1919,6 +1919,10 @@ def ollama_provider_model_metadata(ollama_models: Iterable[dict[str, Any]]) -> d
             entry["max_output_tokens"] = max_output_tokens
             entry["max_output_source"] = "providers_toml"
 
+        if model.get("capabilities_edited") is True:
+            for key in ("capabilities_edited", "supported_reasoning_levels", "default_reasoning_level", "thinking_mode"):
+                entry[key] = model.get(key)
+
         input_modalities = model.get("input_modalities")
         if isinstance(input_modalities, (list, tuple)) and input_modalities:
             entry["input_modalities"] = [str(value) for value in input_modalities if str(value)]
@@ -2431,6 +2435,18 @@ def build_ollama_model(
     )
     if maintained is not None:
         safe_metadata["thinking_mode"] = maintained.thinking_mode
+    edited = (model_metadata or {}).get(slug, {})
+    if edited.get("capabilities_edited") is True:
+        model["supported_reasoning_levels"] = complete_third_party_reasoning_levels(
+            edited.get("supported_reasoning_levels"), fill_missing=False
+        )
+        efforts = [item["effort"] for item in model["supported_reasoning_levels"]]
+        if efforts:
+            configured = edited.get("default_reasoning_level")
+            model["default_reasoning_level"] = configured if configured in efforts else efforts[0]
+        else:
+            model.pop("default_reasoning_level", None)
+        safe_metadata["thinking_mode"] = edited.get("thinking_mode")
     model["codex_proxy_metadata"] = safe_metadata
     _disable_responses_only_capabilities_for_chat(
         model,
@@ -2562,14 +2578,15 @@ def build_external_provider_model(
     provider_alias = str(external_model.get("provider_alias") or "")
     upstream_model = str(external_model.get("upstream_model") or "")
     maintained = maintained_catalog.resolve_model(provider_alias, upstream_model)
-    if maintained is not None and model["input_modalities"] == ["text"]:
+    capabilities_edited = external_model.get("capabilities_edited") is True
+    if not capabilities_edited and maintained is not None and model["input_modalities"] == ["text"]:
         model["input_modalities"] = list(maintained.input_modalities)
 
     explicit_reasoning_levels = external_model.get("supported_reasoning_levels")
     has_explicit_reasoning_levels = (
         isinstance(explicit_reasoning_levels, (list, tuple)) and bool(explicit_reasoning_levels)
     )
-    if has_explicit_reasoning_levels:
+    if has_explicit_reasoning_levels or capabilities_edited:
         reasoning_levels_source = explicit_reasoning_levels
         fill_missing = False
     elif maintained is not None:
@@ -2605,9 +2622,9 @@ def build_external_provider_model(
                 normalized_default = supported_efforts[0]
         model["default_reasoning_level"] = normalized_default
 
-    if maintained is not None:
+    if maintained is not None or capabilities_edited:
         proxy_thinking = dict(model.get("codex_proxy_metadata") or {})
-        proxy_thinking["thinking_mode"] = maintained.thinking_mode
+        proxy_thinking["thinking_mode"] = external_model.get("thinking_mode") if capabilities_edited else maintained.thinking_mode
         model["codex_proxy_metadata"] = proxy_thinking
 
     context_window = external_model.get("context_window")
@@ -2896,7 +2913,7 @@ def normalize_official_model_id(model_id: str) -> str | None:
     return value
 
 
-def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
+def sync_catalog(*, max_age_seconds: int = 0, offline: bool = False) -> dict[str, Any]:
     if catalog_cache_is_fresh(max_age_seconds):
         state = load_cached_state(GENERATED_STATE_PATH)
         state["cache_status"] = "fresh"
@@ -2931,7 +2948,14 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
     )
     fallback_models = load_fallback_catalog_models(OLLAMA_FALLBACK_PATH)
     client_version = read_client_version(OFFICIAL_SEED_PATH, OLLAMA_FALLBACK_PATH)
-    discovered_ids, discovery_source, discovery_status, discovery_detail = discover_ollama_ids()
+    if offline:
+        # Connecting applies the local projection; remote discovery belongs to
+        # explicit refresh, not the configuration writer's critical section.
+        cached_state = load_cached_state(GENERATED_STATE_PATH)
+        discovered_ids = cached_state.get("discovered_ollama_models", []) or model_ids_from_catalog(OLLAMA_FALLBACK_PATH)
+        discovery_source, discovery_status, discovery_detail = "cache", "offline", "using local model information"
+    else:
+        discovered_ids, discovery_source, discovery_status, discovery_detail = discover_ollama_ids()
     providers = load_providers()
     ollama_runtime_configured, runtime_ollama_models = catalog_visible_ollama_cloud_models(
         providers,
@@ -2953,7 +2977,14 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
             if should_include_model(str(slug), policy)
         ]
     )
-    ollama_model_metadata, metadata_detail = discover_ollama_model_metadata(visible_ollama_slugs)
+    if offline:
+        ollama_model_metadata = {
+            slug: metadata for slug, metadata in cached_state.get("ollama_model_metadata", {}).items()
+            if slug in visible_ollama_slugs
+        }
+        metadata_detail = "using cached metadata"
+    else:
+        ollama_model_metadata, metadata_detail = discover_ollama_model_metadata(visible_ollama_slugs)
     if ollama_runtime_configured:
         ollama_model_metadata.update(ollama_provider_model_metadata(runtime_ollama_models))
 
@@ -3021,6 +3052,7 @@ def sync_catalog(*, max_age_seconds: int = 0) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sync Codex proxy model catalog from Ollama discovery.")
     parser.add_argument("--sync", action="store_true", help="discover models and write generated catalog/state files")
+    parser.add_argument("--offline", action="store_true", help="rebuild from local configuration and cached discovery without network requests")
     parser.add_argument(
         "--max-age-seconds",
         type=int,
@@ -3033,7 +3065,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 2
 
-    state = sync_catalog(max_age_seconds=args.max_age_seconds)
+    state = sync_catalog(max_age_seconds=args.max_age_seconds, offline=args.offline)
     diff = state["diff"]
     print(f"catalog={GENERATED_CATALOG_PATH}")
     print(f"state={GENERATED_STATE_PATH}")

@@ -45,11 +45,7 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
             let auto_sync = registry_bool_arg(args, command, "auto_sync")?;
             let force_takeover =
                 registry_optional_bool_arg(args, command, "force_takeover").unwrap_or(false);
-            to_value(crate::switch_mode(
-                mode,
-                auto_sync,
-                Some(force_takeover),
-            ))
+            to_value(crate::switch_mode(mode, auto_sync, Some(force_takeover)))
         }
         Command::StartProxy => to_value(crate::start_proxy()),
         Command::StopProxy => to_value(proxy::stop()),
@@ -86,9 +82,7 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         Command::RefreshOfficialModels => {
             let request_id = registry_optional_string_arg(args, command, "request_id");
             to_value(
-                crate::official_refresh::refresh_current_models_with_request(
-                    request_id.as_deref(),
-                ),
+                crate::official_refresh::refresh_current_models_with_request(request_id.as_deref()),
             )
         }
         Command::OpenaiUsageCompletions => {
@@ -104,7 +98,8 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         Command::DiscoverProviderModels => {
             let base_url = registry_string_arg(args, command, "base_url")?;
             // Blank is valid: xAI uses SuperGrok OAuth; some local endpoints need no key.
-            let api_key = registry_optional_string_arg(args, command, "api_key").unwrap_or_default();
+            let api_key =
+                registry_optional_string_arg(args, command, "api_key").unwrap_or_default();
             let provider_id = registry_optional_string_arg(args, command, "provider_id");
             to_value(models::discover_provider_models(
                 &base_url,
@@ -114,7 +109,8 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         }
         Command::ProbeUpstreamFormat => {
             let base_url = registry_string_arg(args, command, "base_url")?;
-            let api_key = registry_optional_string_arg(args, command, "api_key").unwrap_or_default();
+            let api_key =
+                registry_optional_string_arg(args, command, "api_key").unwrap_or_default();
             let model = args
                 .get("model")
                 .and_then(Value::as_str)
@@ -135,7 +131,8 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         }
         Command::TestModelEndpoint => {
             let base_url = registry_string_arg(args, command, "base_url")?;
-            let api_key = registry_optional_string_arg(args, command, "api_key").unwrap_or_default();
+            let api_key =
+                registry_optional_string_arg(args, command, "api_key").unwrap_or_default();
             let model = registry_string_arg(args, command, "model")?;
             let upstream_format = serde_json::from_value(
                 registry_value(args, command, "upstream_format")
@@ -218,7 +215,18 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
                 .get("model")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
-            to_value(gateway::preview_gateway_client_config(client_id, model))
+            let role_mappings = args
+                .get("role_mappings")
+                .or_else(|| args.get("roleMappings"))
+                .filter(|value| !value.is_null())
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|_| "role_mappings must map roles to model IDs".to_string())?;
+            to_value(gateway::preview_gateway_client_config(
+                client_id,
+                model,
+                role_mappings,
+            ))
         }
         Command::ApplyGatewayClientConfig => {
             let client_id = registry_string_arg(args, command, "client_id")?;
@@ -240,11 +248,26 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             let force_takeover = registry_optional_bool_arg(args, command, "force_takeover");
+            let role_mappings = args
+                .get("role_mappings")
+                .or_else(|| args.get("roleMappings"))
+                .and_then(Value::as_object)
+                .map(|object| {
+                    object
+                        .iter()
+                        .filter_map(|(key, value)| {
+                            value
+                                .as_str()
+                                .map(|mapped| (key.clone(), mapped.to_string()))
+                        })
+                        .collect::<std::collections::BTreeMap<String, String>>()
+                });
             to_value(gateway::switch_gateway_client_route(
                 client_id,
                 mode,
                 model,
                 force_takeover,
+                role_mappings,
             ))
         }
         Command::SyncGatewayClients => {
@@ -278,8 +301,7 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
                 .and_then(Value::as_str)
                 .map(str::to_string);
             to_value(crate::save_official_multi_agent_version_coordinated(
-                model_id,
-                version,
+                model_id, version,
             ))
         }
         Command::ListOfficialMultiAgentOverrides => {

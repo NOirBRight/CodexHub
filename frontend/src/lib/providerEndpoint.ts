@@ -105,6 +105,9 @@ export function normalizedEndpointFormat(value?: UpstreamFormat | null): Upstrea
 }
 
 export function upstreamFormatLabel(value?: UpstreamFormat | null, t?: Translate) {
+  if (value === "auto") {
+    return t?.("providers.upstreamFormats.auto") ?? i18n.t("providers.upstreamFormats.auto");
+  }
   if (value === "responses") {
     return t?.("providers.upstreamFormats.responses") ?? i18n.t("providers.upstreamFormats.responses");
   }

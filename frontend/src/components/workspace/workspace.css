@@ -438,7 +438,7 @@
   max-width: 220px;
 }
 .ws-bridge-subagent-trigger {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 5px;
   width: 100%;
@@ -451,7 +451,9 @@
   background: var(--ws-surface);
   color: var(--ws-ink);
   font-size: 11px;
+  line-height: 16px;
   font-weight: 500;
+  text-align: left;
   white-space: nowrap;
   overflow: hidden;
   box-shadow: var(--ws-shadow-control);
@@ -459,12 +461,14 @@
 .ws-bridge-subagent-kicker {
   flex-shrink: 0;
   color: var(--ws-muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
+  line-height: 16px;
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
 .ws-bridge-subagent-value {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -476,6 +480,7 @@
 }
 .ws-bridge-subagent-chevron {
   flex-shrink: 0;
+  margin-left: auto;
   color: var(--ws-muted);
   transition: transform 0.15s ease;
 }
@@ -483,13 +488,10 @@
   transform: rotate(180deg);
 }
 .ws-bridge-subagent-menu {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 6px);
-  z-index: 40;
-  width: max(100%, 220px);
+  position: fixed;
+  z-index: 80;
   min-width: 188px;
-  max-width: min(280px, 42vw);
+  max-width: min(320px, calc(100vw - 16px));
   max-height: min(280px, 50vh);
   overflow: auto;
   padding: 4px 0;
@@ -1442,7 +1444,10 @@
   z-index: 34;
 }
 .ws-gateway-clients > div:nth-child(2) > div > .ws-client-card {
-  padding: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 10px 0 0;
   overflow: hidden;
   min-height: 138px;
 }
@@ -1461,7 +1466,7 @@
   flex-wrap: nowrap;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px 0;
+  padding: 0 12px;
 }
 .ws-client-heading > div {
   flex: 1;
@@ -1497,7 +1502,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 8px 12px;
+  margin: 0 12px;
   border: 1px solid var(--ws-line);
   border-radius: var(--ws-radius-small);
   background: var(--ws-inset);
@@ -1513,33 +1518,40 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ws-client-footer {
+  display: contents;
+}
+.ws-client-footer > .ws-bridge-subagent {
+  flex: none;
+  max-width: none;
+  min-width: 0;
+  width: auto;
+  margin: 0 12px;
+}
 .ws-client-bottom {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 10px;
   border-top: 1px solid var(--ws-line);
-  padding: 8px 12px;
+  padding: 4px 12px;
   background: linear-gradient(
     var(--ws-surface),
     color-mix(in srgb, var(--ws-inset) 30%, var(--ws-surface))
   );
 }
-.ws-client-bottom > div > span {
-  font-size: 11px;
-}
-.ws-client-bottom small {
+.ws-client-status {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  min-width: 0;
   font-size: 11px;
-  color: var(--ws-muted);
-  margin-top: 3px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.ws-client-bottom small > span:first-child {
-  display: none;
-}
-.ws-client-card.connected .ws-client-bottom > div > span {
+.ws-client-card.connected .ws-client-status {
   color: var(--ws-green);
 }
 .workspace-root [class~="bg-surface/70"] {
@@ -1733,6 +1745,14 @@
   display: grid;
   gap: 8px;
 }
+
+.ws-provider-balance {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ws-provider-balance span { color: var(--ws-muted); }
 
 .ws-provider-quota .ws-limits:has(> :nth-child(3)) {
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2348,13 +2368,13 @@
 .ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid > section {
   display: flex;
   flex-direction: column;
+  justify-content: space-between;
   min-height: 0;
 }
 .ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid > .ws-client-card > .ws-client-config {
-  margin-block: 6px;
   padding-block: 4px;
 }
-.ws-clients .ws-client-bottom { padding-block: 6px; margin-top: auto; }
+.ws-clients .ws-client-bottom { padding-block: 8px; }
 @media (max-width: 850px) {
   .ws-clients .ws-gateway-clients > div:nth-child(2) > .ws-client-board-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2403,3 +2423,25 @@
   color: var(--ws-warning);
   background: color-mix(in srgb, var(--ws-warning) 10%, var(--ws-surface));
 }
+
+/* Claude settings share the workspace dialog, field and surface tokens. */
+.ws-claude-section { display: grid; gap: 12px; border-top: 1px solid var(--ws-line); padding-top: 16px; }
+.ws-claude-section h3, .ws-claude-conflicts h3 { font-size: 13px; font-weight: 600; }
+.ws-claude-note { color: var(--ws-muted); font-size: 12px; line-height: 1.6; }
+.ws-claude-field { display: grid; gap: 6px; min-width: 0; font-size: 12px; }
+.ws-claude-field :is(input, select) { width: 100%; min-width: 0; border: 1px solid var(--ws-line); border-radius: var(--ws-radius-control); padding: 9px 10px; background: var(--ws-surface); color: inherit; }
+.ws-claude-field :is(input, select):focus-visible { outline: 2px solid var(--ws-accent); outline-offset: 2px; }
+.ws-claude-field [aria-invalid="true"] { border-color: var(--ws-warning); }
+.ws-claude-role-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.ws-claude-confirm { display: flex; align-items: flex-start; gap: 9px; font-size: 12px; line-height: 1.6; }
+.ws-claude-confirm input { margin-top: 3px; flex-shrink: 0; }
+.ws-claude-pending { margin-right: auto; align-self: center; color: var(--ws-muted); font-size: 11px; }
+.ws-claude-conflicts { padding: 12px; border: 1px solid var(--ws-warning); border-radius: var(--ws-radius-control); font-size: 12px; }
+.ws-claude-conflicts ul { padding-left: 18px; list-style: disc; overflow-wrap: anywhere; }
+.ws-claude-catalog { font-size: 12px; }
+.ws-claude-catalog ul { max-height: 180px; overflow-y: auto; }
+.ws-claude-catalog li { display: grid; gap: 3px; padding: 8px 0; border-bottom: 1px solid var(--ws-line); }
+.ws-claude-catalog code, .ws-claude-path { color: var(--ws-muted); font-size: 11px; overflow-wrap: anywhere; }
+.ws-claude-section summary, .ws-claude-catalog summary { cursor: pointer; font-size: 12px; }
+.ws-dialog > footer { gap: 8px; flex-wrap: wrap; }
+@media (max-width: 520px) { .ws-claude-role-grid { grid-template-columns: 1fr; } }

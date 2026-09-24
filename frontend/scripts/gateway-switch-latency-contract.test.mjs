@@ -54,7 +54,10 @@ test("gateway client switches refresh without version probes", async () => {
   const gatewaySource = await readFile(gatewayPagePath, "utf8");
 
   assert.match(gatewaySource, /async function switchClientMode/);
-  assert.match(gatewaySource, /api\.switchGatewayClientRoute\(clientId, mode, defaultModel\)/);
+  assert.match(
+    gatewaySource,
+    /api\.switchGatewayClientRoute\(\s*clientId,\s*owner,\s*selectedModel \|\| defaultModel/,
+  );
   assert.match(gatewaySource, /await onRefreshClients\(\);/);
   assert.doesNotMatch(gatewaySource, /await onRefreshClients\(\{ includeClientVersions: true \}\)[\s\S]*setMessage\(`\$\{clientName\} switched/);
 });
@@ -69,9 +72,13 @@ test("gateway client refreshes discard stale route snapshots", async () => {
 
 test("gateway client card does not coerce unknown route state to official", async () => {
   const cardSource = await readFile(gatewayClientCardPath, "utf8");
+  const stateSource = await readFile(
+    new URL("../src/lib/clientConnectionState.ts", import.meta.url),
+    "utf8",
+  );
 
   assert.doesNotMatch(cardSource, /info\?\.route_mode === "hub" \? "hub" : "official"/);
-  assert.match(cardSource, /type RouteMode = "official" \| "hub"/);
-  assert.match(cardSource, /type DisplayRouteMode = RouteMode \| "stale" \| "unknown"/);
-  assert.match(cardSource, /routeMode === "stale" \? "hub" : routeMode === "unknown" \? null : routeMode/);
+  assert.match(cardSource, /connectionStateFromInfo/);
+  assert.match(stateSource, /info\.route_mode === "stale"/);
+  assert.doesNotMatch(stateSource, /route_mode === "unknown" \? "official"/);
 });

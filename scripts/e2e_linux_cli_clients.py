@@ -1,4 +1,5 @@
 """Build and run the eight-case Linux real-client CLI E2E matrix."""
+
 # ruff: noqa: E402
 
 from __future__ import annotations
@@ -268,6 +269,43 @@ def _copy_tree(source: Path, target: Path) -> None:
             shutil.copy2(item, destination)
 
 
+def assistant_returned_sentinel(client: str, output: str, sentinel: str) -> bool:
+    """Require assistant output; an echoed user prompt is not a successful turn."""
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if client == "codex" and event.get("type") == "item.completed":
+            item = event.get("item", {})
+            if (
+                item.get("type") == "agent_message"
+                and item.get("text", "").strip() == sentinel
+            ):
+                return True
+        elif client == "opencode" and event.get("type") == "text":
+            if event.get("part", {}).get("text", "").strip() == sentinel:
+                return True
+        elif client in ("pi", "omp") and event.get("type") == "agent_end":
+            for message in event.get("messages", []):
+                if (
+                    message.get("role") != "assistant"
+                    or message.get("stopReason") != "stop"
+                ):
+                    continue
+                content = message.get("content", [])
+                text = "".join(
+                    part.get("text", "")
+                    for part in content
+                    if part.get("type") == "text"
+                )
+                if text.strip() == sentinel:
+                    return True
+    return False
+
+
 def _client_launch(
     case: Case,
     managed_root: Path,
@@ -377,10 +415,13 @@ def _client_launch(
             command, env=env, cwd=case_root, timeout=timeout, input_text=input_text
         )
         output = (result.stdout or "") + "\n" + (result.stderr or "")
+        saw_sentinel = assistant_returned_sentinel(
+            case.client, result.stdout or "", sentinel
+        )
         return {
-            "ok": result.returncode == 0 and sentinel in output,
+            "ok": result.returncode == 0 and saw_sentinel,
             "returncode": result.returncode,
-            "saw_sentinel": sentinel in output,
+            "saw_sentinel": saw_sentinel,
             "output_tail": output[-1600:],
         }
     except FileNotFoundError as error:

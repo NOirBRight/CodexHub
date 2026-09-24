@@ -1,10 +1,12 @@
+import { ClaudeSettingsDialog } from "./ClaudeSettingsDialog";
+import claudeIcon from "../assets/claude-code-icon.svg";
 import { useState } from "react";
 import { WorkspaceDialog } from "./workspace/WorkspaceDialog";
+import { DefaultSubagentPicker } from "./workspace/ProviderWorkspaceView";
 import { api, messageFromError } from "../lib/tauri";
 import {
   MoreHorizontal,
   RefreshCcw,
-  AlertTriangle,
   FileText,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -23,17 +25,37 @@ import {
 } from "../lib/clientConnectionState";
 import type { GatewayClientContract, GatewayClientInfo } from "../lib/types";
 import { SwitchControl } from "./SettingsDrawer";
+import {
+  resolveSubagentEffort,
+  type DefaultSubagentOption,
+} from "../lib/defaultSubagent";
 
 export type { ClientConnectionState };
 export { connectionStateFromInfo };
+
+export interface ExportedGatewayModel {
+  id: string;
+  label: string;
+}
 
 interface GatewayClientCardProps {
   busy?: boolean;
   className?: string;
   client: GatewayClientContract;
   enabledModelCount?: number;
+  exportedModels?: ExportedGatewayModel[];
   info?: GatewayClientInfo;
-  onToggle: (connect: boolean) => void;
+  defaultSubagent?: {
+    model: string;
+    effort: string;
+    options: DefaultSubagentOption[];
+    onChange: (model: string, effort: string) => void;
+  };
+  onToggle: (
+    connect: boolean,
+    model?: string | null,
+    roleMappings?: Record<string, string> | null,
+  ) => void;
   onRefresh?: () => Promise<void>;
 }
 
@@ -42,7 +64,9 @@ export function GatewayClientCard({
   className,
   client,
   enabledModelCount,
+  exportedModels = [],
   info,
+  defaultSubagent,
   onToggle,
   onRefresh,
 }: GatewayClientCardProps) {
@@ -51,6 +75,14 @@ export function GatewayClientCard({
   const [preview, setPreview] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
+  const isClaude = client.id === "claude";
+  function requestToggle(connect: boolean) {
+    if (isClaude && connect) {
+      setDetailsOpen(true);
+      return;
+    }
+    onToggle(connect);
+  }
   async function loadPreview() {
     setDetailBusy(true);
     setDetailError(null);
@@ -118,119 +150,159 @@ export function GatewayClientCard({
             {configPath || t("common.copyOnly")}
           </code>
         </div>
-        <div className="ws-client-bottom">
-          <div>
-            <span className={labelTone}>{label}</span>
-            <small>
+        <div className="ws-client-footer">
+          {defaultSubagent ? (
+            <DefaultSubagentPicker
+              disabled={Boolean(busy)}
+              model={defaultSubagent.model}
+              effort={
+                defaultSubagent.model
+                  ? resolveSubagentEffort(
+                      defaultSubagent.options.find(
+                        (option) => option.id === defaultSubagent.model,
+                      ),
+                      defaultSubagent.effort,
+                    )
+                  : ""
+              }
+              options={defaultSubagent.options}
+              selected={defaultSubagent.options.find(
+                (option) => option.id === defaultSubagent.model,
+              )}
+              emptyLabel={t("workspace.defaultSubagentCliDefault")}
+              onChange={defaultSubagent.onChange}
+            />
+          ) : null}
+          <div className="ws-client-bottom">
+            <div className={cx("ws-client-status", labelTone)}>
               <ConnectionNarrative
                 clientId={client.id}
                 enabledModelCount={enabledModelCount}
                 installed={installed}
                 state={state}
-                onRepair={() => onToggle(true)}
+                onRepair={() => requestToggle(true)}
               />
-            </small>
+            </div>
+            <SwitchControl
+              ariaLabel={t("gateway.routeMode", { name })}
+              checked={checked}
+              disabled={disabled}
+              tone={state === "drift" ? "warn" : "action"}
+              onChange={requestToggle}
+            />
           </div>
-          <SwitchControl
-            ariaLabel={t("gateway.routeMode", { name })}
-            checked={checked}
-            disabled={disabled}
-            tone={state === "drift" ? "warn" : "action"}
-            onChange={onToggle}
-          />
         </div>
       </section>
-      <WorkspaceDialog
-        open={detailsOpen}
-        title={t("workspace.clientDetails", { name })}
-        onClose={() => setDetailsOpen(false)}
-        actions={
-          <button
-            className="ws-primary"
-            disabled={disabled || detailBusy}
-            onClick={() => onToggle(!checked)}
-          >
-            {label} ·{" "}
-            {t(checked ? "workspace.disconnect" : "workspace.connect")}
-          </button>
-        }
-      >
-        <div className="ws-client-detail-heading">
-          <ClientLogo id={client.id} name={name} />
-          <div>
-            <b>{name}</b>
-            <small>{kindLabel}</small>
-          </div>
-        </div>
-        <dl className="ws-detail-list">
-          <div>
-            <dt>{t("workspace.connectionState")}</dt>
-            <dd>{label}</dd>
-          </div>
-          <div>
-            <dt>{t("workspace.configPath")}</dt>
-            <dd>
-              <code>{configPath || "—"}</code>
-            </dd>
-          </div>
-          <div>
-            <dt>{t("workspace.installedVersion")}</dt>
-            <dd>{info?.current_version || t("common.unknown")}</dd>
-          </div>
-          <div>
-            <dt>{t("workspace.latestVersion")}</dt>
-            <dd>{info?.latest_version || t("workspace.notChecked")}</dd>
-          </div>
-          <div>
-            <dt>{t("workspace.ownership")}</dt>
-            <dd>{info?.route_owner || "—"}</dd>
-          </div>
-          {info?.status?.includes("allowed_models") ? (
+      {isClaude ? (
+        detailsOpen && (
+          <ClaudeSettingsDialog
+            info={info}
+            models={exportedModels}
+            busy={busy}
+            connected={
+              switchCheckedFromState(connectionStateFromInfo(info)) ||
+              Boolean(info?.managed_by_current_app && info.route_mode === "stale")
+            }
+            onClose={() => setDetailsOpen(false)}
+            onToggle={onToggle}
+            onRefresh={onRefresh}
+          />
+        )
+      ) : (
+        <WorkspaceDialog
+          open={detailsOpen}
+          title={t("workspace.clientDetails", { name })}
+          onClose={() => setDetailsOpen(false)}
+          actions={
+            <button
+              className="ws-primary"
+              disabled={disabled || detailBusy}
+              onClick={() => requestToggle(!checked)}
+            >
+              {label} ·{" "}
+              {t(checked ? "workspace.disconnect" : "workspace.connect")}
+            </button>
+          }
+        >
+          <div className="ws-client-detail-heading">
+            <ClientLogo id={client.id} name={name} />
             <div>
-              <dt>{t("workspace.note")}</dt>
-              <dd>{t("gateway.grokAllowedModelsMayHide")}</dd>
+              <b>{name}</b>
+              <small>{kindLabel}</small>
             </div>
-          ) : null}
-        </dl>
-        <div className="ws-actions">
-          {onRefresh && (
+          </div>
+          <dl className="ws-detail-list">
+            <div>
+              <dt>{t("workspace.connectionState")}</dt>
+              <dd>{label}</dd>
+            </div>
+            <div>
+              <dt>{t("workspace.configPath")}</dt>
+              <dd>
+                <code>{configPath || "—"}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>{t("workspace.installedVersion")}</dt>
+              <dd>{info?.current_version || t("common.unknown")}</dd>
+            </div>
+            <div>
+              <dt>{t("workspace.latestVersion")}</dt>
+              <dd>{info?.latest_version || t("workspace.notChecked")}</dd>
+            </div>
+            <div>
+              <dt>{t("workspace.ownership")}</dt>
+              <dd>{info?.route_owner || "—"}</dd>
+            </div>
+            {info?.status?.includes("allowed_models") ? (
+              <div>
+                <dt>{t("workspace.note")}</dt>
+                <dd>{t("gateway.grokAllowedModelsMayHide")}</dd>
+              </div>
+            ) : null}
+          </dl>
+          <div className="ws-actions">
+            {onRefresh && (
+              <button
+                className="ws-button"
+                disabled={detailBusy}
+                onClick={async () => {
+                  setDetailBusy(true);
+                  try {
+                    await onRefresh();
+                  } finally {
+                    setDetailBusy(false);
+                  }
+                }}
+              >
+                <RefreshCcw size={12} />
+                {t("gateway.refreshClients")}
+              </button>
+            )}
             <button
               className="ws-button"
               disabled={detailBusy}
-              onClick={async () => {
-                setDetailBusy(true);
-                try {
-                  await onRefresh();
-                } finally {
-                  setDetailBusy(false);
-                }
-              }}
+              onClick={() =>
+                preview !== null ? setPreview(null) : void loadPreview()
+              }
             >
-              <RefreshCcw size={12} />
-              {t("gateway.refreshClients")}
+              {t(
+                preview !== null
+                  ? "workspace.hidePreview"
+                  : "workspace.configPreview",
+              )}
             </button>
+          </div>
+          {detailError && (
+            <p className="text-danger" role="alert">
+              {detailError}
+            </p>
           )}
-          <button
-            className="ws-button"
-            disabled={detailBusy}
-            onClick={() =>
-              preview !== null ? setPreview(null) : void loadPreview()
-            }
-          >
-            {t(
-              preview !== null
-                ? "workspace.hidePreview"
-                : "workspace.configPreview",
-            )}
-          </button>
-        </div>
-        {detailError && (
-          <p className="text-danger" role="alert">
-            {detailError}
-          </p>
-        )}
-        {preview !== null && <pre className="ws-config-preview">{preview}</pre>}
-      </WorkspaceDialog>
+          {preview !== null && (
+            <pre className="ws-config-preview">{preview}</pre>
+          )}
+        </WorkspaceDialog>
+      )}
     </>
   );
 }
@@ -250,53 +322,28 @@ function ConnectionNarrative({
 }) {
   const { t } = useTranslation();
   if (state === "busy") {
-    return (
-      <>
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
-        <span>{t("gateway.updatingClientConfig")}</span>
-      </>
-    );
+    return t("gateway.updatingClientConfig");
   }
   if (state === "drift") {
     return (
-      <>
-        <AlertTriangle className="h-3 w-3 text-amber-600" />
-        <button
-          type="button"
-          className="text-left text-amber-700 underline-offset-2 hover:underline"
-          onClick={onRepair}
-        >
-          {t("gateway.configDriftRepair")}
-        </button>
-      </>
+      <button
+        type="button"
+        className="text-left text-amber-700 underline-offset-2 hover:underline"
+        onClick={onRepair}
+      >
+        {t("gateway.configDriftRepair")}
+      </button>
     );
   }
   if (state === "unavailable" || !installed) {
-    return (
-      <>
-        <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
-        <span>{t("gateway.installToConnect")}</span>
-      </>
-    );
+    return t("gateway.installToConnect");
   }
   if (state === "connected") {
-    return (
-      <>
-        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-        <span>
-          {clientId === "dsh"
-            ? t("gateway.injectedProvider", { count: enabledModelCount ?? 0 })
-            : t("gateway.connectedViaHub")}
-        </span>
-      </>
-    );
+    return clientId === "dsh"
+      ? t("gateway.injectedProvider", { count: enabledModelCount ?? 0 })
+      : t("gateway.connectedViaHub");
   }
-  return (
-    <>
-      <span className="h-1.5 w-1.5 rounded-full bg-slate-300" />
-      <span>{t("gateway.configUnchanged")}</span>
-    </>
-  );
+  return `${t("gateway.connectionDisconnected")} · ${t("gateway.configUnchanged")}`;
 }
 
 function ClientLogo({ id, name }: { id: string; name: string }) {
@@ -338,6 +385,8 @@ function clientIcon(id: string) {
       return piIcon;
     case "omp":
       return ompIcon;
+    case "claude":
+      return claudeIcon;
     case "grok":
       return grokIcon;
     default:
@@ -349,7 +398,7 @@ function clientIconClass(id: string) {
   if (id === "codex" || id === "dsh") {
     return "h-8 w-8 object-contain";
   }
-  if (id === "grok") {
+  if (id === "grok" || id === "claude") {
     return "h-6 w-6 object-contain";
   }
   if (id === "pi") {

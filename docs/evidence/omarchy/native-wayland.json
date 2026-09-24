@@ -1,0 +1,17 @@
+{
+  "schema": "codexhub.hyprland-e2e.v1",
+  "sha256": "0b9d49332013cb66fbcb09ba15edec074063e0ff92a30d1cf9c8505c524b427c",
+  "checks": [
+    "native_wayland_window",
+    "settings_native_pointer_input",
+    "workspace_native_pointer_input",
+    "tray_menu_labels",
+    "tray_start_gateway",
+    "close_keeps_gateway",
+    "tray_restores_window",
+    "tray_restarts_gateway",
+    "tray_stop_gateway",
+    "exit_stops_gateway"
+  ],
+  "ok": true
+}

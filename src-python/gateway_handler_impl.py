@@ -18,6 +18,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
+import anthropic_messages
 import collaboration_adapter as _collaboration_adapter_module
 import gateway_admission
 import gateway_catalog_runtime
@@ -198,6 +199,16 @@ def _event_context_with_request_kind(context: Mapping[str, Any], request_kind: s
     return payload
 
 
+def _bind_resolved_route_model(upstream: Mapping[str, Any], model: str | None, inbound_payload: Any) -> str | None:
+    resolved = upstream.get("model_id")
+    if not isinstance(resolved, str) or not resolved.strip():
+        return model
+    model = resolved.strip()
+    if isinstance(inbound_payload, dict):
+        inbound_payload["model"] = model
+    return model
+
+
 def _parse_gateway_request_input(
     handler: Any,
     *,
@@ -277,8 +288,6 @@ class GatewayHandlerMixin:
         status = 500
         try:
             admission.raise_if_cancelled()
-            upstream = gateway_catalog_runtime.official_upstream()
-            upstream_name = str(upstream["name"])
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
             except (TypeError, ValueError):
@@ -300,6 +309,11 @@ class GatewayHandlerMixin:
 
             body = self.rfile.read(content_length)
             admission.raise_if_cancelled()
+            # Read the bounded body before resolving routing configuration:
+            # an early lookup failure otherwise closes with unread bytes and
+            # can reset Windows clients instead of delivering our JSON error.
+            upstream = gateway_catalog_runtime.official_upstream()
+            upstream_name = str(upstream["name"])
             operational_authentication = gateway_transport.materialize_operational_authentication(
                 self.headers,
                 upstream,
@@ -583,6 +597,7 @@ class GatewayHandlerMixin:
             model = request_input.model
             route_reason = request_input.route_reason
             upstream = gateway_catalog_runtime.choose_upstream(model) if model else gateway_catalog_runtime.official_upstream()
+            model = _bind_resolved_route_model(upstream, model, inbound_payload)
             upstream_name = upstream["name"]
             upstream_format = str(upstream.get("upstream_format", "responses"))
             reports_cached_input_tokens = bool(upstream.get("reports_cached_input_tokens"))
@@ -1257,6 +1272,82 @@ class GatewayHandlerMixin:
         self.close_connection = True
         return True
 
+    def _handle_count_tokens(self) -> None:
+        request_context = request_context_from_headers(self.headers)
+        if not _local_request_authorized(self.headers, request_context):
+            self._send_json_and_close(401, _local_gateway_auth_error_payload())
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            self._send_json_and_close(400, {"error": "invalid Content-Length"})
+            return
+        if content_length <= 0:
+            self._send_json_and_close(
+                400,
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "request body is required",
+                    },
+                },
+            )
+            return
+        raw = self.rfile.read(content_length)
+        decoded, _, decode_error = decoded_request_body(
+            raw, self.headers.get("Content-Encoding")
+        )
+        if decode_error:
+            self._send_json_and_close(
+                400,
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "request body encoding is invalid",
+                    },
+                },
+            )
+            return
+        try:
+            payload = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send_json_and_close(
+                400,
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "request body is not JSON",
+                    },
+                },
+            )
+            return
+        if not isinstance(payload, dict):
+            self._send_json_and_close(
+                400,
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "request body must be an object",
+                    },
+                },
+            )
+            return
+        tokens = anthropic_messages.estimate_input_tokens(payload)
+        gateway_events.write_proxy_event(
+            "count_tokens_estimated",
+            model=payload.get("model"),
+            input_tokens=tokens,
+            **request_context,
+        )
+        self._send_json_and_close(
+            200,
+            {"type": "message_count_tokens", "input_tokens": tokens},
+        )
+
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = _json_response_bytes(payload)
         self.send_response(status)
@@ -1354,6 +1445,11 @@ class GatewayHandlerMixin:
             if seam is not None:
                 seam.attach_upstream(lifecycle)
 
+        def keepalive_ready() -> bool:
+            if downstream_output_started is not None:
+                return downstream_output_started()
+            return bool(seam is not None and seam.headers_committed)
+
         context = SseLineRelayContext(
             admission=admission,
             keepalive_interval=gateway_settings.sse_keepalive_seconds(),
@@ -1376,7 +1472,7 @@ class GatewayHandlerMixin:
         return iter_upstream_sse_lines(
             response,
             context=context,
-            downstream_output_started=downstream_output_started,
+            downstream_output_started=keepalive_ready,
             line_resets_idle_timeout=line_resets_idle_timeout,
             on_line=on_line,
         )

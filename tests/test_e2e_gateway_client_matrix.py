@@ -39,13 +39,15 @@ class GatewayClientMatrixTests(unittest.TestCase):
 
             cases = matrix.parse_runtime_providers_config(config, proxy_base_url="http://127.0.0.1:9099/v1")
 
-        self.assertEqual(len(cases), 1)
-        self.assertEqual(cases[0].client, "codex-app")
+        self.assertEqual([case.client for case in cases], ["codex-app", "claude-code"])
         self.assertEqual(cases[0].provider_id, "volc")
         self.assertEqual(cases[0].model_id, "glm-5.2")
         self.assertEqual(cases[0].api, "openai-responses")
         self.assertEqual(cases[0].base_url, "http://127.0.0.1:9099/v1/providers/volc")
         self.assertEqual(cases[0].api_key, "dummy-codexhub-e2e")
+        self.assertEqual(cases[1].api, "anthropic-messages")
+        self.assertEqual(cases[1].base_url, "http://127.0.0.1:9099/v1")
+        self.assertTrue(matrix.endpoint_for_case(cases[1]).endswith("/messages"))
 
     def test_load_cases_can_filter_to_codex_app_runtime_provider_cases(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -139,6 +141,7 @@ class GatewayClientMatrixTests(unittest.TestCase):
             cases = matrix.load_cases(args)
 
         self.assertEqual([matrix.coverage_selector(case) for case in cases], ["volc/glm-5.2", "volc/glm-5.2"])
+        self.assertEqual([case.client for case in cases], ["codex-app", "pi"])
         self.assertNotIn("openai/gpt-extra", [matrix.coverage_selector(case) for case in cases])
 
     def test_report_does_not_include_authorization_secret(self):

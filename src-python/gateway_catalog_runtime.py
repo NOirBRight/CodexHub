@@ -816,6 +816,15 @@ def choose_upstream(model_id: str) -> UpstreamFacts:
     slug = canonical_model_id(str(model_id))
     if not slug:
         raise ValueError("model is required")
+    import claude_code_projection
+
+    from providers_config import exported_gateway_model_ids
+
+    slug = claude_code_projection.resolve_projected_model_id(
+        slug,
+        current_catalog_data(),
+        extra_slugs=exported_gateway_model_ids(),
+    )
     policy = _policy_reader(_facts().policy_path)
     official_fast = _official_fast_variant(slug, policy)
     if official_fast is not None:
@@ -950,6 +959,7 @@ def _external_upstream(
         "api_key": external_model["api_key"],
         "upstream_model": external_model["upstream_model"],
         "upstream_format": external_model.get("upstream_format", "responses"),
+        "available_upstream_formats": external_model.get("available_upstream_formats", ()),
         "tool_protocol": external_model.get("tool_protocol", "auto"),
         "tool_surface_strategy": external_model.get("tool_surface_strategy", "eager"),
         "native_responses_tool_codec": external_model.get(
@@ -1015,6 +1025,15 @@ def openai_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:
             }
         )
     return {"object": "list", "data": data}
+
+
+def discovery_model_list(catalog: Mapping[str, Any], *, anthropic: bool) -> dict[str, Any]:
+    if anthropic:
+        from claude_code_projection import claude_model_list
+        from providers_config import exported_gateway_model_ids
+
+        return claude_model_list(catalog, extra_slugs=exported_gateway_model_ids())
+    return openai_model_list(catalog)
 
 
 def published_official_context_budgets(

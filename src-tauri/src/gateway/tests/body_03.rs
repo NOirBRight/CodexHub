@@ -101,7 +101,6 @@ fn opencode_apply_creates_config_when_absent() {
         "written OpenCode config must be detected as bound: {written}"
     );
     let baseline = super::read_rollback_baseline("opencode").unwrap().unwrap();
-    restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
     assert_eq!(
         baseline.files.get("opencode.json"),
         Some(&super::BaselineFile::Absent)
@@ -134,6 +133,7 @@ fn opencode_apply_creates_config_when_absent() {
     assert!(super::is_opencode_codexhub_config(
         &fs::read_to_string(&config_path).unwrap()
     ));
+    restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
 }
 
 #[test]

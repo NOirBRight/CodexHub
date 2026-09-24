@@ -352,6 +352,15 @@ def _require_supported_fields(value: Mapping[str, Any], allowed: set[str], label
         )
 
 
+def _require_positional_tool_index(tool_call: Mapping[str, Any], position: int) -> None:
+    index = tool_call.get("index", position)
+    if type(index) is not int or index != position:
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate a Chat Completions tool call with a mismatched index.",
+        )
+
+
 def _require_omittable_responses_transport_fields(payload: Mapping[str, Any]) -> None:
     """Accept only Responses transport defaults that have no Chat meaning."""
 
@@ -1235,7 +1244,7 @@ def chat_messages_to_responses_input(
                         "content": [{"type": "output_text", "text": text, "annotations": []}],
                     }
                 )
-            for tool_call in tool_calls:
+            for position, tool_call in enumerate(tool_calls):
                 if not isinstance(tool_call, dict):
                     raise UnsupportedProtocolTranslationError(
                         "unsupported_protocol_semantics",
@@ -1243,9 +1252,10 @@ def chat_messages_to_responses_input(
                     )
                 _require_supported_fields(
                     tool_call,
-                    {"id", "type", "function"},
+                    {"id", "type", "function", "index"},
                     "Chat Completions assistant tool call",
                 )
+                _require_positional_tool_index(tool_call, position)
                 tool_type = tool_call.get("type")
                 if tool_type not in (None, "function"):
                     raise UnsupportedProtocolTranslationError(
@@ -1687,7 +1697,7 @@ def _chat_completion_message_output(
                 "Cannot translate non-text Chat Completions response content to Responses without losing it.",
             )
     text = content if isinstance(content, str) else chat_content_text(content)
-    if not text:
+    if not text and content != "":
         return None
     return {
         "id": f"msg_{index}",
@@ -1716,7 +1726,7 @@ def _chat_completion_tool_outputs(
         return xmlish_tool_outputs(text) if text and xmlish_tool_outputs is not None else []
 
     output: list[dict[str, Any]] = []
-    for tool_call in tool_calls:
+    for position, tool_call in enumerate(tool_calls):
         if not isinstance(tool_call, dict):
             raise UnsupportedProtocolTranslationError(
                 "unsupported_protocol_semantics",
@@ -1724,9 +1734,10 @@ def _chat_completion_tool_outputs(
             )
         _require_supported_fields(
             tool_call,
-            {"id", "type", "function"},
+            {"id", "type", "function", "index"},
             "Chat Completions assistant tool call",
         )
+        _require_positional_tool_index(tool_call, position)
         tool_type = tool_call.get("type")
         if tool_type not in (None, "function"):
             raise UnsupportedProtocolTranslationError(
@@ -4473,6 +4484,7 @@ class PreparedExchange:
     upstream_body: bytes
     stream: bool
     dropped_cache_controls: tuple[str, ...] = ()
+    adaptations: tuple[tuple[str, str, str], ...] = ()
 
 
 class NonForwardable(UnsupportedProtocolTranslationError):
@@ -4522,6 +4534,7 @@ def prepare_exchange(
                 upstream,
                 bool(payload.get("stream")),
                 dropped_cache_controls=dropped_cache_controls,
+                adaptations=(),
             )
 
         if inbound == "responses" and outbound == "chat_completions":
@@ -4564,6 +4577,27 @@ def prepare_exchange(
                 return converted(anthropic_messages.chat_request_to_anthropic_body(chat_body))
             if inbound == "chat_completions":
                 return converted(anthropic_messages.chat_request_to_anthropic_body(conversion_body))
+        if inbound == "anthropic_messages" and outbound in {"responses", "chat_completions"}:
+            from anthropic_messages_prototype import NotForwardable, prepare_upstream_request
+
+            prepared = prepare_upstream_request(conversion_body, outbound)
+            if isinstance(prepared, NotForwardable):
+                named = ",".join(prepared.fields) if prepared.fields else prepared.reason
+                raise NonForwardable(
+                    prepared.reason,
+                    f"Cannot convert Anthropic Messages without a lossless mapping: {named}",
+                )
+            exchange = converted(prepared.body)
+            return PreparedExchange(
+                exchange.inbound_format,
+                exchange.outbound_format,
+                exchange.upstream_body,
+                exchange.stream,
+                dropped_cache_controls=exchange.dropped_cache_controls,
+                adaptations=tuple(
+                    (item.field, item.policy, item.detail) for item in prepared.adaptations
+                ),
+            )
         if inbound == outbound:
             stream = bool(
                 re.search(rb'"stream"\s*:\s*true\b', request_body, flags=re.IGNORECASE)

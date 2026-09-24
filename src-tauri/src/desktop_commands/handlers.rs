@@ -266,8 +266,9 @@ pub async fn list_gateway_clients(
 pub fn preview_gateway_client_config(
     client_id: String,
     model: Option<String>,
+    role_mappings: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<gateway::GatewayClientConfigPreview, String> {
-    gateway::preview_gateway_client_config(client_id, model)
+    gateway::preview_gateway_client_config(client_id, model, role_mappings)
 }
 
 #[tauri::command]
@@ -311,8 +312,9 @@ pub fn switch_gateway_client_route(
     mode: String,
     model: Option<String>,
     force_takeover: Option<bool>,
+    role_mappings: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<gateway::GatewayClientApplyResult, String> {
-    gateway::switch_gateway_client_route(client_id, mode, model, force_takeover)
+    gateway::switch_gateway_client_route(client_id, mode, model, force_takeover, role_mappings)
 }
 
 #[tauri::command]
@@ -447,7 +449,8 @@ pub async fn refresh_official_models(
     .await
 }
 
-pub(crate) fn refresh_official_models_published() -> Result<official_refresh::OfficialRefreshResult, String> {
+pub(crate) fn refresh_official_models_published(
+) -> Result<official_refresh::OfficialRefreshResult, String> {
     codex_desktop::serialize_config_writer(|| {
         official_refresh::refresh_manual().map_err(|error| error.to_string())
     })
@@ -551,7 +554,9 @@ pub(crate) fn finish_catalog_write<T>(
     })
 }
 
-#[tauri::command]
+// Catalog generation, file locks and history reconciliation can take seconds.
+// Tauri's async dispatch keeps this synchronous CLI-compatible entry off GTK.
+#[tauri::command(async)]
 pub fn switch_mode(
     mode: String,
     auto_sync: bool,

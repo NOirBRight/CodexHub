@@ -294,7 +294,7 @@ function ProvidersPageImpl({
     }
   }
   async function refreshProviderModels(provider: Provider) {
-    const result = await discoverProviderModels(provider.id);
+    const result = await discoverProviderModels(provider.id, provider);
     if (result.kind === "error") {
       setDiscoveryError(result.message);
     }

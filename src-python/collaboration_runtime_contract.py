@@ -565,7 +565,11 @@ def _is_client_execution_error(name: str, value: str) -> bool:
     their tools; successful JSON still uses the frozen output schemas.
     """
     if name == "wait_agent":
-        return _client_timeout_limit(value) is not None
+        # CLI 0.155.1 persists cancelled waits as text, not a JSON result.
+        # Preserve that history verbatim so the next turn can continue.
+        return _client_timeout_limit(value) is not None or re.fullmatch(
+            r"aborted by user after [0-9]+\.[0-9]s", value,
+        ) is not None
     if value == "collab manager unavailable":
         return name in {"spawn_agent", "list_agents", "send_message", "followup_task"}
     if value == "Empty message can't be sent to an agent":

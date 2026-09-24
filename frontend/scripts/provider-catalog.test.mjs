@@ -94,6 +94,23 @@ test("complete provider is left unchanged", () => {
   assert.equal(applyCatalogPresetDefaults(existing, catalogXai), existing);
 });
 
+test("saved official DeepSeek provider inherits the new Anthropic endpoint without changing preference", () => {
+  const existing = makeProvider({
+    id: "deepseek", base_url: "https://api.deepseek.com",
+    upstream_format: "responses",
+    available_upstream_formats: ["responses", "chat_completions"],
+  });
+  const preset = makeProvider({
+    id: "deepseek", base_url: "https://api.deepseek.com",
+    upstream_format: "auto",
+    available_upstream_formats: ["responses", "chat_completions", "anthropic_messages"],
+  });
+  const filled = applyCatalogPresetDefaults(existing, preset);
+  assert.equal(filled.upstream_format, "responses");
+  assert.deepEqual(filled.available_upstream_formats,
+    ["responses", "chat_completions", "anthropic_messages"]);
+});
+
 test("subscription auth is declared on the preset, not by provider id", () => {
   assert.equal(usesSubscriptionAuth(makeProvider()), false);
   assert.equal(subscriptionAuthAdapter(makeProvider()), null);
@@ -325,7 +342,8 @@ test("editor reasoning checkboxes follow catalog levels when present", () => {
     "high",
     "xhigh",
   ]);
-  assert.deepEqual(editorReasoningLevelOptions([]), ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(editorReasoningLevelOptions([]), []);
+  assert.deepEqual(editorReasoningLevelOptions(undefined), ["low", "medium", "high", "xhigh", "max"]);
 });
 
 test("saved xAI rows inherit subscription capabilities from the preset", () => {
@@ -410,4 +428,33 @@ test("merge upgrades text-only official rows to catalog vision without dropping 
   assert.deepEqual(merged[0].input_modalities, ["text", "image"]);
   assert.equal(merged[0].default_reasoning_level, "medium");
   assert.equal(merged[1].id, "qwen/qwen3.8-max");
+});
+
+test("a reasoning model without effort grades clears stale family grades", () => {
+  const preset = makeProvider({
+    id: "opencode-go",
+    models: [{ id: "mimo-v2.6-flash", thinking_mode: "always_on", supported_reasoning_levels: [], default_reasoning_level: null, input_modalities: ["text", "image"] }],
+  });
+  const [model] = applyPresetReasoningDefaults([
+    { id: "mimo-v2.6-flash", supported_reasoning_levels: ["low", "medium", "xhigh"], default_reasoning_level: "xhigh" },
+  ], preset);
+  assert.deepEqual(model.supported_reasoning_levels, []);
+  assert.equal(model.default_reasoning_level, null);
+  assert.equal(model.thinking_mode, "always_on");
+});
+
+test("explicit capability edits survive preset refresh and reload", () => {
+  const official = { id: "grok-4.6", enabled: true, input_modalities: ["text", "image"], thinking_mode: "always_on", supported_reasoning_levels: ["low", "medium", "high", "xhigh"], default_reasoning_level: "high" };
+  const edited = { ...official, capabilities_edited: true, input_modalities: ["text"], thinking_mode: "none", supported_reasoning_levels: [], default_reasoning_level: null };
+  const saved = JSON.parse(JSON.stringify(mergeOfficialPresetModels([edited], [official])));
+  assert.deepEqual(JSON.parse(JSON.stringify(applyPresetReasoningDefaults(saved, makeProvider({ models: [official] }))[0])), edited);
+});
+
+test("unedited stale capabilities refresh in both directions", () => {
+  const stale = { id: "mimo", enabled: true, input_modalities: ["text", "image"], thinking_mode: "always_on", supported_reasoning_levels: ["low", "high"], default_reasoning_level: "high" };
+  const official = { ...stale, input_modalities: ["text"], supported_reasoning_levels: [], default_reasoning_level: null };
+  const refreshed = mergeOfficialPresetModels([stale], [official])[0];
+  assert.deepEqual(refreshed.input_modalities, ["text"]);
+  assert.deepEqual(refreshed.supported_reasoning_levels, []);
+  assert.equal(refreshed.default_reasoning_level, null);
 });

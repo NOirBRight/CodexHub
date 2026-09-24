@@ -7,7 +7,7 @@ from typing import Any, Mapping, NoReturn
 # Extra High official TTFB can exceed 3–5 minutes. Keep the default
 # first-byte wait aligned with the SSE idle ceiling (10 minutes).
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 600
-UPSTREAM_USER_AGENT = "CodexHub/0.2.21 (+https://github.com/noirbright/CodexHub)"
+UPSTREAM_USER_AGENT = "CodexHub/0.2.24 (+https://github.com/noirbright/CodexHub)"
 DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS = 600.0
 DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS = 300.0
 DEFAULT_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
@@ -37,6 +37,9 @@ WIRE_RESPONSES_TO_CHAT = "responses_to_chat"
 WIRE_CHAT_TO_RESPONSES = "chat_to_responses"
 WIRE_RESPONSES_TO_ANTHROPIC = "responses_to_anthropic"
 WIRE_CHAT_TO_ANTHROPIC = "chat_to_anthropic"
+WIRE_ANTHROPIC_TO_RESPONSES = "anthropic_to_responses"
+WIRE_ANTHROPIC_TO_CHAT = "anthropic_to_chat"
+WIRE_UNSUPPORTED = "unsupported"
 
 CODEX_SEMANTIC_EXTERNAL_ADAPTER = "codex_app_external_adapter"
 CODEX_SEMANTIC_NONE = "none"
@@ -80,6 +83,8 @@ class AttemptRequestBodyMode(str, Enum):
     CONVERT_CHAT_TO_RESPONSES = "convert_chat_to_responses"
     CONVERT_RESPONSES_TO_ANTHROPIC = "convert_responses_to_anthropic"
     CONVERT_CHAT_TO_ANTHROPIC = "convert_chat_to_anthropic"
+    CONVERT_ANTHROPIC_TO_RESPONSES = "convert_anthropic_to_responses"
+    CONVERT_ANTHROPIC_TO_CHAT = "convert_anthropic_to_chat"
 
 
 class CallerRequestBodyMode(str, Enum):

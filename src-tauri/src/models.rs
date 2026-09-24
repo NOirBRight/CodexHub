@@ -195,7 +195,7 @@ pub fn discover_provider_models(
     api_key: &str,
     provider_id: Option<&str>,
 ) -> Result<Vec<Model>, String> {
-    let credential = resolve_provider_discovery_api_key(api_key, provider_id)?;
+    let credential = resolve_provider_discovery_api_key(base_url, api_key, provider_id)?;
     let mut models =
         discover_provider_models_with_timeout(base_url, &credential, DISCOVERY_TIMEOUT)?;
     if let Some(id) = provider_id.filter(|id| id.eq_ignore_ascii_case("opencode-go")) {
@@ -205,16 +205,44 @@ pub fn discover_provider_models(
 }
 
 pub(crate) fn resolve_provider_discovery_api_key(
+    base_url: &str,
     api_key: &str,
     provider_id: Option<&str>,
 ) -> Result<String, String> {
-    if let Some(key) = resolve_api_key(api_key)? {
-        return Ok(key);
+    resolve_provider_api_key_with_subscription(api_key, provider_id, || {
+        if !is_xai_api_base_url(base_url) {
+            return Err("xAI subscription credentials require https://api.x.ai".to_string());
+        }
+        crate::xai_auth::xai_access_token_blocking()
+    })
+}
+
+fn resolve_provider_api_key_with_subscription(
+    api_key: &str,
+    provider_id: Option<&str>,
+    subscription_token: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    let subscription = provider_id.is_some_and(|id| id.eq_ignore_ascii_case("xai"));
+    // A legacy env placeholder is optional for subscription providers. Literal
+    // API keys and successfully resolved env keys retain their existing priority.
+    let placeholder = env_placeholder_name(api_key.trim())?.is_some();
+    match resolve_api_key(api_key) {
+        Ok(Some(key)) => Ok(key),
+        Ok(None) if subscription => subscription_token(),
+        Err(_) if subscription && placeholder => subscription_token(),
+        Err(error) => Err(error),
+        Ok(None) => Ok(String::new()),
     }
-    if provider_id.is_some_and(|id| id.eq_ignore_ascii_case("xai")) {
-        return crate::xai_auth::xai_access_token_blocking();
-    }
-    Ok(String::new())
+}
+
+fn is_xai_api_base_url(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url.trim()).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some("api.x.ai")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port_or_known_default() == Some(443)
+    })
 }
 
 pub fn probe_upstream_format(
@@ -1715,6 +1743,7 @@ fn subscription_models_to_metadata_models(
                 .clone()
                 .or_else(|| defaults.and_then(|model| model.default_reasoning_level.clone())),
             thinking_mode: defaults.and_then(|model| model.thinking_mode.clone()),
+            capabilities_edited: defaults.is_some_and(|model| model.capabilities_edited),
             pricing: defaults.and_then(|model| model.pricing.clone()),
             metadata_provenance: Some(MetadataProvenance {
                 source: "codex_subscription".to_string(),
@@ -2149,6 +2178,13 @@ fn resolve_api_key(api_key: &str) -> Result<Option<String>, String> {
         return Ok(Some(api_key.to_string()));
     };
     let value = std::env::var(&env_name)
+        .or_else(|error| {
+            if env_name == "MOONSHOT_CN_API_KEY" {
+                std::env::var("MOONSHOT_API_KEY")
+            } else {
+                Err(error)
+            }
+        })
         .map_err(|_| format!("{env_name} is not set"))?
         .trim()
         .to_string();
@@ -2167,6 +2203,9 @@ fn resolve_gateway_api_key_for_settings(
     api_key: &str,
     gateway_settings: Option<&Settings>,
 ) -> Result<Option<String>, String> {
+    if is_xai_api_base_url(base_url) {
+        return resolve_provider_discovery_api_key(base_url, api_key, Some("xai")).map(Some);
+    }
     if let Some(api_key) = resolve_api_key(api_key)? {
         return Ok(Some(api_key));
     }
@@ -3208,6 +3247,7 @@ fn merge_model_override(base: &mut Model, override_model: Model) {
             .default_reasoning_level
             .or(base.default_reasoning_level.take()),
         thinking_mode: override_model.thinking_mode.or(base.thinking_mode.take()),
+        capabilities_edited: override_model.capabilities_edited || base.capabilities_edited,
         pricing: override_model.pricing.or(base.pricing.take()),
         metadata_provenance: override_model.metadata_provenance,
         sort_order: override_model.sort_order.or(base.sort_order),
@@ -3546,6 +3586,10 @@ fn catalog_model_from_item(item: &Value) -> Option<Model> {
             .get("default_reasoning_level")
             .and_then(Value::as_str)
             .and_then(nonblank),
+        capabilities_edited: object
+            .get("capabilities_edited")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         thinking_mode: object
             .get("thinking_mode")
             .and_then(Value::as_str)
@@ -5981,13 +6025,56 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn subscription_discovery_ignores_missing_legacy_env_key_but_not_auth_errors() {
+        let placeholder = "{env:CODEXHUB_TEST_UNSET_XAI_LEGACY_KEY_94817}";
+        assert!(std::env::var("CODEXHUB_TEST_UNSET_XAI_LEGACY_KEY_94817").is_err());
+        for key in ["", placeholder] {
+            assert_eq!(
+                super::resolve_provider_api_key_with_subscription(key, Some("xai"), || Ok(
+                    "session-fixture".into()
+                ))
+                .unwrap(),
+                "session-fixture"
+            );
+        }
+        assert!(super::resolve_provider_api_key_with_subscription(
+            placeholder,
+            Some("other"),
+            || panic!("not a subscription")
+        )
+        .unwrap_err()
+        .contains("is not set"));
+        assert_eq!(
+            super::resolve_provider_api_key_with_subscription(placeholder, Some("xai"), || Err(
+                "sign in required".into()
+            ))
+            .unwrap_err(),
+            "sign in required"
+        );
+        for url in [
+            "http://api.x.ai/v1",
+            "https://api.x.ai.evil.test/v1",
+            "https://user@api.x.ai/v1",
+            "https://api.x.ai:444/v1",
+        ] {
+            assert!(
+                resolve_provider_discovery_api_key(url, placeholder, Some("xai"))
+                    .unwrap_err()
+                    .contains("require https://api.x.ai")
+            );
+        }
+    }
+
+    #[test]
     fn resolve_provider_discovery_api_key_keeps_explicit_secret() {
         assert_eq!(
-            resolve_provider_discovery_api_key(" secret ", Some("xai")).expect("key"),
+            resolve_provider_discovery_api_key("https://api.x.ai/v1", " secret ", Some("xai"))
+                .expect("key"),
             "secret"
         );
         assert_eq!(
-            resolve_provider_discovery_api_key("  ", None).expect("blank"),
+            resolve_provider_discovery_api_key("https://example.test/v1", "  ", None)
+                .expect("blank"),
             ""
         );
     }
@@ -6090,6 +6177,25 @@ for line in sys.stdin:
                 .unwrap(),
             "https://example.test/api/coding/v3/chat/completions"
         );
+    }
+
+    #[test]
+    fn kimi_cn_env_fallback_matches_gateway_credentials() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous_cn = std::env::var_os("MOONSHOT_CN_API_KEY");
+        let previous_global = std::env::var_os("MOONSHOT_API_KEY");
+        std::env::remove_var("MOONSHOT_CN_API_KEY");
+        std::env::set_var("MOONSHOT_API_KEY", "global-fixture");
+        let fallback = super::resolve_api_key("{env:MOONSHOT_CN_API_KEY}");
+        std::env::set_var("MOONSHOT_CN_API_KEY", "cn-fixture");
+        let dedicated = super::resolve_api_key("{env:MOONSHOT_CN_API_KEY}");
+        std::env::set_var("MOONSHOT_CN_API_KEY", "");
+        let empty = super::resolve_api_key("{env:MOONSHOT_CN_API_KEY}");
+        restore_env("MOONSHOT_CN_API_KEY", previous_cn);
+        restore_env("MOONSHOT_API_KEY", previous_global);
+        assert_eq!(fallback.unwrap().as_deref(), Some("global-fixture"));
+        assert_eq!(dedicated.unwrap().as_deref(), Some("cn-fixture"));
+        assert!(empty.unwrap_err().contains("is empty"));
     }
 
     #[test]

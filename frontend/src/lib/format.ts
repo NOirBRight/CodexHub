@@ -103,6 +103,13 @@ export function mergeDiscoveredModels(existing: Model[], discovered: Model[]) {
       metadata_provenance: previous?.metadata_provenance ?? model.metadata_provenance ?? null,
       enabled: previous?.enabled ?? true,
       sort_order: previous?.sort_order ?? index + 1,
+      ...(previous?.capabilities_edited ? {
+        capabilities_edited: true,
+        input_modalities: previous.input_modalities,
+        thinking_mode: previous.thinking_mode,
+        supported_reasoning_levels: previous.supported_reasoning_levels,
+        default_reasoning_level: previous.default_reasoning_level,
+      } : {}),
     };
   });
 

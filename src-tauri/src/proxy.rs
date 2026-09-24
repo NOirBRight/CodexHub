@@ -3422,8 +3422,27 @@ fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
         .map(|part| String::from_utf8_lossy(part).to_string())
         .collect::<Vec<_>>();
     let mut info = ProcessInfo::from_args(args);
-    // Command line can be empty for zombies, mid-exec children, and some
-    // Python shutdown races. Creation identity still lives in /proc/pid/stat.
+    // A zombie has exited and released its descriptors even before its parent
+    // reaps it. Do not confuse its empty cmdline with a live PID replacement.
+    // Empty cmdline alone is insufficient: a live process may be mid-exec.
+    if bytes.is_empty() {
+        match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat)
+                if matches!(
+                    stat.rsplit_once(')')
+                        .and_then(|(_, rest)| rest.split_whitespace().next()),
+                    Some("Z" | "X")
+                ) =>
+            {
+                return Ok(InspectedProcess::Missing)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(InspectedProcess::Missing);
+            }
+            _ => {}
+        }
+    }
+    // Creation identity remains available even when a live cmdline is empty.
     info.process_start_id = match linux_process_start_id(pid) {
         Ok(process_start_id) => Some(process_start_id),
         Err(_) if bytes.is_empty() => None,
@@ -3787,14 +3806,10 @@ mod tests {
             start_id.starts_with("proc-start-ticks:"),
             "unexpected start identity {start_id}"
         );
-        match inspected.expect("zombie /proc entry should still be inspectable") {
-            InspectedProcess::Running(info) => {
-                assert_eq!(info.process_start_id.as_deref(), Some(start_id.as_str()));
-            }
-            InspectedProcess::Missing => {
-                panic!("zombie should not be reported missing before wait")
-            }
-        }
+        assert!(matches!(
+            inspected.expect("zombie /proc entry should still be inspectable"),
+            InspectedProcess::Missing
+        ));
     }
 
     #[cfg(not(windows))]
@@ -5364,7 +5379,6 @@ time.sleep(10)
 
     #[cfg(not(windows))]
     #[test]
-    #[ignore = "Linux host: /proc cmdline is empty during Python shutdown, so inspect_process reports Running([]) and stop fails PID identity; Windows FastProcessInspector covers this lifecycle"]
     fn start_status_stop_real_python_proxy_on_ephemeral_port() {
         let root = temp_root("python-lifecycle");
         let repo_root = copy_python_sources_to_temp_repo(&root);
@@ -5601,7 +5615,6 @@ time.sleep(10)
 
     #[cfg(not(windows))]
     #[test]
-    #[ignore = "Linux host: /proc cmdline is empty during Python shutdown, so inspect_process reports Running([]) and stop fails PID identity; Windows FastProcessInspector covers this lifecycle"]
     fn start_replaces_running_managed_proxy_from_previous_bundle() {
         let root = temp_root("python-bundle-upgrade");
         let old_repo_root = copy_python_sources_to_temp_repo(&root.join("old-bundle"));
@@ -5708,7 +5721,6 @@ time.sleep(10)
 
     #[cfg(not(windows))]
     #[test]
-    #[ignore = "Linux host: /proc cmdline is empty during Python shutdown, so inspect_process reports Running([]) and stop fails PID identity; Windows FastProcessInspector covers this lifecycle"]
     fn start_replaces_running_managed_proxy_after_same_path_upgrade() {
         let root = temp_root("python-in-place-upgrade");
         let repo_root = copy_python_sources_to_temp_repo(&root);

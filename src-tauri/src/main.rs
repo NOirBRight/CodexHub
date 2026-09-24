@@ -138,6 +138,8 @@ pub struct Model {
     pub default_reasoning_level: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_mode: Option<String>,
+    #[serde(default)]
+    pub capabilities_edited: bool,
     pub pricing: Option<ModelPricing>,
     pub metadata_provenance: Option<MetadataProvenance>,
     pub sort_order: Option<i32>,
@@ -170,6 +172,7 @@ impl Default for Model {
             supported_reasoning_levels: None,
             default_reasoning_level: None,
             thinking_mode: None,
+            capabilities_edited: false,
             pricing: None,
             metadata_provenance: None,
             sort_order: None,
@@ -327,6 +330,22 @@ pub struct Settings {
     pub codex_default_subagent_model: String,
     #[serde(default)]
     pub codex_default_subagent_reasoning_effort: String,
+    #[serde(default)]
+    pub opencode_default_subagent_model: String,
+    #[serde(default)]
+    pub opencode_default_subagent_reasoning_effort: String,
+    #[serde(default)]
+    pub zcode_default_subagent_model: String,
+    #[serde(default)]
+    pub zcode_default_subagent_reasoning_effort: String,
+    #[serde(default)]
+    pub omp_default_subagent_model: String,
+    #[serde(default)]
+    pub omp_default_subagent_reasoning_effort: String,
+    #[serde(default)]
+    pub grok_default_subagent_model: String,
+    #[serde(default)]
+    pub grok_default_subagent_reasoning_effort: String,
     pub proxy_port: u16,
 }
 
@@ -362,6 +381,14 @@ impl Default for Settings {
             official_provider_sort_order: 0,
             codex_default_subagent_model: String::new(),
             codex_default_subagent_reasoning_effort: String::new(),
+            opencode_default_subagent_model: String::new(),
+            opencode_default_subagent_reasoning_effort: String::new(),
+            zcode_default_subagent_model: String::new(),
+            zcode_default_subagent_reasoning_effort: String::new(),
+            omp_default_subagent_model: String::new(),
+            omp_default_subagent_reasoning_effort: String::new(),
+            grok_default_subagent_model: String::new(),
+            grok_default_subagent_reasoning_effort: String::new(),
             proxy_port: app_flavor::default_gateway_port(),
         }
     }
@@ -816,6 +843,25 @@ mod tests {
         finish_app_status_switch, finish_catalog_write, prepare_then_commit_official_multi_agent,
     };
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn edited_capabilities_survive_json_and_toml_roundtrip() {
+        let model: super::Model = serde_json::from_value(serde_json::json!({
+            "id": "grok-4.7", "capabilities_edited": true,
+            "thinking_mode": "none", "input_modalities": ["text"],
+            "supported_reasoning_levels": [], "default_reasoning_level": null
+        }))
+        .unwrap();
+        let reloaded: super::Model = toml::from_str(&toml::to_string(&model).unwrap()).unwrap();
+        assert!(reloaded.capabilities_edited);
+        assert_eq!(reloaded.thinking_mode.as_deref(), Some("none"));
+        assert_eq!(reloaded.input_modalities, Some(vec!["text".to_string()]));
+        assert_eq!(reloaded.supported_reasoning_levels, Some(vec![]));
+        assert_eq!(reloaded.default_reasoning_level, None);
+        let legacy: super::Model =
+            serde_json::from_value(serde_json::json!({"id": "legacy"})).unwrap();
+        assert!(!legacy.capabilities_edited);
+    }
 
     #[test]
     fn failed_switch_reopened_is_a_public_structured_status() {

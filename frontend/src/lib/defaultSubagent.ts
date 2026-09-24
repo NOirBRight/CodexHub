@@ -1,4 +1,4 @@
-import type { Model, Provider } from "./types";
+import type { Model, Provider, Settings } from "./types";
 import { shortWireDisplayName } from "./wireDisplayName";
 
 export const CODEX_SUBAGENT_EFFORTS = [
@@ -8,6 +8,75 @@ export const CODEX_SUBAGENT_EFFORTS = [
   "xhigh",
   "max",
 ] as const;
+
+export const CLIENT_DEFAULT_SUBAGENT_IDS = ["opencode", "zcode", "omp", "grok"] as const;
+
+export function supportsClientDefaultSubagent(clientId: string) {
+  return (CLIENT_DEFAULT_SUBAGENT_IDS as readonly string[]).includes(clientId);
+}
+
+export function clientDefaultSubagentFields(settings: Settings, clientId: string) {
+  switch (clientId) {
+    case "opencode":
+      return {
+        model: settings.opencode_default_subagent_model,
+        effort: settings.opencode_default_subagent_reasoning_effort,
+      };
+    case "zcode":
+      return {
+        model: settings.zcode_default_subagent_model,
+        effort: settings.zcode_default_subagent_reasoning_effort,
+      };
+    case "omp":
+      return {
+        model: settings.omp_default_subagent_model,
+        effort: settings.omp_default_subagent_reasoning_effort,
+      };
+    case "grok":
+      return {
+        model: settings.grok_default_subagent_model,
+        effort: settings.grok_default_subagent_reasoning_effort,
+      };
+    default:
+      return { model: "", effort: "" };
+  }
+}
+
+export function withClientDefaultSubagent(
+  settings: Settings,
+  clientId: string,
+  model: string,
+  effort: string,
+): Settings {
+  switch (clientId) {
+    case "opencode":
+      return {
+        ...settings,
+        opencode_default_subagent_model: model,
+        opencode_default_subagent_reasoning_effort: effort,
+      };
+    case "zcode":
+      return {
+        ...settings,
+        zcode_default_subagent_model: model,
+        zcode_default_subagent_reasoning_effort: effort,
+      };
+    case "omp":
+      return {
+        ...settings,
+        omp_default_subagent_model: model,
+        omp_default_subagent_reasoning_effort: effort,
+      };
+    case "grok":
+      return {
+        ...settings,
+        grok_default_subagent_model: model,
+        grok_default_subagent_reasoning_effort: effort,
+      };
+    default:
+      return settings;
+  }
+}
 
 export type DefaultSubagentOption = {
   id: string;
@@ -38,6 +107,7 @@ export function listDefaultSubagentOptions(input: {
   officialModels: Model[];
   officialDisabledModels: string[];
   providers: Provider[];
+  excludeProviderIds?: string[];
 }): DefaultSubagentOption[] {
   const options: DefaultSubagentOption[] = [];
   const seen = new Set<string>();
@@ -60,8 +130,10 @@ export function listDefaultSubagentOptions(input: {
     }
   }
 
+  const excluded = new Set(input.excludeProviderIds ?? []);
   for (const provider of input.providers) {
     if (!provider.enabled) continue;
+    if (excluded.has(provider.id)) continue;
     for (const model of provider.models) {
       if (model.enabled === false) continue;
       const id = subagentCatalogSlug(provider.id, model.id, input.officialId);

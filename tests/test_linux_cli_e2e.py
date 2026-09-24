@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -13,6 +14,57 @@ assert SPEC and SPEC.loader
 E2E = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(E2E)
 CONTRACT = json.loads(E2E.CLI_CONTRACT_PATH.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("client", ["codex", "opencode", "pi", "omp"])
+def test_echoed_prompt_is_not_a_successful_assistant_turn(client):
+    sentinel = "SENTINEL:test"
+    output = json.dumps(
+        {
+            "type": "agent_end",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": sentinel}]},
+                {"role": "assistant", "content": [], "stopReason": "error"},
+            ],
+        }
+    )
+    assert not E2E.assistant_returned_sentinel(client, output, sentinel)
+
+
+@pytest.mark.parametrize(
+    ("client", "event"),
+    [
+        (
+            "codex",
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "SENTINEL:test"},
+            },
+        ),
+        (
+            "opencode",
+            {"type": "text", "part": {"type": "text", "text": "SENTINEL:test"}},
+        ),
+        *[
+            (
+                client,
+                {
+                    "type": "agent_end",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "stopReason": "stop",
+                            "content": [{"type": "text", "text": "SENTINEL:test"}],
+                        }
+                    ],
+                },
+            )
+            for client in ("pi", "omp")
+        ],
+    ],
+)
+def test_completed_assistant_turn_is_recognized(client, event):
+    assert E2E.assistant_returned_sentinel(client, json.dumps(event), "SENTINEL:test")
 
 
 def test_cli_contract_is_versioned_and_complete() -> None:

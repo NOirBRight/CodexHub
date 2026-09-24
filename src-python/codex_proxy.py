@@ -160,7 +160,13 @@ class CodexProxyHandler(GatewayHandlerMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/models":
             catalog = gateway_catalog_runtime.current_catalog_data()
-            self._send_json(200, gateway_catalog_runtime.openai_model_list(catalog))
+            self._send_json(
+                200,
+                gateway_catalog_runtime.discovery_model_list(
+                    catalog,
+                    anthropic=bool(self.headers.get("anthropic-version")),
+                ),
+            )
             return
         if parsed.path == "/v1/responses":
             if _is_websocket_upgrade(self.headers):
@@ -208,6 +214,17 @@ class CodexProxyHandler(GatewayHandlerMixin, BaseHTTPRequestHandler):
         provider_hint = provider_scoped_path(parsed.path, "chat/completions")
         if provider_hint is not None:
             self._proxy_post_request(inbound_format="chat_completions", provider_hint=provider_hint)
+            return
+
+        if parsed.path == "/v1/messages/count_tokens":
+            self._handle_count_tokens()
+            return
+        if parsed.path == "/v1/messages":
+            self._proxy_post_request(inbound_format="anthropic_messages")
+            return
+        provider_hint = provider_scoped_path(parsed.path, "messages")
+        if provider_hint is not None:
+            self._proxy_post_request(inbound_format="anthropic_messages", provider_hint=provider_hint)
             return
 
         upstream_image_path = official_image_upstream_path(parsed.path)

@@ -75,6 +75,7 @@ pub fn provider_usage_blocking(provider_id: String) -> Result<Value, String> {
     let base = match provider_id.as_str() {
         "opencode-go" => "https://opencode.ai/zen/go/v1",
         "commandcode" => "https://api.commandcode.ai/provider/v1",
+        "deepseek" => "https://api.deepseek.com",
         _ => return Err("Provider has no quota adapter".into()),
     };
     let provider = crate::config::get_providers()?
@@ -82,10 +83,14 @@ pub fn provider_usage_blocking(provider_id: String) -> Result<Value, String> {
         .find(|p| p.id == provider_id)
         .ok_or("Provider was not found")?;
     // A catalog ID with a custom endpoint must never forward that endpoint's key.
-    if provider.base_url.trim_end_matches('/') != base {
+    if provider.base_url.trim_end_matches('/') != base
+        && !(provider_id == "deepseek"
+            && provider.base_url.trim_end_matches('/') == "https://api.deepseek.com/v1")
+    {
         return Err("Quota requires the official provider endpoint".into());
     }
     let key = crate::models::resolve_provider_discovery_api_key(
+        base,
         provider.api_key.as_deref().unwrap_or(""),
         None,
     )?;
@@ -101,6 +106,13 @@ pub fn provider_usage_blocking(provider_id: String) -> Result<Value, String> {
         return normalize_opencode(&get_json(
             &client,
             "https://opencode.ai/zen/go/v1/usage",
+            &key,
+        )?);
+    }
+    if provider_id == "deepseek" {
+        return normalize_deepseek(&get_json(
+            &client,
+            "https://api.deepseek.com/user/balance",
             &key,
         )?);
     }
@@ -192,6 +204,33 @@ pub fn normalize_commandcode(value: &Value) -> Result<Value, String> {
     Ok(json!({"limits":limits,"balance":balance,"currency":"USD"}))
 }
 
+pub fn normalize_deepseek(value: &Value) -> Result<Value, String> {
+    let infos = value
+        .get("balance_infos")
+        .and_then(Value::as_array)
+        .ok_or("Quota response has no recognized balance")?;
+    let selected = infos
+        .iter()
+        .find(|info| info.get("currency").and_then(Value::as_str) == Some("CNY"))
+        .or_else(|| {
+            infos
+                .iter()
+                .find(|info| info.get("currency").and_then(Value::as_str) == Some("USD"))
+        })
+        .ok_or("Quota response has no recognized currency")?;
+    let currency = selected
+        .get("currency")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let balance = selected
+        .get("total_balance")
+        .and_then(Value::as_str)
+        .and_then(|amount| amount.parse::<f64>().ok())
+        .filter(|amount| amount.is_finite() && *amount >= 0.0)
+        .ok_or("Quota response has invalid balance")?;
+    Ok(json!({"limits":[], "balance":balance, "currency":currency}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +265,19 @@ mod tests {
         assert_eq!(value["limits"][0]["period"], "week");
         assert_eq!(value["limits"][0]["resets_at"], "1789000000");
         assert!(normalize_commandcode(&json!({"credits":{}})).is_err());
+    }
+    #[test]
+    fn deepseek_balance_uses_one_currency_without_summing_currencies() {
+        let value = normalize_deepseek(&json!({"is_available":true,"balance_infos":[
+            {"currency":"USD","total_balance":"7.50"},
+            {"currency":"CNY","total_balance":"95.34"}
+        ]}))
+        .unwrap();
+        assert_eq!(value, json!({"limits":[],"balance":95.34,"currency":"CNY"}));
+        assert!(normalize_deepseek(
+            &json!({"balance_infos":[{"currency":"CNY","total_balance":"NaN"}]})
+        )
+        .is_err());
     }
     #[test]
     fn remote_reset_types_are_normalized_at_the_quota_boundary() {

@@ -297,9 +297,11 @@ export const api = {
   dshClientConnect: () => call<DshLifecycleReport>(COMMANDS.dshClientConnect),
   dshClientDisconnect: () => call<DshLifecycleReport>(COMMANDS.dshClientDisconnect),
   dshClientReadback: () => call<DshLifecycleReport>(COMMANDS.dshClientReadback),
-  previewGatewayClientConfig: (clientId: string, model?: string | null) =>
+  previewGatewayClientConfig: (clientId: string, model?: string | null, roleMappings?: Record<string, string> | null) =>
     call<GatewayClientConfigPreview>(COMMANDS.previewGatewayClientConfig, {
       clientId,
+      roleMappings: roleMappings ?? null,
+      role_mappings: roleMappings ?? null,
       model: model ?? null,
     }),
   applyGatewayClientConfig: (clientId: string, model?: string | null) =>
@@ -314,6 +316,7 @@ export const api = {
     mode: RoutingOwner | "hub",
     model?: string | null,
     forceTakeover = false,
+    roleMappings?: Record<string, string> | null,
   ) =>
     call<GatewayClientApplyResult>(COMMANDS.switchGatewayClientRoute, {
       clientId,
@@ -321,6 +324,8 @@ export const api = {
       model: model ?? null,
       forceTakeover,
       force_takeover: forceTakeover,
+      roleMappings: roleMappings ?? null,
+      role_mappings: roleMappings ?? null,
     }),
   syncGatewayClients: (model?: string | null) =>
     call<GatewayClientSyncSummary>(COMMANDS.syncGatewayClients, { model: model ?? null }),

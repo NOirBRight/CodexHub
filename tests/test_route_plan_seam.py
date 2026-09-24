@@ -1218,6 +1218,27 @@ class RoutePlanSeamTests(unittest.TestCase):
             route_primitives.AttemptRequestBodyMode.CONVERT_RESPONSES_TO_ANTHROPIC,
         )
 
+    def test_official_deepseek_auto_uses_matching_wire_endpoint(self):
+        upstream = {
+            "name": "deepseek", "provider_id": "deepseek", "model_id": "deepseek/deepseek-flash",
+            "upstream_model": "deepseek-flash", "base_url": "https://api.deepseek.com",
+            "upstream_format": "auto",
+            "available_upstream_formats": ("responses", "chat_completions", "anthropic_messages"),
+        }
+        for inbound, endpoint in (
+            ("responses", "https://api.deepseek.com/v1/responses"),
+            ("chat_completions", "https://api.deepseek.com/v1/chat/completions"),
+            ("anthropic_messages", "https://api.deepseek.com/anthropic/v1/messages"),
+        ):
+            with self.subTest(inbound=inbound):
+                plan = route_plan.route_plan_for_request(
+                    upstream, {"client_id": "claude-code"}, inbound_format=inbound,
+                    model_requested="deepseek/deepseek-flash", provider_hint="deepseek",
+                )
+                self.assertEqual(len(plan.attempts), 1)
+                self.assertEqual(plan.attempts[0].selected_upstream_format, inbound)
+                self.assertEqual(plan.attempts[0].endpoint_url, endpoint)
+
     def test_route_plan_separates_schema_identity_from_optional_manifest_evidence(self):
         valid_manifest_hash = f"sha256:{'a' * 64}"
         unqualified = route_plan.route_plan_for_request(
@@ -1550,6 +1571,72 @@ class RoutePlanSeamTests(unittest.TestCase):
         retry = plan.attempts[0].retry
         self.assertEqual(retry.request_timeout_seconds, 90)
         self.assertEqual(retry.pre_response_budget_seconds, 90.0)
+
+    def test_inbound_messages_native_anthropic_is_transparent(self):
+        plan = route_plan.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "upstream_model": "custom-claude",
+                "upstream_format": "anthropic_messages",
+            },
+            {"client_id": "unknown"},
+            inbound_format="anthropic_messages",
+            model_requested="ollama-cloud/custom-claude",
+        )
+        self.assertEqual(plan.protocol_capability_state, route_primitives.CapabilityState.SUPPORTED)
+        self.assertEqual(len(plan.attempts), 1)
+        self.assertEqual(plan.attempts[0].selected_upstream_format, "anthropic_messages")
+        self.assertEqual(plan.attempts[0].wire_format_adapter, route_primitives.WIRE_TRANSPARENT)
+        self.assertEqual(
+            plan.attempts[0].request_body_mode,
+            route_primitives.AttemptRequestBodyMode.PREPARED_DIRECT,
+        )
+
+    def test_inbound_messages_converts_to_responses_and_chat(self):
+        responses = route_plan.route_plan_for_request(
+            {
+                "name": "official",
+                "upstream_model": "gpt-5.6-luna",
+                "upstream_format": "responses",
+            },
+            {"client_id": "unknown"},
+            inbound_format="anthropic_messages",
+            model_requested="gpt-5.6-luna",
+        )
+        self.assertEqual(responses.attempts[0].wire_format_adapter, route_primitives.WIRE_ANTHROPIC_TO_RESPONSES)
+        self.assertEqual(
+            responses.attempts[0].request_body_mode,
+            route_primitives.AttemptRequestBodyMode.CONVERT_ANTHROPIC_TO_RESPONSES,
+        )
+        chat = route_plan.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "upstream_model": "glm-5.2",
+                "upstream_format": "chat_completions",
+            },
+            {"client_id": "unknown"},
+            inbound_format="anthropic_messages",
+            model_requested="ollama-cloud/glm-5.2",
+        )
+        self.assertEqual(chat.attempts[0].wire_format_adapter, route_primitives.WIRE_ANTHROPIC_TO_CHAT)
+        self.assertEqual(
+            chat.attempts[0].request_body_mode,
+            route_primitives.AttemptRequestBodyMode.CONVERT_ANTHROPIC_TO_CHAT,
+        )
+
+    def test_inbound_messages_unknown_upstream_is_not_transparent(self):
+        plan = route_plan.route_plan_for_request(
+            {
+                "name": "ollama_cloud",
+                "upstream_model": "glm-5.2",
+                "upstream_format": "invalid_wire",
+            },
+            {"client_id": "unknown"},
+            inbound_format="anthropic_messages",
+            model_requested="ollama-cloud/glm-5.2",
+        )
+        self.assertEqual(plan.attempts, ())
+        self.assertNotEqual(plan.wire_format_adapter, route_primitives.WIRE_TRANSPARENT)
 
 
 def test_route_plan_seam_source_does_not_use_handler_privates() -> None:

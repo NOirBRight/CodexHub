@@ -353,6 +353,10 @@ class DownstreamStreamCommit:
         self._ensure_headers_committed_callback: Callable[[], bool] | None = None
 
     @property
+    def headers_committed(self) -> bool:
+        return self._headers_committed
+
+    @property
     def terminal_committed(self) -> bool:
         return self._terminal_committed
 
