@@ -15,4 +15,43 @@ usage rows. The resumed request recorded 23,055 input tokens, 36 output tokens,
 22,730 cache-read tokens and 323 cache-write tokens. `explicit_model_resume`
 is verified for this candidate; plain `--resume`, same-session native/external
 switching and the packaged Usage UI were not verified by this run. The final
-reviewed SHA still requires its own candidate evidence and platform checks.
+code SHA has separate candidate evidence below.
+
+## Packaged candidate `c97d0889`
+
+The final code SHA is `c97d08897bdae3f56de6e3ce51235150356d8a43`.
+The Linux debug portable archive SHA256 is
+`72050ed47656ae556202a35ef3a9e6bd102de51803f5f9b23aeb9de2315321de`;
+the isolated Windows debug portable archive SHA256 is
+`d8ddaec8eff14959f565bb7e19f7a47b62fdebea64613c44d7b65b552c794216`.
+Neither replaced the installed app.
+
+- [Real subscription Opus explicit resume](explicit-model-resume-c97d0889.json):
+  Claude Code 2.1.280 created and explicitly resumed one session with
+  `claude-opus-5-5`. Both Gateway requests retained that complete ID, returned
+  HTTP 200 and persisted upstream token/cache counts. Plain `--resume` was
+  previously observed to follow the current default/family mapping; it is not
+  an identity-preserving recovery command.
+- [Real subscription Haiku and packaged Usage page](native-haiku-usage-ui-c97d0889.json)
+  ([screenshot](native-haiku-usage-ui-c97d0889.png)): one bounded Claude Code
+  generation invocation used native `claude-haiku-4-5-20251001`; Gateway,
+  SQLite and the rendered packaged Usage details all showed the subscription
+  request and upstream token/cache counts. The UI ran with independent D-Bus,
+  Xvfb, temporary HOME/runtime and ports. The first 640×480 virtual-display
+  attempt could not show the details row; the 1280×940 rerun passed.
+
+Both live runs used an access-token-only subscription snapshot, excluded the
+refresh token, capped output at 128 tokens per request and verified source
+credentials were unchanged. The Opus run reserved two CLI generation attempts,
+90 seconds each and 300 seconds overall. The Haiku run reserved one CLI
+generation attempt, 90 seconds and 180 seconds overall; Claude Code itself can
+send more than one Gateway request during an invocation.
+
+The final code SHA also passed Linux Python (3260), Windows Python (3385),
+Windows synthetic real-client contract (152), Windows serial Rust (774),
+Windows clippy, frontend build and UI contract checks. Same-session
+native → external → native switching, automatic compaction, every subscription
+version and Windows live subscription traffic are still unverified on this
+candidate. Earlier DeepSeek official Messages/Chat, balance and Codex Luna
+Responses results were obtained on precursor `154af624`, not repeated on
+`c97d0889`.
