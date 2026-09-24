@@ -243,7 +243,7 @@ def test_rewritten_messages_headers_drop_upstream_zstd() -> None:
 
 
 def test_tool_result_is_error_prefixes_chat_content() -> None:
-    from anthropic_messages_prototype import Adapted, prepare_upstream_request
+    from anthropic_messages_ir import Adapted, prepare_upstream_request
 
     body = json.dumps(
         {

@@ -15,7 +15,7 @@ import http.client
 import urllib.error
 
 import anthropic_messages
-import anthropic_messages_prototype
+import anthropic_messages_ir
 import collaboration_adapter
 import gateway_relay_anthropic
 import gateway_compat
@@ -988,13 +988,13 @@ def relay_upstream_response(
                 response_headers = getattr(response, "headers", None)
                 if response_headers is not None:
                     content_type = response_headers.get("content-type", content_type) or content_type
-                adapted = anthropic_messages_prototype.adapt_upstream_response(
+                adapted = anthropic_messages_ir.adapt_upstream_response(
                     upstream_format,
                     body,
                     status=status,
                     content_type=content_type,
                 )
-                if isinstance(adapted, anthropic_messages_prototype.NotForwardable):
+                if isinstance(adapted, anthropic_messages_ir.NotForwardable):
                     status = status if status >= 400 else 400
                     body = json.dumps(
                         {

@@ -1,4 +1,4 @@
-"""Deterministic checks for the isolated Messages representation prototype (#74).
+"""Deterministic checks for the Messages representation seam (#74).
 
 Two fixture classes, kept visibly separate:
 
@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-from anthropic_messages_prototype import (
+from anthropic_messages_ir import (
     Adapted,
     NotForwardable,
     NATIVE_GATEWAY_REWRITES,
@@ -132,7 +132,7 @@ def test_representation_keeps_every_field_including_unmodelled() -> None:
 
 
 def test_unknown_top_level_field_is_reported_not_dropped() -> None:
-    # Adversarial/synthetic: a future field the prototype does not model.
+    # Adversarial/synthetic: a future field the adapter does not model.
     body = json.loads(observed_shape_body())
     body.pop("safeguards")
     body["future_beta_option"] = {"enabled": True}

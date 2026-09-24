@@ -11,15 +11,14 @@ from typing import Any, Mapping
 
 import pytest
 
-from anthropic_messages_prototype import (
+from anthropic_messages_ir import (
     AdaptedResponse,
     NotForwardable,
     adapt_upstream_response,
     adapt_upstream_stream,
-    execute_exchange,
     prepare_upstream_request,
-    relay_incremental_exchange,
 )
+from claude_messages_evidence_exchange import execute_exchange, relay_incremental_exchange
 from gateway_sse import DownstreamStreamCommit
 
 

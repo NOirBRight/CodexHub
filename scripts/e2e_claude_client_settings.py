@@ -266,7 +266,8 @@ enabled = true
             assert preview["can_apply"] is True
             assert planned["env"]["ANTHROPIC_MODEL"] == "claude-codexhub-e2e-alpha"
             assert planned["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-codexhub-e2e-beta"
-            assert planned["env"]["ANTHROPIC_AUTH_TOKEN"] == "***"
+            assert "ANTHROPIC_AUTH_TOKEN" not in planned["env"]
+            assert planned["env"]["ANTHROPIC_CUSTOM_HEADERS"] == "***"
 
             connected = accepted(port, "switch_gateway_client_route", {
                 "client_id": "claude", "mode": "hub", "model": "e2e/alpha",
@@ -277,6 +278,13 @@ enabled = true
             assert written["theme"] == "dark" and written["env"]["EDITOR"] == "vim"
             assert written["env"]["ANTHROPIC_MODEL"] == planned["env"]["ANTHROPIC_MODEL"]
             assert written["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == planned["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
+            assert "ANTHROPIC_AUTH_TOKEN" not in written["env"]
+            assert written["env"]["ANTHROPIC_CUSTOM_HEADERS"] == (
+                "x-codexhub-gateway-key: synthetic-local-gateway-key"
+            )
+            assert {"claude-codexhub-e2e-alpha", "claude-codexhub-e2e-beta"} <= {
+                row["model"] for row in written["modelPicker"]["options"]
+            }
             readback = claude_info(port)
             assert readback["route_mode"] == "hub"
             assert readback["claude_settings"]["default_model"] == "e2e/alpha"
@@ -325,6 +333,7 @@ enabled = true
             assert restored["env"]["ANTHROPIC_API_KEY"] == "synthetic-conflicting-key"
             assert not any(key.startswith("CODEXHUB_") or key in {
                 "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_CUSTOM_HEADERS",
                 "ANTHROPIC_DEFAULT_SONNET_MODEL",
             } for key in restored["env"])
             assert claude_info(port)["route_mode"] == "official"

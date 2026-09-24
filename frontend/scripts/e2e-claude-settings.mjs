@@ -41,7 +41,8 @@ try {
   await expect(dialog).toBeHidden();
   await card.getByRole("button", { name: "Claude Code connection details" }).click();
   dialog = page.getByRole("dialog", { name: "Claude Code settings" });
-  await expect(picker("Default model")).toHaveValue("e2e/alpha");
+  await expect(picker("Default model")).toHaveValue("__codexhub_preserve_claude_default__");
+  await expect(picker("Default model")).toContainText("Keep current default (e2e/alpha)");
   await expect(picker("Haiku / fast")).toHaveValue("e2e/beta");
   await picker("Default model").selectOption("e2e/beta");
   await picker("Haiku / fast").selectOption("");
@@ -55,7 +56,8 @@ try {
   await expect(dialog).toBeHidden();
   await card.getByRole("button", { name: "Claude Code connection details" }).click();
   dialog = page.getByRole("dialog", { name: "Claude Code settings" });
-  await expect(picker("Default model")).toHaveValue("e2e/beta");
+  await expect(picker("Default model")).toHaveValue("__codexhub_preserve_claude_default__");
+  await expect(picker("Default model")).toContainText("Keep current default (e2e/beta)");
   await expect(picker("Sonnet")).toHaveValue("e2e/alpha");
   await dialog.getByRole("button", { name: "Disconnect" }).click();
   await expect.poll(() => settings().env?.ANTHROPIC_MODEL).toBeUndefined();
