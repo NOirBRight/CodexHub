@@ -451,8 +451,7 @@ class GatewayHandlerMixin:
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 **request_context,
             )
-            self._send_json(401, _local_gateway_auth_error_payload())
-            self.close_connection = True
+            self._send_json_and_close(401, _local_gateway_auth_error_payload())
             return
         request_kind = RETRY_REQUEST_MAIN_GENERATION
         proxy_request_context = _event_context_with_request_kind(request_context, request_kind)
