@@ -332,7 +332,7 @@ const zhCN = {
     claudeModelsTitle: "模型选择",
     claudeCatalog: "查看已导出模型（{{count}}）",
     claudeRolesTitle: "模型家族映射",
-    claudeRolesHelp: "可将 Claude 的 opus、sonnet、haiku 或 fable 别名映射到 Gateway 模型。请求中显式指定的完整模型 ID 保持原身份。",
+    claudeRolesHelp: "可将 Claude 的 opus、sonnet、haiku 或 fable 别名映射到 Gateway 模型。断开连接后，CodexHub 仍会记住这些映射。请求中显式指定的完整模型 ID 保持原身份。",
     claudeDiagnostics: "高级与诊断",
     claudeOverrideScope: "仅检查当前用户设置及 CodexHub 进程环境。项目设置和其他终端的环境变量仍可能覆盖这些设置。",
     claudeConnectScope:

@@ -9,8 +9,8 @@ export const claudeClearDefault = "__codexhub_clear_claude_default__";
 
 export function claudeResumeCommand(modelId: string): string {
   const id = modelId.trim();
-  return /^claude-[a-zA-Z0-9._-]+$/.test(id)
-    ? `claude --resume --model ${id}`
+  return /^claude-[a-zA-Z0-9._-]+(?:\[1m\])?$/.test(id)
+    ? `claude --resume --model ${id.includes("[") ? `'${id}'` : id}`
     : "";
 }
 

@@ -37,9 +37,13 @@ This decision does not import history or add a subscription quota dashboard.
   `ANTHROPIC_CUSTOM_HEADERS` as `x-codexhub-gateway-key`, alongside its saved
   OAuth bearer and OAuth beta header. CodexHub must consume and validate that
   local header without replacing subscription authentication. The same probe
-  showed OAuth-only model discovery is skipped, so the managed client projection
-  is published additively through `modelPicker.options`; the built-in lineup is
-  left in place.
+  showed OAuth-only Gateway model discovery is skipped. Amendment 2026-09-25:
+  append mode cannot relabel mapped built-in families, so the client projection
+  uses `modelPicker.replaceBuiltInOptions` after a successful isolated CLI native
+  model enumeration. Exact native IDs and genuine native 1M variants are composed
+  with exported external rows. Failed enumeration preserves the applied config.
+  This supersedes the original additive-only policy. Claude still owns Default
+  and current-model rows; replacement cannot remove or relabel them.
 - Subscription credentials remain client-carried and can reach only the official
   Anthropic destination. External provider dispatch strips incoming credentials.
   Tokens do not enter telemetry, configuration backups or persisted usage data.
@@ -48,6 +52,19 @@ This decision does not import history or add a subscription quota dashboard.
   authenticated Claude client's request, not reuse by unrelated clients.
 - Failed/disabled mappings never silently substitute another model. Disconnected
   direct traffic is not observable by Gateway and is not claimed as recorded.
+- Family and Default subagent preferences are persisted in CodexHub independently
+  of the Injected Block. Disconnect restores the client configuration and retains
+  those preferences. Reconnect validates and reapplies them without changing the
+  separate default selection. Explicit empty values clear a mapping.
+- Native enumeration runs at preview/apply with disposable configuration, without
+  copying login/refresh credentials or making an inference request. The published
+  snapshot records CLI version and a hash of selection/account metadata and rows;
+  it is not an exhaustive subscription-entitlement catalog. Explicit native IDs
+  remain available independently of picker enumeration.
+- External rows do not synthesize a 1M variant. The client-owned Default and
+  manually selected/resumed external `[1m]` rows remain an unresolved compatibility
+  boundary until their outcome is explicitly accepted and qualified. Global 1M
+  disable is not applied because it also reduces genuine native Claude capacity.
 - ADR-0014's declared compatibility adaptation, explicit identity, conflict
   handling, rollback and evidence requirements otherwise remain in force.
 

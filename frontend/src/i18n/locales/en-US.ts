@@ -333,7 +333,7 @@ const enUS = {
     claudeModelsTitle: "Model selection",
     claudeCatalog: "View exported models ({{count}})",
     claudeRolesTitle: "Family mappings",
-    claudeRolesHelp: "Map Claude's opus, sonnet, haiku, or fable aliases to Gateway models. A complete model ID explicitly selected for a request keeps its identity.",
+    claudeRolesHelp: "Map Claude's opus, sonnet, haiku, or fable aliases to Gateway models. CodexHub remembers these mappings after disconnecting. A complete model ID explicitly selected for a request keeps its identity.",
     claudeDiagnostics: "Advanced and diagnostics",
     claudeOverrideScope: "Checks cover current-user settings and the CodexHub process environment. Project settings and other terminals may still override them.",
     claudeConnectScope:

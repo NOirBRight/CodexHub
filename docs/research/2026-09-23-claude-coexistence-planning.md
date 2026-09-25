@@ -6,6 +6,10 @@ Status: product direction confirmed; remaining factual checks are recorded in th
 architecture direction. Implementation and candidate delivery are not complete.
 The synthesized specification is published as
 [#559](https://github.com/NOirBRight/CodexHub/issues/559), marked ready-for-agent.
+Update 2026-09-25: child issues #560–#564 and PR #565 now exist. The implementation
+plan's reconciliation distinguishes implemented code, remaining acceptance and
+the proposed persistence/picker/context amendments. Evidence/backlog statements
+below describe the original discussion, not current candidate qualification.
 
 ## Accepted product direction
 

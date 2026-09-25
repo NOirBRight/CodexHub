@@ -16,6 +16,8 @@ const CLIENT_ID: &str = "claude";
 const MANAGED_MARKER_KEY: &str = "CODEXHUB_MANAGED_CLIENT";
 const MANAGED_MARKER_VALUE: &str = "claude";
 const PICKER_FINGERPRINTS_KEY: &str = "CODEXHUB_MANAGED_MODEL_PICKER_SHA256";
+const PICKER_REPLACE_KEY: &str = "CODEXHUB_MANAGED_PICKER_REPLACE_BASELINE";
+const PICKER_SOURCE_KEY: &str = "CODEXHUB_MANAGED_NATIVE_PICKER_SOURCE";
 const CUSTOM_HEADER_FINGERPRINT_KEY: &str = "CODEXHUB_MANAGED_CUSTOM_HEADER_SHA256";
 const LOCAL_HEADER_NAME: &str = "x-codexhub-gateway-key";
 pub(in crate::gateway) const PRESERVE_DEFAULT_MODEL: &str = "__codexhub_preserve_claude_default__";
@@ -40,6 +42,8 @@ pub(in crate::gateway) const MANAGED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_DEFAULT_FABLE_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
     PICKER_FINGERPRINTS_KEY,
+    PICKER_REPLACE_KEY,
+    PICKER_SOURCE_KEY,
     CUSTOM_HEADER_FINGERPRINT_KEY,
     "CODEXHUB_MANAGED_CLIENT",
 ];
@@ -89,6 +93,7 @@ pub(in crate::gateway) fn read_claude_settings(
         let raw = value
             .pointer(&format!("/env/{key}"))
             .and_then(Value::as_str)
+            .or_else(|| (key == "ANTHROPIC_MODEL").then(|| value.get("model").and_then(Value::as_str)).flatten())
             .unwrap_or("");
         exported
             .iter()
@@ -96,14 +101,19 @@ pub(in crate::gateway) fn read_claude_settings(
             .map(|model| model.id.clone())
             .unwrap_or_else(|| raw.to_string())
     };
+    let preference = |role: &str, key: &str| {
+        settings.claude_model_mappings.as_ref()
+            .and_then(|saved| saved.get(role)).cloned()
+            .unwrap_or_else(|| canonical(key))
+    };
     ClaudeClientSettings {
         default_model: canonical("ANTHROPIC_MODEL"),
         role_mappings: ROLE_ENV
             .iter()
             .filter(|(role, _)| *role != "subagent")
-            .map(|(role, key)| (role.to_string(), canonical(key)))
+            .map(|(role, key)| (role.to_string(), preference(role, key)))
             .collect(),
-        default_subagent_model: canonical("CLAUDE_CODE_SUBAGENT_MODEL"),
+        default_subagent_model: preference("subagent", "CLAUDE_CODE_SUBAGENT_MODEL"),
         conflicts: claude_override_conflicts(Some(&value), settings),
     }
 }
@@ -325,6 +335,17 @@ fn restore_custom_headers(
 }
 
 fn remove_managed_model_picker_options(root: &mut Value) {
+    let replace_baseline = env_string(root, PICKER_REPLACE_KEY)
+        .and_then(|value| serde_json::from_str::<Value>(value).ok());
+    if let Some(picker) = root.get_mut("modelPicker").and_then(Value::as_object_mut) {
+        if picker.get("replaceBuiltInOptions") == Some(&Value::Bool(true)) {
+            match replace_baseline {
+                Some(Value::Null) => { picker.remove("replaceBuiltInOptions"); }
+                Some(value) => { picker.insert("replaceBuiltInOptions".into(), value); }
+                None => {}
+            }
+        }
+    }
     let hashes = root
         .pointer("/env/CODEXHUB_MANAGED_MODEL_PICKER_SHA256")
         .and_then(Value::as_str)
@@ -453,6 +474,40 @@ fn claude_picker_options(
         .collect()
 }
 
+fn native_picker_settings(config_path: &Path, settings: &Settings) -> Result<Settings, String> {
+    if settings.claude_native_picker.is_some() {
+        return Ok(settings.clone());
+    }
+    let expected = fs::read(config_path).ok();
+    let executable = detect_claude_executable_path()
+        .ok_or_else(|| "Claude Code is required to read native models before connecting".to_string())?;
+    let python = crate::config::find_python()?;
+    let script = crate::runtime_paths::resource_root()?.join("src-python/claude_native_models.py");
+    let mut command = std::process::Command::new(python);
+    command.arg(script).args(["--claude-bin", &executable.to_string_lossy(),
+        "--config-dir", &config_path.parent().unwrap_or(Path::new(".")).to_string_lossy()]);
+    let output = super::super::command_output_no_window_with_timeout(&mut command, std::time::Duration::from_secs(20))
+        .ok_or_else(|| "Could not start Claude native model discovery".to_string())?;
+    if !output.status.success() {
+        return Err("Cannot obtain native Claude models. Update Claude Code and retry; existing configuration was preserved.".into());
+    }
+    if fs::read(config_path).ok() != expected {
+        return Err("Claude settings changed during native model discovery; retry Apply".into());
+    }
+    let snapshot: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Claude native model discovery returned invalid data".to_string())?;
+    let rows: Vec<Value> = serde_json::from_value(snapshot["models"].clone())
+        .map_err(|_| "Claude native model discovery returned invalid rows".to_string())?;
+    if rows.is_empty() || rows.iter().any(|row| !row.get("model").and_then(Value::as_str)
+        .is_some_and(|id| id.starts_with("claude-") && !id.starts_with("claude-codexhub-"))) {
+        return Err("Claude native model discovery returned no usable native choices".into());
+    }
+    let mut prepared = settings.clone();
+    prepared.claude_native_picker = Some(rows);
+    prepared.claude_native_picker_source = Some(snapshot["source"].clone());
+    Ok(prepared)
+}
+
 fn mask_env_secrets(text: &str) -> String {
     let Ok(mut value) = serde_json::from_str::<Value>(text) else {
         return sanitize_text(text);
@@ -557,6 +612,7 @@ fn claude_override_conflicts(current: Option<&Value>, settings: &Settings) -> Ve
         .and_then(|value| value.pointer("/modelPicker/replaceBuiltInOptions"))
         .and_then(Value::as_bool)
         == Some(true)
+        && current.and_then(|value| env_string(value, PICKER_REPLACE_KEY)).is_none()
     {
         conflicts.push(
             "modelPicker.replaceBuiltInOptions hides Claude subscription models; set it to false before connecting."
@@ -665,6 +721,9 @@ pub(in crate::gateway) fn claude_settings_text(
     model: &str,
     role_mappings: &BTreeMap<String, String>,
 ) -> Result<String, String> {
+    let mut mappings = settings.claude_model_mappings.clone().unwrap_or_default();
+    mappings.extend(role_mappings.clone());
+    let role_mappings = &mappings;
     let mut root = match current.map(str::trim).filter(|text| !text.is_empty()) {
         Some(text) => serde_json::from_str::<Value>(text)
             .map_err(|error| format!("failed to parse Claude settings.json: {error}"))?,
@@ -748,7 +807,27 @@ pub(in crate::gateway) fn claude_settings_text(
             );
         }
     }
-    merge_model_picker(&mut root, claude_picker_options(settings, providers)?)?;
+    let mut rows = settings.claude_native_picker.clone().unwrap_or_else(|| {
+        let owned: Vec<String> = env_string(&previous_value, PICKER_FINGERPRINTS_KEY)
+            .and_then(|text| serde_json::from_str(text).ok()).unwrap_or_default();
+        previous_value.pointer("/modelPicker/options").and_then(Value::as_array)
+            .into_iter().flatten()
+            .filter(|row| owned.contains(&value_fingerprint(row)) && row.get("model")
+                .and_then(Value::as_str).is_some_and(|id| id.starts_with("claude-") && !id.starts_with("claude-codexhub-")))
+            .cloned().collect()
+    });
+    rows.extend(claude_picker_options(settings, providers)?);
+    merge_model_picker(&mut root, rows)?;
+    if settings.claude_native_picker.as_ref().is_some_and(|rows| !rows.is_empty()) {
+        let baseline = previous_value.pointer("/modelPicker/replaceBuiltInOptions")
+            .cloned().unwrap_or(Value::Null);
+        root.pointer_mut("/env").and_then(Value::as_object_mut).expect("env object")
+            .entry(PICKER_REPLACE_KEY).or_insert_with(|| json!(baseline.to_string()));
+        root["modelPicker"]["replaceBuiltInOptions"] = json!(true);
+        if let Some(source) = &settings.claude_native_picker_source {
+            root["env"][PICKER_SOURCE_KEY] = json!(source.to_string());
+        }
+    }
     serde_json::to_string_pretty(&root)
         .map_err(|error| format!("failed to serialize Claude settings.json: {error}"))
 }
@@ -763,7 +842,8 @@ fn alias_change_note(
     if !matches!(model.trim(), "" | PRESERVE_DEFAULT_MODEL) {
         return None;
     }
-    let alias = env_string(current?, "ANTHROPIC_MODEL")?
+    let alias = env_string(current?, "ANTHROPIC_MODEL")
+        .or_else(|| current?.get("model").and_then(Value::as_str))?
         .trim()
         .to_ascii_lowercase();
     let aliases: &[&str] = match alias.as_str() {
@@ -816,6 +896,8 @@ pub(in crate::gateway) fn preview_claude_config_with_path(
     model: &str,
     role_mappings: &BTreeMap<String, String>,
 ) -> Result<GatewayClientConfigPreview, String> {
+    let prepared = native_picker_settings(config_path, settings)?;
+    let settings = &prepared;
     let current = fs::read_to_string(config_path).ok();
     let next = claude_settings_text(
         current.as_deref(),
@@ -841,6 +923,14 @@ pub(in crate::gateway) fn preview_claude_config_with_path(
                 .is_none_or(|text| !is_claude_codexhub_config(text)),
         message: {
             let mut message = "Connect adds the Gateway route and model-picker entries while preserving Claude Code's configured default and subscription login. Restart Claude Code; existing sessions must be restarted before resuming through the new route.".to_string();
+            if let (Some(previous), Some(source)) = (
+                value.as_ref().and_then(|value| env_string(value, PICKER_SOURCE_KEY)),
+                settings.claude_native_picker_source.as_ref(),
+            ) {
+                if serde_json::from_str::<Value>(previous).ok().as_ref() != Some(source) {
+                    message.push_str(" Native model choices were refreshed for the current Claude version and account/policy snapshot.");
+                }
+            }
             if let Some(note) =
                 alias_change_note(value.as_ref(), settings, providers, model, role_mappings)
             {
@@ -870,6 +960,8 @@ pub(in crate::gateway) fn plan_claude_apply(
     model: &str,
     role_mappings: BTreeMap<String, String>,
 ) -> Result<ClaudeApplyPlan, String> {
+    let prepared = native_picker_settings(config_path, settings)?;
+    let settings = &prepared;
     let current = if config_path.exists() {
         Some(
             fs::read_to_string(config_path)
@@ -1037,10 +1129,35 @@ mod tests {
 
     fn settings() -> Settings {
         Settings {
+            claude_native_picker: Some(vec![json!({"model":"claude-opus-5-5","label":"Claude Opus 5.5","description":"Claude subscription via Gateway"})]),
             proxy_port: 18789,
             gateway_client_key: "gateway-secret-key".to_string(),
             ..Settings::default()
         }
+    }
+
+    #[test]
+    fn disconnected_readback_and_reconnect_keep_saved_mapping_intent() {
+        let dir = std::env::temp_dir().join(format!("claude-saved-intent-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"model":"claude-opus-5-5"}"#).unwrap();
+        let mut settings = settings();
+        settings.claude_model_mappings = Some(BTreeMap::from([
+            ("opus".into(), "gpt-5.5".into()), ("haiku".into(), String::new()),
+        ]));
+        let readback = read_claude_settings(&path, &settings, &[]);
+        assert_eq!(readback.default_model, "claude-opus-5-5");
+        assert_eq!(readback.role_mappings["opus"], "gpt-5.5");
+        let preview = preview_claude_config_with_path(&path, &settings, &[], PRESERVE_DEFAULT_MODEL, &BTreeMap::new()).unwrap();
+        let next: Value = serde_json::from_str(&preview.next_redacted).unwrap();
+        assert_eq!(next["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-codexhub-gpt-5.5");
+        assert_eq!(next["model"], "claude-opus-5-5");
+        let clear = BTreeMap::from([("opus".into(), String::new())]);
+        let preview = preview_claude_config_with_path(&path, &settings, &[], PRESERVE_DEFAULT_MODEL, &clear).unwrap();
+        let next: Value = serde_json::from_str(&preview.next_redacted).unwrap();
+        assert!(next["env"].get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1252,7 +1369,7 @@ mod tests {
         assert_eq!(codex_row["label"], "CodexHub 5.5");
         assert_eq!(codex_row["description"], "Codex subscription via Gateway");
         assert_eq!(codex_row["behavesAs"], "claude-sonnet-4-6");
-        assert_ne!(
+        assert_eq!(
             value
                 .pointer("/modelPicker/replaceBuiltInOptions")
                 .and_then(Value::as_bool),

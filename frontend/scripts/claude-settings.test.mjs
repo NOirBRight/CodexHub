@@ -15,6 +15,7 @@ const models = [
   { id: "two", label: "Two" },
 ];
 test("resume command requires a complete native model ID", () => {
+  assert.equal(claudeResumeCommand("claude-opus-5-5[1m]"), "claude --resume --model 'claude-opus-5-5[1m]'");
   assert.equal(claudeResumeCommand(" claude-opus-5-5 "), "claude --resume --model claude-opus-5-5");
   assert.equal(claudeResumeCommand("opus"), "");
   assert.equal(claudeResumeCommand("claude-opus-5-5;echo unsafe"), "");
