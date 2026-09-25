@@ -431,8 +431,17 @@ fn claude_picker_options(
                     model.id
                 ));
             }
-            let label = format!("{} · {}", model.display_name, model.source);
-            Ok(json!({ "model": projected, "label": label }))
+            let label = if model.display_name.starts_with("CodexHub ") {
+                model.display_name
+            } else {
+                format!("CodexHub {}", model.display_name)
+            };
+            let description = if model.source_kind == "official" {
+                "Codex subscription via Gateway".to_string()
+            } else {
+                format!("{} via Gateway", model.source)
+            };
+            Ok(json!({ "model": projected, "label": label, "description": description }))
         })
         .collect()
 }
@@ -1219,6 +1228,21 @@ mod tests {
             .iter()
             .any(|row| row.get("model").and_then(Value::as_str)
                 == Some("claude-codexhub-deepseek-deepseek-chat")));
+        let deepseek_row = options
+            .iter()
+            .find(|row| {
+                row.get("model").and_then(Value::as_str)
+                    == Some("claude-codexhub-deepseek-deepseek-chat")
+            })
+            .unwrap();
+        assert_eq!(deepseek_row["label"], "CodexHub DeepSeek Flash 4.1");
+        assert_eq!(deepseek_row["description"], "DeepSeek Official via Gateway");
+        let codex_row = options
+            .iter()
+            .find(|row| row.get("model").and_then(Value::as_str) == Some("claude-codexhub-gpt-5.5"))
+            .unwrap();
+        assert_eq!(codex_row["label"], "CodexHub 5.5");
+        assert_eq!(codex_row["description"], "Codex subscription via Gateway");
         assert_ne!(
             value
                 .pointer("/modelPicker/replaceBuiltInOptions")

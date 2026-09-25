@@ -163,6 +163,11 @@ def real_cli_roundtrip(claude_bin: Path, config: Path, root: Path, gateway_port:
         assert messages, "Claude Code did not send an Anthropic Messages request"
         assert any(record.get("request", {}).get("model") == "claude-codexhub-e2e-alpha"
                    for record in messages), "Claude Code did not use the saved default model"
+        from e2e_claude_coexistence_qualification import _picker_transcript
+
+        picker = _picker_transcript(str(claude_bin), cli_env, root, timeout=8)
+        assert "CodexHub Alpha" in picker, "Gateway label missing from Claude /model"
+        assert "E2E via Gateway" in picker, "Gateway source missing from Claude /model"
         assert all("authorization" in {key.lower() for key in record.get("headers", {})}
                    for record in messages), "Claude Code did not send the saved bearer credential"
     finally:
@@ -196,6 +201,17 @@ def run(binary: Path, claude_bin: Path | None, browser: bool) -> None:
         }}))
         credentials.chmod(0o600)
         credential_snapshot = credentials.read_bytes()
+        if claude_bin is not None:
+            version = subprocess.run([str(claude_bin), "--version"], capture_output=True,
+                                     text=True, check=True, timeout=10).stdout.split()[0]
+            onboarding = {
+                "hasCompletedOnboarding": True,
+                "lastOnboardingVersion": version,
+                "theme": "dark",
+                "projects": {str(root): {"hasTrustDialogAccepted": True}},
+            }
+            (root / ".claude.json").write_text(json.dumps(onboarding))
+            (config / ".claude.json").write_text(json.dumps(onboarding))
         claude_path = config / "settings.json"
         claude_path.write_text(json.dumps({"theme": "dark", "env": {"EDITOR": "vim"}}))
         providers_path.write_text('''[[providers]]
@@ -294,9 +310,11 @@ enabled = true
             assert written["env"]["ANTHROPIC_CUSTOM_HEADERS"] == (
                 "x-codexhub-gateway-key: synthetic-local-gateway-key"
             )
-            assert {"claude-codexhub-e2e-alpha", "claude-codexhub-e2e-beta"} <= {
-                row["model"] for row in written["modelPicker"]["options"]
-            }
+            picker_rows = {row["model"]: row for row in written["modelPicker"]["options"]}
+            for model_id, name in (("claude-codexhub-e2e-alpha", "Alpha"),
+                                   ("claude-codexhub-e2e-beta", "Beta")):
+                assert picker_rows[model_id]["label"] == f"CodexHub {name}"
+                assert picker_rows[model_id]["description"] == "E2E via Gateway"
             readback = claude_info(port)
             assert readback["route_mode"] == "hub"
             assert readback["claude_settings"]["default_model"] == "e2e/alpha"
@@ -351,7 +369,7 @@ enabled = true
             assert claude_info(port)["route_mode"] == "official"
             assert credentials.read_bytes() == credential_snapshot
             print("PASS: isolated Claude bridge preview, connect, edit, readback, invalid target, conflict, disconnect"
-                  + ("; real Claude Code text roundtrip" if claude_bin else ""))
+                  + ("; real Claude Code text roundtrip and /model labels" if claude_bin else ""))
         finally:
             process.terminate()
             try:
