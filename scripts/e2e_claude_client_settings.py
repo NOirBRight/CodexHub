@@ -155,6 +155,13 @@ def real_cli_roundtrip(claude_bin: Path, config: Path, root: Path, gateway_port:
             )
         answer = json.loads(completed.stdout)
         assert answer.get("is_error") is False, "Claude Code reported a failed response"
+        selected = subprocess.run(
+            [str(claude_bin), "-p", "--model", "claude-codexhub-gpt-6-sol",
+             "--permission-mode", "plan", "--output-format", "json", "reply with the word ok"],
+            cwd=root, env=cli_env, capture_output=True, text=True, timeout=90,
+        )
+        assert selected.returncode == 0 and json.loads(selected.stdout).get("is_error") is False, (
+            "Claude Code could not send an explicit Codex Gateway model request")
         records_path = evidence / "requests.jsonl"
         assert records_path.is_file(), "Claude Code did not contact the configured loopback route"
         records = [json.loads(line) for line in records_path.read_text().splitlines()]
@@ -163,11 +170,17 @@ def real_cli_roundtrip(claude_bin: Path, config: Path, root: Path, gateway_port:
         assert messages, "Claude Code did not send an Anthropic Messages request"
         assert any(record.get("request", {}).get("model") == "claude-codexhub-e2e-alpha"
                    for record in messages), "Claude Code did not use the saved default model"
+        assert any(record.get("request", {}).get("model") == "claude-codexhub-gpt-6-sol"
+                   for record in messages), "Claude Code changed the explicit Codex Gateway model ID"
         from e2e_claude_coexistence_qualification import _picker_transcript
 
-        picker = _picker_transcript(str(claude_bin), cli_env, root, timeout=8)
+        picker = _picker_transcript(str(claude_bin), cli_env, root, timeout=8,
+                                    model_override="claude-codexhub-gpt-6-sol")
         assert "CodexHub Alpha" in picker, "Gateway label missing from Claude /model"
         assert "E2E via Gateway" in picker, "Gateway source missing from Claude /model"
+        assert "CodexHub 6 Sol" in picker, "Codex subscription label missing from Claude /model"
+        assert "isn't described by this version's model catalog" not in picker, (
+            "Claude Code warned that the Gateway model has no behavior mapping")
         assert all("authorization" in {key.lower() for key in record.get("headers", {})}
                    for record in messages), "Claude Code did not send the saved bearer credential"
     finally:
@@ -189,6 +202,24 @@ def run(binary: Path, claude_bin: Path | None, browser: bool) -> None:
         settings_path = runtime / "proxy" / "settings.json"
         for path in (config, fake_bin, providers_path.parent, root / "codex"):
             path.mkdir(parents=True)
+        catalog = runtime / "model-catalogs" / "codexhub-model-catalog.json"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(json.dumps({"models": [{
+            "slug": "gpt-6-sol",
+            "codex_proxy_metadata": {
+                "provider": "openai", "upstream_name": "official",
+                "official_context_budget": {
+                    "source": "degraded_last_known_official", "freshness": "stale",
+                    "model_context_window": 272000,
+                    "effective_context_window_percent": 95,
+                    "effective_context_window": 258400,
+                    "model_auto_compact_token_limit": 244800,
+                },
+            },
+        }]}))
+        (catalog.parent / "openai-plus-ollama-cloud.json").write_text(json.dumps({
+            "models": [{"slug": "gpt-6-sol", "display_name": "6 Sol", "visibility": "list"}],
+        }))
         # The coexistence contract assumes an existing Claude subscription login.
         # Keep this synthetic credential inside the loopback-only test home.
         credentials = config / ".credentials.json"
@@ -237,7 +268,7 @@ enabled = true
 ''')
         gateway_port = free_port()
         settings_path.write_text(json.dumps({
-            "include_official_models": False,
+            "include_official_models": True,
             "auto_sync_clients": False,
             "gateway_client_key": "synthetic-local-gateway-key",
             "proxy_port": gateway_port,
@@ -315,6 +346,7 @@ enabled = true
                                    ("claude-codexhub-e2e-beta", "Beta")):
                 assert picker_rows[model_id]["label"] == f"CodexHub {name}"
                 assert picker_rows[model_id]["description"] == "E2E via Gateway"
+            assert picker_rows["claude-codexhub-gpt-6-sol"]["behavesAs"] == "claude-sonnet-4-6"
             readback = claude_info(port)
             assert readback["route_mode"] == "hub"
             assert readback["claude_settings"]["default_model"] == "e2e/alpha"
@@ -369,7 +401,7 @@ enabled = true
             assert claude_info(port)["route_mode"] == "official"
             assert credentials.read_bytes() == credential_snapshot
             print("PASS: isolated Claude bridge preview, connect, edit, readback, invalid target, conflict, disconnect"
-                  + ("; real Claude Code text roundtrip and /model labels" if claude_bin else ""))
+                  + ("; real Claude Code text roundtrip and /model metadata" if claude_bin else ""))
         finally:
             process.terminate()
             try:

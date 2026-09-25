@@ -318,7 +318,7 @@ def _run_case(binary: str, env: dict[str, str], cwd: Path, state: HarnessState,
 
 
 def _picker_transcript(binary: str, env: dict[str, str], cwd: Path,
-                       timeout: float = 12) -> str:
+                       timeout: float = 12, model_override: str | None = "opus") -> str:
     """Open the real /model picker in a PTY and return its terminal text."""
     import fcntl
     import pty
@@ -328,9 +328,12 @@ def _picker_transcript(binary: str, env: dict[str, str], cwd: Path,
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 48, 180, 0, 0))
     picker_env = {**env, "TERM": "xterm-256color"}
+    command = [binary, "--bare", "--tools", "", "--strict-mcp-config",
+               "--setting-sources", "user"]
+    if model_override is not None:
+        command.extend(["--model", model_override])
     process = subprocess.Popen(
-        [binary, "--bare", "--tools", "", "--strict-mcp-config",
-         "--setting-sources", "user", "--model", "opus"],
+        command,
         cwd=cwd, env=picker_env, stdin=slave, stdout=slave,
                                stderr=slave, close_fds=True, start_new_session=True)
     os.close(slave)

@@ -436,12 +436,19 @@ fn claude_picker_options(
             } else {
                 format!("CodexHub {}", model.display_name)
             };
-            let description = if model.source_kind == "official" {
+            let official = model.source_kind == "official";
+            let description = if official {
                 "Codex subscription via Gateway".to_string()
             } else {
                 format!("{} via Gateway", model.source)
             };
-            Ok(json!({ "model": projected, "label": label, "description": description }))
+            let mut option =
+                json!({ "model": projected, "label": label, "description": description });
+            if official {
+                // Keep unknown Codex IDs on a conservative 200k client profile without changing routing.
+                option["behavesAs"] = json!("claude-sonnet-4-6");
+            }
+            Ok(option)
         })
         .collect()
 }
@@ -1237,12 +1244,14 @@ mod tests {
             .unwrap();
         assert_eq!(deepseek_row["label"], "CodexHub DeepSeek Flash 4.1");
         assert_eq!(deepseek_row["description"], "DeepSeek Official via Gateway");
+        assert!(deepseek_row.get("behavesAs").is_none());
         let codex_row = options
             .iter()
             .find(|row| row.get("model").and_then(Value::as_str) == Some("claude-codexhub-gpt-5.5"))
             .unwrap();
         assert_eq!(codex_row["label"], "CodexHub 5.5");
         assert_eq!(codex_row["description"], "Codex subscription via Gateway");
+        assert_eq!(codex_row["behavesAs"], "claude-sonnet-4-6");
         assert_ne!(
             value
                 .pointer("/modelPicker/replaceBuiltInOptions")
