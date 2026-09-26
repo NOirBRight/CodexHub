@@ -3291,7 +3291,7 @@ fn standalone_fast_models_inherit_capabilities_and_respect_selection() {
     let models = official_models_from_metadata(&Settings::default(), Some(metadata.clone()), &contexts);
     assert_eq!(models.len(), registry.len() * 2);
     for (alias, base) in registry {
-        assert!(is_gateway_fast_variant_id(&format!("openai/{alias}")));
+        assert!(super::is_gateway_fast_variant_id(&format!("openai/{alias}")));
         let original = models.iter().find(|model| model.id == *base).unwrap();
         let fast = models.iter().find(|model| model.id == *alias).unwrap();
         let mut expected = original.clone();
@@ -3305,6 +3305,6 @@ fn standalone_fast_models_inherit_capabilities_and_respect_selection() {
         ..Settings::default()
     };
     let models = official_models_from_metadata(&selected, Some(metadata), &contexts);
-    let aliases: Vec<_> = models.iter().filter(|model| is_gateway_fast_variant_id(&model.id)).map(|model| model.id.as_str()).collect();
+    let aliases: Vec<_> = models.iter().filter(|model| super::is_gateway_fast_variant_id(&model.id)).map(|model| model.id.as_str()).collect();
     assert_eq!(aliases, vec!["gpt-5.6-luna-fast"]);
 }
