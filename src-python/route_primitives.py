@@ -7,7 +7,7 @@ from typing import Any, Mapping, NoReturn
 # Extra High official TTFB can exceed 3–5 minutes. Keep the default
 # first-byte wait aligned with the SSE idle ceiling (10 minutes).
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 600
-UPSTREAM_USER_AGENT = "CodexHub/0.2.24 (+https://github.com/noirbright/CodexHub)"
+UPSTREAM_USER_AGENT = "CodexHub/0.2.25 (+https://github.com/noirbright/CodexHub)"
 DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS = 600.0
 DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS = 300.0
 DEFAULT_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
