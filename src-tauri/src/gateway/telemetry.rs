@@ -613,6 +613,41 @@ pub(crate) fn initialize_telemetry_db(connection: &Connection) -> Result<(), Str
             "#,
         )
         .map_err(|error| format!("failed to initialize telemetry sqlite indexes: {error}"))?;
+    migrate_usage_provider_ids(connection)?;
+    Ok(())
+}
+
+fn migrate_usage_provider_ids(connection: &Connection) -> Result<(), String> {
+    let migrated = connection
+        .query_row(
+            "SELECT 1 FROM telemetry_meta WHERE key = 'usage_provider_aliases_v1'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("failed to read usage provider migration status: {error}"))?;
+    if migrated.is_some() {
+        return Ok(());
+    }
+    connection
+        .execute_batch(
+            r#"
+            BEGIN IMMEDIATE;
+            UPDATE gateway_requests SET provider_id = CASE provider_id
+                WHEN 'official' THEN 'openai'
+                WHEN 'volcengine' THEN 'volc'
+                WHEN 'minimax_cn' THEN 'minimax-cn'
+                WHEN 'ollama_cloud' THEN 'ollama-cloud'
+                WHEN 'opencode_go' THEN 'opencode-go'
+                WHEN 'anthropic_native' THEN 'claude_subscription'
+            END WHERE provider_id IN (
+                'official', 'volcengine', 'minimax_cn', 'ollama_cloud', 'opencode_go', 'anthropic_native'
+            );
+            INSERT OR IGNORE INTO telemetry_meta(key, value) VALUES ('usage_provider_aliases_v1', 'done');
+            COMMIT;
+            "#,
+        )
+        .map_err(|error| format!("failed to migrate usage provider IDs: {error}"))?;
     Ok(())
 }
 
@@ -846,7 +881,14 @@ fn upsert_gateway_request_from_event(
     };
     let upstream = string_field(value, "upstream");
     let model = string_field(value, "model");
-    let provider_id = string_field(value, "provider_id").or_else(|| upstream.clone());
+    let provider_id = if upstream.as_deref() == Some("anthropic_native") {
+        Some("claude_subscription".to_string())
+    } else {
+        string_field(value, "route_provider_id")
+            .or_else(|| string_field(value, "provider_id"))
+            .or_else(|| upstream.clone())
+            .map(|id| canonical_usage_provider_id(&id).to_string())
+    };
     let model_canonical = string_field(value, "model_canonical").or_else(|| model.clone());
     let model_requested = string_field(value, "model_requested").or_else(|| model.clone());
     let route_mode =
@@ -1131,7 +1173,9 @@ pub(crate) fn read_usage_events_from_sqlite_path_with_window(
                     ts: row.get(0)?,
                     request_id: row.get(1)?,
                     model: normalize_usage_model(row.get(3)?, row.get(2)?),
-                    upstream: row.get(3)?,
+                    upstream: row
+                        .get::<_, Option<String>>(3)?
+                        .map(|id| canonical_usage_provider_id(&id).to_string()),
                     client_id: row.get(4)?,
                     client_inference_source: row.get(5)?,
                     reports_cached_input_tokens: optional_i64_to_bool(
@@ -1362,10 +1406,25 @@ fn normalize_usage_model(upstream: Option<String>, model: Option<String>) -> Opt
         return None;
     }
     let upstream = upstream.as_deref().unwrap_or_default();
-    if upstream == "official" && !trimmed.contains('/') && is_official_usage_model(trimmed) {
+    if matches!(upstream, "official" | "openai")
+        && !trimmed.contains('/')
+        && is_official_usage_model(trimmed)
+    {
         return Some(format!("openai/{trimmed}"));
     }
     Some(trimmed.to_string())
+}
+
+fn canonical_usage_provider_id(id: &str) -> &str {
+    match id {
+        "official" => "openai",
+        "volcengine" => "volc",
+        "minimax_cn" => "minimax-cn",
+        "ollama_cloud" => "ollama-cloud",
+        "opencode_go" => "opencode-go",
+        "anthropic_native" => "claude_subscription",
+        _ => id,
+    }
 }
 
 fn is_official_usage_model(model: &str) -> bool {

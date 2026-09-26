@@ -2780,3 +2780,71 @@ fn opencode_restore_malformed_config_fails_without_mutation() {
     assert!(result.is_err());
     assert_eq!(fs::read_to_string(&config_path).unwrap(), "not json");
 }
+
+#[test]
+fn usage_events_fold_transport_aliases_and_migrate_existing_rows() {
+    let root = unique_temp_dir("codexhub-usage-provider-aliases");
+    fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("usage.sqlite");
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    super::initialize_telemetry_db(&connection).unwrap();
+    connection.execute_batch(r#"
+        INSERT INTO gateway_requests (request_id, completed_ts, method, path, model, upstream, provider_id, status, created_at, updated_at)
+        VALUES
+            ('legacy', '2026-09-27T00:00:00Z', 'POST', '/v1/responses', 'gpt-5.5', 'official', 'official', 200, 'test', 'test'),
+            ('current', '2026-09-27T00:00:01Z', 'POST', '/v1/responses', 'gpt-5.5', 'official', 'openai', 200, 'test', 'test'),
+            ('other', '2026-09-27T00:00:02Z', 'POST', '/v1/responses', 'gpt-5.5', 'external', 'other-provider', 200, 'test', 'test');
+        INSERT INTO gateway_requests (request_id, provider_id, created_at, updated_at) VALUES
+            ('volcengine', 'volcengine', 'test', 'test'),
+            ('minimax_cn', 'minimax_cn', 'test', 'test'),
+            ('ollama_cloud', 'ollama_cloud', 'test', 'test'),
+            ('opencode_go', 'opencode_go', 'test', 'test'),
+            ('anthropic_native', 'anthropic_native', 'test', 'test');
+    "#).unwrap();
+    connection.execute("DELETE FROM telemetry_meta WHERE key = 'usage_provider_aliases_v1'", []).unwrap();
+
+    let events = read_usage_events_from_sqlite_path(&db_path, usize::MAX).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.upstream.as_deref() == Some("openai"))
+            .count(),
+        2
+    );
+    assert!(events
+        .iter()
+        .filter(|event| event.upstream.as_deref() == Some("openai"))
+        .all(|event| event.model.as_deref() == Some("openai/gpt-5.5")));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.upstream.as_deref() == Some("other-provider"))
+            .count(),
+        1
+    );
+    super::initialize_telemetry_db(&connection).unwrap();
+    let stored: String = connection
+        .query_row(
+            "SELECT provider_id FROM gateway_requests WHERE request_id = 'legacy'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "openai");
+    for (old, canonical) in [
+        ("volcengine", "volc"),
+        ("minimax_cn", "minimax-cn"),
+        ("ollama_cloud", "ollama-cloud"),
+        ("opencode_go", "opencode-go"),
+        ("anthropic_native", "claude_subscription"),
+    ] {
+        let stored: String = connection
+            .query_row(
+                "SELECT provider_id FROM gateway_requests WHERE request_id = ?",
+                [old],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, canonical);
+    }
+}

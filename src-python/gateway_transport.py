@@ -2192,7 +2192,10 @@ def _emit_upstream_retry_suppressed_event(
         event_context,
         "upstream_retry_suppressed",
         upstream=upstream_name,
-        provider_id=upstream_name,
+        provider_id=(
+            gateway_events.usage_provider_id(upstream_name) if upstream_name == "anthropic_native"
+            else (event_context or {}).get("route_provider_id") or gateway_events.usage_provider_id(upstream_name)
+        ),
         upstream_format=upstream_format,
         request_kind=request_kind,
         retryable=False,
@@ -2235,7 +2238,10 @@ def _emit_upstream_retry_event(
         detail = safe_upstream_error_detail(exc, redact_identity=identity)
     fields: dict[str, Any] = {
         "upstream": upstream_name,
-        "provider_id": upstream_name,
+        "provider_id": (
+            gateway_events.usage_provider_id(upstream_name) if upstream_name == "anthropic_native"
+            else (event_context or {}).get("route_provider_id") or gateway_events.usage_provider_id(upstream_name)
+        ),
         "upstream_format": upstream_format,
         "request_kind": request_kind,
         "retryable": True,

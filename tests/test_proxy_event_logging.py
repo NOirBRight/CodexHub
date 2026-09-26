@@ -20,6 +20,27 @@ import gateway_request
 
 
 class ProxyEventLoggingTests(TestCase):
+    def test_usage_provider_ids_are_canonical_on_write_and_replay(self):
+        import proxy_telemetry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "usage.sqlite"
+            for request_id, fields in (
+                ("old", {"upstream": "official", "provider_id": "official"}),
+                ("route", {"upstream": "official", "provider_id": "official", "route_provider_id": "openai"}),
+                ("custom", {"upstream": "external", "provider_id": "custom"}),
+            ):
+                proxy_telemetry.write_event_to_sqlite(db_path, {
+                    "ts": "2026-09-27T00:00:00Z", "event": "request_complete",
+                    "request_id": request_id, **fields,
+                })
+            with sqlite3.connect(db_path) as connection:
+                rows = dict(connection.execute("SELECT request_id, provider_id FROM gateway_requests"))
+
+        self.assertEqual(rows, {"old": "openai", "route": "openai", "custom": "custom"})
+        for old, canonical in proxy_telemetry.USAGE_PROVIDER_ALIASES.items():
+            self.assertEqual(gateway_events.usage_provider_id(old), canonical)
+
     def test_event_log_uses_runtime_codex_home(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             codex_home = Path(tmpdir) / "codex-home"
@@ -227,7 +248,7 @@ class ProxyEventLoggingTests(TestCase):
                         "suppressed_post_write",
                     )
                     self.assertEqual(payload["failure_phase"], "response_headers")
-                    self.assertEqual(payload["provider_id"], "ollama_cloud")
+                    self.assertEqual(payload["provider_id"], "ollama-cloud")
                     for private_value in private_values:
                         self.assertNotIn(private_value, jsonl)
             finally:

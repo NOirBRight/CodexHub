@@ -427,7 +427,10 @@ def write_usage_observed_event(
         model_requested=context.get("model_requested"),
         model_canonical=context.get("model_canonical"),
         upstream=context.get("upstream"),
-        provider_id=context.get("provider_id") or usage_provider_id(context.get("upstream")),
+        provider_id=(
+            "claude_subscription" if context.get("upstream") == "anthropic_native"
+            else context.get("route_provider_id") or usage_provider_id(context.get("upstream"), context)
+        ),
         upstream_format=context.get("upstream_format"),
         inbound_format=context.get("inbound_format"),
         route_mode=context.get("route_mode"),
@@ -452,9 +455,11 @@ def usage_provider_id(upstream_name: Any, upstream: Mapping[str, Any] | None = N
         and upstream.get("native_anthropic_subscription") is True
     ):
         return "claude_subscription"
-    if isinstance(upstream, Mapping) and isinstance(upstream.get("provider_id"), str):
-        return upstream["provider_id"]
-    return upstream_name if isinstance(upstream_name, str) else None
+    if isinstance(upstream, Mapping):
+        configured = upstream.get("provider_id") or upstream.get("provider_alias")
+        if isinstance(configured, str) and configured.strip():
+            return proxy_telemetry.canonical_usage_provider_id(configured)
+    return proxy_telemetry.canonical_usage_provider_id(upstream_name)
 
 
 OFFICIAL_PASSTHROUGH_USAGE_QUEUE: queue.Queue[tuple[dict[str, Any], bytes]] = queue.Queue(maxsize=2048)

@@ -12,6 +12,23 @@ from typing import Any, Iterable, Mapping
 from atomic_io import atomic_read_or_create_text
 
 EVENT_SCHEMA_VERSION = 2
+USAGE_PROVIDER_ALIASES = {
+    "official": "openai",
+    "volcengine": "volc",
+    "minimax_cn": "minimax-cn",
+    "ollama_cloud": "ollama-cloud",
+    "opencode_go": "opencode-go",
+    "anthropic_native": "claude_subscription",
+}
+
+
+def canonical_usage_provider_id(provider_id: Any) -> str | None:
+    if not isinstance(provider_id, str) or not provider_id.strip():
+        return None
+    value = provider_id.strip()
+    return USAGE_PROVIDER_ALIASES.get(value, value)
+
+
 TELEMETRY_DB_FILENAME = "codex-proxy-telemetry.sqlite"
 TELEMETRY_SECRET_FILENAME = "telemetry-secret"
 PRIVATE_TELEMETRY_SECRET_MODE = 0o600
@@ -657,8 +674,12 @@ def _request_values(payload: Mapping[str, Any], payload_json: str) -> dict[str, 
         upstream,
         _string(payload.get("model_canonical")) or model,
     )
-    if "provider_id" not in values and upstream:
-        values["provider_id"] = upstream
+    provider_id = canonical_usage_provider_id(
+        "anthropic_native" if upstream == "anthropic_native"
+        else payload.get("route_provider_id") or payload.get("provider_id") or upstream
+    )
+    if provider_id:
+        values["provider_id"] = provider_id
     if canonical_model:
         values["model_canonical"] = canonical_model
         values["model"] = canonical_model
@@ -682,7 +703,10 @@ def _apply_field_defaults(payload: dict[str, Any], codex_home: Path) -> None:
         upstream,
         _string(payload.get("model_canonical")) or model,
     )
-    payload.setdefault("provider_id", upstream)
+    payload["provider_id"] = canonical_usage_provider_id(
+        "anthropic_native" if upstream == "anthropic_native"
+        else payload.get("route_provider_id") or payload.get("provider_id") or upstream
+    )
     payload.setdefault("route_mode", _route_mode(upstream))
     payload.setdefault("model_requested", model)
     if canonical_model:

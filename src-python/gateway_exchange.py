@@ -150,6 +150,7 @@ class RouteAttemptLike(Protocol):
 
 
 class RoutePlanLike(Protocol):
+    provider_id: str
     attempts: tuple[RouteAttemptLike, ...]
     primary_attempt: RouteAttemptLike | None
     transparent_tool_loop_guard: bool
@@ -467,6 +468,7 @@ def protocol_fallback_fields(
     """Build the upstream_protocol_fallback event fields (fixed policy)."""
     import gateway_errors as _errors
     import gateway_request as _greq
+    import gateway_events as _gateway_events
 
     failed = failed_attempt.telemetry_snapshot()
     following = next_attempt.telemetry_snapshot()
@@ -476,7 +478,9 @@ def protocol_fallback_fields(
         "model_requested": request.inbound.model_requested,
         "model_canonical": request.model_canonical,
         "upstream": request.upstream_name,
-        "provider_id": request.upstream_name,
+        "provider_id": _gateway_events.usage_provider_id(request.upstream_name, request.upstream)
+        if request.upstream_name == "anthropic_native"
+        else request.route_plan.provider_id,
         "provider_hint": request.inbound.provider_hint,
         "upstream_format": (
             request.route_plan.configured_upstream_protocol_name
