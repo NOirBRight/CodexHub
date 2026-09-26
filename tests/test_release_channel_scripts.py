@@ -491,23 +491,45 @@ def test_linux_release_builder_rejects_stale_or_ambiguous_bundle_artifacts():
     assert "deb package version mismatch" in script
 
 
-def test_linux_release_builder_recovers_only_a_prepared_appdir_linuxdeploy_failure():
+def test_linux_release_builder_uses_native_host_libraries_and_pinned_tools():
     script = (ROOT / "scripts" / "build-linux-release.sh").read_text(encoding="utf-8")
-
-    assert "tauri build --verbose" in script
-    assert 'grep -Fq "Failed to download runtime file" "$bundle_log"' in script
-    assert "has_prepared_appimage_dir" in script
-    assert '"$app_dir/usr/bin/codexhub"' in script
-    assert '"$app_dir/usr/share/applications/CodexHub.desktop"' in script
-    assert "linuxdeploy-x86_64.AppImage" in script
-    assert "plugins/linuxdeploy-plugin-appimage/appimagetool-prefix/usr/bin/appimagetool" in script
+    assert '--bundles deb --ci' in script
+    assert "prepare-linux-appdir.sh" in script
     assert "appimage_runtime_sha256=" in script
-    assert "curl --fail --location --retry 3" in script
+    assert "appimagetool/releases/download/1.9.1/" in script
     assert "sha256sum --check --status" in script
-    assert '"$appimagetool_path" --runtime-file "$runtime_path"' in script
-    assert 'cargo "${tauri_deb_args[@]}"' in script
     assert 'cargo tauri signer sign --private-key-path "$private_key_path"' in script
-    assert "releases/download/continuous" not in script
+    assert "linuxdeploy" not in script
+
+
+@pytest.mark.skipif(os.name == "nt", reason="native Linux AppDir")
+def test_native_appdir_preserves_resources_arguments_and_host_backend(tmp_path):
+    release = tmp_path / "release"
+    appdir = tmp_path / "App Dir"
+    release.mkdir()
+    binary = release / "codexhub"
+    binary.write_text('#!/bin/sh\nprintf "%s\\n" "$GDK_BACKEND" "$@"\n')
+    binary.chmod(0o755)
+    resources = ["config/providers.toml", "config/official_fast_variants.json",
+                 "src-python/codex_proxy.py", "scripts/xai_device_login.py"]
+    for resource in resources:
+        path = release / resource
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(resource)
+    icon = tmp_path / "icon.png"
+    icon.write_bytes(b"icon")
+    command = ["bash", str(ROOT / "scripts/prepare-linux-appdir.sh"),
+               str(release), str(appdir), str(icon)]
+    subprocess.run(command, check=True)
+    result = subprocess.run([str(appdir / "AppRun"), "argument with spaces"],
+                            env={**os.environ, "GDK_BACKEND": "wayland"},
+                            text=True, capture_output=True, check=True)
+    assert result.stdout.splitlines() == ["wayland", "argument with spaces"]
+    for resource in resources:
+        assert (appdir / resource).read_text() == resource
+    assert not (appdir / "usr/lib").exists()
+    (release / resources[1]).unlink()
+    assert subprocess.run(command, capture_output=True).returncode != 0
 
 
 def test_linux_portable_packages_the_xai_device_login_helper():
