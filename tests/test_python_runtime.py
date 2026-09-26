@@ -21,6 +21,7 @@ ACTIVATION = ROOT / "scripts" / "Enter-CodexHubPython.ps1"
 PREPARE_RUNTIME = ROOT / "scripts" / "Prepare-PythonRuntime.ps1"
 
 DIRECT_PYTHON_ENTRYPOINTS = (
+    "src-python/claude_native_models.py",
     "scripts/capture_desktop_tool_catalog.py",
     "scripts/e2e_desktop_tool_matrix.py",
     "src-python/bucket_sync.py",
@@ -53,6 +54,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/e2e_codex_catalog_roundtrip.py",
     "scripts/e2e_claude_client_settings.py",
     "scripts/e2e_claude_live_routes.py",
+    "scripts/e2e_claude_coexistence_qualification.py",
     "scripts/e2e_catalog_connection_recovery.py",
     "scripts/e2e_gateway_client_matrix.py",
     "scripts/e2e_grok_provider_compat.py",

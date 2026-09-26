@@ -372,9 +372,17 @@ def sanitize_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
             continue
         if key == "path":
             path = item.split("?", 1)[0] if isinstance(item, str) else None
+            if path and path.startswith("/v1/providers/"):
+                parts = path.split("/", 4)
+                if len(parts) == 5 and parts[3] and parts[4] in {
+                    "responses", "chat/completions", "messages", "messages/count_tokens", "models",
+                }:
+                    result[key] = "/v1/providers/{provider}/" + parts[4]
+                    continue
             result[key] = path if path in {
                 "/responses", "/v1/responses", "/chat/completions",
                 "/v1/chat/completions", "/models", "/v1/models", "/health",
+                "/v1/messages", "/v1/messages/count_tokens",
             } else "unknown"
             continue
         result[key] = _sanitize_value(item)
@@ -600,7 +608,9 @@ def _upsert_request(connection: sqlite3.Connection, payload: Mapping[str, Any], 
         if existing_usage_source and existing_usage_source != "missing":
             values.pop("usage_source", None)
             values.pop("usage_missing_reason", None)
-    clear_usage_missing_reason = bool(incoming_usage_source and incoming_usage_source != "missing")
+    clear_usage_missing_reason = bool(
+        incoming_usage_source and incoming_usage_source not in {"missing", "partial"}
+    )
     values["updated_at"] = now
 
     assignments = []

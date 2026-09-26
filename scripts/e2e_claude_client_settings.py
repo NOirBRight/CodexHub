@@ -155,6 +155,13 @@ def real_cli_roundtrip(claude_bin: Path, config: Path, root: Path, gateway_port:
             )
         answer = json.loads(completed.stdout)
         assert answer.get("is_error") is False, "Claude Code reported a failed response"
+        selected = subprocess.run(
+            [str(claude_bin), "-p", "--model", "claude-codexhub-gpt-6-sol",
+             "--permission-mode", "plan", "--output-format", "json", "reply with the word ok"],
+            cwd=root, env=cli_env, capture_output=True, text=True, timeout=90,
+        )
+        assert selected.returncode == 0 and json.loads(selected.stdout).get("is_error") is False, (
+            "Claude Code could not send an explicit Codex Gateway model request")
         records_path = evidence / "requests.jsonl"
         assert records_path.is_file(), "Claude Code did not contact the configured loopback route"
         records = [json.loads(line) for line in records_path.read_text().splitlines()]
@@ -163,6 +170,17 @@ def real_cli_roundtrip(claude_bin: Path, config: Path, root: Path, gateway_port:
         assert messages, "Claude Code did not send an Anthropic Messages request"
         assert any(record.get("request", {}).get("model") == "claude-codexhub-e2e-alpha"
                    for record in messages), "Claude Code did not use the saved default model"
+        assert any(record.get("request", {}).get("model") == "claude-codexhub-gpt-6-sol"
+                   for record in messages), "Claude Code changed the explicit Codex Gateway model ID"
+        from e2e_claude_coexistence_qualification import _picker_transcript
+
+        picker = _picker_transcript(str(claude_bin), cli_env, root, timeout=8,
+                                    model_override="claude-codexhub-gpt-6-sol")
+        assert "CodexHub Alpha" in picker, "Gateway label missing from Claude /model"
+        assert "E2E via Gateway" in picker, "Gateway source missing from Claude /model"
+        assert "CodexHub 6 Sol" in picker, "Codex subscription label missing from Claude /model"
+        assert "isn't described by this version's model catalog" not in picker, (
+            "Claude Code warned that the Gateway model has no behavior mapping")
         assert all("authorization" in {key.lower() for key in record.get("headers", {})}
                    for record in messages), "Claude Code did not send the saved bearer credential"
     finally:
@@ -184,6 +202,47 @@ def run(binary: Path, claude_bin: Path | None, browser: bool) -> None:
         settings_path = runtime / "proxy" / "settings.json"
         for path in (config, fake_bin, providers_path.parent, root / "codex"):
             path.mkdir(parents=True)
+        catalog = runtime / "model-catalogs" / "codexhub-model-catalog.json"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(json.dumps({"models": [{
+            "slug": "gpt-6-sol",
+            "codex_proxy_metadata": {
+                "provider": "openai", "upstream_name": "official",
+                "official_context_budget": {
+                    "source": "degraded_last_known_official", "freshness": "stale",
+                    "model_context_window": 272000,
+                    "effective_context_window_percent": 95,
+                    "effective_context_window": 258400,
+                    "model_auto_compact_token_limit": 244800,
+                },
+            },
+        }]}))
+        (catalog.parent / "openai-plus-ollama-cloud.json").write_text(json.dumps({
+            "models": [{"slug": "gpt-6-sol", "display_name": "6 Sol", "visibility": "list"}],
+        }))
+        # The coexistence contract assumes an existing Claude subscription login.
+        # Keep this synthetic credential inside the loopback-only test home.
+        credentials = config / ".credentials.json"
+        credentials.write_text(json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-ant-oat01-codexhub-fixture",
+            "expiresAt": int((time.time() + 3600) * 1000),
+            "subscriptionType": "pro",
+            "rateLimitTier": "default_claude_ai",
+            "scopes": ["user:inference"],
+        }}))
+        credentials.chmod(0o600)
+        credential_snapshot = credentials.read_bytes()
+        if claude_bin is not None:
+            version = subprocess.run([str(claude_bin), "--version"], capture_output=True,
+                                     text=True, check=True, timeout=10).stdout.split()[0]
+            onboarding = {
+                "hasCompletedOnboarding": True,
+                "lastOnboardingVersion": version,
+                "theme": "dark",
+                "projects": {str(root): {"hasTrustDialogAccepted": True}},
+            }
+            (root / ".claude.json").write_text(json.dumps(onboarding))
+            (config / ".claude.json").write_text(json.dumps(onboarding))
         claude_path = config / "settings.json"
         claude_path.write_text(json.dumps({"theme": "dark", "env": {"EDITOR": "vim"}}))
         providers_path.write_text('''[[providers]]
@@ -209,14 +268,22 @@ enabled = true
 ''')
         gateway_port = free_port()
         settings_path.write_text(json.dumps({
-            "include_official_models": False,
+            "include_official_models": True,
             "auto_sync_clients": False,
             "gateway_client_key": "synthetic-local-gateway-key",
             "proxy_port": gateway_port,
         }))
         fake_claude = fake_bin / "claude"
-        fake_claude.write_text("#!/bin/sh\necho '2.1.280 (Claude Code)'\n")
-        fake_claude.chmod(0o700)
+        if claude_bin is not None:
+            fake_claude.symlink_to(claude_bin)
+        else:
+            fixture_models = {"response": {"response": {"models": [
+                {"value": "opus", "resolvedModel": "claude-opus-5-5"},
+                {"value": "haiku", "resolvedModel": "claude-haiku-4-5-20251001"},
+            ]}}}
+            fake_claude.write_text("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '2.1.280 (Claude Code)'; else\n"
+                                  + "cat <<'JSON'\n" + json.dumps(fixture_models) + "\nJSON\nfi\n")
+            fake_claude.chmod(0o700)
         env = os.environ.copy()
         for key in list(env):
             if key.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "CODEXHUB_CLAUDE_")):
@@ -266,7 +333,8 @@ enabled = true
             assert preview["can_apply"] is True
             assert planned["env"]["ANTHROPIC_MODEL"] == "claude-codexhub-e2e-alpha"
             assert planned["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-codexhub-e2e-beta"
-            assert planned["env"]["ANTHROPIC_AUTH_TOKEN"] == "***"
+            assert "ANTHROPIC_AUTH_TOKEN" not in planned["env"]
+            assert planned["env"]["ANTHROPIC_CUSTOM_HEADERS"] == "***"
 
             connected = accepted(port, "switch_gateway_client_route", {
                 "client_id": "claude", "mode": "hub", "model": "e2e/alpha",
@@ -277,6 +345,18 @@ enabled = true
             assert written["theme"] == "dark" and written["env"]["EDITOR"] == "vim"
             assert written["env"]["ANTHROPIC_MODEL"] == planned["env"]["ANTHROPIC_MODEL"]
             assert written["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == planned["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
+            assert "ANTHROPIC_AUTH_TOKEN" not in written["env"]
+            assert written["env"]["ANTHROPIC_CUSTOM_HEADERS"] == (
+                "x-codexhub-gateway-key: synthetic-local-gateway-key"
+            )
+            picker_rows = {row["model"]: row for row in written["modelPicker"]["options"]}
+            assert written["modelPicker"]["replaceBuiltInOptions"] is True
+            assert any(model.startswith("claude-opus-") for model in picker_rows)
+            for model_id, name in (("claude-codexhub-e2e-alpha", "Alpha"),
+                                   ("claude-codexhub-e2e-beta", "Beta")):
+                assert picker_rows[model_id]["label"] == f"CodexHub {name}"
+                assert picker_rows[model_id]["description"] == "E2E via Gateway"
+            assert picker_rows["claude-codexhub-gpt-6-sol"]["behavesAs"] == "claude-sonnet-4-6"
             readback = claude_info(port)
             assert readback["route_mode"] == "hub"
             assert readback["claude_settings"]["default_model"] == "e2e/alpha"
@@ -296,11 +376,13 @@ enabled = true
             assert claude_info(port)["claude_settings"]["default_model"] == "e2e/beta"
 
             snapshot = claude_path.read_bytes()
+            preferences_snapshot = settings_path.read_bytes()
             invalid = invoke(port, "switch_gateway_client_route", {
                 "client_id": "claude", "mode": "hub", "model": "e2e/removed",
                 "role_mappings": changed_roles,
             })
             assert invalid["ok"] is False and claude_path.read_bytes() == snapshot
+            assert settings_path.read_bytes() == preferences_snapshot
 
             updated["env"]["ANTHROPIC_API_KEY"] = "synthetic-conflicting-key"
             claude_path.write_text(json.dumps(updated))
@@ -316,6 +398,12 @@ enabled = true
             })
             assert conflict_apply["ok"] is False and claude_path.read_bytes() == snapshot
 
+            # Simulate upgrading a connected older candidate that had no saved
+            # application preference yet. Its first Disconnect must adopt it.
+            old_preferences = json.loads(settings_path.read_text())
+            old_preferences.pop("claude_model_mappings", None)
+            settings_path.write_text(json.dumps(old_preferences))
+
             detached = accepted(port, "switch_gateway_client_route", {
                 "client_id": "claude", "mode": "official", "role_mappings": {},
             })
@@ -325,11 +413,47 @@ enabled = true
             assert restored["env"]["ANTHROPIC_API_KEY"] == "synthetic-conflicting-key"
             assert not any(key.startswith("CODEXHUB_") or key in {
                 "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_CUSTOM_HEADERS",
                 "ANTHROPIC_DEFAULT_SONNET_MODEL",
             } for key in restored["env"])
             assert claude_info(port)["route_mode"] == "official"
+            remembered = claude_info(port)["claude_settings"]
+            assert remembered["role_mappings"]["sonnet"] == "e2e/alpha"
+            assert remembered["role_mappings"]["haiku"] == ""
+            restored["env"].pop("ANTHROPIC_API_KEY")
+            claude_path.write_text(json.dumps(restored))
+            process.terminate()
+            process.wait(timeout=5)
+            process = subprocess.Popen(
+                [str(binary), "web-bridge", "--port", str(port)],
+                cwd=root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    remembered = claude_info(port)["claude_settings"]
+                    break
+                except (URLError, ConnectionError, TimeoutError):
+                    if time.monotonic() >= deadline:
+                        raise AssertionError("restarted bridge did not become ready") from None
+                    time.sleep(0.1)
+            assert remembered["role_mappings"]["sonnet"] == "e2e/alpha"
+            accepted(port, "switch_gateway_client_route", {"client_id": "claude", "mode": "hub"})
+            reconnected = json.loads(claude_path.read_text())
+            assert reconnected["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-codexhub-e2e-alpha"
+            assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in reconnected["env"]
+            assert "ANTHROPIC_MODEL" not in reconnected["env"], "reconnect changed the restored default"
+            last_applied = claude_path.read_bytes()
+            fake_claude.unlink()  # Remove the fixture symlink, never its real CLI target.
+            fake_claude.write_text("#!/bin/sh\nexit 1\n")
+            fake_claude.chmod(0o700)
+            unavailable = invoke(port, "switch_gateway_client_route", {"client_id": "claude", "mode": "hub"})
+            assert unavailable["ok"] is False, "missing native catalog must stop publication"
+            assert claude_path.read_bytes() == last_applied
+            assert credentials.read_bytes() == credential_snapshot
             print("PASS: isolated Claude bridge preview, connect, edit, readback, invalid target, conflict, disconnect"
-                  + ("; real Claude Code text roundtrip" if claude_bin else ""))
+                  + ("; real Claude Code text roundtrip and /model metadata" if claude_bin else ""))
         finally:
             process.terminate()
             try:

@@ -506,6 +506,68 @@ fn usage_snapshot_bounded_window_returns_all_events() {
 }
 
 #[test]
+fn native_claude_usage_flows_through_public_statistics_query() {
+    let root = unique_temp_dir("codexhub-native-claude-usage");
+    fs::create_dir_all(&root).unwrap();
+    let event_path = root.join("codex-proxy-events.jsonl");
+    let db_path = root.join("codex-proxy-telemetry.sqlite");
+    let events = [
+        r#"{"ts":"2026-09-23T01:00:00Z","event":"request_complete","request_id":"native-complete","method":"POST","path":"/v1/messages","inbound_format":"anthropic_messages","route_reason":"model","upstream":"anthropic_native","provider_id":"claude_subscription","model":"claude-opus-5-5","reports_cached_input_tokens":true,"status":200,"duration_ms":140,"usage_source":"upstream","usage_input_tokens":12,"usage_cached_input_tokens":3,"usage_cache_write_input_tokens":2,"usage_output_tokens":5,"usage_total_tokens":17}"#,
+        r#"{"ts":"2026-09-23T01:00:01Z","event":"request_complete","request_id":"native-partial","method":"POST","path":"/v1/messages","inbound_format":"anthropic_messages","route_reason":"model","upstream":"anthropic_native","provider_id":"claude_subscription","model":"claude-opus-5-5","reports_cached_input_tokens":true,"status":502,"duration_ms":320,"usage_source":"partial","usage_missing_reason":"stream_incomplete","usage_input_tokens":12,"usage_cached_input_tokens":4,"usage_cache_write_input_tokens":2}"#,
+        r#"{"ts":"2026-09-23T01:00:02Z","event":"request_complete","request_id":"native-missing","method":"POST","path":"/v1/messages","inbound_format":"anthropic_messages","route_reason":"model","upstream":"anthropic_native","provider_id":"claude_subscription","model":"claude-opus-5-5","reports_cached_input_tokens":true,"status":502,"duration_ms":80,"usage_source":"missing","usage_missing_reason":"upstream_error"}"#,
+        r#"{"ts":"2026-09-23T01:00:03Z","event":"request_complete","request_id":"external-complete","method":"POST","path":"/v1/messages","inbound_format":"anthropic_messages","route_reason":"model","upstream":"deepseek","provider_id":"deepseek","model":"deepseek/deepseek-flash","reports_cached_input_tokens":false,"status":200,"duration_ms":210,"usage_source":"upstream","usage_input_tokens":2,"usage_output_tokens":1,"usage_total_tokens":3}"#,
+        r#"{"ts":"2026-09-23T01:00:04Z","event":"request_complete","request_id":"count-tokens","method":"POST","path":"/v1/messages/count_tokens","inbound_format":"anthropic_messages","route_reason":"model","upstream":"anthropic_native","provider_id":"claude_subscription","model":"claude-opus-5-5","reports_cached_input_tokens":true,"status":200,"duration_ms":5,"usage_source":"upstream","usage_input_tokens":500,"usage_total_tokens":500}"#,
+    ];
+    fs::write(&event_path, events.join("\n")).unwrap();
+    super::ingest_telemetry_once_for_paths(&event_path, &db_path).unwrap();
+
+    let snapshot = super::gateway_usage_snapshot_for_paths(
+        &event_path,
+        &db_path,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(snapshot.summary.requests, 4);
+    assert_eq!(snapshot.summary.successful_requests, 2);
+    assert_eq!(snapshot.summary.missing_usage_requests, 1);
+    assert_eq!(snapshot.summary.partial_usage_requests, 1);
+    assert_eq!(snapshot.summary.total_tokens, Some(32));
+    assert_eq!(snapshot.summary.input_tokens, Some(26));
+    assert_eq!(snapshot.summary.output_tokens, Some(6));
+    assert_eq!(snapshot.summary.cached_input_tokens, Some(7));
+    assert_eq!(snapshot.summary.cache_write_input_tokens, Some(4));
+    assert_eq!(snapshot.summary.cache_hit_rate, Some(29.2));
+
+    let native = snapshot
+        .events
+        .iter()
+        .find(|event| event.request_id.as_deref() == Some("native-complete"))
+        .expect("native usage row");
+    assert_eq!(native.upstream.as_deref(), Some("claude_subscription"));
+    assert_eq!(native.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(native.status, Some(200));
+    assert_eq!(native.duration_ms, Some(140));
+    assert_eq!(native.cache_write_input_tokens, Some(2));
+
+    let partial = snapshot
+        .events
+        .iter()
+        .find(|event| event.request_id.as_deref() == Some("native-partial"))
+        .expect("partial native usage row");
+    assert_eq!(partial.usage_source, "partial");
+    assert_eq!(partial.usage_missing_reason.as_deref(), Some("stream_incomplete"));
+    assert_eq!(partial.status, Some(502));
+    assert_eq!(partial.duration_ms, Some(320));
+    assert_eq!(partial.output_tokens, None);
+    assert!(!snapshot.events.iter().any(|event| {
+        event.request_id.as_deref() == Some("count-tokens")
+    }));
+}
+
+#[test]
 fn usage_events_normalize_official_bare_model_names() {
     let root = unique_temp_dir("codexhub-usage-official-models");
     fs::create_dir_all(&root).unwrap();

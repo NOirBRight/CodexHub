@@ -45,6 +45,7 @@ from route_primitives import (
     AuthenticationStrategy,
     authentication_strategy as _authentication_strategy,
     BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER,
+    BEHAVIOR_CLAUDE_NATIVE_PASSTHROUGH,
     BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY,
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
     BEHAVIOR_OFFICIAL_GATEWAY_COMPAT,
@@ -823,6 +824,8 @@ def behavior_profile_for_request(
     inbound_format: str,
     official_http_passthrough_enabled: bool | None = None,
 ) -> str:
+    if upstream.get("native_anthropic_subscription") is True:
+        return BEHAVIOR_CLAUDE_NATIVE_PASSTHROUGH
     if str(upstream.get("name")) != "official":
         return BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY
     if official_http_passthrough_enabled is None:
@@ -1387,7 +1390,10 @@ def _tool_exposure_policy_for_route(
     tool_protocol = _external_tool_protocol(upstream)
     raw_requested_mode = upstream.get("tool_exposure_mode")
     if raw_requested_mode is None:
-        if behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH:
+        if behavior_profile in {
+            BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            BEHAVIOR_CLAUDE_NATIVE_PASSTHROUGH,
+        }:
             requested_mode = ToolExposureMode.OFFICIAL_NATIVE
         elif behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
             requested_mode = ToolExposureMode.UNKNOWN
@@ -1436,7 +1442,10 @@ def _tool_exposure_policy_for_route(
     if not isinstance(supports_search_tool, bool):
         supports_search_tool = None
 
-    if behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH:
+    if behavior_profile in {
+        BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+        BEHAVIOR_CLAUDE_NATIVE_PASSTHROUGH,
+    }:
         effective_mode = ToolExposureMode.OFFICIAL_NATIVE
     elif behavior_profile == BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED:
         effective_mode = ToolExposureMode.UNKNOWN
@@ -1458,6 +1467,7 @@ def _tool_exposure_policy_for_route(
         and behavior_profile
         not in {
             BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
+            BEHAVIOR_CLAUDE_NATIVE_PASSTHROUGH,
             BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED,
         }
     )
@@ -1477,6 +1487,7 @@ def route_plan_for_request(
     request_context: Mapping[str, str],
     *,
     inbound_format: str,
+    inbound_path: str | None = None,
     provider_hint: str | None = None,
     collaboration_protocol: str | None = None,
     model_requested: str | None = None,
@@ -1495,9 +1506,21 @@ def route_plan_for_request(
     ) = None,
 ) -> RoutePlan:
     upstream_name = str(upstream.get("name") or "")
+    native_anthropic_subscription = (
+        upstream.get("native_anthropic_subscription") is True
+    )
     configured_upstream_format = str(upstream.get("upstream_format") or "responses")
     configured_upstream_protocol = _route_protocol(configured_upstream_format)
-    if configured_upstream_protocol == RouteProtocol.AUTO:
+    if native_anthropic_subscription:
+        attempt_protocols = (
+            (RouteProtocol.ANTHROPIC_MESSAGES,)
+            if (
+                configured_upstream_protocol == RouteProtocol.ANTHROPIC_MESSAGES
+                and inbound_format == RouteProtocol.ANTHROPIC_MESSAGES.value
+            )
+            else ()
+        )
+    elif configured_upstream_protocol == RouteProtocol.AUTO:
         attempt_protocols = (
             RouteProtocol.RESPONSES,
             RouteProtocol.CHAT_COMPLETIONS,
@@ -1601,7 +1624,9 @@ def route_plan_for_request(
         collaboration_protocol=collaboration_protocol,
         raw_provider_probe=raw_provider_probe,
     )
-    if codex_app_external:
+    if native_anthropic_subscription:
+        behavior_profile = BEHAVIOR_CLAUDE_NATIVE_PASSTHROUGH
+    elif codex_app_external:
         behavior_profile = BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER
     elif compatibility_external:
         behavior_profile = BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY
@@ -1649,7 +1674,7 @@ def route_plan_for_request(
     )
     retry_policy = (
         RetryPolicy.CONSERVATIVE_PRE_OUTPUT
-        if transparent_metered
+        if transparent_metered or native_anthropic_subscription
         else RetryPolicy.GATEWAY_FULL
     )
     usage_policy = (
@@ -1676,7 +1701,12 @@ def route_plan_for_request(
         request_kind=request_kind,
         raw_provider_probe=raw_provider_probe,
     )
-    if official_http_passthrough:
+    if native_anthropic_subscription:
+        codex_compatibility_policy = CodexCompatibilityPolicy.NONE
+        collaboration_backend = CollaborationBackend.CLIENT_RUNTIME
+        streaming_policy = StreamingPolicy.TRANSPARENT
+        mutation_policy = MutationPolicy.CLAUDE_NATIVE_PASSTHROUGH
+    elif official_http_passthrough:
         codex_compatibility_policy = CodexCompatibilityPolicy.OFFICIAL_NATIVE
         collaboration_backend = CollaborationBackend.CODEX_RUNTIME
         streaming_policy = StreamingPolicy.OFFICIAL_PASSTHROUGH
@@ -1706,7 +1736,11 @@ def route_plan_for_request(
         else TransportPolicy.STANDARD
     )
     caller_request_body_mode = CallerRequestBodyMode.PRESERVE_CALLER
-    base_named_mutations = {RouteMutation.MODEL_ALIAS}
+    base_named_mutations = (
+        set()
+        if native_anthropic_subscription
+        else {RouteMutation.MODEL_ALIAS}
+    )
     if tool_exposure.gateway_schema_injection:
         base_named_mutations.add(RouteMutation.HARD_CODED_SCHEMA_INJECTION)
     if codex_semantic_adapter == CODEX_SEMANTIC_EXTERNAL_ADAPTER:
@@ -1715,7 +1749,7 @@ def route_plan_for_request(
         base_named_mutations.add(RouteMutation.SEMANTIC_REPAIR)
     if official_http_passthrough:
         base_named_mutations.add(RouteMutation.OFFICIAL_TOOL_SEARCH_PRESERVATION)
-    elif not transparent_metered:
+    elif not transparent_metered and not native_anthropic_subscription:
         base_named_mutations.add(RouteMutation.SYNTHETIC_TERMINAL_FAILURE)
     if vision.action == VisionAction.PROXY:
         base_named_mutations.add(RouteMutation.IMAGE_CONTENT_REPLACEMENT)
@@ -1727,6 +1761,7 @@ def route_plan_for_request(
         base_named_mutations.add(RouteMutation.UNSUPPORTED_PROTOCOL_REJECTION)
 
     attempts: list[RouteAttemptPlan] = []
+    native_query = urlsplit(inbound_path or "").query if native_anthropic_subscription else ""
     for index, attempt_protocol in enumerate(attempt_protocols):
         attempt_wire_adapter = _wire_format_adapter(
             inbound_format,
@@ -1815,7 +1850,7 @@ def route_plan_for_request(
             base_relay_attempts = (
                 selected_runtime_facts.request_kind_base_attempts
             )
-            retry_http_errors = True
+            retry_http_errors = not native_anthropic_subscription
             open_attempt_budget = None
         retry_execution = RetryExecutionPlan(
             eligibility=protocol_capability_state,
@@ -1864,12 +1899,15 @@ def route_plan_for_request(
             **upstream,
             "upstream_format": attempt_protocol.value,
         }
+        endpoint_url = _route_endpoint_url(upstream, attempt_protocol)
+        if native_query:
+            endpoint_url += ("&" if "?" in endpoint_url else "?") + native_query
         attempts.append(
             RouteAttemptPlan(
                 index=index,
                 upstream_protocol=attempt_protocol,
                 selected_upstream_format=attempt_protocol.value,
-                endpoint_url=_route_endpoint_url(upstream, attempt_protocol),
+                endpoint_url=endpoint_url,
                 prompt_cache_key_policy=cache_key_policy_for_endpoint(
                     _route_endpoint_url(upstream, attempt_protocol), attempt_protocol.value,
                 ),

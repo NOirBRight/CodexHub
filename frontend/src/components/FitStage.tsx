@@ -7,8 +7,6 @@ export const FIT_STAGE_WIDTH = 1024;
 export const FIT_STAGE_HEIGHT = 768;
 export const FIT_STAGE_SCALE = 1.1;
 export const NATIVE_SHADOW_INSET = 12;
-const DEFAULT_FIT_STAGE_WIDTH = 1024;
-const DEFAULT_FIT_STAGE_HEIGHT = 768;
 
 function usesCssTransformScale() {
   if (typeof navigator === "undefined") {
@@ -23,17 +21,11 @@ export function FitStage({ children }: { children: ReactNode }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const linuxViewport = isLinuxViewport();
   const cssTransform = usesCssTransformScale();
-  const [metrics, setMetrics] = useState(() => linuxViewport
-    ? {
-      scale: FIT_STAGE_SCALE,
-      width: FIT_STAGE_WIDTH / FIT_STAGE_SCALE - 2 * NATIVE_SHADOW_INSET,
-      height: FIT_STAGE_HEIGHT / FIT_STAGE_SCALE - 2 * NATIVE_SHADOW_INSET,
-    }
-    : {
-      scale: FIT_STAGE_SCALE,
-      width: DEFAULT_FIT_STAGE_WIDTH / FIT_STAGE_SCALE,
-      height: DEFAULT_FIT_STAGE_HEIGHT / FIT_STAGE_SCALE,
-    });
+  const [metrics, setMetrics] = useState({
+    scale: FIT_STAGE_SCALE,
+    width: FIT_STAGE_WIDTH / FIT_STAGE_SCALE,
+    height: FIT_STAGE_HEIGHT / FIT_STAGE_SCALE,
+  });
 
   useLayoutEffect(() => {
     const host = hostRef.current;
@@ -61,25 +53,16 @@ export function FitStage({ children }: { children: ReactNode }) {
     let cancelled = false;
     let stopListening: (() => void) | undefined;
 
-    const syncLinuxViewportMetrics = async () => {
-      const viewport = await readLogicalViewportSize();
-      if (cancelled || viewport.width <= 0 || viewport.height <= 0) {
-        return;
-      }
-      const scale = FIT_STAGE_SCALE;
-      const inset = viewport.expanded ? 0 : NATIVE_SHADOW_INSET;
-      document.documentElement.dataset.windowExpanded = String(viewport.expanded);
-      setMetrics({
-        scale,
-        width: viewport.width / scale - 2 * inset,
-        height: viewport.height / scale - 2 * inset,
-      });
-      await setWebviewZoom(scale);
+    const syncLinuxWindowState = async () => {
+      const expanded = await readExpandedWindowState();
+      if (cancelled) return;
+      document.documentElement.dataset.windowExpanded = String(expanded);
+      await setWebviewZoom(FIT_STAGE_SCALE);
     };
 
-    void syncLinuxViewportMetrics();
+    void syncLinuxWindowState();
     void listenForViewportChanges(() => {
-      void syncLinuxViewportMetrics();
+      void syncLinuxWindowState();
     }).then((stop) => {
       if (cancelled) {
         stop();
@@ -100,8 +83,8 @@ export function FitStage({ children }: { children: ReactNode }) {
       <div
         className={cssTransform ? "relative origin-top-left" : "relative"}
         style={{
-          width: metrics.width,
-          height: metrics.height,
+          width: linuxViewport ? "100%" : metrics.width,
+          height: linuxViewport ? "100%" : metrics.height,
           ...(cssTransform ? { transform: "scale(" + metrics.scale + ")" } : {}),
         }}
       >
@@ -115,24 +98,15 @@ function isLinuxViewport() {
   return typeof navigator !== "undefined" && Boolean(window.__TAURI_INTERNALS__) && /Linux/i.test(navigator.userAgent);
 }
 
-async function readLogicalViewportSize() {
+async function readExpandedWindowState() {
   try {
     const currentWindow = getCurrentWindow();
-    const [inner, factor, maximized, fullscreen] = await Promise.all([
-      currentWindow.innerSize(), currentWindow.scaleFactor(),
+    const [maximized, fullscreen] = await Promise.all([
       currentWindow.isMaximized(), currentWindow.isFullscreen(),
     ]);
-    return {
-      width: inner.width / factor,
-      height: inner.height / factor,
-      expanded: maximized || fullscreen,
-    };
+    return maximized || fullscreen;
   } catch {
-    return {
-      width: document.documentElement.clientWidth,
-      height: document.documentElement.clientHeight,
-      expanded: false,
-    };
+    return false;
   }
 }
 

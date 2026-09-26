@@ -177,7 +177,7 @@ those remain #77 work.
 
 ## 5. Representation seam status
 
-`src-python/anthropic_messages_prototype.py` re-establishes the ADR-0001 /
+`src-python/anthropic_messages_ir.py` re-establishes the ADR-0001 /
 ADR-0014 seam as an isolated prototype (no production import, no route):
 
 - native path: byte-exact pass-through of the inbound body; the Gateway-owned
@@ -219,7 +219,7 @@ ADR-0014 seam as an isolated prototype (no production import, no route):
 ./scripts/codexhub-python.sh scripts/claude_messages_loopback_harness.py run \
   --out /tmp/t74-run --claude-bin "$(command -v claude)" \
   --scenario tool --enable-discovery --max-output-tokens 32768 --timeout 120
-./scripts/codexhub-python.sh -m pytest tests/test_anthropic_messages_prototype.py tests/test_anthropic_messages_exchange.py tests/test_claude_messages_upstream_fixtures.py -q
+./scripts/codexhub-python.sh -m pytest tests/test_anthropic_messages_ir.py tests/test_anthropic_messages_exchange.py tests/test_claude_messages_upstream_fixtures.py -q
 ```
 
 `run` refuses `--allow-network`: this harness implements loopback only. Later

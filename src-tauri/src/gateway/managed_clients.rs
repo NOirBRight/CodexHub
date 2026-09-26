@@ -909,7 +909,11 @@ pub fn apply_native_at(
             let plan = plan_claude_apply(path, settings, providers, model, role_mappings)?;
             let result = publish_claude_apply(&plan, backup_roots)?;
             if result.applied {
-                readback_native_at("claude", &[path.to_path_buf()], settings, providers, model)?;
+                let written = std::fs::read_to_string(path)
+                    .map_err(|_| "Cannot verify applied Claude configuration".to_string())?;
+                if written != plan.next {
+                    return Err("Claude configuration changed during publication; retry Apply".into());
+                }
             }
             Ok(result)
         }

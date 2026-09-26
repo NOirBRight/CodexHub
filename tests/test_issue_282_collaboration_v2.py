@@ -946,6 +946,39 @@ def test_v2_wait_argument_parse_error_history_round_trips(native: bool) -> None:
     # Codex CLI 0.155.1 records an interrupted wait as plain text in history.
     ("wait_agent", {"timeout_ms": 120000}, "aborted by user after 104.0s"),
     ("wait_agent", {"timeout_ms": 120000}, "aborted by user after 0.0s"),
+    # Codex CLI 0.157.0 rejects task_name before spawn returns a JSON result.
+    ("spawn_agent", {"task_name": "review-standards", "message": "review", "fork_turns": "none"},
+     "agent_name must use only lowercase letters, digits, and underscores"),
+    ("spawn_agent", {"task_name": "review-standards", "message": "review", "fork_turns": "none"},
+     "agent_name must use only lowercase letters, digits, and underscores."),
+    ("spawn_agent", {"task_name": "review-spec", "message": "review", "fork_turns": "none"},
+     "agent_name must use only lowercase letters, digits, and underscores"),
+    ("spawn_agent", {"task_name": "", "message": "review", "fork_turns": "none"},
+     "agent_name must not be empty."),
+    ("spawn_agent", {"task_name": "", "message": "review", "fork_turns": "none"},
+     "agent_name must not be empty"),
+    ("spawn_agent", {"task_name": "review/standards", "message": "review", "fork_turns": "none"},
+     "agent_name must not contain `/`"),
+    ("spawn_agent", {"task_name": "root", "message": "review", "fork_turns": "none"},
+     "agent_name `root` is reserved"),
+    ("spawn_agent", {"task_name": ".", "message": "review", "fork_turns": "none"},
+     "agent_name `.` is reserved"),
+    ("spawn_agent", {"task_name": "..", "message": "review", "fork_turns": "none"},
+     "agent_name `..` is reserved"),
+    # The same AgentPath errors come back from target and path_prefix resolution.
+    ("send_message", {"target": "review-standards", "message": "review"},
+     "agent_name must use only lowercase letters, digits, and underscores"),
+    ("followup_task", {"target": "/not-root", "message": "review"},
+     "absolute agent paths must start with `/root` or be `/morpheus`"),
+    ("followup_task", {"target": "/not-root", "message": "review"},
+     "absolute agent paths must start with `/root` or be `/morpheus`."),
+    ("list_agents", {"path_prefix": "worker/"},
+     "relative agent path must not end with `/`"),
+    ("interrupt_agent", {"target": ""}, "agent path must not be empty"),
+    ("send_message", {"target": "/root/", "message": "review"},
+     "absolute agent path must not end with `/`"),
+    ("followup_task", {"target": "/root/review-spec", "message": "review"},
+     "agent_name must use only lowercase letters, digits, and underscores"),
 ])
 def test_v2_client_execution_error_history_round_trips(native, name, arguments, output) -> None:
     index = list(V2_ARGUMENTS).index(name) * 2
@@ -1006,6 +1039,8 @@ def test_v2_timeout_error_keeps_identity_and_result_validation(native, mutation)
 @pytest.mark.parametrize("version", [COLLABORATION_V1, COLLABORATION_V2])
 @pytest.mark.parametrize("name,output", [
     ("wait_agent", "Empty message can't be sent to an agent"),
+    ("wait_agent", "agent_name must use only lowercase letters, digits, and underscores"),
+    ("send_message", "agent_name must not contain `/`"),
     ("send_message", "Follow-up tasks can't target the root agent"),
     ("wait_agent", "collab manager unavailable"),
     ("followup_task", "Follow-up tasks can't target the root agent\nextra"),
@@ -1067,6 +1102,11 @@ def test_v2_spawn_existing_agent_error_history_round_trips(native: bool, task_na
 
 @pytest.mark.parametrize("output", [
     "unrecognized result text",
+    "agent_name must use only lowercase letters, digits, and underscores..",
+    "agent_name must use only lowercase letters, digits, and underscores. extra",
+    "agent_name must use only lowercase letters, digits, and underscores\n",
+    "absolute agent paths must start with `/root` or be `/morpheus`",
+    "agent path must not be empty",
     "agent path `` already exists",
     "agent path `/root/worker` already exists\nextra",
     "agent path `/root/worker\nother` already exists",

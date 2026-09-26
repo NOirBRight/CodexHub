@@ -43,7 +43,7 @@ pub use readback::verify_apply_readback;
 
 use clients::claude::{
     claude_installed, detect_claude_config_path, detect_claude_route_details,
-    detect_claude_version, read_claude_settings,
+    detect_claude_version, read_claude_settings, PRESERVE_DEFAULT_MODEL,
 };
 use clients::codex::read_codex_auth_status;
 #[cfg(test)]
@@ -177,10 +177,12 @@ pub struct GatewayUsageSummary {
     pub requests: u64,
     pub successful_requests: u64,
     pub missing_usage_requests: u64,
+    pub partial_usage_requests: u64,
     pub total_tokens: Option<u64>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
     pub cache_hit_rate: Option<f64>,
     pub estimated_cost_usd: Option<f64>,
     pub cost_label: String,
@@ -203,6 +205,7 @@ pub struct GatewayUsageEvent {
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
 }
 
@@ -911,8 +914,14 @@ pub fn preview_gateway_client_config(
 ) -> Result<GatewayClientConfigPreview, String> {
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
-    let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let id = normalize_client_id(&client_id);
+    let model = model.unwrap_or_else(|| {
+        if id == "claude" {
+            PRESERVE_DEFAULT_MODEL.to_string()
+        } else {
+            DEFAULT_MODEL.to_string()
+        }
+    });
     managed_clients::preview_native(
         &id,
         &settings,
@@ -950,9 +959,42 @@ fn apply_gateway_client_config_locked(
     let _guard = gateway_client_config_write_lock()
         .lock()
         .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
+    if client_id == "claude" {
+        return crate::codex_desktop::serialize_config_writer(|| {
+            let paths = config::ConfigPaths::runtime()?;
+            let mut settings = config::get_settings_with_paths(&paths)?;
+            let providers = config::get_providers()?;
+            let path = clients::claude::detect_claude_config_path();
+            let mut mappings = settings.claude_model_mappings.clone().unwrap_or_default();
+            if settings.claude_model_mappings.is_none()
+                && std::fs::read_to_string(&path).ok().as_deref()
+                    .is_some_and(clients::claude::is_claude_codexhub_config)
+            {
+                let previous = clients::claude::read_claude_settings(&path, &settings, &providers);
+                mappings.extend(previous.role_mappings);
+                mappings.insert("subagent".into(), previous.default_subagent_model);
+            }
+            mappings.extend(role_mappings);
+            settings.claude_model_mappings = Some(mappings.clone());
+            let model = model.unwrap_or_else(|| PRESERVE_DEFAULT_MODEL.to_string());
+            // Save intent first, then publish the client file atomically. Only
+            // our settings roll back on failure: restoring a client snapshot
+            // here could overwrite the concurrent foreign edit Apply detected.
+            crate::file_transaction::with_text_file_rollback(&[paths.settings_path()], || {
+                config::save_settings_with_paths(settings.clone(), &paths)?;
+                managed_clients::apply_native(client_id, &settings, &providers, &model, mappings)
+            }).map_err(|error| error.to_string())
+        });
+    }
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
-    let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model = model.unwrap_or_else(|| {
+        if client_id == "claude" {
+            PRESERVE_DEFAULT_MODEL.to_string()
+        } else {
+            DEFAULT_MODEL.to_string()
+        }
+    });
     managed_clients::apply_native(client_id, &settings, &providers, &model, role_mappings)
 }
 
@@ -983,6 +1025,24 @@ fn restore_gateway_client_config_locked(
         .lock()
         .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
     let backup_roots = client_backup_roots_for_restore(&client_id, backup_owner);
+    if client_id == "claude" {
+        return crate::codex_desktop::serialize_config_writer(|| {
+            let paths = config::ConfigPaths::runtime()?;
+            let mut settings = config::get_settings_with_paths(&paths)?;
+            let path = clients::claude::detect_claude_config_path();
+            if settings.claude_model_mappings.is_none()
+                && std::fs::read_to_string(&path).ok().as_deref()
+                    .is_some_and(clients::claude::is_claude_codexhub_config)
+            {
+                let previous = clients::claude::read_claude_settings(&path, &settings, &config::get_providers()?);
+                let mut mappings = previous.role_mappings;
+                mappings.insert("subagent".into(), previous.default_subagent_model);
+                settings.claude_model_mappings = Some(mappings);
+                config::save_settings_with_paths(settings, &paths)?;
+            }
+            managed_clients::restore_native(client_id, &backup_roots)
+        });
+    }
     managed_clients::restore_native(client_id, &backup_roots)
 }
 
@@ -1093,11 +1153,7 @@ pub fn switch_gateway_client_route(
         let settings = config::get_settings()?;
         let providers = config::get_providers()?;
         Some(if normalize_client_id(&client_id) == "claude" {
-            resolve_gateway_client_model_id(
-                &settings,
-                &providers,
-                model.as_deref().ok_or("Select a Claude default model")?,
-            )?
+            model.unwrap_or_else(|| PRESERVE_DEFAULT_MODEL.to_string())
         } else {
             gateway_client_route_model(model, &settings, &providers)?
         })
@@ -1166,13 +1222,7 @@ where
         }
 
         let client_model = if client.id == "claude" {
-            Some(
-                client
-                    .claude_settings
-                    .as_ref()
-                    .map(|saved| saved.default_model.clone())
-                    .unwrap_or_default(),
-            )
+            Some(PRESERVE_DEFAULT_MODEL.to_string())
         } else {
             model.clone()
         };
@@ -1801,13 +1851,17 @@ fn is_supported_version_probe_path(path: &Path) -> bool {
 }
 
 fn command_output_no_window(mut command: Command) -> Option<std::process::Output> {
-    crate::runtime_paths::configure_no_window(&mut command);
+    command_output_no_window_with_timeout(&mut command, VERSION_PROBE_TIMEOUT)
+}
+
+fn command_output_no_window_with_timeout(command: &mut Command, timeout: Duration) -> Option<std::process::Output> {
+    crate::runtime_paths::configure_no_window(command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().ok()?;
-    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     loop {
         if child.try_wait().ok()?.is_some() {
             return child.wait_with_output().ok();

@@ -4,12 +4,13 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Bin,
+    [string]$CandidateSha = '',
     [string]$Output = 'test-results\chat-completions-e2e.json',
     [string]$Auth = '',
     [string]$Providers = '',
     [string]$Settings = '',
     [string]$Catalog = '',
-    [string]$OpenCodeGoCredentials = '',
+    [string]$DeepSeekCredentials = '',
     [string]$KeepRuntime = '',
     [string[]]$Case = @(),
     [switch]$Capabilities,
@@ -52,6 +53,9 @@ $arguments = @(
     '--output', $Output,
     '--timeout', [string]$TimeoutSeconds
 )
+if (-not [string]::IsNullOrWhiteSpace($CandidateSha)) {
+    $arguments += @('--candidate-sha', $CandidateSha)
+}
 if (-not [string]::IsNullOrWhiteSpace($Auth)) {
     $arguments += @('--auth', $Auth)
 }
@@ -64,8 +68,8 @@ if (-not [string]::IsNullOrWhiteSpace($Settings)) {
 if (-not [string]::IsNullOrWhiteSpace($Catalog)) {
     $arguments += @('--catalog', $Catalog)
 }
-if (-not [string]::IsNullOrWhiteSpace($OpenCodeGoCredentials)) {
-    $arguments += @('--opencode-go-credentials', $OpenCodeGoCredentials)
+if (-not [string]::IsNullOrWhiteSpace($DeepSeekCredentials)) {
+    $arguments += @('--deepseek-credentials', $DeepSeekCredentials)
 }
 if (-not [string]::IsNullOrWhiteSpace($KeepRuntime)) {
     $arguments += @('--keep-runtime', $KeepRuntime)

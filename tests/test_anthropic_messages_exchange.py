@@ -11,15 +11,14 @@ from typing import Any, Mapping
 
 import pytest
 
-from anthropic_messages_prototype import (
+from anthropic_messages_ir import (
     AdaptedResponse,
     NotForwardable,
     adapt_upstream_response,
     adapt_upstream_stream,
-    execute_exchange,
     prepare_upstream_request,
-    relay_incremental_exchange,
 )
+from claude_messages_evidence_exchange import execute_exchange, relay_incremental_exchange
 from gateway_sse import DownstreamStreamCommit
 
 
@@ -326,6 +325,56 @@ def test_responses_reasoning_items_are_omitted_not_refused() -> None:
     assert isinstance(result, AdaptedResponse)
     assert json.loads(result.body)["content"] == [{"type": "text", "text": "pong"}]
     assert any(item.policy == "responses_output_item_omitted_for_anthropic" for item in result.adaptations)
+
+
+@pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
+def test_chat_reasoning_stream_keeps_answer_and_declares_unsigned_thinking(field: str) -> None:
+    chunks = _events(_chat_stream())
+    chunks[0]["choices"][0]["delta"][field] = "private reasoning fixture"
+    chunks[1]["choices"][0]["delta"][field] = "more private reasoning"
+    result = adapt_upstream_stream("chat_completions", [_sse(None, item) for item in chunks])
+    assert isinstance(result, AdaptedResponse), result
+    events = _events(result.body)
+    assert "".join(item.get("delta", {}).get("text", "") for item in events) == "pong"
+    assert events[-1]["type"] == "message_stop"
+    assert b"private reasoning" not in result.body
+    policies = [item for item in result.adaptations if item.policy == "unsigned_reasoning_omitted_for_anthropic"]
+    assert len(policies) == 1
+    assert "private reasoning" not in repr(policies)
+
+
+def test_responses_reasoning_stream_keeps_tool_identity() -> None:
+    events = _events(_responses_stream())
+    events.insert(1, {"type": "response.reasoning_summary_text.delta", "delta": "private reasoning fixture"})
+    result = adapt_upstream_stream("responses", [_sse(item.get("type"), item) for item in events])
+    assert isinstance(result, AdaptedResponse), result
+    output = _events(result.body)
+    tool = next(item["content_block"] for item in output if item.get("content_block", {}).get("type") == "tool_use")
+    assert tool["id"] == "call_stream_1"
+    assert output[-1]["type"] == "message_stop"
+    assert any(item.policy == "unsigned_reasoning_omitted_for_anthropic" for item in result.adaptations)
+
+
+def test_encrypted_responses_reasoning_without_summary_is_declared() -> None:
+    events = _events(_responses_stream())
+    opaque = {"type": "reasoning", "id": "rs_opaque", "summary": [], "encrypted_content": "opaque-private-state"}
+    events.insert(1, {"type": "response.output_item.added", "item": opaque, "output_index": 1})
+    events[-1]["response"]["output"].insert(0, opaque)
+    result = adapt_upstream_stream("responses", [_sse(item.get("type"), item) for item in events])
+    assert isinstance(result, AdaptedResponse), result
+    assert _events(result.body)[-1]["type"] == "message_stop"
+    assert b"opaque-private-state" not in result.body
+    diagnostics = [item for item in result.adaptations if item.field == "response.reasoning"]
+    assert len(diagnostics) == 1
+    assert "opaque-private-state" not in repr(diagnostics)
+
+
+@pytest.mark.parametrize("value", [True, 7, {}, ["not a string"]])
+def test_malformed_reasoning_delta_is_not_converted_to_success(value: object) -> None:
+    chunks = _events(_chat_stream())
+    chunks[0]["choices"][0]["delta"]["reasoning_content"] = value
+    result = adapt_upstream_stream("chat_completions", [_sse(None, item) for item in chunks])
+    assert isinstance(result, NotForwardable)
 
 
 def test_chat_json_preserves_explicit_empty_text() -> None:

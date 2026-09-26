@@ -55,8 +55,8 @@ def selection(client: str, model: str, catalog_path: str | None) -> tuple[str, s
     provider, model_id = model.split("/", 1)
     selector = f"codexhub-{provider}/{model_id}"
     protocol = "responses"
-    if model_id == "gpt-5.6-luna" and catalog_path is None:
-        fail("openai/gpt-5.6-luna requires candidate catalog", 11)
+    if model_id == "gpt-6-luna" and catalog_path is None:
+        fail("openai/gpt-6-luna requires candidate catalog", 11)
     return selector, protocol
 
 
@@ -85,8 +85,8 @@ def reported_targets(client: str, mode: str) -> list[str]:
 def write_zcode(root: Path) -> None:
     gateway = "http://127.0.0.1:19190"
     specs = {
-        "codexhub-openai": ("openai", "gpt-5.6-luna", "openai", "openai-responses", "responses"),
-        "codexhub-opencode-go": ("opencode-go", "muse-spark-1.3-contributor", "openai", "openai-responses", "responses"),
+        "codexhub-openai": ("openai", "gpt-6-luna", "openai", "openai-responses", "responses"),
+        "codexhub-deepseek": ("deepseek", "deepseek-flash", "openai", "openai-responses", "responses"),
     }
     catalog_providers = []
     cache_providers = []
@@ -301,11 +301,13 @@ def main() -> None:
                 "target_names": targets(client),
                 "backup_dir_relative": "backups",
             }
+            if mode == "present-optionals":
+                result["restart_required"] = "none"
     else:
         result = base | {"ok": True}
     if mode == "unsafe-output":
         result["api_key"] = "fixture-gateway-private-key"
-    if catalog_path and model_id == "gpt-5.6-luna" and (
+    if catalog_path and model_id == "gpt-6-luna" and (
         not Path(catalog_path).is_file() or "candidate-managed" not in Path(catalog_path).read_text(encoding="utf-8")
     ):
         fail("candidate catalog missing or stale")

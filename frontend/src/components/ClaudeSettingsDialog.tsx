@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { WorkspaceDialog } from "./workspace/WorkspaceDialog";
+import { useToasts } from "./PageToast";
 import { api, messageFromError } from "../lib/tauri";
 import {
+  aliasDefaultChanges,
+  claudeDefaultTarget,
   claudeDraft,
   claudeDraftChanged,
   claudeDraftValid,
+  claudeClearDefault,
+  claudePreserveDefault,
+  claudeResumeCommand,
   claudeRoles,
   filterClaudeModels,
   rebaseClaudeDraft,
@@ -36,6 +42,7 @@ export function ClaudeSettingsDialog({
   ) => void;
 }) {
   const { t } = useTranslation();
+  const toast = useToasts();
   const fallback = connected ? "" : (models[0]?.id ?? "");
   const saved = useMemo(
     () => claudeDraft(info?.claude_settings, fallback),
@@ -50,6 +57,7 @@ export function ClaudeSettingsDialog({
     setPreview(null);
   }, [saved]);
   const [query, setQuery] = useState("");
+  const [resumeModelId, setResumeModelId] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [preview, setPreview] = useState<{
     text: string;
@@ -62,8 +70,34 @@ export function ClaudeSettingsDialog({
   const dirty = claudeDraftChanged(draft, saved);
   const conflicts = info?.claude_settings?.conflicts ?? [];
   const unavailable = !info?.installed || !info?.claude_settings;
-  const invalid = !claudeDraftValid(draft, ids);
+  const nativeModels = info?.claude_settings?.native_models ?? [];
+  const nativeIds = new Set(nativeModels.map((model) => model.id));
+  const invalid = !claudeDraftValid(draft, ids, saved, nativeIds);
+  const aliasChanges = aliasDefaultChanges(
+    info?.claude_settings?.default_model ?? "",
+    saved.roles,
+    draft.roles,
+  );
+  const selectedDefault =
+    draft.model === claudePreserveDefault
+      ? (info?.claude_settings?.default_model ?? "")
+      : draft.model === claudeClearDefault
+        ? ""
+        : draft.model;
+  const defaultTarget = claudeDefaultTarget(
+    selectedDefault,
+    models,
+    draft.roles,
+    nativeModels,
+  ).map((part) =>
+    part === "builtin"
+      ? t("gateway.claudeDefaultBuiltin")
+      : part === "subscription"
+        ? t("gateway.claudeSubscriptionDefault")
+        : part,
+  );
   const locked = Boolean(busy || previewBusy);
+  const resumeCommand = claudeResumeCommand(resumeModelId);
   const needsActivation = !connected || !info?.managed_by_current_app;
   const canApply =
     !locked &&
@@ -85,7 +119,7 @@ export function ClaudeSettingsDialog({
       const result = await api.previewGatewayClientConfig(
         "claude",
         draft.model,
-        draft.roles,
+        { ...draft.roles, subagent: draft.subagent },
       );
       setPreview({
         text: result.next_redacted,
@@ -163,7 +197,12 @@ export function ClaudeSettingsDialog({
           <button
             className="ws-primary"
             disabled={!canApply}
-            onClick={() => onToggle(true, draft.model, draft.roles)}
+            onClick={() =>
+              onToggle(true, draft.model, {
+                ...draft.roles,
+                subagent: draft.subagent,
+              })
+            }
           >
             {busy
               ? t("gateway.connectionUpdating")
@@ -216,11 +255,41 @@ export function ClaudeSettingsDialog({
             onChange={(event) => setQuery(event.target.value)}
           />
         </label>
-        {picker(
-          draft.model,
-          (model) => update({ ...draft, model }),
-          t("gateway.claudeDefaultModel"),
-        )}
+        <label className="ws-claude-field">
+          <span>{t("gateway.claudeDefaultModel")}</span>
+          <select
+            value={draft.model}
+            disabled={locked}
+            onChange={(event) => update({ ...draft, model: event.target.value })}
+          >
+            <option value={claudePreserveDefault}>
+              {t("gateway.claudeKeepDefault", {
+                model:
+                  info?.claude_settings?.default_model ||
+                  t("gateway.claudeCliDefault"),
+              })}
+            </option>
+            <option value={claudeClearDefault}>
+              {t("gateway.claudeUseCliDefault")}
+            </option>
+            {filterClaudeModels(models, query, draft.model).map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.label}
+              </option>
+            ))}
+            {filterClaudeModels(nativeModels, query, draft.model)
+              .filter((model) => !ids.has(model.id))
+              .map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+          </select>
+        </label>
+        <p className="ws-claude-note" role="status">
+          {t("gateway.claudeDefaultTarget", { model: defaultTarget.join(" / ") })}
+        </p>
+        <p className="ws-claude-note">{t("gateway.claudeDefaultOneMillionBoundary")}</p>
         <details className="ws-claude-catalog">
           <summary>
             {t("gateway.claudeCatalog", { count: models.length })}
@@ -257,7 +326,54 @@ export function ClaudeSettingsDialog({
             </div>
           ))}
         </div>
+        {aliasChanges.length > 0 && (
+          <ul className="ws-claude-note" role="status">
+            {aliasChanges.map(({ alias, from, to }) => (
+              <li key={`${alias}:${from}:${to}`}>
+                {t("gateway.claudeAliasDefaultPreview", { alias, from, to })}
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
+      <section className="ws-claude-section">
+        <h3>{t("gateway.claudeSubagentTitle")}</h3>
+        <p className="ws-claude-note">{t("gateway.claudeSubagentHelp")}</p>
+        {picker(
+          draft.subagent,
+          (subagent) => update({ ...draft, subagent }),
+          t("gateway.claudeRoleSubagent"),
+          true,
+        )}
+      </section>
+      {connected && (
+        <section className="ws-claude-section">
+          <h3>{t("gateway.claudeResumeTitle")}</h3>
+          <p className="ws-claude-note">{t("gateway.claudeResumeHelp")}</p>
+          <label className="ws-claude-field">
+            <span>{t("gateway.claudeResumeModelId")}</span>
+            <input
+              value={resumeModelId}
+              placeholder="claude-opus-5-5"
+              spellCheck={false}
+              aria-invalid={Boolean(resumeModelId) && !resumeCommand}
+              onChange={(event) => setResumeModelId(event.target.value)}
+            />
+          </label>
+          {resumeCommand && <code className="ws-claude-path">{resumeCommand}</code>}
+          <button
+            className="ws-button"
+            disabled={!resumeCommand}
+            onClick={() =>
+              void navigator.clipboard.writeText(resumeCommand)
+                .then(() => toast.showToast(t("common.copied"), "success"))
+                .catch((error) => toast.showToast(messageFromError(error), "error"))
+            }
+          >
+            {t("gateway.claudeCopyResumeCommand")}
+          </button>
+        </section>
+      )}
       {needsActivation && (
         <section className="ws-claude-section">
           <p className="ws-claude-note">{t("gateway.claudeConnectScope")}</p>

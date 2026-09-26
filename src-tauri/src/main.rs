@@ -293,6 +293,12 @@ impl AppStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(skip)]
+    pub claude_native_picker: Option<Vec<serde_json::Value>>,
+    #[serde(skip)]
+    pub claude_native_picker_source: Option<serde_json::Value>,
+    #[serde(default)]
+    pub claude_model_mappings: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default)]
     pub locale: String,
     pub auto_sync_history: bool,
@@ -356,6 +362,9 @@ fn default_fast_model_variants() -> Vec<String> {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            claude_native_picker: None,
+            claude_native_picker_source: None,
+            claude_model_mappings: None,
             locale: String::new(),
             auto_sync_history: false,
             unified_codex_history: true,

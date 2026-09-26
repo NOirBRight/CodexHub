@@ -823,6 +823,18 @@ def materialize_operational_authentication(
             strategy,
             authorization=read_header(incoming_headers, "Authorization"),
         )
+    if strategy == AuthenticationStrategy.ANTHROPIC_OAUTH:
+        authorization = read_header(incoming_headers, "Authorization")
+        return OperationalAuthentication(
+            strategy,
+            authorization=(
+                authorization
+                if isinstance(authorization, str)
+                and authorization.strip().lower().startswith("bearer ")
+                and authorization.strip()[7:].strip()
+                else None
+            ),
+        )
     if strategy == AuthenticationStrategy.OLLAMA_API_KEY:
         api_key = (
             ollama_api_key()
@@ -871,18 +883,35 @@ def build_upstream_headers(
         operational_authentication=operational_authentication,
         authentication_strategy=authentication_strategy,
     )
+    native_anthropic_subscription = (
+        upstream.get("native_anthropic_subscription") is True
+    )
     outgoing: dict[str, str] = {}
     adapter = credential_for(auth_mode)
     drop_incoming_header = (
         getattr(adapter, "drop_incoming_header", None) if adapter is not None else None
     )
     model_id_for_adapter = str(upstream.get("upstream_model") or model_id or "")
+    claude_gateway_key = read_header(
+        incoming_headers, "x-codexhub-gateway-key"
+    )
 
     for key, value in items(incoming_headers):
         lowered = key.lower()
         if (
             lowered in resolved_facts.hop_by_hop_request_headers
-            or lowered == "authorization"
+            or lowered in {
+                "authorization",
+                "x-codexhub-gateway-key",
+            }
+            or (native_anthropic_subscription and lowered == "accept-encoding")
+            or (
+                lowered == "x-api-key"
+                and (
+                    auth_mode != "incoming"
+                    or bool(claude_gateway_key)
+                )
+            )
         ):
             continue
         if drop_incoming_header is not None and drop_incoming_header(
@@ -891,6 +920,26 @@ def build_upstream_headers(
             continue
         if drop_content_encoding and lowered == "content-encoding":
             continue
+        if (
+            lowered == "anthropic-beta"
+            and not native_anthropic_subscription
+            and "dangerous-tool-use-2026-09-03" in {beta.strip() for beta in value.split(",")}
+        ):
+            # Paired with the declared classifier-context adaptation in the
+            # Messages converter. External providers cannot invoke it.
+            value = ", ".join(
+                beta.strip() for beta in value.split(",")
+                if beta.strip() and beta.strip() != "dangerous-tool-use-2026-09-03"
+            )
+            gateway_events.write_proxy_event(
+                "protocol_adaptation",
+                field="headers.anthropic-beta.dangerous-tool-use-2026-09-03",
+                policy="claude_server_classifier_beta_omitted_for_non_anthropic",
+                detail="The selected external route has no equivalent Anthropic server classifier.",
+                upstream_format=upstream.get("upstream_format"),
+            )
+            if not value:
+                continue
         outgoing[key] = value
 
     # Official passthrough keeps the caller User-Agent. Chat clients and
@@ -910,6 +959,10 @@ def build_upstream_headers(
             if key.lower() != "user-agent"
         }
         outgoing["User-Agent"] = UPSTREAM_USER_AGENT
+
+    if native_anthropic_subscription:
+        # The native SSE relay parses upstream bytes before forwarding them.
+        outgoing["Accept-Encoding"] = "identity"
 
     if adapter is not None:
         outgoing["Authorization"] = _subscription_authorization(
@@ -952,8 +1005,23 @@ def build_upstream_headers(
             if operational_authentication is not None
             else read_header(incoming_headers, "Authorization")
         )
+        if claude_gateway_key:
+            incoming_auth = None
         if incoming_auth:
             outgoing["Authorization"] = incoming_auth
+    elif auth_mode == "anthropic_oauth":
+        authorization = (
+            operational_authentication.authorization
+            if operational_authentication is not None
+            else read_header(incoming_headers, "Authorization")
+        )
+        if (
+            not isinstance(authorization, str)
+            or not authorization.strip().lower().startswith("bearer ")
+            or not authorization.strip()[7:].strip()
+        ):
+            raise ValueError("Claude subscription OAuth bearer is missing")
+        outgoing["Authorization"] = authorization
     elif auth_mode == "ollama_api_key":
         if operational_authentication is not None:
             authorization = operational_authentication.authorization
@@ -2415,6 +2483,9 @@ def bind_route_plan_operational_authentication(
                         request_headers.to_dict(), attempt.endpoint_url, prompt_cache_key,
                     ),
                     attempt.endpoint_url,
+                    preserve_oauth=(
+                        upstream.get("native_anthropic_subscription") is True
+                    ),
                 ),
                 materialized=True,
             ))

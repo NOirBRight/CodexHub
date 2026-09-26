@@ -148,27 +148,49 @@ selector, route, protocol, evidence, and CLI-version contract lives at
 `scripts/real_client_cli_contract.v1.json`. It builds
 the current Rust candidate locally, starts its Gateway in an isolated runtime,
 materializes fresh client configuration, and runs Codex CLI, OpenCode, Pi, and
-OMP once against Official `gpt-5.6-luna` and once against OpenCode Go
-`muse-spark-1.3-contributor`:
+OMP once against Official `gpt-6-luna` and once against the official DeepSeek API
+`deepseek-flash`:
 
 ```bash
 ./scripts/codexhub-python.sh scripts/e2e_linux_cli_clients.py \
-  --output test-results/linux-cli-e2e.json
+  --candidate-sha <full-reviewed-sha> \
+  --output <new-run>/linux-cli-e2e.json \
+  --auth <inputs>/auth.json \
+  --providers <inputs>/providers.toml \
+  --settings <inputs>/settings.json \
+  --catalog <inputs>/codexhub-model-catalog.json \
+  --deepseek-credentials <inputs>/deepseek.json
 ```
 
-The default credential inputs are the current operator's Codex auth,
-`providers.toml`, settings, and Official catalog. They are copied only into a
-temporary isolated runtime and are never written to the report. Use `--auth`,
-`--providers`, `--settings`, and `--catalog` to select dedicated inputs. The
-report must contain eight successful apply/readback/live sentinel cases.
+The runner requires a clean tracked source checkout at `--candidate-sha`.
+A supplied `--bin` must have a matching `<binary>.candidate-sha` build sidecar;
+the report records the full source SHA and binary SHA-256.
+The runner requires explicit `--auth`, `--providers`, `--settings`, and
+`--deepseek-credentials` inputs; it does not discover operator configuration.
+DeepSeek credentials use `codexhub.real-client-deepseek.v1` with only `schema`
+and a nonempty `api_key`. The provider input must bind that key through
+`{env:DEEPSEEK_API_KEY}` to the official HTTPS `api.deepseek.com` Responses route.
+An alternate host, embedded URL credentials or redirect path is rejected.
+`--catalog` is optional; without it the candidate
+refreshes the Official catalog inside the isolated runtime. Inputs are copied
+into temporary homes and runtime directories, never into the report. The
+Gateway retains the Provider key; client subprocesses receive their own
+isolated configuration and no inherited Provider key.
+
+All eight cases must pass stable CLI version floors, production managed
+configuration, one successful read-only tool call, the assistant sentinel,
+exact terminal completion and correlated Gateway model/Provider/protocol/HTTP
+streaming checks. Retry, fallback and error outcomes are recorded under the
+shared contract. Client output is bounded and represented by hashes and
+measured fields rather than raw text. A response sentinel alone is not a pass.
 
 Inbound Chat Completions live coverage is a sibling gate, not a ninth CLI
 protocol. Use `scripts/e2e_chat_completions.py` and
 `scripts/real_client_chat_contract.v1.json`. Do not fold those cases into the
 eight-row CLI contract or the CLI summary. Official Chat is
-`POST /v1/chat/completions`; Muse Chat is
-`POST /v1/providers/opencode-go/chat/completions` and requires
-`--opencode-go-credentials`. Windows uses `scripts/Run-ChatCompletionsE2E.ps1`
+`POST /v1/chat/completions`; DeepSeek Chat is
+`POST /v1/providers/deepseek/chat/completions` and requires
+`--deepseek-credentials`. Windows uses `scripts/Run-ChatCompletionsE2E.ps1`
 against a Debug portable candidate. See `docs/agents/real-client-e2e.md`.
 
 This host's accepted floors are the same numeric floors as Windows: Codex

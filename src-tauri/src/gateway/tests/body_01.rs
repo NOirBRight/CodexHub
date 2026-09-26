@@ -3278,13 +3278,14 @@ fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
 }
 
 #[test]
-fn claude_sync_keeps_its_saved_default_instead_of_the_global_model() {
+fn claude_sync_preserves_its_saved_default_instead_of_reapplying_it() {
     let mut client = sync_test_client("claude", "Claude Code", true, true, "hub");
     client.claude_settings = Some(super::clients::claude::ClaudeClientSettings {
-        default_model: "chosen/model".into(), role_mappings: Default::default(), conflicts: vec![],
+        default_model: "chosen/model".into(), role_mappings: Default::default(),
+        default_subagent_model: String::new(), native_models: Vec::new(), conflicts: vec![],
     });
     let summary = super::sync_gateway_clients_from_infos(vec![client], Some("global/model".into()), |client_id, model| {
-        assert_eq!(model.as_deref(), Some("chosen/model"));
+        assert_eq!(model.as_deref(), Some(super::clients::claude::PRESERVE_DEFAULT_MODEL));
         Ok(super::GatewayClientApplyResult { client_id, applied: true, config_path: None, backup_path: None, message: String::new() })
     });
     assert_eq!(summary.applied, 1);
