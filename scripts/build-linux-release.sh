@@ -170,6 +170,7 @@ fi
 # Sign only the final shipped bytes.
 (
   cd "$repo_root/src-tauri"
+  unset TAURI_SIGNING_PRIVATE_KEY
   cargo tauri signer sign --private-key-path "$private_key_path" "$appimage_dst"
 )
 
