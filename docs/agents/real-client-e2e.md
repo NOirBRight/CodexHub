@@ -316,7 +316,9 @@ fallback. Codex apply requires the six production fields
 `gateway_lifecycle`, `message`, `mode`, `proxy_build`, `proxy_port`, and
 `proxy_running`. `history_sync_status` and `history_sync_message` are the only
 optional keys and may be omitted, null, or bounded safe strings; all other
-unknown or missing-required keys fail closed.
+unknown or missing-required keys fail closed. Non-Codex apply results also
+accept the production `restart_required` field under the same bounded safe-string
+validation; older baseline candidates may omit it.
 
 The runner does not construct or parse Codex TOML, OpenCode JSON, Pi JSON, OMP
 YAML, or ZCode catalog/cache/config schemas. It copies the production-applied,

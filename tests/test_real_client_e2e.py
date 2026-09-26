@@ -995,7 +995,7 @@ def test_opencodex_appdata_shim_fails_under_case_local_isolation(tmp_path):
     assert "replaces `%APPDATA%`" in documentation
 
 
-def test_codex_apply_accepts_bounded_present_optional_history_fields(tmp_path):
+def test_apply_accepts_bounded_present_optional_history_and_restart_fields(tmp_path):
     result = _run(
         tmp_path,
         materializer_fake="fake-managed-client-config-present-optionals.cmd",

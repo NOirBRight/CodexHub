@@ -301,6 +301,8 @@ def main() -> None:
                 "target_names": targets(client),
                 "backup_dir_relative": "backups",
             }
+            if mode == "present-optionals":
+                result["restart_required"] = "none"
     else:
         result = base | {"ok": True}
     if mode == "unsafe-output":

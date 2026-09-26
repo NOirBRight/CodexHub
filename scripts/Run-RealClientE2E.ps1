@@ -3164,7 +3164,7 @@ function Initialize-ClientConfiguration {
         }
     }
     else {
-        Assert-ManagedClientOutputKeys -Value $apply -Required @('client_id', 'applied', 'selector', 'model', 'route_protocol', 'target_names', 'backup_dir_relative')
+        Assert-ManagedClientOutputKeys -Value $apply -Required @('client_id', 'applied', 'selector', 'model', 'route_protocol', 'target_names', 'backup_dir_relative') -Optional @('restart_required')
         if ((Get-JsonProperty $apply 'applied' $false) -ne $true) {
             throw 'client_configuration_materializer_contradiction'
         }
