@@ -23,13 +23,14 @@ function loadDefaultSubagent() {
   const exported = {};
   new Function(
     "exports",
+    "officialFastVariants",
     `${js}
     exports.subagentCatalogSlug = subagentCatalogSlug;
     exports.listDefaultSubagentOptions = listDefaultSubagentOptions;
     exports.resolveSubagentEffort = resolveSubagentEffort;
     exports.formatSubagentEffort = formatSubagentEffort;
     exports.defaultSubagentSummary = defaultSubagentSummary;`,
-  )(exported);
+  )(exported, JSON.parse(fs.readFileSync(new URL("../../config/official_fast_variants.json", import.meta.url), "utf8")));
   return exported;
 }
 

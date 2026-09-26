@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 import re
 import secrets
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -107,6 +107,7 @@ SETTINGS_PATH = RUNTIME_CODEX_DIR / "proxy" / "settings.json"
 RESOLVED_MODEL_LIMITS_PATH = REPO_ROOT / "config" / "resolved_model_limits.json"
 RESOLVED_MODEL_LIMITS = load_resolved_model_limits(RESOLVED_MODEL_LIMITS_PATH)
 OFFICIAL_CATALOG_METADATA_PATH = REPO_ROOT / "config" / "official_model_catalog_metadata.json"
+OFFICIAL_FAST_VARIANTS_PATH = REPO_ROOT / "config" / "official_fast_variants.json"
 
 OLLAMA_MODELS_URL = "https://ollama.com/v1/models"
 OLLAMA_SHOW_URL = "https://ollama.com/api/show"
@@ -207,10 +208,10 @@ MINIMAL_OFFICIAL_MODEL: dict[str, Any] = {
 OFFICIAL_FAST_SERVICE_TIERS: list[dict[str, str]] = [
     {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
 ]
-OFFICIAL_GATEWAY_FAST_VARIANT_SLUGS = {
-    "gpt-6-astra-fast", "gpt-5.6-sol-fast", "gpt-5.6-terra-fast",
-    "gpt-5.6-luna-fast", "gpt-5.5-fast", "gpt-5.4-fast",
-}
+OFFICIAL_FAST_VARIANT_BASE_MODELS: dict[str, str] = json.loads(
+    OFFICIAL_FAST_VARIANTS_PATH.read_text(encoding="utf-8")
+)
+OFFICIAL_GATEWAY_FAST_VARIANT_SLUGS = frozenset(OFFICIAL_FAST_VARIANT_BASE_MODELS)
 
 OFFICIAL_MODEL_DEFAULTS: dict[str, dict[str, Any]] = {
     "gpt-5.5": {
@@ -450,6 +451,7 @@ def catalog_cache_dependency_paths() -> tuple[Path, ...]:
         POLICY_PATH,
         OFFICIAL_SEED_PATH,
         OFFICIAL_CATALOG_METADATA_PATH,
+        OFFICIAL_FAST_VARIANTS_PATH,
         RUNTIME_OFFICIAL_SEED_PATH,
         DIRECT_OFFICIAL_MODELS_CACHE_PATH,
         OLLAMA_FALLBACK_PATH,
@@ -764,7 +766,13 @@ def _catalog_models(payload: Any) -> list[dict[str, Any]]:
     models = payload.get("models")
     if not isinstance(models, list):
         return []
-    return [model for model in models if isinstance(model, dict)]
+    # Fast rows are regenerated from their base after planner overrides. They
+    # share its upstream identity but are never an independent override source.
+    return [
+        model for model in models
+        if isinstance(model, dict)
+        and not is_official_gateway_fast_variant_slug(str(model.get("slug", "")))
+    ]
 
 
 def _catalog_payload_shape_is_valid(
@@ -2156,6 +2164,39 @@ def is_official_gateway_fast_variant_slug(slug: str) -> bool:
     return canonical_model_id(slug) in OFFICIAL_GATEWAY_FAST_VARIANT_SLUGS
 
 
+def build_official_fast_variant(
+    base_model: Mapping[str, Any], fast_model: str, upstream_model: str,
+) -> dict[str, Any]:
+    model = deepcopy(dict(base_model))
+    model["slug"] = fast_model
+    model["display_name"] = f"{base_model.get('display_name', upstream_model)} Fast"
+    model["codex_proxy_metadata"] = {
+        **model.get("codex_proxy_metadata", {}),
+        "provider": "openai",
+        "upstream_model": upstream_model,
+        "service_tier": "priority",
+    }
+    return model
+
+
+def project_static_fast_variants(catalog: dict[str, Any]) -> None:
+    """Keep spawnable aliases in Codex's offline catalog, out of its picker."""
+    models = [
+        model for model in catalog["models"]
+        if not is_official_gateway_fast_variant_slug(str(model.get("slug", "")))
+    ]
+    by_slug = {model["slug"]: model for model in models}
+    for fast_model, upstream_model in OFFICIAL_FAST_VARIANT_BASE_MODELS.items():
+        base = by_slug.get(upstream_model)
+        if base is None:
+            continue
+        model = build_official_fast_variant(base, fast_model, upstream_model)
+        model["visibility"] = "hide"
+        stamp_catalog_owner_metadata(model)
+        models.append(model)
+    catalog["models"] = models
+
+
 def official_sort_keys(model_id: str) -> tuple[str, str]:
     key = canonical_model_id(model_id)
     prefix = f"{OFFICIAL_PROXY_PROVIDER_ALIAS}/"
@@ -2793,12 +2834,13 @@ def build_codex_catalog(
         models.append(model)
         seen_slugs.add(slug)
 
-    return {
+    catalog = {
         "fetched_at": fetched_at or utc_now_iso(),
         "client_version": client_version,
         "visibility_diagnostics": visibility_diagnostics,
         "models": models,
     }
+    return catalog
 
 
 def diff_model_state(previous: Iterable[str], current: Iterable[str]) -> dict[str, list[str]]:
@@ -3018,7 +3060,11 @@ def sync_catalog(*, max_age_seconds: int = 0, offline: bool = False) -> dict[str
         catalog_overrides,
         override_diagnostics,
     )
-    visible_slugs = [str(model["slug"]) for model in catalog["models"] if model.get("slug")]
+    project_static_fast_variants(catalog)
+    visible_slugs = [
+        str(model["slug"]) for model in catalog["models"]
+        if model.get("slug") and model.get("visibility") == "list"
+    ]
     previous_visible_slugs = load_previous_visible_models(GENERATED_STATE_PATH)
     diff = diff_model_state(previous_visible_slugs, visible_slugs)
     state = {

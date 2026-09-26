@@ -20,10 +20,15 @@ const moduleExports = {};
 const wrappedModule = new Function(
   "exports",
   "normalizeOfficialModelId",
+  "officialFastVariants",
   jsOutput +
     "\nexports.mergeOfficialModelSources = mergeOfficialModelSources; exports.filterCodexVisibleOfficialModels = filterCodexVisibleOfficialModels; exports.officialCollaborationVersionOptions = officialCollaborationVersionOptions;",
 );
-wrappedModule(moduleExports, (value) => value.trim().replace(/^openai\//, ""));
+wrappedModule(
+  moduleExports,
+  (value) => value.trim().replace(/^openai\//, ""),
+  JSON.parse(await readFile(new URL("../../config/official_fast_variants.json", import.meta.url), "utf8")),
+);
 
 const { mergeOfficialModelSources, officialCollaborationVersionOptions } = moduleExports;
 

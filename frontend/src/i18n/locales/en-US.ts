@@ -69,6 +69,7 @@ const enUS = {
   "defaultSubagentModel": "Model",
   "defaultSubagentEffort": "Effort",
   "defaultSubagentFastOn": "On",
+  "defaultSubagentFast": "Fast",
   "defaultSubagentFastOff": "Off",
   "savingDefaultSubagent": "Saving default subagent…",
   "defaultSubagentSaved": "Default subagent saved. Restart Codex to apply.",

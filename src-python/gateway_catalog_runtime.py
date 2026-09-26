@@ -36,6 +36,8 @@ from catalog_sync import (
     GENERATED_CATALOG_PATH,
     LEGACY_GENERATED_CATALOG_PATH,
     POLICY_PATH,
+    OFFICIAL_FAST_VARIANT_BASE_MODELS,
+    build_official_fast_variant,
     existing_generated_catalog_path,
     known_official_model_ids,
     official_short_display_name,
@@ -129,14 +131,7 @@ class CatalogFacts:
     ollama_cloud_alias_prefix: str = "ollama-cloud/"
     official_fast_variant_service_tier: str = "priority"
     official_fast_variant_base_models: Mapping[str, str] = field(
-        default_factory=lambda: {
-            "gpt-6-astra-fast": "gpt-6-astra",
-            "gpt-5.6-sol-fast": "gpt-5.6-sol",
-            "gpt-5.6-terra-fast": "gpt-5.6-terra",
-            "gpt-5.6-luna-fast": "gpt-5.6-luna",
-            "gpt-5.5-fast": "gpt-5.5",
-            "gpt-5.4-fast": "gpt-5.4",
-        }
+        default_factory=lambda: dict(OFFICIAL_FAST_VARIANT_BASE_MODELS)
     )
     official_fast_variant_display_names: Mapping[str, str] = field(
         default_factory=lambda: {
@@ -1261,20 +1256,11 @@ def catalog_with_official_fast_variants(catalog: dict[str, Any]) -> dict[str, An
         base_model = by_slug.get(upstream_model) or by_slug.get(legacy_base_slug)
         if not isinstance(base_model, Mapping) or fast_model in by_slug:
             continue
-        fast_entry = deepcopy(dict(base_model))
-        fast_entry["slug"] = fast_model
+        fast_entry = build_official_fast_variant(base_model, fast_model, upstream_model)
         fast_entry["display_name"] = _facts().official_fast_variant_display_names.get(
             fast_model, f"{base_model.get('display_name', upstream_model)} Fast"
         )
-        metadata = dict(fast_entry.get("codex_proxy_metadata", {}))
-        metadata.update(
-            {
-                "provider": "openai",
-                "upstream_model": upstream_model,
-                "service_tier": _facts().official_fast_variant_service_tier,
-            }
-        )
-        fast_entry["codex_proxy_metadata"] = metadata
+        fast_entry["codex_proxy_metadata"]["service_tier"] = _facts().official_fast_variant_service_tier
         models.append(fast_entry)
         by_slug[fast_model] = fast_entry
     return catalog

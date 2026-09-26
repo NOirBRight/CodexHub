@@ -69,6 +69,7 @@ const zhCN = {
   "defaultSubagentModel": "模型",
   "defaultSubagentEffort": "推理强度",
   "defaultSubagentFastOn": "开启",
+  "defaultSubagentFast": "快速模式",
   "defaultSubagentFastOff": "关闭",
   "savingDefaultSubagent": "正在保存默认子代理…",
   "defaultSubagentSaved": "默认子代理已保存。请重启 Codex 使其生效。",

@@ -1125,13 +1125,27 @@ class CatalogSyncTests(unittest.TestCase):
                 managed = json.loads(paths["MANAGED_CATALOG_BASELINE_PATH"].read_text())
                 effective = json.loads(paths["GENERATED_CATALOG_PATH"].read_text())
                 self.assertEqual([row["multi_agent_version"] for row in managed["models"]], ["v2", "v2"])
-                self.assertEqual([row["multi_agent_version"] for row in effective["models"]], ["v1", "v1"])
+                self.assertEqual([row["multi_agent_version"] for row in effective["models"]], ["v1"] * 4)
+                by_slug = {row["slug"]: row for row in effective["models"]}
+                for base_slug in ("gpt-5.6-luna", "gpt-5.5"):
+                    base = by_slug[base_slug]
+                    fast = by_slug[f"{base_slug}-fast"]
+                    self.assertEqual(fast["visibility"], "hide")
+                    self.assertEqual(fast["codex_proxy_metadata"]["service_tier"], "priority")
+                    self.assertEqual(fast["codex_proxy_metadata"]["upstream_model"], base_slug)
+                    # Codex's static child lookup must inherit the full base
+                    # contract, including user-selected collaboration version.
+                    identity_fields = {"slug", "display_name", "visibility", "codex_proxy_metadata"}
+                    self.assertEqual(
+                        {key: value for key, value in fast.items() if key not in identity_fields},
+                        {key: value for key, value in base.items() if key not in identity_fields},
+                    )
             # Clear through the same sidecar contract as the model-details command.
             paths["CATALOG_OVERRIDES_PATH"].write_text(json.dumps({"schema_version": 1, "overrides": []}), encoding="utf-8")
             effective["models"] = managed["models"]
             paths["GENERATED_CATALOG_PATH"].write_text(json.dumps(effective), encoding="utf-8")
             catalog_sync.sync_catalog()
-            self.assertEqual([row["multi_agent_version"] for row in json.loads(paths["GENERATED_CATALOG_PATH"].read_text())["models"]], ["v2", "v2"])
+            self.assertEqual([row["multi_agent_version"] for row in json.loads(paths["GENERATED_CATALOG_PATH"].read_text())["models"]], ["v2"] * 4)
             self.assertEqual(catalog_sync.PINNED_OFFICIAL_CATALOG_METADATA["gpt-5.6-luna"]["multi_agent_version"], "v1")
             self.assertIsNone(catalog_sync.PINNED_OFFICIAL_CATALOG_METADATA["gpt-5.5"]["multi_agent_version"])
 

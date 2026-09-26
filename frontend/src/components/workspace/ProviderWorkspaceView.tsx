@@ -900,7 +900,7 @@ export function DefaultSubagentPicker({
                   commitIfChanged(nextModel, draftEffort);
                 }}
               >
-                <span>Fast</span>
+                <span>{t("workspace.defaultSubagentFast")}</span>
                 <span>
                   {t(activeSelected?.fast
                     ? "workspace.defaultSubagentFastOn"

@@ -1,5 +1,6 @@
 import { normalizeOfficialModelId } from "./settings";
 import type { Model } from "./types";
+import officialFastVariants from "../../../config/official_fast_variants.json";
 
 export const LEGACY_AUTOMATIC_OFFICIAL_MODEL_ORDER = [
   "gpt-5.5",
@@ -293,14 +294,7 @@ export function isCatalogModelListable(model: Model) {
 
 export function isOfficialGatewayFastVariant(model: Model) {
   const normalizedId = model.id.trim().replace(/^openai\//, "");
-  return [
-    "gpt-6-astra-fast",
-    "gpt-5.6-sol-fast",
-    "gpt-5.6-terra-fast",
-    "gpt-5.6-luna-fast",
-    "gpt-5.5-fast",
-    "gpt-5.4-fast",
-  ].includes(normalizedId);
+  return Object.prototype.hasOwnProperty.call(officialFastVariants, normalizedId);
 }
 
 export function officialModelSortKeys(id: string) {

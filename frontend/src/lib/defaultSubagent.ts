@@ -1,5 +1,6 @@
 import type { Model, Provider, Settings } from "./types";
 import { shortWireDisplayName } from "./wireDisplayName";
+import officialFastVariants from "../../../config/official_fast_variants.json";
 
 export const CODEX_SUBAGENT_EFFORTS = [
   "low",
@@ -87,14 +88,7 @@ export type DefaultSubagentOption = {
   speedVariant?: string;
 };
 
-const FAST_SUBAGENT_MODELS = new Set([
-  "gpt-6-astra",
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-  "gpt-5.6-luna",
-  "gpt-5.5",
-  "gpt-5.4",
-]);
+const FAST_SUBAGENT_MODELS = new Set(Object.values(officialFastVariants));
 
 export function subagentCatalogSlug(
   providerId: string,
