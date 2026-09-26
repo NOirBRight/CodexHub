@@ -8,6 +8,10 @@ CodexHub is a local model-routing utility for the Codex ecosystem. This glossary
 The user-facing local OpenAI-compatible HTTP service that exposes official Codex subscription models and configured third-party models through one endpoint.
 _Avoid_: Proxy, runtime proxy, local proxy
 
+**ChatGPT Web Runtime**:
+The CodexHub-managed local capability that connects a signed-in ChatGPT webpage to a selected Gateway model route. Its browser account is separate from the existing official Codex subscription credential.
+_Avoid_: Official account, API subscription, second Gateway
+
 **Vision Proxy**:
 The Gateway feature that lets a non-vision target model handle image requests by using a configured image-capable model to produce text visual context.
 _Avoid_: Image conversion, image workaround

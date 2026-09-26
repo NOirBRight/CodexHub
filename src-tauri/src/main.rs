@@ -6,6 +6,7 @@ mod app_updates;
 mod autostart;
 mod build_info;
 mod catalog;
+mod chatgpt_web;
 mod cli;
 mod codex_cli;
 mod codex_desktop;

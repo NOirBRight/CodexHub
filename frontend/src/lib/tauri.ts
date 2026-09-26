@@ -42,6 +42,7 @@ import type {
   UpstreamFormatProbeResult,
   UnifiedHistoryResult,
   UsageQueryWindow,
+  ChatGptWebStatus,
   XaiAuthStatus,
   XaiDeviceLogin,
   XaiUsageSnapshot,
@@ -400,6 +401,12 @@ export const api = {
     writeQuotaCache("xai", snapshot);
     return snapshot;
   },
+  chatgptWebStatus: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebStatus),
+  chatgptWebEnable: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebEnable),
+  chatgptWebStop: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebStop),
+  chatgptWebDisable: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebDisable),
+  chatgptWebOpenLogin: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebOpenLogin),
+  chatgptWebCloseLogin: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebCloseLogin),
 };
 
 export function messageFromError(error: unknown): string {

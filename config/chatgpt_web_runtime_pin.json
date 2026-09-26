@@ -1,0 +1,27 @@
+{
+  "component": "chatgpt-web-runtime",
+  "commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5",
+  "version": "6.1.1",
+  "license": "MIT",
+  "license_file": "docs/third-party/codex-chatgpt-web-LICENSE.txt",
+  "upstream_repository": "https://github.com/miuuyy/codex-chatgpt-web",
+  "product_entry": "codexhub-supervisor",
+  "rejected_entries": ["setup", "dev", "--replace-codex-route"],
+  "artifacts": {
+    "linux-x64": {
+      "filename": "codex-chatgpt-web-linux-amd64.tar.gz",
+      "url": "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.1/codex-chatgpt-web-linux-amd64.tar.gz",
+      "sha256": "e86371aa677722811c34e4ac9b8984a3859f24f57c5ad0e3e1d6014a96298531"
+    },
+    "linux-arm64": {
+      "filename": "codex-chatgpt-web-linux-arm64.tar.gz",
+      "url": "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.1/codex-chatgpt-web-linux-arm64.tar.gz",
+      "sha256": "06094b0c3e5e91ac87e31f91b27ebb3bf588acf33aa100a0c8e586becf8ebfb0"
+    },
+    "windows-x64": {
+      "filename": "codex-chatgpt-web-windows-amd64.zip",
+      "url": "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.1/codex-chatgpt-web-windows-amd64.zip",
+      "sha256": "88341bd2818894799be98f1283f64a2124de0f43193ee2dc1d2a774362ea59d5"
+    }
+  }
+}

@@ -158,6 +158,12 @@ macro_rules! desktop_command_registry {
             XaiLogout => "xai_logout" => $crate::xai_auth::xai_logout, true, true, true, false, NO_ALIASES;
             XaiUsageSnapshot => "xai_usage_snapshot" => $crate::xai_auth::xai_usage_snapshot, true, true, true, false, NO_ALIASES;
             XaiOpenVerificationUrl => "xai_open_verification_url" => $crate::xai_auth::xai_open_verification_url, true, true, true, false, NO_ALIASES;
+            ChatGptWebStatus => "chatgpt_web_status" => $crate::chatgpt_web::chatgpt_web_status, true, true, true, false, NO_ALIASES;
+            ChatGptWebEnable => "chatgpt_web_enable" => $crate::chatgpt_web::chatgpt_web_enable, true, true, true, false, NO_ALIASES;
+            ChatGptWebStop => "chatgpt_web_stop" => $crate::chatgpt_web::chatgpt_web_stop, true, true, true, false, NO_ALIASES;
+            ChatGptWebDisable => "chatgpt_web_disable" => $crate::chatgpt_web::chatgpt_web_disable, true, true, true, false, NO_ALIASES;
+            ChatGptWebOpenLogin => "chatgpt_web_open_login" => $crate::chatgpt_web::chatgpt_web_open_login, true, true, true, false, NO_ALIASES;
+            ChatGptWebCloseLogin => "chatgpt_web_close_login" => $crate::chatgpt_web::chatgpt_web_close_login, true, true, true, false, NO_ALIASES;
         }
     };
 }

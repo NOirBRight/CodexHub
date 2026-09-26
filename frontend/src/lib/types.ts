@@ -266,6 +266,38 @@ export interface XaiAuthStatus {
   signed_in: boolean;
 }
 
+export interface ChatGptWebStatus {
+  ok?: boolean;
+  ready: boolean;
+  restart_required: boolean;
+  disabled: boolean;
+  installed: boolean;
+  entry?: string;
+  upstream_executed?: boolean;
+  component: {
+    version: string;
+    commit: string;
+    pin: string;
+    compatible: boolean;
+    artifact_sha256?: string | null;
+    installed_sha256?: string | null;
+  };
+  login: { state: string; window: string; account_id?: string | null };
+  browser_smoke: { state: string };
+  tunnel: { state: string; detail?: string };
+  connector: { selectable: boolean };
+  process: {
+    pid?: number | null;
+    port?: number | null;
+    executable?: string | null;
+    private_home?: string | null;
+    running: boolean;
+    ownership: string;
+    listen_host?: string | null;
+  };
+  login_url?: string;
+}
+
 export interface XaiUsageSnapshot {
   signed_in?: boolean;
   limits: OpenAIUsageLimit[];

@@ -25,6 +25,7 @@ import {
   HeaderRow,
   IconButton,
 } from "./ProviderFormControls";
+import { ChatGptWebRuntimeCard } from "./ChatGptWebRuntimeCard";
 import { XaiLoginCard } from "./XaiLoginCard";
 import {
   applyAddProviderProbeResult,
@@ -45,6 +46,7 @@ import {
   applyPresetReasoningDefaults,
   bundledPresetFor,
   modelsMissingFromPreset,
+  runtimeCapability,
   subscriptionAuthAdapter,
 } from "../../lib/providerCatalog";
 import {
@@ -128,6 +130,8 @@ export function ProviderDetail({
   const subscriptionAuth =
     subscriptionAuthAdapter(provider) ?? subscriptionAuthAdapter(preset);
   const xaiSubscriptionAuth = subscriptionAuth === "xai_oauth";
+  const chatgptWebRuntime =
+    runtimeCapability(provider) === "chatgpt_web" || runtimeCapability(preset) === "chatgpt_web";
 
   useEffect(() => {
     setDraft(normalizedProvider);
@@ -498,6 +502,8 @@ export function ProviderDetail({
             </>
           }
         />
+
+        {chatgptWebRuntime ? <ChatGptWebRuntimeCard /> : null}
 
         {xaiSubscriptionAuth && !desktopTab ? null : (
           <div className="grid grid-cols-2 gap-2">

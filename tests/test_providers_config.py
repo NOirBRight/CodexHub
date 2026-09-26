@@ -1484,7 +1484,7 @@ enabled = true
 
         self.assertEqual(
             [provider.id for provider in providers],
-            ["ollama-cloud", "volc", "minimax-cn", "kimi-cn", "kimi", "commandcode", "opencode-go", "xai"],
+            ["ollama-cloud", "volc", "minimax-cn", "kimi-cn", "kimi", "commandcode", "opencode-go", "xai", "chatgpt-web"],
         )
         xai = next(provider for provider in providers if provider.id == "xai")
         grok46 = next(model for model in xai.models if model.id == "grok-4.6")
