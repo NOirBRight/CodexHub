@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from contextlib import closing
 import json
 import os
 import sqlite3
@@ -34,7 +35,7 @@ class ProxyEventLoggingTests(TestCase):
                     "ts": "2026-09-27T00:00:00Z", "event": "request_complete",
                     "request_id": request_id, **fields,
                 })
-            with sqlite3.connect(db_path) as connection:
+            with closing(sqlite3.connect(db_path)) as connection:
                 rows = dict(connection.execute("SELECT request_id, provider_id FROM gateway_requests"))
 
         self.assertEqual(rows, {"old": "openai", "route": "openai", "custom": "custom"})
