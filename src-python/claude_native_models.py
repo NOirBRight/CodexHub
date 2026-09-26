@@ -37,13 +37,15 @@ def concrete_executable(binary: Path) -> Path:
     return found
 
 
-def cli_command(binary: Path, arguments: list[str]) -> list[str]:
+def cli_command(binary: Path, arguments: list[str]) -> list[str] | str:
     command = [str(binary), *arguments]
     if os.name == 'nt' and binary.suffix.lower() in ('.cmd', '.bat'):
         if any(any(char in arg for char in '\"%!\r\n') for arg in command):
             raise ValueError('Unsafe Claude batch shim path')
         shell = str(Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'cmd.exe')
-        return [shell, '/d', '/s', '/c', '"' + ' '.join('"' + arg + '"' for arg in command) + '"']
+        payload = '"' + ' '.join('"' + arg + '"' for arg in command) + '"'
+        # cmd parses this quoting itself; list2cmdline would escape it again.
+        return f'"{shell}" /d /s /c {payload}'
     return command
 
 
