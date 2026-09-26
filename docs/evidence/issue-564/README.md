@@ -1,5 +1,27 @@
 # Claude coexistence live candidate evidence (#564)
 
+## Live source switching candidate `b1ce405a` (2026-09-26)
+
+Real Claude Code 2.1.283 and the unmodified Linux source Gateway passed three
+isolated live-upstream runs: **18 tool/recall turns and 48 successful Gateway
+requests**. They cover Opus 5.5, Codex Sol/Luna Responses, and DeepSeek Flash
+Responses/Chat/Messages, with return to native Opus. Every turn retained its
+session marker and completed a fresh Read roundtrip. Manual compaction and
+explicit same-session native resume also passed. The first two runs used low
+effort; the third selected max effort without the forced thinking-disable
+environment override. Seven watched operator configuration/credential files
+were unchanged, and all temporary runtime data was removed.
+
+- [Main switching, manual compaction and resume](live-switch-main-b1ce405a.json)
+- [Luna and third-party Responses](live-switch-responses-b1ce405a.json)
+- [Max-effort switching across all protocols](live-switch-max-effort-b1ce405a.json)
+- [Method, bounds and limitations](../../research/2026-09-26-claude-model-switch-compatibility.md#real-upstream-qualification-on-2026-09-26)
+
+These runs qualify the named source routes; they do not qualify a new package,
+Windows, the Usage Statistics UI, every tool/provider, automatic compaction,
+or too-long recovery. No package was published or installed for this delta.
+The older packaged evidence below remains bound to its named SHA.
+
 ## Reviewed candidate `fae658a2`
 
 The reviewed **code** SHA is `fae658a2c523ec8431ba0959bf4da22756903bb3`.

@@ -122,8 +122,9 @@ Code candidate: `1957e35a5754ea2b96993af0d49cdf94ea4acecf`.
   review found classifier context reaching third-party Messages routes. Both
   were fixed in this candidate. The external Messages regression now asserts
   context and beta omission while preserving native subscription passthrough.
-- No package, installation, or live-provider qualification was performed for
-  this new code candidate.
+- At the initial code-review checkpoint, no package, installation, or
+  live-provider qualification had been performed for this code candidate.
+  The later live runs below qualify the named models on the same source code.
 - Delta-only Spec re-review passed with no confirmed blockers. The classifier
   isolation rule is a design conclusion documented by this research note, not
   an explicit classifier-specific clause in #559/#73.
@@ -131,3 +132,65 @@ Code candidate: `1957e35a5754ea2b96993af0d49cdf94ea4acecf`.
   event follows the existing relay event style and lacks request correlation;
   a future telemetry consistency change could associate those header-only
   diagnostics with request details.
+
+## Real upstream qualification on 2026-09-26
+
+The user requested complete real switching tests in isolation. The unmodified
+production source Gateway at `b1ce405a1fab287d6e18d3c56dcb4b35d8aa1450` and real
+Claude Code **2.1.283** passed three bounded runs against live upstreams:
+
+| Run | Same-process switching sequence | Result |
+| --- | --- | --- |
+| Main | Opus 5.5 → Codex Sol Responses → DeepSeek Flash Chat → DeepSeek Flash Messages → Opus 5.5 | All five turns passed |
+| Additional protocols | Opus 5.5 → Codex Luna Responses → DeepSeek Flash Responses → Opus 5.5 | All four turns passed |
+| Max effort | Opus 5.5 → Luna Responses → Sol Responses → DeepSeek Responses → DeepSeek Chat → DeepSeek Messages → Opus 5.5 | All seven turns passed |
+
+Every turn used a newly generated random file marker and the CLI's real `Read`
+tool. The original session marker appeared only in the first prompt; later
+prompts requested recall without supplying it. All turns returned both the
+original marker and new file content. CLI tool-use/result IDs paired correctly,
+and Gateway completion events recorded the expected model/provider, executed
+protocol, and HTTP 200. DeepSeek Responses completed as Responses, with no
+protocol fallback. This is client-visible tool pairing and a successful live
+roundtrip, not a raw upstream-body capture.
+
+The main run then issued `/compact`, observed a real `compact_boundary`, and
+successfully recalled the original marker while reading another new file. The
+CLI was terminated and restarted with `--resume <same-session> --model
+claude-opus-5-5`; that turn also recalled the marker and completed a fresh `Read`.
+The compaction request and both follow-up turns completed on native Opus 5.5.
+
+The first two runs requested low effort with thinking disabled in the CLI
+environment. The third run removed that override and started the CLI with
+`--effort max`; it also passed every switch, marker recall and Read roundtrip.
+This records the client selection and observed behavior, not the providers'
+internal reasoning amount or identical effort semantics across providers.
+
+The main run made **18 Gateway requests**, the supplemental run **12**, and the
+max-effort run **18**. All **48 requests** completed with HTTP 200 and no recorded request errors.
+Counts include model-validation and tool-continuation requests. Each run was
+bounded to 900 seconds overall, 120 seconds per turn, a watchdog on 32 observed
+Gateway request IDs, and 2,048 requested output tokens per request. Read-only
+restricted CLI mode and strict MCP configuration limited available tools to
+`Read` within the temporary working directory.
+
+All runs used new temporary HOME/config/work/runtime directories, random
+loopback ports and access-token-only subscription snapshots. Refresh tokens
+were excluded. Only the temporary provider configuration changed when choosing
+DeepSeek's explicit protocol. Seven watched operator credential/configuration
+files retained identical fingerprints; the installed Gateway was untouched.
+Temporary credentials, transcripts and files were removed when each run ended.
+No private conversation, credential value, prompt text, tool argument or raw
+session ID is retained in the committed evidence.
+
+Sanitized evidence:
+
+- [Main switching, compaction and resume](../evidence/issue-564/live-switch-main-b1ce405a.json)
+- [Luna and third-party Responses](../evidence/issue-564/live-switch-responses-b1ce405a.json)
+- [Max-effort switching across all three protocols](../evidence/issue-564/live-switch-max-effort-b1ce405a.json)
+
+This qualifies the named live models and paths on Linux source. Automatic
+compaction, too-long recovery, pinned/inherited subagents, cancellation, images,
+provider-specific signed/encrypted thinking replay, all other providers, Windows,
+and packaged-installation behavior are not claimed by these runs. No new
+production source fix was needed, and no package was published or installed.
