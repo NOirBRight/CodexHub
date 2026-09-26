@@ -105,3 +105,29 @@ External proxy traffic was directed to an unavailable loopback endpoint. The
 operator's Claude settings, credentials, sessions and installed Gateway were not
 changed. The first attempt exposed the buffered-SSE defect described above; after
 the fix both model-check controls and all four generation results succeeded.
+
+### Reviewed source candidate
+
+Code candidate: `1957e35a5754ea2b96993af0d49cdf94ea4acecf`.
+
+- Full Linux Python core:
+  `./scripts/codexhub-python.sh -m pytest -q --ignore=tests/test_real_client_e2e.py`
+  — **3355 passed, 189 skipped, 283 subtests passed**, 105.69 seconds.
+- Focused exchange/transport/switching checks passed; the final external Messages
+  HTTP tests also prove unknown/malformed classifier controls return 400 before
+  any upstream request.
+- `git diff --check` passed. The report-only quality gate completed successfully
+  with existing findings and no parse errors.
+- Standards review found a missing standalone beta adaptation diagnostic; Spec
+  review found classifier context reaching third-party Messages routes. Both
+  were fixed in this candidate. The external Messages regression now asserts
+  context and beta omission while preserving native subscription passthrough.
+- No package, installation, or live-provider qualification was performed for
+  this new code candidate.
+- Delta-only Spec re-review passed with no confirmed blockers. The classifier
+  isolation rule is a design conclusion documented by this research note, not
+  an explicit classifier-specific clause in #559/#73.
+- Delta-only Standards review found no confirmed blocker. The standalone beta
+  event follows the existing relay event style and lacks request correlation;
+  a future telemetry consistency change could associate those header-only
+  diagnostics with request details.
