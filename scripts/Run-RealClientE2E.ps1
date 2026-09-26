@@ -40,6 +40,9 @@ param(
 
     [string]$UpstreamProxy = '',
 
+    # Explicit snapshot staged in this run's isolation root; never discover host state.
+    [string]$OfficialCatalog = '',
+
     [int]$TimeoutSeconds = 180,
 
     [int]$ManualEvidenceTimeoutSeconds = 900,
@@ -583,6 +586,7 @@ function Invoke-RunnerSupervisor {
         OmpPath = $OmpPath
         CliOnly = [bool]$CliOnly
         UpstreamProxy = $UpstreamProxy
+        OfficialCatalog = $OfficialCatalog
         TimeoutSeconds = $TimeoutSeconds
         ManualEvidenceTimeoutSeconds = $ManualEvidenceTimeoutSeconds
         OverallTimeoutSeconds = $OverallTimeoutSeconds
@@ -3270,7 +3274,7 @@ try {
         'ManagedClientConfigSha', 'LunaModel', 'ThirdPartyModel', 'DeepSeekCredentials', 'OutputDirectory',
         'HostEnvironmentManifest', 'TestWindowsInstallMetadataFixture',
         'CodexDesktopPath', 'CodexCliPath', 'ZCodePath', 'OpenCodePath',
-        'PiPath', 'OmpPath', 'CliOnly', 'UpstreamProxy', 'TimeoutSeconds', 'ManualEvidenceTimeoutSeconds',
+        'PiPath', 'OmpPath', 'CliOnly', 'UpstreamProxy', 'OfficialCatalog', 'TimeoutSeconds', 'ManualEvidenceTimeoutSeconds',
         'OverallTimeoutSeconds'
     ) -Failure 'preflight_supervisor_arguments_invalid'
     $CandidateSha = [string]$forwardedArguments.CandidateSha
@@ -3291,6 +3295,7 @@ try {
     $OmpPath = [string]$forwardedArguments.OmpPath
     $CliOnly = [bool]$forwardedArguments.CliOnly
     $UpstreamProxy = [string]$forwardedArguments.UpstreamProxy
+    $OfficialCatalog = [string]$forwardedArguments.OfficialCatalog
     $TimeoutSeconds = [int]$forwardedArguments.TimeoutSeconds
     $ManualEvidenceTimeoutSeconds = [int]$forwardedArguments.ManualEvidenceTimeoutSeconds
     $OverallTimeoutSeconds = [int]$forwardedArguments.OverallTimeoutSeconds
@@ -3419,6 +3424,16 @@ $script:CandidatePythonPath = Resolve-E2EPythonPath -Executable $DebugBuild -Fai
 $script:MaterializerPythonPath = Resolve-E2EPythonPath -Executable $ManagedClientConfigBuild -FailureClassification 'preflight_materializer_python_invalid'
 foreach ($isolatedInput in @($HostEnvironmentManifest, $accountPath, $accountAuthPath, $credentialPath, $gatewayConfigPath)) {
     Assert-IsolatedRegularFile -Path $isolatedInput -IsolationRoot $isolationRoot
+}
+$officialCatalogHash = $null
+if ($OfficialCatalog) {
+    if (-not (Test-Path -LiteralPath $OfficialCatalog -PathType Leaf)) {
+        throw 'preflight_official_catalog_invalid'
+    }
+    Assert-IsolatedRegularFile -Path $OfficialCatalog -IsolationRoot $isolationRoot
+    $OfficialCatalog = (Resolve-Path -LiteralPath $OfficialCatalog).Path
+    [void](Read-JsonObject -Path $OfficialCatalog -Failure 'preflight_official_catalog_invalid')
+    $officialCatalogHash = Get-Sha256 -Path $OfficialCatalog
 }
 $script:WindowsInstallMetadata = $null
 if ($TestWindowsInstallMetadataFixture) {
@@ -3617,8 +3632,25 @@ try {
     Set-RunnerPhase -Phase 'candidate_startup'
     $candidateStartupBudgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
     $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    [void](Invoke-CandidateOfficialBootstrap -Executable $DebugBuild -CandidateRoot $candidateRoot -Environment $candidateEnvironment -TimeoutSeconds $TimeoutSeconds -PythonPath $script:CandidatePythonPath)
     $candidateCatalogPath = Join-Path $script:CandidateRuntimeRoot 'model-catalogs\codexhub-model-catalog.json'
+    if ($OfficialCatalog) {
+        [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $candidateCatalogPath))
+        Copy-Item -LiteralPath $OfficialCatalog -Destination $candidateCatalogPath
+        Assert-IsolatedRegularFile -Path $candidateCatalogPath -IsolationRoot $isolationRoot
+        if ((Get-Sha256 -Path $candidateCatalogPath) -cne $officialCatalogHash -or
+            (Get-Sha256 -Path $OfficialCatalog) -cne $officialCatalogHash) {
+            throw 'preflight_official_catalog_changed'
+        }
+        # Production materialization and live /models checks still validate the exact model.
+        Write-JsonFile -Path (Join-Path $artifactRoot 'official-catalog-input.json') -Value ([ordered]@{
+            mode = 'explicit_snapshot'
+            sha256 = $officialCatalogHash
+        })
+        [void]$script:FailureArtifacts.Add('artifacts/official-catalog-input.json')
+    }
+    else {
+        [void](Invoke-CandidateOfficialBootstrap -Executable $DebugBuild -CandidateRoot $candidateRoot -Environment $candidateEnvironment -TimeoutSeconds $TimeoutSeconds -PythonPath $script:CandidatePythonPath)
+    }
     $catalogWait = [System.Diagnostics.Stopwatch]::StartNew()
     while (-not (Test-Path -LiteralPath $candidateCatalogPath -PathType Leaf) -and
         $catalogWait.ElapsedMilliseconds -lt 2000) {
@@ -3826,7 +3858,7 @@ try {
             automated_case_count = $automatedCases.Count
         }
         cases = $caseResults
-        artifacts = @($caseResults | ForEach-Object { $_.artifact })
+        artifacts = @($caseResults | ForEach-Object { $_.artifact }) + @(if ($OfficialCatalog) { 'artifacts/official-catalog-input.json' })
     }
     Set-RunnerPhase -Phase 'summary'
     Write-JsonFile -Path $summaryPath -Value $summary

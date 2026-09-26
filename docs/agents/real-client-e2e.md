@@ -277,7 +277,7 @@ escape, reparse points or junctions, hard links, and an over-bound tree fail
 closed. This lookup is generic: operators and the runner must not infer a
 client-specific candidate source directory from the target name.
 
-The runner first invokes the candidate's production `refresh-models` command
+By default, the runner first invokes the candidate's production `refresh-models` command
 with the isolated `CODEXHUB_RUNTIME_HOME`, isolated
 `CODEXHUB_CODEX_TARGET_HOME`, dedicated auth input, and the exact
 version-verified Codex CLI path. This publishes the candidate-managed Official
@@ -285,9 +285,24 @@ catalog at `CODEXHUB_RUNTIME_HOME/model-catalogs/codexhub-model-catalog.json`
 and resolved context budget without discovering or copying a host catalog,
 session, or configuration. The runner never reads
 `CODEXHUB_RUNTIME_HOME/proxy/model-catalogs` or discovers a host catalog.
-Operators must not seed this state by hand or hard-code a context limit.
+Operators must not fabricate catalog state or hard-code a context limit.
 
-After `refresh-models` succeeds, the runner contract-probes the actual passed
+For isolated CLI qualification while the operator Desktop remains running,
+`-OfficialCatalog <output>/isolated/config/official-catalog.json` accepts an
+explicit, unmodified current Official catalog snapshot, matching Linux's
+`--catalog` input. Stage a copy from the recorded qualification input; the runner
+never discovers operator state. The input must be a regular file beneath this
+run's isolation root, with no reparse path, and valid JSON. The runner copies
+it into the fresh candidate runtime and verifies both hashes. Its mode and
+SHA-256 are recorded in `artifacts/official-catalog-input.json`, linked from
+the summary. Production materialization must still resolve the exact Official
+model and its context budget; every live availability, route, tool, streaming,
+and correlation check remains required. There is no fallback on snapshot
+failure. This mode qualifies CLI routing with an explicit catalog input; it
+does **not** qualify `refresh-models` or bypass Desktop lifecycle protection.
+Keep the snapshot's origin and the separate refresh result in the evidence.
+
+After catalog preparation succeeds, the runner contract-probes the actual passed
 `-ManagedClientConfigBuild` for Codex, OpenCode, ZCode, Pi, and OMP across both
 Official Luna selections. Each probe performs `preview`/`apply`/`readback`
 in the final case-local root, passing the explicit candidate runtime catalog

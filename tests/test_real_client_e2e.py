@@ -419,6 +419,7 @@ def _run(
     cli_only: bool = False,
     deepseek_credentials: Path | None = None,
     upstream_proxy: str | None = None,
+    official_catalog: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     output, isolation, debug_build, materializer_build, host_manifest = _prepare_run(
         tmp_path, candidate_sha, materializer_sha
@@ -541,6 +542,8 @@ def _run(
     command.extend(("-TimeoutSeconds", str(timeout_seconds)))
     if cli_only:
         command.append("-CliOnly")
+    if official_catalog is not None:
+        command.extend(("-OfficialCatalog", str(official_catalog)))
     if upstream_proxy is not None:
         command.extend(("-UpstreamProxy", upstream_proxy))
     command.extend(("-ManualEvidenceTimeoutSeconds", str(manual_timeout_seconds)))
@@ -2328,7 +2331,7 @@ def test_release_matrix_uses_deepseek_native_responses(tmp_path):
             expected_provider = (
                 "deepseek"
                 if event["model_canonical"] == THIRD_PARTY_MANAGED_MODEL
-                else "official"
+                else OFFICIAL_CODEX_CASE["diagnostic_provider_id"]
             )
             assert event["provider_id"] == expected_provider
 
@@ -3108,6 +3111,51 @@ def test_dynamic_client_port_is_rejected_before_candidate_or_gui(tmp_path):
     summary = json.loads((tmp_path / "output" / "summary.json").read_text())
     assert summary["failure_classification"] == "preflight_gateway_port_unsafe"
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_explicit_catalog_is_copied_without_refresh_and_validated(tmp_path, valid):
+    catalog = tmp_path / "output" / "isolated" / "config" / "official-catalog.json"
+    content = '{"candidate-managed": true}' if valid else '{}'
+
+    def prepare(_output, _isolation, debug_build):
+        catalog.write_text(content, encoding="utf-8")
+        script = debug_build.read_text(encoding="utf-8")
+        debug_build.write_text(
+            script.replace("@echo off", '@echo off\nif /I "%~1"=="refresh-models" exit /b 89', 1),
+            encoding="utf-8",
+        )
+
+    result = _run(tmp_path, cli_only=True, official_catalog=catalog, mutate=prepare)
+    assert catalog.read_text(encoding="utf-8") == content
+    if not valid:
+        assert result.returncode != 0
+        summary = json.loads((tmp_path / "output/summary.json").read_text(encoding="utf-8-sig"))
+        assert summary["failure_classification"] == "client_configuration_materializer_failed"
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    copied = tmp_path / "output/isolated/work/candidate/runtime/model-catalogs/codexhub-model-catalog.json"
+    assert copied.read_bytes() == catalog.read_bytes()
+    assert copied.stat().st_ino != catalog.stat().st_ino
+    provenance = json.loads((tmp_path / "output/artifacts/official-catalog-input.json").read_text(encoding="utf-8-sig"))
+    assert provenance == {"mode": "explicit_snapshot", "sha256": "sha256:" + hashlib.sha256(catalog.read_bytes()).hexdigest()}
+    summary = json.loads((tmp_path / "output/summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["counts"]["passed_count"] == CLI_CASE_COUNT
+    assert "artifacts/official-catalog-input.json" in summary["artifacts"]
+
+
+@pytest.mark.parametrize("kind", ["outside", "missing", "invalid_json"])
+def test_explicit_catalog_rejects_unsafe_or_invalid_input(tmp_path, kind):
+    catalog = tmp_path / ("host-catalog.json" if kind == "outside" else "output/isolated/config/official-catalog.json")
+
+    def prepare(_output, _isolation, _debug):
+        if kind != "missing":
+            catalog.write_text("not-json" if kind == "invalid_json" else '{"candidate-managed": true}', encoding="utf-8")
+
+    result = _run(tmp_path, cli_only=True, official_catalog=catalog, mutate=prepare)
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output/summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["failure_classification"] == ("preflight_host_session_reuse_detected" if kind == "outside" else "preflight_official_catalog_invalid")
 
 
 def test_candidate_bootstraps_official_context_budget_before_gateway_start(tmp_path):
