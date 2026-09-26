@@ -223,9 +223,9 @@ def relay_inbound_anthropic_sse(
                     continue
             if isinstance(payload, Mapping):
                 observed_usage = (
-                    gateway_events._usage_from_response_event(payload)
+                    gateway_events.usage_from_response_event(payload)
                     if responses_converter is not None
-                    else gateway_events._usage_from_payload(payload)
+                    else gateway_events.usage_from_payload(payload)
                 )
                 if observed_usage is not None:
                     gateway_events.capture_usage(

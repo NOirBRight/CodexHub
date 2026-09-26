@@ -119,7 +119,7 @@ def _contract_cases() -> tuple[Case, ...]:
                 str(client_names[client_kind]),
                 str(provider_names[provider_id]),
                 provider_id,
-                "openai" if provider_id == "official" else str(raw["diagnostic_provider_id"]),
+                str(raw["diagnostic_provider_id"]),
                 str(models["managed"]),
                 str(models["selector"]),
                 str(models["canonical"]),

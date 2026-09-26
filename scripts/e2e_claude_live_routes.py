@@ -938,7 +938,13 @@ def run_packaged_usage_statistics_window(
                 failure_class, "packaged CodexHub window did not appear",
             )
 
-        app_x, app_y, app_width, app_height = window_geometry(window_id)
+        x11.move_resize_raise(window_id, 0, 0, 1280, 960)
+        deadline = time.monotonic() + 5
+        while True:
+            app_x, app_y, app_width, app_height = window_geometry(window_id)
+            if app_width >= 1280 and app_height >= 960 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
 
         def capture_text() -> str:
             screenshot.unlink(missing_ok=True)

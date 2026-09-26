@@ -55,7 +55,7 @@
     {
       "client": "codex_cli",
       "provider_id": "official",
-      "diagnostic_provider_id": "official",
+      "diagnostic_provider_id": "openai",
       "models": {
         "managed": "gpt-6-luna",
         "selector": "gpt-6-luna",
@@ -89,7 +89,7 @@
     {
       "client": "opencode",
       "provider_id": "official",
-      "diagnostic_provider_id": "official",
+      "diagnostic_provider_id": "openai",
       "models": {
         "managed": "openai/gpt-6-luna",
         "selector": "codexhub-openai/gpt-6-luna",
@@ -126,7 +126,7 @@
     {
       "client": "pi",
       "provider_id": "official",
-      "diagnostic_provider_id": "official",
+      "diagnostic_provider_id": "openai",
       "models": {
         "managed": "openai/gpt-6-luna",
         "selector": "codexhub-openai/gpt-6-luna",
@@ -163,7 +163,7 @@
     {
       "client": "omp",
       "provider_id": "official",
-      "diagnostic_provider_id": "official",
+      "diagnostic_provider_id": "openai",
       "models": {
         "managed": "openai/gpt-6-luna",
         "selector": "codexhub-openai/gpt-6-luna",

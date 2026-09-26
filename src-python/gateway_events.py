@@ -273,11 +273,14 @@ def _usage_from_json_body(body: bytes) -> Mapping[str, Any] | None:
     return _usage_from_payload(payload)
 
 
-def _usage_from_response_event(event: Mapping[str, Any]) -> Mapping[str, Any] | None:
+def usage_from_response_event(event: Mapping[str, Any]) -> Mapping[str, Any] | None:
     if event.get("type") != "response.completed":
         return None
     response = event.get("response")
-    return _usage_from_payload(response)
+    return usage_from_payload(response)
+
+
+_usage_from_response_event = usage_from_response_event
 
 
 def capture_usage(
