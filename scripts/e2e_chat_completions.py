@@ -690,6 +690,7 @@ def debug_candidate_paths() -> tuple[Path, ...]:
 def build_candidate() -> Path:
     env = os.environ.copy()
     env["CODEXHUB_BUILD_FLAVOR"] = "debug"
+    env["CARGO_TARGET_DIR"] = str(ROOT / "src-tauri" / "target")
     result = _run(
         ["cargo", "build", "--locked", "--features", "debug-diagnostics"],
         cwd=ROOT / "src-tauri",
