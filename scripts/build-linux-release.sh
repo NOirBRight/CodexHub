@@ -171,7 +171,8 @@ fi
 (
   cd "$repo_root/src-tauri"
   unset TAURI_SIGNING_PRIVATE_KEY
-  cargo tauri signer sign --private-key-path "$private_key_path" "$appimage_dst"
+  cargo tauri signer sign --private-key-path "$private_key_path" \
+    --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" "$appimage_dst"
 )
 
 deb_version="$(dpkg-deb -f "$deb_dst" Version)"
