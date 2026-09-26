@@ -51,7 +51,7 @@ def cli_command(binary: Path, arguments: list[str]) -> list[str] | str:
 
 def discover(binary: Path, config: Path) -> dict:
     source = config / 'settings.json'
-    current = json.loads(source.read_text()) if source.exists() else {}
+    current = json.loads(source.read_text(encoding='utf-8')) if source.exists() else {}
     if not isinstance(current, dict):
         raise ValueError('Claude settings must be an object')
     # Carry selection policy, never hooks, plugins, credentials or arbitrary env.
@@ -76,7 +76,7 @@ def discover(binary: Path, config: Path) -> dict:
         metadata = {}
         for account_path in (config.parent / '.claude.json', config / '.claude.json'):
             if account_path.is_file():
-                account = json.loads(account_path.read_text())
+                account = json.loads(account_path.read_text(encoding='utf-8'))
                 if isinstance(account, dict) and isinstance(account.get('oauthAccount'), dict):
                     metadata = {'oauthAccount': {key: value for key, value in account['oauthAccount'].items()
                                                 if key in ('accountUuid', 'organizationUuid', 'billingType', 'hasExtraUsageEnabled')}}
@@ -104,6 +104,7 @@ def discover(binary: Path, config: Path) -> dict:
             '--output-format', 'stream-json', '--verbose', '--no-session-persistence',
         ])
         result = subprocess.run(command, input=json.dumps(request) + '\n', capture_output=True, text=True,
+            encoding='utf-8', errors='strict',
             cwd=root, env=env, timeout=15,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
         if result.returncode:
@@ -129,6 +130,7 @@ def discover(binary: Path, config: Path) -> dict:
         if not rows:
             raise ValueError('Claude returned no native models; existing configuration was preserved')
         version = subprocess.run(cli_command(binary, ['--version']), capture_output=True, text=True,
+                                 encoding='utf-8', errors='strict',
                                  cwd=root, env=env, timeout=3,
                                  creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
         match = re.match(r'\d+\.\d+\.\d+', version.stdout.strip())
