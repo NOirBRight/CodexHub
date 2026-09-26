@@ -635,6 +635,23 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
         prepared_exchange = replace(prepared_exchange, upstream_body=conversion_body)
     body = prepared_exchange.upstream_body
     if attempt.selected_upstream_format == "anthropic_messages":
+        from anthropic_messages_ir import NotForwardable, omit_external_classifier_context
+
+        adapted = omit_external_classifier_context(body)
+        if isinstance(adapted, NotForwardable):
+            raise UpstreamProtocolTranslationError(
+                UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics", adapted.diagnostic()
+                )
+            )
+        body = adapted.body
+        prepared_exchange = replace(
+            prepared_exchange,
+            upstream_body=body,
+            adaptations=prepared_exchange.adaptations + tuple(
+                (item.field, item.policy, item.detail) for item in adapted.adaptations
+            ),
+        )
         payload = _passthrough._safe_json_mapping(body)
         upstream_model = upstream.get("upstream_model")
         if (

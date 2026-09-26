@@ -42,11 +42,13 @@ best-effort conversion.
 
 ## Adaptation policy
 
-Native Anthropic retains the original body and semantic headers. Converted
-routes accept only a list of the known classifier-context envelopes (or an empty
+Native Anthropic subscription retains the original body and semantic headers.
+External routes, including third-party Anthropic Messages endpoints, accept only a list of the known classifier-context envelopes (or an empty
 list). They omit that context under
 `claude_server_classifier_context_omitted_for_non_anthropic`, and the transport
-removes its matching beta. Diagnostics explicitly state that no equivalent
+removes its matching beta with an independent sanitized adaptation diagnostic.
+The historical policy suffix "non_anthropic" denotes the non-native route here,
+including external Anthropic-compatible providers. Diagnostics explicitly state that no equivalent
 Anthropic server classifier ran. The Gateway never fabricates a classifier
 result or a permission decision; Claude Code retains its permission handling.
 Unknown types, extra envelope controls, and malformed context fail explicitly.
@@ -60,7 +62,9 @@ valid answer/tool stream. Like the existing JSON response adaptation, unsigned
 reasoning is omitted with a named diagnostic; it is not presented as an answer
 or fabricated Anthropic-signed thinking. Models that require their exact thinking
 history on the next tool roundtrip still require separate qualification. This
-change does not claim every provider-specific capability is portable.
+change does not claim every provider-specific capability is portable. Empty or
+encrypted-only Responses reasoning items also produce a sanitized omission
+diagnostic, without exposing the opaque state.
 
 Claude Code also sends a non-streaming model-check request before changing to a
 custom model. If an upstream supplies SSE for that request, Gateway reconstructs
@@ -73,7 +77,8 @@ Responses and Chat versions were reproduced as HTTP 400 before the fix.
 
 `tests/test_claude_model_switch_http.py` runs the production HTTP Gateway against
 loopback upstreams. One growing history crosses native Anthropic, official Codex
-Responses, third-party Chat, third-party Responses, then native Anthropic again.
+Responses, third-party Chat, third-party Responses, third-party Anthropic
+Messages, then native Anthropic again.
 It checks the actual upstream model, preserved text/tool results, matching call
 IDs, and credential separation. It also exercises reasoning SSE through the
 production relay. This is deterministic HTTP evidence, not live-provider proof.

@@ -920,12 +920,23 @@ def build_upstream_headers(
             continue
         if drop_content_encoding and lowered == "content-encoding":
             continue
-        if lowered == "anthropic-beta" and upstream.get("upstream_format") in {"chat_completions", "responses"}:
+        if (
+            lowered == "anthropic-beta"
+            and not native_anthropic_subscription
+            and "dangerous-tool-use-2026-09-03" in {beta.strip() for beta in value.split(",")}
+        ):
             # Paired with the declared classifier-context adaptation in the
-            # Messages converter. Non-Anthropic endpoints cannot invoke it.
+            # Messages converter. External providers cannot invoke it.
             value = ", ".join(
                 beta.strip() for beta in value.split(",")
                 if beta.strip() and beta.strip() != "dangerous-tool-use-2026-09-03"
+            )
+            gateway_events.write_proxy_event(
+                "protocol_adaptation",
+                field="headers.anthropic-beta.dangerous-tool-use-2026-09-03",
+                policy="claude_server_classifier_beta_omitted_for_non_anthropic",
+                detail="The selected external route has no equivalent Anthropic server classifier.",
+                upstream_format=upstream.get("upstream_format"),
             )
             if not value:
                 continue

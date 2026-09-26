@@ -238,6 +238,7 @@ def relay_inbound_anthropic_sse(
                         )
                     handler.close_connection = True
                     return status if status >= 400 else 502
+                emitter.observe_responses_event(payload)
                 chat_chunks = responses_converter.chunks_for_event(payload)
                 if not isinstance(responses_converter.response_id, str) or not responses_converter.response_id:
                     continue

@@ -533,6 +533,17 @@ def _declare_classifier_context(value: Any, declared: _Declared) -> None:
     )
 
 
+
+def omit_external_classifier_context(body: bytes) -> Adapted | NotForwardable:
+    """Remove Claude subscription classifier context from an external Messages route."""
+    payload = _load(body)
+    if "safeguards" not in payload:
+        return Adapted(body=body)
+    declared = _Declared()
+    _declare_classifier_context(payload.pop("safeguards"), declared)
+    return declared.result(_dump(payload))
+
+
 def _map_output_config(value: Any, chat: dict[str, Any], declared: _Declared) -> None:
     """Map effort through the Chat seam instead of dropping the whole field.
 
@@ -1346,6 +1357,21 @@ class ChatToAnthropicEmitter:
         self._frames = []
         return frames
 
+    def observe_responses_event(self, event: Mapping[str, Any]) -> None:
+        """Disclose opaque reasoning even when it produces no Chat text delta."""
+        item = event.get("item")
+        response = event.get("response")
+        output = response.get("output") if isinstance(response, Mapping) else None
+        if (isinstance(item, Mapping) and item.get("type") == "reasoning") or (
+            isinstance(output, list)
+            and any(isinstance(entry, Mapping) and entry.get("type") == "reasoning" for entry in output)
+        ):
+            if not any(entry.field == "response.reasoning" for entry in self.declared):
+                self.declared.append(Adaptation(
+                    "response.reasoning", "responses_reasoning_omitted_for_anthropic",
+                    "Responses reasoning and encrypted state have no Anthropic-signed equivalent.",
+                ))
+
     def feed(self, chunk: Mapping[str, Any] | str) -> list[bytes] | NotForwardable:
         if chunk == "[DONE]":
             self.saw_done = True
@@ -1564,6 +1590,7 @@ def _chat_chunks_to_anthropic_sse(
     expected_id: str | None = None,
     expected_model: str | None = None,
     allow_empty_text: bool = False,
+    responses_events: Iterable[Mapping[str, Any] | str] = (),
 ) -> AdaptedResponse | NotForwardable:
     source_chunks = [chunk for chunk in chunks if chunk != "[DONE]"]
     if not source_chunks or not isinstance(source_chunks[0], Mapping):
@@ -1582,6 +1609,9 @@ def _chat_chunks_to_anthropic_sse(
         )
     except ValueError:
         return response_refusal("unsupported_upstream_usage", "responses.usage")
+    for event in responses_events:
+        if isinstance(event, Mapping):
+            emitter.observe_responses_event(event)
     events: list[bytes] = []
     for chunk in chunks:
         fed = emitter.feed(chunk)
@@ -1743,6 +1773,7 @@ def adapt_upstream_stream(
                 expected_id=response_id,
                 expected_model=model,
                 allow_empty_text=terminal_has_text,
+                responses_events=payloads,
             )
         chunks_for_chat = [payload for payload in payloads]
         return _chat_chunks_to_anthropic_sse(chunks_for_chat, status=status, require_done=True)

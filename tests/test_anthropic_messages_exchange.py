@@ -355,6 +355,20 @@ def test_responses_reasoning_stream_keeps_tool_identity() -> None:
     assert any(item.policy == "unsigned_reasoning_omitted_for_anthropic" for item in result.adaptations)
 
 
+def test_encrypted_responses_reasoning_without_summary_is_declared() -> None:
+    events = _events(_responses_stream())
+    opaque = {"type": "reasoning", "id": "rs_opaque", "summary": [], "encrypted_content": "opaque-private-state"}
+    events.insert(1, {"type": "response.output_item.added", "item": opaque, "output_index": 1})
+    events[-1]["response"]["output"].insert(0, opaque)
+    result = adapt_upstream_stream("responses", [_sse(item.get("type"), item) for item in events])
+    assert isinstance(result, AdaptedResponse), result
+    assert _events(result.body)[-1]["type"] == "message_stop"
+    assert b"opaque-private-state" not in result.body
+    diagnostics = [item for item in result.adaptations if item.field == "response.reasoning"]
+    assert len(diagnostics) == 1
+    assert "opaque-private-state" not in repr(diagnostics)
+
+
 @pytest.mark.parametrize("value", [True, 7, {}, ["not a string"]])
 def test_malformed_reasoning_delta_is_not_converted_to_success(value: object) -> None:
     chunks = _events(_chat_stream())

@@ -403,6 +403,8 @@ def relay_incremental_exchange(
                     if selected == "responses":
                         if not isinstance(payload, Mapping):
                             raise ValueError("responses.event")
+                        if emitter is not None:
+                            emitter.observe_responses_event(payload)
                         chat_chunks = responses_converter.chunks_for_event(payload) if responses_converter is not None else []
                         if responses_converter is not None and (
                             not isinstance(responses_converter.response_id, str)

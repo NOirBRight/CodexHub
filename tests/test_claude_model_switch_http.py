@@ -21,6 +21,7 @@ def test_same_conversation_switches_native_codex_third_party_and_back() -> None:
             ("openai/gpt-5.5", "responses", "gpt-5.5"),
             ("volc/glm-5.2", "chat_completions", "glm-5.2"),
             ("external/responses-model", "responses", "responses-model"),
+            ("external/messages-model", "anthropic_messages", "messages-model"),
             ("claude-opus-5-5", "anthropic_messages", "claude-opus-5-5"),
         ]
         for index, (selected, protocol, model) in enumerate(routes):
@@ -51,7 +52,7 @@ def test_same_conversation_switches_native_codex_third_party_and_back() -> None:
                 "tools": [{"name": "Read", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}}],
                 "safeguards": [{"type": "dangerous_tool_use", "classifier_context": {"synthetic": True}}],
             }
-            if protocol == "anthropic_messages":
+            if selected == "claude-opus-5-5":
                 upstream = _native_upstream(harness.stub_base_url.removesuffix("/v1"))
             elif selected.startswith("external/"):
                 upstream = {
@@ -70,6 +71,7 @@ def test_same_conversation_switches_native_codex_third_party_and_back() -> None:
                         "x-codexhub-gateway-key": GATEWAY_CLIENT_KEY,
                         "Content-Type": "application/json", "Connection": "close",
                         "X-Claude-Code-Session-Id": "same-synthetic-session",
+                        "Anthropic-Beta": "dangerous-tool-use-2026-09-03",
                     }, timeout=8.0,
                 )
             assert response.status == 200, (selected, response.body)
@@ -79,19 +81,29 @@ def test_same_conversation_switches_native_codex_third_party_and_back() -> None:
             assert sent["model"] == model
             assert capture.headers["x-claude-code-session-id"] == "same-synthetic-session"
             assert "x-codexhub-gateway-key" not in capture.headers
-            if protocol == "anthropic_messages":
+            if selected == "claude-opus-5-5":
                 assert sent == request
+                assert capture.headers["anthropic-beta"] == "dangerous-tool-use-2026-09-03"
                 assert capture.headers["authorization"] == f"Bearer {CLAUDE_OAUTH}"
             else:
                 assert "safeguards" not in sent
                 assert capture.headers["authorization"] != f"Bearer {CLAUDE_OAUTH}"
+                assert "anthropic-beta" not in capture.headers
+                if protocol == "anthropic_messages":
+                    assert sent["messages"] == history
+                    assert sent["tools"] == request["tools"]
                 replay = sent["input"] if protocol == "responses" else sent["messages"]
                 calls = ([item for item in replay if item.get("type") == "function_call"]
                          if protocol == "responses" else [call for item in replay for call in item.get("tool_calls", [])])
                 results = [item for item in replay if item.get("type") == "function_call_output" or item.get("role") == "tool"]
+                if protocol == "anthropic_messages":
+                    calls = [block for item in replay if isinstance(item["content"], list)
+                             for block in item["content"] if block["type"] == "tool_use"]
+                    results = [block for item in replay if isinstance(item["content"], list)
+                               for block in item["content"] if block["type"] == "tool_result"]
                 assert len(calls) == len(results) == 1, (selected, replay)
                 assert calls[0].get("call_id", calls[0].get("id")) == tool_id
-                assert results[0].get("call_id", results[0].get("tool_call_id")) == tool_id
+                assert results[0].get("call_id", results[0].get("tool_call_id", results[0].get("tool_use_id"))) == tool_id
                 assert "file-result-marker" in json.dumps(replay)
                 assert "Continue with selected model" in json.dumps(replay)
             message = json.loads(response.body)
@@ -134,3 +146,31 @@ def test_selected_reasoning_model_stream_finishes_through_http(protocol: str, mo
     assert output[-1]["type"] == "message_stop", output
     assert not any(event["type"] == "error" for event in output)
     assert b"private reasoning" not in response.body
+
+
+@pytest.mark.parametrize("safeguards", [
+    [{"type": "unknown_policy", "classifier_context": {}}],
+    [{"type": "dangerous_tool_use", "classifier_context": "malformed"}],
+    [{"type": "dangerous_tool_use", "classifier_context": {}, "enforce": True}],
+])
+def test_external_messages_rejects_unknown_classifier_controls(safeguards: object) -> None:
+    with GatewayHarness() as harness:
+        upstream = {
+            "name": "external", "provider_id": "external", "model_id": "external/messages-model",
+            "base_url": harness.stub_base_url, "auth": "api_key", "api_key": "external-test-token",
+            "upstream_model": "messages-model", "upstream_format": "anthropic_messages",
+        }
+        with patch.object(gateway_catalog_runtime, "choose_upstream", return_value=upstream):
+            response = request_gateway(
+                harness.host, harness.port, "POST", "/v1/messages",
+                body=json.dumps({"model": "external/messages-model", "max_tokens": 64,
+                                 "messages": [{"role": "user", "content": "hello"}],
+                                 "safeguards": safeguards}).encode(),
+                headers={"Authorization": f"Bearer {GATEWAY_CLIENT_KEY}",
+                         "Content-Type": "application/json"},
+                timeout=8.0,
+            )
+        assert response.status == 400
+        assert b"safeguards" in response.body
+        assert harness.stub is not None
+        assert not harness.stub.captures
