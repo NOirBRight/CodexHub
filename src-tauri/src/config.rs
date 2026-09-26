@@ -579,7 +579,9 @@ fn sanitize_fast_model_variants(values: Vec<String>) -> Vec<String> {
         .filter(|value| crate::official_fast_variants().values().any(|base| base == value))
         .collect();
     // Upgrade the previous all-Fast default while preserving custom subsets.
-    if models.len() == 2 && models.iter().all(|model| matches!(model.as_str(), "gpt-5.5" | "gpt-5.4")) {
+    if (models.len() == 2 && models.iter().all(|model| matches!(model.as_str(), "gpt-5.5" | "gpt-5.4")))
+        || (models.len() == 6 && models.iter().all(|model| !matches!(model.as_str(), "gpt-6-luna" | "gpt-6-sol")))
+    {
         crate::default_fast_model_variants()
     } else {
         models

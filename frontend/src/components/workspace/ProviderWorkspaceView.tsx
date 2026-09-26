@@ -21,6 +21,7 @@ import {
   Search,
   Settings2,
   Unplug,
+  Zap,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { providerLogoSrc } from "../../lib/providerLogos";
@@ -906,6 +907,7 @@ export function DefaultSubagentPicker({
                   {t(activeSelected?.fast
                     ? "workspace.defaultSubagentFastOn"
                     : "workspace.defaultSubagentFastOff")}
+                  <Zap size={11} aria-hidden="true" />
                 </span>
               </button>}
             </>

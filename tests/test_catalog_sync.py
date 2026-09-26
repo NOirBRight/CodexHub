@@ -3769,3 +3769,23 @@ class CatalogSyncTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_all_fast_aliases_are_spawnable_with_inherited_capabilities():
+    registry = catalog_sync.OFFICIAL_FAST_VARIANT_BASE_MODELS
+    catalog = {"models": [
+        {"slug": base, "display_name": base, "visibility": "list",
+         "multi_agent_version": "v2", "context_window": 272000,
+         "supported_reasoning_levels": [{"effort": "max"}]}
+        for base in registry.values()
+    ]}
+    catalog_sync.project_static_fast_variants(catalog)
+    models = {model["slug"]: model for model in catalog["models"]}
+    for alias, base in registry.items():
+        fast = models[alias]
+        assert fast["visibility"] == "hide"
+        assert fast["multi_agent_version"] == models[base]["multi_agent_version"]
+        assert fast["supported_reasoning_levels"] == models[base]["supported_reasoning_levels"]
+        assert fast["context_window"] == models[base]["context_window"]
+        assert fast["codex_proxy_metadata"]["upstream_model"] == base
+        assert fast["codex_proxy_metadata"]["service_tier"] == "priority"

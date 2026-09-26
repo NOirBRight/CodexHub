@@ -301,3 +301,29 @@ test("Codex persist and restart-reminder contract stays on ProvidersPage", async
   assert.match(fn, /workspace\.defaultSubagentSaved/);
   assert.doesNotMatch(fn, /defaultSubagentSavedClient/);
 });
+
+test("current 6 Luna and 6 Sol keep Fast available when retired 5.6 models are disabled", () => {
+  for (const id of ["gpt-6-luna", "gpt-6-sol"]) {
+    const options = listDefaultSubagentOptions({
+      includeFastVariants: true,
+      officialId: "__official__", officialIncluded: true,
+      officialModels: [official(id, { supported_reasoning_levels: ["medium", "max"] })],
+      officialDisabledModels: ["gpt-5.6-luna", "gpt-5.6-sol"], providers: [],
+    });
+    assert.equal(options.find((option) => option.id === id)?.speedVariant, id + "-fast");
+    assert.equal(resolveSubagentEffort(options.find((option) => option.id === id + "-fast"), "max"), "max");
+  }
+});
+
+test("every registered Fast model has a subagent toggle and a plain other-client variant", () => {
+  const registry = JSON.parse(fs.readFileSync(new URL("../../config/official_fast_variants.json", import.meta.url), "utf8"));
+  for (const [alias, base] of Object.entries(registry)) {
+    const input = { officialId: "__official__", officialIncluded: true,
+      officialModels: [official(base)], officialDisabledModels: [], providers: [] };
+    const options = listDefaultSubagentOptions({ ...input, includeFastVariants: true });
+    assert.equal(options.find((option) => option.id === base)?.speedVariant, alias);
+    assert.equal(options.find((option) => option.id === alias)?.speedVariant, base);
+    const other = listDefaultSubagentOptions({ ...input, officialModels: [official(base), official(alias)] });
+    assert.ok(other.some((option) => option.id === alias && !option.fast && !option.speedVariant));
+  }
+});

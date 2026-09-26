@@ -176,7 +176,10 @@ function normalizeModelIds(values: string[] | null | undefined) {
 function normalizeFastModelVariants(values: string[] | null | undefined) {
   const source = values?.length ? values : DEFAULT_FAST_MODEL_VARIANTS;
   const normalized = normalizeModelIds(source).filter((value) => ALLOWED_FAST_MODEL_VARIANTS.has(value));
-  if (normalized.length === 2 && normalized.every((value) => value === "gpt-5.5" || value === "gpt-5.4")) {
+  if (
+    (normalized.length === 2 && normalized.every((value) => value === "gpt-5.5" || value === "gpt-5.4")) ||
+    (normalized.length === 6 && normalized.every((value) => value !== "gpt-6-luna" && value !== "gpt-6-sol"))
+  ) {
     return [...DEFAULT_FAST_MODEL_VARIANTS];
   }
   return normalized.length ? normalized : [...DEFAULT_FAST_MODEL_VARIANTS];

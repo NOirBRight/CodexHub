@@ -2376,3 +2376,17 @@ mod isolated_codex_managed_config {
         );
     }
 }
+
+#[test]
+fn fast_defaults_upgrade_026_inventory_without_expanding_custom_subsets() {
+    let legacy = vec!["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra",
+        "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"];
+    assert_eq!(
+        super::sanitize_fast_model_variants(legacy.into_iter().map(str::to_string).collect()),
+        crate::default_fast_model_variants()
+    );
+    assert_eq!(
+        super::sanitize_fast_model_variants(vec!["gpt-6-luna".to_string()]),
+        vec!["gpt-6-luna".to_string()]
+    );
+}

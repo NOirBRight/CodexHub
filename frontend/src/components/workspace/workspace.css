@@ -550,8 +550,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.ws-bridge-subagent-row-value + svg {
+.ws-bridge-subagent-row > span:last-child > svg {
   flex-shrink: 0;
+}
+.ws-bridge-subagent-row[role="switch"] {
+  background: transparent;
+}
+.ws-bridge-subagent-row[role="switch"][aria-checked="true"] > span:last-child {
+  color: var(--ws-accent);
 }
 .ws-bridge-subagent-back {
   justify-content: flex-start;

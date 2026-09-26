@@ -77,7 +77,7 @@ def test_catalog_runtime_is_exposed_as_module_functions():
 
 @pytest.mark.parametrize(
     "model",
-    ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"],
+    ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"],
 )
 def test_subagent_fast_alias_publishes_and_routes_priority(model):
     runtime = CatalogRuntime(
