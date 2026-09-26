@@ -5,6 +5,7 @@ import { useToasts } from "./PageToast";
 import { api, messageFromError } from "../lib/tauri";
 import {
   aliasDefaultChanges,
+  claudeDefaultTarget,
   claudeDraft,
   claudeDraftChanged,
   claudeDraftValid,
@@ -69,11 +70,31 @@ export function ClaudeSettingsDialog({
   const dirty = claudeDraftChanged(draft, saved);
   const conflicts = info?.claude_settings?.conflicts ?? [];
   const unavailable = !info?.installed || !info?.claude_settings;
-  const invalid = !claudeDraftValid(draft, ids, saved);
+  const nativeModels = info?.claude_settings?.native_models ?? [];
+  const nativeIds = new Set(nativeModels.map((model) => model.id));
+  const invalid = !claudeDraftValid(draft, ids, saved, nativeIds);
   const aliasChanges = aliasDefaultChanges(
     info?.claude_settings?.default_model ?? "",
     saved.roles,
     draft.roles,
+  );
+  const selectedDefault =
+    draft.model === claudePreserveDefault
+      ? (info?.claude_settings?.default_model ?? "")
+      : draft.model === claudeClearDefault
+        ? ""
+        : draft.model;
+  const defaultTarget = claudeDefaultTarget(
+    selectedDefault,
+    models,
+    draft.roles,
+    nativeModels,
+  ).map((part) =>
+    part === "builtin"
+      ? t("gateway.claudeDefaultBuiltin")
+      : part === "subscription"
+        ? t("gateway.claudeSubscriptionDefault")
+        : part,
   );
   const locked = Boolean(busy || previewBusy);
   const resumeCommand = claudeResumeCommand(resumeModelId);
@@ -256,8 +277,19 @@ export function ClaudeSettingsDialog({
                 {model.label}
               </option>
             ))}
+            {filterClaudeModels(nativeModels, query, draft.model)
+              .filter((model) => !ids.has(model.id))
+              .map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
           </select>
         </label>
+        <p className="ws-claude-note" role="status">
+          {t("gateway.claudeDefaultTarget", { model: defaultTarget.join(" / ") })}
+        </p>
+        <p className="ws-claude-note">{t("gateway.claudeDefaultOneMillionBoundary")}</p>
         <details className="ws-claude-catalog">
           <summary>
             {t("gateway.claudeCatalog", { count: models.length })}

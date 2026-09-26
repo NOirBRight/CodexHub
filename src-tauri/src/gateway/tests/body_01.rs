@@ -3282,7 +3282,7 @@ fn claude_sync_preserves_its_saved_default_instead_of_reapplying_it() {
     let mut client = sync_test_client("claude", "Claude Code", true, true, "hub");
     client.claude_settings = Some(super::clients::claude::ClaudeClientSettings {
         default_model: "chosen/model".into(), role_mappings: Default::default(),
-        default_subagent_model: String::new(), conflicts: vec![],
+        default_subagent_model: String::new(), native_models: Vec::new(), conflicts: vec![],
     });
     let summary = super::sync_gateway_clients_from_infos(vec![client], Some("global/model".into()), |client_id, model| {
         assert_eq!(model.as_deref(), Some(super::clients::claude::PRESERVE_DEFAULT_MODEL));

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   aliasDefaultChanges,
+  claudeDefaultTarget,
   claudeDraft,
   claudeDraftChanged,
   claudeDraftValid,
@@ -103,4 +104,64 @@ test("refresh updates clean Claude fields while preserving edits", () => {
     roles: dirty.roles,
   });
   assert.deepEqual(rebaseClaudeDraft(baseline, baseline, incoming), incoming);
+});
+
+test("default target names the actual model and does not treat an external 1m badge as capacity", () => {
+  const models = [{ id: "gpt-5.5", label: "6 Astra" }];
+  const native = [{ id: "claude-opus-5-5[1m]", label: "Claude Opus 5.5 1M" }];
+  assert.deepEqual(claudeDefaultTarget("opus", models, { opus: "gpt-5.5" }), ["6 Astra"]);
+  assert.deepEqual(claudeDefaultTarget("opus", models, {}), ["subscription"]);
+  assert.deepEqual(claudeDefaultTarget("", models, {}), ["builtin"]);
+  assert.deepEqual(claudeDefaultTarget("gpt-5.5[1m]", models, {}), ["6 Astra"]);
+  assert.deepEqual(claudeDefaultTarget("claude-opus-5-5[1m]", models, {}, native), ["Claude Opus 5.5 1M"]);
+  assert.deepEqual(
+    claudeDefaultTarget("opusplan", models, { opus: "gpt-5.5", sonnet: "" }, native),
+    ["6 Astra", "subscription"],
+  );
+});
+
+test("resume keeps native 1m and rewrites a pasted external 1m id", () => {
+  assert.equal(
+    claudeResumeCommand("claude-codexhub-gpt-5.5[1m]"),
+    "claude --resume --model claude-codexhub-gpt-5.5",
+  );
+  assert.equal(
+    claudeResumeCommand("claude-codexhub-gpt-5.5"),
+    "claude --resume --model claude-codexhub-gpt-5.5",
+  );
+  assert.equal(
+    claudeResumeCommand("claude-opus-5-5[1m]"),
+    "claude --resume --model 'claude-opus-5-5[1m]'",
+  );
+});
+
+test("a native default is selectable without being an exported Gateway model", () => {
+  const saved = claudeDraft(
+    {
+      default_model: "claude-opus-5-5",
+      role_mappings: {},
+      default_subagent_model: "",
+      conflicts: [],
+      native_models: [{ id: "claude-opus-5-5[1m]", label: "Claude Opus 5.5 1M" }],
+    },
+    "",
+  );
+  assert.equal(
+    claudeDraftValid(
+      { ...saved, model: "claude-opus-5-5[1m]" },
+      new Set(["gpt-5.5"]),
+      saved,
+      new Set(["claude-opus-5-5[1m]"]),
+    ),
+    true,
+  );
+  assert.equal(
+    claudeDraftValid(
+      { ...saved, model: "claude-codexhub-gpt-5.5[1m]" },
+      new Set(["gpt-5.5"]),
+      saved,
+      new Set(["claude-opus-5-5[1m]"]),
+    ),
+    false,
+  );
 });

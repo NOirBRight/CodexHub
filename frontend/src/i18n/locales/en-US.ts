@@ -341,12 +341,17 @@ const enUS = {
     claudeRestartRequired:
       "Restart Claude Code after applying. Existing processes keep their loaded settings. When resuming an old session, explicitly pass its original full model ID; plain --resume uses the current default or family mapping. Project settings or managed policy can still override current-user settings.",
     claudeResumeTitle: "Resume an existing conversation",
-    claudeResumeHelp: "Enter the conversation's original full native model ID, then copy this command. Claude Code chooses the session after --resume. CodexHub cannot infer the old model from a resume request.",
+    claudeResumeHelp: "Enter the original native model ID, or the unsuffixed exported model ID. A pasted external [1m] suffix is removed; that is recovery guidance, not safe support. Claude Code chooses the session after --resume.",
     claudeResumeModelId: "Original full model ID",
     claudeCopyResumeCommand: "Copy resume command",
     claudeSearchModels: "Search exported models",
     claudeDefaultModel: "Default model",
     claudeKeepDefault: "Keep current default ({{model}})",
+    claudeDefaultTarget: "Default → {{model}}",
+    claudeDefaultBuiltin: "Claude Code built-in default",
+    claudeSubscriptionDefault: "Claude subscription default",
+    claudeDefaultOneMillionBoundary:
+      "Claude keeps its own Default row and may still badge it [1m]. That badge is not an external capacity promise. Saved external defaults are written without [1m]. Resume an old external [1m] session with the unsuffixed model ID; that recovery is not claimed as safe support.",
     claudeCliDefault: "Claude Code default",
     claudeUseCliDefault: "Use Claude Code's built-in default",
     claudeAliasDefaultPreview: "Default alias {{alias}} changes its effective target from {{from}} to {{to}}. Explicit model IDs remain unchanged.",

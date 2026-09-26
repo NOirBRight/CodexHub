@@ -7,18 +7,56 @@ export const claudeRoles = [
 export const claudePreserveDefault = "__codexhub_preserve_claude_default__";
 export const claudeClearDefault = "__codexhub_clear_claude_default__";
 
+const nativeClaudeId = /^claude-(?!codexhub-)[A-Za-z0-9._-]+(?:\[1m\])?$/;
+const externalClaudeId = /^(claude-codexhub-[A-Za-z0-9._-]+)(?:\[1m\])?$/;
+
 export function claudeResumeCommand(modelId: string): string {
   const id = modelId.trim();
-  return /^claude-[a-zA-Z0-9._-]+(?:\[1m\])?$/.test(id)
+  const external = externalClaudeId.exec(id);
+  if (external) {
+    return `claude --resume --model ${external[1]}`;
+  }
+  return nativeClaudeId.test(id)
     ? `claude --resume --model ${id.includes("[") ? `'${id}'` : id}`
     : "";
 }
 
+export function claudeDefaultTarget(
+  defaultModel: string,
+  models: { id: string; label: string }[],
+  roles: Record<string, string>,
+  nativeModels: { id: string; label: string }[] = [],
+): Array<"builtin" | "subscription" | string> {
+  const raw = defaultModel.trim();
+  if (!raw) return ["builtin"];
+  const named = (id: string) => {
+    const unsuffixed = id.endsWith("[1m]") && !nativeClaudeId.test(id) ? id.slice(0, -4) : id;
+    return (
+      models.find((model) => model.id === id || model.id === unsuffixed)?.label ||
+      nativeModels.find((model) => model.id === id)?.label ||
+      (nativeClaudeId.test(id) ? id : "")
+    );
+  };
+  const families = raw.toLowerCase() === "opusplan" ? ["opus", "sonnet"] : [raw.toLowerCase()];
+  if (
+    families.every((family) => claudeRoles.includes(family as (typeof claudeRoles)[number])) ||
+    raw.toLowerCase() === "opusplan"
+  ) {
+    return families.map((family) => named(roles[family]?.trim() ?? "") || "subscription");
+  }
+  return [named(raw) || raw];
+}
+
+export interface ClaudeModelChoice {
+  id: string;
+  label: string;
+}
 export interface ClaudeSettings {
   default_model: string;
   role_mappings: Record<string, string>;
   default_subagent_model: string;
   conflicts: string[];
+  native_models?: ClaudeModelChoice[];
 }
 export interface ClaudeDraft {
   model: string;
@@ -41,11 +79,13 @@ export function claudeDraftValid(
   draft: ClaudeDraft,
   ids: Set<string>,
   saved: ClaudeDraft,
+  nativeIds: Set<string> = new Set(),
 ): boolean {
   return (
     (draft.model === claudePreserveDefault ||
       draft.model === claudeClearDefault ||
-      ids.has(draft.model)) &&
+      ids.has(draft.model) ||
+      nativeIds.has(draft.model)) &&
     claudeRoles.every(
       (role) =>
         !draft.roles[role] ||

@@ -340,12 +340,17 @@ const zhCN = {
     claudeRestartRequired:
       "应用后需要重启 Claude Code。已运行进程会继续使用加载时的设置。恢复旧会话时须显式传入原始完整模型 ID；单独 --resume 会使用当前默认值或家族映射。项目设置或托管策略仍可能覆盖当前用户设置。",
     claudeResumeTitle: "恢复已有会话",
-    claudeResumeHelp: "输入该会话原来的原生模型完整 ID，再复制命令。--resume 会让 Claude Code 选择会话；CodexHub 无法从恢复请求推断旧模型。",
+    claudeResumeHelp: "输入原来的原生模型 ID，或不带后缀的已导出模型 ID。粘贴的外部 [1m] 后缀会被去掉；这只是恢复提示，不表示已安全支持。--resume 会让 Claude Code 选择会话。",
     claudeResumeModelId: "原始完整模型 ID",
     claudeCopyResumeCommand: "复制恢复命令",
     claudeSearchModels: "搜索已导出模型",
     claudeDefaultModel: "默认模型",
     claudeKeepDefault: "保留当前默认值（{{model}}）",
+    claudeDefaultTarget: "默认模型 → {{model}}",
+    claudeDefaultBuiltin: "Claude Code 内置默认值",
+    claudeSubscriptionDefault: "Claude 订阅默认值",
+    claudeDefaultOneMillionBoundary:
+      "Claude 会保留自己的 Default 行，并可能仍显示 [1m]。该标记不是外部模型的容量承诺。保存的外部默认模型不会写入 [1m]。旧的外部 [1m] 会话请用不带后缀的模型 ID 恢复；这种手动恢复不表示已安全支持。",
     claudeCliDefault: "Claude Code 默认值",
     claudeUseCliDefault: "使用 Claude Code 内置默认值",
     claudeAliasDefaultPreview: "默认别名 {{alias}} 的实际目标将从 {{from}} 改为 {{to}}。显式模型 ID 保持不变。",

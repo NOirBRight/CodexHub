@@ -49,11 +49,18 @@ pub(in crate::gateway) const MANAGED_ENV_KEYS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ClaudeNativeModelChoice {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ClaudeClientSettings {
     pub default_model: String,
     pub role_mappings: BTreeMap<String, String>,
     pub default_subagent_model: String,
     pub conflicts: Vec<String>,
+    pub native_models: Vec<ClaudeNativeModelChoice>,
 }
 
 pub(in crate::gateway) fn read_claude_settings(
@@ -69,6 +76,7 @@ pub(in crate::gateway) fn read_claude_settings(
                 default_model: String::new(),
                 role_mappings: BTreeMap::new(),
                 default_subagent_model: String::new(),
+                native_models: Vec::new(),
                 conflicts: vec!["Cannot read Claude settings.json".into()],
             }
         }
@@ -84,6 +92,7 @@ pub(in crate::gateway) fn read_claude_settings(
                 default_model: String::new(),
                 role_mappings: BTreeMap::new(),
                 default_subagent_model: String::new(),
+                native_models: Vec::new(),
                 conflicts: vec!["Cannot parse Claude settings.json".into()],
             }
         }
@@ -114,8 +123,50 @@ pub(in crate::gateway) fn read_claude_settings(
             .map(|(role, key)| (role.to_string(), preference(role, key)))
             .collect(),
         default_subagent_model: preference("subagent", "CLAUDE_CODE_SUBAGENT_MODEL"),
+        native_models: native_model_choices(&value),
         conflicts: claude_override_conflicts(Some(&value), settings),
     }
+}
+
+fn is_native_claude_model_id(model: &str) -> bool {
+    let id = model.trim();
+    let base = id.strip_suffix("[1m]").unwrap_or(id);
+    let Some(rest) = base.strip_prefix("claude-") else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.starts_with("codexhub-")
+        && rest.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+}
+
+fn native_model_choices(value: &Value) -> Vec<ClaudeNativeModelChoice> {
+    let mut seen = HashSet::new();
+    value.pointer("/modelPicker/options").and_then(Value::as_array).into_iter().flatten().filter_map(|row| {
+        let id = row.get("model").and_then(Value::as_str)?.trim();
+        if !is_native_claude_model_id(id) || !seen.insert(id.to_string()) {
+            return None;
+        }
+        let label = row.get("label").and_then(Value::as_str).filter(|label| !label.trim().is_empty()).unwrap_or(id);
+        Some(ClaudeNativeModelChoice { id: id.to_string(), label: label.to_string() })
+    }).collect()
+}
+
+fn resolved_external_model(
+    settings: &Settings,
+    providers: &[Provider],
+    requested: &str,
+) -> Result<String, String> {
+    let requested = requested.trim().strip_suffix("[1m]").unwrap_or(requested.trim());
+    if is_native_claude_model_id(requested) {
+        return Err(format!("Gateway model is not exported: {requested}"));
+    }
+    if let Some(model) = super::super::gateway_models_from_config(settings, providers)
+        .into_iter()
+        .find(|model| model.id == requested || projected_claude_model_id(&model.id) == requested)
+    {
+        return Ok(model.id);
+    }
+    resolve_claude_model(settings, providers, requested)
 }
 
 pub(in crate::gateway) fn claude_home() -> PathBuf {
@@ -776,11 +827,12 @@ pub(in crate::gateway) fn claude_settings_text(
                 env_map.remove("ANTHROPIC_MODEL");
             }
             requested => {
-                let resolved = resolve_claude_model(settings, providers, requested)?;
-                env_map.insert(
-                    "ANTHROPIC_MODEL".to_string(),
-                    Value::String(projected_claude_model_id(&resolved)),
-                );
+                let written = if is_native_claude_model_id(requested) {
+                    requested.to_string()
+                } else {
+                    projected_claude_model_id(&resolved_external_model(settings, providers, requested)?)
+                };
+                env_map.insert("ANTHROPIC_MODEL".to_string(), Value::String(written));
             }
         }
         env_map.insert(
@@ -797,14 +849,15 @@ pub(in crate::gateway) fn claude_settings_text(
                 continue;
             }
             let existing = env_map.get(*env_key).and_then(Value::as_str).unwrap_or("");
-            if canonical == existing || projected_claude_model_id(canonical) == existing {
+            if canonical == existing {
                 continue;
             }
-            let resolved = resolve_claude_model(settings, providers, canonical)?;
-            env_map.insert(
-                (*env_key).to_string(),
-                Value::String(projected_claude_model_id(&resolved)),
-            );
+            let resolved = resolved_external_model(settings, providers, canonical)?;
+            let projected = projected_claude_model_id(&resolved);
+            if projected == existing {
+                continue;
+            }
+            env_map.insert((*env_key).to_string(), Value::String(projected));
         }
     }
     let mut rows = settings.claude_native_picker.clone().unwrap_or_else(|| {
@@ -1379,6 +1432,88 @@ mod tests {
             value.pointer("/theme").and_then(Value::as_str),
             Some("dark")
         );
+    }
+
+    #[test]
+    fn external_default_drops_one_million_suffix_and_native_default_keeps_it() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
+        let mut native = settings();
+        native.claude_native_picker.as_mut().unwrap().push(json!({
+            "model": "claude-opus-5-5[1m]",
+            "label": "Claude Opus 5.5 1M",
+            "description": "Claude subscription via Gateway"
+        }));
+        let external =
+            claude_settings_text(None, &native, &[], "gpt-5.5[1m]", &BTreeMap::new()).unwrap();
+        let value: Value = serde_json::from_str(&external).unwrap();
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-codexhub-gpt-5.5")
+        );
+        let projected = claude_settings_text(
+            None,
+            &native,
+            &[],
+            "claude-codexhub-gpt-5.5[1m]",
+            &BTreeMap::from([("haiku".into(), "gpt-5.5[1m]".into())]),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&projected).unwrap();
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-codexhub-gpt-5.5")
+        );
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-codexhub-gpt-5.5"),
+        );
+        let native_default =
+            claude_settings_text(None, &native, &[], "claude-opus-5-5[1m]", &BTreeMap::new())
+                .unwrap();
+        let value: Value = serde_json::from_str(&native_default).unwrap();
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-opus-5-5[1m]")
+        );
+        let options = value
+            .pointer("/modelPicker/options")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(options
+            .iter()
+            .any(|row| row.get("model").and_then(Value::as_str) == Some("claude-opus-5-5[1m]")));
+        assert!(options.iter().all(|row| {
+            let id = row.get("model").and_then(Value::as_str).unwrap_or("");
+            !id.starts_with("claude-codexhub-") || !id.ends_with("[1m]")
+        }));
+        let dir =
+            std::env::temp_dir().join(format!("claude-native-default-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, &native_default).unwrap();
+        let readback = read_claude_settings(&path, &native, &[]);
+        assert_eq!(readback.default_model, "claude-opus-5-5[1m]");
+        assert!(readback
+            .native_models
+            .iter()
+            .any(|model| model.id == "claude-opus-5-5[1m]" && model.label == "Claude Opus 5.5 1M"));
+        assert!(readback
+            .native_models
+            .iter()
+            .all(|model| !model.id.starts_with("claude-codexhub-")));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

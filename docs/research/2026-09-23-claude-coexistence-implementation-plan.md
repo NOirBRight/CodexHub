@@ -375,7 +375,9 @@ repeated real subscription inference, native/external interactive switching, or
 an automatic compaction cycle. Historical evidence belongs to its recorded SHA.
 An explicit external `[1m]` remains a Claude client override whose suffix is
 stripped before Gateway sees the request; picker replacement cannot prohibit it.
-The choice between retaining genuine native 1M with that documented boundary and
-a global 200K restriction remains pending user decision. No global restriction
-was applied. Installed software, live client settings and active sessions were
+On 2026-09-25 the user accepted the boundary: keep genuine native 1M, write
+external defaults without `[1m]`, show Default → the actual model name, and
+tell users to resume old external `[1m]` sessions with the unsuffixed ID. That
+recovery is not claimed as safe support. No global 200K restriction is applied.
+Installed software, live client settings and active sessions were
 not changed by this verification.
