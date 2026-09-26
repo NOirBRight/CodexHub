@@ -335,7 +335,7 @@ def relay_incremental_exchange(
         forwarded = 0
         reader_hung = False
         emitter = ChatToAnthropicEmitter() if selected != "anthropic_messages" else None
-        responses_converter = ResponsesToChatStreamConverter() if selected == "responses" else None
+        responses_converter = ResponsesToChatStreamConverter(preserve_reasoning_history=True) if selected == "responses" else None
 
         def commit_frames(frames: list[bytes]) -> bool:
             nonlocal forwarded, terminal_kind

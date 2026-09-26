@@ -986,10 +986,10 @@ def relay_upstream_response(
             elif inbound_format == "anthropic_messages":
                 content_type = "application/json"
                 response_headers = getattr(response, "headers", None)
-                if response_headers is not None:
+                if response_headers is not None and not buffered_json_response:
                     content_type = response_headers.get("content-type", content_type) or content_type
                 adapted = anthropic_messages_ir.adapt_upstream_response(
-                    upstream_format,
+                    "responses" if buffered_chat_sse_to_responses else upstream_format,
                     body,
                     status=status,
                     content_type=content_type,

@@ -920,6 +920,15 @@ def build_upstream_headers(
             continue
         if drop_content_encoding and lowered == "content-encoding":
             continue
+        if lowered == "anthropic-beta" and upstream.get("upstream_format") in {"chat_completions", "responses"}:
+            # Paired with the declared classifier-context adaptation in the
+            # Messages converter. Non-Anthropic endpoints cannot invoke it.
+            value = ", ".join(
+                beta.strip() for beta in value.split(",")
+                if beta.strip() and beta.strip() != "dangerous-tool-use-2026-09-03"
+            )
+            if not value:
+                continue
         outgoing[key] = value
 
     # Official passthrough keeps the caller User-Agent. Chat clients and

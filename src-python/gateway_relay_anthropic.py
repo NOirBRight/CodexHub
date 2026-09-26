@@ -199,7 +199,7 @@ def relay_inbound_anthropic_sse(
         return status
     emitter = anthropic_messages_ir.ChatToAnthropicEmitter()
     responses_converter = (
-        protocol_translation.ResponsesToChatStreamConverter()
+        protocol_translation.ResponsesToChatStreamConverter(preserve_reasoning_history=True)
         if upstream_format == "responses"
         else None
     )

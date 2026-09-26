@@ -314,6 +314,22 @@ def test_gateway_compatibility_replaces_inbound_client_user_agent() -> None:
     assert headers["x-session-id"] == "e2e-image-compact"
 
 
+@pytest.mark.parametrize("protocol", ["chat_completions", "responses", "anthropic_messages"])
+@pytest.mark.parametrize("other_beta", ["", "claude-code-20250219, "])
+def test_claude_server_classifier_beta_follows_its_protocol(protocol: str, other_beta: str) -> None:
+    value = other_beta + "dangerous-tool-use-2026-09-03"
+    headers = build_upstream_headers(
+        {"Anthropic-Beta": value},
+        {"auth": "api_key", "name": "external", "api_key": "synthetic", "upstream_format": protocol},
+    )
+    if protocol == "anthropic_messages":
+        assert headers["Anthropic-Beta"] == value
+    elif other_beta:
+        assert headers["Anthropic-Beta"] == other_beta.rstrip(", ")
+    else:
+        assert "Anthropic-Beta" not in headers
+
+
 def test_gateway_compat_replaces_caller_user_agent() -> None:
     headers = build_upstream_headers(
         {

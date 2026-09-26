@@ -160,9 +160,70 @@ def test_content_block_order_and_opaque_tool_id_round_trip() -> None:
     assert tool_result["tool_call_id"] == "toolu_bdrk_synthetic.1"
 
 
-def test_safety_control_is_never_adapted_away() -> None:
-    request = parse_request(observed_shape_body())
-    converted = request.to_chat_request()
+@pytest.mark.parametrize("protocol", ["chat_completions", "responses", "anthropic_messages"])
+def test_model_switch_keeps_user_content_after_tool_results(protocol: str) -> None:
+    from anthropic_messages_ir import prepare_upstream_request
+
+    body = json.loads(observed_shape_body())
+    body.pop("safeguards")
+    body["messages"][-1]["content"].extend([
+        {"type": "text", "text": "Continue with the selected model."},
+        {"type": "image", "source": {"type": "url", "url": "https://example.test/image.png"}},
+    ])
+    wire = json.dumps(body).encode()
+    result = prepare_upstream_request(wire, protocol)
+    assert isinstance(result, Adapted), result
+    if protocol == "anthropic_messages":
+        assert result.body == wire
+        return
+    translated = json.loads(result.body)
+    if protocol == "chat_completions":
+        tool, user = translated["messages"][-2:]
+        assert tool == {"role": "tool", "tool_call_id": "toolu_bdrk_synthetic.1", "content": "file body"}
+        assert user["role"] == "user"
+        assert user["content"] == [
+            {"type": "text", "text": "Continue with the selected model."},
+            {"type": "image_url", "image_url": {"url": "https://example.test/image.png"}},
+        ]
+    else:
+        tool, user = translated["input"][-2:]
+        assert tool == {"type": "function_call_output", "call_id": "toolu_bdrk_synthetic.1", "output": "file body"}
+        assert user["role"] == "user"
+        assert user["content"] == [
+            {"type": "input_text", "text": "Continue with the selected model."},
+            {"type": "input_image", "image_url": "https://example.test/image.png"},
+        ]
+
+
+@pytest.mark.parametrize("protocol", ["chat_completions", "responses"])
+def test_known_claude_classifier_context_has_a_declared_conversion(protocol: str) -> None:
+    from anthropic_messages_ir import prepare_upstream_request
+
+    result = prepare_upstream_request(observed_shape_body(), protocol)
+    assert isinstance(result, Adapted), result
+    assert "safeguards" not in json.loads(result.body)
+    policy = next(item for item in result.adaptations if item.field == "safeguards")
+    assert policy.policy == "claude_server_classifier_context_omitted_for_non_anthropic"
+    assert "No equivalent Anthropic server classifier is invoked" in policy.detail
+    assert "classifier_context" not in policy.detail
+
+
+@pytest.mark.parametrize("safeguards", [
+    None, {}, True, "dangerous_tool_use", [None],
+    [{"type": "dangerous_tool_use"}],
+    [{"type": "dangerous_tool_use", "classifier_context": "private context"}],
+    [{"type": "future_control", "classifier_context": {}}],
+    [{"type": "dangerous_tool_use", "classifier_context": {}, "enforce": True}],
+])
+@pytest.mark.parametrize("protocol", ["chat_completions", "responses"])
+def test_unknown_or_malformed_safeguards_are_never_adapted_away(safeguards: object, protocol: str) -> None:
+    from anthropic_messages_ir import prepare_upstream_request
+
+    body = json.loads(observed_shape_body())
+    body["safeguards"] = safeguards
+    wire = json.dumps(body).encode()
+    assert parse_request(wire).to_native_body() == wire
+    converted = prepare_upstream_request(wire, protocol)
     assert isinstance(converted, NotForwardable)
     assert converted.fields == ("safeguards",)
     assert converted.diagnostic() == "unsupported_for_chat_conversion: safeguards"

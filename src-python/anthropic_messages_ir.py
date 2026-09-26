@@ -87,10 +87,10 @@ OPTION_FIELDS_WITHOUT_CHAT_EQUIVALENT = {
     "metadata": "request_metadata_omitted_for_chat",
 }
 
-# Explicitly requested safety controls are not "best effort" material. Until an
-# equivalent enforcement is proven upstream, they make the request
-# non-forwardable instead of being adapted away (ADR-0013 critical content).
-SAFETY_BEARING_FIELDS = frozenset({"safeguards"})
+# Claude Code's optional server classifier has no Chat/Responses equivalent.
+# Only its observed classifier-context envelope is adaptable; future controls
+# remain non-forwardable. See the 2026-09-26 model-switch compatibility evidence.
+CLASSIFIER_CONTEXT_FIELDS = frozenset({"safeguards"})
 
 # The native path forwards the inbound bytes; the Gateway still owns these
 # rewrites at the boundary (ADR-0013). Named here so nothing is implicit.
@@ -335,7 +335,7 @@ def parse_request(body: bytes | str) -> AnthropicRequest:
     modelled = (
         MODELLED_REQUEST_FIELDS
         | set(OPTION_FIELDS_WITHOUT_CHAT_EQUIVALENT)
-        | SAFETY_BEARING_FIELDS
+        | CLASSIFIER_CONTEXT_FIELDS
         | {"output_config"}
     )
     options = {
@@ -424,15 +424,22 @@ def _to_chat_request(request: AnthropicRequest) -> Adapted | NotForwardable:
         if message.role == "user":
             results = [block for block in message.content if block.type == _TOOL_RESULT_BLOCK]
             if results:
+                content = []
                 for position, block in enumerate(message.content):
                     if block.type != _TOOL_RESULT_BLOCK:
+                        content.append(block)
                         continue
+                    if content:
+                        declared.refuse("user_content_before_tool_result")
                     pending_tool_results.append(
                         _tool_result_message(block, declared, label=f"{label}.content[{position}]")
                     )
-                for position, block in enumerate(message.content):
-                    if block.type != _TOOL_RESULT_BLOCK:
-                        declared.refuse(f"user_content_after_tool_result:{block.type}")
+                if content:
+                    flush_tool_results()
+                    messages.append({
+                        "role": "user",
+                        "content": _chat_user_content(tuple(content), declared, label=label),
+                    })
                 continue
             flush_tool_results()
             messages.append({"role": "user", "content": _chat_user_content(message.content, declared, label=label)})
@@ -456,9 +463,8 @@ def _to_chat_request(request: AnthropicRequest) -> Adapted | NotForwardable:
     for name, value in request.options.items():
         if name == "model":
             continue
-        if name in SAFETY_BEARING_FIELDS:
-            # Fail closed: never adapt an explicitly requested safety control away.
-            declared.refuse(name)
+        if name == "safeguards":
+            _declare_classifier_context(value, declared)
             continue
         if name == "output_config":
             _map_output_config(value, chat, declared)
@@ -508,6 +514,23 @@ def _declare_block_extras(
             "content_block_field_dropped_for_chat",
             "Chat Completions has no equivalent for this content-block field.",
         )
+
+
+def _declare_classifier_context(value: Any, declared: _Declared) -> None:
+    if not isinstance(value, list) or any(
+        not isinstance(item, Mapping)
+        or set(item) != {"type", "classifier_context"}
+        or item.get("type") != "dangerous_tool_use"
+        or not isinstance(item.get("classifier_context"), Mapping)
+        for item in value
+    ):
+        declared.refuse("safeguards")
+        return
+    declared.adapt(
+        "safeguards",
+        "claude_server_classifier_context_omitted_for_non_anthropic",
+        "No equivalent Anthropic server classifier is invoked; Claude Code owns tool permission checks and classifier fallback.",
+    )
 
 
 def _map_output_config(value: Any, chat: dict[str, Any], declared: _Declared) -> None:
@@ -1371,11 +1394,20 @@ class ChatToAnthropicEmitter:
             raw_delta = choice.get("delta", {})
             if not isinstance(raw_delta, Mapping):
                 return response_refusal("unsupported_upstream_stream", "chat.delta")
+            for name in ("reasoning", "reasoning_content"):
+                reasoning = raw_delta.get(name)
+                if reasoning is not None and not isinstance(reasoning, str):
+                    return response_refusal("unsupported_upstream_stream", f"chat.delta.{name}")
+                field_name = f"chat.delta.{name}"
+                if reasoning and not any(item.field == field_name for item in self.declared):
+                    self.declared.append(Adaptation(
+                        field_name,
+                        "unsigned_reasoning_omitted_for_anthropic",
+                        "Upstream reasoning has no Anthropic signature; it is not emitted as signed thinking or answer text.",
+                    ))
             if any(
-                name in raw_delta
+                raw_delta.get(name) not in (None, "", [], {})
                 for name in (
-                    "reasoning",
-                    "reasoning_content",
                     "reasoning_details",
                     "refusal",
                     "audio",
@@ -1702,6 +1734,7 @@ def adapt_upstream_stream(
             chunks_for_chat = response_events_to_chat_stream_chunks(
                 [payload for payload in payloads if payload != "[DONE]"],
                 require_completed=True,
+                preserve_reasoning_history=True,
             )
             return _chat_chunks_to_anthropic_sse(
                 chunks_for_chat,
