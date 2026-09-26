@@ -1969,3 +1969,16 @@ enabled = true
   thinking_mode = "always_on"
   sort_order = 2
   enabled = true
+
+# Add-flow identity only. Installation, credentials, and request routing are not owned here.
+[[providers]]
+id = "chatgpt-web"
+name = "ChatGPT Web"
+base_url = ""
+api_key = ""
+display_prefix = "Web"
+upstream_format = "responses"
+auth_capabilities = ["runtime:chatgpt_web"]
+onboarding_hint = "providers.chatgptWebRuntimeHint"
+sort_order = 9
+enabled = true

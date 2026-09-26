@@ -47,6 +47,14 @@ function connectionGrid(componentSource) {
   return firstDiv(componentSource, gridStart);
 }
 
+test("ChatGPT Web runtime controls sit outside the connection grid", () => {
+  const detail = namedFunction(editorSource, "ProviderDetail");
+  const card = detail.indexOf("<ChatGptWebRuntimeCard");
+  const grid = detail.indexOf('className="grid grid-cols-2 gap-2"');
+  assert.ok(card >= 0 && grid > card);
+  assert.doesNotMatch(connectionGrid(detail), /ChatGptWebRuntimeCard/);
+});
+
 test("ProviderDetail and AddProviderPanel share a two-column connection grid instead of stacked full-width Base URL and endpoint rows", () => {
   for (const name of ["ProviderDetail", "AddProviderPanel"]) {
     const grid = connectionGrid(namedFunction(editorSource, name));

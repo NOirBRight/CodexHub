@@ -83,6 +83,12 @@ export const COMMANDS = {
   xaiLogout: "xai_logout",
   xaiUsageSnapshot: "xai_usage_snapshot",
   xaiOpenVerificationUrl: "xai_open_verification_url",
+  chatgptWebStatus: "chatgpt_web_status",
+  chatgptWebEnable: "chatgpt_web_enable",
+  chatgptWebStop: "chatgpt_web_stop",
+  chatgptWebDisable: "chatgpt_web_disable",
+  chatgptWebOpenLogin: "chatgpt_web_open_login",
+  chatgptWebCloseLogin: "chatgpt_web_close_login",
 } as const;
 
 export type CommandName = (typeof COMMANDS)[keyof typeof COMMANDS];

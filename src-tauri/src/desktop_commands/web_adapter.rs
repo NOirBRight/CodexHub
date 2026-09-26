@@ -4,8 +4,8 @@
 //! HTTP envelope (origin, body, response) and calls dispatch_web.
 
 use crate::{
-    app_updates, autostart, catalog, config, gateway, history, models, openai_usage, proxy,
-    xai_auth,
+    app_updates, autostart, catalog, chatgpt_web, config, gateway, history, models, openai_usage,
+    proxy, xai_auth,
 };
 use serde_json::Value;
 use tauri::AppHandle;
@@ -368,6 +368,12 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
                 .ok_or_else(|| "url argument is required".to_string())?;
             to_value(xai_auth::xai_open_verification_url_blocking(url))
         }
+        Command::ChatGptWebStatus => to_value(chatgpt_web::chatgpt_web_status_blocking()),
+        Command::ChatGptWebEnable => to_value(chatgpt_web::chatgpt_web_enable_blocking()),
+        Command::ChatGptWebStop => to_value(chatgpt_web::chatgpt_web_stop_blocking()),
+        Command::ChatGptWebDisable => to_value(chatgpt_web::chatgpt_web_disable_blocking()),
+        Command::ChatGptWebOpenLogin => to_value(chatgpt_web::chatgpt_web_open_login_blocking()),
+        Command::ChatGptWebCloseLogin => to_value(chatgpt_web::chatgpt_web_close_login_blocking()),
         // These commands are registered for the desktop handler or retained
         // as an internal compatibility entry, but deliberately have no Web
         // Bridge implementation. Keep them explicit so adding a registry row
