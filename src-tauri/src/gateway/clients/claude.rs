@@ -792,6 +792,10 @@ pub(in crate::gateway) fn claude_settings_text(
         previous_header_hash.as_deref(),
         Some(&header_line),
     );
+    let selected_model_is_native = previous_value
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(is_native_claude_model_id);
     {
         let env = root
             .as_object_mut()
@@ -822,7 +826,14 @@ pub(in crate::gateway) fn claude_settings_text(
             env_map.remove("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY");
         }
         match model.trim() {
-            PRESERVE_DEFAULT_MODEL | "" => {}
+            PRESERVE_DEFAULT_MODEL | "" => {
+                // ANTHROPIC_MODEL overrides settings.model. A native selection
+                // such as Opus 5.5 must stay that model; only the family alias
+                // variables remap hardcoded opus/sonnet/haiku/fable calls.
+                if selected_model_is_native {
+                    env_map.remove("ANTHROPIC_MODEL");
+                }
+            }
             CLEAR_DEFAULT_MODEL => {
                 env_map.remove("ANTHROPIC_MODEL");
             }
@@ -1211,6 +1222,28 @@ mod tests {
         let next: Value = serde_json::from_str(&preview.next_redacted).unwrap();
         assert!(next["env"].get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn explicit_native_model_is_not_replaced_by_the_opus_family_mapping() {
+        let current = r#"{"model":"claude-opus-5-5[1m]","env":{"ANTHROPIC_MODEL":"claude-codexhub-gpt-5.5","ANTHROPIC_DEFAULT_OPUS_MODEL":"claude-codexhub-gpt-5.5"}}"#;
+        let next = claude_settings_text(
+            Some(current),
+            &settings(),
+            &[],
+            PRESERVE_DEFAULT_MODEL,
+            &BTreeMap::from([("opus".into(), "gpt-5.5".into())]),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&next).unwrap();
+        assert_eq!(value["model"], "claude-opus-5-5[1m]");
+        assert!(value.pointer("/env/ANTHROPIC_MODEL").is_none());
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-codexhub-gpt-5.5")
+        );
     }
 
     #[test]
