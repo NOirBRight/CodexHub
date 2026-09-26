@@ -487,7 +487,7 @@ def test_linux_release_builder_rejects_stale_or_ambiguous_bundle_artifacts():
     assert "head -n 1" not in script
     assert "expected exactly one AppImage" in script
     assert "expected exactly one deb" in script
-    assert 'dpkg-deb -f "$deb_dst" Version' in script
+    assert 'ar p "$deb_dst" control.tar.gz' in script
     assert "deb package version mismatch" in script
 
 

@@ -175,7 +175,7 @@ fi
     --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" "$appimage_dst"
 )
 
-deb_version="$(dpkg-deb -f "$deb_dst" Version)"
+deb_version="$(ar p "$deb_dst" control.tar.gz | tar -xzO control | sed -n 's/^Version: //p')"
 if [[ "$deb_version" != "$version" ]]; then
   echo "deb package version mismatch: expected $version, found $deb_version in $deb_dst" >&2
   exit 1

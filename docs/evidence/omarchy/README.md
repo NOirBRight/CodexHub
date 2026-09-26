@@ -111,8 +111,12 @@ was accepted as an artifact. The upstream
 [GTK plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-gtk) still
 assumes loader directories; GdkPixbuf's
 [build configuration](https://github.com/GNOME/gdk-pixbuf/blob/master/meson_options.txt)
-supports built-in/Glycin loaders. A supported AppImage build host/toolchain is
-still needed before AppImage distribution can be qualified.
+supports built-in/Glycin loaders. This construction blocker was superseded on
+2026-09-26 by the native Omarchy AppDir workflow documented in
+[Linux packaging](../../agents/linux-packaging.md): host GTK/WebKit libraries,
+hash-pinned appimagetool/runtime, and no root or Docker. The 0.2.26 candidate
+AppImage was built, signed, and passed isolated X11 physical pointer input.
+The unperformed checks below describe the earlier evidence run.
 
 Real-login autostart, IME, fractional scaling, installed AppImage upgrade,
 Windows checks, and release qualification were not performed. The checked-in
