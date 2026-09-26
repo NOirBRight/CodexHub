@@ -1,9 +1,11 @@
 # Claude coexistence live candidate evidence (#564)
 
-## Current continuation: e0a2289b packages
+## Current continuation: 631a5478 packages
 
-[Versioned results, exact SHA distinctions and remaining gates](e0a2289b/README.md)
-cover the current Linux/Windows work. Publication and installation remain on
+[Current real-client results and Windows blocker resolution](631a5478/README.md)
+cover the matching Linux/Windows packages: CLI 8/8 and independent Chat 2/2 on
+each OS. [Earlier bounded Claude evidence](e0a2289b/README.md) retains its
+original SHA and scope. Publication and installation remain on
 hold while the other session stabilizes its fixes. No gate waiver is granted.
 
 ## Live source switching candidate `b1ce405a` (2026-09-26)

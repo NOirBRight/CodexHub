@@ -1,0 +1,17 @@
+{
+  "schema": "codexhub.qualification-catalog-provenance.v1",
+  "candidate_sha": "631a5478b474d46ea78690767971642de80deda2",
+  "source_input": "/home/noirbright/.cache/codexhub-release-0.2.25-gate-inputs/linux-deepseek-inputs-20260926/codexhub-model-catalog.json",
+  "windows_staging_input": "D:/Workstation/codexhub-real-client-e2e/tools/catalog-e0a2289b.json",
+  "sha256": "sha256:c46ce534c0f316943d01c26c5deebc3d1651c943b29c2514df1853b5130c2ce0",
+  "fetched_at": "2026-09-26T04:00:40.351663Z",
+  "catalog_client_version": "0.2.24",
+  "qualification_model": "gpt-6-luna",
+  "same_input_used_by": [
+    "631a5478 Linux CLI",
+    "631a5478 Linux Chat",
+    "631a5478 Windows Chat",
+    "631a5478 Windows CLI"
+  ],
+  "refresh_result": "windows-refresh-diagnostic.json"
+}
