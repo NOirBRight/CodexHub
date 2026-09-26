@@ -107,6 +107,7 @@ export function subagentCatalogSlug(
 }
 
 export function listDefaultSubagentOptions(input: {
+  includeFastVariants?: boolean;
   officialId: string;
   officialIncluded: boolean;
   officialModels: Model[];
@@ -133,7 +134,7 @@ export function listDefaultSubagentOptions(input: {
         defaultEffort: defaultEffortForModel(model),
       };
       if (
-        FAST_SUBAGENT_MODELS.has(id) &&
+        input.includeFastVariants && FAST_SUBAGENT_MODELS.has(id) &&
         !input.officialDisabledModels.some((item) => officialModelKey(item) === `${id}-fast`)
       ) {
         option.speedVariant = `${id}-fast`;

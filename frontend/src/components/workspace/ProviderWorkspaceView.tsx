@@ -212,6 +212,7 @@ export function ProviderWorkspaceView(props: Props) {
       props.officialIncluded ? props.officialEnabled : 0,
     );
   const subagentOptions = listDefaultSubagentOptions({
+    includeFastVariants: true,
     officialId: props.officialId,
     officialIncluded: props.officialIncluded,
     officialModels: props.officialModels,
@@ -886,7 +887,7 @@ export function DefaultSubagentPicker({
                   <ChevronRight size={11} />
                 </span>
               </button>
-              <button
+              {options.some((option) => option.speedVariant) && <button
                 type="button"
                 className="ws-bridge-subagent-row"
                 role="switch"
@@ -906,7 +907,7 @@ export function DefaultSubagentPicker({
                     ? "workspace.defaultSubagentFastOn"
                     : "workspace.defaultSubagentFastOff")}
                 </span>
-              </button>
+              </button>}
             </>
           ) : (
             <>

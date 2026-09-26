@@ -55,9 +55,12 @@ async function loadCombinedModule() {
   const wrapped = new Function(
     "exports",
     "require",
+    "officialFastVariants",
     js + "\nexports.buildOfficialRefreshIntent = buildOfficialRefreshIntent; exports.providerWorkspaceReducer = providerWorkspaceReducer; exports.selectOfficialEnabledCount = selectOfficialEnabledCount; exports.selectOfficialModelDraftDirty = selectOfficialModelDraftDirty; exports.selectSelectedProvider = selectSelectedProvider; exports.catalogOverrideToastMessage = catalogOverrideToastMessage;",
   );
-  wrapped(moduleExports, mockRequire);
+  wrapped(moduleExports, mockRequire, JSON.parse(
+    await readFile(new URL("../../config/official_fast_variants.json", import.meta.url), "utf8"),
+  ));
   return moduleExports;
 }
 

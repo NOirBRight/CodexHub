@@ -69,6 +69,7 @@ test("third-party subagent slugs stay provider-qualified", () => {
 
 test("default subagent options include enabled official and provider models", () => {
   const options = listDefaultSubagentOptions({
+    includeFastVariants: true,
     officialId: "__official__",
     officialIncluded: true,
     officialModels: [
@@ -118,12 +119,23 @@ test("default subagent options include enabled official and provider models", ()
 
 test("disabled and unsupported official models do not gain Fast choices", () => {
   const options = listDefaultSubagentOptions({
+    includeFastVariants: true,
     officialId: "__official__", officialIncluded: true,
     officialModels: [official("gpt-5.6-luna"), official("gpt-5.5"), official("gpt-5.4-mini")],
     officialDisabledModels: ["openai/gpt-5.6-luna", "gpt-5.5-fast"], providers: [],
   });
   assert.deepEqual(options.map((option) => option.id), ["gpt-5.5", "gpt-5.4-mini"]);
   assert.ok(options.every((option) => !option.speedVariant));
+});
+
+test("other client subagent options do not opt into Codex Fast aliases", () => {
+  const options = listDefaultSubagentOptions({
+    officialId: "__official__", officialIncluded: true,
+    officialModels: [official("gpt-5.6-luna")],
+    officialDisabledModels: [], providers: [],
+  });
+  assert.deepEqual(options.map((option) => option.id), ["gpt-5.6-luna"]);
+  assert.equal(options[0].speedVariant, undefined);
 });
 
 test("OpenCode Go flash stays a provider-qualified subagent option", () => {
