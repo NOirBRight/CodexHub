@@ -778,6 +778,9 @@ export function DefaultSubagentPicker({
   }, [open]);
 
   function chooseModel(nextModel: string) {
+    if (activeSelected?.fast) {
+      nextModel = options.find((item) => item.id === nextModel)?.speedVariant ?? nextModel;
+    }
     const option =
       options.find((item) => item.id === nextModel) ??
       (nextModel && selected?.id === nextModel ? selected : undefined);
@@ -883,6 +886,27 @@ export function DefaultSubagentPicker({
                   <ChevronRight size={11} />
                 </span>
               </button>
+              <button
+                type="button"
+                className="ws-bridge-subagent-row"
+                role="switch"
+                aria-checked={Boolean(activeSelected?.fast)}
+                disabled={!activeSelected?.speedVariant}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  const nextModel = activeSelected?.speedVariant;
+                  if (!nextModel) return;
+                  setDraftModel(nextModel);
+                  commitIfChanged(nextModel, draftEffort);
+                }}
+              >
+                <span>Fast</span>
+                <span>
+                  {t(activeSelected?.fast
+                    ? "workspace.defaultSubagentFastOn"
+                    : "workspace.defaultSubagentFastOff")}
+                </span>
+              </button>
             </>
           ) : (
             <>
@@ -913,13 +937,13 @@ export function DefaultSubagentPicker({
                     >
                       {fallback}
                     </button>
-                    {modelChoices.map((option) => (
+                    {modelChoices.filter((option) => !option.fast).map((option) => (
                       <button
                         key={option.id}
                         type="button"
                         className="select-option"
                         role="option"
-                        aria-selected={option.id === draftModel}
+                        aria-selected={option.id === draftModel || (activeSelected?.fast && option.id === activeSelected.speedVariant)}
                         title={option.label}
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => chooseModel(option.id)}

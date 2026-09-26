@@ -293,7 +293,14 @@ export function isCatalogModelListable(model: Model) {
 
 export function isOfficialGatewayFastVariant(model: Model) {
   const normalizedId = model.id.trim().replace(/^openai\//, "");
-  return normalizedId === "gpt-5.5-fast" || normalizedId === "gpt-5.4-fast";
+  return [
+    "gpt-6-astra-fast",
+    "gpt-5.6-sol-fast",
+    "gpt-5.6-terra-fast",
+    "gpt-5.6-luna-fast",
+    "gpt-5.5-fast",
+    "gpt-5.4-fast",
+  ].includes(normalizedId);
 }
 
 export function officialModelSortKeys(id: string) {

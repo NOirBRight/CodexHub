@@ -101,12 +101,28 @@ test("default subagent options include enabled official and provider models", ()
   });
   assert.deepEqual(
     options.map((option) => option.id),
-    ["gpt-5.6-luna", "xai/grok-4.6"],
+    ["gpt-5.6-luna", "gpt-5.6-luna-fast", "xai/grok-4.6"],
   );
   assert.equal(options[0].label, "GPT-5.6 Luna");
-  assert.equal(options[1].label, "xAI · Grok 4.6");
+  assert.equal(options[2].label, "xAI · Grok 4.6");
+  assert.equal(options[0].speedVariant, "gpt-5.6-luna-fast");
+  assert.equal(options[1].speedVariant, "gpt-5.6-luna");
+  assert.equal(options[1].fast, true);
+  assert.equal(options[1].label, "GPT-5.6 Luna Fast");
+  assert.equal(resolveSubagentEffort(options[1], "max"), "max");
+  assert.equal(options[2].speedVariant, undefined);
   assert.equal(resolveSubagentEffort(options[0], "max"), "max");
-  assert.equal(resolveSubagentEffort(options[1], "max"), "high");
+  assert.equal(resolveSubagentEffort(options[2], "max"), "high");
+});
+
+test("disabled and unsupported official models do not gain Fast choices", () => {
+  const options = listDefaultSubagentOptions({
+    officialId: "__official__", officialIncluded: true,
+    officialModels: [official("gpt-5.6-luna"), official("gpt-5.5"), official("gpt-5.4-mini")],
+    officialDisabledModels: ["openai/gpt-5.6-luna", "gpt-5.5-fast"], providers: [],
+  });
+  assert.deepEqual(options.map((option) => option.id), ["gpt-5.5", "gpt-5.4-mini"]);
+  assert.ok(options.every((option) => !option.speedVariant));
 });
 
 test("OpenCode Go flash stays a provider-qualified subagent option", () => {

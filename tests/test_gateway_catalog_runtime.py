@@ -75,6 +75,35 @@ def test_catalog_runtime_is_exposed_as_module_functions():
     assert callable(gateway_catalog_runtime.choose_upstream)
 
 
+@pytest.mark.parametrize(
+    "model",
+    ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"],
+)
+def test_subagent_fast_alias_publishes_and_routes_priority(model):
+    runtime = CatalogRuntime(
+        policy_reader=lambda _path: _policy(),
+        generated_official_reader=lambda slug, _policy: model if slug == model else None,
+    )
+    catalog = runtime.catalog_with_official_fast_variants(
+        {"models": [{"slug": model, "display_name": model}]}
+    )
+    fast = next(item for item in catalog["models"] if item["slug"] == f"{model}-fast")
+    assert fast["codex_proxy_metadata"]["service_tier"] == "priority"
+    for slug in (fast["slug"], f"openai/{fast['slug']}"):
+        upstream = runtime.choose_upstream(slug)
+        assert upstream["upstream_model"] == model
+        assert upstream["service_tier"] == "priority"
+
+
+def test_subagent_fast_alias_respects_disabled_base_model():
+    policy = _policy()
+    policy.denied_models.add("gpt-5.6-luna")
+    runtime = CatalogRuntime(policy_reader=lambda _path: policy)
+    with pytest.raises(ModelIdentityResolutionError) as failure:
+        runtime.choose_upstream("gpt-5.6-luna-fast")
+    assert failure.value.reason == "denied_model"
+
+
 def test_catalog_facts_are_deeply_immutable() -> None:
     facts = CatalogFacts(
         official_fast_variant_base_models={"fast": "base"},

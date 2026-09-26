@@ -83,7 +83,18 @@ export type DefaultSubagentOption = {
   label: string;
   efforts: string[];
   defaultEffort: string;
+  fast?: boolean;
+  speedVariant?: string;
 };
+
+const FAST_SUBAGENT_MODELS = new Set([
+  "gpt-6-astra",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5",
+  "gpt-5.4",
+]);
 
 export function subagentCatalogSlug(
   providerId: string,
@@ -121,12 +132,28 @@ export function listDefaultSubagentOptions(input: {
     for (const model of input.officialModels) {
       if (!isOfficialModelEnabled(model, input.officialDisabledModels)) continue;
       const id = subagentCatalogSlug(input.officialId, model.id, input.officialId);
-      push({
+      const option: DefaultSubagentOption = {
         id,
         label: shortWireDisplayName(model.display_name, model.id),
         efforts: effortsForModel(model),
         defaultEffort: defaultEffortForModel(model),
-      });
+      };
+      if (
+        FAST_SUBAGENT_MODELS.has(id) &&
+        !input.officialDisabledModels.some((item) => officialModelKey(item) === `${id}-fast`)
+      ) {
+        option.speedVariant = `${id}-fast`;
+      }
+      push(option);
+      if (option.speedVariant) {
+        push({
+          ...option,
+          id: option.speedVariant,
+          label: `${option.label} Fast`,
+          fast: true,
+          speedVariant: id,
+        });
+      }
     }
   }
 

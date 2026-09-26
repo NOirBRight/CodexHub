@@ -130,6 +130,10 @@ class CatalogFacts:
     official_fast_variant_service_tier: str = "priority"
     official_fast_variant_base_models: Mapping[str, str] = field(
         default_factory=lambda: {
+            "gpt-6-astra-fast": "gpt-6-astra",
+            "gpt-5.6-sol-fast": "gpt-5.6-sol",
+            "gpt-5.6-terra-fast": "gpt-5.6-terra",
+            "gpt-5.6-luna-fast": "gpt-5.6-luna",
             "gpt-5.5-fast": "gpt-5.5",
             "gpt-5.4-fast": "gpt-5.4",
         }

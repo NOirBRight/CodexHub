@@ -68,6 +68,8 @@ const enUS = {
   "defaultSubagentCliDefault": "CLI default",
   "defaultSubagentModel": "Model",
   "defaultSubagentEffort": "Effort",
+  "defaultSubagentFastOn": "On",
+  "defaultSubagentFastOff": "Off",
   "savingDefaultSubagent": "Saving default subagent…",
   "defaultSubagentSaved": "Default subagent saved. Restart Codex to apply.",
   "defaultSubagentSavedDisconnected": "Default subagent saved. It will be written to Codex when you connect CodexHub.",

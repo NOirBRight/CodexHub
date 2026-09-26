@@ -207,7 +207,10 @@ MINIMAL_OFFICIAL_MODEL: dict[str, Any] = {
 OFFICIAL_FAST_SERVICE_TIERS: list[dict[str, str]] = [
     {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
 ]
-OFFICIAL_GATEWAY_FAST_VARIANT_SLUGS = {"gpt-5.5-fast", "gpt-5.4-fast"}
+OFFICIAL_GATEWAY_FAST_VARIANT_SLUGS = {
+    "gpt-6-astra-fast", "gpt-5.6-sol-fast", "gpt-5.6-terra-fast",
+    "gpt-5.6-luna-fast", "gpt-5.5-fast", "gpt-5.4-fast",
+}
 
 OFFICIAL_MODEL_DEFAULTS: dict[str, dict[str, Any]] = {
     "gpt-5.5": {
