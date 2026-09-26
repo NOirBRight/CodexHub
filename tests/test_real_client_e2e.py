@@ -418,6 +418,7 @@ def _run(
     authoritative_paths_with_spaces: bool = False,
     cli_only: bool = False,
     deepseek_credentials: Path | None = None,
+    upstream_proxy: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     output, isolation, debug_build, materializer_build, host_manifest = _prepare_run(
         tmp_path, candidate_sha, materializer_sha
@@ -540,6 +541,8 @@ def _run(
     command.extend(("-TimeoutSeconds", str(timeout_seconds)))
     if cli_only:
         command.append("-CliOnly")
+    if upstream_proxy is not None:
+        command.extend(("-UpstreamProxy", upstream_proxy))
     command.extend(("-ManualEvidenceTimeoutSeconds", str(manual_timeout_seconds)))
     command.extend(("-OverallTimeoutSeconds", str(overall_timeout_seconds)))
     finalizer = None
@@ -655,6 +658,48 @@ def test_baseline_gateway_is_bound_to_exact_current_candidate_materializer(tmp_p
     )
     assert manual_template["candidate_sha"] == baseline_sha
     assert manual_template["managed_client_config_sha"] == materializer_sha
+
+
+@pytest.mark.parametrize("proxy", [None, "http://127.0.0.1:17898"])
+def test_upstream_proxy_is_explicit_and_candidate_only(tmp_path, monkeypatch, proxy):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:19999")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:19999")
+
+    def check_candidate_environment(_output, _isolation, debug_build):
+        checks = (
+            f'if not "%HTTP_PROXY%"=="{proxy}" exit /b 87\n'
+            f'if not "%HTTPS_PROXY%"=="{proxy}" exit /b 88\n'
+            'if not "%NO_PROXY%"=="localhost,127.0.0.1" exit /b 89\n'
+            if proxy else
+            'if defined HTTP_PROXY exit /b 87\nif defined HTTPS_PROXY exit /b 88\n'
+        )
+        debug_build.write_text("@echo off\n" + checks + debug_build.read_text())
+
+    client = tmp_path / "client-without-upstream-proxy.cmd"
+    client.write_text(
+        "@echo off\nif defined HTTP_PROXY exit /b 87\n"
+        "if defined HTTPS_PROXY exit /b 88\n"
+        f'call "{FIXTURES / "fake-client-real-contract.cmd"}" %*\n'
+    )
+    result = _run(
+        tmp_path, fake=str(client), cli_only=True, finalize_manual=False,
+        mutate=check_candidate_environment, upstream_proxy=proxy,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads((tmp_path / "output/summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["counts"]["passed_count"] == CLI_CASE_COUNT
+
+
+@pytest.mark.parametrize("proxy", [
+    "http://example.com:17898", "http://127.0.0.1:9099",
+    "http://user:password@127.0.0.1:17898", "http://127.0.0.1:17898/path",
+])
+def test_upstream_proxy_rejects_nonisolated_or_credential_bearing_urls(tmp_path, proxy):
+    result = _run(tmp_path, upstream_proxy=proxy, cli_only=True, finalize_manual=False)
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output/summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["failure_classification"] == "preflight_upstream_proxy_invalid"
+    assert summary["counts"]["case_count"] == 0
 
 
 def test_runner_invokes_candidate_materializer_for_every_managed_client(tmp_path):

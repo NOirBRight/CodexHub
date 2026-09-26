@@ -22,7 +22,7 @@ try {
   await card.getByRole("button", { name: "Claude Code connection details" }).click();
   let dialog = page.getByRole("dialog", { name: "Claude Code settings" });
   const picker = (name) => dialog.locator("label.ws-claude-field")
-    .filter({ has: page.getByText(name, { exact: true }) }).locator("select");
+    .filter({ has: page.locator("span").filter({ hasText: new RegExp(`^${name}$`) }) }).locator("select");
   await expect(dialog).toBeVisible();
   await picker("Default model").selectOption("e2e/alpha");
   await picker("Haiku / fast").selectOption("e2e/beta");

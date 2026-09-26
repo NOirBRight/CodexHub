@@ -38,6 +38,8 @@ param(
 
     [switch]$CliOnly,
 
+    [string]$UpstreamProxy = '',
+
     [int]$TimeoutSeconds = 180,
 
     [int]$ManualEvidenceTimeoutSeconds = 900,
@@ -580,6 +582,7 @@ function Invoke-RunnerSupervisor {
         PiPath = $PiPath
         OmpPath = $OmpPath
         CliOnly = [bool]$CliOnly
+        UpstreamProxy = $UpstreamProxy
         TimeoutSeconds = $TimeoutSeconds
         ManualEvidenceTimeoutSeconds = $ManualEvidenceTimeoutSeconds
         OverallTimeoutSeconds = $OverallTimeoutSeconds
@@ -3267,7 +3270,7 @@ try {
         'ManagedClientConfigSha', 'LunaModel', 'ThirdPartyModel', 'DeepSeekCredentials', 'OutputDirectory',
         'HostEnvironmentManifest', 'TestWindowsInstallMetadataFixture',
         'CodexDesktopPath', 'CodexCliPath', 'ZCodePath', 'OpenCodePath',
-        'PiPath', 'OmpPath', 'CliOnly', 'TimeoutSeconds', 'ManualEvidenceTimeoutSeconds',
+        'PiPath', 'OmpPath', 'CliOnly', 'UpstreamProxy', 'TimeoutSeconds', 'ManualEvidenceTimeoutSeconds',
         'OverallTimeoutSeconds'
     ) -Failure 'preflight_supervisor_arguments_invalid'
     $CandidateSha = [string]$forwardedArguments.CandidateSha
@@ -3287,6 +3290,7 @@ try {
     $PiPath = [string]$forwardedArguments.PiPath
     $OmpPath = [string]$forwardedArguments.OmpPath
     $CliOnly = [bool]$forwardedArguments.CliOnly
+    $UpstreamProxy = [string]$forwardedArguments.UpstreamProxy
     $TimeoutSeconds = [int]$forwardedArguments.TimeoutSeconds
     $ManualEvidenceTimeoutSeconds = [int]$forwardedArguments.ManualEvidenceTimeoutSeconds
     $OverallTimeoutSeconds = [int]$forwardedArguments.OverallTimeoutSeconds
@@ -3313,6 +3317,16 @@ $failureSummaryPath = Join-Path $failureOutputDirectory 'summary.json'
 $failureArtifactRoot = Join-Path $failureOutputDirectory 'artifacts'
 $script:FailureArtifacts = [System.Collections.Generic.List[string]]::new()
 try {
+if ($UpstreamProxy) {
+    $proxyUri = $null
+    if (-not [Uri]::TryCreate($UpstreamProxy, [UriKind]::Absolute, [ref]$proxyUri) -or
+        $proxyUri.Scheme -cne 'http' -or $proxyUri.Host -cne '127.0.0.1' -or
+        $proxyUri.Port -lt 1024 -or $proxyUri.Port -eq 9099 -or
+        $proxyUri.UserInfo -or $proxyUri.Query -or $proxyUri.Fragment -or
+        $proxyUri.AbsolutePath -cne '/') {
+        throw 'preflight_upstream_proxy_invalid'
+    }
+}
 if ($CandidateSha -notmatch '^[0-9a-f]{40}$') {
     throw 'preflight_candidate_sha_invalid'
 }
@@ -3592,6 +3606,13 @@ try {
         CODEX_PROXY_GATEWAY_CLIENT_KEY = [string]$script:GatewayConfig.gateway_client_key
         DEEPSEEK_API_KEY = [string]$credential.api_key
         CODEXHUB_E2E_CONTRACT_PROBE_LOG = $script:ManagedClientConfigLogPath
+    }
+    if ($UpstreamProxy) {
+        # Only the candidate's HTTPS upstream traffic uses this explicit tunnel.
+        # Native clients keep their isolated loopback-only configuration.
+        $candidateEnvironment.HTTP_PROXY = $UpstreamProxy
+        $candidateEnvironment.HTTPS_PROXY = $UpstreamProxy
+        $candidateEnvironment.NO_PROXY = 'localhost,127.0.0.1'
     }
     Set-RunnerPhase -Phase 'candidate_startup'
     $candidateStartupBudgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
