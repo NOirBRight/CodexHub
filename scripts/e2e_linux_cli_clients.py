@@ -1066,8 +1066,10 @@ def _run_case_attempt(
 ) -> tuple[dict[str, object], dict[str, object], int]:
     managed_root = work / "managed" / case.case_id
     if configure:
+        preview_root = work / "managed-preview" / case.case_id
+        preview_root.mkdir(parents=True)
         managed_root.mkdir(parents=True)
-        preview = _managed(binary, "preview", case, managed_root, settings, providers, catalog, env)
+        preview = _managed(binary, "preview", case, preview_root, settings, providers, catalog, env)
         apply = (
             _managed(binary, "apply", case, managed_root, settings, providers, catalog, env)
             if preview["ok"]

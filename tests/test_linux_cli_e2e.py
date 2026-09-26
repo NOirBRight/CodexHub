@@ -192,6 +192,36 @@ def test_client_timeout_kills_descendant_process_group(tmp_path):
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("case", E2E.CASES, ids=lambda case: case.case_id)
+def test_preview_and_apply_use_fresh_roots_and_readback_uses_apply(case, tmp_path, monkeypatch):
+    roots = {}
+
+    def managed(_binary, verb, _case, root, *_inputs):
+        roots[verb] = root
+        marker = root / "runtime"
+        if verb == "readback":
+            assert marker.is_dir()
+        else:
+            assert not marker.exists(), "isolated root is not fresh"
+            marker.mkdir(parents=True)
+        return {"ok": True, "returncode": 0}
+
+    monkeypatch.setattr(E2E, "_managed", managed)
+    monkeypatch.setattr(E2E, "_client_launch", lambda *args: {"ok": False})
+    monkeypatch.setattr(E2E, "_gateway_events_for_attempt", lambda *args, **kwargs: ([], 0))
+    result, _, _ = E2E._run_case_attempt(
+        case, binary=tmp_path / "candidate", work=tmp_path,
+        env={"CODEXHUB_RUNTIME_HOME": str(tmp_path / "runtime")},
+        settings=tmp_path / "settings.json", providers=tmp_path / "providers.toml",
+        catalog=tmp_path / "catalog.json", timeout=1,
+    )
+
+    assert all(result[verb]["ok"] for verb in ("preview", "apply", "readback"))
+    assert roots["preview"] != roots["apply"]
+    assert roots["apply"] == roots["readback"]
+    assert (roots["preview"] / "runtime").is_dir()
+
+
 def test_retried_client_attempt_gets_a_fresh_case_home(tmp_path, monkeypatch):
     case = E2E.CASES[0]
     roots = []
