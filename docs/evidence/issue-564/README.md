@@ -1,5 +1,11 @@
 # Claude coexistence live candidate evidence (#564)
 
+## Current continuation: e0a2289b packages
+
+[Versioned results, exact SHA distinctions and remaining gates](e0a2289b/README.md)
+cover the current Linux/Windows work. Publication and installation remain on
+hold while the other session stabilizes its fixes. No gate waiver is granted.
+
 ## Live source switching candidate `b1ce405a` (2026-09-26)
 
 Real Claude Code 2.1.283 and the unmodified Linux source Gateway passed three
