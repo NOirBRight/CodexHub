@@ -85,6 +85,42 @@ print(json.dumps({"response":{"response":{"models":[{"value":"opus","resolvedMod
     assert json.loads(result.stdout)['models'][0]['model'] == 'claude-opus-5-5'
 
 
+def test_native_discovery_resolves_a_mise_shim_before_isolation(tmp_path):
+    if os.name == 'nt':
+        return
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'settings.json').write_text('{}')
+    program = tmp_path / 'fixture.py'
+    program.write_text('''
+import json,sys
+if "--version" in sys.argv:
+    print("2.1.283 (Claude Code)")
+    raise SystemExit(0)
+assert json.loads(sys.stdin.readline())["request"]["subtype"] == "initialize"
+print(json.dumps({"response":{"response":{"models":[{"value":"opus","resolvedModel":"claude-opus-5-5","displayName":"Opus"}]}}}))
+''')
+    installed = tmp_path / 'installs' / 'claude'
+    installed.parent.mkdir()
+    installed.write_text(f'#!/bin/sh\nexec "$CODEXHUB_E2E_PYTHON" {shlex.quote(str(program))} "$@"\n')
+    installed.chmod(0o700)
+    mise = tmp_path / 'mise'
+    mise.write_text(f'#!/bin/sh\nif [ "$1" = which ] && [ "$2" = claude ]; then echo {shlex.quote(str(installed))}; exit 0; fi\necho "mise network" >&2; exit 9\n')
+    mise.chmod(0o700)
+    shim = tmp_path / 'shims' / 'claude'
+    shim.parent.mkdir()
+    shim.symlink_to(mise)
+    script = Path(__file__).resolve().parents[1] / 'src-python' / 'claude_native_models.py'
+    result = subprocess.run(
+        [sys.executable, str(script), '--claude-bin', str(shim), '--config-dir', str(source)],
+        capture_output=True, text=True, timeout=15,
+        env={**os.environ, 'CODEXHUB_E2E_PYTHON': sys.executable},
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['models'][0]['model'] == 'claude-opus-5-5'
+    assert 'mise network' not in result.stderr
+
+
 def test_native_discovery_failure_does_not_publish_an_empty_catalog(tmp_path):
     script = Path(__file__).resolve().parents[1] / 'src-python' / 'claude_native_models.py'
     result = subprocess.run([sys.executable, str(script), '--claude-bin', str(tmp_path / 'missing'),

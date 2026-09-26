@@ -14,6 +14,29 @@ import sys
 import tempfile
 
 
+def concrete_executable(binary: Path) -> Path:
+    """Return a Claude binary that can start without a version-manager lookup.
+
+    A mise shim's resolved file is ``mise``. Running that shim after ``HOME`` is
+    replaced makes mise try to download Claude, which the offline discovery
+    proxy then refuses.
+    """
+    if not binary.is_file():
+        raise ValueError('Claude executable was not found')
+    resolved = binary.resolve()
+    if resolved.name != 'mise':
+        return binary
+    which = subprocess.run(
+        [str(resolved), 'which', 'claude'],
+        capture_output=True, text=True, timeout=5,
+    )
+    lines = [line.strip() for line in which.stdout.splitlines() if line.strip()]
+    found = Path(lines[-1]) if which.returncode == 0 and lines else None
+    if found is None or not found.is_file() or found.resolve().name == 'mise':
+        raise ValueError('Claude executable was not found')
+    return found
+
+
 def cli_command(binary: Path, arguments: list[str]) -> list[str]:
     command = [str(binary), *arguments]
     if os.name == 'nt' and binary.suffix.lower() in ('.cmd', '.bat'):
@@ -121,11 +144,7 @@ def main() -> int:
     parser.add_argument('--config-dir', type=Path, required=True)
     args = parser.parse_args()
     try:
-        # Keep a shim's own path. Resolving a mise `claude` shim yields
-        # `mise` itself, and argv0 no longer selects the Claude tool.
-        binary = args.claude_bin.expanduser()
-        if not binary.is_file():
-            raise ValueError('Claude executable was not found')
+        binary = concrete_executable(args.claude_bin.expanduser())
         print(json.dumps(discover(binary, args.config_dir.expanduser().resolve())))
         return 0
     except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
