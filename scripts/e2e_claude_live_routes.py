@@ -1036,7 +1036,7 @@ def run_packaged_usage_statistics_window(
         expected_provider = "claudesubscription"
         row_y = min(460, max(0, app_height - 1))
         row_height = min(170, app_height - row_y)
-        row_width = min(1024, app_width)
+        row_width = app_width
         while time.monotonic() < deadline:
             capture_text()
             subprocess.run(

@@ -2741,6 +2741,49 @@ def _collapse_hosted_output_item_for_chat(item: Mapping[str, Any]) -> Mapping[st
     return collapsed if collapsed is not None else item
 
 
+def _normalize_raw_reasoning_event(
+    event: Mapping[str, Any],
+    texts: dict[tuple[str, int], str],
+    *,
+    enabled: bool,
+) -> Mapping[str, Any]:
+    """Normalize raw reasoning parts to portable deltas without replaying final text."""
+    kind = event.get("type")
+    part = event.get("part")
+    is_part = kind in {"response.content_part.added", "response.content_part.done"} and isinstance(part, Mapping) and part.get("type") == "reasoning_text"
+    if not is_part and kind not in {"response.reasoning_text.delta", "response.reasoning_text.done"}:
+        return event
+    if not enabled:
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Responses reasoning output requires an explicit Chat capability.",
+        )
+    if is_part:
+        _require_supported_fields(part, {"type", "text"}, "Responses reasoning content part")
+    text = part.get("text") if is_part else event.get("delta" if kind == "response.reasoning_text.delta" else "text")
+    identity = event.get("item_id", event.get("output_index", 0))
+    index = event.get("content_index", 0)
+    if not isinstance(text, str) or not isinstance(identity, (str, int)) or isinstance(identity, bool) or not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        raise UnsupportedProtocolTranslationError(
+            "unsupported_protocol_semantics",
+            "Cannot translate malformed Responses reasoning text or identity.",
+        )
+    key = (str(identity), index)
+    previous = texts.get(key, "")
+    if kind == "response.reasoning_text.delta":
+        delta = text
+        texts[key] = previous + delta
+    else:
+        if not text.startswith(previous):
+            raise UnsupportedProtocolTranslationError(
+                "unsupported_protocol_semantics",
+                "Cannot translate conflicting final Responses reasoning text.",
+            )
+        delta = text[len(previous):]
+        texts[key] = text
+    return {"type": "response.reasoning_summary_text.delta", "delta": delta}
+
+
 def _validated_responses_stream_output_item(
     item: Any,
     *,
@@ -2803,6 +2846,7 @@ _POST_TERMINAL_SEMANTIC_EVENT_TYPES = frozenset(
     {
         "response.output_text.delta",
         "response.reasoning_summary_text.delta",
+        "response.reasoning_text.delta",
         "response.function_call_arguments.delta",
         "response.output_item.added",
         "response.failed",
@@ -2849,6 +2893,7 @@ def response_events_to_chat_stream_chunks(
     response_id: str | None = None
     finish_reason: str | None = None
     reasoning_texts_emitted: set[str] = set()
+    raw_reasoning_texts: dict[tuple[str, int], str] = {}
     stream_created: int | None = None
 
     def chunk_created(source: Mapping[str, Any] | None = None) -> int:
@@ -2904,6 +2949,8 @@ def response_events_to_chat_stream_chunks(
     for event in events:
         if not isinstance(event, Mapping):
             continue
+        event = _normalize_raw_reasoning_event(event, raw_reasoning_texts, enabled=preserve_reasoning_history)
+        reasoning_texts_emitted.update(raw_reasoning_texts.values())
         event_type = event.get("type")
         if event_type in {"response.failed", "response.incomplete", "error"}:
             raise UnsupportedProtocolTranslationError(
@@ -3158,6 +3205,18 @@ def response_events_to_chat_stream_chunks(
             continue
         if event_type == "response.output_item.done":
             item = event.get("item")
+            if isinstance(item, Mapping) and item.get("type") == "reasoning":
+                if not preserve_reasoning_history:
+                    raise UnsupportedProtocolTranslationError(
+                        "unsupported_protocol_semantics",
+                        "Responses reasoning output requires an explicit Chat capability.",
+                    )
+                _require_supported_fields(
+                    item, {"id", "type", "status", "summary", "content", "encrypted_content"},
+                    "Responses completed reasoning item",
+                )
+                _portable_output_reasoning_text(item, drop_encrypted=True)
+                continue
             item_type, call_id, name, arguments = _validated_responses_stream_output_item(
                 item,
                 function_name_from_response_item=function_name_from_response_item,
@@ -3269,6 +3328,7 @@ class ResponsesToChatStreamConverter:
         self.completed = False
         self.preserve_reasoning_history = preserve_reasoning_history
         self._reasoning_texts_emitted: set[str] = set()
+        self._raw_reasoning_texts: dict[tuple[str, int], str] = {}
         self._visible_output = False
 
     def _stream_created(self, source: Mapping[str, Any] | None = None) -> int:
@@ -3337,6 +3397,9 @@ class ResponsesToChatStreamConverter:
                     "Cannot translate Responses stream semantics after a terminal event.",
                 )
             return []
+        event = _normalize_raw_reasoning_event(event, self._raw_reasoning_texts, enabled=self.preserve_reasoning_history)
+        self._reasoning_texts_emitted.update(self._raw_reasoning_texts.values())
+        event_type = event.get("type")
         if event_type in {"response.failed", "response.incomplete", "error"}:
             raise UnsupportedProtocolTranslationError(
                 "upstream_response_failed",
