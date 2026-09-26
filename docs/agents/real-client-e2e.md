@@ -9,16 +9,16 @@ ZCode GUI/manual-evidence cases on Windows or Linux.
 Linux owns a separate self-built CLI gate in
 `scripts/e2e_linux_cli_clients.py`. Both operating systems must run the same
 eight live combinations: Codex CLI, OpenCode, Pi, and OMP against Official
-Luna and OpenCode Go Muse Spark. A pass on one operating system never replaces
+Luna and DeepSeek Flash. A pass on one operating system never replaces
 the other. See `docs/agents/linux-packaging.md` for the Linux command and input
 contract.
 
-Ollama remains prohibited. The live third-party CLI leg is OpenCode Go
-`muse-spark-1.3-contributor` (client selector
-`codexhub-opencode-go/muse-spark-1.3-contributor`, Gateway route
-`opencode-go/muse-spark-1.3-contributor`). Dedicated input is
-`isolated/credentials/opencode-go.json` with schema
-`codexhub.real-client-opencode-go.v1`. Issue #497 tracks the Yoga credential.
+Ollama remains prohibited. The live third-party CLI leg is the official DeepSeek API
+`deepseek-flash` (client selector
+`codexhub-deepseek/deepseek-flash`, Gateway route
+`deepseek/deepseek-flash`). Dedicated input is
+`isolated/credentials/deepseek.json` with schema
+`codexhub.real-client-deepseek.v1`. Issue #497 tracks the Yoga credential.
 
 xAI Grok is **not** one of those eight cases. Windows `Run-RealClientE2E.ps1`
 still runs `scripts/e2e_xai_grok_tools.py` during preflight with
@@ -50,23 +50,27 @@ The Chat contract is `scripts/real_client_chat_contract.v1.json`
 (`codexhub.real-client-chat-contract.v1`). It owns two cases:
 
 - `chat-official`: Official Luna on `POST /v1/chat/completions`
-- `chat-opencode-go`: OpenCode Go Muse on
-  `POST /v1/providers/opencode-go/chat/completions`
+- `chat-deepseek`: DeepSeek Flash on
+  `POST /v1/providers/deepseek/chat/completions`
 
 Linux:
 
 ```bash
 ./scripts/codexhub-python.sh scripts/e2e_chat_completions.py \
   --bin src-tauri/target/debug/codexhub \
-  --output test-results/chat-completions-e2e.json \
-  --opencode-go-credentials <isolated/credentials/opencode-go.json>
+  --output <new-run>/chat-completions-e2e.json \
+  --auth <inputs>/auth.json \
+  --providers <inputs>/providers.toml \
+  --settings <inputs>/settings.json \
+  --catalog <inputs>/codexhub-model-catalog.json \
+  --deepseek-credentials <isolated/credentials/deepseek.json>
 ```
 
 Windows uses the Debug portable candidate and
 `scripts/Run-ChatCompletionsE2E.ps1`, which launches
 `scripts/codexhub-python.cmd`. Pass a new output directory every live run.
-Do not reuse a previous `isolated/work` keep-runtime. OpenCode Go Chat requires
-`-OpenCodeGoCredentials` with schema `codexhub.real-client-opencode-go.v1`.
+Do not reuse a previous `isolated/work` keep-runtime. DeepSeek Chat requires
+`-DeepSeekCredentials` with schema `codexhub.real-client-deepseek.v1`.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Run-ChatCompletionsE2E.ps1 `
@@ -76,7 +80,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Run-ChatCompletionsE
   -Providers <inputs>/providers.toml `
   -Settings <inputs>/settings.json `
   -Catalog <inputs>/codexhub-model-catalog.json `
-  -OpenCodeGoCredentials <inputs>/opencode-go.json `
+  -DeepSeekCredentials <inputs>/deepseek.json `
   -KeepRuntime <new-run>/runtime `
   -Proxy http://127.0.0.1:7890
 ```
@@ -86,9 +90,19 @@ The Chat runner starts an isolated Gateway with Chat enabled, sets
 `src-python`, and does not send `X-Codex-Client-Id` (that identity would leave
 the official `#509` `official_gateway_compat` path). Loopback `/health` and
 Chat POST must bypass `HTTP_PROXY`. Windows `codexhub start` waits on
-`/health`, not on the starter process exiting. Muse Chat fail-closes if the
+`/health`, not on the starter process exiting. DeepSeek Chat fail-closes if the
 credential file is missing. A pass requires HTTP 200, Chat `choices`, the
 named sentinel in content, no `encrypted_content`, and no Responses events.
+
+Both Chat wrappers require explicit `--auth`, `--providers` and `--settings`
+(or the matching PowerShell parameters); they do not discover operator inputs.
+`--catalog` is optional: without it, refresh occurs in the isolated runtime.
+The DeepSeek credential must use the exact approved schema and is never taken
+from an ambient API-key environment variable. Live evidence retains measured
+fields and a response hash, excluding response text, reasoning and raw errors.
+The optional `--capabilities` probes still test Official function/V2/web search.
+Legacy OpenCode Go Muse search/image helpers remain available to offline tests;
+they are not DeepSeek capabilities or required rows of this two-case contract.
 
 ## Authoritative host and compatibility baselines
 
@@ -96,7 +110,7 @@ Run on SSH host `yoga` in the `codexhub-real-client-e2e` lab, with a new output
 root, dedicated Codex login input, and no reused host user session or client
 configuration. Use an isolated checkout; leave `D:\Workstation\CodexHub`
 untouched. Isolated-checkout rules live in `docs/agents/release.md`. Do not
-supply Ollama credentials. Use `isolated/credentials/opencode-go.json`. A VM or named snapshot is not required. The runner
+supply Ollama credentials. Use `isolated/credentials/deepseek.json`. A VM or named snapshot is not required. The runner
 verifies each native installed version against the versioned CLI contract
 (`scripts/real_client_cli_contract.v1.json`) before launching the candidate or
 a client. Desktop and ZCode GUI floors remain owned by this Windows runner.
@@ -159,7 +173,7 @@ Use a new output directory for every invocation. Before launch it contains:
       profile.json
       auth.json
     credentials/
-      opencode-go.json
+      deepseek.json
     config/
       gateway.json
       host-environment.json
@@ -203,8 +217,8 @@ browser login state and is never uploaded.
 `auth.json` is freshly materialized directly in this invocation's isolated
 root; it is never discovered or copied from the current user's Codex home. It
 must use `chatgpt` mode and contain non-empty access and refresh tokens.
-`opencode-go.json` has schema
-`codexhub.real-client-opencode-go.v1` and one non-empty `api_key`. `gateway.json` has
+`deepseek.json` has schema
+`codexhub.real-client-deepseek.v1` and one non-empty `api_key`. `gateway.json` has
 schema `codexhub.real-client-gateway.v1`, a loopback `listen_port` below the
 Windows dynamic client range (`1024`–`49151`), and a dedicated
 `gateway_client_key`. Preflight must also be able to bind that port
@@ -267,8 +281,8 @@ After `refresh-models` succeeds, the runner contract-probes the actual passed
 `-ManagedClientConfigBuild` for Codex, OpenCode, ZCode, Pi, and OMP across both
 Official Luna selections. Each probe performs `preview`/`apply`/`readback`
 in the final case-local root, passing the explicit candidate runtime catalog
-via `--catalog-path` for every Official `gpt-5.6-luna` preview, apply, and
-readback probe. Official Luna uses `--catalog-path`; OpenCode Go Muse Spark uses the production provider configuration
+via `--catalog-path` for every Official CLI-contract model preview, apply, and
+readback probe. Official Luna uses `--catalog-path`; DeepSeek Flash uses the production provider configuration
 and its Native Responses route without a catalog-path override. The verified roots
 are then reused for the corresponding client launch. Thus the probe detects
 candidate #194 CLI schema drift and verifies that the candidate-managed catalog
@@ -328,10 +342,10 @@ PIDs, credentials, or account data.
 
 Provider protocol selection comes only from #194 preview/apply/readback. The
 runner verifies those three results agree, then verifies the real Gateway
-diagnostics agree with the returned canonical route. Under the current
-production providers this yields Responses for the Official Luna leg and Native
-Responses for Official Luna and OpenCode Go Muse Spark. The runner contains no endpoint root, SDK, or
-protocol-format generator.
+diagnostics agree with the returned canonical route. The selected Official Luna
+and DeepSeek Flash routes use Responses; DeepSeek uses its native Responses
+upstream. Client endpoint, SDK and protocol configuration come from the
+production materializer rather than a second client-schema generator.
 
 Every child receives a cleared environment with case-local `HOME`,
 `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `CODEX_HOME`, `XDG_CONFIG_HOME`,
@@ -347,17 +361,18 @@ and hard links fail as host-session reuse.
 The fixed case order, platform name mappings, selectors, model routes, protocol,
 minimum versions, and shared evidence fields are defined in
 `scripts/real_client_cli_contract.v1.json`. Both platform runners read that
-contract; historical Windows and Linux case IDs remain unchanged. The live
-Windows gate is `-CliOnly`: four Official Luna CLI cases plus four OpenCode Go
-Muse Spark CLI cases. Desktop/ZCode GUI rows are outside the CLI contract and
+contract. Historical evidence retains its original case IDs and Provider; the
+new DeepSeek rows use the IDs in this contract. The live
+Windows gate is `-CliOnly`: four Official Luna CLI cases plus four DeepSeek
+Flash CLI cases. Desktop/ZCode GUI rows are outside the CLI contract and
 remain available only to the non-CLI Windows workflow. Ollama remains
 prohibited.
 
 ### CLI-only verification
 
-Always pass `-CliOnly` with `-ThirdPartyModel codexhub-opencode-go/muse-spark-1.3-contributor`.
+Always pass `-CliOnly` with `-ThirdPartyModel codexhub-deepseek/deepseek-flash`.
 This runs eight automated cases for Codex CLI, OpenCode, Pi, and OMP (Official
-Luna and OpenCode Go Muse Spark 1.3 Contributor). The runner does not resolve
+Luna and DeepSeek Flash). The runner does not resolve
 or start Codex Desktop or ZCode GUI, does not inspect GUI seeds, does not
 require `gui_ready = true`, and never creates or waits for
 `manual-evidence.template.json` or `manual-evidence.json`. A CLI-only summary
@@ -411,8 +426,8 @@ production Gateway `request_complete.is_stream = true` evidence for both the
 tool request and final continuation; the sanitized case records
 `streaming_request_count = 2`.
 
-Official Codex diagnostics may canonicalize `gpt-5.6-luna` as
-`openai/gpt-5.6-luna`. The runner treats those two spellings as the same
+Official Codex diagnostics may canonicalize `gpt-6-luna` as
+`openai/gpt-6-luna`. The runner treats those two spellings as the same
 qualified route in both contradiction detection and the final pass decision;
 no other model alias is accepted.
 
@@ -503,9 +518,9 @@ the template to `manual-evidence.json` and changes only the observed fields:
       "case_id": "desktop-luna",
       "client": "desktop",
       "provider_id": "official",
-      "client_selector": "gpt-5.6-luna",
-      "canonical_model": "gpt-5.6-luna",
-      "gateway_model": "gpt-5.6-luna",
+      "client_selector": "gpt-6-luna",
+      "canonical_model": "gpt-6-luna",
+      "gateway_model": "gpt-6-luna",
       "endpoint_binding": "/v1/responses",
       "protocol": "responses",
       "sentinel_relative_path": "isolated/work/gui-desktop/desktop-luna/sentinel.txt",
@@ -538,7 +553,7 @@ absolute path, or request/session/task identifier.
    modify any current user's Codex, ZCode, OpenCode, Pi, OMP, or provider
    session/configuration.
 2. Create a fresh output root and directly materialize its machine-bound host
-   manifest, dedicated Codex login, and OpenCode Go credential. Do not use Ollama credentials, links, or copy an
+   manifest, dedicated Codex login, and DeepSeek credential. Do not use Ollama credentials, links, or copy an
    existing host session, and do not create `isolated/work`.
 3. Check out the candidate. Run the exact `build-windows-portable.ps1 -Flavor
    debug -RepoRoot <absolute-repo-root>` command above, select the resulting
@@ -557,8 +572,10 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
   -DebugBuild <path> `
   -ManagedClientConfigBuild <candidate-portable-path> `
   -ManagedClientConfigSha <candidate-materializer-sha> `
-  -LunaModel codexhub-openai/gpt-5.6-luna `
-  -ThirdPartyModel codexhub-opencode-go/muse-spark-1.3-contributor `
+  -LunaModel codexhub-openai/gpt-6-luna `
+  -ThirdPartyModel codexhub-deepseek/deepseek-flash `
+  -DeepSeekCredentials <output>/isolated/credentials/deepseek.json `
+  -CodexCliPath D:\DevTools\npm-global\codex.cmd `
   -OutputDirectory <path> `
   -HostEnvironmentManifest <path-to-host-environment.json> `
   -CliOnly `
@@ -568,7 +585,7 @@ powershell -NoProfile -File scripts/Run-RealClientE2E.ps1 `
 Always pass `-CliOnly`. Do not use Ollama credentials. GUI seed directories,
 GUI executables, and manual evidence are not needed.
 
-6. Official and OpenCode Go CLI cases run automated. ZCode is covered by
+6. Official and DeepSeek CLI cases run automated. ZCode is covered by
    isolated `managed-client-config preview/apply/readback`, not GUI launch.
 7. Confirm all eight CLI cases passed and the SHA/run binding match. Upload
    only `summary.json` and the relative files in its `artifacts` list. Never

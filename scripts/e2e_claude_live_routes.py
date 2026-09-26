@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -40,10 +41,22 @@ MAX_OVERALL_TIMEOUT_SECONDS = 600
 CLAUDE_OUTPUT_TOKEN_CAP = 128
 _SAFE_DIAGNOSTIC_LABEL = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,79}\Z")
 _SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_SAFE_MODEL_ID = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}(?:/[A-Za-z0-9][A-Za-z0-9_.-]{0,79})?\Z"
+)
+_SAFE_UTC_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
 _SAFE_ERROR_CLASSES = frozenset({
     "HTTPError", "IncompleteRead", "OSError", "SseFrameTooLargeError",
     "TimeoutError", "UpstreamStreamErrorEvent", "UpstreamStreamIncompleteError",
     "URLError", "ValueError",
+})
+CLAUDE_CLI_FAILURE_CLASSES = frozenset({
+    "auth_needed", "invalid_model", "connection_refused", "rate_limited",
+    "gateway_unavailable", "timeout", "cli_error",
+})
+CLAUDE_SUBSCRIPTION_IDENTITY_CASES = frozenset({
+    "claude-deepseek", "claude-luna", "claude-native-haiku",
+    "claude-native-opus-5-5", "claude-native-opus-5-5-resume",
 })
 PACKAGED_UI_ISOLATION_ENV = "CODEXHUB_CLAUDE_LIVE_E2E_UI_SANDBOX"
 PACKAGED_UI_ISOLATION_VALUE = "dbus-run-session+xvfb-run-v1"
@@ -53,6 +66,48 @@ class PackagedUIVerificationError(AssertionError):
     def __init__(self, failure_class: str, detail: str) -> None:
         self.failure_class = failure_class
         super().__init__(detail)
+
+
+class ClaudeCliFailure(AssertionError):
+    def __init__(self, exit_code: int | None, failure_class: str) -> None:
+        if failure_class not in CLAUDE_CLI_FAILURE_CLASSES:
+            failure_class = "cli_error"
+        self.failure_class = failure_class
+        exit_label = str(exit_code) if isinstance(exit_code, int) else "unknown"
+        super().__init__(f"Claude Code request failed: exit={exit_label}, failure_class={failure_class}")
+
+
+def classify_claude_cli_failure(
+    result_text: object, stderr: object, return_code: int | None,
+) -> str:
+    """Classify CLI failure without retaining its response or stderr text."""
+    pieces = [value.lower() for value in (result_text, stderr) if isinstance(value, str)]
+    text = " ".join(pieces)[-8192:]
+    if any(marker in text for marker in (
+        "authentication required", "not authenticated", "unauthorized", "401",
+        "please log in", "please login", "run /login", "api key is required",
+    )):
+        return "auth_needed"
+    if any(marker in text for marker in (
+        "invalid model", "unknown model", "model not found", "unsupported model",
+    )):
+        return "invalid_model"
+    if any(marker in text for marker in (
+        "rate limit", "rate_limit", "too many requests", "http 429", "status 429",
+    )):
+        return "rate_limited"
+    if any(marker in text for marker in (
+        "econnrefused", "connection refused", "failed to connect", "connect error",
+    )):
+        return "connection_refused"
+    if any(marker in text for marker in (
+        "bad gateway", "gateway unavailable", "http 502", "http 503", "http 504",
+        "status 502", "status 503", "status 504",
+    )):
+        return "gateway_unavailable"
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    return "cli_error"
 
 
 def validate_packaged_ui_isolation(environ: dict[str, str] | None = None) -> None:
@@ -373,6 +428,16 @@ def route_case_acceptance_status(
     return "unverified"
 
 
+def usage_case_acceptance_status(
+    rows: list[dict[str, object]], failures: list[str], *, cases: tuple[str, ...],
+) -> str:
+    if any(row.get("case") in cases for row in rows):
+        return "verified"
+    if any(item.startswith(tuple(f"{case}:" for case in cases)) for item in failures):
+        return "failed"
+    return "unverified"
+
+
 def gateway_route_diagnostics(
     bridge_port: int,
     *,
@@ -498,6 +563,200 @@ def _usage_summary_evidence(snapshot: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _safe_usage_diagnostic_row(row: object) -> dict[str, object]:
+    if not isinstance(row, dict):
+        return {}
+    safe: dict[str, object] = {}
+    token_fields = {
+        "usage_input_tokens", "usage_output_tokens", "usage_total_tokens",
+        "usage_cached_input_tokens", "usage_cache_write_input_tokens",
+        "usage_reasoning_tokens", "input_tokens", "output_tokens",
+        "total_tokens", "cached_input_tokens", "cache_write_input_tokens",
+        "reasoning_tokens",
+    }
+    for name in (
+        "request_id", "event", "ts", "completed_ts", "model", "model_requested",
+        "model_canonical", "upstream", "provider_id", "client_id", "status",
+        "duration_ms", "inbound_format", "upstream_format", "usage_source",
+        "usage_missing_reason", *sorted(token_fields),
+    ):
+        value = row.get(name)
+        if name == "request_id":
+            if isinstance(value, str) and _SAFE_REQUEST_ID.fullmatch(value):
+                safe[name] = value
+        elif name in {"model", "model_requested", "model_canonical"}:
+            if isinstance(value, str) and _SAFE_MODEL_ID.fullmatch(value):
+                safe[name] = value
+        elif name in {"ts", "completed_ts"}:
+            if isinstance(value, str) and _SAFE_UTC_TIMESTAMP.fullmatch(value):
+                safe[name] = value
+        elif name in {"status", "duration_ms", *token_fields}:
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                safe[name] = value
+        elif name == "usage_source":
+            if value in {"upstream", "upstream_async", "partial", "missing"}:
+                safe[name] = value
+        elif isinstance(value, str) and _SAFE_DIAGNOSTIC_LABEL.fullmatch(value):
+            safe[name] = value
+    return safe
+
+
+def usage_persistence_failure_diagnostic(
+    snapshot: dict[str, object] | None,
+    *,
+    runtime_home: Path,
+    gateway_request_ids: list[str],
+) -> dict[str, object]:
+    """Keep only correlated telemetry state, safe row fields, and runtime paths."""
+    request_ids = sorted({
+        value for value in gateway_request_ids
+        if isinstance(value, str) and _SAFE_REQUEST_ID.fullmatch(value)
+    })
+    diagnostic: dict[str, object] = {
+        "runtime_home": str(runtime_home),
+        "request_ids": request_ids,
+        "snapshot_available": isinstance(snapshot, dict),
+    }
+    if isinstance(snapshot, dict):
+        events = snapshot.get("events")
+        matching = [
+            _safe_usage_diagnostic_row(item)
+            for item in events or []
+            if isinstance(item, dict) and item.get("request_id") in request_ids
+        ]
+        diagnostic["snapshot_event_count"] = len(events) if isinstance(events, list) else None
+        diagnostic["snapshot_request_id_match_count"] = len(matching)
+        diagnostic["snapshot_request_id_rows"] = [row for row in matching if row][:20]
+        try:
+            diagnostic["summary"] = _usage_summary_evidence(snapshot)
+        except AssertionError:
+            diagnostic["summary"] = None
+        status = snapshot.get("telemetry_status")
+        if isinstance(status, dict):
+            telemetry_status: dict[str, object] = {}
+            for name in ("event_log_size", "indexed_offset", "lag_bytes"):
+                value = status.get(name)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    telemetry_status[name] = value
+            if isinstance(status.get("backfill_pending"), bool):
+                telemetry_status["backfill_pending"] = status["backfill_pending"]
+            indexed_at = status.get("last_indexed_at")
+            if isinstance(indexed_at, str) and _SAFE_UTC_TIMESTAMP.fullmatch(indexed_at):
+                telemetry_status["last_indexed_at"] = indexed_at
+            last_error = status.get("last_error")
+            telemetry_status["last_error"] = "<REDACTED>" if last_error else None
+            telemetry_status["last_error_present"] = bool(last_error)
+            diagnostic["telemetry_status"] = telemetry_status
+        else:
+            diagnostic["telemetry_status"] = None
+    else:
+        diagnostic.update({
+            "snapshot_event_count": None,
+            "snapshot_request_id_match_count": 0,
+            "snapshot_request_id_rows": [],
+            "summary": None,
+            "telemetry_status": None,
+        })
+
+    proxy_dir = runtime_home / "proxy"
+    event_path = proxy_dir / "codex-proxy-events.jsonl"
+    database_path = proxy_dir / "codex-proxy-telemetry.sqlite"
+    event_log: dict[str, object] = {
+        "path": str(event_path),
+        "exists": event_path.is_file(),
+    }
+    if event_path.is_file():
+        event_log["size_bytes"] = event_path.stat().st_size
+        event_counts: dict[str, int] = {}
+        matching_rows: list[dict[str, object]] = []
+        try:
+            with event_path.open("r", encoding="utf-8") as source:
+                for line in source:
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(item, dict) or item.get("request_id") not in request_ids:
+                        continue
+                    event = item.get("event")
+                    if isinstance(event, str) and _SAFE_DIAGNOSTIC_LABEL.fullmatch(event):
+                        event_counts[event] = event_counts.get(event, 0) + 1
+                    if len(matching_rows) < 20:
+                        matching_rows.append(_safe_usage_diagnostic_row(item))
+            event_log["request_id_match_count"] = sum(event_counts.values())
+            event_log["event_counts"] = event_counts
+            event_log["request_id_rows"] = matching_rows
+        except (OSError, UnicodeError):
+            event_log["read_error"] = True
+    diagnostic["event_log"] = event_log
+
+    database: dict[str, object] = {
+        "path": str(database_path),
+        "exists": database_path.is_file(),
+    }
+    if database_path.is_file():
+        database["size_bytes"] = database_path.stat().st_size
+        try:
+            with sqlite3.connect(database_path.as_uri() + "?mode=ro", uri=True, timeout=2) as connection:
+                tables = {row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )}
+                database["table_row_counts"] = {
+                    table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    for table in ("gateway_events", "gateway_requests", "telemetry_meta")
+                    if table in tables
+                }
+                if "gateway_requests" in tables:
+                    columns = [row[1] for row in connection.execute(
+                        "PRAGMA table_info(gateway_requests)"
+                    )]
+                    safe_columns = (
+                        "request_id", "completed_ts", "status", "provider_id", "upstream",
+                        "inbound_format", "upstream_format", "model", "model_requested",
+                        "model_canonical", "usage_source", "usage_missing_reason",
+                        "usage_input_tokens", "usage_output_tokens", "usage_total_tokens",
+                        "usage_cached_input_tokens", "usage_cache_write_input_tokens",
+                        "usage_reasoning_tokens",
+                    )
+                    selected = [name for name in safe_columns if name in columns]
+                    database["gateway_requests_columns"] = selected
+                    if request_ids and "request_id" in selected:
+                        marks = ",".join("?" for _ in request_ids)
+                        rows = connection.execute(
+                            f"SELECT {', '.join(selected)} FROM gateway_requests WHERE request_id IN ({marks})",
+                            request_ids,
+                        ).fetchall()
+                        database["gateway_request_match_count"] = len(rows)
+                        database["gateway_request_rows"] = [
+                            _safe_usage_diagnostic_row(dict(zip(selected, row)))
+                            for row in rows[:20]
+                        ]
+                if "gateway_events" in tables and request_ids:
+                    marks = ",".join("?" for _ in request_ids)
+                    columns = {row[1] for row in connection.execute(
+                        "PRAGMA table_info(gateway_events)"
+                    )}
+                    if {"event", "request_id"} <= columns:
+                        names = connection.execute(
+                            f"SELECT event FROM gateway_events WHERE request_id IN ({marks})",
+                            request_ids,
+                        ).fetchall()
+                        event_counts: dict[str, int] = {}
+                        for (event,) in names:
+                            if isinstance(event, str) and _SAFE_DIAGNOSTIC_LABEL.fullmatch(event):
+                                event_counts[event] = event_counts.get(event, 0) + 1
+                        database["gateway_event_match_count"] = sum(event_counts.values())
+                        database["gateway_event_counts"] = event_counts
+                if "telemetry_meta" in tables:
+                    database["last_ingest_error_present"] = connection.execute(
+                        "SELECT 1 FROM telemetry_meta WHERE key = 'last_ingest_error' AND value != '' LIMIT 1"
+                    ).fetchone() is not None
+        except (OSError, sqlite3.Error, ValueError) as error:
+            database["read_error_class"] = type(error).__name__
+    diagnostic["database"] = database
+    return diagnostic
+
+
 def usage_evidence(
     snapshot: dict[str, object],
     *,
@@ -568,6 +827,8 @@ def wait_for_usage_evidence(
     model: str,
     provider: str,
     gateway_request_ids: list[str],
+    runtime_home: Path,
+    failure_diagnostics: list[dict[str, object]],
     timeout_seconds: int = 20,
 ) -> tuple[dict[str, object], dict[str, object]]:
     deadline = time.monotonic() + timeout_seconds
@@ -594,6 +855,11 @@ def wait_for_usage_evidence(
         for item in (last_snapshot or {}).get("events", [])
         if isinstance(item, dict) and item.get("request_id") in gateway_request_ids
     ]
+    failure_diagnostics.append(usage_persistence_failure_diagnostic(
+        last_snapshot,
+        runtime_home=runtime_home,
+        gateway_request_ids=gateway_request_ids,
+    ))
     raise AssertionError(
         f"Usage Statistics snapshot did not persist complete {provider}/{model} usage; "
         f"sanitized matching rows={json.dumps(observed, separators=(',', ':'))}"
@@ -630,10 +896,7 @@ def run_packaged_usage_statistics_window(
         raise AssertionError("packaged usage screenshot path already exists")
     screenshot.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-    app_env = {
-        name: value for name, value in env.items()
-        if name != "DEEPSEEK_API_KEY"
-    }
+    app_env = claude_client_environment(env)
     for name in (
         "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE", "SWAYSOCK",
         "XDG_CURRENT_DESKTOP", "DESKTOP_SESSION", "GDMSESSION",
@@ -851,20 +1114,25 @@ def run_claude(
         command.extend(("--model", model))
     command.extend(("--permission-mode", "plan", "--output-format", "json", *extra_args,
                     f"Reply with exactly {sentinel}."))
-    result = subprocess.run(
-        command,
-        cwd=root, env=env, capture_output=True, text=True, timeout=timeout_seconds,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=root, env=env, capture_output=True, text=True, timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        raise ClaudeCliFailure(None, "timeout") from None
+    except OSError:
+        raise ClaudeCliFailure(None, "cli_error") from None
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError:
         payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
     if result.returncode != 0 or payload.get("is_error") is not False:
-        status = re.search(r"\b[45]\d\d\b", str(payload.get("result", "")))
-        raise AssertionError(
-            f"Claude Code request failed: exit={result.returncode}, "
-            f"subtype={payload.get('subtype', 'no-json')}, "
-            f"error_type={payload.get('error_type')}, http_status={status.group() if status else 'unknown'}"
+        raise ClaudeCliFailure(
+            result.returncode,
+            classify_claude_cli_failure(payload.get("result"), result.stderr, result.returncode),
         )
     assert sentinel in str(payload.get("result", "")), "Claude Code response missed sentinel"
     return payload
@@ -1016,6 +1284,82 @@ def run_responses(
     assert sentinel in text, "Responses output missed sentinel"
 
 
+def build_isolated_e2e_environment(
+    host_environment: dict[str, str],
+    *,
+    root: Path,
+    codex_home: Path,
+    claude_home: Path,
+    runtime_home: Path,
+    xdg_runtime: Path,
+    resource_root: Path,
+    claude_bin: Path,
+    deepseek_key: str,
+) -> dict[str, str]:
+    """Build one Gateway environment without inheriting operator client homes."""
+    managed_prefixes = ("ANTHROPIC_", "CLAUDE_", "CODEX_", "CODEXHUB_")
+    secret_names = {
+        "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY",
+    }
+    isolated_path_names = {
+        "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA",
+        "LOCALAPPDATA", "TEMP", "TMP", "TMPDIR", "PATH", "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+    }
+    env = {
+        name: value
+        for name, value in host_environment.items()
+        if not name.upper().startswith(managed_prefixes)
+        and name.upper() not in secret_names
+        and name.upper() not in isolated_path_names
+    }
+    host_path = next((value for name, value in host_environment.items() if name.upper() == "PATH"), "")
+    temp_home = root / "tmp"
+    env.update({
+        "HOME": str(root),
+        "USERPROFILE": str(root),
+        "HOMEDRIVE": root.drive,
+        "HOMEPATH": str(root)[len(root.drive):] or "\\",
+        "APPDATA": str(root / "AppData" / "Roaming"),
+        "LOCALAPPDATA": str(root / "AppData" / "Local"),
+        "TEMP": str(temp_home),
+        "TMP": str(temp_home),
+        "TMPDIR": str(temp_home),
+        "XDG_CONFIG_HOME": str(root / "config"),
+        "XDG_CACHE_HOME": str(root / "cache"),
+        "XDG_DATA_HOME": str(root / "data"),
+        "XDG_STATE_HOME": str(root / "state"),
+        "XDG_RUNTIME_DIR": str(xdg_runtime),
+        "CODEX_HOME": str(codex_home),
+        "CODEXHUB_CODEX_TARGET_HOME": str(codex_home),
+        "CLAUDE_CONFIG_DIR": str(claude_home),
+        "CODEXHUB_CLAUDE_HOME": str(claude_home),
+        "CODEXHUB_RUNTIME_HOME": str(runtime_home),
+        "CODEXHUB_ROLLBACK_PROVENANCE_DIR": str(root / "rollback"),
+        "CODEXHUB_RESOURCE_ROOT": str(resource_root),
+        "CODEXHUB_PYTHON": sys.executable,
+        "CODEXHUB_PROXY_PYTHON": sys.executable,
+        "DEEPSEEK_API_KEY": deepseek_key,
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(CLAUDE_OUTPUT_TOKEN_CAP),
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "DISABLE_TELEMETRY": "1",
+        "DISABLE_AUTOUPDATER": "1",
+        "DISABLE_ERROR_REPORTING": "1",
+        "NO_PROXY": "127.0.0.1,localhost",
+        "no_proxy": "127.0.0.1,localhost",
+        "PATH": os.pathsep.join(value for value in (str(claude_bin.parent), host_path) if value),
+    })
+    return env
+
+
+def claude_client_environment(gateway_environment: dict[str, str]) -> dict[str, str]:
+    """Keep provider credentials inside the Gateway process only."""
+    return {
+        name: value for name, value in gateway_environment.items()
+        if name != "DEEPSEEK_API_KEY"
+    }
+
+
 def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog: Path,
         key: str, selected: set[str], preflight_only: bool,
         claude_subscription_source: Path | None = None,
@@ -1049,10 +1393,17 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
         codex = root / "codex"
         config = root / ".claude"
         xdg_runtime = root / "xdg-runtime"
+        temp_home = root / "tmp"
+        appdata = root / "AppData" / "Roaming"
+        local_appdata = root / "AppData" / "Local"
         proxy_config = runtime / "proxy" / "config"
         model_catalog = runtime / "model-catalogs"
-        for path in (codex, config, proxy_config, model_catalog, xdg_runtime):
-            path.mkdir(parents=True)
+        for path in (
+            codex, config, proxy_config, model_catalog, xdg_runtime, temp_home,
+            appdata, local_appdata, root / "config", root / "cache", root / "data",
+            root / "state",
+        ):
+            path.mkdir(parents=True, exist_ok=True)
         xdg_runtime.chmod(0o700)
         (config / "settings.json").write_text('{"theme":"dark"}')
         if claude_subscription_source is not None:
@@ -1084,37 +1435,11 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
             "official_disabled_models": [],
             "proxy_port": gateway_port,
         }))
-        env = {
-            name: value for name, value in os.environ.items()
-            if not name.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "CODEXHUB_CLAUDE_"))
-            and name not in {
-                "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY",
-            }
-        }
-        env.update({
-            "HOME": str(root),
-            "XDG_CONFIG_HOME": str(root / "config"),
-            "XDG_CACHE_HOME": str(root / "cache"),
-            "XDG_DATA_HOME": str(root / "data"),
-            "XDG_RUNTIME_DIR": str(xdg_runtime),
-            "CODEX_HOME": str(codex),
-            "CLAUDE_CONFIG_DIR": str(config),
-            "CODEXHUB_CLAUDE_HOME": str(config),
-            "CODEXHUB_RUNTIME_HOME": str(runtime),
-            "CODEXHUB_ROLLBACK_PROVENANCE_DIR": str(root / "rollback"),
-            "CODEXHUB_RESOURCE_ROOT": str(resource_root),
-            "CODEXHUB_PYTHON": sys.executable,
-            "CODEXHUB_PROXY_PYTHON": sys.executable,
-            "DEEPSEEK_API_KEY": key,
-            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(CLAUDE_OUTPUT_TOKEN_CAP),
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-            "DISABLE_TELEMETRY": "1",
-            "DISABLE_AUTOUPDATER": "1",
-            "DISABLE_ERROR_REPORTING": "1",
-            "NO_PROXY": "127.0.0.1,localhost",
-            "no_proxy": "127.0.0.1,localhost",
-            "PATH": f"{claude_bin.parent}{os.pathsep}{os.environ.get('PATH', '')}",
-        })
+        env = build_isolated_e2e_environment(
+            dict(os.environ), root=root, codex_home=codex, claude_home=config,
+            runtime_home=runtime, xdg_runtime=xdg_runtime,
+            resource_root=resource_root, claude_bin=claude_bin, deepseek_key=key,
+        )
         bridge = subprocess.Popen(
             [str(binary), "web-bridge", "--port", str(bridge_port)],
             cwd=root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1162,6 +1487,7 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
 
             failures: list[str] = []
             failure_diagnostics: list[dict[str, object]] = []
+            usage_persistence_diagnostics: list[dict[str, object]] = []
             route_request_counts: list[dict[str, object]] = []
 
             def record_route_failure(
@@ -1173,6 +1499,14 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                 outbound: str,
             ) -> None:
                 failures.append(f"{case}: {error}")
+                if isinstance(error, ClaudeCliFailure):
+                    failure_diagnostics.append({
+                        "event": "claude_cli_failure",
+                        "case": case,
+                        "model": model,
+                        "error_category": "claude_cli",
+                        "client_error_class": error.failure_class,
+                    })
                 upsert_route_request_count(
                     route_request_counts,
                     case=case,
@@ -1235,8 +1569,7 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                             case_timeout_seconds=case_timeout_seconds,
                             overall_deadline=overall_deadline,
                         )
-                        client_env = {name: value for name, value in env.items()
-                                      if name != "DEEPSEEK_API_KEY"}
+                        client_env = claude_client_environment(env)
                         resume_probe = native_case == "claude-native-opus-5-5-resume"
                         session_id = str(uuid.uuid4()) if resume_probe else None
                         if resume_probe:
@@ -1264,6 +1597,8 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                             bridge_port, case=native_case, model=model,
                             provider="claude_subscription",
                             gateway_request_ids=gateway_request_ids,
+                            runtime_home=runtime,
+                            failure_diagnostics=usage_persistence_diagnostics,
                         )
                         usage_rows.append(row)
                         print(
@@ -1318,6 +1653,8 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                                 bridge_port, case="claude-native-opus-5-5-resume-followup",
                                 model=model, provider="claude_subscription",
                                 gateway_request_ids=resumed_ids,
+                                runtime_home=runtime,
+                                failure_diagnostics=usage_persistence_diagnostics,
                             )
                             usage_rows.append(resumed_row)
                             print("PASS: resume with explicit Opus model retained native identity", flush=True)
@@ -1367,8 +1704,7 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     continue
                 try:
                     assert launcher.is_file(), "candidate Claude launcher is missing"
-                    client_env = {name: value for name, value in env.items()
-                                  if name != "DEEPSEEK_API_KEY"}
+                    client_env = claude_client_environment(env)
                     client_env["CODEXHUB_GATEWAY_SETTINGS"] = str(runtime / "proxy" / "settings.json")
                     if not preflight_only:
                         used_attempts, timeout_seconds = reserve_generation_budget(
@@ -1410,8 +1746,7 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     if preflight_only:
                         print(f"PASS: isolated Claude Code settings for {label}", flush=True)
                         continue
-                    client_env = {name: value for name, value in env.items()
-                                  if name != "DEEPSEEK_API_KEY"}
+                    client_env = claude_client_environment(env)
                     timeout_seconds = case_timeout_seconds
                     if not preflight_only:
                         used_attempts, timeout_seconds = reserve_generation_budget(
@@ -1425,34 +1760,41 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                                model=model,
                                timeout_seconds=timeout_seconds)
                     wait_for_event(bridge_port, model, "anthropic_messages", outbound)
-                    if label == "deepseek":
-                        gateway_request_ids = gateway_route_request_ids(
-                            bridge_port, model="deepseek/deepseek-flash",
-                            inbound="anthropic_messages", outbound="anthropic_messages",
-                        )
-                        upsert_route_request_count(
-                            route_request_counts,
-                            case="claude-deepseek",
-                            model="deepseek/deepseek-flash",
-                            inbound="anthropic_messages",
-                            outbound="anthropic_messages",
-                            request_ids=gateway_request_ids,
-                            successful_gateway_route_observed=True,
-                        )
-                        row, usage_summary = wait_for_usage_evidence(
-                            bridge_port, case="claude-deepseek",
-                            model="deepseek/deepseek-flash", provider="deepseek",
-                            gateway_request_ids=gateway_request_ids,
-                        )
-                        usage_rows.append(row)
-                        print(
-                            "PASS: Claude Messages -> DeepSeek Official -> persisted Usage Statistics row",
-                            flush=True,
-                        )
+                    route_model = (
+                        "deepseek/deepseek-flash" if label == "deepseek" else "gpt-6-luna"
+                    )
+                    route_case = f"claude-{label}"
+                    route_provider = "deepseek" if label == "deepseek" else "openai"
+                    gateway_request_ids = gateway_route_request_ids(
+                        bridge_port, model=route_model,
+                        inbound="anthropic_messages", outbound=outbound,
+                    )
+                    upsert_route_request_count(
+                        route_request_counts,
+                        case=route_case,
+                        model=route_model,
+                        inbound="anthropic_messages",
+                        outbound=outbound,
+                        request_ids=gateway_request_ids,
+                        successful_gateway_route_observed=True,
+                    )
+                    row, usage_summary = wait_for_usage_evidence(
+                        bridge_port, case=route_case,
+                        model=route_model, provider=route_provider,
+                        gateway_request_ids=gateway_request_ids,
+                        runtime_home=runtime,
+                        failure_diagnostics=usage_persistence_diagnostics,
+                    )
+                    usage_rows.append(row)
+                    print(
+                        f"PASS: Claude Messages -> {route_provider} {route_model} "
+                        "-> persisted Usage Statistics row",
+                        flush=True,
+                    )
                     print(f"PASS: Claude Code -> Anthropic Messages -> {label} {outbound}", flush=True)
                 except (AssertionError, HTTPError) as error:
                     record_route_failure(
-                        "claude-deepseek" if label == "deepseek" else label,
+                        f"claude-{label}",
                         error, model=model,
                         inbound="anthropic_messages", outbound=outbound,
                     )
@@ -1485,6 +1827,8 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                         bridge_port, case="deepseek-chat",
                         model="deepseek/deepseek-flash", provider="deepseek",
                         gateway_request_ids=gateway_request_ids,
+                        runtime_home=runtime,
+                        failure_diagnostics=usage_persistence_diagnostics,
                     )
                     usage_rows.append(row)
                     print(
@@ -1538,6 +1882,8 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     row, usage_summary = wait_for_usage_evidence(
                         bridge_port, case="responses-luna", model="gpt-6-luna",
                         provider="openai", gateway_request_ids=gateway_request_ids,
+                        runtime_home=runtime,
+                        failure_diagnostics=usage_persistence_diagnostics,
                     )
                     usage_rows.append(row)
                     print(
@@ -1626,6 +1972,7 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                     ),
                     "usage_statistics_snapshot": usage_summary,
                     "failure_diagnostics": failure_diagnostics,
+                    "usage_persistence_diagnostics": usage_persistence_diagnostics,
                     "rendered_packaged_usage_statistics_ui_verified": packaged_usage_ui_verified,
                         "packaged_usage_screenshot": packaged_usage_ui_screenshot,
                     "acceptance_status": {
@@ -1683,12 +2030,14 @@ def run(binary: Path, resource_root: Path, claude_bin: Path, auth: Path, catalog
                             if any(item.startswith("claude-deepseek:") for item in failures)
                             else "unverified"
                         ),
-                        "codex_luna_responses_persisted_usage": (
-                            "verified"
-                            if any(row.get("case") == "responses-luna" for row in usage_rows)
-                            else "failed"
-                            if any(item.startswith("responses-luna:") for item in failures)
-                            else "unverified"
+                        "claude_luna_persisted_usage": usage_case_acceptance_status(
+                            usage_rows, failures, cases=("claude-luna",),
+                        ),
+                        "codex_luna_responses_persisted_usage": usage_case_acceptance_status(
+                            usage_rows, failures, cases=("responses-luna",),
+                        ),
+                        "codex_luna_persisted_usage": usage_case_acceptance_status(
+                            usage_rows, failures, cases=("claude-luna", "responses-luna"),
                         ),
                         "codex_luna_responses_usage_ui": "unverified",
                         "tools_compression_cancellation_cache_hit_reuse": "unverified",
@@ -1763,6 +2112,14 @@ def main() -> None:
     native_choices = {"claude-native-haiku", "claude-native-opus-5-5", "claude-native-opus-5-5-resume"}
     if len(native_choices & selected) > 1:
         raise SystemExit("run native model cases in separate isolated invocations")
+    # Direct CLI routes need a bounded OAuth identity in the isolated Claude
+    # home. The launcher cases supply their own Gateway API token.
+    identity_cases = CLAUDE_SUBSCRIPTION_IDENTITY_CASES & selected
+    if not args.preflight_only and identity_cases and args.claude_subscription_source is None:
+        raise SystemExit(
+            "Claude Code E2E requires --claude-subscription-source for "
+            + ", ".join(sorted(identity_cases))
+        )
     if not 1 <= args.overall_timeout_seconds <= MAX_OVERALL_TIMEOUT_SECONDS:
         raise SystemExit("--overall-timeout-seconds must be between 1 and 600")
     if not 1 <= args.case_timeout_seconds <= MAX_CASE_TIMEOUT_SECONDS:

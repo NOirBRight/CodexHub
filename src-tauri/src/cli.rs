@@ -1167,6 +1167,35 @@ gateway_exported = true
         }
 
         #[test]
+        fn managed_client_config_rejects_official_model_missing_from_candidate_catalog() {
+            let root = temp_root("mcc-missing-official-model");
+            let (settings_path, providers_path) = write_settings_and_providers(&root);
+            let catalog_path = write_candidate_official_catalog(&root);
+            let args = vec![
+                "managed-client-config".to_string(),
+                "preview".to_string(),
+                "--client".to_string(),
+                "opencode".to_string(),
+                "--root".to_string(),
+                root.join("isolated").to_string_lossy().to_string(),
+                "--settings-path".to_string(),
+                settings_path.to_string_lossy().to_string(),
+                "--providers-path".to_string(),
+                providers_path.to_string_lossy().to_string(),
+                "--catalog-path".to_string(),
+                catalog_path.to_string_lossy().to_string(),
+                "--model".to_string(),
+                "openai/gpt-6-luna".to_string(),
+            ];
+
+            assert_eq!(
+                run(&args),
+                1,
+                "preview must reject an Official model absent from the candidate catalog"
+            );
+        }
+
+        #[test]
         fn managed_client_config_rejects_hardlinked_external_catalog() {
             let root = temp_root("mcc-hardlinked-catalog");
             let (settings_path, providers_path) = write_settings_and_providers(&root);

@@ -9,7 +9,7 @@ param(
     [string]$Providers = '',
     [string]$Settings = '',
     [string]$Catalog = '',
-    [string]$OpenCodeGoCredentials = '',
+    [string]$DeepSeekCredentials = '',
     [string]$KeepRuntime = '',
     [string[]]$Case = @(),
     [switch]$Capabilities,
@@ -64,8 +64,8 @@ if (-not [string]::IsNullOrWhiteSpace($Settings)) {
 if (-not [string]::IsNullOrWhiteSpace($Catalog)) {
     $arguments += @('--catalog', $Catalog)
 }
-if (-not [string]::IsNullOrWhiteSpace($OpenCodeGoCredentials)) {
-    $arguments += @('--opencode-go-credentials', $OpenCodeGoCredentials)
+if (-not [string]::IsNullOrWhiteSpace($DeepSeekCredentials)) {
+    $arguments += @('--deepseek-credentials', $DeepSeekCredentials)
 }
 if (-not [string]::IsNullOrWhiteSpace($KeepRuntime)) {
     $arguments += @('--keep-runtime', $KeepRuntime)

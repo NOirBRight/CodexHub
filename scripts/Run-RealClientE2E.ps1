@@ -19,6 +19,9 @@ param(
     [string]$ThirdPartyModel,
 
     [Parameter(Mandatory = $true)]
+    [string]$DeepSeekCredentials,
+
+    [Parameter(Mandatory = $true)]
     [string]$OutputDirectory,
 
     [Parameter(Mandatory = $true)]
@@ -230,7 +233,7 @@ $script:OfficialOpenCodeCase = @($script:CliContractCases | Where-Object {
     [string]$_.client -ceq 'opencode' -and [string]$_.provider_id -ceq 'official'
 })[0]
 $script:ThirdPartyOpenCodeCase = @($script:CliContractCases | Where-Object {
-    [string]$_.client -ceq 'opencode' -and [string]$_.provider_id -ceq 'opencode-go'
+    [string]$_.client -ceq 'opencode' -and [string]$_.provider_id -ceq 'deepseek'
 })[0]
 if ($null -eq $script:OfficialCodexCliCase -or $null -eq $script:OfficialOpenCodeCase -or
     $null -eq $script:ThirdPartyOpenCodeCase) {
@@ -566,6 +569,7 @@ function Invoke-RunnerSupervisor {
         ManagedClientConfigSha = $ManagedClientConfigSha
         LunaModel = $LunaModel
         ThirdPartyModel = $ThirdPartyModel
+        DeepSeekCredentials = $DeepSeekCredentials
         OutputDirectory = $OutputDirectory
         HostEnvironmentManifest = $HostEnvironmentManifest
         TestWindowsInstallMetadataFixture = $TestWindowsInstallMetadataFixture
@@ -611,6 +615,7 @@ function Invoke-RunnerSupervisor {
   -ManagedClientConfigSha '0000000000000000000000000000000000000000' `
   -LunaModel 'internal' `
   -ThirdPartyModel 'internal' `
+  -DeepSeekCredentials '.' `
   -OutputDirectory '.' `
   -HostEnvironmentManifest '.' `
   -CliOnly:$false `
@@ -3177,7 +3182,7 @@ function Initialize-ClientConfiguration {
         (@(Get-JsonProperty $apply 'target_names' @()) -join ',') -cne (@(Get-JsonProperty $preview 'target_names' @()) -join ','))) {
         throw 'client_configuration_materializer_contradiction'
     }
-    if ($Model -like 'opencode-go/*' -and [string](Get-JsonProperty $readback 'route_protocol' '') -cne 'responses') {
+    if ($Model -like 'deepseek/*' -and [string](Get-JsonProperty $readback 'route_protocol' '') -cne 'responses') {
         throw 'client_configuration_materializer_contradiction'
     }
     $targetNames = @((Get-JsonProperty $preview 'target_names' @()) | ForEach-Object { [string]$_ })
@@ -3208,17 +3213,17 @@ function Initialize-CandidateRuntime {
     })
     $providerText = @"
 [[providers]]
-id = "opencode-go"
-name = "OpenCode Go"
-base_url = "https://opencode.ai/zen/go/v1"
-api_key = "{env:OPENCODE_API_KEY}"
+id = "deepseek"
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+api_key = "{env:DEEPSEEK_API_KEY}"
 upstream_format = "responses"
 available_upstream_formats = ["responses"]
 enabled = true
 
   [[providers.models]]
   id = "$($script:ThirdPartyUpstreamModel)"
-  display_name = "OpenCode Muse Spark 1.3 Contributor"
+  display_name = "DeepSeek V4.1 Flash"
   context_window = 1000000
   max_output_tokens = 131072
   enabled = true
@@ -3259,7 +3264,7 @@ try {
     $forwardedArguments = $forwardedJson | ConvertFrom-Json -ErrorAction Stop
     Assert-ExactJsonProperties -Value $forwardedArguments -Names @(
         'CandidateSha', 'DebugBuild', 'ManagedClientConfigBuild',
-        'ManagedClientConfigSha', 'LunaModel', 'ThirdPartyModel', 'OutputDirectory',
+        'ManagedClientConfigSha', 'LunaModel', 'ThirdPartyModel', 'DeepSeekCredentials', 'OutputDirectory',
         'HostEnvironmentManifest', 'TestWindowsInstallMetadataFixture',
         'CodexDesktopPath', 'CodexCliPath', 'ZCodePath', 'OpenCodePath',
         'PiPath', 'OmpPath', 'CliOnly', 'TimeoutSeconds', 'ManualEvidenceTimeoutSeconds',
@@ -3271,6 +3276,7 @@ try {
     $ManagedClientConfigSha = [string]$forwardedArguments.ManagedClientConfigSha
     $LunaModel = [string]$forwardedArguments.LunaModel
     $ThirdPartyModel = [string]$forwardedArguments.ThirdPartyModel
+    $DeepSeekCredentials = [string]$forwardedArguments.DeepSeekCredentials
     $OutputDirectory = [string]$forwardedArguments.OutputDirectory
     $HostEnvironmentManifest = [string]$forwardedArguments.HostEnvironmentManifest
     $TestWindowsInstallMetadataFixture = [string]$forwardedArguments.TestWindowsInstallMetadataFixture
@@ -3331,7 +3337,10 @@ $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $isolationRoot = Join-Path $OutputDirectory 'isolated'
 $accountPath = Join-Path $isolationRoot 'account\profile.json'
 $accountAuthPath = Join-Path $isolationRoot 'account\auth.json'
-$credentialPath = Join-Path $isolationRoot 'credentials\opencode-go.json'
+$credentialPath = [System.IO.Path]::GetFullPath((Join-Path $isolationRoot 'credentials\deepseek.json'))
+if ([System.IO.Path]::GetFullPath($DeepSeekCredentials) -ine $credentialPath) {
+    throw 'preflight_deepseek_credential_path_invalid'
+}
 $configRoot = Join-Path $isolationRoot 'config'
 $guiSeedRoot = Join-Path $isolationRoot 'gui-seed'
 $workRoot = Join-Path $isolationRoot 'work'
@@ -3438,10 +3447,10 @@ if ([string](Get-JsonProperty $accountAuth 'auth_mode' '') -cne 'chatgpt' -or
     [string](Get-JsonProperty $authTokens 'refresh_token' '') -eq '') {
     throw 'preflight_codex_login_missing'
 }
-$credential = Read-JsonObject -Path $credentialPath -Failure 'preflight_opencode_go_credential_invalid'
-Assert-ExactJsonProperties -Value $credential -Names @('schema', 'api_key') -Failure 'preflight_opencode_go_credential_invalid'
-if ([string]$credential.schema -cne 'codexhub.real-client-opencode-go.v1' -or [string]$credential.api_key -notmatch '^\S{16,}$') {
-    throw 'preflight_opencode_go_credential_invalid'
+$credential = Read-JsonObject -Path $credentialPath -Failure 'preflight_deepseek_credential_invalid'
+Assert-ExactJsonProperties -Value $credential -Names @('schema', 'api_key') -Failure 'preflight_deepseek_credential_invalid'
+if ([string]$credential.schema -cne 'codexhub.real-client-deepseek.v1' -or [string]$credential.api_key -notmatch '^\S{16,}$') {
+    throw 'preflight_deepseek_credential_invalid'
 }
 $script:GatewayConfig = Read-JsonObject -Path $gatewayConfigPath -Failure 'preflight_gateway_config_invalid'
 Assert-ExactJsonProperties -Value $script:GatewayConfig -Names @('schema', 'listen_port', 'gateway_client_key') -Failure 'preflight_gateway_config_invalid'
@@ -3522,9 +3531,9 @@ $manualCases = if ($CliOnly) {
 } else {
     @(
         [pscustomobject]@{ case_id = 'desktop-luna'; client = 'desktop'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $script:OfficialCodexManagedModel; canonical_model = $script:OfficialCodexManagedModel; gateway_model = $script:OfficialCodexManagedModel; endpoint_binding = '/v1/responses'; protocol = 'responses'; seed_slot = 'desktop-luna'; legacy_seed_slot = '' },
-        [pscustomobject]@{ case_id = 'desktop-opencode-go'; client = 'desktop'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $script:ThirdPartyManagedModel; canonical_model = $script:ThirdPartyManagedModel; gateway_model = $script:ThirdPartyManagedModel; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses'; seed_slot = 'desktop-third-party'; legacy_seed_slot = 'desktop-volc' },
+        [pscustomobject]@{ case_id = 'desktop-deepseek'; client = 'desktop'; provider_id = 'deepseek'; diagnostic_provider_id = 'deepseek'; client_selector = $script:ThirdPartyManagedModel; canonical_model = $script:ThirdPartyManagedModel; gateway_model = $script:ThirdPartyManagedModel; endpoint_binding = '/v1/providers/deepseek/responses'; protocol = 'responses'; seed_slot = 'desktop-third-party'; legacy_seed_slot = 'desktop-volc' },
         [pscustomobject]@{ case_id = 'zcode-luna'; client = 'zcode'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = $script:OfficialGatewayModel; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses'; seed_slot = 'zcode-luna'; legacy_seed_slot = '' },
-        [pscustomobject]@{ case_id = 'zcode-opencode-go'; client = 'zcode'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = $script:ThirdPartyManagedModel; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses'; seed_slot = 'zcode-third-party'; legacy_seed_slot = 'zcode-volc' }
+        [pscustomobject]@{ case_id = 'zcode-deepseek'; client = 'zcode'; provider_id = 'deepseek'; diagnostic_provider_id = 'deepseek'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = $script:ThirdPartyManagedModel; endpoint_binding = '/v1/providers/deepseek/responses'; protocol = 'responses'; seed_slot = 'zcode-third-party'; legacy_seed_slot = 'zcode-volc' }
     )
 }
 $automatedCases = @(
@@ -3581,7 +3590,7 @@ try {
         CODEX_HOME = $script:CandidateCodexRoot
         CODEXHUB_CODEX_PATH = [string]$executables['codex-cli']
         CODEX_PROXY_GATEWAY_CLIENT_KEY = [string]$script:GatewayConfig.gateway_client_key
-        OPENCODE_API_KEY = [string]$credential.api_key
+        DEEPSEEK_API_KEY = [string]$credential.api_key
         CODEXHUB_E2E_CONTRACT_PROBE_LOG = $script:ManagedClientConfigLogPath
     }
     Set-RunnerPhase -Phase 'candidate_startup'

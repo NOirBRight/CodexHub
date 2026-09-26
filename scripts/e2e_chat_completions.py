@@ -11,6 +11,7 @@ except ModuleNotFoundError:
 require_python_313(__file__)
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -29,23 +30,27 @@ ROOT = Path(__file__).resolve().parents[1]
 CHAT_CONTRACT_PATH = ROOT / "scripts" / "real_client_chat_contract.v1.json"
 SENTINEL_PREFIX = "SENTINEL:codexhub-chat-e2e:"
 PROMPT_TEMPLATE = "Reply with only this exact line and no other text: {sentinel}"
-OPENCODE_GO_CREDENTIAL_SCHEMA = "codexhub.real-client-opencode-go.v1"
+DEEPSEEK_CREDENTIAL_SCHEMA = "codexhub.real-client-deepseek.v1"
 
 
-def load_opencode_go_api_key(path: Path | None) -> str:
+def load_deepseek_api_key(path: Path | None) -> str:
     if path is None:
         return ""
     if not path.is_file():
-        raise ValueError(f"missing OpenCode Go credentials: {path}")
+        raise ValueError(f"missing DeepSeek credentials: {path}")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"invalid OpenCode Go credentials: {error}") from error
-    if not isinstance(payload, dict) or payload.get("schema") != OPENCODE_GO_CREDENTIAL_SCHEMA:
-        raise ValueError("invalid OpenCode Go credential schema")
+        raise ValueError(f"invalid DeepSeek credentials: {error}") from error
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema", "api_key"}
+        or payload.get("schema") != DEEPSEEK_CREDENTIAL_SCHEMA
+    ):
+        raise ValueError("invalid DeepSeek credential schema")
     key = payload.get("api_key")
     if not isinstance(key, str) or not key.strip():
-        raise ValueError("OpenCode Go credential missing api_key")
+        raise ValueError("DeepSeek credential missing api_key")
     return key.strip()
 
 
@@ -411,7 +416,7 @@ def dump_conversion_shapes() -> dict[str, object]:
     from protocol_translation import prepare_exchange
 
     official = next(case for case in CASES if case.provider == "official")
-    muse = next(case for case in CASES if case.provider == "opencode-go")
+    third_party = next(case for case in CASES if case.provider == "deepseek")
 
     def _prepared(payload: dict[str, object], *, policy: PromptCacheKeyPolicy, official_compat: bool) -> dict[str, object]:
         exchange = prepare_exchange(
@@ -440,8 +445,8 @@ def dump_conversion_shapes() -> dict[str, object]:
             policy=PromptCacheKeyPolicy.PRESERVE,
             official_compat=True,
         ),
-        "muse_sentinel": _prepared(
-            chat_payload(muse, SENTINEL_PREFIX + muse.case_id),
+        "deepseek_sentinel": _prepared(
+            chat_payload(third_party, SENTINEL_PREFIX + third_party.case_id),
             policy=PromptCacheKeyPolicy.DROP_UNVERIFIED,
             official_compat=False,
         ),
@@ -777,7 +782,11 @@ def _prepare_runtime(
     home = work / "home"
     appdata = home / "appdata"
     temp = home / "temp"
-    env = os.environ.copy()
+    env = {
+        name: value for name, value in os.environ.items()
+        if not name.upper().startswith(("CODEX_", "CODEXHUB_", "ANTHROPIC_", "CLAUDE_", "OPENCODE_", "PI_", "OMP_"))
+        and not name.upper().endswith(("_API_KEY", "_TOKEN", "_SECRET"))
+    }
     env.update(
         {
             "HOME": str(home),
@@ -904,6 +913,24 @@ def evaluate_capability_body(
     return parsed
 
 
+def _live_evidence(result: dict[str, object], body: bytes) -> dict[str, object]:
+    """Persist measured facts, never upstream text, reasoning, or error payloads."""
+    evidence = {
+        name: result[name]
+        for name in (
+            "ok", "http_status", "saw_sentinel", "saw_reasoning_content",
+            "saw_encrypted_content", "saw_responses_event", "saw_v2_tool", "hosted_search",
+        )
+        if name in result
+    }
+    evidence["body_sha256"] = hashlib.sha256(body).hexdigest()
+    evidence["error"] = "" if result["ok"] else (
+        f"HTTP {result['http_status']}"
+        if result["http_status"] != 200 else "chat_protocol_or_content_validation_failed"
+    )
+    return evidence
+
+
 def _live_capability(
     base: str,
     kind: str,
@@ -917,7 +944,9 @@ def _live_capability(
 ) -> dict[str, object]:
     url = base.rstrip("/") + endpoint
     http_status, body = _post_chat(url, payload, chat_headers(gateway_key), timeout)
-    result = evaluate_capability_body(kind, http_status, body, protocol=protocol)
+    result = _live_evidence(
+        evaluate_capability_body(kind, http_status, body, protocol=protocol), body,
+    )
     result.update(
         {
             "case_id": kind,
@@ -928,8 +957,6 @@ def _live_capability(
             "outcome": "passed" if result["ok"] else "failed",
         }
     )
-    if not result["ok"]:
-        result["body_tail"] = body.decode("utf-8", "replace")[-800:]
     return result
 
 
@@ -937,7 +964,7 @@ def _live_case(base: str, case: Case, gateway_key: str, timeout: int) -> dict[st
     sentinel = SENTINEL_PREFIX + case.case_id
     url = chat_url(base, case)
     http_status, body = _post_chat(url, chat_payload(case, sentinel), chat_headers(gateway_key), timeout)
-    result = evaluate_chat_body(http_status, body, sentinel)
+    result = _live_evidence(evaluate_chat_body(http_status, body, sentinel), body)
     result.update(
         {
             "case_id": case.case_id,
@@ -948,8 +975,6 @@ def _live_case(base: str, case: Case, gateway_key: str, timeout: int) -> dict[st
             "outcome": "passed" if result["ok"] else "failed",
         }
     )
-    if not result["ok"]:
-        result["body_tail"] = body.decode("utf-8", "replace")[-800:]
     return result
 
 
@@ -962,7 +987,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--capabilities",
         action="store_true",
-        help="also probe official Chat function/V2/web_search and Muse search/image_gen",
+        help="also probe official Chat function/V2/web_search; legacy Muse helpers are offline-only under the DeepSeek contract",
     )
     parser.add_argument(
         "--dump-conversion",
@@ -974,27 +999,26 @@ def main(argv: list[str]) -> int:
         type=Path,
         help="use this empty directory instead of a throwaway runtime",
     )
-    parser.add_argument("--auth", type=Path, default=Path.home() / ".codex" / "auth.json")
+    parser.add_argument("--auth", type=Path, help="explicit isolated authentication source")
     parser.add_argument(
         "--providers",
         type=Path,
-        default=Path.home() / ".codex" / "proxy" / "config" / "providers.toml",
+        help="explicit isolated provider configuration",
     )
     parser.add_argument(
         "--settings",
         type=Path,
-        default=Path.home() / ".codex" / "proxy" / "settings.json",
+        help="explicit isolated Gateway settings",
     )
     parser.add_argument(
         "--catalog",
         type=Path,
-        default=Path.home() / ".codex" / "model-catalogs" / "codexhub-model-catalog.json",
-        help="reuse a current Official catalog without restarting a running Codex Desktop",
+        help="explicit candidate catalog; otherwise refresh inside the isolated runtime",
     )
     parser.add_argument(
-        "--opencode-go-credentials",
+        "--deepseek-credentials",
         type=Path,
-        help="dedicated OpenCode Go credential JSON for {env:OPENCODE_API_KEY} providers.toml",
+        help="dedicated DeepSeek credential JSON for {env:DEEPSEEK_API_KEY} providers.toml",
     )
     args = parser.parse_args(argv)
     if args.dump_conversion:
@@ -1006,7 +1030,7 @@ def main(argv: list[str]) -> int:
     missing = [
         str(path)
         for path in (args.auth, args.providers, args.settings)
-        if not path.is_file()
+        if path is None or not path.is_file()
     ]
     if missing:
         parser.error(f"missing inputs={missing}")
@@ -1015,11 +1039,11 @@ def main(argv: list[str]) -> int:
     except ValueError as error:
         parser.error(str(error))
     try:
-        opencode_go_api_key = load_opencode_go_api_key(args.opencode_go_credentials)
+        deepseek_api_key = load_deepseek_api_key(args.deepseek_credentials)
     except ValueError as error:
         parser.error(str(error))
-    if any(case.provider == "opencode-go" for case in cases) and not opencode_go_api_key:
-        parser.error("muse Chat case requires --opencode-go-credentials")
+    if any(case.provider == "deepseek" for case in cases) and not deepseek_api_key:
+        parser.error("DeepSeek Chat case requires --deepseek-credentials")
     binary = args.bin.resolve() if args.bin else build_candidate()
     report: dict[str, object] = {
         "schema": "codexhub.chat-completions-e2e.v1",
@@ -1041,8 +1065,8 @@ def main(argv: list[str]) -> int:
         env, _settings, catalog, port, gateway_key = _prepare_runtime(
             work, args.settings, args.providers, args.auth, args.catalog
         )
-        if opencode_go_api_key:
-            env["OPENCODE_API_KEY"] = opencode_go_api_key
+        if deepseek_api_key:
+            env["DEEPSEEK_API_KEY"] = deepseek_api_key
         refresh = None if catalog.is_file() else _run([str(binary), "refresh-models"], env=env, timeout=180)
         if not catalog.is_file():
             failures.append("candidate: refresh-models failed")

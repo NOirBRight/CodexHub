@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import time
@@ -180,6 +181,233 @@ def test_usage_evidence_accepts_official_async_upstream_usage() -> None:
         provider="openai", gateway_request_ids=["synthetic-luna-id"],
     )
     assert evidence["usage_source"] == "upstream_async"
+
+
+def test_claude_luna_usage_counts_as_codex_luna_release_evidence() -> None:
+    rows = [{"case": "claude-luna"}]
+
+    assert live_routes.usage_case_acceptance_status(
+        rows, [], cases=("claude-luna", "responses-luna"),
+    ) == "verified"
+    assert live_routes.usage_case_acceptance_status(
+        [], ["claude-luna: no Usage row"], cases=("claude-luna", "responses-luna"),
+    ) == "failed"
+
+
+def test_claude_luna_messages_route_correlates_complete_usage() -> None:
+    request_id = "synthetic-claude-luna-request"
+    evidence = usage_evidence(
+        {
+            "summary": {"requests": 1, "total_tokens": 19},
+            "events": [{
+                "request_id": request_id,
+                "model": "openai/gpt-6-luna",
+                "upstream": "openai",
+                "status": 200,
+                "usage_source": "upstream_async",
+                "input_tokens": 15,
+                "output_tokens": 4,
+                "total_tokens": 19,
+            }],
+            "telemetry_status": {"backfill_pending": False},
+        },
+        case="claude-luna",
+        model="gpt-6-luna",
+        provider="openai",
+        gateway_request_ids=[request_id],
+    )
+
+    assert evidence["case"] == "claude-luna"
+    assert evidence["request_id"] == request_id
+    assert evidence["total_tokens"] == 19
+
+
+@pytest.mark.parametrize(
+    ("message", "return_code", "expected"),
+    [
+        ("Authentication required. Login first.", 1, "auth_needed"),
+        ("Not logged in · Please run /login", 1, "auth_needed"),
+        ("Unknown model: gpt-6-luna", 1, "invalid_model"),
+        ("connect ECONNREFUSED 127.0.0.1:9099", 1, "connection_refused"),
+        ("HTTP 429 rate limit exceeded", 1, "rate_limited"),
+        ("HTTP 503 Gateway unavailable", 1, "gateway_unavailable"),
+        ("unclassified private response", 1, "cli_error"),
+    ],
+)
+def test_claude_cli_error_classification_is_fixed_and_content_free(
+    message: str, return_code: int, expected: str,
+) -> None:
+    classified = live_routes.classify_claude_cli_failure(message, "", return_code)
+
+    assert classified == expected
+    assert classified in live_routes.CLAUDE_CLI_FAILURE_CLASSES
+
+
+def test_run_claude_failure_does_not_retain_result_or_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = "Bearer private-token; Not logged in · Please run /login"
+    monkeypatch.setattr(
+        live_routes.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 1,
+            stdout=json.dumps({
+                "subtype": "success", "is_error": True, "result": private,
+            }),
+            stderr=private,
+        ),
+    )
+
+    with pytest.raises(AssertionError) as error:
+        live_routes.run_claude(tmp_path / "claude", {}, tmp_path, "sentinel")
+
+    assert "failure_class=auth_needed" in str(error.value)
+    assert private not in str(error.value)
+
+
+def test_isolated_gateway_environment_does_not_inherit_operator_identity_or_paths(
+    tmp_path: Path,
+) -> None:
+    isolated = tmp_path / "isolated"
+    claude_bin = tmp_path / "tools" / "claude"
+    gateway_env = live_routes.build_isolated_e2e_environment(
+        {
+            "HOME": "/operator/home",
+            "USERPROFILE": r"C:\\Users\\operator",
+            "HOMEDRIVE": "C:",
+            "HOMEPATH": r"\\Users\\operator",
+            "APPDATA": r"C:\\Users\\operator\\AppData\\Roaming",
+            "LOCALAPPDATA": r"C:\\Users\\operator\\AppData\\Local",
+            "TEMP": r"C:\\Users\\operator\\Temp",
+            "TMP": r"C:\\Users\\operator\\Temp",
+            "TMPDIR": "/operator/tmp",
+            "XDG_CONFIG_HOME": "/operator/config",
+            "XDG_RUNTIME_DIR": "/operator/runtime",
+            "PATH": "/usr/bin",
+            "ANTHROPIC_AUTH_TOKEN": "operator-auth-token",
+            "ANTHROPIC_API_KEY": "operator-api-key",
+            "CLAUDE_CONFIG_DIR": "/operator/claude",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "999999",
+            "CODEX_HOME": "/operator/codex",
+            "CODEXHUB_GATEWAY_SETTINGS": "/operator/gateway.json",
+            "CODEXHUB_GATEWAY_API_KEY": "operator-gateway-key",
+            "OPENAI_API_KEY": "operator-openai-key",
+            "DEEPSEEK_API_KEY": "operator-deepseek-key",
+            "UNRELATED_SETTING": "preserved",
+        },
+        root=isolated,
+        codex_home=isolated / "codex",
+        claude_home=isolated / "claude",
+        runtime_home=isolated / "runtime",
+        xdg_runtime=isolated / "xdg-runtime",
+        resource_root=tmp_path / "resource",
+        claude_bin=claude_bin,
+        deepseek_key="fixture-deepseek-key",
+    )
+
+    assert gateway_env["HOME"] == str(isolated)
+    assert gateway_env["USERPROFILE"] == str(isolated)
+    assert gateway_env["APPDATA"] == str(isolated / "AppData" / "Roaming")
+    assert gateway_env["LOCALAPPDATA"] == str(isolated / "AppData" / "Local")
+    assert gateway_env["TEMP"] == gateway_env["TMP"] == gateway_env["TMPDIR"] == str(isolated / "tmp")
+    assert gateway_env["XDG_CONFIG_HOME"] == str(isolated / "config")
+    assert gateway_env["XDG_RUNTIME_DIR"] == str(isolated / "xdg-runtime")
+    assert gateway_env["CLAUDE_CONFIG_DIR"] == str(isolated / "claude")
+    assert gateway_env["CODEX_HOME"] == str(isolated / "codex")
+    assert gateway_env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == str(live_routes.CLAUDE_OUTPUT_TOKEN_CAP)
+    assert gateway_env["DEEPSEEK_API_KEY"] == "fixture-deepseek-key"
+    assert gateway_env["UNRELATED_SETTING"] == "preserved"
+    for name in (
+        "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CODEXHUB_GATEWAY_SETTINGS",
+        "CODEXHUB_GATEWAY_API_KEY", "OPENAI_API_KEY",
+    ):
+        assert name not in gateway_env
+    assert "/operator/" not in json.dumps(gateway_env)
+
+    claude_env = live_routes.claude_client_environment(gateway_env)
+    assert "DEEPSEEK_API_KEY" not in claude_env
+    assert "ANTHROPIC_AUTH_TOKEN" not in claude_env
+    assert claude_env["CLAUDE_CONFIG_DIR"] == str(isolated / "claude")
+
+
+def test_usage_failure_diagnostic_uses_runtime_home_and_redacts_last_error(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    codex_home = tmp_path / "codex-target"
+    proxy = runtime / "proxy"
+    proxy.mkdir(parents=True)
+    request_id = "synthetic-runtime-request"
+    event_log = proxy / "codex-proxy-events.jsonl"
+    event_log.write_text(
+        json.dumps({
+            "event": "request_complete", "request_id": request_id, "status": 200,
+            "model": "openai/gpt-6-luna", "prompt": "private prompt text",
+        }) + "\n"
+        + json.dumps({
+            "event": "usage_observed", "request_id": request_id,
+            "usage_source": "missing", "model": "openai/gpt-6-luna; private model text",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    database = proxy / "codex-proxy-telemetry.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.executescript("""
+            CREATE TABLE gateway_events(event_id INTEGER PRIMARY KEY, event TEXT, request_id TEXT);
+            CREATE TABLE gateway_requests(
+                request_id TEXT PRIMARY KEY, status INTEGER, usage_source TEXT, model TEXT
+            );
+            CREATE TABLE telemetry_meta(key TEXT PRIMARY KEY, value TEXT);
+        """)
+        connection.executemany(
+            "INSERT INTO gateway_events(event, request_id) VALUES (?, ?)",
+            [("request_complete", request_id), ("usage_observed", request_id)],
+        )
+        connection.execute(
+            "INSERT INTO gateway_requests VALUES (?, 200, 'missing', 'openai/gpt-6-luna')",
+            (request_id,),
+        )
+        connection.execute(
+            "INSERT INTO telemetry_meta VALUES ('last_ingest_error', 'private filesystem path')",
+        )
+    (codex_home / "proxy").mkdir(parents=True)
+    (codex_home / "proxy" / "codex-proxy-telemetry.sqlite").write_bytes(b"wrong-home")
+
+    diagnostic = live_routes.usage_persistence_failure_diagnostic(
+        {
+            "summary": {"requests": 1},
+            "events": [],
+            "telemetry_status": {
+                "event_log_size": event_log.stat().st_size,
+                "indexed_offset": 0,
+                "lag_bytes": event_log.stat().st_size,
+                "backfill_pending": True,
+                "last_indexed_at": None,
+                "last_error": "private filesystem path",
+            },
+        },
+        runtime_home=runtime,
+        gateway_request_ids=[request_id],
+    )
+    encoded = json.dumps(diagnostic)
+
+    assert diagnostic["runtime_home"] == str(runtime)
+    assert diagnostic["database"]["path"] == str(database)
+    assert diagnostic["database"]["exists"] is True
+    assert diagnostic["database"]["table_row_counts"]["gateway_events"] == 2
+    assert diagnostic["database"]["gateway_request_match_count"] == 1
+    assert diagnostic["event_log"]["request_id_match_count"] == 2
+    event_rows = diagnostic["event_log"]["request_id_rows"]
+    assert event_rows[0]["model"] == "openai/gpt-6-luna"
+    assert "model" not in event_rows[1]
+    assert diagnostic["database"]["gateway_request_rows"][0]["model"] == "openai/gpt-6-luna"
+    assert diagnostic["telemetry_status"]["backfill_pending"] is True
+    assert diagnostic["telemetry_status"]["last_error"] == "<REDACTED>"
+    assert "private filesystem path" not in encoded
+    assert "private prompt text" not in encoded
+    assert "private model text" not in encoded
+    assert str(codex_home) not in encoded
 
 
 def test_usage_evidence_preserves_official_deepseek_identity_and_tokens() -> None:
@@ -627,6 +855,58 @@ def test_packaged_ui_without_isolated_wrapper_starts_no_candidate_or_request(
 
     with pytest.raises(SystemExit, match="dbus-run-session -- xvfb-run"):
         live_routes.main()
+
+
+@pytest.mark.parametrize("case", ["claude-deepseek", "claude-luna"])
+def test_direct_claude_live_case_requires_subscription_source_before_candidate_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    binary = tmp_path / "candidate"
+    binary.write_bytes(b"candidate")
+    monkeypatch.setattr(
+        live_routes.sys, "argv", ["e2e_claude_live_routes.py", "--bin", str(binary), "--case", case],
+    )
+    monkeypatch.setattr(
+        live_routes, "verify_candidate_binding",
+        lambda *args: pytest.fail("candidate binding must not run without subscription identity"),
+    )
+    monkeypatch.setattr(
+        live_routes, "run",
+        lambda *args, **kwargs: pytest.fail("candidate process or model request must not start"),
+    )
+
+    with pytest.raises(SystemExit, match="requires --claude-subscription-source"):
+        live_routes.main()
+
+
+def test_claude_launcher_luna_needs_no_subscription_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary = tmp_path / "candidate"
+    binary.write_bytes(b"candidate")
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(
+        live_routes.sys, "argv", [
+            "e2e_claude_live_routes.py", "--bin", str(binary),
+            "--resource-root", str(tmp_path), "--source-root", str(tmp_path),
+            "--claude-bin", str(binary), "--candidate-sha", "a" * 40,
+            "--auth", str(tmp_path / "missing-auth.json"),
+            "--catalog", str(tmp_path / "missing-catalog.json"),
+            "--case", "claude-launcher-luna",
+            "--evidence-out", str(tmp_path / "evidence.json"),
+        ],
+    )
+    monkeypatch.setattr(live_routes, "verify_candidate_binding", lambda *args: None)
+    monkeypatch.setattr(live_routes, "claude_cli_version", lambda _path: "2.1.283")
+    monkeypatch.setattr(live_routes, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    live_routes.main()
+
+    assert len(calls) == 1
+    assert calls[0][0][6] == {"claude-launcher-luna"}
+    assert calls[0][0][8] is None
+    launcher = Path(live_routes.__file__).resolve().parent / "codexhub-claude-gateway.sh"
+    assert 'export ANTHROPIC_AUTH_TOKEN="$client_key"' in launcher.read_text(encoding="utf-8")
 
 
 def test_resume_invocation_passes_explicit_native_model(
