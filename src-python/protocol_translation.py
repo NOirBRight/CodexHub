@@ -2856,6 +2856,16 @@ _POST_TERMINAL_SEMANTIC_EVENT_TYPES = frozenset(
 )
 
 
+def _has_post_terminal_semantics(event: Mapping[str, Any]) -> bool:
+    if event.get("type") in _POST_TERMINAL_SEMANTIC_EVENT_TYPES:
+        return True
+    part = event.get("part")
+    return event.get("type") == "response.reasoning_text.done" or (
+        event.get("type") in {"response.content_part.added", "response.content_part.done"}
+        and isinstance(part, Mapping) and part.get("type") == "reasoning_text"
+    )
+
+
 def _validate_responses_stream_terminal_order(events: list[Mapping[str, Any] | str]) -> None:
     terminal_seen = False
     for event in events:
@@ -2866,7 +2876,7 @@ def _validate_responses_stream_terminal_order(events: list[Mapping[str, Any] | s
             continue
         event_type = event.get("type")
         if terminal_seen:
-            if event_type in _POST_TERMINAL_SEMANTIC_EVENT_TYPES:
+            if _has_post_terminal_semantics(event):
                 raise UnsupportedProtocolTranslationError(
                     "unsupported_protocol_semantics",
                     "Cannot translate Responses stream semantics after a terminal event.",
@@ -3391,7 +3401,7 @@ class ResponsesToChatStreamConverter:
         if self.completed:
             # OpenCode and similar providers append bookkeeping after
             # response.completed. New visible deltas still fail closed.
-            if event_type in _POST_TERMINAL_SEMANTIC_EVENT_TYPES:
+            if _has_post_terminal_semantics(event):
                 raise UnsupportedProtocolTranslationError(
                     "unsupported_protocol_semantics",
                     "Cannot translate Responses stream semantics after a terminal event.",

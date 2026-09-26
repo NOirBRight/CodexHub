@@ -3283,14 +3283,17 @@ class RawReasoningStreamTests(unittest.TestCase):
                 converter.chunks_for_event(bad_event)
             self.assertNotIn("PRIVATE_SENTINEL", str(caught.exception))
 
-    def test_raw_reasoning_delta_after_terminal_is_rejected(self):
-        events = [
-            {"type": "response.completed", "response": {"id": "resp_1", "output": []}},
+    def test_raw_reasoning_after_terminal_is_rejected(self):
+        terminal = {"type": "response.completed", "response": {"id": "resp_1", "output": []}}
+        for late in (
             {"type": "response.reasoning_text.delta", "delta": "late"},
-        ]
-        converter = protocol_translation.ResponsesToChatStreamConverter(preserve_reasoning_history=True)
-        converter.chunks_for_event(events[0])
-        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
-            converter.chunks_for_event(events[1])
-        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
-            protocol_translation.response_events_to_chat_stream_chunks(events, preserve_reasoning_history=True)
+            {"type": "response.reasoning_text.done", "text": "late"},
+            {"type": "response.content_part.added", "part": {"type": "reasoning_text", "text": ""}},
+            {"type": "response.content_part.done", "part": {"type": "reasoning_text", "text": "late"}},
+        ):
+            converter = protocol_translation.ResponsesToChatStreamConverter(preserve_reasoning_history=True)
+            converter.chunks_for_event(terminal)
+            with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
+                converter.chunks_for_event(late)
+            with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
+                protocol_translation.response_events_to_chat_stream_chunks([terminal, late], preserve_reasoning_history=True)
