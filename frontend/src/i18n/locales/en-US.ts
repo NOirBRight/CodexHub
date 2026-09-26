@@ -579,7 +579,7 @@ const enUS = {
       "Install the pinned ChatGPT Web Runtime. Its browser account stays separate from the official Codex subscription.",
     chatgptWebTitle: "ChatGPT Web Runtime",
     chatgptWebBody:
-      "Enable downloads the checksum-pinned runtime into a private directory and opens a local login window. CodexHub does not run the upstream Codex integration installer.",
+      "Enable verifies the pinned runtime, extracts it, and starts its serve entry inside a private home. The diagnostic page only links to the pinned launcher and does not mark you signed in.",
     chatgptWebEnable: "Enable",
     chatgptWebInstalling: "Installing ChatGPT Web Runtime",
     chatgptWebInstalled: "ChatGPT Web Runtime installed and started",

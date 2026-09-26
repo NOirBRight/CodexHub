@@ -577,7 +577,7 @@ const zhCN = {
       "安装固定版本的 ChatGPT Web Runtime。它的浏览器账号与官方 Codex 订阅分开。",
     chatgptWebTitle: "ChatGPT Web Runtime",
     chatgptWebBody:
-      "启用后会把校验过的固定版本安装到私有目录，并打开本机登录窗口。CodexHub 不会运行上游的 Codex 接管安装器。",
+      "启用后会校验并解压固定版本，在私有目录里启动它的 serve 入口。诊断页只链接到固定版本启动器，不会把账号标成已登录。",
     chatgptWebEnable: "启用",
     chatgptWebInstalling: "正在安装 ChatGPT Web Runtime",
     chatgptWebInstalled: "ChatGPT Web Runtime 已安装并启动",

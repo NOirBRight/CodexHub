@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """CodexHub supervisor for the pinned ChatGPT Web Runtime.
 
-Upstream ``setup`` always installs Codex integration, including with
-``--replace-codex-route``. The DEV harness refuses to start the Responses
-listener. This process is the product entry: it verifies a pinned archive
-into a private directory and does not execute that archive.
+Upstream ``setup`` always calls ``installCodexIntegration``. ``dev`` refuses
+to start a Responses listener, and the upstream installer scripts are not
+used. After the archive checksum matches, this module extracts it and starts
+``bin/codex-chatgpt-web serve`` with config and homes kept inside the private
+runtime directory.
 """
 
 from __future__ import annotations
@@ -14,33 +15,37 @@ import hmac
 import json
 import os
 import platform
+import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 PINNED_COMMIT = "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
 PINNED_VERSION = "6.1.1"
 LOOPBACK_HOST = "127.0.0.1"
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
-ACCOUNT_BODY_LIMIT = 4096
 ALLOWED_DOWNLOAD_HOSTS = {
     "github.com",
     "release-assets.githubusercontent.com",
     "objects.githubusercontent.com",
     "github-releases.githubusercontent.com",
 }
-REJECTED_ENTRIES = ("setup", "dev", "--replace-codex-route")
-SECRET_ENV_NAMES = ("CODEX_WEB_GPT_DEV_HOME",)
+REJECTED_ENTRIES = ("setup", "dev", "--replace-codex-route", "install.sh", "install-launcher.sh")
+CONNECTOR_NAME = "Codex Native2"
+ZERO_RISK_CONNECTOR_NAME = "Codex Zero Risk"
+ENTRY_NAMES = ("bin/codex-chatgpt-web", "bin/codex-chatgpt-web.cmd")
 
 
 class RuntimeError_(RuntimeError):
@@ -56,6 +61,20 @@ def artifact_key() -> str:
     if sys.platform == "linux" and machine in {"aarch64", "arm64"}:
         return "linux-arm64"
     raise RuntimeError_(f"unsupported ChatGPT Web Runtime platform: {sys.platform}/{machine}")
+
+
+def pinned_launcher_url() -> str:
+    machine = platform.machine().lower()
+    if sys.platform == "win32":
+        name = "codex-web-gpt-6.1.1-win-x64.exe"
+    elif machine in {"aarch64", "arm64"}:
+        name = "codex-web-gpt-6.1.1-linux-arm64.AppImage"
+    else:
+        name = "codex-web-gpt-6.1.1-linux-x64.AppImage"
+    return (
+        "https://github.com/miuuyy/codex-chatgpt-web/releases/download/"
+        f"v{PINNED_VERSION}/{name}"
+    )
 
 
 def default_pin_path() -> Path:
@@ -91,8 +110,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 def _write_json(path: Path, payload: dict[str, Any], mode: int = 0o644) -> None:
     _mkdir(path.parent)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    text = json.dumps(payload, sort_keys=True)
-    temporary.write_text(text + "\n", encoding="utf-8")
+    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(temporary, mode)
     os.replace(temporary, path)
     try:
@@ -109,18 +127,16 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _secrets(home: Path) -> list[str]:
-    account = _read_json(home / "account.json") or {}
-    secret = account.get("secret")
-    if isinstance(secret, str) and secret:
-        return [secret]
-    return []
+def _control_token(home: Path) -> str:
+    config = _read_json(_web_home(home) / "config.json") or {}
+    token = config.get("controlToken")
+    return token if isinstance(token, str) else ""
 
 
 def redact(text: str, secrets: list[str]) -> str:
     redacted = text
     for secret in secrets:
-        if len(secret) >= 4:
+        if len(secret) >= 8:
             redacted = redacted.replace(secret, "[redacted]")
     return _redact_token_prefix(redacted, "sk-")
 
@@ -146,6 +162,11 @@ def _redact_token_prefix(text: str, prefix: str) -> str:
     return "".join(output)
 
 
+def _secrets(home: Path) -> list[str]:
+    token = _control_token(home)
+    return [token] if token else []
+
+
 def _append_log(home: Path, message: str) -> None:
     _mkdir(home)
     line = redact(message, _secrets(home)).replace("\n", " ")
@@ -156,7 +177,7 @@ def _append_log(home: Path, message: str) -> None:
 def _assert_private_home(home: Path) -> Path:
     resolved = home.expanduser().resolve()
     forbidden: list[Path] = []
-    for name in ("CODEX_HOME", *SECRET_ENV_NAMES):
+    for name in ("CODEX_HOME", "CODEX_WEB_GPT_DEV_HOME"):
         value = os.environ.get(name, "").strip()
         if value:
             forbidden.append(Path(value))
@@ -216,7 +237,6 @@ def load_pin(path: Path | None = None) -> dict[str, Any]:
     if len(sha) != 64 or any(character not in "0123456789abcdef" for character in sha):
         raise RuntimeError_("ChatGPT Web Runtime pin checksum is invalid")
     _assert_pinned_url(url, PINNED_VERSION)
-    payload["_pin_path"] = str(pin_path)
     return payload
 
 
@@ -225,6 +245,18 @@ def _artifact(pin: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(artifact, dict):
         raise RuntimeError_("ChatGPT Web Runtime pin artifact is invalid")
     return artifact
+
+
+def _runtime_root(home: Path) -> Path:
+    return home / "current" / "runtime"
+
+
+def _web_home(home: Path) -> Path:
+    return home / "web-home"
+
+
+def _codex_home(home: Path) -> Path:
+    return home / "codex-home"
 
 
 def _install_document(home: Path) -> dict[str, Any] | None:
@@ -240,7 +272,7 @@ def _pin_compatible(home: Path, pin: dict[str, Any]) -> bool:
         installed.get("commit") == pin.get("commit") == PINNED_COMMIT
         and installed.get("version") == pin.get("version") == PINNED_VERSION
         and installed.get("sha256") == artifact.get("sha256")
-        and installed.get("executed") is False
+        and installed.get("archive_executed") is False
     )
 
 
@@ -257,30 +289,6 @@ def _write_lifecycle(home: Path, *, enabled: bool, restart_required: bool) -> No
         home / "lifecycle.json",
         {"enabled": enabled, "restart_required": restart_required},
     )
-
-
-def _layers(home: Path) -> dict[str, Any]:
-    payload = _read_json(home / "layers.json") or {}
-    browser = payload.get("browser_smoke")
-    tunnel = payload.get("tunnel")
-    return {
-        "browser_smoke": browser if browser in {"not_run", "passed", "failed"} else "not_run",
-        "tunnel": tunnel if tunnel in {"not_started", "ready", "failed"} else "not_started",
-        "connector_selectable": payload.get("connector_selectable") is True,
-        "detail": payload.get("detail") if isinstance(payload.get("detail"), str) else "",
-    }
-
-
-def _account_public(home: Path) -> dict[str, Any]:
-    payload = _read_json(home / "account.json") or {}
-    account_id = payload.get("account_id")
-    signed_in = isinstance(account_id, str) and bool(account_id) and isinstance(payload.get("secret"), str)
-    window = _read_json(home / "window.json") or {}
-    return {
-        "state": "signed_in" if signed_in else "signed_out",
-        "account_id": account_id if signed_in else None,
-        "window": "open" if window.get("open") is True else "closed",
-    }
 
 
 def _pid_alive(pid: int) -> bool:
@@ -307,17 +315,14 @@ def _cmdline(pid: int) -> str:
     return raw.replace(b"\x00", b" ").decode("utf-8", "replace")
 
 
-def _is_our_process(pid: int, home: Path) -> bool:
-    if not _pid_alive(pid):
-        return False
+def _environ(pid: int) -> str:
     if os.name == "nt":
-        return True
-    command = _cmdline(pid)
-    return (
-        "chatgpt_web_runtime.py" in command
-        and "supervise" in command
-        and str(home) in command
-    )
+        return ""
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return ""
+    return raw.replace(b"\x00", b"\n").decode("utf-8", "replace")
 
 
 def _process_record(home: Path) -> dict[str, Any] | None:
@@ -328,78 +333,110 @@ def _process_record(home: Path) -> dict[str, Any] | None:
         pid = int(payload.get("pid") or 0)
     except (TypeError, ValueError):
         return None
-    if not _is_our_process(pid, home):
+    if not _pid_alive(pid) or not payload.get("executable"):
+        return None
+    if os.name == "nt":
+        return payload
+    # The bundle launcher execs Bun, so the cmdline no longer contains the
+    # shell wrapper. The sandboxed homes remain in the process environment.
+    command = _cmdline(pid).split()
+    if "serve" not in command:
+        return None
+    if any(item in command for item in ("setup", "dev", "--replace-codex-route")):
+        return None
+    environ = set(_environ(pid).split("\n"))
+    if f"CODEX_CHATGPT_WEB_HOME={_web_home(home)}" not in environ:
+        return None
+    if f"CODEX_HOME={_codex_home(home)}" not in environ:
+        return None
+    if any(item.startswith("CODEX_WEB_GPT_DEV_HOME=") for item in environ):
         return None
     return payload
 
 
-def _supervisor_executable() -> str:
-    return f"{sys.executable} {Path(__file__).resolve()}"
+def _reject_archive_path(name: str) -> None:
+    pure = PurePosixPath(name.replace("\\", "/"))
+    if pure.is_absolute() or ".." in pure.parts:
+        raise RuntimeError_("runtime archive path escapes the install directory")
 
 
-def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any]:
-    loaded = pin or load_pin()
-    artifact = _artifact(loaded)
-    installed = _install_document(home)
-    compatible = _pin_compatible(home, loaded)
-    layers = _layers(home)
-    login = _account_public(home)
-    lifecycle = _lifecycle(home)
-    process = _process_record(home)
-    running = process is not None
-    ready = bool(
-        compatible
-        and running
-        and lifecycle["enabled"]
-        and not lifecycle["restart_required"]
-        and login["state"] == "signed_in"
-        and layers["browser_smoke"] == "passed"
-        and layers["tunnel"] == "ready"
-        and layers["connector_selectable"] is True
-    )
-    return {
-        "ok": True,
-        "component": {
-            "version": PINNED_VERSION,
-            "commit": PINNED_COMMIT,
-            "pin": PINNED_COMMIT,
-            "artifact_sha256": artifact.get("sha256"),
-            "installed_sha256": None if installed is None else installed.get("sha256"),
-            "compatible": compatible,
-        },
-        "login": {"state": login["state"], "window": login["window"], "account_id": login["account_id"]},
-        "browser_smoke": {"state": layers["browser_smoke"]},
-        "tunnel": {"state": layers["tunnel"], "detail": layers["detail"]},
-        "connector": {"selectable": layers["connector_selectable"]},
-        "process": {
-            "pid": None if process is None else process.get("pid"),
-            "port": None if process is None else process.get("port"),
-            "executable": _supervisor_executable(),
-            "private_home": str(home),
-            "running": running,
-            "ownership": "codexhub-supervisor",
-            "listen_host": LOOPBACK_HOST if running else None,
-        },
-        "ready": ready,
-        "restart_required": lifecycle["restart_required"],
-        "disabled": not lifecycle["enabled"],
-        "installed": installed is not None,
-        "entry": "codexhub-supervisor",
-        "upstream_executed": False,
-        "rejected_entries": list(REJECTED_ENTRIES),
-    }
+def _assert_link_inside(member_name: str, linkname: str) -> None:
+    _reject_archive_path(member_name)
+    link = PurePosixPath(linkname.replace("\\", "/"))
+    if link.is_absolute():
+        raise RuntimeError_("runtime archive link is absolute")
+    parent = PurePosixPath(member_name.replace("\\", "/")).parent
+    normalized = os.path.normpath(str(parent / linkname.replace("\\", "/")))
+    if normalized.startswith("..") or normalized.startswith("/"):
+        raise RuntimeError_("runtime archive link escapes the install directory")
 
 
-def _emit(home: Path, payload: dict[str, Any]) -> None:
-    text = redact(json.dumps(payload, sort_keys=True), _secrets(home))
-    sys.stdout.write(text + "\n")
+def _extract_archive(archive: Path, dest: Path) -> None:
+    _mkdir(dest)
+    if zipfile.is_zipfile(archive):
+        with zipfile.ZipFile(archive) as bundle:
+            for info in bundle.infolist():
+                _reject_archive_path(info.filename)
+            bundle.extractall(dest)
+        return
+    if not tarfile.is_tarfile(archive):
+        raise RuntimeError_("runtime payload is not a tar.gz or zip archive")
+    with tarfile.open(archive, "r:*") as bundle:
+        for member in bundle.getmembers():
+            _reject_archive_path(member.name)
+            if member.issym() or member.islnk():
+                _assert_link_inside(member.name, member.linkname or "")
+        bundle.extractall(dest, filter="data")
 
 
-def _fail(home: Path, message: str) -> int:
-    safe = redact(message, _secrets(home))
-    _append_log(home, safe)
-    sys.stdout.write(json.dumps({"ok": False, "error": safe}, sort_keys=True) + "\n")
-    return 1
+def _find_entry(runtime_root: Path) -> Path:
+    manifest = _read_json(runtime_root / "manifest.json") or {}
+    launcher = manifest.get("launcher")
+    relatives = []
+    if isinstance(launcher, str) and launcher.strip():
+        relatives.append(launcher.strip())
+    relatives.extend(ENTRY_NAMES)
+    for relative in relatives:
+        _reject_archive_path(relative)
+        candidate = (runtime_root / relative).resolve()
+        if runtime_root.resolve() not in candidate.parents and candidate != runtime_root.resolve():
+            continue
+        if candidate.is_file() and not candidate.is_symlink():
+            return candidate
+    raise RuntimeError_("extracted runtime has no bin/codex-chatgpt-web entry")
+
+
+def _restore_install(home: Path) -> None:
+    current = home / "current"
+    if current.exists():
+        return
+    for name in ("previous-good.next", "previous-good"):
+        candidate = home / name
+        if candidate.is_dir():
+            os.rename(candidate, current)
+            return
+
+
+def _promote(home: Path, incoming: Path) -> None:
+    _restore_install(home)
+    current = home / "current"
+    staged = home / "previous-good.next"
+    if staged.exists():
+        shutil.rmtree(staged)
+    if current.exists():
+        os.rename(current, staged)
+        try:
+            os.rename(incoming, current)
+        except OSError:
+            if not current.exists() and staged.exists():
+                os.rename(staged, current)
+            raise
+        previous = home / "previous-good"
+        if previous.exists():
+            shutil.rmtree(previous)
+        os.rename(staged, previous)
+        return
+    os.rename(incoming, current)
 
 
 def _copy_to_partial(source: Path, dest: Path) -> None:
@@ -445,39 +482,6 @@ def _download_to_partial(url: str, dest: Path, version: str) -> None:
         raise
 
 
-def _restore_install(home: Path) -> None:
-    current = home / "current"
-    if current.exists():
-        return
-    for name in ("previous-good.next", "previous-good"):
-        candidate = home / name
-        if candidate.is_dir():
-            os.rename(candidate, current)
-            return
-
-
-def _promote(home: Path, incoming: Path) -> None:
-    _restore_install(home)
-    current = home / "current"
-    staged = home / "previous-good.next"
-    if staged.exists():
-        shutil.rmtree(staged)
-    if current.exists():
-        os.rename(current, staged)
-        try:
-            os.rename(incoming, current)
-        except OSError:
-            if not current.exists() and staged.exists():
-                os.rename(staged, current)
-            raise
-        previous = home / "previous-good"
-        if previous.exists():
-            shutil.rmtree(previous)
-        os.rename(staged, previous)
-        return
-    os.rename(incoming, current)
-
-
 def install_runtime(home: Path, source: Path | None = None) -> dict[str, Any]:
     home = _assert_private_home(home)
     _mkdir(home)
@@ -485,6 +489,7 @@ def install_runtime(home: Path, source: Path | None = None) -> dict[str, Any]:
     pin = load_pin()
     artifact = _artifact(pin)
     partial = home / "staging" / "payload.partial"
+    incoming = home / "incoming"
     try:
         if source is None:
             _download_to_partial(str(artifact["url"]), partial, PINNED_VERSION)
@@ -496,10 +501,12 @@ def install_runtime(home: Path, source: Path | None = None) -> dict[str, Any]:
             partial.unlink(missing_ok=True)
             raise RuntimeError_("checksum mismatch; payload was not executed")
         os.chmod(partial, 0o644)
-        incoming = home / "incoming"
         if incoming.exists():
             shutil.rmtree(incoming)
-        _mkdir(incoming)
+        runtime_dest = incoming / "runtime"
+        _extract_archive(partial, runtime_dest)
+        entry = _find_entry(runtime_dest)
+        os.chmod(entry, 0o755)
         payload_path = incoming / "payload"
         os.replace(partial, payload_path)
         os.chmod(payload_path, 0o644)
@@ -510,15 +517,17 @@ def install_runtime(home: Path, source: Path | None = None) -> dict[str, Any]:
                 "version": PINNED_VERSION,
                 "sha256": digest,
                 "filename": artifact.get("filename"),
-                "executed": False,
-                "entry": "codexhub-supervisor",
+                "archive_executed": False,
+                "entry": str(entry.relative_to(runtime_dest)),
             },
         )
         _promote(home, incoming)
     except Exception:
         partial.unlink(missing_ok=True)
+        if incoming.exists():
+            shutil.rmtree(incoming, ignore_errors=True)
         raise
-    _append_log(home, "installed pinned runtime without executing the archive")
+    _append_log(home, "extracted pinned runtime; archive was not executed")
     _write_lifecycle(home, enabled=True, restart_required=False)
     return build_status(home, pin)
 
@@ -528,6 +537,198 @@ def _bind_host() -> str:
     if requested != LOOPBACK_HOST:
         raise RuntimeError_("ChatGPT Web Runtime status bind must be 127.0.0.1")
     return requested
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as handle:
+        handle.bind((LOOPBACK_HOST, 0))
+        return int(handle.getsockname()[1])
+
+
+def _runtime_env(home: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["CODEX_CHATGPT_WEB_HOME"] = str(_web_home(home))
+    env["CODEX_HOME"] = str(_codex_home(home))
+    env.pop("CODEX_WEB_GPT_DEV_HOME", None)
+    return env
+
+
+def _write_minimum_config(home: Path, entry: Path) -> int:
+    web_home = _web_home(home)
+    _mkdir(web_home / "browser")
+    _mkdir(web_home / "socket")
+    _mkdir(_codex_home(home))
+    port = _free_port()
+    token = secrets.token_urlsafe(48)
+    _write_json(
+        web_home / "config.json",
+        {
+            "version": 3,
+            "releaseVersion": PINNED_VERSION,
+            "mode": "browser-only",
+            "subagentProtocol": "compatibility-v1",
+            "host": LOOPBACK_HOST,
+            "port": port,
+            "contextWindow": 256000,
+            "appName": CONNECTOR_NAME,
+            "automaticAppName": CONNECTOR_NAME,
+            "manualAppName": ZERO_RISK_CONNECTOR_NAME,
+            "browserHost": "managed-chrome",
+            "browserInteractionMode": "automatic",
+            "chromeExecutablePath": "/usr/bin/google-chrome",
+            "storageStatePath": str(web_home / "browser" / "storage-state.json"),
+            "brokerSocketPath": str(web_home / "socket" / "turn-broker.sock"),
+            "headed": True,
+            "solAvailable": True,
+            "extraHighAvailable": False,
+            "proAvailable": False,
+            "experimentalBiggerContext": False,
+            "experimentalSkillAttachments": False,
+            "experimentalFreshConversationPerTurn": False,
+            "useSavedChats": False,
+            "zeroRiskProEnabled": False,
+            "autoApproveToolCalls": False,
+            "controlToken": token,
+            "runtimeCommand": [str(entry)],
+        },
+        mode=0o600,
+    )
+    return port
+
+
+def _run_doctor(home: Path, entry: Path) -> dict[str, Any] | None:
+    try:
+        completed = subprocess.run(
+            [str(entry), "doctor", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=_runtime_env(home),
+            cwd=str(_web_home(home)),
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        _append_log(home, "runtime doctor did not return")
+        return None
+    stdout = redact(completed.stdout, _secrets(home))
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        _append_log(home, "runtime doctor did not return JSON")
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _layers_from_doctor(report: dict[str, Any] | None) -> dict[str, Any]:
+    checks: dict[str, dict[str, Any]] = {}
+    if report:
+        for check in report.get("checks") or []:
+            if isinstance(check, dict) and isinstance(check.get("id"), str):
+                checks[str(check["id"])] = check
+    login = checks.get("login")
+    smoke = checks.get("browser-smoke")
+    tunnel = checks.get("tunnel-runtime")
+    connector = checks.get("connector")
+    if smoke is None:
+        browser = "not_run"
+    elif smoke.get("status") == "ok":
+        browser = "passed"
+    else:
+        browser = "failed"
+    if tunnel is None:
+        tunnel_state = "not_started"
+    elif tunnel.get("status") == "ok":
+        tunnel_state = "ready"
+    else:
+        tunnel_state = "failed"
+    detail = tunnel.get("message") if isinstance(tunnel, dict) else ""
+    if not isinstance(detail, str):
+        detail = ""
+    return {
+        "login": "signed_in" if login and login.get("status") == "ok" else "signed_out",
+        "browser_smoke": browser,
+        "tunnel": tunnel_state,
+        "tunnel_detail": detail,
+        "connector_selectable": bool(connector and connector.get("status") == "ok"),
+    }
+
+
+def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any]:
+    loaded = pin or load_pin()
+    artifact = _artifact(loaded)
+    installed = _install_document(home)
+    compatible = _pin_compatible(home, loaded)
+    record = _process_record(home)
+    running = record is not None
+    layers = _layers_from_doctor(None)
+    if running and installed is not None:
+        entry = _find_entry(_runtime_root(home))
+        layers = _layers_from_doctor(_run_doctor(home, entry))
+    lifecycle = _lifecycle(home)
+    window = _read_json(home / "window.json") or {}
+    ready = bool(
+        compatible
+        and running
+        and lifecycle["enabled"]
+        and not lifecycle["restart_required"]
+        and layers["login"] == "signed_in"
+        and layers["browser_smoke"] == "passed"
+        and layers["tunnel"] == "ready"
+        and layers["connector_selectable"] is True
+    )
+    executable = None if record is None else record.get("executable")
+    return {
+        "ok": True,
+        "component": {
+            "version": PINNED_VERSION,
+            "commit": PINNED_COMMIT,
+            "pin": PINNED_COMMIT,
+            "artifact_sha256": artifact.get("sha256"),
+            "installed_sha256": None if installed is None else installed.get("sha256"),
+            "compatible": compatible,
+        },
+        "login": {
+            "state": layers["login"],
+            "window": "open" if window.get("open") is True else "closed",
+            "account_id": None,
+        },
+        "browser_smoke": {"state": layers["browser_smoke"]},
+        "tunnel": {"state": layers["tunnel"], "detail": layers["tunnel_detail"]},
+        "connector": {"selectable": layers["connector_selectable"]},
+        "process": {
+            "pid": None if record is None else record.get("pid"),
+            "port": None if record is None else record.get("port"),
+            "diagnostic_port": None if record is None else record.get("diagnostic_port"),
+            "executable": executable,
+            "private_home": str(home),
+            "running": running,
+            "ownership": "codexhub-supervisor",
+            "listen_host": LOOPBACK_HOST if running else None,
+        },
+        "ready": ready,
+        "restart_required": lifecycle["restart_required"],
+        "disabled": not lifecycle["enabled"],
+        "installed": installed is not None,
+        "entry": "codex-chatgpt-web serve",
+        "upstream_executed": False,
+        "rejected_entries": list(REJECTED_ENTRIES),
+    }
+
+
+def _diagnostic_page() -> bytes:
+    url = pinned_launcher_url()
+    page = (
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>ChatGPT Web Runtime</title></head>"
+        "<body><h1>ChatGPT Web Runtime</h1>"
+        "<p>This diagnostic page is not a ChatGPT login. It does not collect a secret "
+        "and it does not mark the runtime signed in.</p>"
+        "<p>The login window is the pinned Codex Web GPT launcher for this release. "
+        "CodexHub does not run upstream setup, dev, or the installer scripts.</p>"
+        f"<p><a href=\"{url}\">Pinned launcher v{PINNED_VERSION}</a></p>"
+        "<p>Login, browser smoke, tunnel, and connector stay unready until "
+        "<code>codex-chatgpt-web doctor</code> reports them.</p></body></html>"
+    )
+    return page.encode("utf-8")
 
 
 class _StatusHandler(BaseHTTPRequestHandler):
@@ -549,97 +750,119 @@ class _StatusHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _status_bytes(self) -> bytes:
-        home: Path = self.server.home  # type: ignore[attr-defined]
-        text = redact(json.dumps(build_status(home), sort_keys=True), _secrets(home))
-        return text.encode("utf-8")
-
     def do_GET(self) -> None:  # noqa: N802
         if not self._client_allowed():
             self._send(403, b'{"ok":false,"error":"loopback only"}', "application/json")
             return
-        if self.path.split("?", 1)[0] == "/status":
-            self._send(200, self._status_bytes(), "application/json")
+        path = self.path.split("?", 1)[0]
+        home: Path = self.server.home  # type: ignore[attr-defined]
+        if path == "/status":
+            text = redact(json.dumps(build_status(home), sort_keys=True), _secrets(home))
+            self._send(200, text.encode("utf-8"), "application/json")
             return
-        if self.path.split("?", 1)[0] == "/login":
-            page = (
-                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>ChatGPT Web Runtime</title></head>"
-                "<body><h1>ChatGPT Web Runtime</h1>"
-                "<p>Private account form for the single local runtime account. "
-                "This page does not sign in to chatgpt.com and does not run browser smoke.</p>"
-                "<form method=\"POST\" action=\"/account\">"
-                "<label>Account secret <input name=\"secret\" type=\"password\" autocomplete=\"off\"></label>"
-                "<button type=\"submit\">Save account</button></form></body></html>"
-            )
-            self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+        if path == "/login":
+            self._send(200, _diagnostic_page(), "text/html; charset=utf-8")
             return
         self._send(404, b'{"ok":false,"error":"not found"}', "application/json")
 
     def do_POST(self) -> None:  # noqa: N802
-        if not self._client_allowed():
-            self._send(403, b'{"ok":false,"error":"loopback only"}', "application/json")
-            return
-        if self.path.split("?", 1)[0] != "/account":
-            self._send(404, b'{"ok":false,"error":"not found"}', "application/json")
-            return
-        home: Path = self.server.home  # type: ignore[attr-defined]
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            length = ACCOUNT_BODY_LIMIT + 1
-        if length < 0 or length > ACCOUNT_BODY_LIMIT:
-            self._send(413, b'{"ok":false,"error":"account form rejected"}', "application/json")
-            return
-        raw = self.rfile.read(length)
-        secret = _secret_from_body(raw, self.headers.get("Content-Type", ""))
-        if secret is None:
-            _append_log(home, "rejected account form")
-            self._send(400, b'{"ok":false,"error":"account form rejected"}', "application/json")
-            return
-        try:
-            _store_account(home, secret)
-        except RuntimeError_ as exc:
-            message = redact(str(exc), [secret, *_secrets(home)])
-            _append_log(home, message)
-            body = json.dumps({"ok": False, "error": message}).encode("utf-8")
-            self._send(409, body, "application/json")
-            return
-        _append_log(home, "stored one local account")
-        self._send(200, self._status_bytes(), "application/json")
+        self._send(404, b'{"ok":false,"error":"not found"}', "application/json")
 
 
-def _secret_from_body(raw: bytes, content_type: str) -> str | None:
-    text = raw.decode("utf-8", "replace")
-    if "application/json" in content_type:
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        secret = payload.get("secret")
-    else:
-        parsed = urllib.parse.parse_qs(text, keep_blank_values=False)
-        values = parsed.get("secret") or []
-        secret = values[0] if values else None
-    if not isinstance(secret, str) or len(secret) < 8 or len(secret) > 512:
-        return None
-    return secret
+def _emit(home: Path, payload: dict[str, Any]) -> None:
+    sys.stdout.write(redact(json.dumps(payload, sort_keys=True), _secrets(home)) + "\n")
 
 
-def _store_account(home: Path, secret: str) -> None:
-    existing = _read_json(home / "account.json")
-    if existing and isinstance(existing.get("secret"), str):
-        stored = str(existing["secret"])
-        same = len(stored) == len(secret) and hmac.compare_digest(stored, secret)
-        if not same:
-            raise RuntimeError_("single account already initialized")
-        return
-    _write_json(
-        home / "account.json",
-        {"account_id": str(uuid.uuid4()), "secret": secret},
-        mode=0o600,
+def _fail(home: Path, message: str) -> int:
+    safe = redact(message, _secrets(home))
+    try:
+        _append_log(home, safe)
+    except OSError:
+        pass
+    sys.stdout.write(json.dumps({"ok": False, "error": safe}, sort_keys=True) + "\n")
+    return 1
+
+
+def supervise(home: Path) -> int:
+    home = _assert_private_home(home)
+    _mkdir(home)
+    pin = load_pin()
+    if not _pin_compatible(home, pin):
+        return _fail(home, "version mismatch; refusing to start an incompatible ChatGPT Web Runtime pin")
+    if not _lifecycle(home)["enabled"]:
+        return _fail(home, "ChatGPT Web Runtime is disabled")
+    host = _bind_host()
+    try:
+        entry = _find_entry(_runtime_root(home))
+    except RuntimeError_ as exc:
+        return _fail(home, str(exc))
+    runtime_port = _write_minimum_config(home, entry)
+    lock_handle = (home / "supervisor.lock").open("a+")
+    try:
+        _try_lock(lock_handle)
+    except BlockingIOError:
+        lock_handle.close()
+        return _fail(home, "ChatGPT Web Runtime supervisor is already running")
+    entry_log = (home / "runtime-entry.log").open("ab")
+    child = subprocess.Popen(
+        [str(entry), "serve"],
+        env=_runtime_env(home),
+        cwd=str(_web_home(home)),
+        stdin=subprocess.DEVNULL,
+        stdout=entry_log,
+        stderr=subprocess.STDOUT,
     )
+    server = ThreadingHTTPServer((host, 0), _StatusHandler)
+    bound_host, diagnostic_port = server.server_address[:2]
+    if bound_host != LOOPBACK_HOST:
+        child.terminate()
+        server.server_close()
+        lock_handle.close()
+        entry_log.close()
+        return _fail(home, "refusing to listen outside 127.0.0.1")
+    server.home = home  # type: ignore[attr-defined]
+    _write_json(
+        home / "process.json",
+        {
+            "pid": child.pid,
+            "supervisor_pid": os.getpid(),
+            "port": runtime_port,
+            "diagnostic_port": diagnostic_port,
+            "executable": str(entry),
+            "private_home": str(home),
+            "ownership": "codexhub-supervisor",
+        },
+    )
+    _write_lifecycle(home, enabled=True, restart_required=False)
+    _append_log(home, f"started {entry.name} serve on 127.0.0.1:{runtime_port}")
+
+    def _stop(_signum: int, _frame: Any) -> None:
+        if child.poll() is None:
+            child.terminate()
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
+    thread.start()
+    try:
+        while child.poll() is None:
+            time.sleep(0.2)
+        _append_log(home, f"runtime entry exited {child.returncode}")
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        entry_log.close()
+        (home / "process.json").unlink(missing_ok=True)
+        lock_handle.close()
+    return 0 if child.returncode == 0 else 1
 
 
 def _try_lock(handle: Any) -> None:
@@ -660,67 +883,15 @@ def _try_lock(handle: Any) -> None:
         raise BlockingIOError from exc
 
 
-def supervise(home: Path) -> int:
-    home = _assert_private_home(home)
-    _mkdir(home)
-    pin = load_pin()
-    if not _pin_compatible(home, pin):
-        return _fail(home, "version mismatch; refusing to start an incompatible ChatGPT Web Runtime pin")
-    if not _lifecycle(home)["enabled"]:
-        return _fail(home, "ChatGPT Web Runtime is disabled")
-    host = _bind_host()
-    lock_path = home / "supervisor.lock"
-    lock_handle = lock_path.open("a+")
-    try:
-        _try_lock(lock_handle)
-    except BlockingIOError:
-        lock_handle.close()
-        return _fail(home, "ChatGPT Web Runtime supervisor is already running")
-    server = ThreadingHTTPServer((host, 0), _StatusHandler)
-    bound_host, port = server.server_address[:2]
-    if bound_host != LOOPBACK_HOST:
-        server.server_close()
-        lock_handle.close()
-        return _fail(home, "refusing to listen outside 127.0.0.1")
-    server.home = home  # type: ignore[attr-defined]
-    _write_json(
-        home / "process.json",
-        {
-            "pid": os.getpid(),
-            "port": port,
-            "executable": _supervisor_executable(),
-            "private_home": str(home),
-            "ownership": "codexhub-supervisor",
-        },
-    )
-    _write_lifecycle(home, enabled=True, restart_required=False)
-    _append_log(home, f"supervisor listening on 127.0.0.1:{port}")
-
-    def _stop_server(_signum: int, _frame: Any) -> None:
-        threading.Thread(target=server.shutdown, daemon=True).start()
-
-    signal.signal(signal.SIGTERM, _stop_server)
-    signal.signal(signal.SIGINT, _stop_server)
-    try:
-        server.serve_forever(poll_interval=0.2)
-    finally:
-        server.server_close()
-        process = home / "process.json"
-        process.unlink(missing_ok=True)
-        lock_handle.close()
-        _append_log(home, "supervisor stopped")
-    return 0
-
-
 def _running_status(home: Path) -> dict[str, Any] | None:
     record = _process_record(home)
     if record is None:
         return None
-    port = record.get("port")
+    port = record.get("diagnostic_port")
     if not isinstance(port, int):
         return None
     try:
-        with urllib.request.urlopen(f"http://{LOOPBACK_HOST}:{port}/status", timeout=1) as response:
+        with urllib.request.urlopen(f"http://{LOOPBACK_HOST}:{port}/status", timeout=2) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
         return None
@@ -742,30 +913,24 @@ def start_runtime(home: Path) -> dict[str, Any]:
     if not _pin_compatible(home, pin):
         raise RuntimeError_("version mismatch; refusing to start an incompatible ChatGPT Web Runtime pin")
     _bind_host()
+    _find_entry(_runtime_root(home))
     existing = _running_status(home)
     if existing is not None:
         return existing
     if (_read_json(home / "lifecycle.json") or {}).get("enabled") is False:
         _write_lifecycle(home, enabled=True, restart_required=False)
-    command = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "supervise",
-        "--home",
-        str(home),
-    ]
-    subprocess_env = os.environ.copy()
-    subprocess_env["CODEXHUB_CHATGPT_WEB_HOME"] = str(home)
-    subprocess_env.pop("CODEX_WEB_GPT_DEV_HOME", None)
+    env = os.environ.copy()
+    env["CODEXHUB_CHATGPT_WEB_HOME"] = str(home)
+    env.pop("CODEX_WEB_GPT_DEV_HOME", None)
     process = subprocess.Popen(
-        command,
-        env=subprocess_env,
+        [sys.executable, str(Path(__file__).resolve()), "supervise", "--home", str(home)],
+        env=env,
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    deadline = time.time() + 10
+    deadline = time.time() + 20
     try:
         while time.time() < deadline:
             existing = _running_status(home)
@@ -777,36 +942,52 @@ def start_runtime(home: Path) -> dict[str, Any]:
         existing = _running_status(home)
         if existing is not None:
             return existing
-        raise RuntimeError_("ChatGPT Web Runtime supervisor did not become ready")
+        raise RuntimeError_("ChatGPT Web Runtime entry did not become ready")
     except Exception:
-        if process.poll() is None:
+        if process.poll() is None and _process_record(home) is None:
             process.kill()
             process.wait(timeout=2)
         raise
 
 
-def _signal_supervisor(home: Path) -> dict[str, Any] | None:
-    record = _process_record(home)
-    if record is None:
-        return None
-    pid = int(record["pid"])
-    if not _is_our_process(pid, home):
-        raise RuntimeError_("refusing to signal a process CodexHub does not own")
-    os.kill(pid, signal.SIGTERM)
-    deadline = time.time() + 5
-    while time.time() < deadline:
-        if not _pid_alive(pid):
-            return record
-        time.sleep(0.05)
-    if _is_our_process(pid, home):
-        os.kill(pid, signal.SIGKILL)
-    return record
+def _signal_supervisor(home: Path) -> None:
+    record = _read_json(home / "process.json") or {}
+    try:
+        supervisor_pid = int(record.get("supervisor_pid") or 0)
+    except (TypeError, ValueError):
+        supervisor_pid = 0
+    if supervisor_pid and _pid_alive(supervisor_pid):
+        command = _cmdline(supervisor_pid)
+        if os.name == "nt" or (
+            "chatgpt_web_runtime.py" in command and "supervise" in command and str(home) in command
+        ):
+            os.kill(supervisor_pid, signal.SIGTERM)
+            return
+    runtime = _process_record(home)
+    if runtime is None:
+        return
+    os.kill(int(runtime["pid"]), signal.SIGTERM)
 
 
 def stop_runtime(home: Path, *, disable: bool) -> dict[str, Any]:
     home = _assert_private_home(home)
     _mkdir(home)
+    record = _read_json(home / "process.json") or {}
+    try:
+        runtime_pid = int(record.get("pid") or 0)
+    except (TypeError, ValueError):
+        runtime_pid = 0
     _signal_supervisor(home)
+    deadline = time.time() + 5
+    while time.time() < deadline and runtime_pid and _pid_alive(runtime_pid):
+        time.sleep(0.05)
+    if runtime_pid and _pid_alive(runtime_pid):
+        environ = set(_environ(runtime_pid).split("\n"))
+        if f"CODEX_CHATGPT_WEB_HOME={_web_home(home)}" in environ:
+            os.kill(runtime_pid, signal.SIGKILL)
+        kill_deadline = time.time() + 2
+        while time.time() < kill_deadline and _pid_alive(runtime_pid):
+            time.sleep(0.05)
     _write_lifecycle(home, enabled=not disable, restart_required=not disable)
     _append_log(home, "disabled runtime" if disable else "stopped runtime; restart required")
     return build_status(home)
@@ -814,15 +995,14 @@ def stop_runtime(home: Path, *, disable: bool) -> dict[str, Any]:
 
 def open_login(home: Path) -> dict[str, Any]:
     home = _assert_private_home(home)
-    lifecycle = _lifecycle(home)
-    if _read_json(home / "lifecycle.json") is not None and not lifecycle["enabled"]:
+    if _read_json(home / "lifecycle.json") is not None and not _lifecycle(home)["enabled"]:
         raise RuntimeError_("ChatGPT Web Runtime is disabled")
     status = _running_status(home)
     if status is None:
         status = start_runtime(home)
-    port = status.get("process", {}).get("port")
+    port = status.get("process", {}).get("diagnostic_port")
     if not isinstance(port, int):
-        raise RuntimeError_("login window has no loopback port")
+        raise RuntimeError_("login diagnostic page has no loopback port")
     _write_json(home / "window.json", {"open": True})
     status = build_status(home)
     status["login_url"] = f"http://{LOOPBACK_HOST}:{port}/login"

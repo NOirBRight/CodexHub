@@ -5,36 +5,46 @@
     "/home/noirbright/Workstation/.worktrees/codexhub-chatgpt-web/568/src-python/chatgpt_web_runtime.py",
     "start",
     "--home",
-    "<private-temp-home>"
+    "<private-home-outside-tmp>"
   ],
   "install_command": [
     "/home/noirbright/Workstation/CodexHub/.venv-ci/bin/python",
     "/home/noirbright/Workstation/.worktrees/codexhub-chatgpt-web/568/src-python/chatgpt_web_runtime.py",
     "install",
     "--source",
-    "<fixture-payload>",
+    "codex-chatgpt-web-linux-amd64.tar.gz",
     "--home",
-    "<private-temp-home>"
+    "<private-home-outside-tmp>"
   ],
-  "supervisor_sha256": "db525fbd82b139d40808a16550911ae75d5fa28b0659d2cea38f4e5057b85964",
-  "fixture_payload_sha256": "4e7bac9eadb0ff024d75a7ab429d481a9d492383b2bb06403c78046e06d0cb96",
-  "payload_kind": "local fixture bytes, not the pinned upstream archive",
-  "stopped_after_observation": true,
+  "runtime_argv": [
+    "bin/codex-chatgpt-web",
+    "serve"
+  ],
+  "supervisor_sha256": "38e3ad49b64accd00d9cb93d75e0048f791619d61276c4abb2218caf3250f031",
+  "archive_sha256": "e86371aa677722811c34e4ac9b8984a3859f24f57c5ad0e3e1d6014a96298531",
   "pinned_commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5",
   "pinned_version": "6.1.1",
-  "product_entry": "codexhub-supervisor",
+  "payload_kind": "pinned upstream linux-amd64 runtime archive, extracted after checksum match",
+  "product_entry": "codex-chatgpt-web serve",
   "upstream_executed": false,
   "rejected_entries": [
     "setup",
     "dev",
-    "--replace-codex-route"
+    "--replace-codex-route",
+    "install.sh",
+    "install-launcher.sh"
   ],
   "process": {
-    "pid": 482075,
+    "running_at_observation": true,
     "listen_host": "127.0.0.1",
     "ownership": "codexhub-supervisor",
-    "running": true,
-    "private_home": "private temp directory, not recorded"
+    "executable_basename": "codex-chatgpt-web"
+  },
+  "healthz": {
+    "service": "codex-chatgpt-web",
+    "status": "ok",
+    "version": "6.1.1",
+    "mode": "browser-only"
   },
   "ready": false,
   "login_state": "signed_out",
@@ -42,6 +52,7 @@
   "tunnel": "not_started",
   "connector_selectable": false,
   "component_compatible": true,
+  "stopped_after_observation": true,
   "real_config_sha256": {
     "before": {
       "codex_config_toml": "c6c176a150a41e648746f75505e233545c15bc7646c3089f8dff5c49c5392bde",
@@ -74,6 +85,9 @@
     "connector verification",
     "upstream setup",
     "upstream dev",
-    "--replace-codex-route"
+    "--replace-codex-route",
+    "install.sh",
+    "install-launcher.sh",
+    "pinned launcher binary start"
   ]
 }
