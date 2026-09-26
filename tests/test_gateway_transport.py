@@ -455,3 +455,23 @@ def test_open_once_hook_is_used_by_open_response() -> None:
         max_attempts=1,
     )
     assert seen == ["official"]
+
+
+@pytest.mark.parametrize("incoming", [{}, {"X-Codex-Routing-Hint": "model=gpt-6-luna-fast;tier=default"}])
+def test_official_fast_alias_rebuilds_routing_hint_from_resolved_model(incoming):
+    headers = build_upstream_headers(
+        incoming,
+        {"auth": "codex_auth", "name": "official",
+         "upstream_model": "gpt-6-luna", "service_tier": "priority"},
+        access_token=lambda: "tok", account_id=lambda: "acct",
+    )
+    hints = {key: value for key, value in headers.items() if key.lower() == "x-codex-routing-hint"}
+    assert hints == {"x-codex-routing-hint": "model=gpt-6-luna;tier=priority"}
+
+
+def test_fast_routing_hint_does_not_leak_to_external_provider():
+    headers = build_upstream_headers(
+        {}, {"auth": "api_key", "name": "external", "api_key": "test",
+             "upstream_model": "gpt-6-luna", "service_tier": "priority"},
+    )
+    assert "x-codex-routing-hint" not in headers

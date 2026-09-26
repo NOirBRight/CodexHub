@@ -893,6 +893,19 @@ def build_upstream_headers(
             continue
         outgoing[key] = value
 
+    # Fast aliases change both the body model/tier and Codex's routing hint.
+    # Never forward a caller hint naming the alias or the parent's default tier.
+    if (
+        upstream.get("name") == resolved_facts.official_upstream_name
+        and upstream.get("service_tier") == "priority"
+        and model_id_for_adapter
+    ):
+        outgoing = {
+            key: value for key, value in outgoing.items()
+            if key.lower() != "x-codex-routing-hint"
+        }
+        outgoing["x-codex-routing-hint"] = f"model={model_id_for_adapter};tier=priority"
+
     # Official passthrough keeps the caller User-Agent. Chat clients and
     # urllib/curl fingerprints 403 on some third-party WAFs (OpenCode Go).
     strict_official_passthrough = (
