@@ -133,6 +133,33 @@ def test_codex_read_command_resolves_from_case_root_and_rejects_shell_extras(tmp
     )
 
 
+def test_pi_tool_target_requires_exact_path_and_correlated_start():
+    end = {"type": "tool_execution_end", "toolName": "read", "toolCallId": "read-1", "isError": False}
+    start = {"type": "tool_execution_start", "toolCallId": "read-1", "args": {"path": "./sentinel.txt"}}
+    assert E2E.parse_client_output("pi", json.dumps(end), "S")["read_only_tool_call_count"] == 0
+    output = "\n".join(json.dumps(e) for e in (start, end))
+    assert E2E.parse_client_output("pi", output, "S")["read_only_tool_call_count"] == 1
+    start["args"]["path"] = "not-sentinel.txt"
+    output = "\n".join(json.dumps(e) for e in (start, end))
+    assert E2E.parse_client_output("pi", output, "S")["read_only_tool_call_count"] == 0
+
+
+def test_arbitrary_model_and_terminal_text_are_not_saved_in_evidence():
+    secret = "unexpected-private-value"
+    gateway = E2E._gateway_evidence(E2E.CASES[0], [
+        {"event": "request_complete", "model": secret, "request_id": "private-id"},
+    ], 0, 2)
+    output = "\n".join(json.dumps(e) for e in [
+        {"type": "message_end", "message": {"role": "assistant", "stopReason": secret}},
+        {"type": "agent_end"},
+    ])
+    client = E2E.parse_client_output("pi", output, "S")
+    assert gateway["model_matches_expected"] is False
+    assert client["terminal_classification"] == "unclassified"
+    assert secret not in json.dumps([gateway, client])
+    assert "private-id" not in json.dumps(gateway)
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [

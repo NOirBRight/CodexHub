@@ -57,6 +57,7 @@ Linux:
 
 ```bash
 ./scripts/codexhub-python.sh scripts/e2e_chat_completions.py \
+  --candidate-sha <full-reviewed-sha> \
   --bin src-tauri/target/debug/codexhub \
   --output <new-run>/chat-completions-e2e.json \
   --auth <inputs>/auth.json \
@@ -74,6 +75,7 @@ Do not reuse a previous `isolated/work` keep-runtime. DeepSeek Chat requires
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Run-ChatCompletionsE2E.ps1 `
+  -CandidateSha <full-reviewed-sha> `
   -Bin <portable>/CodexHub.exe `
   -Output <new-run>/chat-completions-e2e.json `
   -Auth <inputs>/auth.json `
@@ -84,6 +86,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Run-ChatCompletionsE
   -KeepRuntime <new-run>/runtime `
   -Proxy http://127.0.0.1:7890
 ```
+
+Linux CLI and Chat live runs require the full reviewed `--candidate-sha`
+(`-CandidateSha` in PowerShell) and a clean tracked source checkout at that SHA.
+For a supplied `--bin`, create `<binary>.candidate-sha` containing that full SHA
+only after the corresponding build succeeds, as for the Windows CLI gate.
+The evidence records both the source SHA and the binary SHA-256; a missing or
+mismatched sidecar fails before the Gateway starts. The self-build path binds
+its newly built binary directly to the clean current source checkout.
 
 The Chat runner starts an isolated Gateway with Chat enabled, sets
 `CODEXHUB_RESOURCE_ROOT` to the checkout so debug/portable loads current

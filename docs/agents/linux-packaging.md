@@ -153,6 +153,7 @@ OMP once against Official `gpt-6-luna` and once against the official DeepSeek AP
 
 ```bash
 ./scripts/codexhub-python.sh scripts/e2e_linux_cli_clients.py \
+  --candidate-sha <full-reviewed-sha> \
   --output <new-run>/linux-cli-e2e.json \
   --auth <inputs>/auth.json \
   --providers <inputs>/providers.toml \
@@ -161,10 +162,16 @@ OMP once against Official `gpt-6-luna` and once against the official DeepSeek AP
   --deepseek-credentials <inputs>/deepseek.json
 ```
 
+The runner requires a clean tracked source checkout at `--candidate-sha`.
+A supplied `--bin` must have a matching `<binary>.candidate-sha` build sidecar;
+the report records the full source SHA and binary SHA-256.
 The runner requires explicit `--auth`, `--providers`, `--settings`, and
 `--deepseek-credentials` inputs; it does not discover operator configuration.
 DeepSeek credentials use `codexhub.real-client-deepseek.v1` with only `schema`
-and a nonempty `api_key`. `--catalog` is optional; without it the candidate
+and a nonempty `api_key`. The provider input must bind that key through
+`{env:DEEPSEEK_API_KEY}` to the official HTTPS `api.deepseek.com` Responses route.
+An alternate host, embedded URL credentials or redirect path is rejected.
+`--catalog` is optional; without it the candidate
 refreshes the Official catalog inside the isolated runtime. Inputs are copied
 into temporary homes and runtime directories, never into the report. The
 Gateway retains the Provider key; client subprocesses receive their own

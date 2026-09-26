@@ -10,6 +10,11 @@ except ModuleNotFoundError:
 
 require_python_313(__file__)
 
+try:
+    from scripts.e2e_gate_inputs import deepseek_provider_text, qualify_candidate_binary
+except ModuleNotFoundError:
+    from e2e_gate_inputs import deepseek_provider_text, qualify_candidate_binary
+
 import argparse
 import hashlib
 import json
@@ -777,7 +782,7 @@ def _prepare_runtime(
     )
     settings_path = proxy / "settings.json"
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-    shutil.copy2(providers_source, config / "providers.toml")
+    (config / "providers.toml").write_text(deepseek_provider_text(providers_source), encoding="utf-8")
     shutil.copy2(auth_source, codex_home / "auth.json")
     home = work / "home"
     appdata = home / "appdata"
@@ -980,6 +985,7 @@ def _live_case(base: str, case: Case, gateway_key: str, timeout: int) -> dict[st
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--candidate-sha", help="full reviewed source SHA (required for live runs)")
     parser.add_argument("--bin", type=Path, help="skip self-build and use this candidate")
     parser.add_argument("--output", type=Path, default=Path("test-results/chat-completions-e2e.json"))
     parser.add_argument("--timeout", type=int, default=180)
@@ -1025,6 +1031,8 @@ def main(argv: list[str]) -> int:
         shapes = dump_conversion_shapes()
         print(json.dumps(shapes, indent=2))
         return 0
+    if not args.candidate_sha:
+        parser.error("live gate requires --candidate-sha")
     if args.capabilities and not args.cases:
         args.cases = ["chat-official"]
     missing = [
@@ -1045,9 +1053,14 @@ def main(argv: list[str]) -> int:
     if any(case.provider == "deepseek" for case in cases) and not deepseek_api_key:
         parser.error("DeepSeek Chat case requires --deepseek-credentials")
     binary = args.bin.resolve() if args.bin else build_candidate()
+    try:
+        binding = qualify_candidate_binary(binary, ROOT, args.candidate_sha, self_built=args.bin is None)
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        parser.error(str(error))
     report: dict[str, object] = {
         "schema": "codexhub.chat-completions-e2e.v1",
-        "candidate": str(binary),
+        "candidate": binary.name,
+        **binding,
         "cases": [],
     }
     failures: list[str] = []
@@ -1070,16 +1083,17 @@ def main(argv: list[str]) -> int:
         refresh = None if catalog.is_file() else _run([str(binary), "refresh-models"], env=env, timeout=180)
         if not catalog.is_file():
             failures.append("candidate: refresh-models failed")
-            report["bootstrap_tail"] = (
+            bootstrap_output = (
                 ((refresh.stdout or "") + "\n" + (refresh.stderr or ""))[-1600:]
                 if refresh
                 else "Official catalog is missing"
             )
+            report["bootstrap_output_sha256"] = hashlib.sha256(bootstrap_output.encode()).hexdigest()
         else:
             starter, bootstrap_tail = start_candidate(binary, env, port)
             if starter is None:
                 failures.append("candidate: Gateway failed to become healthy")
-                report["bootstrap_tail"] = bootstrap_tail
+                report["bootstrap_output_sha256"] = hashlib.sha256(bootstrap_tail.encode()).hexdigest()
             else:
                 try:
                     base = f"http://127.0.0.1:{port}"

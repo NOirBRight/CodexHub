@@ -4,6 +4,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Bin,
+    [string]$CandidateSha = '',
     [string]$Output = 'test-results\chat-completions-e2e.json',
     [string]$Auth = '',
     [string]$Providers = '',
@@ -52,6 +53,9 @@ $arguments = @(
     '--output', $Output,
     '--timeout', [string]$TimeoutSeconds
 )
+if (-not [string]::IsNullOrWhiteSpace($CandidateSha)) {
+    $arguments += @('--candidate-sha', $CandidateSha)
+}
 if (-not [string]::IsNullOrWhiteSpace($Auth)) {
     $arguments += @('--auth', $Auth)
 }

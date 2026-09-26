@@ -29,6 +29,11 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.request import urlopen
 
+try:
+    from scripts.e2e_gate_inputs import deepseek_provider_text, qualify_candidate_binary
+except ModuleNotFoundError:
+    from e2e_gate_inputs import deepseek_provider_text, qualify_candidate_binary
+
 ROOT = Path(__file__).resolve().parents[1]
 CLI_CONTRACT_PATH = ROOT / "scripts" / "real_client_cli_contract.v1.json"
 DEEPSEEK_CREDENTIAL_SCHEMA = "codexhub.real-client-deepseek.v1"
@@ -221,7 +226,7 @@ def _prepare_runtime(
     settings_path = proxy / "settings.json"
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     providers_path = config / "providers.toml"
-    shutil.copy2(providers_source, providers_path)
+    providers_path.write_text(deepseek_provider_text(providers_source), encoding="utf-8")
     shutil.copy2(auth_source, codex_home / "auth.json")
     env = _isolated_environment()
     env.pop("DEEPSEEK_API_KEY", None)
@@ -398,14 +403,6 @@ def _capture_bounded(stream: object, limit: int) -> tuple[str, int, str, bool]:
     return bytes(kept).decode("utf-8", "replace"), size, digest.hexdigest(), size > limit
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _run_client_bounded(
     command: list[str],
     *,
@@ -554,6 +551,18 @@ def parse_client_output(
     assistant_messages: list[tuple[int, str, str]] = []
     agent_ends: list[int] = []
     last_assistant_line = -1
+    tool_inputs: dict[str, object] = {}
+
+    def reads_sentinel(arguments: object) -> bool:
+        if not isinstance(arguments, dict):
+            return False
+        target = arguments.get("filePath", arguments.get("path"))
+        if not isinstance(target, str):
+            return False
+        path = Path(target)
+        if case_root is None:
+            return path in {Path("sentinel.txt"), Path("./sentinel.txt")}
+        return (path if path.is_absolute() else case_root / path).resolve() == (case_root / "sentinel.txt").resolve()
 
     def flush_open_code_text() -> None:
         if open_code_text:
@@ -605,7 +614,7 @@ def parse_client_output(
                 flush_open_code_text()
                 name = part.get("tool", event.get("name"))
                 input_value = state.get("input", part.get("input", event.get("input", {})))
-                has_target = "sentinel.txt" in json.dumps(input_value, ensure_ascii=True)
+                has_target = reads_sentinel(input_value)
                 tool_calls.append(
                     name in {"read", "read_file"}
                     and has_target
@@ -626,10 +635,12 @@ def parse_client_output(
             elif kind == "error":
                 errors += 1
         elif client in {"pi", "omp"}:
+            if kind == "tool_execution_start" and isinstance(event.get("toolCallId"), str):
+                tool_inputs[event["toolCallId"]] = event.get("args", event.get("input"))
             if kind == "tool_execution_end":
                 name = event.get("toolName")
-                args = event.get("input", event.get("args"))
-                has_target = args is None or "sentinel.txt" in json.dumps(args, ensure_ascii=True)
+                args = event.get("input", event.get("args", tool_inputs.get(event.get("toolCallId"))))
+                has_target = reads_sentinel(args)
                 tool_calls.append(name == "read" and not event.get("isError", False) and has_target)
             elif kind == "message_end":
                 message = event.get("message")
@@ -671,6 +682,8 @@ def parse_client_output(
 
     sentinel_count = sum(text.strip() == sentinel for text in assistant_texts)
     terminal = terminals[-1] if len(terminals) == 1 else "unclassified"
+    if terminal not in {"completed", "error", "aborted", "length"}:
+        terminal = "unclassified"
     return {
         "tool_call_count": len(tool_calls),
         "read_only_tool_call_count": sum(tool_calls),
@@ -988,10 +1001,8 @@ def _gateway_evidence(
         "reconnect_classification": (
             "unclassified" if len(starts) > expected_requests else "none"
         ),
-        "model_selected": (
-            completes[-1].get("model_canonical", completes[-1].get("model"))
-            if completes
-            else None
+        "model_matches_expected": bool(completes) and _model_matches(
+            completes[-1].get("model_canonical", completes[-1].get("model")), case
         ),
         "request_error_statuses": [
             event.get("status") for event in errors if isinstance(event.get("status"), int)
@@ -1035,7 +1046,7 @@ def _attempt_passed(case: Case, live: dict[str, object], gateway: dict[str, obje
         and gateway.get("error_event_count") == 0
         and gateway.get("duplicate_terminal_count") == 0
         and gateway.get("reconnect_classification") == "none"
-        and _model_matches(gateway.get("model_selected"), case)
+        and gateway.get("model_matches_expected") is True
     )
 
 
@@ -1108,6 +1119,7 @@ def _run_case_attempt(
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--candidate-sha", required=True, help="full reviewed source SHA")
     parser.add_argument(
         "--bin", type=Path, help="skip self-build and use this candidate"
     )
@@ -1157,10 +1169,13 @@ def main(argv: list[str]) -> int:
     if version_failures:
         parser.error(f"client version gate failed: {version_failures}")
     binary = args.bin.resolve() if args.bin else build_candidate()
-    candidate_sha256 = _sha256_file(binary)
+    try:
+        binding = qualify_candidate_binary(binary, ROOT, args.candidate_sha, self_built=args.bin is None)
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        parser.error(str(error))
     report: dict[str, object] = {
         "schema": "codexhub.linux-cli-e2e.v3",
-        "candidate_sha256": candidate_sha256,
+        **binding,
         "client_versions": versions,
         "cases": [],
     }
@@ -1266,7 +1281,7 @@ def main(argv: list[str]) -> int:
                             "gateway_request_error_statuses": gateway.get("request_error_statuses", []),
                             "gateway_route_metadata_error_count": gateway.get("route_metadata_error_count", 0),
                             "gateway_malformed_event_count": gateway.get("malformed_event_count", 0),
-                            "gateway_model_selected": gateway.get("model_selected"),
+                            "gateway_model_matches_expected": gateway.get("model_matches_expected", False),
                             "client_returncode": live.get("returncode"),
                             "client_timed_out": live.get("timed_out", False),
                             "client_output_truncated": live.get("output_truncated", False),

@@ -112,7 +112,7 @@ def test_live_chat_requires_explicit_inputs_and_deepseek_key_before_launch(
     with pytest.raises(SystemExit) as missing:
         E2E.main([])
     assert missing.value.code == 2
-    inputs = []
+    inputs = ["--candidate-sha", "0" * 40]
     for name in ("auth", "providers", "settings"):
         path = tmp_path / name
         path.write_text("{}", encoding="utf-8")
@@ -134,6 +134,11 @@ def test_chat_runtime_clears_host_identity_and_configuration(
     sources.mkdir()
     for name in ("settings", "providers", "auth"):
         (sources / name).write_text("{}", encoding="utf-8")
+    (sources / "providers").write_text(
+        '[[providers]]\nid="deepseek"\nbase_url="https://api.deepseek.com"\n'
+        'api_key="{env:DEEPSEEK_API_KEY}"\nupstream_format="responses"\n',
+        encoding="utf-8",
+    )
     work = tmp_path / "run"
     env, _, _, _, _ = E2E._prepare_runtime(
         work, sources / "settings", sources / "providers", sources / "auth", None,
