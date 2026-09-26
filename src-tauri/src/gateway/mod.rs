@@ -1318,7 +1318,7 @@ fn default_gateway_client_sync_model(
             return Ok((*id).to_string());
         }
     }
-    for (_, id, _, _) in OFFICIAL_FAST_VARIANTS {
+    for id in crate::official_fast_variants().keys() {
         if models.iter().any(|model| model.id == *id) {
             return Ok((*id).to_string());
         }

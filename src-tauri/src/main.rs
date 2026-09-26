@@ -350,7 +350,15 @@ pub struct Settings {
 }
 
 fn default_fast_model_variants() -> Vec<String> {
-    vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()]
+    official_fast_variants().values().cloned().collect()
+}
+
+pub(crate) fn official_fast_variants() -> &'static std::collections::BTreeMap<String, String> {
+    static VARIANTS: std::sync::OnceLock<std::collections::BTreeMap<String, String>> = std::sync::OnceLock::new();
+    VARIANTS.get_or_init(|| {
+        serde_json::from_str(include_str!("../../config/official_fast_variants.json"))
+            .expect("valid bundled Fast variant registry")
+    })
 }
 
 impl Default for Settings {

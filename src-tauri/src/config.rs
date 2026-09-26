@@ -574,11 +574,16 @@ fn sanitize_gateway_auto_retry_max_attempts(value: u32) -> u8 {
 }
 
 fn sanitize_fast_model_variants(values: Vec<String>) -> Vec<String> {
-    const ALLOWED: &[&str] = &["gpt-5.5", "gpt-5.4"];
-    sanitize_model_ids(values)
+    let models: Vec<String> = sanitize_model_ids(values)
         .into_iter()
-        .filter(|value| ALLOWED.contains(&value.as_str()))
-        .collect()
+        .filter(|value| crate::official_fast_variants().values().any(|base| base == value))
+        .collect();
+    // Upgrade the previous all-Fast default while preserving custom subsets.
+    if models.len() == 2 && models.iter().all(|model| matches!(model.as_str(), "gpt-5.5" | "gpt-5.4")) {
+        crate::default_fast_model_variants()
+    } else {
+        models
+    }
 }
 
 fn sanitize_model_ids(values: Vec<String>) -> Vec<String> {

@@ -1,7 +1,8 @@
 import type { Settings } from "./types";
 import { browserLocale, resolveLocale } from "../i18n";
+import officialFastVariants from "../../../config/official_fast_variants.json";
 
-const DEFAULT_FAST_MODEL_VARIANTS = ["gpt-5.5", "gpt-5.4"];
+const DEFAULT_FAST_MODEL_VARIANTS = Object.values(officialFastVariants).sort();
 const ALLOWED_FAST_MODEL_VARIANTS = new Set(DEFAULT_FAST_MODEL_VARIANTS);
 
 const DEFAULT_SETTINGS: Settings = {
@@ -175,5 +176,8 @@ function normalizeModelIds(values: string[] | null | undefined) {
 function normalizeFastModelVariants(values: string[] | null | undefined) {
   const source = values?.length ? values : DEFAULT_FAST_MODEL_VARIANTS;
   const normalized = normalizeModelIds(source).filter((value) => ALLOWED_FAST_MODEL_VARIANTS.has(value));
+  if (normalized.length === 2 && normalized.every((value) => value === "gpt-5.5" || value === "gpt-5.4")) {
+    return [...DEFAULT_FAST_MODEL_VARIANTS];
+  }
   return normalized.length ? normalized : [...DEFAULT_FAST_MODEL_VARIANTS];
 }

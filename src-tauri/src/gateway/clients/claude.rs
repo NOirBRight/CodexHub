@@ -274,7 +274,7 @@ pub(in crate::gateway) fn claude_settings_text(
             env_map.remove(*env_key);
             continue;
         }
-        let resolved = resolve_gateway_client_model_id(settings, providers, &canonical)?;
+        let resolved = resolve_gateway_client_model_id(settings, providers, canonical)?;
         env_map.insert(
             (*env_key).to_string(),
             Value::String(projected_claude_model_id(&resolved)),

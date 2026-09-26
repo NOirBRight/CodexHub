@@ -128,14 +128,14 @@ test("disabled and unsupported official models do not gain Fast choices", () => 
   assert.ok(options.every((option) => !option.speedVariant));
 });
 
-test("other client subagent options do not opt into Codex Fast aliases", () => {
+test("other clients expose server Fast models without a speed switch", () => {
   const options = listDefaultSubagentOptions({
     officialId: "__official__", officialIncluded: true,
-    officialModels: [official("gpt-5.6-luna")],
+    officialModels: [official("gpt-5.6-luna"), official("gpt-5.6-luna-fast")],
     officialDisabledModels: [], providers: [],
   });
-  assert.deepEqual(options.map((option) => option.id), ["gpt-5.6-luna"]);
-  assert.equal(options[0].speedVariant, undefined);
+  assert.deepEqual(options.map((option) => option.id), ["gpt-5.6-luna", "gpt-5.6-luna-fast"]);
+  assert.ok(options.every((option) => option.speedVariant === undefined && !option.fast));
 });
 
 test("OpenCode Go flash stays a provider-qualified subagent option", () => {

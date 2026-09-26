@@ -624,7 +624,7 @@ fn legacy_official_model_ids_are_normalized_on_load_and_save() {
 
     assert_eq!(
         loaded.gateway_fast_model_variants,
-        vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()]
+        crate::default_fast_model_variants()
     );
     assert_eq!(
         loaded.official_disabled_models,
@@ -654,7 +654,7 @@ fn legacy_official_model_ids_are_normalized_on_load_and_save() {
 
     assert_eq!(
         saved.gateway_fast_model_variants,
-        vec!["gpt-5.5".to_string(), "gpt-5.4".to_string()]
+        crate::default_fast_model_variants()
     );
     assert_eq!(saved.official_disabled_models, vec!["gpt-5.4".to_string()]);
     assert_eq!(saved.official_model_sort_order, vec!["gpt-5.5".to_string()]);

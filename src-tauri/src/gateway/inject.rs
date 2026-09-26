@@ -21,11 +21,6 @@ pub(in crate::gateway) const OFFICIAL_MODELS: &[(&str, &str, u32)] = &[
     ("gpt-5.3-codex-spark", "5.3 Codex Spark", 128000),
 ];
 
-pub(in crate::gateway) const OFFICIAL_FAST_VARIANTS: &[(&str, &str, &str, u32)] = &[
-    ("gpt-5.5", "gpt-5.5-fast", "5.5 Fast", 258400),
-    ("gpt-5.4", "gpt-5.4-fast", "5.4 Fast", 272000),
-];
-
 pub(in crate::gateway) fn official_gateway_input_modalities() -> Vec<String> {
     vec!["text".to_string(), "image".to_string()]
 }
@@ -215,12 +210,9 @@ pub(in crate::gateway) fn official_models_from_metadata(
         None => fallback_official_gateway_models(settings, published_context_windows),
     };
 
-    let base_ids = models
-        .iter()
-        .map(|model| model.id.clone())
-        .collect::<HashSet<_>>();
-    for (base_id, id, display_name, _) in OFFICIAL_FAST_VARIANTS {
-        if !base_ids.contains(*base_id) || official_model_disabled(settings, base_id) {
+    for (id, base_id) in crate::official_fast_variants() {
+        if official_model_disabled(settings, base_id) || official_model_disabled(settings, id)
+            || models.iter().any(|model| model.id == *id) {
             continue;
         }
         if settings
@@ -228,24 +220,12 @@ pub(in crate::gateway) fn official_models_from_metadata(
             .iter()
             .any(|value| value == base_id)
         {
-            let context_window = models
-                .iter()
-                .find(|model| model.id == *base_id)
-                .and_then(|model| model.context_window);
-            models.push(GatewayModel {
-                id: (*id).to_string(),
-                display_name: (*display_name).to_string(),
-                source: "Official Codex subscription".to_string(),
-                source_kind: "official".to_string(),
-                supports_responses: true,
-                supports_chat_completions: true,
-                context_window,
-                max_output_tokens: None,
-                input_modalities: Some(official_gateway_input_modalities()),
-                supported_reasoning_levels: Some(official_gateway_reasoning_levels()),
-                default_reasoning_level: Some(OFFICIAL_DEFAULT_REASONING_LEVEL.to_string()),
-                thinking_mode: None,
-            });
+            if let Some(base) = models.iter().find(|model| model.id == *base_id) {
+                let mut fast = base.clone();
+                fast.id = id.clone();
+                fast.display_name = format!("{} Fast", base.display_name);
+                models.push(fast);
+            }
         }
     }
 
@@ -325,10 +305,7 @@ pub(in crate::gateway) fn official_gateway_model_id(id: &str) -> Option<String> 
 }
 
 pub(in crate::gateway) fn is_gateway_fast_variant_id(id: &str) -> bool {
-    matches!(
-        id.strip_prefix("openai/").unwrap_or(id),
-        "gpt-5.5-fast" | "gpt-5.4-fast"
-    )
+    crate::official_fast_variants().contains_key(id.strip_prefix("openai/").unwrap_or(id))
 }
 
 pub(in crate::gateway) fn official_model_disabled(settings: &Settings, id: &str) -> bool {

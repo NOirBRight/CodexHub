@@ -1117,7 +1117,7 @@ fn official_gateway_models_use_subscription_metadata_for_display_and_published_l
         &published_contexts,
     );
 
-    assert_eq!(models.len(), 1);
+    assert_eq!(models.len(), 2);
     assert_eq!(models[0].id, "gpt-5.6-sol");
     assert_eq!(models[0].display_name, "5.6 Sol");
     assert_eq!(models[0].context_window, Some(272_000));
@@ -1149,7 +1149,7 @@ fn published_official_context_limit_bounds_stale_subscription_metadata_for_statu
         &published_contexts,
     );
 
-    assert_eq!(models.len(), 1);
+    assert_eq!(models.len(), 2);
     assert_eq!(models[0].context_window, Some(272_000));
 
     let gateway_status_models =
@@ -1219,7 +1219,7 @@ fn official_gateway_models_are_available_when_published_snapshot_exists() {
         &published_contexts,
     );
 
-    assert_eq!(models.len(), 1);
+    assert_eq!(models.len(), 2);
     assert_eq!(models[0].id, "gpt-5.6-terra");
     assert_eq!(models[0].context_window, Some(272_000));
 }
@@ -1336,7 +1336,7 @@ fn official_gateway_models_dedupe_legacy_alias_with_fresh_metadata_winning() {
         &published_contexts,
     );
 
-    assert_eq!(models.len(), 1);
+    assert_eq!(models.len(), 2);
     assert_eq!(models[0].id, "gpt-5.6-sol");
     assert_eq!(models[0].display_name, "5.6 Sol");
     assert_eq!(models[0].context_window, Some(272_000));
@@ -3274,4 +3274,37 @@ fn client_projection_does_not_keep_vendor_path_prefix_in_display_name() {
             .and_then(|model| model.get("name")),
         Some(&serde_json::json!("CC deepseek-v4.1-flash"))
     );
+}
+
+#[test]
+fn standalone_fast_models_inherit_capabilities_and_respect_selection() {
+    let registry = crate::official_fast_variants();
+    let metadata: Vec<Model> = registry.values().map(|id| Model {
+        id: id.clone(),
+        max_output_tokens: Some(42_000),
+        input_modalities: Some(vec!["text".to_string()]),
+        supported_reasoning_levels: Some(vec!["medium".to_string()]),
+        default_reasoning_level: Some("medium".to_string()),
+        ..Model::default()
+    }).collect();
+    let contexts = registry.values().map(|id| (id.clone(), 200_000)).collect();
+    let models = official_models_from_metadata(&Settings::default(), Some(metadata.clone()), &contexts);
+    assert_eq!(models.len(), registry.len() * 2);
+    for (alias, base) in registry {
+        assert!(is_gateway_fast_variant_id(&format!("openai/{alias}")));
+        let original = models.iter().find(|model| model.id == *base).unwrap();
+        let fast = models.iter().find(|model| model.id == *alias).unwrap();
+        let mut expected = original.clone();
+        expected.id = alias.clone();
+        expected.display_name = format!("{} Fast", original.display_name);
+        assert_eq!(serde_json::to_value(fast).unwrap(), serde_json::to_value(expected).unwrap());
+    }
+    let selected = Settings {
+        gateway_fast_model_variants: vec!["gpt-6-astra".to_string(), "gpt-5.6-luna".to_string()],
+        official_disabled_models: vec!["gpt-6-astra-fast".to_string()],
+        ..Settings::default()
+    };
+    let models = official_models_from_metadata(&selected, Some(metadata), &contexts);
+    let aliases: Vec<_> = models.iter().filter(|model| is_gateway_fast_variant_id(&model.id)).map(|model| model.id.as_str()).collect();
+    assert_eq!(aliases, vec!["gpt-5.6-luna-fast"]);
 }
