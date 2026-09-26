@@ -587,16 +587,27 @@ _AGENT_REFERENCE_TOOLS = frozenset({
 })
 
 
+def _is_known_client_sentence(value: str, sentences: frozenset[str]) -> bool:
+    """Accept the CLI sentence, or that same sentence with one trailing period.
+
+    Codex 0.157 emits these without a period. A single extra period is still
+    the same handler error; any other suffix stays rejected.
+    """
+    if value in sentences:
+        return True
+    return value.endswith(".") and value[:-1] in sentences
+
+
 def _is_client_execution_error(name: str, value: str) -> bool:
     """CLI 0.153.4 RespondToModel outputs, not arbitrary non-JSON prose.
 
     The wire has no separate error tag. Keep known handler errors scoped to
     their tools; successful JSON still uses the frozen output schemas.
     """
-    if name == "spawn_agent" and value in _AGENT_NAME_CLIENT_ERRORS:
+    if name == "spawn_agent" and _is_known_client_sentence(value, _AGENT_NAME_CLIENT_ERRORS):
         return True
-    if name in _AGENT_REFERENCE_TOOLS and value in (
-        _AGENT_SEGMENT_CLIENT_ERRORS | _AGENT_PATH_CLIENT_ERRORS
+    if name in _AGENT_REFERENCE_TOOLS and _is_known_client_sentence(
+        value, _AGENT_SEGMENT_CLIENT_ERRORS | _AGENT_PATH_CLIENT_ERRORS
     ):
         return True
     if name == "wait_agent":
