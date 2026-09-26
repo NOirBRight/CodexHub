@@ -203,6 +203,7 @@ def relay_inbound_anthropic_sse(
         if upstream_format == "responses"
         else None
     )
+    gateway_events.capture_usage(usage_capture, None)
     try:
         for frame in iter_events(
             response,
@@ -220,6 +221,16 @@ def relay_inbound_anthropic_sse(
                     payload = protocol_translation.decode_protocol_json(data)
                 except (UnicodeError, json.JSONDecodeError, protocol_translation.UnsupportedProtocolTranslationError):
                     continue
+            if isinstance(payload, Mapping):
+                observed_usage = (
+                    gateway_events._usage_from_response_event(payload)
+                    if responses_converter is not None
+                    else gateway_events._usage_from_payload(payload)
+                )
+                if observed_usage is not None:
+                    gateway_events.capture_usage(
+                        usage_capture, observed_usage, upstream_format=upstream_format,
+                    )
             frames: list[bytes] | anthropic_messages_ir.NotForwardable
             if responses_converter is not None:
                 if not isinstance(payload, Mapping):

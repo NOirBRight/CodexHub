@@ -146,7 +146,7 @@ def test_pi_tool_target_requires_exact_path_and_correlated_start():
 
 def test_arbitrary_model_and_terminal_text_are_not_saved_in_evidence():
     secret = "unexpected-private-value"
-    gateway = E2E._gateway_evidence(E2E.CASES[0], [
+    gateway = E2E.gateway_evidence(E2E.CASES[0], [
         {"event": "request_complete", "model": secret, "request_id": "private-id"},
     ], 0, 2)
     output = "\n".join(json.dumps(e) for e in [
@@ -209,7 +209,7 @@ def test_preview_and_apply_use_fresh_roots_and_readback_uses_apply(case, tmp_pat
     monkeypatch.setattr(E2E, "_managed", managed)
     monkeypatch.setattr(E2E, "_client_launch", lambda *args: {"ok": False})
     monkeypatch.setattr(E2E, "_gateway_events_for_attempt", lambda *args, **kwargs: ([], 0))
-    result, _, _ = E2E._run_case_attempt(
+    result, _, _ = E2E.run_case_attempt(
         case, binary=tmp_path / "candidate", work=tmp_path,
         env={"CODEXHUB_RUNTIME_HOME": str(tmp_path / "runtime")},
         settings=tmp_path / "settings.json", providers=tmp_path / "providers.toml",
@@ -233,12 +233,12 @@ def test_retried_client_attempt_gets_a_fresh_case_home(tmp_path, monkeypatch):
 
     monkeypatch.setattr(E2E, "_client_launch", launch)
     monkeypatch.setattr(E2E, "_gateway_events_for_attempt", lambda *args, **kwargs: ([], 0))
-    monkeypatch.setattr(E2E, "_gateway_evidence", lambda *args, **kwargs: {})
+    monkeypatch.setattr(E2E, "gateway_evidence", lambda *args, **kwargs: {})
     monkeypatch.setattr(E2E, "_attempt_passed", lambda *args, **kwargs: True)
     env = {"CODEXHUB_RUNTIME_HOME": str(tmp_path / "runtime")}
 
     for attempt in (1, 2):
-        E2E._run_case_attempt(
+        E2E.run_case_attempt(
             case,
             binary=tmp_path / "candidate",
             work=tmp_path,
@@ -319,11 +319,11 @@ def test_deepseek_contract_uses_deepseek_flash_and_responses_route() -> None:
         assert case["diagnostic_provider_id"] == "deepseek"
         assert case["models"] == {
             "managed": "deepseek/deepseek-flash",
-            "selector": "codexhub-deepseek/deepseek-flash",
+            "selector": "deepseek/deepseek-flash" if case["client"] == "codex_cli" else "codexhub-deepseek/deepseek-flash",
             "canonical": "deepseek/deepseek-flash",
             "gateway": "deepseek/deepseek-flash",
         }
-        assert case["endpoint_binding"] == "/v1/providers/deepseek/responses"
+        assert case["endpoint_binding"] == ("/v1/responses" if case["client"] == "codex_cli" else "/v1/providers/deepseek/responses")
         assert case["protocol"] == "responses"
     assert {case["case_ids"]["linux"] for case in deepseek_cases} == {
         "codex-deepseek",
@@ -391,3 +391,28 @@ def test_linux_cli_deepseek_credentials_fail_closed(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert E2E.load_deepseek_api_key(good) == "live-key"
+
+
+@pytest.mark.parametrize("case", E2E.CASES, ids=lambda case: case.case_id)
+def test_gateway_route_evidence_matches_production_telemetry(case, tmp_path):
+    from proxy_telemetry import prepare_event_payload
+
+    events = []
+    for request_id in ("request-1", "request-2"):
+        fields = {
+            "request_id": request_id, "model": case.managed_model,
+            "model_canonical": case.managed_model,
+            "provider_id": "openai" if case.provider == "openai" else "deepseek",
+            "upstream": "official" if case.provider == "openai" else "deepseek",
+            "inbound_format": "responses", "upstream_format": "responses",
+            "is_stream": True,
+        }
+        events.append(prepare_event_payload("request_start", {**fields, "path": case.endpoint_binding}, tmp_path))
+        events.append(prepare_event_payload("request_complete", {**fields, "status": 200}, tmp_path))
+    evidence = E2E.gateway_evidence(case, events, 0, 2)
+    assert evidence["error_event_count"] == 0
+    assert evidence["model_matches_expected"] is True
+    events[0]["path"] = "/v1/messages"
+    assert E2E.gateway_evidence(case, events, 0, 2)["route_metadata_error_count"] == 1
+    events[0]["provider_id"] = "wrong-provider"
+    assert E2E.gateway_evidence(case, events, 0, 2)["route_metadata_error_count"] > 1

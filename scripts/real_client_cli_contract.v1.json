@@ -75,11 +75,11 @@
       "diagnostic_provider_id": "deepseek",
       "models": {
         "managed": "deepseek/deepseek-flash",
-        "selector": "codexhub-deepseek/deepseek-flash",
+        "selector": "deepseek/deepseek-flash",
         "canonical": "deepseek/deepseek-flash",
         "gateway": "deepseek/deepseek-flash"
       },
-      "endpoint_binding": "/v1/providers/deepseek/responses",
+      "endpoint_binding": "/v1/responses",
       "protocol": "responses",
       "case_ids": {
         "linux": "codex-deepseek",

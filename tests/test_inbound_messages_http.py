@@ -283,3 +283,51 @@ def test_tool_result_is_error_prefixes_chat_content() -> None:
     assert tool_messages
     assert tool_messages[0]["content"].startswith("[tool_error]")
     assert any(a.policy == "tool_error_prefixed_in_chat_content" for a in prepared.adaptations)
+
+
+@pytest.mark.parametrize("protocol", ["responses", "chat_completions"])
+def test_converted_messages_stream_persists_upstream_usage(protocol, tmp_path, monkeypatch):
+    import sqlite3
+    import gateway_catalog_runtime
+    import gateway_events
+    from proxy_telemetry import prepare_event_payload, write_event_to_sqlite
+
+    database = tmp_path / "telemetry.sqlite"
+
+    def record(event, **fields):
+        write_event_to_sqlite(database, prepare_event_payload(event, fields, tmp_path))
+
+    monkeypatch.setattr(gateway_events, "write_proxy_event", record)
+    usage = {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
+    if protocol == "responses":
+        output = [{"type": "message", "id": "msg_fixture", "role": "assistant", "status": "completed",
+                   "content": [{"type": "output_text", "text": "hello", "annotations": []}]}]
+        payloads = [
+            {"type": "response.created", "response": {"id": "resp_fixture", "model": "gpt-5.5", "output": []}},
+            {"type": "response.output_text.delta", "item_id": "msg_fixture", "output_index": 0, "content_index": 0, "delta": "hello"},
+            {"type": "response.completed", "response": {"id": "resp_fixture", "model": "gpt-5.5", "status": "completed", "output": output, "usage": usage}},
+        ]
+    else:
+        payloads = [
+            {"id": "chat_fixture", "model": "glm-5.2", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hello"}, "finish_reason": None}]},
+            {"id": "chat_fixture", "model": "glm-5.2", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}},
+        ]
+    frames = [f"data: {json.dumps(p)}\n\n".encode() for p in payloads]
+    if protocol == "chat_completions":
+        frames.append(b"data: [DONE]\n\n")
+    with GatewayHarness() as running, monkeypatch.context() as scoped:
+        running.set_sse_response(tuple(frames))
+        upstream = {
+            "name": "fixture", "provider_id": "fixture", "model_id": "fixture/model",
+            "base_url": running.stub_base_url, "auth": "api_key", "api_key": "synthetic",
+            "upstream_model": "model", "upstream_format": protocol, "tool_protocol": "auto",
+        }
+        scoped.setattr(gateway_catalog_runtime, "choose_upstream", lambda *a, **kw: upstream)
+        body = json.loads(_messages_body()); body["stream"] = True
+        response = request_gateway(running.host, running.port, "POST", "/v1/messages",
+                                   body=json.dumps(body).encode(), headers=_auth_headers(), timeout=8.0)
+        assert response.status == 200
+        assert b"message_stop" in response.body
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute("SELECT path,usage_source,usage_input_tokens,usage_output_tokens,usage_total_tokens FROM gateway_requests WHERE status=200").fetchall()
+    assert rows == [("/v1/messages", "upstream", 7, 3, 10)]

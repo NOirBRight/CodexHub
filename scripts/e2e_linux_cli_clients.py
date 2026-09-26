@@ -119,7 +119,7 @@ def _contract_cases() -> tuple[Case, ...]:
                 str(client_names[client_kind]),
                 str(provider_names[provider_id]),
                 provider_id,
-                str(raw["diagnostic_provider_id"]),
+                "openai" if provider_id == "official" else str(raw["diagnostic_provider_id"]),
                 str(models["managed"]),
                 str(models["selector"]),
                 str(models["canonical"]),
@@ -909,7 +909,7 @@ def _model_matches(actual: object, case: Case) -> bool:
     )
 
 
-def _gateway_evidence(
+def gateway_evidence(
     case: Case,
     events: list[dict[str, object]],
     malformed: int,
@@ -969,7 +969,8 @@ def _gateway_evidence(
                 metadata_errors += 1
             if event.get("is_stream") is not True:
                 metadata_errors += 1
-        if kind == "request_start" and event.get("path") != case.endpoint_binding:
+        expected_path = re.sub(r"^/v1/providers/[^/]+/", "/v1/providers/{provider}/", case.endpoint_binding)
+        if kind == "request_start" and event.get("path") != expected_path:
             metadata_errors += 1
 
     duplicate_terminal_count = sum(count - 1 for count in completes_by_id.values() if count > 1)
@@ -1051,7 +1052,7 @@ def _attempt_passed(case: Case, live: dict[str, object], gateway: dict[str, obje
     )
 
 
-def _run_case_attempt(
+def run_case_attempt(
     case: Case,
     *,
     binary: Path,
@@ -1104,7 +1105,7 @@ def _run_case_attempt(
             expected_requests=2,
             timeout=5 if live.get("returncode") == 0 else 2,
         )
-        gateway = _gateway_evidence(case, raw_events, malformed, expected_requests=2)
+        gateway = gateway_evidence(case, raw_events, malformed, expected_requests=2)
         live["ok"] = _attempt_passed(case, live, gateway)
         result["live"] = live
         result["gateway"] = gateway
@@ -1208,7 +1209,7 @@ def main(argv: list[str]) -> int:
             else:
                 try:
                     for case in CASES:
-                        result, identity, duration_ms = _run_case_attempt(
+                        result, identity, duration_ms = run_case_attempt(
                             case,
                             binary=binary,
                             work=work,
@@ -1231,7 +1232,7 @@ def main(argv: list[str]) -> int:
                                 f"capacity_{gateway['request_error_statuses'][0]}_pre_output_retried"
                             )
                             retry_attempt_evidence = {"live": live, "gateway": gateway}
-                            retry_result, _identity, retry_duration = _run_case_attempt(
+                            retry_result, _identity, retry_duration = run_case_attempt(
                                 case,
                                 binary=binary,
                                 work=work,

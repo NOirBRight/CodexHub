@@ -372,9 +372,17 @@ def sanitize_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
             continue
         if key == "path":
             path = item.split("?", 1)[0] if isinstance(item, str) else None
+            if path and path.startswith("/v1/providers/"):
+                parts = path.split("/", 4)
+                if len(parts) == 5 and parts[3] and parts[4] in {
+                    "responses", "chat/completions", "messages", "messages/count_tokens", "models",
+                }:
+                    result[key] = "/v1/providers/{provider}/" + parts[4]
+                    continue
             result[key] = path if path in {
                 "/responses", "/v1/responses", "/chat/completions",
                 "/v1/chat/completions", "/models", "/v1/models", "/health",
+                "/v1/messages", "/v1/messages/count_tokens",
             } else "unknown"
             continue
         result[key] = _sanitize_value(item)
