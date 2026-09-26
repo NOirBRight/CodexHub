@@ -121,7 +121,12 @@ def main() -> int:
     parser.add_argument('--config-dir', type=Path, required=True)
     args = parser.parse_args()
     try:
-        print(json.dumps(discover(args.claude_bin.resolve(), args.config_dir.resolve())))
+        # Keep a shim's own path. Resolving a mise `claude` shim yields
+        # `mise` itself, and argv0 no longer selects the Claude tool.
+        binary = args.claude_bin.expanduser()
+        if not binary.is_file():
+            raise ValueError('Claude executable was not found')
+        print(json.dumps(discover(binary, args.config_dir.expanduser().resolve())))
         return 0
     except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
         print('Cannot obtain the native Claude model list. Update Claude Code and retry; existing configuration was preserved.', file=sys.stderr)

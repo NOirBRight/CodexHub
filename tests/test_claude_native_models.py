@@ -52,6 +52,39 @@ print(json.dumps({"response":{"response":{"models":[{"value":"opus[1m]","resolve
     assert settings.read_bytes() == before
 
 
+def test_native_discovery_keeps_a_symlink_shim_name(tmp_path):
+    if os.name == 'nt':
+        return
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'settings.json').write_text('{}')
+    program = tmp_path / 'fixture.py'
+    program.write_text('''
+import json,os,sys
+from pathlib import Path
+if "--version" in sys.argv:
+    print("2.1.283 (Claude Code)")
+    raise SystemExit(0)
+assert json.loads(sys.stdin.readline())["request"]["subtype"] == "initialize"
+print(json.dumps({"response":{"response":{"models":[{"value":"opus","resolvedModel":"claude-opus-5-5","displayName":"Opus"}]}}}))
+''')
+    target = tmp_path / 'real-tool'
+    target.write_text(f'#!/bin/sh\nname=$(basename "$0")\nif [ "$name" != claude ]; then echo "shim name $name" >&2; exit 9; fi\nexec "$CODEXHUB_E2E_PYTHON" {shlex.quote(str(program))} "$@"\n')
+    target.chmod(0o700)
+    shim_dir = tmp_path / 'shims'
+    shim_dir.mkdir()
+    shim = shim_dir / 'claude'
+    shim.symlink_to(target)
+    script = Path(__file__).resolve().parents[1] / 'src-python' / 'claude_native_models.py'
+    result = subprocess.run(
+        [sys.executable, str(script), '--claude-bin', str(shim), '--config-dir', str(source)],
+        capture_output=True, text=True, timeout=15,
+        env={**os.environ, 'CODEXHUB_E2E_PYTHON': sys.executable},
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['models'][0]['model'] == 'claude-opus-5-5'
+
+
 def test_native_discovery_failure_does_not_publish_an_empty_catalog(tmp_path):
     script = Path(__file__).resolve().parents[1] / 'src-python' / 'claude_native_models.py'
     result = subprocess.run([sys.executable, str(script), '--claude-bin', str(tmp_path / 'missing'),
