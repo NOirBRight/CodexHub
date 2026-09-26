@@ -1,0 +1,62 @@
+{
+  "candidate_sha": "fae658a2c523ec8431ba0959bf4da22756903bb3",
+  "cli_version": "2.1.280 (Claude Code)",
+  "case": "manual_compaction",
+  "bound": {
+    "generation_turns": 3,
+    "overall_seconds": 360,
+    "max_output_tokens": 2048
+  },
+  "turns": [
+    {
+      "label": "native_initial",
+      "selected": "claude-haiku-4-5-20251001",
+      "canonical_model": "claude-haiku-4-5-20251001",
+      "provider": "claude_subscription",
+      "request_id": "3dae39100f0a",
+      "status": 200,
+      "input_tokens": 913,
+      "output_tokens": 17,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": 0,
+      "marker_in_assistant_transcript": true,
+      "assistant_models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    },
+    {
+      "label": "native_recall_after_compact",
+      "selected": "claude-haiku-4-5-20251001",
+      "canonical_model": "claude-haiku-4-5-20251001",
+      "provider": "claude_subscription",
+      "request_id": "8e19a55392cb",
+      "status": 200,
+      "input_tokens": 4131,
+      "output_tokens": 440,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": 4121,
+      "marker_in_assistant_transcript": true,
+      "assistant_models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    }
+  ],
+  "status": "passed",
+  "boundaries": [
+    {
+      "trigger": "manual",
+      "pre_tokens": 3892,
+      "post_tokens": 727
+    }
+  ],
+  "compact_usage": {
+    "request_id": "b03bc3bee3e9",
+    "model": "claude-haiku-4-5-20251001",
+    "provider": "claude_subscription",
+    "status": 200,
+    "input_tokens": 5214,
+    "output_tokens": 839
+  },
+  "source_account_unchanged": true,
+  "interactive_selection_changed_isolated_settings": false
+}

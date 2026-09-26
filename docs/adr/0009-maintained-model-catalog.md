@@ -58,8 +58,8 @@ The bundled Maintained Provider catalog is:
 - `commandcode`
 - `opencode-go`
 
-The standalone `xai` Preset is not maintained by this catalog; it keeps its
-Preset-owned rows while sharing the `grok` family policy. `resolve_model`
+The standalone `xai` and `deepseek` Presets keep their Preset-owned model rows.
+The `xai` Preset shares the `grok` family policy. `resolve_model`
 applies that overlay so Codex catalogs and request-time thinking do not
 five-level-fill Grok. `grok-4.6` is `low` / `medium` / `high` / `xhigh`
 (default `high`); `grok-4.5` omits `xhigh`. Declared reasoning lists are

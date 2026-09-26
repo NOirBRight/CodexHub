@@ -195,7 +195,16 @@ def test_dispatch_error_logger_does_not_emit_provider_payload_traceback(caplog):
     assert SENTINEL not in caplog.text
 
 
-@pytest.mark.parametrize("path,expected", [("/v1/responses?" + SENTINEL, "/v1/responses"), ("/" + SENTINEL, "unknown")])
+@pytest.mark.parametrize("path,expected", [
+    ("/v1/responses?" + SENTINEL, "/v1/responses"),
+    ("/v1/messages?" + SENTINEL, "/v1/messages"),
+    ("/v1/messages/count_tokens?" + SENTINEL, "/v1/messages/count_tokens"),
+    ("/v1/providers/" + SENTINEL + "/responses", "/v1/providers/{provider}/responses"),
+    ("/v1/providers/" + SENTINEL + "/messages", "/v1/providers/{provider}/messages"),
+    ("/v1/providers/" + SENTINEL + "/chat/completions", "/v1/providers/{provider}/chat/completions"),
+    ("/v1/providers/" + SENTINEL + "/unexpected", "unknown"),
+    ("/" + SENTINEL, "unknown"),
+])
 def test_request_path_diagnostics_are_private_in_sqlite(tmp_path, path, expected):
     import sqlite3
     from proxy_telemetry import prepare_event_payload, write_event_to_sqlite

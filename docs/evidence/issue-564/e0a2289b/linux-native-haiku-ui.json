@@ -1,0 +1,81 @@
+{
+  "schema_version": 2,
+  "candidate_sha": "e0a2289b61c2f6d454667e60871fb4bc13152aa4",
+  "claude_cli_version": "2.1.283 (Claude Code)",
+  "status": "passed",
+  "packaged_usage_ui_requested": true,
+  "packaged_usage_ui_session": "dbus-run-session+xvfb-run",
+  "bounds": {
+    "max_live_generation_attempts": 2,
+    "live_generation_attempts": 1,
+    "generation_attempt_budget_scope": "runner-level CLI generation invocation reservations; this is not a hard cap on Gateway request IDs or retries performed internally by a client",
+    "per_generation_timeout_seconds": 120,
+    "overall_timeout_seconds": 600,
+    "max_output_tokens": 128
+  },
+  "verified_routes": [
+    {
+      "case": "claude-native-haiku",
+      "request_id": "10868f7a1934",
+      "model": "claude-haiku-4-5-20251001",
+      "provider": "claude_subscription",
+      "client": "unknown",
+      "status": 200,
+      "usage_source": "upstream",
+      "duration_ms": 7466,
+      "input_tokens": 29493,
+      "output_tokens": 84,
+      "total_tokens": 29577,
+      "cached_input_tokens": 19436,
+      "cache_write_input_tokens": 10047,
+      "reasoning_tokens": null
+    }
+  ],
+  "route_request_counts": [
+    {
+      "case": "claude-native-haiku",
+      "model": "claude-haiku-4-5-20251001",
+      "inbound_format": "anthropic_messages",
+      "upstream_format": "anthropic_messages",
+      "observed_gateway_request_ids": 1,
+      "gateway_request_id_values": [
+        "10868f7a1934"
+      ],
+      "successful_gateway_route_observed": true
+    }
+  ],
+  "total_observed_gateway_request_ids": 1,
+  "usage_statistics_snapshot": {
+    "requests": 1,
+    "successful_requests": 1,
+    "missing_usage_requests": 0,
+    "partial_usage_requests": 0,
+    "total_tokens": 29577,
+    "input_tokens": 29493,
+    "output_tokens": 84,
+    "cached_input_tokens": 19436,
+    "cache_write_input_tokens": 10047,
+    "cache_hit_rate": 65.9
+  },
+  "failure_diagnostics": [],
+  "usage_persistence_diagnostics": [],
+  "rendered_packaged_usage_statistics_ui_verified": true,
+  "packaged_usage_screenshot": "linux-native-haiku-ui.png",
+  "acceptance_status": {
+    "native_haiku_through_gateway": "verified",
+    "native_haiku_persisted_usage": "verified",
+    "packaged_usage_statistics_ui": "verified",
+    "picker_coexistence": "unverified",
+    "resumed_session_switching": "unverified",
+    "explicit_model_resume": "unverified",
+    "explicit_native_opus_5_5_identity": "unverified",
+    "deepseek_chat_messages_usage_ui": "unverified",
+    "deepseek_chat_persisted_usage": "unverified",
+    "deepseek_messages_persisted_usage": "unverified",
+    "claude_luna_persisted_usage": "unverified",
+    "codex_luna_responses_persisted_usage": "unverified",
+    "codex_luna_persisted_usage": "unverified",
+    "codex_luna_responses_usage_ui": "unverified",
+    "tools_compression_cancellation_cache_hit_reuse": "unverified"
+  }
+}

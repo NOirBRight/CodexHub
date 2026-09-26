@@ -7,7 +7,7 @@ from typing import Any, Mapping, NoReturn
 # Extra High official TTFB can exceed 3–5 minutes. Keep the default
 # first-byte wait aligned with the SSE idle ceiling (10 minutes).
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 600
-UPSTREAM_USER_AGENT = "CodexHub/0.2.27 (+https://github.com/noirbright/CodexHub)"
+UPSTREAM_USER_AGENT = "CodexHub/0.2.28 (+https://github.com/noirbright/CodexHub)"
 DEFAULT_TRANSPORT_SSE_IDLE_TIMEOUT_SECONDS = 600.0
 DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS = 300.0
 DEFAULT_PRE_OUTPUT_SSE_IDLE_TIMEOUT_SECONDS = DEFAULT_MODEL_EVENT_SSE_IDLE_TIMEOUT_SECONDS
@@ -28,6 +28,7 @@ RETRY_REQUEST_IMAGE_PROXY_VISION = "image_proxy_vision"
 RETRY_REQUEST_OFFICIAL_CONTROL = "official_control"
 BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH = "official_codex_app_http_passthrough"
 BEHAVIOR_OFFICIAL_GATEWAY_COMPAT = "official_gateway_compat"
+BEHAVIOR_CLAUDE_NATIVE_PASSTHROUGH = "claude_native_passthrough"
 BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY = "external_provider_gateway"
 BEHAVIOR_CODEX_APP_EXTERNAL_ADAPTER = "codex_app_external_adapter"
 BEHAVIOR_THIRD_PARTY_APP_TRANSPARENT_METERED = "third_party_app_transparent_metered"
@@ -94,6 +95,7 @@ class CallerRequestBodyMode(str, Enum):
 
 class AuthenticationStrategy(str, Enum):
     CODEX_AUTH = "codex_auth"
+    ANTHROPIC_OAUTH = "anthropic_oauth"
     API_KEY = "api_key"
     OLLAMA_API_KEY = "ollama_api_key"
     INCOMING = "incoming"
@@ -377,6 +379,7 @@ class TransportPolicy(str, Enum):
 
 class MutationPolicy(str, Enum):
     OFFICIAL_PASSTHROUGH = "official_passthrough"
+    CLAUDE_NATIVE_PASSTHROUGH = "claude_native_passthrough"
     TRANSPARENT = "transparent"
     GATEWAY_COMPATIBILITY = "gateway_compatibility"
 

@@ -54,3 +54,7 @@ test("failed connect drops busy and paints disconnected from the still-official 
     false,
   );
 });
+
+test("Claude settings apply waits for the write even when the old route is connected", () => {
+  assert.equal(listReachedClientBusyTarget("claude:apply:release", info("hub", { route_owner: "release" })), false);
+});

@@ -1,0 +1,79 @@
+{
+  "candidate_sha": "c97d08897bdae3f56de6e3ce51235150356d8a43",
+  "cli_version": "2.1.280 (Claude Code)",
+  "case": "public_autocompact_100k",
+  "bound": {
+    "cli_turns": 4,
+    "overall_seconds": 600,
+    "per_turn_seconds": 120,
+    "max_output_tokens": 2048,
+    "max_prompt_characters_per_turn": 650000
+  },
+  "turns": [
+    {
+      "label": "seed",
+      "prompt_characters": 620123,
+      "cli_exit": 0,
+      "cli_is_error": false,
+      "gateway_request_ids": [
+        "d73fd0c198cd"
+      ],
+      "usage_request_id": "d73fd0c198cd",
+      "input_tokens": 169495,
+      "output_tokens": 104,
+      "marker_in_cli_result": true,
+      "auto_boundary_count_after_turn": 0
+    },
+    {
+      "label": "fill",
+      "prompt_characters": 29072,
+      "cli_exit": 0,
+      "cli_is_error": false,
+      "gateway_request_ids": [
+        "769e58359f7e"
+      ],
+      "usage_request_id": "769e58359f7e",
+      "input_tokens": 174785,
+      "output_tokens": 208,
+      "marker_in_cli_result": true,
+      "auto_boundary_count_after_turn": 0
+    },
+    {
+      "label": "trigger",
+      "prompt_characters": 55,
+      "cli_exit": 0,
+      "cli_is_error": false,
+      "gateway_request_ids": [
+        "4f5259dfb899",
+        "c2b020ac0edc"
+      ],
+      "usage_request_id": "c2b020ac0edc",
+      "input_tokens": 176209,
+      "output_tokens": 1383,
+      "marker_in_cli_result": true,
+      "auto_boundary_count_after_turn": 1
+    },
+    {
+      "label": "after_compact",
+      "prompt_characters": 55,
+      "cli_exit": 0,
+      "cli_is_error": false,
+      "gateway_request_ids": [
+        "1a2ab2f38e45"
+      ],
+      "usage_request_id": "1a2ab2f38e45",
+      "input_tokens": 30635,
+      "output_tokens": 45,
+      "marker_in_cli_result": true,
+      "auto_boundary_count_after_turn": 1
+    }
+  ],
+  "status": "passed",
+  "boundaries": [
+    {
+      "trigger": "auto",
+      "pre_tokens": 175032,
+      "post_tokens": 2478
+    }
+  ]
+}

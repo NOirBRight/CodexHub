@@ -1,18 +1,27 @@
 use super::super::{
-    endpoints, ensure_rollback_baseline, executable_version, is_this_app_gateway_url,
+    ensure_rollback_baseline, executable_version, is_this_app_gateway_url,
     resolve_gateway_client_model_id, route_owner_from_endpoint, sanitize_text, write_text_replace,
     BackupChannel, BaselineFile, GatewayClientApplyResult, GatewayClientConfigPreview,
 };
 use crate::app_flavor::RoutingOwner;
 use crate::{Provider, Settings};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const CLIENT_ID: &str = "claude";
 const MANAGED_MARKER_KEY: &str = "CODEXHUB_MANAGED_CLIENT";
 const MANAGED_MARKER_VALUE: &str = "claude";
+const PICKER_FINGERPRINTS_KEY: &str = "CODEXHUB_MANAGED_MODEL_PICKER_SHA256";
+const PICKER_REPLACE_KEY: &str = "CODEXHUB_MANAGED_PICKER_REPLACE_BASELINE";
+const PICKER_SOURCE_KEY: &str = "CODEXHUB_MANAGED_NATIVE_PICKER_SOURCE";
+const CUSTOM_HEADER_FINGERPRINT_KEY: &str = "CODEXHUB_MANAGED_CUSTOM_HEADER_SHA256";
+const LOCAL_HEADER_NAME: &str = "x-codexhub-gateway-key";
+pub(in crate::gateway) const PRESERVE_DEFAULT_MODEL: &str = "__codexhub_preserve_claude_default__";
+pub(in crate::gateway) const CLEAR_DEFAULT_MODEL: &str = "__codexhub_clear_claude_default__";
 const ROLE_ENV: &[(&str, &str)] = &[
     ("haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
     ("sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL"),
@@ -22,6 +31,8 @@ const ROLE_ENV: &[(&str, &str)] = &[
 ];
 pub(in crate::gateway) const MANAGED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    // Removed on migration from the previous Gateway-token integration.
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_MODEL",
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
@@ -30,8 +41,133 @@ pub(in crate::gateway) const MANAGED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_FABLE_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
+    PICKER_FINGERPRINTS_KEY,
+    PICKER_REPLACE_KEY,
+    PICKER_SOURCE_KEY,
+    CUSTOM_HEADER_FINGERPRINT_KEY,
     "CODEXHUB_MANAGED_CLIENT",
 ];
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeNativeModelChoice {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeClientSettings {
+    pub default_model: String,
+    pub role_mappings: BTreeMap<String, String>,
+    pub default_subagent_model: String,
+    pub conflicts: Vec<String>,
+    pub native_models: Vec<ClaudeNativeModelChoice>,
+}
+
+pub(in crate::gateway) fn read_claude_settings(
+    path: &Path,
+    settings: &Settings,
+    providers: &[Provider],
+) -> ClaudeClientSettings {
+    let current = match fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => {
+            return ClaudeClientSettings {
+                default_model: String::new(),
+                role_mappings: BTreeMap::new(),
+                default_subagent_model: String::new(),
+                native_models: Vec::new(),
+                conflicts: vec!["Cannot read Claude settings.json".into()],
+            }
+        }
+    };
+    let value = match current
+        .as_deref()
+        .map(serde_json::from_str::<Value>)
+        .transpose()
+    {
+        Ok(value) => value.unwrap_or_else(|| json!({})),
+        Err(_) => {
+            return ClaudeClientSettings {
+                default_model: String::new(),
+                role_mappings: BTreeMap::new(),
+                default_subagent_model: String::new(),
+                native_models: Vec::new(),
+                conflicts: vec!["Cannot parse Claude settings.json".into()],
+            }
+        }
+    };
+    let exported = super::super::gateway_models_from_config(settings, providers);
+    let canonical = |key: &str| {
+        let raw = value
+            .pointer(&format!("/env/{key}"))
+            .and_then(Value::as_str)
+            .or_else(|| (key == "ANTHROPIC_MODEL").then(|| value.get("model").and_then(Value::as_str)).flatten())
+            .unwrap_or("");
+        exported
+            .iter()
+            .find(|model| projected_claude_model_id(&model.id) == raw)
+            .map(|model| model.id.clone())
+            .unwrap_or_else(|| raw.to_string())
+    };
+    let preference = |role: &str, key: &str| {
+        settings.claude_model_mappings.as_ref()
+            .and_then(|saved| saved.get(role)).cloned()
+            .unwrap_or_else(|| canonical(key))
+    };
+    ClaudeClientSettings {
+        default_model: canonical("ANTHROPIC_MODEL"),
+        role_mappings: ROLE_ENV
+            .iter()
+            .filter(|(role, _)| *role != "subagent")
+            .map(|(role, key)| (role.to_string(), preference(role, key)))
+            .collect(),
+        default_subagent_model: preference("subagent", "CLAUDE_CODE_SUBAGENT_MODEL"),
+        native_models: native_model_choices(&value),
+        conflicts: claude_override_conflicts(Some(&value), settings),
+    }
+}
+
+fn is_native_claude_model_id(model: &str) -> bool {
+    let id = model.trim();
+    let base = id.strip_suffix("[1m]").unwrap_or(id);
+    let Some(rest) = base.strip_prefix("claude-") else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.starts_with("codexhub-")
+        && rest.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+}
+
+fn native_model_choices(value: &Value) -> Vec<ClaudeNativeModelChoice> {
+    let mut seen = HashSet::new();
+    value.pointer("/modelPicker/options").and_then(Value::as_array).into_iter().flatten().filter_map(|row| {
+        let id = row.get("model").and_then(Value::as_str)?.trim();
+        if !is_native_claude_model_id(id) || !seen.insert(id.to_string()) {
+            return None;
+        }
+        let label = row.get("label").and_then(Value::as_str).filter(|label| !label.trim().is_empty()).unwrap_or(id);
+        Some(ClaudeNativeModelChoice { id: id.to_string(), label: label.to_string() })
+    }).collect()
+}
+
+fn resolved_external_model(
+    settings: &Settings,
+    providers: &[Provider],
+    requested: &str,
+) -> Result<String, String> {
+    let requested = requested.trim().strip_suffix("[1m]").unwrap_or(requested.trim());
+    if is_native_claude_model_id(requested) {
+        return Err(format!("Gateway model is not exported: {requested}"));
+    }
+    if let Some(model) = super::super::gateway_models_from_config(settings, providers)
+        .into_iter()
+        .find(|model| model.id == requested || projected_claude_model_id(&model.id) == requested)
+    {
+        return Ok(model.id);
+    }
+    resolve_claude_model(settings, providers, requested)
+}
 
 pub(in crate::gateway) fn claude_home() -> PathBuf {
     if let Some(path) = std::env::var_os("CODEXHUB_CLAUDE_HOME")
@@ -70,10 +206,6 @@ pub(in crate::gateway) fn claude_installed() -> bool {
 }
 
 pub(in crate::gateway) fn projected_claude_model_id(canonical: &str) -> String {
-    let lower = canonical.to_ascii_lowercase();
-    if lower.contains("claude") || lower.contains("anthropic") {
-        return canonical.to_string();
-    }
     let safe: String = canonical
         .chars()
         .map(|ch| {
@@ -136,12 +268,295 @@ pub(in crate::gateway) fn detect_claude_route_details(
 fn env_key_looks_secret(key: &str) -> bool {
     let key = key.to_ascii_uppercase();
     key.contains("TOKEN")
+        || key.contains("HEADER")
         || key.contains("SECRET")
         || key.contains("PASSWORD")
         || key.contains("CREDENTIAL")
         || key.contains("AUTHORIZATION")
         || key.contains("API_KEY")
         || key.ends_with("_KEY")
+}
+
+fn sha256_hex(value: &[u8]) -> String {
+    Sha256::digest(value)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn value_fingerprint(value: &Value) -> String {
+    serde_json::to_vec(value)
+        .map(|bytes| sha256_hex(&bytes))
+        .unwrap_or_default()
+}
+
+fn env_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value
+        .pointer(&format!("/env/{key}"))
+        .and_then(Value::as_str)
+}
+
+fn custom_header_fingerprint(value: &Value) -> Option<&str> {
+    env_string(value, CUSTOM_HEADER_FINGERPRINT_KEY)
+}
+
+fn header_name(line: &str) -> Option<&str> {
+    line.split_once(':').map(|(name, _)| name.trim())
+}
+
+fn has_unowned_local_header(value: &Value) -> bool {
+    let owned = custom_header_fingerprint(value);
+    env_string(value, "ANTHROPIC_CUSTOM_HEADERS")
+        .into_iter()
+        .flat_map(str::lines)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .any(|line| {
+            let fingerprint = sha256_hex(line.as_bytes());
+            header_name(line).is_some_and(|name| name.eq_ignore_ascii_case(LOCAL_HEADER_NAME))
+                && owned != Some(fingerprint.as_str())
+        })
+}
+
+fn merge_custom_headers(
+    existing: Option<&str>,
+    previous_owned_hash: Option<&str>,
+    new_header: Option<&str>,
+) -> (String, Option<String>) {
+    let mut kept = Vec::new();
+    let mut has_unowned_local_header = false;
+    for line in existing.into_iter().flat_map(str::lines).map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        let is_local =
+            header_name(line).is_some_and(|name| name.eq_ignore_ascii_case(LOCAL_HEADER_NAME));
+        if is_local {
+            let fingerprint = sha256_hex(line.as_bytes());
+            if previous_owned_hash != Some(fingerprint.as_str()) {
+                has_unowned_local_header = true;
+                kept.push(line.to_string());
+            }
+            continue;
+        }
+        kept.push(line.to_string());
+    }
+    let fingerprint = new_header
+        .filter(|_| !has_unowned_local_header)
+        .map(|line| {
+            kept.push(line.to_string());
+            sha256_hex(line.as_bytes())
+        });
+    (kept.join("\n"), fingerprint)
+}
+
+fn strip_owned_local_header(value: Option<&str>, owned_hash: Option<&str>) -> Vec<String> {
+    value
+        .into_iter()
+        .flat_map(str::lines)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            let fingerprint = sha256_hex(line.as_bytes());
+            !(header_name(line).is_some_and(|name| name.eq_ignore_ascii_case(LOCAL_HEADER_NAME))
+                && owned_hash == Some(fingerprint.as_str()))
+        })
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn restore_custom_headers(
+    current: Option<&str>,
+    previous_owned_hash: Option<&str>,
+    baseline: Option<&str>,
+) -> Option<String> {
+    let mut lines = baseline
+        .into_iter()
+        .flat_map(str::lines)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    for line in strip_owned_local_header(current, previous_owned_hash) {
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn remove_managed_model_picker_options(root: &mut Value) {
+    let replace_baseline = env_string(root, PICKER_REPLACE_KEY)
+        .and_then(|value| serde_json::from_str::<Value>(value).ok());
+    if let Some(picker) = root.get_mut("modelPicker").and_then(Value::as_object_mut) {
+        if picker.get("replaceBuiltInOptions") == Some(&Value::Bool(true)) {
+            match replace_baseline {
+                Some(Value::Null) => { picker.remove("replaceBuiltInOptions"); }
+                Some(value) => { picker.insert("replaceBuiltInOptions".into(), value); }
+                None => {}
+            }
+        }
+    }
+    let hashes = root
+        .pointer("/env/CODEXHUB_MANAGED_MODEL_PICKER_SHA256")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashSet<_>>();
+    if hashes.is_empty() {
+        return;
+    }
+    let Some(options) = root
+        .pointer_mut("/modelPicker/options")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    options.retain(|option| !hashes.contains(&value_fingerprint(option)));
+    if options.is_empty() {
+        if let Some(picker) = root.get_mut("modelPicker").and_then(Value::as_object_mut) {
+            picker.remove("options");
+            if picker.is_empty() {
+                root.as_object_mut()
+                    .map(|object| object.remove("modelPicker"));
+            }
+        }
+    }
+}
+
+fn merge_model_picker(root: &mut Value, desired: Vec<Value>) -> Result<(), String> {
+    let env_map = root
+        .get("env")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Claude settings.json env must be an object".to_string())?;
+    let prior_fingerprints = env_map
+        .get(PICKER_FINGERPRINTS_KEY)
+        .and_then(Value::as_str)
+        .map(serde_json::from_str::<Vec<String>>)
+        .transpose()
+        .map_err(|_| "CodexHub model picker ownership record is invalid".to_string())?
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashSet<_>>();
+
+    let picker = root
+        .as_object_mut()
+        .expect("settings object")
+        .entry("modelPicker")
+        .or_insert_with(|| json!({}));
+    let picker_map = picker
+        .as_object_mut()
+        .ok_or_else(|| "Claude settings.json modelPicker must be an object".to_string())?;
+    let options = picker_map.entry("options").or_insert_with(|| json!([]));
+    let options = options
+        .as_array_mut()
+        .ok_or_else(|| "Claude settings.json modelPicker.options must be an array".to_string())?;
+
+    let mut kept = Vec::with_capacity(options.len() + desired.len());
+    let mut model_ids = HashSet::new();
+    for option in options.drain(..) {
+        if prior_fingerprints.contains(&value_fingerprint(&option)) {
+            continue;
+        }
+        if let Some(model) = option.get("model").and_then(Value::as_str) {
+            model_ids.insert(model.to_string());
+        }
+        kept.push(option);
+    }
+    let mut new_fingerprints = Vec::new();
+    for option in desired {
+        let Some(model) = option.get("model").and_then(Value::as_str) else {
+            continue;
+        };
+        if !model_ids.insert(model.to_string()) {
+            continue;
+        }
+        new_fingerprints.push(value_fingerprint(&option));
+        kept.push(option);
+    }
+    *options = kept;
+    let fingerprints = serde_json::to_string(&new_fingerprints)
+        .map_err(|error| format!("failed to serialize model picker ownership: {error}"))?;
+    root.pointer_mut("/env")
+        .and_then(Value::as_object_mut)
+        .expect("env object")
+        .insert(
+            PICKER_FINGERPRINTS_KEY.to_string(),
+            Value::String(fingerprints),
+        );
+    Ok(())
+}
+
+fn claude_picker_options(
+    settings: &Settings,
+    providers: &[Provider],
+) -> Result<Vec<Value>, String> {
+    let mut seen = HashSet::new();
+    super::super::gateway_models_from_config(settings, providers)
+        .into_iter()
+        .map(|model| {
+            let projected = projected_claude_model_id(&model.id);
+            if !seen.insert(projected.to_ascii_lowercase()) {
+                return Err(format!(
+                    "Claude model picker projection collision for {}",
+                    model.id
+                ));
+            }
+            let label = if model.display_name.starts_with("CodexHub ") {
+                model.display_name
+            } else {
+                format!("CodexHub {}", model.display_name)
+            };
+            let official = model.source_kind == "official";
+            let description = if official {
+                "Codex subscription via Gateway".to_string()
+            } else {
+                format!("{} via Gateway", model.source)
+            };
+            let mut option =
+                json!({ "model": projected, "label": label, "description": description });
+            if official {
+                // Keep unknown Codex IDs on a conservative 200k client profile without changing routing.
+                option["behavesAs"] = json!("claude-sonnet-4-6");
+            }
+            Ok(option)
+        })
+        .collect()
+}
+
+fn native_picker_settings(config_path: &Path, settings: &Settings) -> Result<Settings, String> {
+    if settings.claude_native_picker.is_some() {
+        return Ok(settings.clone());
+    }
+    let expected = fs::read(config_path).ok();
+    let executable = detect_claude_executable_path()
+        .ok_or_else(|| "Claude Code is required to read native models before connecting".to_string())?;
+    let python = crate::config::find_python()?;
+    let script = crate::runtime_paths::resource_root()?.join("src-python/claude_native_models.py");
+    let mut command = std::process::Command::new(python);
+    command.arg(script).args(["--claude-bin", &executable.to_string_lossy(),
+        "--config-dir", &config_path.parent().unwrap_or(Path::new(".")).to_string_lossy()]);
+    let output = super::super::command_output_no_window_with_timeout(&mut command, std::time::Duration::from_secs(20))
+        .ok_or_else(|| "Could not start Claude native model discovery".to_string())?;
+    if !output.status.success() {
+        return Err("Cannot obtain native Claude models. Update Claude Code and retry; existing configuration was preserved.".into());
+    }
+    if fs::read(config_path).ok() != expected {
+        return Err("Claude settings changed during native model discovery; retry Apply".into());
+    }
+    let snapshot: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Claude native model discovery returned invalid data".to_string())?;
+    let rows: Vec<Value> = serde_json::from_value(snapshot["models"].clone())
+        .map_err(|_| "Claude native model discovery returned invalid rows".to_string())?;
+    if rows.is_empty() || rows.iter().any(|row| !row.get("model").and_then(Value::as_str)
+        .is_some_and(|id| id.starts_with("claude-") && !id.starts_with("claude-codexhub-"))) {
+        return Err("Claude native model discovery returned no usable native choices".into());
+    }
+    let mut prepared = settings.clone();
+    prepared.claude_native_picker = Some(rows);
+    prepared.claude_native_picker_source = Some(snapshot["source"].clone());
+    Ok(prepared)
 }
 
 fn mask_env_secrets(text: &str) -> String {
@@ -158,31 +573,115 @@ fn mask_env_secrets(text: &str) -> String {
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| sanitize_text(text))
 }
 
-fn claude_override_conflicts() -> Vec<String> {
+fn claude_override_conflicts(current: Option<&Value>, settings: &Settings) -> Vec<String> {
     let mut conflicts = Vec::new();
     for key in [
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_BASE_URL",
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
     ] {
-        if std::env::var(key).ok().is_some_and(|value| !value.is_empty()) {
+        let process = std::env::var(key).ok();
+        let configured_auth = current
+            .and_then(|value| value.get("env"))
+            .and_then(|env| env.get(key))
+            .and_then(Value::as_str);
+        let legacy_gateway_token = key == "ANTHROPIC_AUTH_TOKEN"
+            && current.is_some_and(|value| {
+                env_string(value, MANAGED_MARKER_KEY) == Some(MANAGED_MARKER_VALUE)
+            })
+            && configured_auth == Some(settings.gateway_client_key.as_str());
+        if process.as_deref().is_some_and(|value| {
+            !value.is_empty()
+                && (matches!(key, "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN")
+                    || (value != "0" && value != "false"))
+        }) || (!legacy_gateway_token
+            && configured_auth.is_some_and(|value| {
+                !value.is_empty()
+                    && (matches!(key, "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN")
+                        || (value != "0" && value != "false"))
+            }))
+        {
             conflicts.push(format!(
-                "process environment {key} overrides user settings and was not modified"
+                "{key} conflicts with Gateway routing; remove the override before connecting."
             ));
         }
     }
-    if Path::new(".claude/settings.json").is_file() {
+    if current.is_some_and(|value| {
+        env_string(value, MANAGED_MARKER_KEY) == Some(MANAGED_MARKER_VALUE)
+            && env_string(value, "ANTHROPIC_AUTH_TOKEN")
+                .is_some_and(|token| token != settings.gateway_client_key && !token.is_empty())
+    }) {
         conflicts.push(
-            "project .claude/settings.json may override user settings and was not modified"
-                .to_string(),
+            "Legacy Claude Gateway token changed outside CodexHub; preserve it manually before migrating."
+                .into(),
+        );
+    }
+    for (key, expected) in [(
+        "ANTHROPIC_BASE_URL",
+        claude_gateway_base_url(settings.proxy_port),
+    )] {
+        if std::env::var(key)
+            .ok()
+            .is_some_and(|value| !value.is_empty() && value != expected)
+        {
+            conflicts.push(format!(
+                "Process environment {key} conflicts with Gateway routing."
+            ));
+        }
+    }
+    if std::env::var("ANTHROPIC_CUSTOM_HEADERS")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        conflicts.push(
+            "Process environment ANTHROPIC_CUSTOM_HEADERS may override the managed local credential."
+                .into(),
+        );
+    }
+    if current.is_some_and(has_unowned_local_header) {
+        conflicts.push(format!(
+            "{LOCAL_HEADER_NAME} conflicts with CodexHub's local Gateway credential because it is configured outside CodexHub; remove or rename it before connecting."
+        ));
+    }
+    if current
+        .and_then(|value| value.get("apiKeyHelper"))
+        .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
+    {
+        conflicts.push(
+            "apiKeyHelper conflicts with Gateway authentication; remove it before connecting."
+                .into(),
+        );
+    }
+    if current.is_some_and(|value| {
+        !value.is_object() || value.get("env").is_some_and(|env| !env.is_object())
+    }) {
+        conflicts.push("Claude settings.json and env must be JSON objects.".into());
+    }
+    if current
+        .and_then(|value| value.pointer("/modelPicker/replaceBuiltInOptions"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        && current.and_then(|value| env_string(value, PICKER_REPLACE_KEY)).is_none()
+    {
+        conflicts.push(
+            "modelPicker.replaceBuiltInOptions hides Claude subscription models; set it to false before connecting."
+                .into(),
         );
     }
     conflicts
 }
 
-fn apply_managed_env(current: Option<&str>, managed: Option<&Map<String, Value>>) -> Result<String, String> {
+fn claude_gateway_base_url(port: u16) -> String {
+    // Claude Code appends /v1 to ANTHROPIC_BASE_URL itself.
+    format!("http://127.0.0.1:{port}")
+}
+
+fn apply_managed_env(
+    current: Option<&str>,
+    managed: Option<&Map<String, Value>>,
+) -> Result<String, String> {
     let mut root = match current.map(str::trim).filter(|text| !text.is_empty()) {
         Some(text) => serde_json::from_str::<Value>(text)
             .map_err(|error| format!("failed to parse Claude settings.json: {error}"))?,
@@ -191,6 +690,9 @@ fn apply_managed_env(current: Option<&str>, managed: Option<&Map<String, Value>>
     if !root.is_object() {
         return Err("Claude settings.json must be a JSON object".to_string());
     }
+    let current_value = root.clone();
+    let owned_header_hash = custom_header_fingerprint(&current_value).map(ToOwned::to_owned);
+    remove_managed_model_picker_options(&mut root);
     {
         let env = root
             .as_object_mut()
@@ -206,8 +708,35 @@ fn apply_managed_env(current: Option<&str>, managed: Option<&Map<String, Value>>
                     env_map.insert((*key).to_string(), value.clone());
                 }
                 None => {
-                    env_map.remove(*key);
+                    if *key == "ANTHROPIC_CUSTOM_HEADERS" {
+                        if let Some(headers) = restore_custom_headers(
+                            env_string(&current_value, "ANTHROPIC_CUSTOM_HEADERS"),
+                            owned_header_hash.as_deref(),
+                            None,
+                        ) {
+                            env_map.insert((*key).to_string(), Value::String(headers));
+                        } else {
+                            env_map.remove(*key);
+                        }
+                    } else {
+                        env_map.remove(*key);
+                    }
                 }
+            }
+        }
+        if let Some(baseline_headers) = managed
+            .and_then(|values| values.get("ANTHROPIC_CUSTOM_HEADERS"))
+            .and_then(Value::as_str)
+        {
+            if let Some(headers) = restore_custom_headers(
+                env_string(&current_value, "ANTHROPIC_CUSTOM_HEADERS"),
+                owned_header_hash.as_deref(),
+                Some(baseline_headers),
+            ) {
+                env_map.insert(
+                    "ANTHROPIC_CUSTOM_HEADERS".to_string(),
+                    Value::String(headers),
+                );
             }
         }
         if env_map.is_empty() {
@@ -221,6 +750,21 @@ fn apply_managed_env(current: Option<&str>, managed: Option<&Map<String, Value>>
         .map_err(|error| format!("failed to serialize Claude settings.json: {error}"))
 }
 
+fn resolve_claude_model(
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<String, String> {
+    let resolved = resolve_gateway_client_model_id(settings, providers, model)?;
+    if !super::super::gateway_models_from_config(settings, providers)
+        .iter()
+        .any(|model| model.id == resolved)
+    {
+        return Err(format!("Gateway model is not exported: {model}"));
+    }
+    Ok(resolved)
+}
+
 pub(in crate::gateway) fn claude_settings_text(
     current: Option<&str>,
     settings: &Settings,
@@ -228,7 +772,9 @@ pub(in crate::gateway) fn claude_settings_text(
     model: &str,
     role_mappings: &BTreeMap<String, String>,
 ) -> Result<String, String> {
-    let model = resolve_gateway_client_model_id(settings, providers, model)?;
+    let mut mappings = settings.claude_model_mappings.clone().unwrap_or_default();
+    mappings.extend(role_mappings.clone());
+    let role_mappings = &mappings;
     let mut root = match current.map(str::trim).filter(|text| !text.is_empty()) {
         Some(text) => serde_json::from_str::<Value>(text)
             .map_err(|error| format!("failed to parse Claude settings.json: {error}"))?,
@@ -237,51 +783,174 @@ pub(in crate::gateway) fn claude_settings_text(
     if !root.is_object() {
         return Err("Claude settings.json must be a JSON object".to_string());
     }
-    let env = root
-        .as_object_mut()
-        .expect("object")
-        .entry("env")
-        .or_insert_with(|| json!({}));
-    let env_map = env
-        .as_object_mut()
-        .ok_or_else(|| "Claude settings.json env must be an object".to_string())?;
-    env_map.insert(
-        "ANTHROPIC_BASE_URL".to_string(),
-        Value::String(endpoints(settings.proxy_port).base_url),
+    let legacy_managed = current.is_some_and(is_claude_codexhub_config);
+    let previous_value = root.clone();
+    let previous_header_hash = custom_header_fingerprint(&previous_value).map(ToOwned::to_owned);
+    let header_line = format!("{LOCAL_HEADER_NAME}: {}", settings.gateway_client_key);
+    let headers = merge_custom_headers(
+        env_string(&previous_value, "ANTHROPIC_CUSTOM_HEADERS"),
+        previous_header_hash.as_deref(),
+        Some(&header_line),
     );
-    env_map.insert(
-        "ANTHROPIC_AUTH_TOKEN".to_string(),
-        Value::String(settings.gateway_client_key.clone()),
-    );
-    env_map.insert(
-        "ANTHROPIC_MODEL".to_string(),
-        Value::String(projected_claude_model_id(&model)),
-    );
-    env_map.insert(
-        "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY".to_string(),
-        Value::String("1".to_string()),
-    );
-    env_map.insert(
-        MANAGED_MARKER_KEY.to_string(),
-        Value::String(MANAGED_MARKER_VALUE.to_string()),
-    );
-    let role_map: BTreeMap<&str, &str> = ROLE_ENV.iter().copied().collect();
-    for (role, canonical) in role_mappings {
-        let Some(env_key) = role_map.get(role.as_str()) else {
-            return Err(format!("unknown Claude Code role: {role}"));
-        };
-        if canonical.trim().is_empty() {
-            env_map.remove(*env_key);
-            continue;
-        }
-        let resolved = resolve_gateway_client_model_id(settings, providers, canonical)?;
+    let selected_model_is_native = previous_value
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(is_native_claude_model_id);
+    {
+        let env = root
+            .as_object_mut()
+            .expect("object")
+            .entry("env")
+            .or_insert_with(|| json!({}));
+        let env_map = env
+            .as_object_mut()
+            .ok_or_else(|| "Claude settings.json env must be an object".to_string())?;
         env_map.insert(
-            (*env_key).to_string(),
-            Value::String(projected_claude_model_id(&resolved)),
+            "ANTHROPIC_BASE_URL".to_string(),
+            Value::String(claude_gateway_base_url(settings.proxy_port)),
         );
+        env_map.insert(
+            "ANTHROPIC_CUSTOM_HEADERS".to_string(),
+            Value::String(headers.0),
+        );
+        env_map.insert(
+            CUSTOM_HEADER_FINGERPRINT_KEY.to_string(),
+            Value::String(headers.1.unwrap_or_default()),
+        );
+        if legacy_managed {
+            if env_map.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str)
+                == Some(settings.gateway_client_key.as_str())
+            {
+                env_map.remove("ANTHROPIC_AUTH_TOKEN");
+            }
+            env_map.remove("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY");
+        }
+        match model.trim() {
+            PRESERVE_DEFAULT_MODEL | "" => {
+                // ANTHROPIC_MODEL overrides settings.model. A native selection
+                // such as Opus 5.5 must stay that model; only the family alias
+                // variables remap hardcoded opus/sonnet/haiku/fable calls.
+                if selected_model_is_native {
+                    env_map.remove("ANTHROPIC_MODEL");
+                }
+            }
+            CLEAR_DEFAULT_MODEL => {
+                env_map.remove("ANTHROPIC_MODEL");
+            }
+            requested => {
+                let written = if is_native_claude_model_id(requested) {
+                    requested.to_string()
+                } else {
+                    projected_claude_model_id(&resolved_external_model(settings, providers, requested)?)
+                };
+                env_map.insert("ANTHROPIC_MODEL".to_string(), Value::String(written));
+            }
+        }
+        env_map.insert(
+            MANAGED_MARKER_KEY.to_string(),
+            Value::String(MANAGED_MARKER_VALUE.to_string()),
+        );
+        for (role, canonical) in role_mappings {
+            let Some((_, env_key)) = ROLE_ENV.iter().find(|(known, _)| known == role) else {
+                return Err(format!("unknown Claude Code role: {role}"));
+            };
+            let canonical = canonical.trim();
+            if canonical.is_empty() {
+                env_map.remove(*env_key);
+                continue;
+            }
+            let existing = env_map.get(*env_key).and_then(Value::as_str).unwrap_or("");
+            if canonical == existing {
+                continue;
+            }
+            let resolved = resolved_external_model(settings, providers, canonical)?;
+            let projected = projected_claude_model_id(&resolved);
+            if projected == existing {
+                continue;
+            }
+            env_map.insert((*env_key).to_string(), Value::String(projected));
+        }
+    }
+    let mut rows = settings.claude_native_picker.clone().unwrap_or_else(|| {
+        let owned: Vec<String> = env_string(&previous_value, PICKER_FINGERPRINTS_KEY)
+            .and_then(|text| serde_json::from_str(text).ok()).unwrap_or_default();
+        previous_value.pointer("/modelPicker/options").and_then(Value::as_array)
+            .into_iter().flatten()
+            .filter(|row| owned.contains(&value_fingerprint(row)) && row.get("model")
+                .and_then(Value::as_str).is_some_and(|id| id.starts_with("claude-") && !id.starts_with("claude-codexhub-")))
+            .cloned().collect()
+    });
+    rows.extend(claude_picker_options(settings, providers)?);
+    merge_model_picker(&mut root, rows)?;
+    if settings.claude_native_picker.as_ref().is_some_and(|rows| !rows.is_empty()) {
+        let baseline = previous_value.pointer("/modelPicker/replaceBuiltInOptions")
+            .cloned().unwrap_or(Value::Null);
+        root.pointer_mut("/env").and_then(Value::as_object_mut).expect("env object")
+            .entry(PICKER_REPLACE_KEY).or_insert_with(|| json!(baseline.to_string()));
+        root["modelPicker"]["replaceBuiltInOptions"] = json!(true);
+        if let Some(source) = &settings.claude_native_picker_source {
+            root["env"][PICKER_SOURCE_KEY] = json!(source.to_string());
+        }
     }
     serde_json::to_string_pretty(&root)
         .map_err(|error| format!("failed to serialize Claude settings.json: {error}"))
+}
+
+fn alias_change_note(
+    current: Option<&Value>,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+    mappings: &BTreeMap<String, String>,
+) -> Option<String> {
+    if !matches!(model.trim(), "" | PRESERVE_DEFAULT_MODEL) {
+        return None;
+    }
+    let alias = env_string(current?, "ANTHROPIC_MODEL")
+        .or_else(|| current?.get("model").and_then(Value::as_str))?
+        .trim()
+        .to_ascii_lowercase();
+    let aliases: &[&str] = match alias.as_str() {
+        "opus" => &["opus"],
+        "sonnet" => &["sonnet"],
+        "haiku" => &["haiku"],
+        "fable" => &["fable"],
+        "opusplan" => &["opus", "sonnet"],
+        _ => return None,
+    };
+    let exported = super::super::gateway_models_from_config(settings, providers);
+    let effective = |raw: Option<&str>| {
+        raw.filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                exported
+                    .iter()
+                    .find(|entry| projected_claude_model_id(&entry.id) == value)
+                    .map(|entry| entry.id.clone())
+                    .unwrap_or_else(|| value.to_string())
+            })
+            .unwrap_or_else(|| "Claude subscription default".to_string())
+    };
+    let mut changes = Vec::new();
+    for family in aliases {
+        let Some((_, env_key)) = ROLE_ENV.iter().find(|(role, _)| role == family) else {
+            continue;
+        };
+        let old = effective(env_string(current?, env_key));
+        let new = match mappings.get(*family).map(String::as_str).map(str::trim) {
+            Some(target) if !target.is_empty() => resolve_claude_model(settings, providers, target)
+                .unwrap_or_else(|_| format!("invalid target `{target}`")),
+            _ => "Claude subscription default".to_string(),
+        };
+        if old != new {
+            changes.push(format!("{family}: {old} → {new}"));
+        }
+    }
+    (!changes.is_empty()).then(|| {
+        format!(
+            "The configured `{alias}` default keeps its alias, but its effective target changes: {}. Explicit full model IDs remain unchanged.",
+            changes.join("; ")
+        )
+    })
 }
 
 pub(in crate::gateway) fn preview_claude_config_with_path(
@@ -291,11 +960,23 @@ pub(in crate::gateway) fn preview_claude_config_with_path(
     model: &str,
     role_mappings: &BTreeMap<String, String>,
 ) -> Result<GatewayClientConfigPreview, String> {
+    let prepared = native_picker_settings(config_path, settings)?;
+    let settings = &prepared;
     let current = fs::read_to_string(config_path).ok();
-    let next = claude_settings_text(current.as_deref(), settings, providers, model, role_mappings)?;
+    let next = claude_settings_text(
+        current.as_deref(),
+        settings,
+        providers,
+        model,
+        role_mappings,
+    )?;
+    let value = current
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let conflicts = claude_override_conflicts(value.as_ref(), settings);
     Ok(GatewayClientConfigPreview {
         client_id: CLIENT_ID.to_string(),
-        can_apply: true,
+        can_apply: conflicts.is_empty(),
         strategy: "managed_key_set".to_string(),
         config_path: Some(config_path.to_path_buf()),
         current_redacted: current.as_deref().map(mask_env_secrets),
@@ -305,10 +986,23 @@ pub(in crate::gateway) fn preview_claude_config_with_path(
                 .as_deref()
                 .is_none_or(|text| !is_claude_codexhub_config(text)),
         message: {
-            let mut message = "Connect changes this user's Claude Code default route and default model for newly launched sessions. Restart Claude Code after applying.".to_string();
-            let conflicts = claude_override_conflicts();
-            if !conflicts.is_empty() {
+            let mut message = "Connect adds the Gateway route and model-picker entries while preserving Claude Code's configured default and subscription login. Restart Claude Code; existing sessions must be restarted before resuming through the new route.".to_string();
+            if let (Some(previous), Some(source)) = (
+                value.as_ref().and_then(|value| env_string(value, PICKER_SOURCE_KEY)),
+                settings.claude_native_picker_source.as_ref(),
+            ) {
+                if serde_json::from_str::<Value>(previous).ok().as_ref() != Some(source) {
+                    message.push_str(" Native model choices were refreshed for the current Claude version and account/policy snapshot.");
+                }
+            }
+            if let Some(note) =
+                alias_change_note(value.as_ref(), settings, providers, model, role_mappings)
+            {
                 message.push(' ');
+                message.push_str(&note);
+            }
+            if !conflicts.is_empty() {
+                message.push_str(" Configuration conflicts: ");
                 message.push_str(&conflicts.join(" "));
             }
             message
@@ -330,6 +1024,8 @@ pub(in crate::gateway) fn plan_claude_apply(
     model: &str,
     role_mappings: BTreeMap<String, String>,
 ) -> Result<ClaudeApplyPlan, String> {
+    let prepared = native_picker_settings(config_path, settings)?;
+    let settings = &prepared;
     let current = if config_path.exists() {
         Some(
             fs::read_to_string(config_path)
@@ -338,6 +1034,13 @@ pub(in crate::gateway) fn plan_claude_apply(
     } else {
         None
     };
+    let value = current
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let conflicts = claude_override_conflicts(value.as_ref(), settings);
+    if !conflicts.is_empty() {
+        return Err(conflicts.join(" "));
+    }
     let skip_snapshot = current
         .as_deref()
         .is_none_or(|text| text.trim().is_empty() || is_claude_codexhub_config(text));
@@ -369,9 +1072,7 @@ pub(in crate::gateway) fn publish_claude_apply(
         None
     };
     if on_disk.as_deref() != plan.expected_current.as_deref() {
-        return Err(
-            "Claude settings.json changed while applying; retry Connect".to_string(),
-        );
+        return Err("Claude settings.json changed while applying; retry Connect".to_string());
     }
     let (backup_root, _) = backup_roots
         .first()
@@ -406,7 +1107,9 @@ pub(in crate::gateway) fn publish_claude_apply(
         applied: true,
         config_path: Some(plan.config_path.clone()),
         backup_path,
-        message: "Claude Code now routes new sessions through the CodexHub Gateway. Restart Claude Code.".to_string(),
+        message:
+            "Claude Code now routes new sessions through the CodexHub Gateway. Restart Claude Code."
+                .to_string(),
     })
 }
 
@@ -440,10 +1143,7 @@ pub(in crate::gateway) fn restore_claude_from_baseline(
         }
         BaselineFile::Absent => None,
     };
-    let next = apply_managed_env(
-        current.as_deref(),
-        managed.as_ref(),
-    )?;
+    let next = apply_managed_env(current.as_deref(), managed.as_ref())?;
     write_restored_settings(config_path, &next)?;
     Ok(GatewayClientApplyResult {
         client_id: CLIENT_ID.to_string(),
@@ -473,27 +1173,8 @@ pub(in crate::gateway) fn restore_claude_config_with_backup_roots(
         let text = fs::read_to_string(config_path)
             .map_err(|error| format!("failed to read Claude settings.json: {error}"))?;
         if is_claude_codexhub_config(&text) {
-            let mut value: Value = serde_json::from_str(&text)
-                .map_err(|error| format!("failed to parse Claude settings.json: {error}"))?;
-            if let Some(env) = value.get_mut("env").and_then(Value::as_object_mut) {
-                for key in MANAGED_ENV_KEYS {
-                    env.remove(*key);
-                }
-                if env.is_empty() {
-                    value.as_object_mut().map(|root| root.remove("env"));
-                }
-            }
-            let leftover = value.as_object().is_none_or(|root| root.is_empty());
-            if leftover {
-                fs::remove_file(config_path).map_err(|error| {
-                    format!("failed to remove managed Claude settings.json: {error}")
-                })?;
-            } else {
-                let next = serde_json::to_string_pretty(&value)
-                    .map_err(|error| format!("failed to serialize Claude settings.json: {error}"))?;
-                write_text_replace(config_path, &next)
-                    .map_err(|_| "failed to restore Claude settings.json".to_string())?;
-            }
+            let next = apply_managed_env(Some(&text), None)?;
+            write_restored_settings(config_path, &next)?;
         }
     }
     Ok(GatewayClientApplyResult {
@@ -512,10 +1193,159 @@ mod tests {
 
     fn settings() -> Settings {
         Settings {
+            claude_native_picker: Some(vec![json!({"model":"claude-opus-5-5","label":"Claude Opus 5.5","description":"Claude subscription via Gateway"})]),
             proxy_port: 18789,
             gateway_client_key: "gateway-secret-key".to_string(),
             ..Settings::default()
         }
+    }
+
+    #[test]
+    fn disconnected_readback_and_reconnect_keep_saved_mapping_intent() {
+        let dir = std::env::temp_dir().join(format!("claude-saved-intent-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"model":"claude-opus-5-5"}"#).unwrap();
+        let mut settings = settings();
+        settings.claude_model_mappings = Some(BTreeMap::from([
+            ("opus".into(), "gpt-5.5".into()), ("haiku".into(), String::new()),
+        ]));
+        let readback = read_claude_settings(&path, &settings, &[]);
+        assert_eq!(readback.default_model, "claude-opus-5-5");
+        assert_eq!(readback.role_mappings["opus"], "gpt-5.5");
+        let preview = preview_claude_config_with_path(&path, &settings, &[], PRESERVE_DEFAULT_MODEL, &BTreeMap::new()).unwrap();
+        let next: Value = serde_json::from_str(&preview.next_redacted).unwrap();
+        assert_eq!(next["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-codexhub-gpt-5.5");
+        assert_eq!(next["model"], "claude-opus-5-5");
+        let clear = BTreeMap::from([("opus".into(), String::new())]);
+        let preview = preview_claude_config_with_path(&path, &settings, &[], PRESERVE_DEFAULT_MODEL, &clear).unwrap();
+        let next: Value = serde_json::from_str(&preview.next_redacted).unwrap();
+        assert!(next["env"].get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn explicit_native_model_is_not_replaced_by_the_opus_family_mapping() {
+        let current = r#"{"model":"claude-opus-5-5[1m]","env":{"ANTHROPIC_MODEL":"claude-codexhub-gpt-5.5","ANTHROPIC_DEFAULT_OPUS_MODEL":"claude-codexhub-gpt-5.5"}}"#;
+        let next = claude_settings_text(
+            Some(current),
+            &settings(),
+            &[],
+            PRESERVE_DEFAULT_MODEL,
+            &BTreeMap::from([("opus".into(), "gpt-5.5".into())]),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&next).unwrap();
+        assert_eq!(value["model"], "claude-opus-5-5[1m]");
+        assert!(value.pointer("/env/ANTHROPIC_MODEL").is_none());
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-codexhub-gpt-5.5")
+        );
+    }
+
+    #[test]
+    fn preview_apply_and_readback_use_the_same_draft() {
+        let dir = std::env::temp_dir().join(format!(
+            "codexhub-claude-regression-1-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"env":{"EDITOR":"vim"},"theme":"dark"}"#).unwrap();
+        let mappings = BTreeMap::from([("haiku".into(), "gpt-5.5".into())]);
+        let preview =
+            preview_claude_config_with_path(&path, &settings(), &[], "gpt-5.5", &mappings).unwrap();
+        let plan = plan_claude_apply(&path, &settings(), &[], "gpt-5.5", mappings).unwrap();
+        assert_eq!(preview.next_redacted, mask_env_secrets(&plan.next));
+        publish_claude_apply(&plan, &[(dir.join("backup"), BackupChannel::Stable)]).unwrap();
+        let saved = read_claude_settings(&path, &settings(), &[]);
+        assert_eq!(saved.default_model, "gpt-5.5");
+        assert_eq!(saved.role_mappings["haiku"], "gpt-5.5");
+        assert!(!serde_json::to_string(&saved)
+            .unwrap()
+            .contains("gateway-secret-key"));
+        let cleared = BTreeMap::from([("haiku".into(), String::new())]);
+        let plan = plan_claude_apply(&path, &settings(), &[], "gpt-5.5", cleared).unwrap();
+        assert!(!plan.next.contains("ANTHROPIC_DEFAULT_HAIKU_MODEL"));
+        assert!(plan.next.contains("EDITOR"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn credential_conflicts_block_preview_and_apply_without_writing() {
+        let dir = std::env::temp_dir().join(format!(
+            "codexhub-claude-regression-2-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        for current in [
+            r#"{"env":{"ANTHROPIC_API_KEY":"user-secret"}}"#,
+            r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"user-token"}}"#,
+            r#"{"env":{"ANTHROPIC_CUSTOM_HEADERS":"x-codexhub-gateway-key: user-token"}}"#,
+            r#"{"apiKeyHelper":"credential-command"}"#,
+            r#"{"modelPicker":{"replaceBuiltInOptions":true}}"#,
+        ] {
+            fs::write(&path, current).unwrap();
+            let preview = preview_claude_config_with_path(
+                &path,
+                &settings(),
+                &[],
+                "gpt-5.5",
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            assert!(!preview.can_apply);
+            assert!(preview.message.contains("conflicts"));
+            assert!(
+                plan_claude_apply(&path, &settings(), &[], "gpt-5.5", BTreeMap::new()).is_err()
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), current);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn removed_models_reject_new_choices_but_keep_saved_mappings() {
+        let dir = std::env::temp_dir().join(format!(
+            "codexhub-claude-regression-3-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        assert!(
+            plan_claude_apply(&path, &settings(), &[], "removed/model", BTreeMap::new()).is_err()
+        );
+        let result = plan_claude_apply(
+            &path,
+            &settings(),
+            &[],
+            "gpt-5.5",
+            BTreeMap::from([("haiku".into(), "removed/model".into())]),
+        );
+        assert!(result.is_err());
+        assert!(!path.exists());
+        fs::write(
+            &path,
+            r#"{"env":{"ANTHROPIC_DEFAULT_HAIKU_MODEL":"claude-codexhub-removed-model"}}"#,
+        )
+        .unwrap();
+        let plan = plan_claude_apply(&path, &settings(), &[], "gpt-5.5", BTreeMap::new()).unwrap();
+        let next: Value = serde_json::from_str(&plan.next).unwrap();
+        assert_eq!(
+            next.pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-codexhub-removed-model")
+        );
+        let saved = read_claude_settings(&path, &settings(), &[]);
+        assert_eq!(
+            saved.role_mappings["haiku"],
+            "claude-codexhub-removed-model"
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -524,7 +1354,284 @@ mod tests {
             projected_claude_model_id("volc/glm-5.2"),
             "claude-codexhub-volc-glm-5.2"
         );
-        assert_eq!(projected_claude_model_id("claude-sonnet"), "claude-sonnet");
+        assert_eq!(
+            projected_claude_model_id("claude-sonnet"),
+            "claude-codexhub-claude-sonnet"
+        );
+    }
+
+    #[test]
+    fn coexistence_connect_preserves_native_default_and_publishes_picker_rows() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
+        let provider = Provider {
+            id: "deepseek".to_string(),
+            name: "DeepSeek Official".to_string(),
+            base_url: "https://api.deepseek.com".to_string(),
+            api_key: None,
+            upstream_format: None,
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: Some("DeepSeek".to_string()),
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
+            sort_order: None,
+            enabled: true,
+            locked: false,
+            models: vec![crate::Model {
+                id: "deepseek-chat".to_string(),
+                display_name: Some("Flash 4.1".to_string()),
+                gateway_exported: true,
+                ..crate::Model::default()
+            }],
+        };
+        let current = r#"{"env":{"ANTHROPIC_MODEL":"claude-opus-5-5","ANTHROPIC_AUTH_TOKEN":"gateway-secret-key","CODEXHUB_MANAGED_CLIENT":"claude"},"modelPicker":{"options":[{"model":"custom/model","label":"My custom choice"}]},"theme":"dark"}"#;
+        let mappings = BTreeMap::from([
+            ("haiku".to_string(), "deepseek/deepseek-chat".to_string()),
+            ("subagent".to_string(), "gpt-5.5".to_string()),
+        ]);
+
+        let next =
+            claude_settings_text(Some(current), &settings(), &[provider], "", &mappings).unwrap();
+        let value: Value = serde_json::from_str(&next).unwrap();
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-opus-5-5")
+        );
+        assert!(value.pointer("/env/ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(value
+            .pointer("/env/ANTHROPIC_CUSTOM_HEADERS")
+            .and_then(Value::as_str)
+            .is_some_and(|headers| headers.contains("x-codexhub-gateway-key: gateway-secret-key")));
+        assert!(value
+            .pointer("/env/CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY")
+            .is_none());
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-codexhub-deepseek-deepseek-chat")
+        );
+        assert_eq!(
+            value
+                .pointer("/env/CLAUDE_CODE_SUBAGENT_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-codexhub-gpt-5.5")
+        );
+        let options = value
+            .pointer("/modelPicker/options")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(options
+            .iter()
+            .any(|row| row.get("model").and_then(Value::as_str) == Some("custom/model")));
+        assert!(options
+            .iter()
+            .any(|row| row.get("model").and_then(Value::as_str)
+                == Some("claude-codexhub-deepseek-deepseek-chat")));
+        let deepseek_row = options
+            .iter()
+            .find(|row| {
+                row.get("model").and_then(Value::as_str)
+                    == Some("claude-codexhub-deepseek-deepseek-chat")
+            })
+            .unwrap();
+        assert_eq!(deepseek_row["label"], "CodexHub DeepSeek Flash 4.1");
+        assert_eq!(deepseek_row["description"], "DeepSeek Official via Gateway");
+        assert!(deepseek_row.get("behavesAs").is_none());
+        let codex_row = options
+            .iter()
+            .find(|row| row.get("model").and_then(Value::as_str) == Some("claude-codexhub-gpt-5.5"))
+            .unwrap();
+        assert_eq!(codex_row["label"], "CodexHub 5.5");
+        assert_eq!(codex_row["description"], "Codex subscription via Gateway");
+        assert_eq!(codex_row["behavesAs"], "claude-sonnet-4-6");
+        assert_eq!(
+            value
+                .pointer("/modelPicker/replaceBuiltInOptions")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            value.pointer("/theme").and_then(Value::as_str),
+            Some("dark")
+        );
+    }
+
+    #[test]
+    fn external_default_drops_one_million_suffix_and_native_default_keeps_it() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
+        let mut native = settings();
+        native.claude_native_picker.as_mut().unwrap().push(json!({
+            "model": "claude-opus-5-5[1m]",
+            "label": "Claude Opus 5.5 1M",
+            "description": "Claude subscription via Gateway"
+        }));
+        let external =
+            claude_settings_text(None, &native, &[], "gpt-5.5[1m]", &BTreeMap::new()).unwrap();
+        let value: Value = serde_json::from_str(&external).unwrap();
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-codexhub-gpt-5.5")
+        );
+        let projected = claude_settings_text(
+            None,
+            &native,
+            &[],
+            "claude-codexhub-gpt-5.5[1m]",
+            &BTreeMap::from([("haiku".into(), "gpt-5.5[1m]".into())]),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&projected).unwrap();
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-codexhub-gpt-5.5")
+        );
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-codexhub-gpt-5.5"),
+        );
+        let native_default =
+            claude_settings_text(None, &native, &[], "claude-opus-5-5[1m]", &BTreeMap::new())
+                .unwrap();
+        let value: Value = serde_json::from_str(&native_default).unwrap();
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_MODEL")
+                .and_then(Value::as_str),
+            Some("claude-opus-5-5[1m]")
+        );
+        let options = value
+            .pointer("/modelPicker/options")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(options
+            .iter()
+            .any(|row| row.get("model").and_then(Value::as_str) == Some("claude-opus-5-5[1m]")));
+        assert!(options.iter().all(|row| {
+            let id = row.get("model").and_then(Value::as_str).unwrap_or("");
+            !id.starts_with("claude-codexhub-") || !id.ends_with("[1m]")
+        }));
+        let dir =
+            std::env::temp_dir().join(format!("claude-native-default-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, &native_default).unwrap();
+        let readback = read_claude_settings(&path, &native, &[]);
+        assert_eq!(readback.default_model, "claude-opus-5-5[1m]");
+        assert!(readback
+            .native_models
+            .iter()
+            .any(|model| model.id == "claude-opus-5-5[1m]" && model.label == "Claude Opus 5.5 1M"));
+        assert!(readback
+            .native_models
+            .iter()
+            .all(|model| !model.id.starts_with("claude-codexhub-")));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rollback_removes_only_unchanged_owned_picker_rows() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
+        let provider = Provider {
+            id: "deepseek".into(),
+            name: "DeepSeek Official".into(),
+            base_url: "https://api.deepseek.com".into(),
+            api_key: None,
+            upstream_format: None,
+            available_upstream_formats: None,
+            tool_protocol: None,
+            tool_surface_strategy: None,
+            reports_cached_input_tokens: None,
+            supports_developer_role: None,
+            display_prefix: Some("DeepSeek".into()),
+            auth_capabilities: None,
+            onboarding_hint: None,
+            discovery_policy: None,
+            sort_order: None,
+            enabled: true,
+            locked: false,
+            models: vec![crate::Model {
+                id: "deepseek-chat".into(),
+                display_name: Some("Flash 4.1".into()),
+                gateway_exported: true,
+                ..crate::Model::default()
+            }],
+        };
+        let applied = claude_settings_text(
+            Some(r#"{"modelPicker":{"options":[{"model":"custom/model","label":"Mine"}]}}"#),
+            &settings(),
+            &[provider],
+            PRESERVE_DEFAULT_MODEL,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mut value: Value = serde_json::from_str(&applied).unwrap();
+        let options = value
+            .pointer_mut("/modelPicker/options")
+            .and_then(Value::as_array_mut)
+            .unwrap();
+        let edited = options
+            .iter_mut()
+            .find(|row| row.get("model").and_then(Value::as_str) == Some("claude-codexhub-gpt-5.5"))
+            .unwrap();
+        edited["label"] = Value::String("User edited this row".into());
+        options.push(json!({ "model": "user/added", "label": "Added later" }));
+        let dir = std::env::temp_dir().join(format!(
+            "codexhub-claude-picker-rollback-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        restore_claude_from_baseline(&path, &BaselineFile::Absent).unwrap();
+
+        let restored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let rows = restored
+            .pointer("/modelPicker/options")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(rows
+            .iter()
+            .any(|row| row.get("model").and_then(Value::as_str) == Some("custom/model")));
+        assert!(rows
+            .iter()
+            .any(|row| row.get("label").and_then(Value::as_str) == Some("User edited this row")));
+        assert!(rows
+            .iter()
+            .any(|row| row.get("model").and_then(Value::as_str) == Some("user/added")));
+        assert!(!rows
+            .iter()
+            .any(|row| row.get("model").and_then(Value::as_str)
+                == Some("claude-codexhub-deepseek-deepseek-chat")));
+        assert!(restored
+            .pointer("/env/CODEXHUB_MANAGED_MODEL_PICKER_SHA256")
+            .is_none());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -534,13 +1641,26 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
-        let current = r#"{"env":{"EDITOR":"vim","ANTHROPIC_AUTH_TOKEN":"old","OPENAI_API_KEY":"sk-user"},"theme":"dark"}"#;
-        let next = claude_settings_text(Some(current), &settings(), &[], "gpt-5.5", &BTreeMap::new()).unwrap();
+        let current = r#"{"env":{"EDITOR":"vim","OPENAI_API_KEY":"sk-user"},"theme":"dark"}"#;
+        let next =
+            claude_settings_text(Some(current), &settings(), &[], "gpt-5.5", &BTreeMap::new())
+                .unwrap();
         assert!(next.contains("\"EDITOR\": \"vim\""));
         assert!(next.contains("\"theme\": \"dark\""));
         assert!(next.contains("gateway-secret-key"));
         assert!(next.contains("ANTHROPIC_BASE_URL"));
-        assert!(next.contains("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"));
+        let value: Value = serde_json::from_str(&next).unwrap();
+        assert_eq!(
+            value
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            Some("http://127.0.0.1:18789")
+        );
+        assert!(value.pointer("/env/ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(value
+            .pointer("/env/CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY")
+            .is_none());
+        assert!(next.contains("x-codexhub-gateway-key: gateway-secret-key"));
         let masked = mask_env_secrets(&next);
         assert!(!masked.contains("gateway-secret-key"));
         assert!(!masked.contains("sk-user"));
@@ -554,7 +1674,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
-        let next = claude_settings_text(None, &settings(), &[], "gpt-5.5", &BTreeMap::new()).unwrap();
+        let next =
+            claude_settings_text(None, &settings(), &[], "gpt-5.5", &BTreeMap::new()).unwrap();
         let value: Value = serde_json::from_str(&next).unwrap();
         let env = value.get("env").unwrap().as_object().unwrap();
         assert_eq!(
@@ -563,13 +1684,14 @@ mod tests {
         );
         for key in [
             "ANTHROPIC_BASE_URL",
-            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_CUSTOM_HEADERS",
             "ANTHROPIC_MODEL",
-            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
             "CODEXHUB_MANAGED_CLIENT",
         ] {
             assert!(env.contains_key(key), "{key}");
         }
+        assert!(!env.contains_key("ANTHROPIC_AUTH_TOKEN"));
+        assert!(!env.contains_key("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"));
         assert_eq!(
             env.get("CODEXHUB_MANAGED_CLIENT").and_then(Value::as_str),
             Some("claude")
@@ -584,10 +1706,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
-        let mappings = BTreeMap::from([(
-            "haiku".to_string(),
-            "gpt-5.5".to_string(),
-        )]);
+        let mappings = BTreeMap::from([("haiku".to_string(), "gpt-5.5".to_string())]);
         let next = claude_settings_text(None, &settings(), &[], "gpt-5.5", &mappings).unwrap();
         let value: Value = serde_json::from_str(&next).unwrap();
         let env = value.get("env").unwrap().as_object().unwrap();
@@ -596,7 +1715,7 @@ mod tests {
                 .and_then(Value::as_str),
             Some("claude-codexhub-gpt-5.5")
         );
-        }
+    }
 
     #[test]
     fn restore_without_baseline_removes_only_managed_keys() {
@@ -605,16 +1724,11 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
-        let dir = std::env::temp_dir().join(format!(
-            "codexhub-claude-restore-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("codexhub-claude-restore-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
-        let mappings = BTreeMap::from([(
-            "haiku".to_string(),
-            "gpt-5.5".to_string(),
-        )]);
+        let mappings = BTreeMap::from([("haiku".to_string(), "gpt-5.5".to_string())]);
         let next = claude_settings_text(
             Some(r#"{"env":{"EDITOR":"vim"},"theme":"dark"}"#),
             &settings(),
@@ -627,15 +1741,15 @@ mod tests {
         restore_claude_config_with_backup_roots(&path, &[]).unwrap();
         let restored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
-            restored
-                .pointer("/env/EDITOR")
-                .and_then(Value::as_str),
+            restored.pointer("/env/EDITOR").and_then(Value::as_str),
             Some("vim")
         );
         assert_eq!(restored.get("theme").and_then(Value::as_str), Some("dark"));
         assert!(restored.pointer("/env/ANTHROPIC_AUTH_TOKEN").is_none());
-        assert!(restored.pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none());
-            let _ = fs::remove_dir_all(dir);
+        assert!(restored
+            .pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL")
+            .is_none());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -651,18 +1765,15 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let _official_home = crate::gateway::tests::isolated_official_models_home();
-        let dir = std::env::temp_dir().join(format!(
-            "codexhub-claude-concurrent-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("codexhub-claude-concurrent-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
         fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
         let plan = plan_claude_apply(&path, &settings(), &[], "gpt-5.5", BTreeMap::new()).unwrap();
         fs::write(&path, r#"{"theme":"light"}"#).unwrap();
         let backup = dir.join("backup");
-        let error = publish_claude_apply(&plan, &[(backup, BackupChannel::Stable)])
-            .unwrap_err();
+        let error = publish_claude_apply(&plan, &[(backup, BackupChannel::Stable)]).unwrap_err();
         assert!(error.contains("changed"), "{error}");
         assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"theme":"light"}"#);
         let _ = fs::remove_dir_all(dir);

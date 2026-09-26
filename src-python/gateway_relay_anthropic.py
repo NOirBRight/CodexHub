@@ -6,7 +6,8 @@ import json
 from collections.abc import Callable, Mapping
 from typing import Any
 
-import anthropic_messages_prototype
+import anthropic_messages_ir
+import gateway_events
 import protocol_translation
 from protocol_translation import UpstreamStreamIncompleteError
 from sse_events import SseEvent, SseFrameTooLargeError
@@ -38,6 +39,7 @@ def json_message_from_anthropic_sse(frames: list[SseEvent]) -> bytes | None:
 
     message: dict[str, Any] | None = None
     blocks: dict[int, dict[str, Any]] = {}
+    usage: dict[str, Any] = {}
     saw_stop = False
     for frame in frames:
         event_name = frame.event.decode("utf-8") if frame.event else ""
@@ -53,6 +55,9 @@ def json_message_from_anthropic_sse(frames: list[SseEvent]) -> bytes | None:
             raw_message = payload.get("message")
             if isinstance(raw_message, dict):
                 message = dict(raw_message)
+                gateway_events.merge_anthropic_usage_snapshot(
+                    usage, raw_message.get("usage"), include_output=False
+                )
             continue
         if event_name == "content_block_start":
             index = payload.get("index") if isinstance(payload.get("index"), int) else 0
@@ -77,9 +82,7 @@ def json_message_from_anthropic_sse(frames: list[SseEvent]) -> bytes | None:
                 for key, value in delta.items():
                     if value is not None:
                         message[key] = value
-            usage = payload.get("usage")
-            if isinstance(usage, Mapping):
-                message["usage"] = dict(usage)
+            gateway_events.merge_anthropic_usage_snapshot(usage, payload.get("usage"))
             continue
         if event_name == "message_stop":
             saw_stop = True
@@ -92,18 +95,20 @@ def json_message_from_anthropic_sse(frames: list[SseEvent]) -> bytes | None:
             continue
         content.append(block)
     message["content"] = content
+    if usage:
+        message["usage"] = usage
     message.setdefault("type", "message")
     message.setdefault("role", "assistant")
     return json.dumps(message, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
 
 
 def _commit_conversion_error(seam: Any, finish_closed: Callable[[OSError], int], handler: Any) -> int:
-    adapted = anthropic_messages_prototype.adapt_upstream_response(
+    adapted = anthropic_messages_ir.adapt_upstream_response(
         "chat_completions",
         b'{"error":{"type":"invalid_request_error"}}',
         status=400,
     )
-    body = adapted.body if isinstance(adapted, anthropic_messages_prototype.AdaptedResponse) else b""
+    body = adapted.body if isinstance(adapted, anthropic_messages_ir.AdaptedResponse) else b""
     event = b"event: error\ndata: " + body + b"\n\n" if body else b""
     if event and not seam.commit_sse_bytes(event):
         return finish_closed(seam.last_write_error() or OSError("downstream closed"))
@@ -125,8 +130,20 @@ def relay_inbound_anthropic_sse(
     upstream_format: str,
     inbound_format: str,
     status: int,
+    usage_capture: dict[str, Any] | None = None,
 ) -> int:
+    usage: dict[str, Any] = {}
+
+    def capture_usage(missing_reason: str) -> None:
+        gateway_events.capture_usage(
+            usage_capture,
+            usage or None,
+            missing_reason=missing_reason,
+            upstream_format="anthropic_messages",
+        )
+
     if not send_headers():
+        capture_usage("downstream_cancelled_before_response")
         return finish_closed(
             seam.last_write_error() or OSError("downstream closed")
         )
@@ -139,9 +156,27 @@ def relay_inbound_anthropic_sse(
                 event_resets_idle_timeout=lambda _event: True,
                 on_chunk=observe_line,
             ):
+                event_name = frame.event.decode("utf-8") if frame.event else ""
+                if frame.data:
+                    try:
+                        payload = json.loads(frame.data)
+                    except json.JSONDecodeError:
+                        payload = None
+                    if isinstance(payload, Mapping):
+                        if event_name == "message_start":
+                            message = payload.get("message")
+                            if isinstance(message, Mapping):
+                                gateway_events.merge_anthropic_usage_snapshot(
+                                    usage, message.get("usage"), include_output=False
+                                )
+                        elif event_name == "message_delta":
+                            gateway_events.merge_anthropic_usage_snapshot(
+                                usage, payload.get("usage")
+                            )
                 if frame.raw and not seam.commit_sse_bytes(frame.raw):
                     if seam.terminal_committed:
                         break
+                    capture_usage("downstream_cancelled")
                     return finish_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
@@ -149,21 +184,26 @@ def relay_inbound_anthropic_sse(
                 if terminal_kind is not None:
                     break
         except (SseFrameTooLargeError, UpstreamStreamIncompleteError):
+            capture_usage("stream_incomplete")
             seam.cancel()
             return 502
         if terminal_kind is None or not seam.terminal_committed:
+            capture_usage("stream_incomplete")
             seam.cancel()
             return 502
         handler.close_connection = True
         if terminal_kind == "error":
+            capture_usage("upstream_stream_error")
             return status if status >= 400 else 502
+        capture_usage("upstream_missing_usage")
         return status
-    emitter = anthropic_messages_prototype.ChatToAnthropicEmitter()
+    emitter = anthropic_messages_ir.ChatToAnthropicEmitter()
     responses_converter = (
-        protocol_translation.ResponsesToChatStreamConverter()
+        protocol_translation.ResponsesToChatStreamConverter(preserve_reasoning_history=True)
         if upstream_format == "responses"
         else None
     )
+    gateway_events.capture_usage(usage_capture, None)
     try:
         for frame in iter_events(
             response,
@@ -181,30 +221,41 @@ def relay_inbound_anthropic_sse(
                     payload = protocol_translation.decode_protocol_json(data)
                 except (UnicodeError, json.JSONDecodeError, protocol_translation.UnsupportedProtocolTranslationError):
                     continue
-            frames: list[bytes] | anthropic_messages_prototype.NotForwardable
+            if isinstance(payload, Mapping):
+                observed_usage = (
+                    gateway_events.usage_from_response_event(payload)
+                    if responses_converter is not None
+                    else gateway_events.usage_from_payload(payload)
+                )
+                if observed_usage is not None:
+                    gateway_events.capture_usage(
+                        usage_capture, observed_usage, upstream_format=upstream_format,
+                    )
+            frames: list[bytes] | anthropic_messages_ir.NotForwardable
             if responses_converter is not None:
                 if not isinstance(payload, Mapping):
                     continue
                 if payload.get("type") in {"error", "response.failed", "response.incomplete"}:
-                    error_bytes = anthropic_messages_prototype.adapt_upstream_response(
+                    error_bytes = anthropic_messages_ir.adapt_upstream_response(
                         "responses",
                         json.dumps(payload).encode(),
                         status=status if status >= 400 else 502,
                         content_type="application/json",
                     )
-                    body_bytes = error_bytes.body if isinstance(error_bytes, anthropic_messages_prototype.AdaptedResponse) else b""
+                    body_bytes = error_bytes.body if isinstance(error_bytes, anthropic_messages_ir.AdaptedResponse) else b""
                     if body_bytes and not seam.commit_sse_bytes(body_bytes):
                         return finish_closed(
                             seam.last_write_error() or OSError("downstream closed")
                         )
                     handler.close_connection = True
                     return status if status >= 400 else 502
+                emitter.observe_responses_event(payload)
                 chat_chunks = responses_converter.chunks_for_event(payload)
                 if not isinstance(responses_converter.response_id, str) or not responses_converter.response_id:
                     continue
                 for chunk in chat_chunks:
                     frames = emitter.feed(chunk)
-                    if isinstance(frames, anthropic_messages_prototype.NotForwardable):
+                    if isinstance(frames, anthropic_messages_ir.NotForwardable):
                         return _commit_conversion_error(seam, finish_closed, handler)
                     for item in frames:
                         if not seam.commit_sse_bytes(item):
@@ -213,7 +264,7 @@ def relay_inbound_anthropic_sse(
                             )
                 if payload.get("type") == "response.completed":
                     frames = emitter.finish(require_done=False)
-                    if isinstance(frames, anthropic_messages_prototype.NotForwardable):
+                    if isinstance(frames, anthropic_messages_ir.NotForwardable):
                         return _commit_conversion_error(seam, finish_closed, handler)
                     for item in frames:
                         if not seam.commit_sse_bytes(item):
@@ -233,7 +284,7 @@ def relay_inbound_anthropic_sse(
                     return status
             else:
                 frames = emitter.feed(payload)
-                if isinstance(frames, anthropic_messages_prototype.NotForwardable):
+                if isinstance(frames, anthropic_messages_ir.NotForwardable):
                     return _commit_conversion_error(seam, finish_closed, handler)
                 for item in frames:
                     if not seam.commit_sse_bytes(item):
@@ -242,7 +293,7 @@ def relay_inbound_anthropic_sse(
                         )
                 if payload == "[DONE]":
                     frames = emitter.finish(require_done=True)
-                    if isinstance(frames, anthropic_messages_prototype.NotForwardable):
+                    if isinstance(frames, anthropic_messages_ir.NotForwardable):
                         return _commit_conversion_error(seam, finish_closed, handler)
                     for item in frames:
                         if not seam.commit_sse_bytes(item):

@@ -13,6 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+import re
 import tomllib
 from types import MappingProxyType
 from typing import Any, Protocol, TypedDict
@@ -92,6 +93,7 @@ class CatalogUpstream(TypedDict, total=False):
     capability_manifest_hash: str
     capability_manifest_state: str
     capability_binding: Mapping[str, Any]
+    native_anthropic_subscription: bool
 
 
 UpstreamFacts = CatalogUpstream
@@ -111,6 +113,12 @@ class OllamaModelReader(Protocol):
 CatalogBySlugReader = Callable[[], dict[str, dict[str, Any]]]
 OllamaRuntimeReader = Callable[[str, Any], UpstreamFacts | None]
 TextReader = Callable[[Path, str], str]
+
+_NATIVE_CLAUDE_MODEL_RE = re.compile(
+    r"claude-(?:(?:opus|sonnet|haiku|fable)-\d+(?:-\d+)*(?:-(?:latest|\d{8}))?"
+    r"|\d+(?:-\d+)?-(?:opus|sonnet|haiku|fable)(?:-(?:latest|\d{8}))?)\Z",
+    re.IGNORECASE,
+)
 
 
 def _read_text(path: Path, encoding: str) -> str:
@@ -815,6 +823,22 @@ def choose_upstream(model_id: str) -> UpstreamFacts:
     slug = canonical_model_id(str(model_id))
     if not slug:
         raise ValueError("model is required")
+    if _NATIVE_CLAUDE_MODEL_RE.fullmatch(slug):
+        return {
+            "name": "anthropic_native",
+            "provider_id": "anthropic",
+            "model_id": slug,
+            "base_url": "https://api.anthropic.com/v1",
+            "auth": "anthropic_oauth",
+            "upstream_model": slug,
+            "upstream_format": "anthropic_messages",
+            "native_anthropic_subscription": True,
+            "tool_protocol": "auto",
+            "tool_surface_strategy": "eager",
+            "native_responses_tool_codec": "none",
+            "reports_cached_input_tokens": True,
+            "input_modalities": ("text", "image"),
+        }
     import claude_code_projection
 
     from providers_config import exported_gateway_model_ids
@@ -958,6 +982,7 @@ def _external_upstream(
         "api_key": external_model["api_key"],
         "upstream_model": external_model["upstream_model"],
         "upstream_format": external_model.get("upstream_format", "responses"),
+        "available_upstream_formats": external_model.get("available_upstream_formats", ()),
         "tool_protocol": external_model.get("tool_protocol", "auto"),
         "tool_surface_strategy": external_model.get("tool_surface_strategy", "eager"),
         "native_responses_tool_codec": external_model.get(

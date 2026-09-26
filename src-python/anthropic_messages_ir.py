@@ -1,8 +1,7 @@
-"""Anthropic Messages representation seam (Tickets #74/#75).
+"""Pure Anthropic Messages representation and conversion seam.
 
-Evidence-gate converter for ADR-0001 / ADR-0014. Production inbound
-``/v1/messages`` may import the public functions listed in ``__all__``.
-The isolated execute/relay helpers remain test/evidence-only.
+Production inbound ``/v1/messages`` uses this in-memory seam. The isolated
+HTTP exchange and relay helpers live in ``claude_messages_evidence_exchange``.
 
 Three outcomes, never a silent drop:
 
@@ -10,7 +9,7 @@ Three outcomes, never a silent drop:
   modelled and unmodelled field, so an Anthropic-format upstream loses nothing;
 * a converted path returns :class:`Adapted`, the translated body plus one named
   :class:`Adaptation` per non-equivalent field;
-* anything the prototype cannot carry returns :class:`NotForwardable` naming the
+* anything the adapter cannot carry returns :class:`NotForwardable` naming the
   fields before any upstream I/O.
 
 Conversion reuses existing repository seams rather than adding a third
@@ -23,17 +22,10 @@ from __future__ import annotations
 
 import json
 import math
-import queue
-import socket
-import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping
 
 from gateway_errors import UpstreamStreamIncompleteError
-from gateway_sse import DownstreamStreamCommit
-from gateway_transport import UpstreamSseReaderLifecycle
 from protocol_translation import (
     ResponsesToChatStreamConverter,
     UnsupportedProtocolTranslationError,
@@ -44,11 +36,7 @@ from protocol_translation import (
     response_events_to_chat_stream_chunks,
 )
 from sse_events import (
-    DEFAULT_MAX_FRAME_BYTES,
-    SseAssemblerClosedError,
-    SseEvent,
     SseEventAssembler,
-    SseFrameTooLargeError,
 )
 
 
@@ -63,12 +51,14 @@ __all__ = [
     "NotForwardable",
     "adapt_upstream_response",
     "adapt_upstream_stream",
+    "anthropic_error_body",
+    "anthropic_error_sse",
     "ChatToAnthropicEmitter",
     "classify_headers",
-    "execute_exchange",
+    "content_type_is_sse",
     "parse_request",
     "prepare_upstream_request",
-    "relay_incremental_exchange",
+    "response_refusal",
 ]
 
 ANTHROPIC_VERSION = "2023-06-01"
@@ -97,10 +87,10 @@ OPTION_FIELDS_WITHOUT_CHAT_EQUIVALENT = {
     "metadata": "request_metadata_omitted_for_chat",
 }
 
-# Explicitly requested safety controls are not "best effort" material. Until an
-# equivalent enforcement is proven upstream, they make the request
-# non-forwardable instead of being adapted away (ADR-0013 critical content).
-SAFETY_BEARING_FIELDS = frozenset({"safeguards"})
+# Claude Code's optional server classifier has no Chat/Responses equivalent.
+# Only its observed classifier-context envelope is adaptable; future controls
+# remain non-forwardable. See the 2026-09-26 model-switch compatibility evidence.
+CLASSIFIER_CONTEXT_FIELDS = frozenset({"safeguards"})
 
 # The native path forwards the inbound bytes; the Gateway still owns these
 # rewrites at the boundary (ADR-0013). Named here so nothing is implicit.
@@ -159,7 +149,7 @@ class Adapted:
 class AdaptedResponse:
     """Anthropic response produced from one upstream response envelope.
 
-    The prototype buffers a finite SSE fixture so tests can inspect the full
+    The adapter buffers a finite SSE fixture so tests can inspect the full
     result.  A production relay can use the same conversion helpers per frame;
     this seam deliberately keeps that transport policy outside the converter.
     """
@@ -345,7 +335,7 @@ def parse_request(body: bytes | str) -> AnthropicRequest:
     modelled = (
         MODELLED_REQUEST_FIELDS
         | set(OPTION_FIELDS_WITHOUT_CHAT_EQUIVALENT)
-        | SAFETY_BEARING_FIELDS
+        | CLASSIFIER_CONTEXT_FIELDS
         | {"output_config"}
     )
     options = {
@@ -434,15 +424,22 @@ def _to_chat_request(request: AnthropicRequest) -> Adapted | NotForwardable:
         if message.role == "user":
             results = [block for block in message.content if block.type == _TOOL_RESULT_BLOCK]
             if results:
+                content = []
                 for position, block in enumerate(message.content):
                     if block.type != _TOOL_RESULT_BLOCK:
+                        content.append(block)
                         continue
+                    if content:
+                        declared.refuse("user_content_before_tool_result")
                     pending_tool_results.append(
                         _tool_result_message(block, declared, label=f"{label}.content[{position}]")
                     )
-                for position, block in enumerate(message.content):
-                    if block.type != _TOOL_RESULT_BLOCK:
-                        declared.refuse(f"user_content_after_tool_result:{block.type}")
+                if content:
+                    flush_tool_results()
+                    messages.append({
+                        "role": "user",
+                        "content": _chat_user_content(tuple(content), declared, label=label),
+                    })
                 continue
             flush_tool_results()
             messages.append({"role": "user", "content": _chat_user_content(message.content, declared, label=label)})
@@ -466,9 +463,8 @@ def _to_chat_request(request: AnthropicRequest) -> Adapted | NotForwardable:
     for name, value in request.options.items():
         if name == "model":
             continue
-        if name in SAFETY_BEARING_FIELDS:
-            # Fail closed: never adapt an explicitly requested safety control away.
-            declared.refuse(name)
+        if name == "safeguards":
+            _declare_classifier_context(value, declared)
             continue
         if name == "output_config":
             _map_output_config(value, chat, declared)
@@ -518,6 +514,34 @@ def _declare_block_extras(
             "content_block_field_dropped_for_chat",
             "Chat Completions has no equivalent for this content-block field.",
         )
+
+
+def _declare_classifier_context(value: Any, declared: _Declared) -> None:
+    if not isinstance(value, list) or any(
+        not isinstance(item, Mapping)
+        or set(item) != {"type", "classifier_context"}
+        or item.get("type") != "dangerous_tool_use"
+        or not isinstance(item.get("classifier_context"), Mapping)
+        for item in value
+    ):
+        declared.refuse("safeguards")
+        return
+    declared.adapt(
+        "safeguards",
+        "claude_server_classifier_context_omitted_for_non_anthropic",
+        "No equivalent Anthropic server classifier is invoked; Claude Code owns tool permission checks and classifier fallback.",
+    )
+
+
+
+def omit_external_classifier_context(body: bytes) -> Adapted | NotForwardable:
+    """Remove Claude subscription classifier context from an external Messages route."""
+    payload = _load(body)
+    if "safeguards" not in payload:
+        return Adapted(body=body)
+    declared = _Declared()
+    _declare_classifier_context(payload.pop("safeguards"), declared)
+    return declared.result(_dump(payload))
 
 
 def _map_output_config(value: Any, chat: dict[str, Any], declared: _Declared) -> None:
@@ -836,11 +860,11 @@ def prepare_upstream_request(body: bytes, upstream_format: str) -> Adapted | Not
     return NotForwardable("unsupported_upstream_format", (selected or "missing",))
 
 
-def _response_refusal(reason: str, field_name: str = "response") -> NotForwardable:
+def response_refusal(reason: str, field_name: str = "response") -> NotForwardable:
     return NotForwardable(reason, (field_name,))
 
 
-def _content_type_is_sse(content_type: str) -> bool:
+def content_type_is_sse(content_type: str) -> bool:
     return content_type.lower().split(";", 1)[0].strip() == "text/event-stream"
 
 
@@ -875,7 +899,7 @@ def _error_message(_payload: Mapping[str, Any] | None, status: int, default: str
     return f"{default} (status {status})"
 
 
-def _anthropic_error_body(status: int, payload: Mapping[str, Any] | None, *, default: str) -> bytes:
+def anthropic_error_body(status: int, payload: Mapping[str, Any] | None, *, default: str) -> bytes:
     raw = payload.get("error") if isinstance(payload, Mapping) else None
     raw_type = raw.get("type") if isinstance(raw, Mapping) else None
     value = {
@@ -893,10 +917,10 @@ def _sse_record(event_name: str, payload: Mapping[str, Any]) -> bytes:
     return f"event: {event_name}\n" f"data: {encoded}\n\n".encode("utf-8")
 
 
-def _anthropic_error_sse(status: int, payload: Mapping[str, Any] | None, *, default: str) -> bytes:
+def anthropic_error_sse(status: int, payload: Mapping[str, Any] | None, *, default: str) -> bytes:
     return _sse_record(
         "error",
-        json.loads(_anthropic_error_body(status, payload, default=default).decode("utf-8")),
+        json.loads(anthropic_error_body(status, payload, default=default).decode("utf-8")),
     )
 
 
@@ -996,7 +1020,7 @@ def _responses_output_to_anthropic(
     if payload.get("error") is not None or response_status == "failed":
         effective_status = status if status >= 400 else 502
         return AdaptedResponse(
-            body=_anthropic_error_body(effective_status, payload, default="Upstream response failed"),
+            body=anthropic_error_body(effective_status, payload, default="Upstream response failed"),
             status=effective_status,
             adaptations=(
                 Adaptation(
@@ -1007,39 +1031,39 @@ def _responses_output_to_anthropic(
             ),
         )
     if response_status not in ("completed", "incomplete"):
-        return _response_refusal("unsupported_upstream_response", "response.status")
+        return response_refusal("unsupported_upstream_response", "response.status")
     if "output" not in payload or not isinstance(payload["output"], list):
-        return _response_refusal("unsupported_upstream_response", "response.output")
+        return response_refusal("unsupported_upstream_response", "response.output")
     output = payload["output"]
     if response_status == "completed" and not output:
-        return _response_refusal("unsupported_upstream_response", "response.output")
+        return response_refusal("unsupported_upstream_response", "response.output")
 
     blocks: list[dict[str, Any]] = []
     for index, raw_item in enumerate(output):
         if not isinstance(raw_item, Mapping):
-            return _response_refusal("unsupported_upstream_response", f"response.output[{index}]")
+            return response_refusal("unsupported_upstream_response", f"response.output[{index}]")
         item_type = raw_item.get("type")
         if item_type == "message":
             if "content" not in raw_item:
-                return _response_refusal("unsupported_upstream_response", f"response.output[{index}].content")
+                return response_refusal("unsupported_upstream_response", f"response.output[{index}].content")
             content = raw_item["content"]
             if not isinstance(content, list):
-                return _response_refusal("unsupported_upstream_response", f"response.output[{index}].content")
+                return response_refusal("unsupported_upstream_response", f"response.output[{index}].content")
             for content_index, raw_part in enumerate(content):
                 if not isinstance(raw_part, Mapping):
-                    return _response_refusal(
+                    return response_refusal(
                         "unsupported_upstream_response",
                         f"response.output[{index}].content[{content_index}]",
                     )
                 part_type = raw_part.get("type")
                 if part_type not in {"output_text", "text"}:
-                    return _response_refusal(
+                    return response_refusal(
                         "unsupported_upstream_response",
                         f"response.output[{index}].content[{content_index}].type",
                     )
                 text = raw_part.get("text")
                 if not isinstance(text, str):
-                    return _response_refusal(
+                    return response_refusal(
                         "unsupported_upstream_response",
                         f"response.output[{index}].content[{content_index}].text",
                     )
@@ -1058,17 +1082,17 @@ def _responses_output_to_anthropic(
             name = raw_item.get("name")
             arguments = raw_item.get("arguments")
             if not isinstance(call_id, str) or not call_id:
-                return _response_refusal("unpaired_tool_call", f"response.output[{index}].call_id")
+                return response_refusal("unpaired_tool_call", f"response.output[{index}].call_id")
             if not isinstance(name, str) or not name:
-                return _response_refusal("unsupported_upstream_response", f"response.output[{index}].name")
+                return response_refusal("unsupported_upstream_response", f"response.output[{index}].name")
             if not isinstance(arguments, str):
-                return _response_refusal("unsupported_upstream_response", f"response.output[{index}].arguments")
+                return response_refusal("unsupported_upstream_response", f"response.output[{index}].arguments")
             try:
                 tool_input = json.loads(arguments)
             except json.JSONDecodeError:
-                return _response_refusal("unsupported_upstream_response", f"response.output[{index}].arguments")
+                return response_refusal("unsupported_upstream_response", f"response.output[{index}].arguments")
             if not isinstance(tool_input, Mapping):
-                return _response_refusal("unsupported_upstream_response", f"response.output[{index}].arguments")
+                return response_refusal("unsupported_upstream_response", f"response.output[{index}].arguments")
             blocks.append({"type": "tool_use", "id": call_id, "name": name, "input": dict(tool_input)})
             continue
         declared.append(
@@ -1079,15 +1103,15 @@ def _responses_output_to_anthropic(
             )
         )
     if response_status == "completed" and not blocks:
-        return _response_refusal("unsupported_upstream_response", "response.output")
+        return response_refusal("unsupported_upstream_response", "response.output")
 
     usage = _usage_for_anthropic(payload.get("usage"), declared, source="Responses")
     response_id = payload.get("id")
     if not isinstance(response_id, str) or not response_id:
-        return _response_refusal("unsupported_upstream_response", "response.id")
+        return response_refusal("unsupported_upstream_response", "response.id")
     model = payload.get("model")
     if not isinstance(model, str) or not model:
-        return _response_refusal("unsupported_upstream_response", "response.model")
+        return response_refusal("unsupported_upstream_response", "response.model")
     stop_reason = "tool_use" if any(block["type"] == "tool_use" for block in blocks) else (
         "max_tokens" if response_status == "incomplete" else "end_turn"
     )
@@ -1121,12 +1145,12 @@ def adapt_upstream_response(
 
     selected = str(upstream_format or "").strip().lower()
     if selected not in UPSTREAM_FORMATS:
-        return _response_refusal("unsupported_upstream_format", selected or "missing")
+        return response_refusal("unsupported_upstream_format", selected or "missing")
     if cancelled:
         cancelled_status = 499
-        if _content_type_is_sse(content_type):
+        if content_type_is_sse(content_type):
             return AdaptedResponse(
-                body=_anthropic_error_sse(cancelled_status, None, default="Upstream stream cancelled"),
+                body=anthropic_error_sse(cancelled_status, None, default="Upstream stream cancelled"),
                 status=cancelled_status,
                 content_type="text/event-stream",
                 adaptations=(
@@ -1138,7 +1162,7 @@ def adapt_upstream_response(
                 ),
             )
         return AdaptedResponse(
-            body=_anthropic_error_body(cancelled_status, None, default="Upstream request cancelled"),
+            body=anthropic_error_body(cancelled_status, None, default="Upstream request cancelled"),
             status=cancelled_status,
             adaptations=(
                 Adaptation(
@@ -1150,17 +1174,17 @@ def adapt_upstream_response(
         )
     if selected == "anthropic_messages":
         return AdaptedResponse(body=body, status=status, content_type=content_type)
-    if _content_type_is_sse(content_type):
+    if content_type_is_sse(content_type):
         return adapt_upstream_stream(selected, (body,), status=status, content_type=content_type)
     try:
         payload = decode_protocol_json(body)
     except (UnicodeError, json.JSONDecodeError, UnsupportedProtocolTranslationError):
-        return _response_refusal("invalid_upstream_response", "json")
+        return response_refusal("invalid_upstream_response", "json")
     if not isinstance(payload, Mapping):
-        return _response_refusal("invalid_upstream_response", "json")
+        return response_refusal("invalid_upstream_response", "json")
     if status >= 400:
         return AdaptedResponse(
-            body=_anthropic_error_body(status, payload, default="Upstream request failed"),
+            body=anthropic_error_body(status, payload, default="Upstream request failed"),
             status=status,
             adaptations=(
                 Adaptation(
@@ -1174,26 +1198,26 @@ def adapt_upstream_response(
         if selected == "chat_completions":
             if payload.get("error") is None:
                 if not isinstance(payload.get("id"), str) or not payload.get("id"):
-                    return _response_refusal("unsupported_upstream_response", "chat.id")
+                    return response_refusal("unsupported_upstream_response", "chat.id")
                 if not isinstance(payload.get("model"), str) or not payload.get("model"):
-                    return _response_refusal("unsupported_upstream_response", "chat.model")
+                    return response_refusal("unsupported_upstream_response", "chat.model")
                 choices = payload.get("choices")
                 if not isinstance(choices, list) or not choices:
-                    return _response_refusal("unsupported_upstream_response", "chat.choices")
+                    return response_refusal("unsupported_upstream_response", "chat.choices")
                 for index, choice in enumerate(choices):
                     if not isinstance(choice, Mapping):
-                        return _response_refusal("unsupported_upstream_response", f"chat.choices[{index}]")
+                        return response_refusal("unsupported_upstream_response", f"chat.choices[{index}]")
                     message = choice.get("message")
                     if not isinstance(message, Mapping) or message.get("role") != "assistant":
-                        return _response_refusal("unsupported_upstream_response", f"chat.choices[{index}].message.role")
+                        return response_refusal("unsupported_upstream_response", f"chat.choices[{index}].message.role")
                     if choice.get("finish_reason") not in {"stop", "length", "tool_calls", "function_call"}:
-                        return _response_refusal("unsupported_upstream_response", f"chat.choices[{index}].finish_reason")
+                        return response_refusal("unsupported_upstream_response", f"chat.choices[{index}].finish_reason")
                     content = message.get("content")
                     if content is not None and not isinstance(content, (str, list)):
-                        return _response_refusal("unsupported_upstream_response", f"chat.choices[{index}].message.content")
+                        return response_refusal("unsupported_upstream_response", f"chat.choices[{index}].message.content")
                     tool_calls = message.get("tool_calls")
                     if tool_calls is not None and not isinstance(tool_calls, list):
-                        return _response_refusal("unsupported_upstream_response", f"chat.choices[{index}].message.tool_calls")
+                        return response_refusal("unsupported_upstream_response", f"chat.choices[{index}].message.tool_calls")
             converted = chat_completion_to_response_body(body, repair=False)
             result = _responses_output_to_anthropic(json.loads(converted), status=status)
             if isinstance(result, tuple):
@@ -1227,7 +1251,7 @@ def adapt_upstream_response(
             return result
         result = _responses_output_to_anthropic(payload, status=status)
     except (TypeError, ValueError, UnsupportedProtocolTranslationError, json.JSONDecodeError):
-        return _response_refusal("unsupported_upstream_response", "response")
+        return response_refusal("unsupported_upstream_response", "response")
     if isinstance(result, tuple):
         converted_body, adaptations = result
         return AdaptedResponse(
@@ -1245,15 +1269,15 @@ def _decode_sse_frames(chunks: Iterable[bytes]) -> tuple[list[Mapping[str, Any] 
     try:
         for chunk in chunks:
             if not isinstance(chunk, bytes):
-                return _response_refusal("invalid_upstream_stream", "sse.bytes")
+                return response_refusal("invalid_upstream_stream", "sse.bytes")
             raw_parts.append(chunk)
             frames.extend(assembler.feed(chunk))
         termination = assembler.finish()
         frames.extend(termination.events)
     except (ValueError, RuntimeError):
-        return _response_refusal("invalid_upstream_stream", "sse")
+        return response_refusal("invalid_upstream_stream", "sse")
     if termination.disposition != "complete":
-        return _response_refusal("incomplete_upstream_stream", "sse")
+        return response_refusal("incomplete_upstream_stream", "sse")
     payloads: list[Mapping[str, Any] | str] = []
     for frame in frames:
         data = frame.data.decode("utf-8", errors="strict")
@@ -1265,9 +1289,9 @@ def _decode_sse_frames(chunks: Iterable[bytes]) -> tuple[list[Mapping[str, Any] 
         try:
             payload = decode_protocol_json(data)
         except (UnicodeError, json.JSONDecodeError, UnsupportedProtocolTranslationError):
-            return _response_refusal("invalid_upstream_stream", "sse.data")
+            return response_refusal("invalid_upstream_stream", "sse.data")
         if not isinstance(payload, Mapping):
-            return _response_refusal("invalid_upstream_stream", "sse.data")
+            return response_refusal("invalid_upstream_stream", "sse.data")
         payloads.append(payload)
     return payloads, b"".join(raw_parts)
 
@@ -1333,31 +1357,46 @@ class ChatToAnthropicEmitter:
         self._frames = []
         return frames
 
+    def observe_responses_event(self, event: Mapping[str, Any]) -> None:
+        """Disclose opaque reasoning even when it produces no Chat text delta."""
+        item = event.get("item")
+        response = event.get("response")
+        output = response.get("output") if isinstance(response, Mapping) else None
+        if (isinstance(item, Mapping) and item.get("type") == "reasoning") or (
+            isinstance(output, list)
+            and any(isinstance(entry, Mapping) and entry.get("type") == "reasoning" for entry in output)
+        ):
+            if not any(entry.field == "response.reasoning" for entry in self.declared):
+                self.declared.append(Adaptation(
+                    "response.reasoning", "responses_reasoning_omitted_for_anthropic",
+                    "Responses reasoning and encrypted state have no Anthropic-signed equivalent.",
+                ))
+
     def feed(self, chunk: Mapping[str, Any] | str) -> list[bytes] | NotForwardable:
         if chunk == "[DONE]":
             self.saw_done = True
             return []
         if not isinstance(chunk, Mapping):
-            return _response_refusal("unsupported_upstream_stream", "chat.chunk")
+            return response_refusal("unsupported_upstream_stream", "chat.chunk")
         chunk_id = chunk.get("id")
         chunk_model = chunk.get("model")
         if self.response_id is None:
             if not isinstance(chunk_id, str) or not chunk_id:
-                return _response_refusal("unsupported_upstream_stream", "chat.id")
+                return response_refusal("unsupported_upstream_stream", "chat.id")
             if not isinstance(chunk_model, str) or not chunk_model:
-                return _response_refusal("unsupported_upstream_stream", "chat.model")
+                return response_refusal("unsupported_upstream_stream", "chat.model")
             if self.expected_id is not None and chunk_id != self.expected_id:
-                return _response_refusal("unsupported_upstream_stream", "chat.id")
+                return response_refusal("unsupported_upstream_stream", "chat.id")
             if self.expected_model is not None and chunk_model != self.expected_model:
-                return _response_refusal("unsupported_upstream_stream", "chat.model")
+                return response_refusal("unsupported_upstream_stream", "chat.model")
             self.response_id = chunk_id
             self.model = chunk_model
         if "id" in chunk and (not isinstance(chunk_id, str) or not chunk_id or chunk_id != self.response_id):
-            return _response_refusal("unsupported_upstream_stream", "chat.id")
+            return response_refusal("unsupported_upstream_stream", "chat.id")
         if "model" in chunk and (
             not isinstance(chunk_model, str) or not chunk_model or chunk_model != self.model
         ):
-            return _response_refusal("unsupported_upstream_stream", "chat.model")
+            return response_refusal("unsupported_upstream_stream", "chat.model")
         if isinstance(chunk_id, str) and chunk_id:
             self.response_id = chunk_id
         if isinstance(chunk_model, str) and chunk_model:
@@ -1369,33 +1408,42 @@ class ChatToAnthropicEmitter:
             try:
                 self.usage = _usage_for_anthropic(raw_usage, self.declared, source=self.usage_source)
             except ValueError:
-                return _response_refusal("unsupported_upstream_usage", "chat.usage")
+                return response_refusal("unsupported_upstream_usage", "chat.usage")
         choices = chunk.get("choices")
         if choices is None:
             return self._take()
         if not isinstance(choices, list):
-            return _response_refusal("unsupported_upstream_stream", "chat.choices")
+            return response_refusal("unsupported_upstream_stream", "chat.choices")
         for choice in choices:
             if not isinstance(choice, Mapping):
-                return _response_refusal("unsupported_upstream_stream", "chat.choice")
+                return response_refusal("unsupported_upstream_stream", "chat.choice")
             raw_delta = choice.get("delta", {})
             if not isinstance(raw_delta, Mapping):
-                return _response_refusal("unsupported_upstream_stream", "chat.delta")
+                return response_refusal("unsupported_upstream_stream", "chat.delta")
+            for name in ("reasoning", "reasoning_content"):
+                reasoning = raw_delta.get(name)
+                if reasoning is not None and not isinstance(reasoning, str):
+                    return response_refusal("unsupported_upstream_stream", f"chat.delta.{name}")
+                field_name = f"chat.delta.{name}"
+                if reasoning and not any(item.field == field_name for item in self.declared):
+                    self.declared.append(Adaptation(
+                        field_name,
+                        "unsigned_reasoning_omitted_for_anthropic",
+                        "Upstream reasoning has no Anthropic signature; it is not emitted as signed thinking or answer text.",
+                    ))
             if any(
-                name in raw_delta
+                raw_delta.get(name) not in (None, "", [], {})
                 for name in (
-                    "reasoning",
-                    "reasoning_content",
                     "reasoning_details",
                     "refusal",
                     "audio",
                     "annotations",
                 )
             ):
-                return _response_refusal("unsupported_upstream_stream", "chat.delta")
+                return response_refusal("unsupported_upstream_stream", "chat.delta")
             content = raw_delta.get("content")
             if content is not None and not isinstance(content, str):
-                return _response_refusal("unsupported_upstream_stream", "chat.delta.content")
+                return response_refusal("unsupported_upstream_stream", "chat.delta.content")
             if isinstance(content, str) and "content" in raw_delta and not content:
                 self.empty_text_seen = True
             if isinstance(content, str) and content:
@@ -1425,22 +1473,22 @@ class ChatToAnthropicEmitter:
             raw_tools = raw_delta.get("tool_calls")
             if raw_tools is not None:
                 if not isinstance(raw_tools, list):
-                    return _response_refusal("unsupported_upstream_stream", "chat.tool_calls")
+                    return response_refusal("unsupported_upstream_stream", "chat.tool_calls")
                 for fallback_index, raw_tool in enumerate(raw_tools):
                     if not isinstance(raw_tool, Mapping):
-                        return _response_refusal("unsupported_upstream_stream", "chat.tool_calls")
+                        return response_refusal("unsupported_upstream_stream", "chat.tool_calls")
                     tool_index = raw_tool.get("index", fallback_index)
                     if not isinstance(tool_index, int):
-                        return _response_refusal("unsupported_upstream_stream", "chat.tool_calls.index")
+                        return response_refusal("unsupported_upstream_stream", "chat.tool_calls.index")
                     function = raw_tool.get("function", {})
                     if not isinstance(function, Mapping):
-                        return _response_refusal("unsupported_upstream_stream", "chat.tool_calls.function")
+                        return response_refusal("unsupported_upstream_stream", "chat.tool_calls.function")
                     state = self.tools.get(tool_index)
                     call_id = raw_tool.get("id")
                     name = function.get("name")
                     if state is None:
                         if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:
-                            return _response_refusal("unpaired_tool_call", "chat.tool_calls")
+                            return response_refusal("unpaired_tool_call", "chat.tool_calls")
                         state = {"id": call_id, "name": name, "index": self.next_index, "arguments": []}
                         self.next_index += 1
                         self.tools[tool_index] = state
@@ -1460,12 +1508,12 @@ class ChatToAnthropicEmitter:
                             )
                         )
                     elif call_id not in (None, "") and call_id != state["id"]:
-                        return _response_refusal("unpaired_tool_call", "chat.tool_calls.id")
+                        return response_refusal("unpaired_tool_call", "chat.tool_calls.id")
                     elif name not in (None, "") and name != state["name"]:
-                        return _response_refusal("unsupported_upstream_stream", "chat.tool_calls.name")
+                        return response_refusal("unsupported_upstream_stream", "chat.tool_calls.name")
                     arguments = function.get("arguments")
                     if arguments is not None and not isinstance(arguments, str):
-                        return _response_refusal("unsupported_upstream_stream", "chat.tool_calls.arguments")
+                        return response_refusal("unsupported_upstream_stream", "chat.tool_calls.arguments")
                     if isinstance(arguments, str) and arguments:
                         state["arguments"].append(arguments)
                         self._frames.append(
@@ -1487,19 +1535,19 @@ class ChatToAnthropicEmitter:
                 elif finish == "length":
                     self.terminal_reason = "max_tokens"
                 else:
-                    return _response_refusal("unsupported_upstream_stream", "chat.finish_reason")
+                    return response_refusal("unsupported_upstream_stream", "chat.finish_reason")
         return self._take()
 
     def finish(self, *, require_done: bool) -> list[bytes] | NotForwardable:
         if self.terminal_reason is None or (require_done and not self.saw_done):
-            return _response_refusal("incomplete_upstream_stream", "chat.terminal")
+            return response_refusal("incomplete_upstream_stream", "chat.terminal")
         if not self.response_id:
-            return _response_refusal("unsupported_upstream_stream", "chat.id")
+            return response_refusal("unsupported_upstream_stream", "chat.id")
         if not self.model:
-            return _response_refusal("unsupported_upstream_stream", "chat.model")
+            return response_refusal("unsupported_upstream_stream", "chat.model")
         if self.terminal_reason == "end_turn" and self.text_index is None and not self.tools:
             if not (self.allow_empty_text or self.empty_text_seen):
-                return _response_refusal("unsupported_upstream_stream", "chat.output")
+                return response_refusal("unsupported_upstream_stream", "chat.output")
             self.text_index = self.next_index
             self._frames.append(
                 _sse_record(
@@ -1542,14 +1590,15 @@ def _chat_chunks_to_anthropic_sse(
     expected_id: str | None = None,
     expected_model: str | None = None,
     allow_empty_text: bool = False,
+    responses_events: Iterable[Mapping[str, Any] | str] = (),
 ) -> AdaptedResponse | NotForwardable:
     source_chunks = [chunk for chunk in chunks if chunk != "[DONE]"]
     if not source_chunks or not isinstance(source_chunks[0], Mapping):
-        return _response_refusal("unsupported_upstream_stream", "chat.identity")
+        return response_refusal("unsupported_upstream_stream", "chat.identity")
     try:
         chat_stream_chunks_to_response_events(chunks)
     except (ValueError, UnsupportedProtocolTranslationError):
-        return _response_refusal("unsupported_upstream_stream", "chat.stream")
+        return response_refusal("unsupported_upstream_stream", "chat.stream")
     try:
         emitter = ChatToAnthropicEmitter(
             terminal_usage=terminal_usage,
@@ -1559,7 +1608,10 @@ def _chat_chunks_to_anthropic_sse(
             usage_source="Responses" if terminal_usage is not _MISSING else "Chat Completions",
         )
     except ValueError:
-        return _response_refusal("unsupported_upstream_usage", "responses.usage")
+        return response_refusal("unsupported_upstream_usage", "responses.usage")
+    for event in responses_events:
+        if isinstance(event, Mapping):
+            emitter.observe_responses_event(event)
     events: list[bytes] = []
     for chunk in chunks:
         fed = emitter.feed(chunk)
@@ -1589,9 +1641,9 @@ def adapt_upstream_stream(
 
     selected = str(upstream_format or "").strip().lower()
     if selected not in UPSTREAM_FORMATS:
-        return _response_refusal("unsupported_upstream_format", selected or "missing")
+        return response_refusal("unsupported_upstream_format", selected or "missing")
     if max_buffered_bytes <= 0:
-        return _response_refusal("invalid_response_limit", "max_buffered_bytes")
+        return response_refusal("invalid_response_limit", "max_buffered_bytes")
     if cancelled is not None and cancelled():
         return adapt_upstream_response(selected, b"", status=status, content_type=content_type, cancelled=True)
     if selected == "anthropic_messages":
@@ -1599,10 +1651,10 @@ def adapt_upstream_stream(
         total_bytes = 0
         for chunk in chunks:
             if not isinstance(chunk, bytes):
-                return _response_refusal("invalid_upstream_stream", "sse.bytes")
+                return response_refusal("invalid_upstream_stream", "sse.bytes")
             total_bytes += len(chunk)
             if total_bytes > max_buffered_bytes:
-                return _response_refusal("upstream_response_too_large", "sse.bytes")
+                return response_refusal("upstream_response_too_large", "sse.bytes")
             raw_parts.append(chunk)
             if cancelled is not None and cancelled():
                 return adapt_upstream_response(selected, b"", status=status, content_type=content_type, cancelled=True)
@@ -1611,10 +1663,10 @@ def adapt_upstream_stream(
     total_bytes = 0
     for chunk in chunks:
         if not isinstance(chunk, bytes):
-            return _response_refusal("invalid_upstream_stream", "sse.bytes")
+            return response_refusal("invalid_upstream_stream", "sse.bytes")
         total_bytes += len(chunk)
         if total_bytes > max_buffered_bytes:
-            return _response_refusal("upstream_response_too_large", "sse.bytes")
+            return response_refusal("upstream_response_too_large", "sse.bytes")
         raw_parts.append(chunk)
         if cancelled is not None and cancelled():
             return adapt_upstream_response(selected, b"", status=status, content_type=content_type, cancelled=True)
@@ -1626,7 +1678,7 @@ def adapt_upstream_stream(
         error_payload = next(payload for payload in payloads if isinstance(payload, Mapping) and payload.get("error") is not None)
         effective_status = status if status >= 400 else 502
         return AdaptedResponse(
-            body=_anthropic_error_sse(effective_status, error_payload, default="Upstream stream failed"),
+            body=anthropic_error_sse(effective_status, error_payload, default="Upstream stream failed"),
             status=effective_status,
             content_type="text/event-stream",
             adaptations=(
@@ -1649,7 +1701,7 @@ def adapt_upstream_stream(
                     else failed
                 )
                 return AdaptedResponse(
-                    body=_anthropic_error_sse(effective_status, failed_payload, default="Upstream response failed"),
+                    body=anthropic_error_sse(effective_status, failed_payload, default="Upstream response failed"),
                     status=effective_status,
                     content_type="text/event-stream",
                     adaptations=(
@@ -1661,41 +1713,41 @@ def adapt_upstream_stream(
                     ),
                 )
             if any(isinstance(payload, Mapping) and payload.get("type") == "response.incomplete" for payload in payloads):
-                return _response_refusal("incomplete_upstream_stream", "responses.terminal")
+                return response_refusal("incomplete_upstream_stream", "responses.terminal")
             created = next(
                 (payload for payload in payloads if isinstance(payload, Mapping) and payload.get("type") == "response.created"),
                 None,
             )
             if not isinstance(created, Mapping) or not isinstance(created.get("response"), Mapping):
-                return _response_refusal("unsupported_upstream_stream", "responses.identity")
+                return response_refusal("unsupported_upstream_stream", "responses.identity")
             created_response = created["response"]
             response_id = created_response.get("id")
             model = created_response.get("model")
             if not isinstance(response_id, str) or not response_id:
-                return _response_refusal("unsupported_upstream_stream", "responses.id")
+                return response_refusal("unsupported_upstream_stream", "responses.id")
             if not isinstance(model, str) or not model:
-                return _response_refusal("unsupported_upstream_stream", "responses.model")
+                return response_refusal("unsupported_upstream_stream", "responses.model")
             for payload in payloads:
                 if not isinstance(payload, Mapping) or not isinstance(payload.get("response"), Mapping):
                     continue
                 response = payload["response"]
                 if "id" in response and response["id"] != response_id:
-                    return _response_refusal("unsupported_upstream_stream", "responses.id")
+                    return response_refusal("unsupported_upstream_stream", "responses.id")
                 if "model" in response and response["model"] != model:
-                    return _response_refusal("unsupported_upstream_stream", "responses.model")
+                    return response_refusal("unsupported_upstream_stream", "responses.model")
             terminal = next(
                 (payload for payload in payloads if isinstance(payload, Mapping) and payload.get("type") == "response.completed"),
                 None,
             )
             if not isinstance(terminal, Mapping) or not isinstance(terminal.get("response"), Mapping):
-                return _response_refusal("incomplete_upstream_stream", "responses.terminal")
+                return response_refusal("incomplete_upstream_stream", "responses.terminal")
             terminal_response = terminal["response"]
             if terminal_response.get("id") != response_id or terminal_response.get("model") != model:
-                return _response_refusal("unsupported_upstream_stream", "responses.identity")
+                return response_refusal("unsupported_upstream_stream", "responses.identity")
             if terminal_response.get("status") != "completed":
-                return _response_refusal("unsupported_upstream_stream", "responses.status")
+                return response_refusal("unsupported_upstream_stream", "responses.status")
             if not isinstance(terminal_response.get("output"), list) or not terminal_response["output"]:
-                return _response_refusal("unsupported_upstream_stream", "responses.output")
+                return response_refusal("unsupported_upstream_stream", "responses.output")
             terminal_has_text = any(
                 isinstance(item, Mapping)
                 and item.get("type") == "message"
@@ -1712,6 +1764,7 @@ def adapt_upstream_stream(
             chunks_for_chat = response_events_to_chat_stream_chunks(
                 [payload for payload in payloads if payload != "[DONE]"],
                 require_completed=True,
+                preserve_reasoning_history=True,
             )
             return _chat_chunks_to_anthropic_sse(
                 chunks_for_chat,
@@ -1720,568 +1773,11 @@ def adapt_upstream_stream(
                 expected_id=response_id,
                 expected_model=model,
                 allow_empty_text=terminal_has_text,
+                responses_events=payloads,
             )
         chunks_for_chat = [payload for payload in payloads]
         return _chat_chunks_to_anthropic_sse(chunks_for_chat, status=status, require_done=True)
     except UpstreamStreamIncompleteError:
-        return _response_refusal("incomplete_upstream_stream", "responses.terminal")
+        return response_refusal("incomplete_upstream_stream", "responses.terminal")
     except (TypeError, ValueError, UnsupportedProtocolTranslationError):
-        return _response_refusal("unsupported_upstream_stream", "stream")
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
-        return None
-
-
-class _IncrementalCancelled(Exception):
-    pass
-
-
-class _IncrementalDeadlineExceeded(TimeoutError):
-    pass
-
-
-class _IncrementalResponseTooLarge(ValueError):
-    pass
-
-
-def _native_terminal_kind(event: SseEvent) -> str | None:
-    event_name = (
-        event.event.decode("utf-8", errors="replace").strip()
-        if event.event is not None
-        else ""
-    )
-    payload: Any = None
-    if event.data:
-        try:
-            payload = decode_protocol_json(event.data)
-        except (UnicodeError, json.JSONDecodeError, UnsupportedProtocolTranslationError):
-            payload = None
-    payload_type = payload.get("type") if isinstance(payload, Mapping) else None
-    if event_name == "error" or payload_type == "error":
-        return "error"
-    if event_name == "message_stop" or payload_type == "message_stop":
-        return "success"
-    return None
-
-
-def _close_incremental_response(response: Any) -> None:
-    """Abort the underlying socket before closing a blocked stdlib response."""
-    for name in ("cancel",):
-        action = getattr(response, name, None)
-        if callable(action):
-            try:
-                action()
-            except Exception:
-                pass
-    candidates = (
-        getattr(response, "_sock", None),
-        getattr(getattr(response, "fp", None), "_sock", None),
-        getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None),
-        getattr(getattr(response, "connection", None), "sock", None),
-        getattr(getattr(getattr(response, "_response", None), "connection", None), "sock", None),
-    )
-    seen: set[int] = set()
-    for candidate in candidates:
-        if candidate is None or id(candidate) in seen:
-            continue
-        seen.add(id(candidate))
-        shutdown = getattr(candidate, "shutdown", None)
-        if callable(shutdown):
-            try:
-                shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-        close_socket = getattr(candidate, "close", None)
-        if callable(close_socket):
-            try:
-                close_socket()
-            except OSError:
-                pass
-    close = getattr(response, "close", None)
-    if callable(close):
-        try:
-            close()
-        except Exception:
-            pass
-
-
-class _AbortableNativeResponse:
-    """Give the shared reader lifecycle a bounded socket-abort close seam."""
-
-    def __init__(self, response: Any) -> None:
-        self._response = response
-
-    def readline(self) -> bytes:
-        return self._response.readline()
-
-    def close(self) -> None:
-        _close_incremental_response(self._response)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._response, name)
-
-
-def _open_native_response(request: urllib.request.Request, timeout: float) -> Any:
-    """Open exactly one no-redirect, no-retry native attempt."""
-    return urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout)
-
-
-def relay_incremental_exchange(
-    request_body: bytes,
-    *,
-    upstream_format: str,
-    url: str,
-    admit: Callable[[str, str, str, bytes], Any],
-    commit: DownstreamStreamCommit,
-    timeout: float = 30.0,
-    headers: Mapping[str, str] | None = None,
-    cancelled: Callable[[], bool] | None = None,
-    max_response_bytes: int = MAX_BUFFERED_RESPONSE_BYTES,
-    open_response: Callable[[urllib.request.Request, float], Any] | None = None,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> int | NotForwardable:
-    """Relay one SSE attempt without buffering the upstream body.
-
-    Native Anthropic bytes are forwarded as ``SseEvent.raw``. Responses and Chat
-    Completions are converted incrementally into Anthropic SSE frames. ``commit``
-    remains the sole write/terminal owner. The default opener makes one
-    no-redirect attempt and never uses Gateway retry policy.
-    """
-
-    selected = str(upstream_format or "").strip().lower()
-    if selected not in UPSTREAM_FORMATS:
-        return _response_refusal("unsupported_upstream_format", selected or "missing")
-    prepared = prepare_upstream_request(request_body, selected)
-    if isinstance(prepared, NotForwardable):
-        return prepared
-    try:
-        payload = decode_protocol_json(prepared.body)
-    except (UnicodeError, json.JSONDecodeError, UnsupportedProtocolTranslationError):
-        payload = None
-    if not isinstance(payload, Mapping) or payload.get("stream") is not True:
-        return _response_refusal("incremental_requires_stream", "stream")
-    if (
-        isinstance(max_response_bytes, bool)
-        or not isinstance(max_response_bytes, int)
-        or max_response_bytes <= 0
-    ):
-        return _response_refusal("invalid_response_limit", "max_response_bytes")
-    try:
-        timeout_is_finite = math.isfinite(timeout)
-    except (OverflowError, TypeError):
-        timeout_is_finite = False
-    if (
-        isinstance(timeout, bool)
-        or not isinstance(timeout, (int, float))
-        or not timeout_is_finite
-        or timeout <= 0
-    ):
-        return _response_refusal("invalid_timeout", "timeout")
-    if cancelled is not None and cancelled():
-        commit.cancel()
-        return 499
-
-    method = "POST"
-    request_headers = {"content-type": "application/json", "accept": "text/event-stream"}
-    request_headers.update(headers or {})
-    admission_started = monotonic()
-    reservation = admit(selected, method, url, prepared.body)
-    deadline_remaining = getattr(reservation, "deadline_remaining", None)
-    try:
-        deadline_is_finite = math.isfinite(deadline_remaining)
-    except (OverflowError, TypeError):
-        deadline_is_finite = False
-    if (
-        isinstance(deadline_remaining, bool)
-        or not isinstance(deadline_remaining, (int, float))
-        or not deadline_is_finite
-        or deadline_remaining < 0
-    ):
-        commit.cancel()
-        return _response_refusal("invalid_admission_reservation", "deadline_remaining")
-    absolute_deadline = admission_started + float(deadline_remaining)
-    if not math.isfinite(absolute_deadline):
-        commit.cancel()
-        return _response_refusal("invalid_admission_reservation", "deadline_remaining")
-    attempt_deadline = min(absolute_deadline, admission_started + float(timeout))
-    remaining = attempt_deadline - monotonic()
-    if remaining <= 0:
-        commit.cancel()
-        return _response_refusal("admission_deadline_exhausted", "deadline_remaining")
-
-    request = urllib.request.Request(
-        url,
-        data=prepared.body,
-        headers=request_headers,
-        method=method,
-    )
-    opener = open_response or _open_native_response
-    response: Any | None = None
-    lifecycle: UpstreamSseReaderLifecycle | None = None
-    try:
-        try:
-            response = opener(request, min(float(timeout), remaining))
-        except urllib.error.HTTPError as error:
-            response = error
-        except (OSError, TimeoutError, urllib.error.URLError):
-            commit.cancel()
-            return 502
-        try:
-            response_status = int(getattr(response, "status", None) or getattr(response, "code", 200) or 200)
-        except (TypeError, ValueError):
-            commit.cancel()
-            return 502
-        response_headers = getattr(response, "headers", {})
-        response_type = response_headers.get("content-type", "") if response_headers is not None else ""
-        if not isinstance(response_type, str) or not _content_type_is_sse(response_type):
-            _close_incremental_response(response)
-            return _response_refusal("unsupported_incremental_response", "content_type")
-
-        lifecycle = UpstreamSseReaderLifecycle(
-            _AbortableNativeResponse(response),
-            cancellation_requested=cancelled,
-        )
-        commit.attach_upstream(lifecycle)
-
-        def read_lines(_response: Any, **_kwargs: Any) -> Iterable[bytes]:
-            lifecycle.start()
-            while True:
-                if cancelled is not None and cancelled():
-                    raise _IncrementalCancelled()
-                remaining_now = attempt_deadline - monotonic()
-                if remaining_now <= 0:
-                    raise _IncrementalDeadlineExceeded()
-                try:
-                    kind, value = lifecycle.get(timeout=min(0.1, remaining_now))
-                except queue.Empty:
-                    continue
-                if kind == "error":
-                    raise value
-                if not isinstance(value, bytes):
-                    raise ValueError("upstream SSE reader returned non-bytes")
-                yield value
-                if not value:
-                    return
-
-        def iter_events() -> Iterable[SseEvent]:
-            # Match gateway_relay.iter_upstream_sse_events, including deferred
-            # SseFrameTooLargeError after pending complete events. Copied so the
-            # isolated prototype can cap max_frame_bytes without importing the
-            # production relay stack.
-            assembler = SseEventAssembler(
-                max_frame_bytes=min(DEFAULT_MAX_FRAME_BYTES, max_response_bytes)
-            )
-            pending_events: list[SseEvent] = []
-            assembler_finished = False
-            deferred_size_error: SseFrameTooLargeError | None = None
-
-            def assemble_chunk(chunk: bytes) -> None:
-                nonlocal deferred_size_error
-                events: list[SseEvent] = []
-                try:
-                    assembler.feed(chunk, on_event=events.append)
-                except SseFrameTooLargeError as exc:
-                    deferred_size_error = exc
-                pending_events.extend(events)
-
-            try:
-                for line in read_lines(response):
-                    if not line:
-                        break
-                    assemble_chunk(line)
-                    ready = tuple(pending_events)
-                    pending_events.clear()
-                    yield from ready
-                    if deferred_size_error is not None:
-                        raise deferred_size_error
-                termination = assembler.finish()
-                assembler_finished = True
-                yield from termination.events
-                if termination.disposition == "incomplete":
-                    raise UpstreamStreamIncompleteError(
-                        "Upstream SSE stream ended with an incomplete pending frame"
-                    )
-            finally:
-                if not assembler_finished:
-                    try:
-                        assembler.cancel()
-                    except SseAssemblerClosedError:
-                        pass
-
-        def fail(status: int) -> int:
-            if not commit.terminal_committed:
-                commit.cancel()
-            return status
-
-        terminal_kind: str | None = None
-        forwarded = 0
-        reader_hung = False
-        emitter = ChatToAnthropicEmitter() if selected != "anthropic_messages" else None
-        responses_converter = ResponsesToChatStreamConverter() if selected == "responses" else None
-
-        def commit_frames(frames: list[bytes]) -> bool:
-            nonlocal forwarded, terminal_kind
-            for frame in frames:
-                size = len(frame)
-                if forwarded + size > max_response_bytes:
-                    raise _IncrementalResponseTooLarge()
-                if not commit.commit_sse_bytes(frame):
-                    terminal_kind = "downstream_closed"
-                    return False
-                forwarded += size
-            return True
-
-        def converted_payload(event: SseEvent) -> Mapping[str, Any] | str | NotForwardable:
-            data = event.data.strip() if event.data else b""
-            if data == b"[DONE]":
-                return "[DONE]"
-            if not data:
-                return {}
-            try:
-                payload = decode_protocol_json(data)
-            except (UnicodeError, json.JSONDecodeError, UnsupportedProtocolTranslationError):
-                return _response_refusal("invalid_upstream_stream", "sse.data")
-            if isinstance(payload, Mapping):
-                return payload
-            return _response_refusal("invalid_upstream_stream", "sse.data")
-
-        try:
-            for event in iter_events():
-                if cancelled is not None and cancelled():
-                    raise _IncrementalCancelled()
-                if selected == "anthropic_messages":
-                    size = len(event.raw)
-                    if forwarded + size > max_response_bytes:
-                        raise _IncrementalResponseTooLarge()
-                    if not commit.commit_sse_bytes(event.raw):
-                        terminal_kind = "downstream_closed"
-                        break
-                    forwarded += size
-                    terminal_kind = _native_terminal_kind(event)
-                    if terminal_kind is not None:
-                        break
-                    continue
-
-                payload = converted_payload(event)
-                if isinstance(payload, NotForwardable):
-                    if forwarded == 0:
-                        commit.cancel()
-                        return payload
-                    raise ValueError(payload.reason)
-                if isinstance(payload, Mapping) and (
-                    event.event == b"error" or payload.get("type") == "error" or payload.get("error") is not None
-                    or payload.get("type") in {"response.failed", "response.incomplete"}
-                ):
-                    error_bytes = _anthropic_error_sse(
-                        response_status if response_status >= 400 else 502,
-                        payload,
-                        default="Upstream stream failed",
-                    )
-                    if not commit_frames([error_bytes]):
-                        break
-                    terminal_kind = "error"
-                    break
-                try:
-                    if selected == "responses":
-                        if not isinstance(payload, Mapping):
-                            raise ValueError("responses.event")
-                        chat_chunks = responses_converter.chunks_for_event(payload) if responses_converter is not None else []
-                        if responses_converter is not None and (
-                            not isinstance(responses_converter.response_id, str)
-                            or not responses_converter.response_id
-                            or not isinstance(responses_converter.model, str)
-                            or not responses_converter.model
-                        ):
-                            missing = _response_refusal("unsupported_upstream_stream", "responses.identity")
-                            if forwarded == 0:
-                                commit.cancel()
-                                return missing
-                            raise ValueError(missing.reason)
-                        for chunk in chat_chunks:
-                            frames = emitter.feed(chunk) if emitter is not None else []
-                            if isinstance(frames, NotForwardable):
-                                if forwarded == 0:
-                                    commit.cancel()
-                                    return frames
-                                raise ValueError(frames.reason)
-                            if not commit_frames(frames):
-                                break
-                        if terminal_kind == "downstream_closed":
-                            break
-                        if payload.get("type") == "response.completed":
-                            frames = emitter.finish(require_done=False) if emitter is not None else []
-                            if isinstance(frames, NotForwardable):
-                                if forwarded == 0:
-                                    commit.cancel()
-                                    return frames
-                                raise ValueError(frames.reason)
-                            if not commit_frames(frames):
-                                break
-                            terminal_kind = "success"
-                            break
-                    else:
-                        frames = emitter.feed(payload) if emitter is not None else []
-                        if isinstance(frames, NotForwardable):
-                            if forwarded == 0:
-                                commit.cancel()
-                                return frames
-                            raise ValueError(frames.reason)
-                        if not commit_frames(frames):
-                            break
-                        if payload == "[DONE]":
-                            frames = emitter.finish(require_done=True) if emitter is not None else []
-                            if isinstance(frames, NotForwardable):
-                                if forwarded == 0:
-                                    commit.cancel()
-                                    return frames
-                                raise ValueError(frames.reason)
-                            if not commit_frames(frames):
-                                break
-                            terminal_kind = "success"
-                            break
-                except UnsupportedProtocolTranslationError as exc:
-                    if forwarded == 0:
-                        commit.cancel()
-                        return _response_refusal("unsupported_upstream_stream", getattr(exc, "reason", "stream"))
-                    raise ValueError("unsupported_upstream_stream") from exc
-                if terminal_kind is not None:
-                    break
-        finally:
-            lifecycle.close()
-            joined, outcome = lifecycle.join(timeout=UpstreamSseReaderLifecycle.JOIN_TIMEOUT_SECONDS)
-            reader_hung = (not joined) or outcome == "upstream_sse_reader_thread_did_not_terminate"
-
-        cancelled_now = cancelled is not None and cancelled()
-        if reader_hung:
-            return fail(499 if cancelled_now else 502)
-        if terminal_kind is None:
-            return fail(499 if cancelled_now else 502)
-        if terminal_kind == "downstream_closed":
-            return fail(499)
-        if terminal_kind == "error":
-            if not commit.terminal_committed:
-                commit.cancel()
-            return response_status if response_status >= 400 else 502
-        if not commit.terminal_committed:
-            return fail(502)
-        return response_status
-    except _IncrementalCancelled:
-        commit.cancel()
-        return 499
-    except _IncrementalDeadlineExceeded:
-        commit.cancel()
-        return 504
-    except (_IncrementalResponseTooLarge, SseFrameTooLargeError, UpstreamStreamIncompleteError, OSError, TimeoutError, urllib.error.URLError, ValueError):
-        commit.cancel()
-        return 502
-    finally:
-        if response is not None:
-            # The reader lifecycle owns normal response closure; this is only a
-            # fallback for failures before the lifecycle was attached.
-            if lifecycle is None:
-                _close_incremental_response(response)
-
-
-def execute_exchange(
-    request_body: bytes,
-    *,
-    upstream_format: str,
-    url: str,
-    admit: Callable[[str, str, str, bytes], None],
-    timeout: float = 30.0,
-    headers: Mapping[str, str] | None = None,
-    cancelled: Callable[[], bool] | None = None,
-    max_response_bytes: int = MAX_BUFFERED_RESPONSE_BYTES,
-) -> AdaptedResponse | NotForwardable:
-    """Run one explicitly admitted buffered fixture/live attempt without retries.
-
-    The prototype buffers the response before adapting it; this does not prove
-    a production incremental relay or cancellation-safe socket teardown.
-    ``admit(protocol, method, final_url, body_bytes)`` is called before any
-    socket write.  The callback is the hand-off to the bounded authorized
-    runner; this module owns no credentials, budgets, retries, or redirects.
-    """
-
-    prepared = prepare_upstream_request(request_body, upstream_format)
-    if isinstance(prepared, NotForwardable):
-        return prepared
-    selected = str(upstream_format).strip().lower()
-    method = "POST"
-    request_headers = {"content-type": "application/json"}
-    try:
-        prepared_payload = decode_protocol_json(prepared.body)
-    except (UnicodeError, json.JSONDecodeError, UnsupportedProtocolTranslationError):
-        prepared_payload = None
-    stream_requested = isinstance(prepared_payload, Mapping) and prepared_payload.get("stream") is True
-    request_headers["accept"] = "text/event-stream" if stream_requested else "application/json"
-    if max_response_bytes <= 0:
-        return _response_refusal("invalid_response_limit", "max_response_bytes")
-    request_headers.update(headers or {})
-    admit(selected, method, url, prepared.body)
-    request = urllib.request.Request(url, data=prepared.body, headers=request_headers, method=method)
-    opener = urllib.request.build_opener(_NoRedirect())
-    try:
-        with opener.open(request, timeout=timeout) as response:
-            response_status = int(response.status)
-            response_type = response.headers.get("content-type", "application/json")
-            pieces: list[bytes] = []
-            total_bytes = 0
-            while True:
-                piece = response.read(min(64 * 1024, max_response_bytes - total_bytes + 1))
-                if not piece:
-                    break
-                total_bytes += len(piece)
-                if total_bytes > max_response_bytes:
-                    return _response_refusal("upstream_response_too_large", "response.bytes")
-                pieces.append(piece)
-                if cancelled is not None and cancelled():
-                    return adapt_upstream_response(
-                        selected,
-                        b"",
-                        status=response_status,
-                        content_type=response_type,
-                        cancelled=True,
-                    )
-            if cancelled is not None and cancelled():
-                return adapt_upstream_response(
-                    selected,
-                    b"",
-                    status=response_status,
-                    content_type=response_type,
-                    cancelled=True,
-                )
-            if _content_type_is_sse(response_type):
-                return adapt_upstream_stream(
-                    selected,
-                    pieces,
-                    status=response_status,
-                    content_type=response_type,
-                    max_buffered_bytes=max_response_bytes,
-                )
-            return adapt_upstream_response(
-                selected,
-                b"".join(pieces),
-                status=response_status,
-                content_type=response_type,
-            )
-    except urllib.error.HTTPError as error:
-        response_type = error.headers.get("content-type", "application/json") if error.headers else "application/json"
-        body = error.read(max_response_bytes + 1)
-        if len(body) > max_response_bytes:
-            return _response_refusal("upstream_response_too_large", "error.bytes")
-        if not body:
-            if _content_type_is_sse(response_type):
-                return AdaptedResponse(
-                    body=_anthropic_error_sse(error.code, None, default="Upstream HTTP request failed"),
-                    status=error.code,
-                    content_type="text/event-stream",
-                )
-            return AdaptedResponse(
-                body=_anthropic_error_body(error.code, None, default="Upstream HTTP request failed"),
-                status=error.code,
-            )
-        if _content_type_is_sse(response_type):
-            return adapt_upstream_stream(selected, (body,), status=error.code, content_type=response_type)
-        return adapt_upstream_response(selected, body, status=error.code, content_type=response_type)
+        return response_refusal("unsupported_upstream_stream", "stream")

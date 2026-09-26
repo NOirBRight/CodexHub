@@ -41,18 +41,19 @@ pub use clients::dsh::{
 pub use providers::provider_probe_upstream_format;
 pub use readback::verify_apply_readback;
 
+use clients::claude::{
+    claude_installed, detect_claude_config_path, detect_claude_route_details,
+    detect_claude_version, read_claude_settings, PRESERVE_DEFAULT_MODEL,
+};
 use clients::codex::read_codex_auth_status;
 #[cfg(test)]
-use clients::grok::{grok_ownership_bounded_cleanup, restore_grok_config_with_backup_roots};
-use clients::claude::{
-    claude_installed, detect_claude_config_path, detect_claude_route_details, detect_claude_version,
-};
+use clients::grok::grok_config_text;
 use clients::grok::{
     detect_grok_config_path, detect_grok_route_details, detect_grok_version, grok_home,
     grok_injected_keys_may_be_hidden, grok_installed,
 };
 #[cfg(test)]
-use clients::grok::grok_config_text;
+use clients::grok::{grok_ownership_bounded_cleanup, restore_grok_config_with_backup_roots};
 #[cfg(test)]
 use clients::omp::{
     apply_omp_config_with_paths, omp_config_text, omp_models_yml_text, omp_route_mode,
@@ -176,10 +177,12 @@ pub struct GatewayUsageSummary {
     pub requests: u64,
     pub successful_requests: u64,
     pub missing_usage_requests: u64,
+    pub partial_usage_requests: u64,
     pub total_tokens: Option<u64>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
     pub cache_hit_rate: Option<f64>,
     pub estimated_cost_usd: Option<f64>,
     pub cost_label: String,
@@ -202,6 +205,7 @@ pub struct GatewayUsageEvent {
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
 }
 
@@ -264,6 +268,8 @@ pub struct GatewayClientConfig {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayClientInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_settings: Option<clients::claude::ClaudeClientSettings>,
     pub id: String,
     pub name: String,
     pub kind: String,
@@ -583,6 +589,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         || opencode_executable.is_some();
     let generic_route_owner = current_owner;
     let mut clients = vec![GatewayClientInfo {
+        claude_settings: None,
         id: "generic".to_string(),
         name: "Generic OpenAI-compatible".to_string(),
         kind: "Copy-only".to_string(),
@@ -622,6 +629,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         ),
     );
     clients.push(GatewayClientInfo {
+        claude_settings: None,
         id: "opencode".to_string(),
         name: "OpenCode".to_string(),
         kind: "Terminal client".to_string(),
@@ -676,6 +684,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         );
     let zcode_route_mode = route_mode_for_owner(zcode_route_details.0, current_owner, zcode_stale);
     clients.push(GatewayClientInfo {
+        claude_settings: None,
         id: "zcode".to_string(),
         name: "ZCode".to_string(),
         kind: "IDE extension".to_string(),
@@ -719,6 +728,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         ),
     );
     clients.push(GatewayClientInfo {
+        claude_settings: None,
         id: "pi".to_string(),
         name: "Pi".to_string(),
         kind: "Compact CLI".to_string(),
@@ -758,6 +768,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         ),
     );
     clients.push(GatewayClientInfo {
+        claude_settings: None,
         id: "omp".to_string(),
         name: "OMP".to_string(),
         kind: "Prompt runtime".to_string(),
@@ -795,6 +806,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         grok_status.push_str(" Injected picker keys may be hidden by allowed_models.");
     }
     clients.push(GatewayClientInfo {
+        claude_settings: None,
         id: "grok".to_string(),
         name: "Grok CLI".to_string(),
         kind: "Terminal client".to_string(),
@@ -825,6 +837,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         ),
     );
     clients.push(GatewayClientInfo {
+        claude_settings: Some(read_claude_settings(&claude_path, &settings, &providers)),
         id: "claude".to_string(),
         name: "Claude Code".to_string(),
         kind: "Terminal client".to_string(),
@@ -871,6 +884,7 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
         dsh_status_parts.extend(report.drift_details.iter().cloned());
     }
     clients.push(GatewayClientInfo {
+        claude_settings: None,
         id: "dsh".to_owned(),
         name: "DeepSeek Harness".to_owned(),
         kind: "Agent runtime".to_owned(),
@@ -896,12 +910,25 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
 pub fn preview_gateway_client_config(
     client_id: String,
     model: Option<String>,
+    role_mappings: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<GatewayClientConfigPreview, String> {
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
-    let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let id = normalize_client_id(&client_id);
-    managed_clients::preview_native(&id, &settings, &providers, &model)
+    let model = model.unwrap_or_else(|| {
+        if id == "claude" {
+            PRESERVE_DEFAULT_MODEL.to_string()
+        } else {
+            DEFAULT_MODEL.to_string()
+        }
+    });
+    managed_clients::preview_native(
+        &id,
+        &settings,
+        &providers,
+        &model,
+        &role_mappings.unwrap_or_default(),
+    )
 }
 
 pub fn apply_gateway_client_config(
@@ -932,9 +959,42 @@ fn apply_gateway_client_config_locked(
     let _guard = gateway_client_config_write_lock()
         .lock()
         .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
+    if client_id == "claude" {
+        return crate::codex_desktop::serialize_config_writer(|| {
+            let paths = config::ConfigPaths::runtime()?;
+            let mut settings = config::get_settings_with_paths(&paths)?;
+            let providers = config::get_providers()?;
+            let path = clients::claude::detect_claude_config_path();
+            let mut mappings = settings.claude_model_mappings.clone().unwrap_or_default();
+            if settings.claude_model_mappings.is_none()
+                && std::fs::read_to_string(&path).ok().as_deref()
+                    .is_some_and(clients::claude::is_claude_codexhub_config)
+            {
+                let previous = clients::claude::read_claude_settings(&path, &settings, &providers);
+                mappings.extend(previous.role_mappings);
+                mappings.insert("subagent".into(), previous.default_subagent_model);
+            }
+            mappings.extend(role_mappings);
+            settings.claude_model_mappings = Some(mappings.clone());
+            let model = model.unwrap_or_else(|| PRESERVE_DEFAULT_MODEL.to_string());
+            // Save intent first, then publish the client file atomically. Only
+            // our settings roll back on failure: restoring a client snapshot
+            // here could overwrite the concurrent foreign edit Apply detected.
+            crate::file_transaction::with_text_file_rollback(&[paths.settings_path()], || {
+                config::save_settings_with_paths(settings.clone(), &paths)?;
+                managed_clients::apply_native(client_id, &settings, &providers, &model, mappings)
+            }).map_err(|error| error.to_string())
+        });
+    }
     let settings = config::get_settings()?;
     let providers = config::get_providers()?;
-    let model = model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model = model.unwrap_or_else(|| {
+        if client_id == "claude" {
+            PRESERVE_DEFAULT_MODEL.to_string()
+        } else {
+            DEFAULT_MODEL.to_string()
+        }
+    });
     managed_clients::apply_native(client_id, &settings, &providers, &model, role_mappings)
 }
 
@@ -965,6 +1025,24 @@ fn restore_gateway_client_config_locked(
         .lock()
         .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
     let backup_roots = client_backup_roots_for_restore(&client_id, backup_owner);
+    if client_id == "claude" {
+        return crate::codex_desktop::serialize_config_writer(|| {
+            let paths = config::ConfigPaths::runtime()?;
+            let mut settings = config::get_settings_with_paths(&paths)?;
+            let path = clients::claude::detect_claude_config_path();
+            if settings.claude_model_mappings.is_none()
+                && std::fs::read_to_string(&path).ok().as_deref()
+                    .is_some_and(clients::claude::is_claude_codexhub_config)
+            {
+                let previous = clients::claude::read_claude_settings(&path, &settings, &config::get_providers()?);
+                let mut mappings = previous.role_mappings;
+                mappings.insert("subagent".into(), previous.default_subagent_model);
+                settings.claude_model_mappings = Some(mappings);
+                config::save_settings_with_paths(settings, &paths)?;
+            }
+            managed_clients::restore_native(client_id, &backup_roots)
+        });
+    }
     managed_clients::restore_native(client_id, &backup_roots)
 }
 
@@ -1074,7 +1152,11 @@ pub fn switch_gateway_client_route(
     let model = if next_owner == current_app_owner {
         let settings = config::get_settings()?;
         let providers = config::get_providers()?;
-        Some(gateway_client_route_model(model, &settings, &providers)?)
+        Some(if normalize_client_id(&client_id) == "claude" {
+            model.unwrap_or_else(|| PRESERVE_DEFAULT_MODEL.to_string())
+        } else {
+            gateway_client_route_model(model, &settings, &providers)?
+        })
     } else {
         model
     };
@@ -1139,7 +1221,12 @@ where
             continue;
         }
 
-        match apply_client(client.id.clone(), model.clone()) {
+        let client_model = if client.id == "claude" {
+            Some(PRESERVE_DEFAULT_MODEL.to_string())
+        } else {
+            model.clone()
+        };
+        match apply_client(client.id.clone(), client_model) {
             Ok(result) => {
                 if result.applied {
                     applied = applied.saturating_add(1);
@@ -1764,13 +1851,17 @@ fn is_supported_version_probe_path(path: &Path) -> bool {
 }
 
 fn command_output_no_window(mut command: Command) -> Option<std::process::Output> {
-    crate::runtime_paths::configure_no_window(&mut command);
+    command_output_no_window_with_timeout(&mut command, VERSION_PROBE_TIMEOUT)
+}
+
+fn command_output_no_window_with_timeout(command: &mut Command, timeout: Duration) -> Option<std::process::Output> {
+    crate::runtime_paths::configure_no_window(command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().ok()?;
-    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     loop {
         if child.try_wait().ok()?.is_some() {
             return child.wait_with_output().ok();
@@ -1900,9 +1991,8 @@ mod tests {
     use super::{
         apply_opencode_config_with_paths, gateway_client_provider_groups_from_exported,
         gateway_models_from_config, gateway_models_from_sources, grok_config_text,
-        official_gateway_reasoning_levels,
-        official_models_from_metadata, omp_models_yml_text, opencode_config_text,
-        opencode_reasoning_variants, pi_models_text, pi_settings_text,
+        official_gateway_reasoning_levels, official_models_from_metadata, omp_models_yml_text,
+        opencode_config_text, opencode_reasoning_variants, pi_models_text, pi_settings_text,
         read_usage_events_from_sqlite_path, read_usage_events_from_text,
         read_usage_summary_from_sqlite_path_with_pricing, read_usage_summary_from_text,
         read_usage_summary_from_text_with_pricing, restore_latest_backup, runtime_proxy_dir,

@@ -408,6 +408,7 @@ struct ProvidersDocument {
 
 #[derive(Debug, Deserialize)]
 struct SettingsDocument {
+    claude_model_mappings: Option<std::collections::BTreeMap<String, String>>,
     locale: Option<String>,
     auto_sync_history: Option<bool>,
     unified_codex_history: Option<bool>,
@@ -449,6 +450,9 @@ impl SettingsDocument {
     fn into_settings(self, known_official_models: &HashSet<String>) -> Settings {
         let defaults = Settings::default();
         Settings {
+            claude_native_picker: None,
+            claude_native_picker_source: None,
+            claude_model_mappings: self.claude_model_mappings,
             locale: self.locale.unwrap_or_default(),
             auto_sync_history: self.auto_sync_history.unwrap_or(defaults.auto_sync_history),
             unified_codex_history: self
@@ -1105,7 +1109,7 @@ pub(crate) fn get_settings_with_paths(paths: &ConfigPaths) -> Result<Settings, S
     Ok(document.into_settings(&known_official_model_ids(paths)))
 }
 
-fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<Settings, String> {
+pub(crate) fn save_settings_with_paths(settings: Settings, paths: &ConfigPaths) -> Result<Settings, String> {
     let settings = sanitize_settings_for_save(settings, paths);
     let path = paths.settings_path();
     if let Some(parent) = path.parent() {

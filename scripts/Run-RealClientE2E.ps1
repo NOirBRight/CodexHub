@@ -19,6 +19,9 @@ param(
     [string]$ThirdPartyModel,
 
     [Parameter(Mandatory = $true)]
+    [string]$DeepSeekCredentials,
+
+    [Parameter(Mandatory = $true)]
     [string]$OutputDirectory,
 
     [Parameter(Mandatory = $true)]
@@ -34,6 +37,11 @@ param(
     [string]$OmpPath = 'omp.exe',
 
     [switch]$CliOnly,
+
+    [string]$UpstreamProxy = '',
+
+    # Explicit snapshot staged in this run's isolation root; never discover host state.
+    [string]$OfficialCatalog = '',
 
     [int]$TimeoutSeconds = 180,
 
@@ -230,7 +238,7 @@ $script:OfficialOpenCodeCase = @($script:CliContractCases | Where-Object {
     [string]$_.client -ceq 'opencode' -and [string]$_.provider_id -ceq 'official'
 })[0]
 $script:ThirdPartyOpenCodeCase = @($script:CliContractCases | Where-Object {
-    [string]$_.client -ceq 'opencode' -and [string]$_.provider_id -ceq 'opencode-go'
+    [string]$_.client -ceq 'opencode' -and [string]$_.provider_id -ceq 'deepseek'
 })[0]
 if ($null -eq $script:OfficialCodexCliCase -or $null -eq $script:OfficialOpenCodeCase -or
     $null -eq $script:ThirdPartyOpenCodeCase) {
@@ -566,6 +574,7 @@ function Invoke-RunnerSupervisor {
         ManagedClientConfigSha = $ManagedClientConfigSha
         LunaModel = $LunaModel
         ThirdPartyModel = $ThirdPartyModel
+        DeepSeekCredentials = $DeepSeekCredentials
         OutputDirectory = $OutputDirectory
         HostEnvironmentManifest = $HostEnvironmentManifest
         TestWindowsInstallMetadataFixture = $TestWindowsInstallMetadataFixture
@@ -576,6 +585,8 @@ function Invoke-RunnerSupervisor {
         PiPath = $PiPath
         OmpPath = $OmpPath
         CliOnly = [bool]$CliOnly
+        UpstreamProxy = $UpstreamProxy
+        OfficialCatalog = $OfficialCatalog
         TimeoutSeconds = $TimeoutSeconds
         ManualEvidenceTimeoutSeconds = $ManualEvidenceTimeoutSeconds
         OverallTimeoutSeconds = $OverallTimeoutSeconds
@@ -611,6 +622,7 @@ function Invoke-RunnerSupervisor {
   -ManagedClientConfigSha '0000000000000000000000000000000000000000' `
   -LunaModel 'internal' `
   -ThirdPartyModel 'internal' `
+  -DeepSeekCredentials '.' `
   -OutputDirectory '.' `
   -HostEnvironmentManifest '.' `
   -CliOnly:$false `
@@ -3152,7 +3164,7 @@ function Initialize-ClientConfiguration {
         }
     }
     else {
-        Assert-ManagedClientOutputKeys -Value $apply -Required @('client_id', 'applied', 'selector', 'model', 'route_protocol', 'target_names', 'backup_dir_relative')
+        Assert-ManagedClientOutputKeys -Value $apply -Required @('client_id', 'applied', 'selector', 'model', 'route_protocol', 'target_names', 'backup_dir_relative') -Optional @('restart_required')
         if ((Get-JsonProperty $apply 'applied' $false) -ne $true) {
             throw 'client_configuration_materializer_contradiction'
         }
@@ -3177,7 +3189,7 @@ function Initialize-ClientConfiguration {
         (@(Get-JsonProperty $apply 'target_names' @()) -join ',') -cne (@(Get-JsonProperty $preview 'target_names' @()) -join ','))) {
         throw 'client_configuration_materializer_contradiction'
     }
-    if ($Model -like 'opencode-go/*' -and [string](Get-JsonProperty $readback 'route_protocol' '') -cne 'responses') {
+    if ($Model -like 'deepseek/*' -and [string](Get-JsonProperty $readback 'route_protocol' '') -cne 'responses') {
         throw 'client_configuration_materializer_contradiction'
     }
     $targetNames = @((Get-JsonProperty $preview 'target_names' @()) | ForEach-Object { [string]$_ })
@@ -3208,17 +3220,17 @@ function Initialize-CandidateRuntime {
     })
     $providerText = @"
 [[providers]]
-id = "opencode-go"
-name = "OpenCode Go"
-base_url = "https://opencode.ai/zen/go/v1"
-api_key = "{env:OPENCODE_API_KEY}"
+id = "deepseek"
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+api_key = "{env:DEEPSEEK_API_KEY}"
 upstream_format = "responses"
 available_upstream_formats = ["responses"]
 enabled = true
 
   [[providers.models]]
   id = "$($script:ThirdPartyUpstreamModel)"
-  display_name = "OpenCode Muse Spark 1.3 Contributor"
+  display_name = "DeepSeek V4.1 Flash"
   context_window = 1000000
   max_output_tokens = 131072
   enabled = true
@@ -3259,10 +3271,10 @@ try {
     $forwardedArguments = $forwardedJson | ConvertFrom-Json -ErrorAction Stop
     Assert-ExactJsonProperties -Value $forwardedArguments -Names @(
         'CandidateSha', 'DebugBuild', 'ManagedClientConfigBuild',
-        'ManagedClientConfigSha', 'LunaModel', 'ThirdPartyModel', 'OutputDirectory',
+        'ManagedClientConfigSha', 'LunaModel', 'ThirdPartyModel', 'DeepSeekCredentials', 'OutputDirectory',
         'HostEnvironmentManifest', 'TestWindowsInstallMetadataFixture',
         'CodexDesktopPath', 'CodexCliPath', 'ZCodePath', 'OpenCodePath',
-        'PiPath', 'OmpPath', 'CliOnly', 'TimeoutSeconds', 'ManualEvidenceTimeoutSeconds',
+        'PiPath', 'OmpPath', 'CliOnly', 'UpstreamProxy', 'OfficialCatalog', 'TimeoutSeconds', 'ManualEvidenceTimeoutSeconds',
         'OverallTimeoutSeconds'
     ) -Failure 'preflight_supervisor_arguments_invalid'
     $CandidateSha = [string]$forwardedArguments.CandidateSha
@@ -3271,6 +3283,7 @@ try {
     $ManagedClientConfigSha = [string]$forwardedArguments.ManagedClientConfigSha
     $LunaModel = [string]$forwardedArguments.LunaModel
     $ThirdPartyModel = [string]$forwardedArguments.ThirdPartyModel
+    $DeepSeekCredentials = [string]$forwardedArguments.DeepSeekCredentials
     $OutputDirectory = [string]$forwardedArguments.OutputDirectory
     $HostEnvironmentManifest = [string]$forwardedArguments.HostEnvironmentManifest
     $TestWindowsInstallMetadataFixture = [string]$forwardedArguments.TestWindowsInstallMetadataFixture
@@ -3281,6 +3294,8 @@ try {
     $PiPath = [string]$forwardedArguments.PiPath
     $OmpPath = [string]$forwardedArguments.OmpPath
     $CliOnly = [bool]$forwardedArguments.CliOnly
+    $UpstreamProxy = [string]$forwardedArguments.UpstreamProxy
+    $OfficialCatalog = [string]$forwardedArguments.OfficialCatalog
     $TimeoutSeconds = [int]$forwardedArguments.TimeoutSeconds
     $ManualEvidenceTimeoutSeconds = [int]$forwardedArguments.ManualEvidenceTimeoutSeconds
     $OverallTimeoutSeconds = [int]$forwardedArguments.OverallTimeoutSeconds
@@ -3307,6 +3322,16 @@ $failureSummaryPath = Join-Path $failureOutputDirectory 'summary.json'
 $failureArtifactRoot = Join-Path $failureOutputDirectory 'artifacts'
 $script:FailureArtifacts = [System.Collections.Generic.List[string]]::new()
 try {
+if ($UpstreamProxy) {
+    $proxyUri = $null
+    if (-not [Uri]::TryCreate($UpstreamProxy, [UriKind]::Absolute, [ref]$proxyUri) -or
+        $proxyUri.Scheme -cne 'http' -or $proxyUri.Host -cne '127.0.0.1' -or
+        $proxyUri.Port -lt 1024 -or $proxyUri.Port -eq 9099 -or
+        $proxyUri.UserInfo -or $proxyUri.Query -or $proxyUri.Fragment -or
+        $proxyUri.AbsolutePath -cne '/') {
+        throw 'preflight_upstream_proxy_invalid'
+    }
+}
 if ($CandidateSha -notmatch '^[0-9a-f]{40}$') {
     throw 'preflight_candidate_sha_invalid'
 }
@@ -3331,7 +3356,10 @@ $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $isolationRoot = Join-Path $OutputDirectory 'isolated'
 $accountPath = Join-Path $isolationRoot 'account\profile.json'
 $accountAuthPath = Join-Path $isolationRoot 'account\auth.json'
-$credentialPath = Join-Path $isolationRoot 'credentials\opencode-go.json'
+$credentialPath = [System.IO.Path]::GetFullPath((Join-Path $isolationRoot 'credentials\deepseek.json'))
+if ([System.IO.Path]::GetFullPath($DeepSeekCredentials) -ine $credentialPath) {
+    throw 'preflight_deepseek_credential_path_invalid'
+}
 $configRoot = Join-Path $isolationRoot 'config'
 $guiSeedRoot = Join-Path $isolationRoot 'gui-seed'
 $workRoot = Join-Path $isolationRoot 'work'
@@ -3397,6 +3425,16 @@ $script:MaterializerPythonPath = Resolve-E2EPythonPath -Executable $ManagedClien
 foreach ($isolatedInput in @($HostEnvironmentManifest, $accountPath, $accountAuthPath, $credentialPath, $gatewayConfigPath)) {
     Assert-IsolatedRegularFile -Path $isolatedInput -IsolationRoot $isolationRoot
 }
+$officialCatalogHash = $null
+if ($OfficialCatalog) {
+    if (-not (Test-Path -LiteralPath $OfficialCatalog -PathType Leaf)) {
+        throw 'preflight_official_catalog_invalid'
+    }
+    Assert-IsolatedRegularFile -Path $OfficialCatalog -IsolationRoot $isolationRoot
+    $OfficialCatalog = (Resolve-Path -LiteralPath $OfficialCatalog).Path
+    [void](Read-JsonObject -Path $OfficialCatalog -Failure 'preflight_official_catalog_invalid')
+    $officialCatalogHash = Get-Sha256 -Path $OfficialCatalog
+}
 $script:WindowsInstallMetadata = $null
 if ($TestWindowsInstallMetadataFixture) {
     if (-not (Test-Path -LiteralPath $TestWindowsInstallMetadataFixture -PathType Leaf)) {
@@ -3438,10 +3476,10 @@ if ([string](Get-JsonProperty $accountAuth 'auth_mode' '') -cne 'chatgpt' -or
     [string](Get-JsonProperty $authTokens 'refresh_token' '') -eq '') {
     throw 'preflight_codex_login_missing'
 }
-$credential = Read-JsonObject -Path $credentialPath -Failure 'preflight_opencode_go_credential_invalid'
-Assert-ExactJsonProperties -Value $credential -Names @('schema', 'api_key') -Failure 'preflight_opencode_go_credential_invalid'
-if ([string]$credential.schema -cne 'codexhub.real-client-opencode-go.v1' -or [string]$credential.api_key -notmatch '^\S{16,}$') {
-    throw 'preflight_opencode_go_credential_invalid'
+$credential = Read-JsonObject -Path $credentialPath -Failure 'preflight_deepseek_credential_invalid'
+Assert-ExactJsonProperties -Value $credential -Names @('schema', 'api_key') -Failure 'preflight_deepseek_credential_invalid'
+if ([string]$credential.schema -cne 'codexhub.real-client-deepseek.v1' -or [string]$credential.api_key -notmatch '^\S{16,}$') {
+    throw 'preflight_deepseek_credential_invalid'
 }
 $script:GatewayConfig = Read-JsonObject -Path $gatewayConfigPath -Failure 'preflight_gateway_config_invalid'
 Assert-ExactJsonProperties -Value $script:GatewayConfig -Names @('schema', 'listen_port', 'gateway_client_key') -Failure 'preflight_gateway_config_invalid'
@@ -3521,10 +3559,10 @@ $manualCases = if ($CliOnly) {
     @()
 } else {
     @(
-        [pscustomobject]@{ case_id = 'desktop-luna'; client = 'desktop'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $script:OfficialCodexManagedModel; canonical_model = $script:OfficialCodexManagedModel; gateway_model = $script:OfficialCodexManagedModel; endpoint_binding = '/v1/responses'; protocol = 'responses'; seed_slot = 'desktop-luna'; legacy_seed_slot = '' },
-        [pscustomobject]@{ case_id = 'desktop-opencode-go'; client = 'desktop'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $script:ThirdPartyManagedModel; canonical_model = $script:ThirdPartyManagedModel; gateway_model = $script:ThirdPartyManagedModel; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses'; seed_slot = 'desktop-third-party'; legacy_seed_slot = 'desktop-volc' },
-        [pscustomobject]@{ case_id = 'zcode-luna'; client = 'zcode'; provider_id = 'official'; diagnostic_provider_id = 'official'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = $script:OfficialGatewayModel; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses'; seed_slot = 'zcode-luna'; legacy_seed_slot = '' },
-        [pscustomobject]@{ case_id = 'zcode-opencode-go'; client = 'zcode'; provider_id = 'opencode-go'; diagnostic_provider_id = 'opencode_go'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = $script:ThirdPartyManagedModel; endpoint_binding = '/v1/providers/opencode-go/responses'; protocol = 'responses'; seed_slot = 'zcode-third-party'; legacy_seed_slot = 'zcode-volc' }
+        [pscustomobject]@{ case_id = 'desktop-luna'; client = 'desktop'; provider_id = 'official'; diagnostic_provider_id = 'openai'; client_selector = $script:OfficialCodexManagedModel; canonical_model = $script:OfficialCodexManagedModel; gateway_model = $script:OfficialCodexManagedModel; endpoint_binding = '/v1/responses'; protocol = 'responses'; seed_slot = 'desktop-luna'; legacy_seed_slot = '' },
+        [pscustomobject]@{ case_id = 'desktop-deepseek'; client = 'desktop'; provider_id = 'deepseek'; diagnostic_provider_id = 'deepseek'; client_selector = $script:ThirdPartyManagedModel; canonical_model = $script:ThirdPartyManagedModel; gateway_model = $script:ThirdPartyManagedModel; endpoint_binding = '/v1/providers/deepseek/responses'; protocol = 'responses'; seed_slot = 'desktop-third-party'; legacy_seed_slot = 'desktop-volc' },
+        [pscustomobject]@{ case_id = 'zcode-luna'; client = 'zcode'; provider_id = 'official'; diagnostic_provider_id = 'openai'; client_selector = $LunaModel; canonical_model = $LunaModel; gateway_model = $script:OfficialGatewayModel; endpoint_binding = '/v1/providers/openai/responses'; protocol = 'responses'; seed_slot = 'zcode-luna'; legacy_seed_slot = '' },
+        [pscustomobject]@{ case_id = 'zcode-deepseek'; client = 'zcode'; provider_id = 'deepseek'; diagnostic_provider_id = 'deepseek'; client_selector = $ThirdPartyModel; canonical_model = $ThirdPartyModel; gateway_model = $script:ThirdPartyManagedModel; endpoint_binding = '/v1/providers/deepseek/responses'; protocol = 'responses'; seed_slot = 'zcode-third-party'; legacy_seed_slot = 'zcode-volc' }
     )
 }
 $automatedCases = @(
@@ -3581,14 +3619,38 @@ try {
         CODEX_HOME = $script:CandidateCodexRoot
         CODEXHUB_CODEX_PATH = [string]$executables['codex-cli']
         CODEX_PROXY_GATEWAY_CLIENT_KEY = [string]$script:GatewayConfig.gateway_client_key
-        OPENCODE_API_KEY = [string]$credential.api_key
+        DEEPSEEK_API_KEY = [string]$credential.api_key
         CODEXHUB_E2E_CONTRACT_PROBE_LOG = $script:ManagedClientConfigLogPath
+    }
+    if ($UpstreamProxy) {
+        # Only the candidate's HTTPS upstream traffic uses this explicit tunnel.
+        # Native clients keep their isolated loopback-only configuration.
+        $candidateEnvironment.HTTP_PROXY = $UpstreamProxy
+        $candidateEnvironment.HTTPS_PROXY = $UpstreamProxy
+        $candidateEnvironment.NO_PROXY = 'localhost,127.0.0.1'
     }
     Set-RunnerPhase -Phase 'candidate_startup'
     $candidateStartupBudgetMilliseconds = [Math]::Min($TimeoutSeconds, 30) * 1000
     $candidateStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    [void](Invoke-CandidateOfficialBootstrap -Executable $DebugBuild -CandidateRoot $candidateRoot -Environment $candidateEnvironment -TimeoutSeconds $TimeoutSeconds -PythonPath $script:CandidatePythonPath)
     $candidateCatalogPath = Join-Path $script:CandidateRuntimeRoot 'model-catalogs\codexhub-model-catalog.json'
+    if ($OfficialCatalog) {
+        [void](New-Item -ItemType Directory -Force -Path (Split-Path -Parent $candidateCatalogPath))
+        Copy-Item -LiteralPath $OfficialCatalog -Destination $candidateCatalogPath
+        Assert-IsolatedRegularFile -Path $candidateCatalogPath -IsolationRoot $isolationRoot
+        if ((Get-Sha256 -Path $candidateCatalogPath) -cne $officialCatalogHash -or
+            (Get-Sha256 -Path $OfficialCatalog) -cne $officialCatalogHash) {
+            throw 'preflight_official_catalog_changed'
+        }
+        # Production materialization and live /models checks still validate the exact model.
+        Write-JsonFile -Path (Join-Path $artifactRoot 'official-catalog-input.json') -Value ([ordered]@{
+            mode = 'explicit_snapshot'
+            sha256 = $officialCatalogHash
+        })
+        [void]$script:FailureArtifacts.Add('artifacts/official-catalog-input.json')
+    }
+    else {
+        [void](Invoke-CandidateOfficialBootstrap -Executable $DebugBuild -CandidateRoot $candidateRoot -Environment $candidateEnvironment -TimeoutSeconds $TimeoutSeconds -PythonPath $script:CandidatePythonPath)
+    }
     $catalogWait = [System.Diagnostics.Stopwatch]::StartNew()
     while (-not (Test-Path -LiteralPath $candidateCatalogPath -PathType Leaf) -and
         $catalogWait.ElapsedMilliseconds -lt 2000) {
@@ -3796,7 +3858,7 @@ try {
             automated_case_count = $automatedCases.Count
         }
         cases = $caseResults
-        artifacts = @($caseResults | ForEach-Object { $_.artifact })
+        artifacts = @($caseResults | ForEach-Object { $_.artifact }) + @(if ($OfficialCatalog) { 'artifacts/official-catalog-input.json' })
     }
     Set-RunnerPhase -Phase 'summary'
     Write-JsonFile -Path $summaryPath -Value $summary

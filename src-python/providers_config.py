@@ -295,6 +295,7 @@ def build_external_model_index(
                 "base_url": base_url,
                 "api_key": api_key,
                 "upstream_format": provider.upstream_format,
+                "available_upstream_formats": provider.available_upstream_formats,
                 "tool_protocol": provider.tool_protocol,
                 "tool_protocol_capabilities": _resolved_tool_protocol_capabilities(provider, model),
                 "tool_surface_strategy": tool_surface_strategy,

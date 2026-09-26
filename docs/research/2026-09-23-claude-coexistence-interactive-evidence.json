@@ -1,0 +1,101 @@
+{
+  "cli_version": "2.1.280",
+  "tests": [],
+  "requests": [
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "live": true,
+      "path": "/v1/messages",
+      "oauth_auth": true,
+      "synthetic_auth": false,
+      "oauth_beta": true,
+      "messages": 1,
+      "destination": "api.anthropic.com",
+      "status": 200
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "live": true,
+      "path": "/v1/messages",
+      "oauth_auth": true,
+      "synthetic_auth": false,
+      "oauth_beta": true,
+      "messages": 1,
+      "destination": "api.anthropic.com",
+      "status": 200
+    },
+    {
+      "model": "claude-codexhub-deepseek-deepseek-flash",
+      "live": true,
+      "path": "/v1/messages",
+      "oauth_auth": true,
+      "synthetic_auth": false,
+      "oauth_beta": true,
+      "messages": 5,
+      "destination": "isolated_gateway",
+      "oauth_forwarded": false,
+      "status": 200
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "live": true,
+      "path": "/v1/messages",
+      "oauth_auth": true,
+      "synthetic_auth": false,
+      "oauth_beta": true,
+      "messages": 1,
+      "destination": "api.anthropic.com",
+      "status": 200
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "live": true,
+      "path": "/v1/messages",
+      "oauth_auth": true,
+      "synthetic_auth": false,
+      "oauth_beta": true,
+      "messages": 5,
+      "destination": "api.anthropic.com",
+      "status": 200
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "live": true,
+      "path": "/v1/messages",
+      "oauth_auth": true,
+      "synthetic_auth": false,
+      "oauth_beta": true,
+      "messages": 5,
+      "destination": "api.anthropic.com",
+      "status": 200
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "live": true,
+      "path": "/v1/messages",
+      "oauth_auth": true,
+      "synthetic_auth": false,
+      "oauth_beta": true,
+      "messages": 3,
+      "destination": "api.anthropic.com",
+      "status": 200
+    }
+  ],
+  "picker": {
+    "deepseek_present": true,
+    "haiku_present": true,
+    "opus_present": true
+  },
+  "interactive": {
+    "external_marker": true,
+    "native_marker": true,
+    "post_compact_marker": true,
+    "compact_visible": true,
+    "compaction_completed": true
+  },
+  "host_files_unchanged": {
+    "/home/noirbright/.claude/settings.json": true,
+    "/home/noirbright/.claude/.credentials.json": true,
+    "/home/noirbright/.claude.json": true
+  }
+}

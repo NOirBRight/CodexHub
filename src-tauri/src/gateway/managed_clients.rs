@@ -901,11 +901,19 @@ pub fn apply_native_at(
             }
             Ok(result)
         }
-        NativeApplySpec::Claude { path, backup_roots, role_mappings } => {
+        NativeApplySpec::Claude {
+            path,
+            backup_roots,
+            role_mappings,
+        } => {
             let plan = plan_claude_apply(path, settings, providers, model, role_mappings)?;
             let result = publish_claude_apply(&plan, backup_roots)?;
             if result.applied {
-                readback_native_at("claude", &[path.to_path_buf()], settings, providers, model)?;
+                let written = std::fs::read_to_string(path)
+                    .map_err(|_| "Cannot verify applied Claude configuration".to_string())?;
+                if written != plan.next {
+                    return Err("Claude configuration changed during publication; retry Apply".into());
+                }
             }
             Ok(result)
         }
@@ -1091,6 +1099,7 @@ pub enum NativePreviewSpec<'a> {
     },
     Claude {
         path: &'a Path,
+        role_mappings: &'a std::collections::BTreeMap<String, String>,
     },
 }
 
@@ -1118,15 +1127,10 @@ pub fn preview_native_at(
         NativePreviewSpec::Grok { path } => {
             preview_grok_config_with_path(path, settings, providers, model)
         }
-        NativePreviewSpec::Claude { path } => {
-            preview_claude_config_with_path(
-                path,
-                settings,
-                providers,
-                model,
-                &std::collections::BTreeMap::new(),
-            )
-        }
+        NativePreviewSpec::Claude {
+            path,
+            role_mappings,
+        } => preview_claude_config_with_path(path, settings, providers, model, role_mappings),
     }
 }
 
@@ -1136,6 +1140,7 @@ pub fn preview_native(
     settings: &Settings,
     providers: &[Provider],
     model: &str,
+    role_mappings: &std::collections::BTreeMap<String, String>,
 ) -> Result<super::GatewayClientConfigPreview, String> {
     match client_id {
         "opencode" => {
@@ -1193,7 +1198,10 @@ pub fn preview_native(
         "claude" => {
             let path = detect_claude_config_path();
             preview_native_at(
-                NativePreviewSpec::Claude { path: &path },
+                NativePreviewSpec::Claude {
+                    path: &path,
+                    role_mappings,
+                },
                 settings,
                 providers,
                 model,
@@ -1320,7 +1328,10 @@ pub fn preview_native_isolated(
                 .first()
                 .ok_or_else(|| "claude isolated targets are missing files".to_string())?;
             preview_native_at(
-                NativePreviewSpec::Claude { path },
+                NativePreviewSpec::Claude {
+                    path,
+                    role_mappings: &std::collections::BTreeMap::new(),
+                },
                 settings,
                 providers,
                 model,
@@ -1522,7 +1533,7 @@ mod tests {
             "gpt-5.6-luna",
             std::collections::BTreeMap::new(),
         )
-            .expect("copy-only result");
+        .expect("copy-only result");
         assert!(!result.applied);
         assert_eq!(result.client_id, "unknown");
         assert!(result.message.contains("copy-only"));
@@ -1533,7 +1544,7 @@ mod tests {
             "gpt-5.6-luna",
             std::collections::BTreeMap::new(),
         )
-            .expect("dsh is not native apply");
+        .expect("dsh is not native apply");
         assert!(!dsh.applied);
         assert_eq!(dsh.client_id, "dsh");
     }
@@ -1552,12 +1563,18 @@ mod tests {
     #[test]
     fn preview_native_unknown_client_is_copy_only() {
         let settings = Settings::default();
-        let preview =
-            preview_native("unknown", &settings, &[], "gpt-5.6-luna").expect("copy-only preview");
+        let preview = preview_native(
+            "unknown",
+            &settings,
+            &[],
+            "gpt-5.6-luna",
+            &Default::default(),
+        )
+        .expect("copy-only preview");
         assert!(!preview.can_apply);
         assert_eq!(preview.client_id, "unknown");
         assert_eq!(preview.strategy, "copy_only");
-        let dsh = preview_native("dsh", &settings, &[], "gpt-5.6-luna")
+        let dsh = preview_native("dsh", &settings, &[], "gpt-5.6-luna", &Default::default())
             .expect("dsh is copy-only preview");
         assert!(!dsh.can_apply);
         assert_eq!(dsh.client_id, "dsh");
@@ -1572,7 +1589,9 @@ mod tests {
 
     #[test]
     fn has_existing_config_matches_adapter_config_present() {
-        for id in ["codex", "opencode", "pi", "omp", "zcode", "grok", "claude", "dsh"] {
+        for id in [
+            "codex", "opencode", "pi", "omp", "zcode", "grok", "claude", "dsh",
+        ] {
             let adapter = adapter_for(id).expect("registered adapter");
             assert_eq!(
                 has_existing_config(id),

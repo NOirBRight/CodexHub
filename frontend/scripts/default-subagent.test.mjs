@@ -244,7 +244,7 @@ test("subagent picker keeps the menu open after model or effort changes", async 
     "utf8",
   );
   const start = source.indexOf("function DefaultSubagentPicker");
-  const fn = source.slice(start);
+  const fn = source.slice(start).replace(/\r\n/g, "\n");
   assert.match(fn, /function chooseEffort\(nextEffort: string\) \{\n    setDraftEffort\(nextEffort\);\n    setPanel\("menu"\);\n    commitIfChanged\(draftModel, nextEffort\);/);
   assert.match(fn, /createPortal\(/);
   assert.match(fn, /document\.body/);

@@ -539,6 +539,23 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
     caller_is_chat = request.inbound.inbound_format == "chat_completions"
     caller_is_anthropic = request.inbound.inbound_format == "anthropic_messages"
     attempt_is_responses = attempt.selected_upstream_format == "responses"
+    if policy is MutationPolicy.CLAUDE_NATIVE_PASSTHROUGH:
+        if not caller_is_anthropic or attempt.selected_upstream_format != "anthropic_messages":
+            raise UpstreamProtocolTranslationError(
+                UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Claude subscription requests require native Anthropic Messages.",
+                )
+            )
+        prepared_exchange = attempt.prepare_body(conversion_body)
+        if prepared_exchange.upstream_body != conversion_body:
+            raise UpstreamProtocolTranslationError(
+                UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Claude subscription request could not be preserved byte for byte.",
+                )
+            )
+        return prepared_exchange, conversion_body
     convert_before_compat = (
         caller_is_chat and attempt_is_responses
     ) or (
@@ -618,6 +635,23 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
         prepared_exchange = replace(prepared_exchange, upstream_body=conversion_body)
     body = prepared_exchange.upstream_body
     if attempt.selected_upstream_format == "anthropic_messages":
+        from anthropic_messages_ir import NotForwardable, omit_external_classifier_context
+
+        adapted = omit_external_classifier_context(body)
+        if isinstance(adapted, NotForwardable):
+            raise UpstreamProtocolTranslationError(
+                UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics", adapted.diagnostic()
+                )
+            )
+        body = adapted.body
+        prepared_exchange = replace(
+            prepared_exchange,
+            upstream_body=body,
+            adaptations=prepared_exchange.adaptations + tuple(
+                (item.field, item.policy, item.detail) for item in adapted.adaptations
+            ),
+        )
         payload = _passthrough._safe_json_mapping(body)
         upstream_model = upstream.get("upstream_model")
         if (
