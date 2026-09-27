@@ -1,0 +1,115 @@
+{
+  "candidate_sha": "c0d4840ed411e4089cb7f675cb1181dc645e49bd",
+  "platform": "windows-x64",
+  "core": {
+    "status": "passed",
+    "passed": 3693,
+    "skipped": 68,
+    "subtests_passed": 283,
+    "elapsed_seconds": 435.45,
+    "exit_code": 0,
+    "owned_process_count_after_cleanup": 0
+  },
+  "synthetic_partition": {
+    "status": "passed",
+    "passed": 164,
+    "elapsed_seconds": 1296.22,
+    "exit_code": 0,
+    "unique_basetemp_leftover_process_count": 0,
+    "watchdog_tempfile_count": 0
+  },
+  "package": {
+    "status": "passed",
+    "filename": "CodexHub_0.2.29_portable_c0d4840e.zip",
+    "archive_sha256": "c51ea9126482a0d3f74d6077cf4fb22ca51fb49b15965699ef2691efb18130ec",
+    "archive_bytes": 83801037,
+    "source_file_count": 98,
+    "source_mismatch_count_after_crlf_normalization": 0,
+    "raw_byte_mismatch_count_due_to_crlf": 98,
+    "source_comparison": "Exact content after CRLF-to-LF normalization",
+    "private_state_file_count": 0,
+    "runtime_archive_sha256": "5cbb11d6d848018d1f079c89151f4dd46cc7d5ebb83a878970626b5120b35a95",
+    "runtime_hash_matches_pin": true
+  },
+  "settings_adapter": {
+    "status": "passed",
+    "settings_page_served": true,
+    "bootstrap_session_origin_checks": "passed",
+    "legacy_settings_readback": "passed",
+    "save_and_reopen": "passed",
+    "pending_restart": true,
+    "synthetic_secret_redacted_from_http": true,
+    "runtime_process_started": false,
+    "text_ready": false,
+    "tools_ready": false,
+    "live_account_or_upstream_runtime_acceptance": "not_performed"
+  },
+  "packaged_runtime_lifecycle": {
+    "status": "passed",
+    "stages_passed": 8,
+    "stages_total": 8,
+    "credentials_used": false,
+    "synthetic_state_only": true,
+    "legacy_migration_read_and_first_start": {
+      "status": "passed",
+      "health_samples": 3,
+      "legacy_settings_preserved": true,
+      "pending_restart": false
+    },
+    "pinned_runtime_install_and_hash_check": "passed",
+    "save_remains_pending_without_restart": {
+      "status": "passed",
+      "saved_context_window": 262144,
+      "active_context_window": 131072,
+      "pending_restart": true,
+      "runtime_process_unchanged": true,
+      "admission_preserved": true,
+      "delayed_restart_seen": false
+    },
+    "explicit_stop_start_activates_saved_settings": {
+      "status": "passed",
+      "new_runtime_process": true,
+      "saved_context_window": 262144,
+      "active_context_window": 262144,
+      "pending_restart": false
+    },
+    "same_package_upgrade_preserves_settings_and_synthetic_markers": {
+      "status": "passed",
+      "saved_settings_preserved": true,
+      "active_snapshot_preserved": true,
+      "synthetic_account_marker_preserved": true,
+      "legacy_control_token_digest_preserved": true,
+      "restart_required_after_upgrade": true
+    },
+    "post_upgrade_runtime_start": {
+      "status": "passed",
+      "runtime_running": true,
+      "active_context_window": 262144,
+      "pending_restart": false,
+      "ready": false,
+      "login_state": "unknown",
+      "text_ready": false,
+      "tools_ready": false,
+      "real_account_or_provider_call": false
+    },
+    "final_stop_cleanup": {
+      "status": "passed",
+      "process_record_absent": true,
+      "stop_request_absent": true,
+      "independently_checked_recorded_process_count": 6,
+      "independently_checked_alive_process_count": 0
+    }
+  },
+  "fixture_retry": {
+    "r1": "During startup, CodexHub replaced the undersized synthetic control token, so the probe's preservation assertion failed.",
+    "r2": "The noncredential test fixture was corrected and all eight lifecycle stages passed.",
+    "token_value_or_hash_included": false
+  },
+  "focused_rechecks": {
+    "candidate_sha": "f2f95fe1aff0294dc28b848ed4b4bfa4d5be429d",
+    "status": "passed",
+    "passed": 4
+  },
+  "application_release": false,
+  "production_installation": false
+}
