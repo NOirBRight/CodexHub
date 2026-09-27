@@ -15,5 +15,10 @@
         "skipTaskbar": false
       }
     ]
+  },
+  "bundle": {
+    "resources": {
+      "resources/chatgpt-web-runtime/*.tar.gz": "config"
+    }
   }
 }
