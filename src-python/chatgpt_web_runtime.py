@@ -17,13 +17,17 @@ require_python_313(__file__)
 
 import hashlib
 import hmac
+import io
 import json
+import math
 import os
 import platform
+import re
 import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -33,9 +37,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterator
 
 PINNED_COMMIT = "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
 PINNED_VERSION = "6.1.1"
@@ -52,6 +57,27 @@ REJECTED_ENTRIES = ("setup", "dev", "--replace-codex-route", "install.sh", "inst
 CONNECTOR_NAME = "Codex Native2"
 ZERO_RISK_CONNECTOR_NAME = "Codex Zero Risk"
 ENTRY_NAMES = ("bin/codex-chatgpt-web", "bin/codex-chatgpt-web.cmd")
+ZERO_RISK_UNSUPPORTED_REASON = (
+    "Zero Risk Pro requires manual browser interaction with the desktop launcher; "
+    "the managed runtime uses automatic interaction with managed Chromium"
+)
+TUNNEL_CLIENT_VERSION = "0.0.12"
+TUNNEL_CLIENT_ALLOWED_HOSTS = ALLOWED_DOWNLOAD_HOSTS | {"github.com"}
+TUNNEL_CLIENT_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
+TUNNEL_CONNECT_TIMEOUT_SECONDS = 125
+TUNNEL_ID_PATTERN = re.compile(r"^tunnel_[a-f0-9]{32}$")
+TUNNEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+RUNTIME_OPTION_DEFAULTS: dict[str, Any] = {
+    "context_window": 256000,
+    "headed": True,
+    "auto_approve_tool_calls": False,
+    "use_saved_chats": False,
+    "experimental_bigger_context": False,
+    "experimental_skill_attachments": False,
+    "experimental_fresh_conversation_per_turn": False,
+    "zero_risk_pro_enabled": False,
+    "stall_timeout_sec": None,
+}
 
 
 class RuntimeError_(RuntimeError):
@@ -115,14 +141,40 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 def _write_json(path: Path, payload: dict[str, Any], mode: int = 0o644) -> None:
     _mkdir(path.parent)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}-{secrets.token_hex(8)}")
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     try:
         os.chmod(path, mode)
     except OSError:
         return
+
+
+def _write_private_bytes(path: Path, payload: bytes) -> None:
+    _mkdir(path.parent)
+    temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}-{secrets.token_hex(8)}")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _sha256(path: Path) -> str:
@@ -142,7 +194,7 @@ def _control_token(home: Path) -> str:
 def redact(text: str, secrets: list[str]) -> str:
     redacted = text
     for secret in secrets:
-        if len(secret) >= 8:
+        if secret:
             redacted = redacted.replace(secret, "[redacted]")
     return _redact_token_prefix(redacted, "sk-")
 
@@ -169,8 +221,24 @@ def _redact_token_prefix(text: str, prefix: str) -> str:
 
 
 def _secrets(home: Path) -> list[str]:
-    token = _control_token(home)
-    return [token] if token else []
+    values = [_control_token(home)]
+    settings = _read_json(_settings_path(home)) or {}
+    tunnel = settings.get("tunnel")
+    key = tunnel.get("runtime_key") if isinstance(tunnel, dict) else None
+    if isinstance(key, str):
+        values.append(key)
+    config = _read_json(_web_home(home) / "config.json") or {}
+    active_tunnel = config.get("tunnel")
+    key_path = active_tunnel.get("runtimeKeyFile") if isinstance(active_tunnel, dict) else None
+    if (
+        isinstance(key_path, str)
+        and Path(key_path).expanduser().resolve() == _managed_runtime_key(home).resolve()
+    ):
+        try:
+            values.append(Path(key_path).read_text(encoding="utf-8").strip())
+        except OSError:
+            pass
+    return [value for value in values if value]
 
 
 def _append_log(home: Path, message: str) -> None:
@@ -263,12 +331,69 @@ def _artifact(pin: dict[str, Any]) -> dict[str, Any]:
     return artifact
 
 
+def _tunnel_artifact(pin: dict[str, Any]) -> dict[str, Any]:
+    component = pin.get("tunnel_client")
+    if not isinstance(component, dict) or component.get("version") != TUNNEL_CLIENT_VERSION:
+        raise RuntimeError_("ChatGPT Web Tunnel client pin is missing or incompatible")
+    artifacts = component.get("artifacts")
+    artifact = artifacts.get(artifact_key()) if isinstance(artifacts, dict) else None
+    if not isinstance(artifact, dict):
+        raise RuntimeError_("ChatGPT Web Tunnel client pin has no artifact for this platform")
+    filename = artifact.get("filename")
+    expected_prefix = f"tunnel-client-v{TUNNEL_CLIENT_VERSION}-"
+    if (
+        not isinstance(filename, str)
+        or not filename.startswith(expected_prefix)
+        or not filename.endswith(".zip")
+        or Path(filename).name != filename
+    ):
+        raise RuntimeError_("ChatGPT Web Tunnel client pin filename is invalid")
+    url = artifact.get("url")
+    parsed = urllib.parse.urlparse(url if isinstance(url, str) else "")
+    expected_path = f"/openai/tunnel-client/releases/download/v{TUNNEL_CLIENT_VERSION}/{filename}"
+    if parsed.scheme != "https" or parsed.hostname != "github.com" or parsed.path != expected_path:
+        raise RuntimeError_("ChatGPT Web Tunnel client URL is not the pinned release")
+    digest = artifact.get("sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise RuntimeError_("ChatGPT Web Tunnel client checksum is invalid")
+    return artifact
+
+
 def _runtime_root(home: Path) -> Path:
     return home / "current" / "runtime"
 
 
 def _web_home(home: Path) -> Path:
     return home / "web-home"
+
+
+def _settings_path(home: Path) -> Path:
+    return home / "runtime-settings.json"
+
+
+def _settings_lock_path(home: Path) -> Path:
+    return home / "runtime-settings.lock"
+
+
+def _managed_tunnel_binary(home: Path) -> Path:
+    return _web_home(home) / "bin" / ("tunnel-client.exe" if os.name == "nt" else "tunnel-client")
+
+
+def _managed_runtime_key(home: Path) -> Path:
+    return _web_home(home) / "secrets" / "tunnel-runtime-automatic.key"
+
+
+def _managed_profile_dir(home: Path) -> Path:
+    return _web_home(home) / "tunnel" / "profiles"
+
+
+def _tunnel_alias_prefix(home: Path) -> str:
+    identity = hashlib.sha256(str(home.resolve()).casefold().encode("utf-8")).hexdigest()[:12]
+    return f"codexhub-{identity}-"
+
+
+def _owned_tunnel_alias(home: Path, alias: str) -> str:
+    return f"{_tunnel_alias_prefix(home)}{alias}"
 
 
 def _codex_home(home: Path) -> Path:
@@ -327,9 +452,289 @@ def _storage_state(home: Path) -> Path:
     return _web_home(home) / "browser" / "storage-state.json"
 
 
+def _default_settings() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "mode": "browser-only",
+        "tunnel": {
+            "tunnel_id": "",
+            "profile_name": "codex-chatgpt-web",
+            "alias": "codex-chatgpt-web",
+            "runtime_key": "",
+        },
+        "connector_name": CONNECTOR_NAME,
+        "options": dict(RUNTIME_OPTION_DEFAULTS),
+    }
+
+
+@contextmanager
+def _settings_lock(home: Path) -> Iterator[None]:
+    _mkdir(home)
+    handle = _settings_lock_path(home).open("a+")
+    deadline = time.monotonic() + 10
+    try:
+        while True:
+            try:
+                _try_lock(handle)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError_("ChatGPT Web settings are busy; retry the operation")
+                time.sleep(0.01)
+        yield
+    finally:
+        handle.close()
+
+
+def _validate_settings(
+    settings: dict[str, Any], *, require_full: bool, allow_unsupported_options: bool = False
+) -> dict[str, Any]:
+    if settings.get("version") != 1:
+        raise RuntimeError_("ChatGPT Web settings version is unsupported")
+    if settings.get("mode") not in {"browser-only", "full"}:
+        raise RuntimeError_("ChatGPT Web mode must be browser-only or full")
+    connector = settings.get("connector_name")
+    if not isinstance(connector, str) or not connector.strip() or len(connector) > 80:
+        raise RuntimeError_("ChatGPT connector name must contain 1 to 80 characters")
+    if any(ord(character) < 32 for character in connector):
+        raise RuntimeError_("ChatGPT connector name contains unsupported characters")
+    tunnel = settings.get("tunnel")
+    if not isinstance(tunnel, dict):
+        raise RuntimeError_("ChatGPT Tunnel settings are invalid")
+    tunnel_id = tunnel.get("tunnel_id")
+    profile_name = tunnel.get("profile_name")
+    alias = tunnel.get("alias")
+    runtime_key = tunnel.get("runtime_key")
+    if not isinstance(tunnel_id, str) or (tunnel_id and not TUNNEL_ID_PATTERN.fullmatch(tunnel_id)):
+        raise RuntimeError_("ChatGPT Tunnel ID is invalid")
+    if not isinstance(profile_name, str) or not TUNNEL_NAME_PATTERN.fullmatch(profile_name):
+        raise RuntimeError_("ChatGPT Tunnel profile name is invalid")
+    if not isinstance(alias, str) or len(alias) > 40 or not TUNNEL_NAME_PATTERN.fullmatch(alias):
+        raise RuntimeError_("ChatGPT Tunnel alias is invalid")
+    if not isinstance(runtime_key, str) or len(runtime_key.encode("utf-8")) > 64 * 1024:
+        raise RuntimeError_("ChatGPT Tunnel Runtime Key is invalid")
+    if require_full and settings["mode"] == "full" and (
+        not tunnel_id or not runtime_key.strip()
+    ):
+        raise RuntimeError_("Full mode requires a Tunnel ID and Runtime Key")
+    options = settings.get("options")
+    if not isinstance(options, dict) or set(options) != set(RUNTIME_OPTION_DEFAULTS):
+        raise RuntimeError_("ChatGPT runtime options are invalid")
+    context_window = options.get("context_window")
+    if (
+        not isinstance(context_window, int)
+        or isinstance(context_window, bool)
+        or not 1 <= context_window <= 9_007_199_254_740_991
+    ):
+        raise RuntimeError_("ChatGPT context window must be a positive safe integer")
+    for name in RUNTIME_OPTION_DEFAULTS.keys() - {"context_window", "stall_timeout_sec"}:
+        if not isinstance(options.get(name), bool):
+            raise RuntimeError_(f"ChatGPT option {name} must be true or false")
+    if options["zero_risk_pro_enabled"] and not allow_unsupported_options:
+        raise RuntimeError_(ZERO_RISK_UNSUPPORTED_REASON)
+    stall_timeout = options.get("stall_timeout_sec")
+    if stall_timeout is not None and (
+        not isinstance(stall_timeout, (int, float))
+        or isinstance(stall_timeout, bool)
+        or not math.isfinite(stall_timeout)
+        or stall_timeout <= 0
+    ):
+        raise RuntimeError_("ChatGPT stall timeout must be a positive number")
+    return settings
+
+
+def _settings_from_upstream(home: Path, config: dict[str, Any]) -> dict[str, Any]:
+    settings = _default_settings()
+    mode = config.get("mode")
+    if mode in {"browser-only", "full"}:
+        settings["mode"] = mode
+    if config.get("browserInteractionMode", "automatic") != "automatic":
+        raise RuntimeError_("This managed runtime supports the automatic connector mode only")
+    connector = config.get("automaticAppName", config.get("appName", CONNECTOR_NAME))
+    if isinstance(connector, str) and connector.strip():
+        settings["connector_name"] = connector.strip()
+    option_keys = {
+        "context_window": "contextWindow",
+        "headed": "headed",
+        "auto_approve_tool_calls": "autoApproveToolCalls",
+        "use_saved_chats": "useSavedChats",
+        "experimental_bigger_context": "experimentalBiggerContext",
+        "experimental_skill_attachments": "experimentalSkillAttachments",
+        "experimental_fresh_conversation_per_turn": "experimentalFreshConversationPerTurn",
+        "zero_risk_pro_enabled": "zeroRiskProEnabled",
+        "stall_timeout_sec": "stallTimeoutSec",
+    }
+    for target, source in option_keys.items():
+        if source in config:
+            settings["options"][target] = config[source]
+    tunnel = config.get("tunnel")
+    if not isinstance(tunnel, dict) and isinstance(config.get("automaticTunnel"), dict):
+        tunnel = config["automaticTunnel"]
+    if isinstance(tunnel, dict):
+        alias = tunnel.get("alias", "codex-chatgpt-web")
+        if isinstance(alias, str) and alias.startswith(_tunnel_alias_prefix(home)):
+            alias = alias.removeprefix(_tunnel_alias_prefix(home))
+        settings["tunnel"].update(
+            tunnel_id=tunnel.get("tunnelId", ""),
+            profile_name=tunnel.get("profileName", "codex-chatgpt-web"),
+            alias=alias,
+        )
+        expected_binary = _managed_tunnel_binary(home).resolve()
+        expected_profile = _managed_profile_dir(home).resolve()
+        binary = tunnel.get("binaryPath")
+        profile = tunnel.get("profileDir")
+        key_path = tunnel.get("runtimeKeyFile")
+        if binary and Path(str(binary)).expanduser().resolve() != expected_binary:
+            raise RuntimeError_("Existing ChatGPT Tunnel uses an unmanaged client path")
+        if profile and Path(str(profile)).expanduser().resolve() != expected_profile:
+            raise RuntimeError_("Existing ChatGPT Tunnel uses an unmanaged profile path")
+        if key_path:
+            expected_key = _managed_runtime_key(home).resolve()
+            if Path(str(key_path)).expanduser().resolve() != expected_key:
+                raise RuntimeError_("Existing ChatGPT Tunnel uses an unmanaged key path")
+            try:
+                settings["tunnel"]["runtime_key"] = expected_key.read_text(encoding="utf-8").strip()
+            except OSError:
+                settings["tunnel"]["runtime_key"] = ""
+    return _validate_settings(settings, require_full=False, allow_unsupported_options=True)
+
+
+def _read_saved_settings_locked(home: Path) -> dict[str, Any]:
+    path = _settings_path(home)
+    if path.exists():
+        payload = _read_json(path)
+        if payload is None:
+            raise RuntimeError_("Saved ChatGPT Web settings are unreadable")
+        return _validate_settings(payload, require_full=False, allow_unsupported_options=True)
+    old_config = _read_json(_web_home(home) / "config.json")
+    return _settings_from_upstream(home, old_config) if old_config else _default_settings()
+
+
+def _active_settings_locked(home: Path) -> dict[str, Any] | None:
+    config = _read_json(_web_home(home) / "config.json")
+    return _settings_from_upstream(home, config) if config else None
+
+
+def _public_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    tunnel = settings["tunnel"]
+    unsupported_options = (
+        {"zero_risk_pro_enabled": ZERO_RISK_UNSUPPORTED_REASON}
+        if settings["options"]["zero_risk_pro_enabled"]
+        else {}
+    )
+    return {
+        "mode": settings["mode"],
+        "configuration_complete": settings["mode"] != "full" or bool(
+            tunnel["tunnel_id"] and tunnel["runtime_key"].strip()
+        ),
+        "connector_name": settings["connector_name"],
+        "tunnel": {
+            "tunnel_id": tunnel["tunnel_id"],
+            "profile_name": tunnel["profile_name"],
+            "alias": tunnel["alias"],
+            "runtime_key_configured": bool(tunnel["runtime_key"]),
+        },
+        "options": dict(settings["options"]),
+        "unsupported_options": unsupported_options,
+    }
+
+
+def _settings_snapshot_locked(home: Path) -> dict[str, Any]:
+    saved = _read_saved_settings_locked(home)
+    config_path = _web_home(home) / "config.json"
+    active_state = "not_started"
+    try:
+        active = _active_settings_locked(home)
+        if active is not None:
+            active_state = "loaded"
+        elif config_path.exists():
+            active_state = "unavailable"
+    except RuntimeError_:
+        active = None
+        active_state = "unavailable"
+    return {
+        "ok": True,
+        "saved": _public_settings(saved),
+        "active": None if active is None else _public_settings(active),
+        "active_state": active_state,
+        "pending_restart": (active is not None and saved != active) or active_state == "unavailable",
+        "restart_target": "ChatGPT Web Runtime",
+    }
+
+
+def read_settings(home: Path) -> dict[str, Any]:
+    """Return saved and last-loaded runtime settings without exposing credentials."""
+    home = _assert_private_home(home)
+    with _settings_lock(home):
+        return _settings_snapshot_locked(home)
+
+
+def save_settings(home: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate and atomically save desired settings; never affect a running process."""
+    home = _assert_private_home(home)
+    if not isinstance(payload, dict):
+        raise RuntimeError_("ChatGPT Web settings request must be an object")
+    allowed = {"mode", "connector_name", "tunnel", "options"}
+    if set(payload) - allowed:
+        raise RuntimeError_("ChatGPT Web settings request contains unsupported fields")
+    with _settings_lock(home):
+        candidate = _read_saved_settings_locked(home)
+        if "mode" in payload:
+            candidate["mode"] = payload["mode"]
+        if "connector_name" in payload:
+            candidate["connector_name"] = payload["connector_name"]
+        if "tunnel" in payload:
+            update = payload["tunnel"]
+            if not isinstance(update, dict) or set(update) - {
+                "tunnel_id", "profile_name", "alias", "runtime_key"
+            }:
+                raise RuntimeError_("ChatGPT Tunnel settings request is invalid")
+            for name in ("tunnel_id", "profile_name", "alias"):
+                if name in update:
+                    candidate["tunnel"][name] = update[name]
+            if "runtime_key" in update:
+                secret_update = update["runtime_key"]
+                if not isinstance(secret_update, dict) or set(secret_update) - {"action", "value"}:
+                    raise RuntimeError_("ChatGPT Runtime Key update is invalid")
+                action = secret_update.get("action")
+                if action == "keep" and set(secret_update) == {"action"}:
+                    pass
+                elif action == "clear" and set(secret_update) == {"action"}:
+                    candidate["tunnel"]["runtime_key"] = ""
+                elif action == "replace" and set(secret_update) == {"action", "value"}:
+                    value = secret_update.get("value")
+                    if not isinstance(value, str):
+                        raise RuntimeError_("ChatGPT Runtime Key update is invalid")
+                    candidate["tunnel"]["runtime_key"] = value.strip()
+                else:
+                    raise RuntimeError_("ChatGPT Runtime Key action must be keep, replace, or clear")
+        if "options" in payload:
+            updates = payload["options"]
+            if not isinstance(updates, dict) or set(updates) - set(RUNTIME_OPTION_DEFAULTS):
+                raise RuntimeError_("ChatGPT runtime options request is invalid")
+            if updates.get("zero_risk_pro_enabled") is True:
+                raise RuntimeError_(ZERO_RISK_UNSUPPORTED_REASON)
+            candidate["options"].update(updates)
+        _validate_settings(candidate, require_full=False, allow_unsupported_options=True)
+        try:
+            _write_json(_settings_path(home), candidate, mode=0o600)
+        except OSError as exc:
+            raise RuntimeError_("ChatGPT Web settings could not be saved") from exc
+        result = _settings_snapshot_locked(home)
+    result["changed"] = True
+    return result
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name != "nt":
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(") ", 1)[1].split(maxsplit=1)[0]
+            if state in {"Z", "X"}:
+                return False
+        except (OSError, IndexError):
+            pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -751,55 +1156,479 @@ def _browser_executable() -> str:
 
 def _write_minimum_config(home: Path, entry: Path) -> int:
     web_home = _web_home(home)
-    _mkdir(web_home / "browser")
-    _mkdir(web_home / "socket")
-    _mkdir(_codex_home(home))
-    port = _free_port()
-    token = secrets.token_urlsafe(48)
-    storage_state = web_home / "browser" / "storage-state.json"
-    # Match the pinned runtime's login marker contract, never a stale config.json.
-    capabilities = _read_json(storage_state.with_name(storage_state.name + ".verified.json")) or {}
-    verified = (
-        storage_state.is_file()
-        and capabilities.get("version") == 1
-        and capabilities.get("authenticated") is True
-        and isinstance(capabilities.get("verifiedAt"), str)
-    )
-    sol_available = verified and capabilities.get("solAvailable") is True
-    _write_json(
-        web_home / "config.json",
-        {
+    with _settings_lock(home):
+        settings = _validate_settings(_read_saved_settings_locked(home), require_full=True)
+        web_config_path = web_home / "config.json"
+        previous = _read_json(web_config_path) or {}
+        _mkdir(web_home / "browser")
+        _mkdir(web_home / "socket")
+        _mkdir(_codex_home(home))
+        port = _free_port()
+        old_token = previous.get("controlToken")
+        token = (
+            old_token
+            if isinstance(old_token, str) and re.fullmatch(r"[A-Za-z0-9_-]{40,}", old_token)
+            else secrets.token_urlsafe(48)
+        )
+        storage_state = _storage_state(home)
+        capabilities = _read_json(storage_state.with_name(storage_state.name + ".verified.json")) or {}
+        verified = (
+            storage_state.is_file()
+            and capabilities.get("version") == 1
+            and capabilities.get("authenticated") is True
+            and isinstance(capabilities.get("verifiedAt"), str)
+        )
+        sol_available = verified and capabilities.get("solAvailable") is True
+        options = settings["options"]
+        config: dict[str, Any] = {
             "version": 3,
             "releaseVersion": PINNED_VERSION,
-            "mode": "browser-only",
-            "subagentProtocol": "compatibility-v1",
+            "mode": settings["mode"],
+            "subagentProtocol": previous.get("subagentProtocol", "compatibility-v1"),
             "host": LOOPBACK_HOST,
             "port": port,
-            "contextWindow": 256000,
-            "appName": CONNECTOR_NAME,
-            "automaticAppName": CONNECTOR_NAME,
+            "contextWindow": options["context_window"],
+            "appName": settings["connector_name"],
+            "automaticAppName": settings["connector_name"],
             "manualAppName": ZERO_RISK_CONNECTOR_NAME,
             "browserHost": "managed-chrome",
             "browserInteractionMode": "automatic",
             "chromeExecutablePath": _browser_executable(),
             "storageStatePath": str(storage_state),
             "brokerSocketPath": str(web_home / "socket" / "turn-broker.sock"),
-            "headed": True,
+            "headed": options["headed"],
             "solAvailable": sol_available,
             "extraHighAvailable": sol_available and capabilities.get("extraHighAvailable") is True,
             "proAvailable": sol_available and capabilities.get("proAvailable") is True,
-            "experimentalBiggerContext": False,
-            "experimentalSkillAttachments": False,
-            "experimentalFreshConversationPerTurn": False,
-            "useSavedChats": False,
-            "zeroRiskProEnabled": False,
-            "autoApproveToolCalls": False,
+            "experimentalBiggerContext": options["experimental_bigger_context"],
+            "experimentalSkillAttachments": options["experimental_skill_attachments"],
+            "experimentalFreshConversationPerTurn": options["experimental_fresh_conversation_per_turn"],
+            "useSavedChats": options["use_saved_chats"],
+            "zeroRiskProEnabled": options["zero_risk_pro_enabled"],
+            "autoApproveToolCalls": options["auto_approve_tool_calls"],
             "controlToken": token,
             "runtimeCommand": [str(entry)],
+        }
+        if options["stall_timeout_sec"] is not None:
+            config["stallTimeoutSec"] = options["stall_timeout_sec"]
+        if settings["mode"] == "full":
+            tunnel = settings["tunnel"]
+            key_path = _managed_runtime_key(home)
+            _write_private_bytes(key_path, tunnel["runtime_key"].encode("utf-8"))
+            config["tunnel"] = {
+                "binaryPath": str(_managed_tunnel_binary(home)),
+                "tunnelId": tunnel["tunnel_id"],
+                "runtimeKeyFile": str(key_path),
+                "profileDir": str(_managed_profile_dir(home)),
+                "profileName": tunnel["profile_name"],
+                "alias": _owned_tunnel_alias(home, tunnel["alias"]),
+            }
+        _write_json(web_config_path, config, mode=0o600)
+    return port
+
+
+def _tunnel_manifest_path(home: Path) -> Path:
+    return _managed_tunnel_binary(home).with_name("tunnel-client-manifest.json")
+
+
+def _tunnel_ownership_path(home: Path) -> Path:
+    return home / "tunnel-ownership.json"
+
+
+def _download_tunnel_archive(artifact: dict[str, Any]) -> bytes:
+    url = str(artifact["url"])
+    request = urllib.request.Request(url, headers={"User-Agent": "CodexHub"})
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            final = urllib.parse.urlparse(response.geturl())
+            if final.scheme != "https" or final.hostname not in TUNNEL_CLIENT_ALLOWED_HOSTS:
+                raise RuntimeError_("Tunnel client download left the pinned release")
+            length = response.headers.get("Content-Length")
+            if length and int(length) > TUNNEL_CLIENT_MAX_DOWNLOAD_BYTES:
+                raise RuntimeError_("Tunnel client archive exceeds the size limit")
+            payload = response.read(TUNNEL_CLIENT_MAX_DOWNLOAD_BYTES + 1)
+    except (OSError, urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError_("Pinned Tunnel client download failed") from exc
+    if len(payload) > TUNNEL_CLIENT_MAX_DOWNLOAD_BYTES:
+        raise RuntimeError_("Tunnel client archive exceeds the size limit")
+    return payload
+
+
+def _check_tunnel_version(binary: Path, home: Path) -> None:
+    try:
+        result = subprocess.run(
+            [str(binary), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=_runtime_env(home),
+            cwd=str(binary.parent),
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError_("Managed Tunnel client version check failed") from exc
+    if result.returncode != 0 or TUNNEL_CLIENT_VERSION not in f"{result.stdout}\n{result.stderr}":
+        raise RuntimeError_("Managed Tunnel client version check failed")
+
+
+def _ensure_tunnel_client(home: Path, pin: dict[str, Any]) -> Path:
+    artifact = _tunnel_artifact(pin)
+    binary = _managed_tunnel_binary(home)
+    manifest_path = _tunnel_manifest_path(home)
+    if binary.is_symlink() or manifest_path.is_symlink():
+        raise RuntimeError_("Managed Tunnel client path must not be a symbolic link")
+    manifest = _read_json(manifest_path)
+    if binary.is_file() and manifest is not None:
+        digest = _sha256(binary)
+        if (
+            manifest.get("tunnelClientVersion") == TUNNEL_CLIENT_VERSION
+            and manifest.get("asset") == artifact["filename"]
+            and manifest.get("archiveSha256") == artifact["sha256"]
+            and manifest.get("binarySha256") == digest
+            and (os.name == "nt" or binary.stat().st_mode & 0o111)
+        ):
+            _check_tunnel_version(binary, home)
+            return binary
+    payload = _download_tunnel_archive(artifact)
+    if hashlib.sha256(payload).hexdigest() != artifact["sha256"]:
+        raise RuntimeError_("Tunnel client archive checksum mismatch")
+    expected_name = "tunnel-client.exe" if os.name == "nt" else "tunnel-client"
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            matches = [
+                entry for entry in archive.infolist()
+                if PurePosixPath(entry.filename.replace("\\", "/")).name == expected_name
+            ]
+            if len(matches) != 1 or stat.S_ISLNK(matches[0].external_attr >> 16):
+                raise RuntimeError_("Pinned Tunnel archive has no unique regular client binary")
+            if matches[0].file_size < 1 or matches[0].file_size > TUNNEL_CLIENT_MAX_DOWNLOAD_BYTES:
+                raise RuntimeError_("Pinned Tunnel client binary has an invalid size")
+            binary_payload = archive.read(matches[0])
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        if isinstance(exc, RuntimeError_):
+            raise
+        raise RuntimeError_("Pinned Tunnel client archive is invalid") from exc
+    if not binary_payload:
+        raise RuntimeError_("Pinned Tunnel client binary is empty")
+    staged = binary.with_name(f"{binary.name}.install-{os.getpid()}-{secrets.token_hex(8)}")
+    try:
+        _write_private_bytes(staged, binary_payload)
+        if os.name != "nt":
+            os.chmod(staged, 0o700)
+        _check_tunnel_version(staged, home)
+        _mkdir(binary.parent)
+        os.replace(staged, binary)
+        if os.name != "nt":
+            os.chmod(binary, 0o700)
+        _write_json(
+            manifest_path,
+            {
+                "version": 1,
+                "tunnelClientVersion": TUNNEL_CLIENT_VERSION,
+                "asset": artifact["filename"],
+                "archiveSha256": artifact["sha256"],
+                "binarySha256": hashlib.sha256(binary_payload).hexdigest(),
+            },
+            mode=0o600,
+        )
+    except Exception:
+        staged.unlink(missing_ok=True)
+        raise
+    return binary
+
+
+def _tunnel_config(home: Path) -> dict[str, str]:
+    config = _read_json(_web_home(home) / "config.json") or {}
+    tunnel = config.get("tunnel")
+    if config.get("mode") != "full" or not isinstance(tunnel, dict):
+        raise RuntimeError_("Full mode has no managed Tunnel configuration")
+    expected_paths = {
+        "binaryPath": _managed_tunnel_binary(home),
+        "runtimeKeyFile": _managed_runtime_key(home),
+        "profileDir": _managed_profile_dir(home),
+    }
+    for name, expected in expected_paths.items():
+        value = tunnel.get(name)
+        if not isinstance(value, str) or Path(value).expanduser().resolve() != expected.resolve():
+            raise RuntimeError_("ChatGPT Tunnel configuration uses an unmanaged path")
+    tunnel_id = tunnel.get("tunnelId")
+    profile_name = tunnel.get("profileName")
+    alias = tunnel.get("alias")
+    if (
+        not isinstance(tunnel_id, str) or not TUNNEL_ID_PATTERN.fullmatch(tunnel_id)
+        or not isinstance(profile_name, str) or not TUNNEL_NAME_PATTERN.fullmatch(profile_name)
+        or not isinstance(alias, str) or not alias.startswith(_tunnel_alias_prefix(home))
+    ):
+        raise RuntimeError_("ChatGPT Tunnel configuration is invalid")
+    return {
+        "binary": str(expected_paths["binaryPath"]),
+        "tunnel_id": tunnel_id,
+        "key": str(expected_paths["runtimeKeyFile"]),
+        "profile_dir": str(expected_paths["profileDir"]),
+        "profile_name": profile_name,
+        "alias": alias,
+    }
+
+
+def _tunnel_mcp_command(entry: Path, broker_socket: Path, contract: str = "native") -> str:
+    if contract not in {"native", "safe"}:
+        raise RuntimeError_("Unsupported Tunnel MCP contract")
+    command = [str(entry), "mcp", "--contract", contract, "--broker-socket", str(broker_socket)]
+    if any("\r" in item or "\n" in item for item in command):
+        raise RuntimeError_("Tunnel MCP command contains a newline")
+    return " ".join('"' + item.replace("\\", "\\\\").replace('"', '\\"') + '"' for item in command)
+
+
+def _run_tunnel_command(
+    home: Path,
+    tunnel: dict[str, str],
+    args: list[str],
+    *,
+    timeout: float,
+) -> tuple[int, str, str]:
+    try:
+        result = subprocess.run(
+            [tunnel["binary"], *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=_runtime_env(home),
+            cwd=tunnel["profile_dir"],
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = _tunnel_error_output(home, _captured_text(exc.stdout), _captured_text(exc.stderr))
+        detail = f": {output}" if output else ""
+        raise RuntimeError_(f"Managed Tunnel client command timed out{detail}") from exc
+    except OSError as exc:
+        raise RuntimeError_("Managed Tunnel client command failed") from exc
+    return result.returncode, result.stdout, result.stderr
+
+
+def _captured_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value or ""
+
+
+def _tunnel_error_output(home: Path, stdout: str, stderr: str) -> str:
+    return redact(f"{stderr}\n{stdout}", _secrets(home)).strip()[:2000]
+
+
+def _tunnel_inventory(home: Path, tunnel: dict[str, str]) -> dict[str, Any]:
+    code, stdout, stderr = _run_tunnel_command(home, tunnel, ["runtimes", "cleanup", "--json"], timeout=10)
+    if code != 0:
+        output = _tunnel_error_output(home, stdout, stderr)
+        raise RuntimeError_(f"Tunnel runtime inventory failed: {output or f'exit {code}'}")
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError_("Tunnel runtime inventory returned invalid JSON") from exc
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise RuntimeError_("Tunnel runtime inventory has no entries")
+    matches = [item for item in entries if isinstance(item, dict) and item.get("alias") == tunnel["alias"]]
+    if len(matches) > 1:
+        raise RuntimeError_("Tunnel runtime inventory contains a duplicate owned alias")
+    if not matches:
+        return {"state": "stopped", "pid": None}
+    entry = matches[0]
+    state = entry.get("runtime_state")
+    if state not in {"stopped", "starting", "healthy", "ready"}:
+        raise RuntimeError_("Tunnel runtime inventory returned an unknown state")
+    return {"state": state}
+
+
+def _tunnel_process_status(home: Path, tunnel: dict[str, str]) -> dict[str, Any]:
+    code, stdout, stderr = _run_tunnel_command(
+        home, tunnel, ["runtimes", "status", tunnel["alias"], "--json"], timeout=10
+    )
+    if code != 0:
+        output = _tunnel_error_output(home, stdout, stderr)
+        raise RuntimeError_(f"Tunnel runtime status failed: {output or f'exit {code}'}")
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError_("Tunnel runtime status returned invalid JSON") from exc
+    process = payload.get("process") if isinstance(payload, dict) else None
+    if (
+        not isinstance(process, dict)
+        or payload.get("alias") != tunnel["alias"]
+        or payload.get("tunnel_id") != tunnel["tunnel_id"]
+        or Path(str(process.get("profile_dir") or "")).expanduser().resolve()
+        != Path(tunnel["profile_dir"]).resolve()
+    ):
+        raise RuntimeError_("Tunnel runtime status does not match the managed alias and profile")
+    mode = process.get("mode")
+    pid = process.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        pid = None
+    session_name = process.get("session_name")
+    if not isinstance(session_name, str) or not session_name:
+        session_name = None
+    if (mode == "process" and pid is None) or (mode == "tmux" and session_name is None):
+        raise RuntimeError_("Tunnel runtime status has no verifiable process identity")
+    if mode not in {"process", "tmux"}:
+        raise RuntimeError_("Tunnel runtime status has an unknown process mode")
+    running = payload.get("process_running") is True
+    if mode == "tmux":
+        tmux = payload.get("tmux")
+        running = running or (isinstance(tmux, dict) and tmux.get("running") is True)
+    if not running:
+        raise RuntimeError_("Tunnel runtime process is not running")
+    return {"pid": pid, "mode": mode, "session_name": session_name}
+
+
+def _same_tunnel_owner(
+    marker: dict[str, Any] | None,
+    tunnel: dict[str, str],
+    status: dict[str, Any],
+) -> bool:
+    if not (
+        marker
+        and marker.get("owner") == "codexhub"
+        and marker.get("alias") == tunnel["alias"]
+        and marker.get("tunnel_id") == tunnel["tunnel_id"]
+        and marker.get("profile_dir") == tunnel["profile_dir"]
+        and marker.get("mode") == status.get("mode")
+    ):
+        return False
+    if status["mode"] == "process":
+        return isinstance(status.get("pid"), int) and marker.get("pid") == status["pid"]
+    return isinstance(status.get("session_name"), str) and marker.get("session_name") == status["session_name"]
+
+
+def _write_tunnel_owner(
+    home: Path,
+    tunnel: dict[str, str],
+    identity: dict[str, Any],
+    *,
+    start_id: str | None = None,
+) -> None:
+    marker = {
+        "owner": "codexhub",
+        "alias": tunnel["alias"],
+        "tunnel_id": tunnel["tunnel_id"],
+        "profile_dir": tunnel["profile_dir"],
+        **identity,
+    }
+    if start_id is not None:
+        marker["start_id"] = start_id
+    _write_json(_tunnel_ownership_path(home), marker, mode=0o600)
+
+
+def _stop_tunnel_runtime(home: Path, tunnel: dict[str, str]) -> None:
+    status = _tunnel_inventory(home, tunnel)
+    marker_path = _tunnel_ownership_path(home)
+    marker = _read_json(marker_path)
+    if status["state"] == "stopped":
+        marker_path.unlink(missing_ok=True)
+        return
+    identity = _tunnel_process_status(home, tunnel)
+    if not _same_tunnel_owner(marker, tunnel, identity):
+        raise RuntimeError_("Refusing to stop an unowned Tunnel runtime alias")
+    code, stdout, stderr = _run_tunnel_command(
+        home, tunnel, ["runtimes", "stop", tunnel["alias"], "--json"], timeout=10
+    )
+    output = _tunnel_error_output(home, stdout, stderr)
+    if code != 0 and not re.search(r"not found|not running|unknown alias", output, re.IGNORECASE):
+        raise RuntimeError_(f"Tunnel runtime refused shutdown: {output or f'exit {code}'}")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        status = _tunnel_inventory(home, tunnel)
+        if status["state"] == "stopped":
+            marker_path.unlink(missing_ok=True)
+            return
+        time.sleep(0.25)
+    raise RuntimeError_("Tunnel runtime did not confirm stopped state")
+
+
+def _start_tunnel_runtime(home: Path, pin: dict[str, Any], entry: Path) -> dict[str, str]:
+    tunnel = _tunnel_config(home)
+    _ensure_tunnel_client(home, pin)
+    Path(tunnel["profile_dir"]).mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(tunnel["profile_dir"], 0o700)
+    except OSError:
+        pass
+    previous = _tunnel_inventory(home, tunnel)
+    if previous["state"] != "stopped":
+        marker = _read_json(_tunnel_ownership_path(home))
+        identity = _tunnel_process_status(home, tunnel)
+        if not _same_tunnel_owner(marker, tunnel, identity):
+            raise RuntimeError_("Tunnel alias is already in use by an unowned runtime")
+        _stop_tunnel_runtime(home, tunnel)
+    else:
+        _tunnel_ownership_path(home).unlink(missing_ok=True)
+    start_id = secrets.token_hex(16)
+    _write_json(
+        _tunnel_ownership_path(home),
+        {
+            "owner": "codexhub",
+            "alias": tunnel["alias"],
+            "tunnel_id": tunnel["tunnel_id"],
+            "profile_dir": tunnel["profile_dir"],
+            "start_id": start_id,
         },
         mode=0o600,
     )
-    return port
+    config = _read_json(_web_home(home) / "config.json") or {}
+    contract = "safe" if config.get("browserInteractionMode") == "manual" else "native"
+    args = [
+        "runtimes", "connect",
+        "--alias", tunnel["alias"],
+        "--profile", tunnel["profile_name"],
+        "--profile-dir", tunnel["profile_dir"],
+        "--tunnel-client-bin", tunnel["binary"],
+        "--tunnel-id", tunnel["tunnel_id"],
+        "--runtime-api-key", f"file:{tunnel['key']}",
+        "--mcp-command", _tunnel_mcp_command(entry, Path(config["brokerSocketPath"]), contract),
+        "--json",
+    ]
+    try:
+        code, stdout, stderr = _run_tunnel_command(
+            home, tunnel, args, timeout=TUNNEL_CONNECT_TIMEOUT_SECONDS
+        )
+        try:
+            result = json.loads(stdout) if stdout else None
+        except json.JSONDecodeError as exc:
+            raise RuntimeError_("Tunnel managed startup returned invalid JSON") from exc
+        if code != 0:
+            output = _tunnel_error_output(home, stdout, stderr)
+            raise RuntimeError_(f"Tunnel managed startup failed: {output or f'exit {code}'}")
+        if not isinstance(result, dict) or result.get("running") is not True or result.get("healthy") is not True:
+            raise RuntimeError_("Tunnel managed startup did not confirm a healthy process")
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            status = _tunnel_inventory(home, tunnel)
+            if status["state"] == "ready":
+                identity = _tunnel_process_status(home, tunnel)
+                _write_tunnel_owner(home, tunnel, identity, start_id=start_id)
+                return tunnel
+            if status["state"] == "stopped":
+                raise RuntimeError_("Tunnel runtime stopped during startup")
+            time.sleep(1)
+        raise RuntimeError_("Tunnel runtime did not reach ready state within 120 seconds")
+    except Exception:
+        try:
+            _cleanup_tunnel_start(home, tunnel, start_id)
+        except Exception as cleanup_error:
+            _append_log(home, f"tunnel startup cleanup failed: {cleanup_error}")
+        raise
+
+
+def _cleanup_tunnel_start(home: Path, tunnel: dict[str, str], start_id: str) -> None:
+    marker_path = _tunnel_ownership_path(home)
+    marker = _read_json(marker_path)
+    if not marker or marker.get("start_id") != start_id:
+        raise RuntimeError_("Refusing Tunnel startup cleanup without matching ownership marker")
+    status = _tunnel_inventory(home, tunnel)
+    if status["state"] == "stopped":
+        marker_path.unlink(missing_ok=True)
+        return
+    identity = _tunnel_process_status(home, tunnel)
+    _write_tunnel_owner(home, tunnel, identity, start_id=start_id)
+    _stop_tunnel_runtime(home, tunnel)
 
 
 def _run_doctor(home: Path, entry: Path) -> dict[str, Any] | None:
@@ -816,13 +1645,27 @@ def _run_doctor(home: Path, entry: Path) -> dict[str, Any] | None:
     except (OSError, subprocess.TimeoutExpired):
         _append_log(home, "runtime doctor did not return")
         return None
-    stdout = redact(completed.stdout, _secrets(home))
     try:
-        payload = json.loads(stdout)
+        payload = json.loads(completed.stdout)
     except json.JSONDecodeError:
         _append_log(home, "runtime doctor did not return JSON")
         return None
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    return _redact_diagnostic_fields(payload, _secrets(home))
+
+
+def _redact_diagnostic_fields(value: Any, secrets: list[str]) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: redact(item, secrets)
+            if key in {"message", "error", "detail"} and isinstance(item, str)
+            else _redact_diagnostic_fields(item, secrets)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_diagnostic_fields(item, secrets) for item in value]
+    return value
 
 
 def _doctor_lists_image(value: dict[str, Any]) -> bool:
@@ -934,6 +1777,10 @@ def _layers_from_doctor(report: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        settings_status = read_settings(home)
+    except RuntimeError_:
+        settings_status = {"pending_restart": True, "restart_target": "ChatGPT Web Runtime"}
     loaded = pin or load_pin()
     artifact = _artifact(loaded)
     installed = _install_document(home)
@@ -952,6 +1799,9 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
     capacity = raw_capacity if isinstance(raw_capacity, str) and raw_capacity else "available"
     lifecycle = _lifecycle(home)
     window = _read_json(home / "window.json") or {}
+    window_error = window.get("error")
+    if isinstance(window_error, str):
+        window_error = redact(window_error, _secrets(home))
     restart_required = lifecycle["restart_required"] or bool(
         running and record.get("login_control") != LOGIN_CONTROL
     )
@@ -979,7 +1829,7 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
         "login": {
             "state": layers["login"],
             "window": "open" if running and window.get("open") is True else "closed",
-            "error": window.get("error"),
+            "error": window_error,
             "control": None if record is None else record.get("login_control"),
             "account_id": None,
         },
@@ -1000,6 +1850,8 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
         "capacity": capacity,
         "models": doctor_models,
         "restart_required": restart_required,
+        "settings_pending_restart": settings_status["pending_restart"],
+        "settings_restart_target": settings_status["restart_target"],
         "admitting": lifecycle["admitting"],
         "disabled": not lifecycle["enabled"],
         "installed": installed is not None,
@@ -1051,7 +1903,7 @@ class _StatusHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         home: Path = self.server.home  # type: ignore[attr-defined]
         if path == "/status":
-            text = redact(json.dumps(build_status(home), sort_keys=True), _secrets(home))
+            text = json.dumps(build_status(home), sort_keys=True)
             self._send(200, text.encode("utf-8"), "application/json")
             return
         if path == "/login":
@@ -1064,7 +1916,7 @@ class _StatusHandler(BaseHTTPRequestHandler):
 
 
 def _emit(home: Path, payload: dict[str, Any]) -> None:
-    sys.stdout.write(redact(json.dumps(payload, sort_keys=True), _secrets(home)) + "\n")
+    sys.stdout.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
 def _fail(home: Path, message: str) -> int:
@@ -1092,77 +1944,103 @@ def supervise(home: Path) -> int:
         return _fail(home, str(exc))
     from chatgpt_web_login import LoginSession
 
-    runtime_port = _write_minimum_config(home, entry)
     lock_handle = (home / "supervisor.lock").open("a+")
     try:
         _try_lock(lock_handle)
     except BlockingIOError:
         lock_handle.close()
         return _fail(home, "ChatGPT Web Runtime supervisor is already running")
-    entry_log = (home / "runtime-entry.log").open("ab")
-    child = subprocess.Popen(
-        [str(entry), "serve"],
-        env=_runtime_env(home),
-        cwd=str(_web_home(home)),
-        stdin=subprocess.DEVNULL,
-        stdout=entry_log,
-        stderr=subprocess.STDOUT,
-    )
-    server = ThreadingHTTPServer((host, 0), _StatusHandler)
-    bound_host, diagnostic_port = server.server_address[:2]
-    if bound_host != LOOPBACK_HOST:
-        child.terminate()
-        server.server_close()
-        lock_handle.close()
-        entry_log.close()
-        return _fail(home, "refusing to listen outside 127.0.0.1")
-    login = LoginSession(home, entry)
-    server.home = home  # type: ignore[attr-defined]
-    _write_json(
-        home / "process.json",
-        {
-            "pid": child.pid,
-            "supervisor_pid": os.getpid(),
-            "login_control": LOGIN_CONTROL,
-            "port": runtime_port,
-            "diagnostic_port": diagnostic_port,
-            "executable": str(entry),
-            "private_home": str(home),
-            "ownership": "codexhub-supervisor",
-        },
-    )
-    _write_lifecycle(home, enabled=True, restart_required=False)
-    _append_log(home, f"started {entry.name} serve on 127.0.0.1:{runtime_port}")
-
-    def _stop(_signum: int, _frame: Any) -> None:
-        if child.poll() is None:
-            child.terminate()
-        threading.Thread(target=server.shutdown, daemon=True).start()
-
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
-    thread.start()
+    entry_log = None
+    child = None
+    server = None
+    thread = None
+    login = None
+    tunnel = None
+    startup_error: Exception | None = None
     try:
+        runtime_port = _write_minimum_config(home, entry)
+        config = _read_json(_web_home(home) / "config.json") or {}
+        if config.get("mode") == "full":
+            tunnel = _start_tunnel_runtime(home, pin, entry)
+        entry_log = (home / "runtime-entry.log").open("ab")
+        child = subprocess.Popen(
+            [str(entry), "serve"],
+            env=_runtime_env(home),
+            cwd=str(_web_home(home)),
+            stdin=subprocess.DEVNULL,
+            stdout=entry_log,
+            stderr=subprocess.STDOUT,
+        )
+        server = ThreadingHTTPServer((host, 0), _StatusHandler)
+        bound_host, diagnostic_port = server.server_address[:2]
+        if bound_host != LOOPBACK_HOST:
+            raise RuntimeError_("refusing to listen outside 127.0.0.1")
+        login = LoginSession(home, entry)
+        server.home = home  # type: ignore[attr-defined]
+        tunnel_owner = _read_json(_tunnel_ownership_path(home)) or {}
+        _write_json(
+            home / "process.json",
+            {
+                "pid": child.pid,
+                "supervisor_pid": os.getpid(),
+                "login_control": LOGIN_CONTROL,
+                "port": runtime_port,
+                "diagnostic_port": diagnostic_port,
+                "executable": str(entry),
+                "private_home": str(home),
+                "ownership": "codexhub-supervisor",
+                "tunnel_alias": tunnel.get("alias") if tunnel else None,
+                "tunnel_pid": tunnel_owner.get("pid") if tunnel else None,
+            },
+        )
+        _write_lifecycle(home, enabled=True, restart_required=False)
+        _append_log(home, f"started {entry.name} serve on 127.0.0.1:{runtime_port}")
+
+        def _stop(_signum: int, _frame: Any) -> None:
+            if child is not None and child.poll() is None:
+                child.terminate()
+            if server is not None:
+                threading.Thread(target=server.shutdown, daemon=True).start()
+
+        signal.signal(signal.SIGTERM, _stop)
+        signal.signal(signal.SIGINT, _stop)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
+        thread.start()
         while child.poll() is None:
             login.tick()
             time.sleep(0.2)
         _append_log(home, f"runtime entry exited {child.returncode}")
+    except Exception as exc:
+        startup_error = exc if isinstance(exc, RuntimeError_) else RuntimeError_(
+            f"ChatGPT Web Runtime supervisor failed: {exc.__class__.__name__}"
+        )
     finally:
-        login.close()
-        if child.poll() is None:
+        if login is not None:
+            login.close()
+        if child is not None and child.poll() is None:
             child.terminate()
             try:
                 child.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 child.kill()
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-        entry_log.close()
+        if server is not None:
+            if thread is not None:
+                server.shutdown()
+            server.server_close()
+        if thread is not None:
+            thread.join(timeout=2)
+        if entry_log is not None:
+            entry_log.close()
+        if tunnel is not None:
+            try:
+                _stop_tunnel_runtime(home, tunnel)
+            except Exception as exc:
+                _append_log(home, f"owned Tunnel shutdown could not be confirmed: {exc}")
         (home / "process.json").unlink(missing_ok=True)
         lock_handle.close()
-    return 0 if child.returncode == 0 else 1
+    if startup_error is not None:
+        return _fail(home, str(startup_error))
+    return 0 if child is not None and child.returncode == 0 else 1
 
 
 def _try_lock(handle: Any) -> None:
@@ -1232,7 +2110,7 @@ def start_runtime(home: Path) -> dict[str, Any]:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    deadline = time.time() + 20
+    deadline = time.time() + 180
     try:
         while time.time() < deadline:
             existing = _running_status(home)
@@ -1279,19 +2157,36 @@ def stop_runtime(home: Path, *, disable: bool) -> dict[str, Any]:
         runtime_pid = int(record.get("pid") or 0)
     except (TypeError, ValueError):
         runtime_pid = 0
+    try:
+        supervisor_pid = int(record.get("supervisor_pid") or 0)
+    except (TypeError, ValueError):
+        supervisor_pid = 0
     _signal_supervisor(home)
-    deadline = time.time() + 5
-    while time.time() < deadline and runtime_pid and _pid_alive(runtime_pid):
+    deadline = time.monotonic() + 25
+    while time.monotonic() < deadline and (
+        (runtime_pid and _pid_alive(runtime_pid))
+        or (supervisor_pid and _pid_alive(supervisor_pid))
+    ):
         time.sleep(0.05)
     if runtime_pid and _pid_alive(runtime_pid):
         environ = set(_environ(runtime_pid).split("\n"))
         if f"CODEX_CHATGPT_WEB_HOME={_web_home(home)}" in environ:
             os.kill(runtime_pid, signal.SIGKILL)
-        kill_deadline = time.time() + 2
-        while time.time() < kill_deadline and _pid_alive(runtime_pid):
+        kill_deadline = time.monotonic() + 2
+        while time.monotonic() < kill_deadline and _pid_alive(runtime_pid):
             time.sleep(0.05)
-    if not runtime_pid or not _pid_alive(runtime_pid):
-        (home / "process.json").unlink(missing_ok=True)
+    if supervisor_pid and _pid_alive(supervisor_pid):
+        raise RuntimeError_("ChatGPT Web supervisor has not completed owned shutdown")
+    if runtime_pid and _pid_alive(runtime_pid):
+        raise RuntimeError_("ChatGPT Web Runtime process did not stop")
+    if _tunnel_ownership_path(home).exists():
+        try:
+            _stop_tunnel_runtime(home, _tunnel_config(home))
+        except RuntimeError_:
+            raise
+        except Exception as exc:
+            raise RuntimeError_("ChatGPT Web Tunnel shutdown could not be confirmed") from exc
+    (home / "process.json").unlink(missing_ok=True)
     state = _lifecycle(home)
     # Disable stops the supervisor only. Account files stay until delete-account.
     _write_lifecycle(
@@ -1400,6 +2295,14 @@ def main(argv: list[str] | None = None) -> int:
         elif command == "status":
             home = _assert_private_home(home)
             _emit(home, build_status(home))
+        elif command == "settings-get":
+            _emit(home, read_settings(home))
+        elif command == "settings-save":
+            try:
+                request = json.loads(sys.stdin.read())
+            except json.JSONDecodeError as exc:
+                raise RuntimeError_("ChatGPT Web settings request must be valid JSON") from exc
+            _emit(home, save_settings(home, request))
         elif command == "open-login":
             _emit(home, open_login(home))
         elif command == "close-login":
