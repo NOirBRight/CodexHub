@@ -12,14 +12,12 @@ import pytest
 from test_chatgpt_web_route import (
     MODEL_ID,
     PROMPT,
-    _doctor,
     _gateway,
     _install,
     _requests,
     _run,
     _sse_events,
     _start,
-    _write_doctor,
 )
 
 SHELL_TOOL = {
@@ -33,21 +31,9 @@ SHELL_TOOL = {
 
 
 @pytest.fixture
-def runtime(tmp_path: Path):
+def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home, pin = _install(tmp_path)
-    _write_doctor(
-        home,
-        _doctor(
-            [
-                {
-                    "id": MODEL_ID,
-                    "display_name": "Sol",
-                    "efforts": ["medium", "high"],
-                }
-            ]
-        ),
-    )
-    _start(home, pin)
+    _start(home, pin, monkeypatch)
     try:
         yield home, pin
     finally:
