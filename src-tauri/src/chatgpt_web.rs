@@ -37,12 +37,7 @@ pub fn chatgpt_web_delete_account_blocking() -> Result<Value, String> {
 }
 
 pub fn chatgpt_web_open_login_blocking() -> Result<Value, String> {
-    let value = run_cli(&["open-login"])?;
-    if let Some(url) = value.get("login_url").and_then(Value::as_str) {
-        let pinned = pin_loopback_login_url(url)?;
-        spawn_loopback_browser(&pinned)?;
-    }
-    Ok(value)
+    run_cli(&["open-login"])
 }
 
 pub fn chatgpt_web_close_login_blocking() -> Result<Value, String> {
@@ -87,26 +82,6 @@ pub async fn chatgpt_web_open_login() -> Result<Value, String> {
 #[tauri::command]
 pub async fn chatgpt_web_close_login() -> Result<Value, String> {
     spawn_cli(chatgpt_web_close_login_blocking).await
-}
-
-pub(crate) fn pin_loopback_login_url(url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url.trim()).map_err(|error| format!("invalid URL: {error}"))?;
-    if parsed.scheme() != "http" {
-        return Err("ChatGPT Web login URL must use the loopback HTTP status page".to_string());
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err("ChatGPT Web login URL must not contain credentials".to_string());
-    }
-    if parsed.host_str() != Some("127.0.0.1") {
-        return Err("ChatGPT Web login URL must be bound to 127.0.0.1".to_string());
-    }
-    let port = parsed
-        .port()
-        .ok_or_else(|| "ChatGPT Web login URL is missing its loopback port".to_string())?;
-    if parsed.path() != "/login" || parsed.query().is_some() || parsed.fragment().is_some() {
-        return Err("ChatGPT Web login URL must be the loopback /login page".to_string());
-    }
-    Ok(format!("http://127.0.0.1:{port}/login"))
 }
 
 async fn spawn_cli<F>(task: F) -> Result<Value, String>
@@ -212,70 +187,10 @@ pub(crate) fn redact_secrets(text: &str) -> String {
     output
 }
 
-fn spawn_loopback_browser(url: &str) -> Result<(), String> {
-    let mut command = loopback_browser_command(url);
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    command
-        .spawn()
-        .map_err(|error| format!("failed to open ChatGPT Web login window: {error}"))?;
-    Ok(())
-}
-
-fn loopback_browser_command(url: &str) -> Command {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let escaped = url.replace('\'', "''");
-        let mut command = Command::new("powershell");
-        command.args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &format!("Start-Process '{escaped}'"),
-        ]);
-        command.creation_flags(CREATE_NO_WINDOW);
-        command
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let mut command = Command::new("open");
-        command.arg(url);
-        command
-    }
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        let mut command = Command::new("xdg-open");
-        command.arg(url);
-        command
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{pin_loopback_login_url, redact_secrets};
+    use super::redact_secrets;
     use std::path::PathBuf;
-
-    #[test]
-    fn loopback_login_url_rejects_remote_and_credential_targets() {
-        let pinned = pin_loopback_login_url("http://127.0.0.1:43123/login").expect("pinned");
-        assert_eq!(pinned, "http://127.0.0.1:43123/login");
-        for url in [
-            "http://127.0.0.1:43123/status",
-            "http://localhost:43123/login",
-            "https://127.0.0.1:43123/login",
-            "http://0.0.0.0:43123/login",
-            "http://user:secret@127.0.0.1:43123/login",
-            "http://127.0.0.1:43123/login?token=sk-chatgpt-web-test-secret",
-            "file:///tmp/login",
-        ] {
-            pin_loopback_login_url(url).expect_err(url);
-        }
-    }
 
     #[test]
     fn command_errors_redact_secret_looking_tokens() {

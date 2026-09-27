@@ -11,6 +11,36 @@ from tests.gateway_harness import GATEWAY_CLIENT_KEY, GatewayHarness, request_ga
 from tests.test_claude_native_subscription_http import CLAUDE_OAUTH, _native_upstream
 
 
+def test_native_thinking_history_switches_to_official_without_output_only_fields() -> None:
+    with GatewayHarness() as harness:
+        harness.set_json_response(json.dumps({
+            "id": "resp_switch", "status": "completed", "model": "gpt-5.5",
+            "output": [{"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "OK", "annotations": []}]}],
+            "usage": {"input_tokens": 7, "output_tokens": 1},
+        }).encode())
+        response = request_gateway(
+            harness.host, harness.port, "POST", "/v1/messages",
+            body=json.dumps({"model": "claude-codexhub-gpt-5.5", "max_tokens": 64,
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": [
+                        {"type": "thinking", "thinking": "Portable prior summary.",
+                         "signature": "synthetic-claude-signature"},
+                        {"type": "text", "text": "Prior visible answer."}]},
+                    {"role": "user", "content": "Continue with Astra."},
+                ]}).encode(),
+            headers={"Authorization": f"Bearer {GATEWAY_CLIENT_KEY}",
+                     "Content-Type": "application/json"}, timeout=8.0,
+        )
+        assert response.status == 200
+        sent = json.loads(harness.stub.captures[-1].body)
+        assert all("status" not in item for item in sent["input"]), sent["input"]
+        assert "Portable prior summary." in json.dumps(sent["input"])
+        assert "Prior visible answer." in json.dumps(sent["input"])
+        assert "Continue with Astra." in json.dumps(sent["input"])
+
+
 def test_same_conversation_switches_native_codex_third_party_and_back() -> None:
     history = [{"role": "user", "content": "Remember switch-marker and read the file."}]
     tool_id = "toolu_switch.1"

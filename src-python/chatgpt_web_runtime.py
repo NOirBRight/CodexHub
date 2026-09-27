@@ -698,12 +698,16 @@ def delete_account(home: Path) -> dict[str, Any]:
     """Remove login files. Disable does not call this."""
     home = _assert_private_home(home)
     _mkdir(home)
+    close_login(home)
+    stop_runtime(home, disable=not _lifecycle(home)["enabled"])
     account = _account_dir(home)
     if account.is_symlink() or account.is_file():
         account.unlink()
     elif account.exists():
         shutil.rmtree(account)
-    _storage_state(home).unlink(missing_ok=True)
+    browser = _storage_state(home).parent
+    if browser.exists():
+        shutil.rmtree(browser)
     _append_log(home, "deleted ChatGPT Web account files")
     return build_status(home)
 
@@ -727,6 +731,21 @@ def _runtime_env(home: Path) -> dict[str, str]:
     env["CODEX_HOME"] = str(_codex_home(home))
     env.pop("CODEX_WEB_GPT_DEV_HOME", None)
     return env
+
+
+def _browser_executable() -> str:
+    for name in ("chromium", "chromium-browser", "google-chrome", "chrome", "msedge"):
+        if found := shutil.which(name):
+            return found
+    if os.name == "nt":
+        for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            if root := os.environ.get(variable):
+                for relative in ("Google/Chrome/Application/chrome.exe", "Microsoft/Edge/Application/msedge.exe"):
+                    candidate = Path(root) / relative
+                    if candidate.is_file():
+                        return str(candidate)
+    # Preserve a concrete path for doctor to report as missing.
+    return "/usr/bin/chromium" if os.name != "nt" else "chrome.exe"
 
 
 def _write_minimum_config(home: Path, entry: Path) -> int:
@@ -761,7 +780,7 @@ def _write_minimum_config(home: Path, entry: Path) -> int:
             "manualAppName": ZERO_RISK_CONNECTOR_NAME,
             "browserHost": "managed-chrome",
             "browserInteractionMode": "automatic",
-            "chromeExecutablePath": "/usr/bin/chromium",
+            "chromeExecutablePath": _browser_executable(),
             "storageStatePath": str(storage_state),
             "brokerSocketPath": str(web_home / "socket" / "turn-broker.sock"),
             "headed": True,
@@ -954,7 +973,8 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
         },
         "login": {
             "state": layers["login"],
-            "window": "open" if window.get("open") is True else "closed",
+            "window": "open" if running and window.get("open") is True else "closed",
+            "error": window.get("error"),
             "account_id": None,
         },
         "browser_smoke": {"state": layers["browser_smoke"]},
@@ -1064,6 +1084,8 @@ def supervise(home: Path) -> int:
         entry = _find_entry(_runtime_root(home))
     except RuntimeError_ as exc:
         return _fail(home, str(exc))
+    from chatgpt_web_login import LoginSession
+
     runtime_port = _write_minimum_config(home, entry)
     lock_handle = (home / "supervisor.lock").open("a+")
     try:
@@ -1088,6 +1110,7 @@ def supervise(home: Path) -> int:
         lock_handle.close()
         entry_log.close()
         return _fail(home, "refusing to listen outside 127.0.0.1")
+    login = LoginSession(home, entry)
     server.home = home  # type: ignore[attr-defined]
     _write_json(
         home / "process.json",
@@ -1115,9 +1138,11 @@ def supervise(home: Path) -> int:
     thread.start()
     try:
         while child.poll() is None:
+            login.tick()
             time.sleep(0.2)
         _append_log(home, f"runtime entry exited {child.returncode}")
     finally:
+        login.close()
         if child.poll() is None:
             child.terminate()
             try:
@@ -1184,7 +1209,9 @@ def start_runtime(home: Path) -> dict[str, Any]:
     _find_entry(_runtime_root(home))
     existing = _running_status(home)
     if existing is not None:
-        return existing
+        if not existing.get("restart_required"):
+            return existing
+        stop_runtime(home, disable=False)
     if (_read_json(home / "lifecycle.json") or {}).get("enabled") is False:
         _write_lifecycle(home, enabled=True, restart_required=False)
     env = os.environ.copy()
@@ -1277,20 +1304,28 @@ def open_login(home: Path) -> dict[str, Any]:
     status = _running_status(home)
     if status is None:
         status = start_runtime(home)
-    port = status.get("process", {}).get("diagnostic_port")
-    if not isinstance(port, int):
-        raise RuntimeError_("login diagnostic page has no loopback port")
-    _write_json(home / "window.json", {"open": True})
-    status = build_status(home)
-    status["login_url"] = f"http://{LOOPBACK_HOST}:{port}/login"
-    return status
+    return _login_command(home, "open")
+
+
+def _login_command(home: Path, action: str) -> dict[str, Any]:
+    request_id = secrets.token_hex(16)
+    _write_json(home / "login-command.json", {"action": action, "request_id": request_id})
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        window = _read_json(home / "window.json") or {}
+        if window.get("request_id") == request_id:
+            if window.get("error"):
+                raise RuntimeError_("ChatGPT browser login could not start; check the local browser installation")
+            return build_status(home)
+        time.sleep(0.05)
+    raise RuntimeError_("ChatGPT login supervisor did not respond")
 
 
 def close_login(home: Path) -> dict[str, Any]:
     home = _assert_private_home(home)
-    _mkdir(home)
-    _write_json(home / "window.json", {"open": False})
-    return build_status(home)
+    if _process_record(home) is None:
+        return build_status(home)
+    return _login_command(home, "close")
 
 
 def _parse(argv: list[str]) -> tuple[list[str], Path, Path | None]:

@@ -52,6 +52,10 @@ test("ChatGPT Web runtime controls sit outside the connection grid", () => {
   const card = detail.indexOf("<ChatGptWebRuntimeCard");
   const grid = detail.indexOf('className="grid grid-cols-2 gap-2"');
   assert.ok(card >= 0 && grid > card);
+  const runtimeBranch = detail.slice(detail.indexOf("if (chatgptWebRuntime)"), grid);
+  assert.match(runtimeBranch, /return \(/);
+  assert.match(runtimeBranch, /unsaved=\{unsaved\}/);
+  assert.doesNotMatch(runtimeBranch, /common\.baseUrl|common\.apiKey|<ModelSection|<EndpointSelectionPanel/);
   assert.doesNotMatch(connectionGrid(detail), /ChatGptWebRuntimeCard/);
 });
 

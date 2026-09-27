@@ -282,7 +282,10 @@ export interface ChatGptWebStatus {
     artifact_sha256?: string | null;
     installed_sha256?: string | null;
   };
-  login: { state: string; window: string; account_id?: string | null };
+  login: { state: string; window: string; error?: string | null; account_id?: string | null };
+  models?: { id: string; display_name: string; efforts: string[]; image_input: boolean }[];
+  capacity?: string;
+  admitting?: boolean;
   browser_smoke: { state: string };
   tunnel: { state: string; detail?: string };
   connector: { selectable: boolean };
