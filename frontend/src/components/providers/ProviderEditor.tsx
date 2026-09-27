@@ -450,7 +450,7 @@ export function ProviderDetail({
           } />
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          <ChatGptWebRuntimeCard unsaved={unsaved} />
+          <ChatGptWebRuntimeCard provider={draft} onProviderChange={setDraft} unsaved={unsaved} />
         </div>
         {unsaved ? (
           <div className="flex items-center justify-between gap-3 border-t border-line px-4 py-3">
@@ -460,7 +460,14 @@ export function ProviderDetail({
               <Plus size={14} />{t("providers.chatgptWebAdd")}
             </button>
           </div>
-        ) : null}
+        ) : (
+          <div className="flex items-center justify-end border-t border-line px-4 py-3">
+            <button type="button" className="ws-button" disabled={!dirty || busy === "save"}
+              onClick={() => onChange(draft, t("providers.providerSaved", { name: draft.name }))}>
+              <Save size={16} />{t("common.save")}
+            </button>
+          </div>
+        )}
       </div>
     );
   }

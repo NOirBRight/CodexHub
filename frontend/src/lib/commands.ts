@@ -84,6 +84,7 @@ export const COMMANDS = {
   xaiUsageSnapshot: "xai_usage_snapshot",
   xaiOpenVerificationUrl: "xai_open_verification_url",
   chatgptWebStatus: "chatgpt_web_status",
+  chatgptWebConnectionCheck: "chatgpt_web_connection_check",
   chatgptWebEnable: "chatgpt_web_enable",
   chatgptWebStop: "chatgpt_web_stop",
   chatgptWebDisable: "chatgpt_web_disable",
