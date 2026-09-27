@@ -779,6 +779,65 @@ def test_client_disconnect_closes_the_upstream_body(runtime, tmp_path: Path) -> 
         assert _requests(home)[0]["body"]["client_metadata"]["x-codex-turn-metadata"]
 
 
+def test_settings_save_during_live_gateway_request_does_not_wait(runtime, tmp_path: Path) -> None:
+    home, pin = runtime
+    (home / "web-home" / "serve-mode").write_text("hold", encoding="utf-8")
+    with _gateway(home, pin, tmp_path / "codex-client") as port:
+        payload = json.dumps(
+            _request_body(
+                MODEL_ID,
+                [_message("msg_settings_during_request", "turn_settings_during_request", PROMPT)],
+                thread_id="thread_settings_during_request",
+                turn_id="turn_settings_during_request",
+                effort="high",
+            )
+        ).encode("utf-8")
+        key = os.environ["CODEX_PROXY_GATEWAY_CLIENT_KEY"]
+        request = (
+            f"POST /v1/responses HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Content-Type: application/json\r\n"
+            f"Authorization: Bearer {key}\r\n"
+            f"Content-Length: {len(payload)}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii") + payload
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            client.sendall(request)
+            seen = b""
+            deadline = time.time() + 5
+            while b"hello web" not in seen and time.time() < deadline:
+                chunk = client.recv(128)
+                if not chunk:
+                    break
+                seen += chunk
+            assert b"hello web" in seen
+            assert len(_requests(home)) == 1
+
+            before = chatgpt_web_runtime.build_status(home)
+            started_at = time.monotonic()
+            saved = chatgpt_web_runtime.save_settings(home, {"connector_name": "Pending Gateway Settings"})
+            elapsed = time.monotonic() - started_at
+            after = chatgpt_web_runtime.build_status(home)
+
+            assert elapsed < 2
+            assert saved["pending_restart"] is True
+            assert after["settings_pending_restart"] is True
+            assert after["restart_required"] is False
+            assert before["process"]["pid"] == after["process"]["pid"]
+            assert after["process"]["running"] is True
+        finally:
+            client.shutdown(socket.SHUT_RDWR)
+            client.close()
+
+        closed = home / "web-home" / "upstream-closed"
+        deadline = time.time() + 5
+        while not closed.is_file() and time.time() < deadline:
+            time.sleep(0.05)
+        assert closed.is_file()
+
+
 SHELL_TOOL = {
     "type": "function",
     "name": "shell",
