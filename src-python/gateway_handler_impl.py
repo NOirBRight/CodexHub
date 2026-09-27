@@ -896,13 +896,9 @@ class GatewayHandlerMixin:
                 )
             finally:
                 active_route_attempt = exchange_progress.active_attempt
-                relay_execution_plan = (
-                    exchange_progress.relay_execution_plan
-                )
+                relay_execution_plan = exchange_progress.relay_execution_plan
                 upstream_format = exchange_progress.upstream_format
-                request_observability = (
-                    exchange_progress.request_observability
-                )
+                request_observability = exchange_progress.request_observability
                 downstream_sse_started = (
                     exchange_progress.downstream_sse_started
                     or live.downstream_sse_started
