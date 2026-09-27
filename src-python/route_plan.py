@@ -245,6 +245,13 @@ def _is_codex_app_context(request_context: Mapping[str, str]) -> bool:
     return request_context.get("client_id") == "codex-app"
 
 
+def _is_chatgpt_web_upstream(upstream: Mapping[str, Any]) -> bool:
+    return (
+        str(upstream.get("name") or "") == "chatgpt_web"
+        or str(upstream.get("provider_id") or "") == "chatgpt-web"
+    )
+
+
 def _has_explicit_third_party_client_identity(request_context: Mapping[str, str]) -> bool:
     client_id = str(request_context.get("client_id") or "").strip().lower()
     return bool(client_id and client_id not in {"unknown", "codex-app"})
@@ -1590,6 +1597,13 @@ def route_plan_for_request(
             inbound_format=inbound_format,
             official_http_passthrough_enabled=official_http_passthrough_enabled,
         )
+    if _is_chatgpt_web_upstream(upstream):
+        # Keep the selected web provider and model. Do not repair, meter, or
+        # swap this route onto another upstream.
+        codex_app_external = False
+        compatibility_external = False
+        transparent_metered = False
+        behavior_profile = BEHAVIOR_EXTERNAL_PROVIDER_GATEWAY
 
     official_http_passthrough = (
         behavior_profile == BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH
@@ -1793,6 +1807,13 @@ def route_plan_for_request(
             )
             retry_http_errors = True
             open_attempt_budget = None
+        web_direct = _is_chatgpt_web_upstream(upstream)
+        if web_direct:
+            # A turn already handed to the runtime is not replayed.
+            base_open_attempts = 1
+            base_relay_attempts = 1
+            retry_http_errors = False
+            open_attempt_budget = 1
         retry_execution = RetryExecutionPlan(
             eligibility=protocol_capability_state,
             policy=retry_policy,
@@ -1803,10 +1824,10 @@ def route_plan_for_request(
             base_open_attempts=base_open_attempts,
             base_relay_attempts=base_relay_attempts,
             failure_expansion_attempts=(
-                selected_runtime_facts.failure_expansion_attempts
+                0 if web_direct else selected_runtime_facts.failure_expansion_attempts
             ),
             request_kind_attempts_configured=(
-                selected_runtime_facts.request_kind_attempts_configured
+                True if web_direct else selected_runtime_facts.request_kind_attempts_configured
             ),
             retry_http_errors=retry_http_errors,
             open_attempt_budget=open_attempt_budget,
@@ -1817,11 +1838,15 @@ def route_plan_for_request(
                 selected_runtime_facts.stream_elapsed_limit_seconds
             ),
             emit_downstream_retry_notice=(
-                not official_http_passthrough
-                and not transparent_metered
-                and caller_stream
-                and inbound_format == RouteProtocol.RESPONSES.value
-                and selected_runtime_facts.downstream_retry_notice_enabled
+                False
+                if web_direct
+                else (
+                    not official_http_passthrough
+                    and not transparent_metered
+                    and caller_stream
+                    and inbound_format == RouteProtocol.RESPONSES.value
+                    and selected_runtime_facts.downstream_retry_notice_enabled
+                )
             ),
             pre_response_budget_seconds=(
                 selected_runtime_facts.pre_response_budget_seconds
@@ -1830,11 +1855,16 @@ def route_plan_for_request(
                 else None
             ),
             lifecycle_final_retry_eligible=(
-                not official_http_passthrough
-                and repair_policy != REPAIR_NONE
-                and effective_request_kind
-                == RETRY_REQUEST_MAIN_GENERATION
+                False
+                if web_direct
+                else (
+                    not official_http_passthrough
+                    and repair_policy != REPAIR_NONE
+                    and effective_request_kind
+                    == RETRY_REQUEST_MAIN_GENERATION
+                )
             ),
+            empty_completed_max_attempts=1 if web_direct else 2,
         )
         attempt_upstream = {
             **upstream,

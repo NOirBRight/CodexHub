@@ -619,6 +619,61 @@ def _run_doctor(home: Path, entry: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _doctor_model_entry(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, str):
+        model_id = value.strip()
+        efforts: list[Any] = []
+        display_name = ""
+    elif isinstance(value, dict):
+        raw_id = value.get("id", value.get("slug"))
+        model_id = raw_id.strip() if isinstance(raw_id, str) else ""
+        display_name = value.get("display_name", value.get("name"))
+        display_name = display_name.strip() if isinstance(display_name, str) else ""
+        raw_efforts = value.get("efforts", value.get("supported_reasoning_levels"))
+        efforts = raw_efforts if isinstance(raw_efforts, list) else []
+    else:
+        return None
+    if not model_id.startswith("chatgpt-web/"):
+        return None
+    parsed_efforts: list[str] = []
+    for effort in efforts:
+        if isinstance(effort, str):
+            token = effort.strip().lower()
+        elif isinstance(effort, dict) and isinstance(effort.get("effort"), str):
+            token = effort["effort"].strip().lower()
+        else:
+            continue
+        if token and token not in parsed_efforts:
+            parsed_efforts.append(token)
+    return {
+        "id": model_id,
+        "display_name": display_name,
+        "efforts": parsed_efforts,
+    }
+
+
+def _models_from_doctor(report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Return only model rows the runtime doctor listed. Missing means none."""
+    if not isinstance(report, dict):
+        return []
+    raw_models = report.get("models")
+    if not isinstance(raw_models, list):
+        raw_models = []
+        for check in report.get("checks") or []:
+            if isinstance(check, dict) and check.get("id") == "models" and isinstance(check.get("models"), list):
+                raw_models = check["models"]
+                break
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in raw_models:
+        entry = _doctor_model_entry(value)
+        if entry is None or entry["id"] in seen:
+            continue
+        seen.add(entry["id"])
+        models.append(entry)
+    return models
+
+
 def _layers_from_doctor(report: dict[str, Any] | None) -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
     if report:
@@ -661,9 +716,12 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
     record = _process_record(home)
     running = record is not None
     layers = _layers_from_doctor(None)
+    doctor_models: list[dict[str, Any]] = []
     if running and installed is not None:
         entry = _find_entry(_runtime_root(home))
-        layers = _layers_from_doctor(_run_doctor(home, entry))
+        report = _run_doctor(home, entry)
+        layers = _layers_from_doctor(report)
+        doctor_models = _models_from_doctor(report)
     lifecycle = _lifecycle(home)
     window = _read_json(home / "window.json") or {}
     ready = bool(
@@ -706,6 +764,7 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
             "listen_host": LOOPBACK_HOST if running else None,
         },
         "ready": ready,
+        "models": doctor_models,
         "restart_required": lifecycle["restart_required"],
         "disabled": not lifecycle["enabled"],
         "installed": installed is not None,

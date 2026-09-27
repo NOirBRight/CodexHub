@@ -530,6 +530,16 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
     import gateway_compat as _gateway_compat
     import gateway_compat.official_passthrough as _passthrough
 
+    if str(request.upstream.get("name") or "") == "chatgpt_web":
+        import chatgpt_web_route
+
+        bound = chatgpt_web_route.bind_responses_body(request.prepared_body)
+        try:
+            prepared_exchange = attempt.prepare_body(bound)
+        except UnsupportedProtocolTranslationError as exc:
+            raise UpstreamProtocolTranslationError(exc) from exc
+        return replace(prepared_exchange, upstream_body=bound), bound
+
     policy = attempt.request_mutation_policy
     upstream = dict(request.upstream)
     upstream["upstream_format"] = attempt.selected_upstream_format
@@ -685,6 +695,14 @@ def execute_exchange(request: ExchangeRequest, ports: ExchangePorts, *, progress
     import gateway_transport as _gateway_transport
     import gateway_events as _gateway_events
     import gateway_compat.official_passthrough as _passthrough
+
+    if str(request.upstream.get("name") or "") == "chatgpt_web":
+        import chatgpt_web_route
+
+        chatgpt_web_route.ensure_exchange_allowed(
+            request.upstream,
+            request.inbound_payload if isinstance(request.inbound_payload, Mapping) else None,
+        )
 
     transport = ports.transport
     downstream = ports.downstream
