@@ -1,7 +1,7 @@
 """ChatGPT Web session binding and loopback route lookup.
 
 Gateway still owns the public Responses exchange. This module only resolves
-the supervised runtime, projects doctor-listed models, and keeps the caller's
+the supervised runtime, projects models from explicit account checks, and keeps the caller's
 session, thread, turn, and item identities intact.
 """
 
@@ -93,7 +93,7 @@ def listed_models(status: Mapping[str, Any] | None = None) -> tuple[dict[str, An
 
 
 def project_catalog(catalog: Mapping[str, Any]) -> dict[str, Any]:
-    """Append only doctor-listed models enabled in the ChatGPT Provider."""
+    """Append only account-visible runtime models enabled in the ChatGPT Provider."""
     try:
         status = read_status()
         enabled_models = chatgpt_web_connection.selected_model_ids(status)
@@ -132,7 +132,7 @@ def upstream_for_model(slug: str) -> dict[str, Any]:
     selected = next((model for model in listed_models(status) if model["id"] == identity), None)
     if selected is None:
         raise identity_failure(
-            f"ChatGPT Web model is not in the runtime doctor list: {identity}",
+            f"ChatGPT Web model is not in the account-visible runtime model list: {identity}",
             reason=REASON_MODEL_NOT_LISTED,
             provider_id=PROVIDER_ID,
             model_slug=identity,
@@ -157,7 +157,7 @@ def ensure_exchange_allowed(upstream: Mapping[str, Any], payload: Mapping[str, A
     selected = next((model for model in listed_models(status) if model["id"] == identity), None)
     if selected is None:
         raise identity_failure(
-            f"ChatGPT Web model is not in the runtime doctor list: {identity}",
+            f"ChatGPT Web model is not in the account-visible runtime model list: {identity}",
             reason=REASON_MODEL_NOT_LISTED,
             provider_id=PROVIDER_ID,
             model_slug=identity,
@@ -166,7 +166,7 @@ def ensure_exchange_allowed(upstream: Mapping[str, Any], payload: Mapping[str, A
         requested = _requested_effort(payload)
         if requested is not None and requested not in selected["efforts"]:
             raise identity_failure(
-                f"ChatGPT Web effort is not in the runtime doctor list: {requested}",
+                f"ChatGPT Web effort is not in the model's reported effort list: {requested}",
                 reason=REASON_MODEL_NOT_LISTED,
                 provider_id=PROVIDER_ID,
                 model_slug=identity,
@@ -246,9 +246,16 @@ def _raise_for_status(status: Mapping[str, Any], slug: str) -> None:
         )
     if not _text_runtime_admitted(status):
         login = status.get("login")
-        if not isinstance(login, Mapping) or login.get("state") != "signed_in":
+        if isinstance(login, Mapping) and login.get("state") == "signed_out":
             raise identity_failure(
                 "ChatGPT Web runtime is signed out and not ready",
+                reason=REASON_NOT_READY,
+                provider_id=PROVIDER_ID,
+                model_slug=slug,
+            )
+        if not isinstance(login, Mapping) or login.get("state") != "signed_in":
+            raise identity_failure(
+                "ChatGPT Web login has not been verified and the runtime is not ready",
                 reason=REASON_NOT_READY,
                 provider_id=PROVIDER_ID,
                 model_slug=slug,
@@ -297,7 +304,13 @@ def _text_runtime_admitted(status: Mapping[str, Any]) -> bool:
     if not isinstance(login, Mapping) or login.get("state") != "signed_in":
         return False
     smoke = status.get("browser_smoke")
-    return isinstance(smoke, Mapping) and smoke.get("state") == "passed"
+    checks = status.get("readiness_checks")
+    return (
+        isinstance(smoke, Mapping)
+        and smoke.get("state") == "passed"
+        and isinstance(checks, Mapping)
+        and checks.get("capabilities_match") is True
+    )
 
 
 def _upstream_facts(status: Mapping[str, Any], model: Mapping[str, Any]) -> dict[str, Any]:
@@ -363,7 +376,7 @@ def _catalog_entry(model: Mapping[str, Any]) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "slug": model["id"],
         "display_name": compose_flat_label(DISPLAY_PREFIX, short_name),
-        "description": "ChatGPT Web model listed by the runtime doctor.",
+        "description": "Account-visible model from the managed ChatGPT Web runtime.",
         "visibility": "list",
         "supported_in_api": True,
         "input_modalities": list(_input_modalities(model)),

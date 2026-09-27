@@ -51,22 +51,29 @@ def test_connection_overrides_are_limited_to_the_current_managed_loopback(tmp_pa
             chatgpt_web_connection.resolve_connection(base_url, key, home=home, status=status)
 
 
-def test_connection_check_makes_an_authenticated_read_only_models_request(tmp_path: Path) -> None:
-    class ModelsHandler(BaseHTTPRequestHandler):
+def test_connection_check_makes_an_authenticated_read_only_control_request(tmp_path: Path) -> None:
+    class ControlHandler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: object) -> None:
             return
 
         def do_GET(self) -> None:  # noqa: N802
-            assert self.path == "/v1/models"
+            assert self.path == "/admin/status"
             assert self.headers.get("Authorization") == f"Bearer {TOKEN}"
-            body = b'{"object":"list","data":[{"id":"chatgpt-web/gpt-5.6-sol"}]}'
+            body = (
+                b'{"control_contract_version":1,"status":"ok","accepting_turns":true,'
+                b'"active_http_turns":0,"active_browser_turns":0,'
+                b'"account_capabilities":{"sol_available":true,'
+                b'"extra_high_available":false,"pro_available":false},'
+                b'"models":[{"id":"chatgpt-web/gpt-5.6-sol",'
+                b'"display_name":"GPT 5.6 Sol","efforts":["high"],"image_input":true}]}'
+            )
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), ModelsHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ControlHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     home = tmp_path / "runtime"
@@ -88,6 +95,34 @@ def test_connection_check_makes_an_authenticated_read_only_models_request(tmp_pa
         "model_count": 1,
     }
     assert TOKEN not in json.dumps(result)
+
+
+def test_connection_check_rejects_the_native_models_passthrough_as_control_status(tmp_path: Path) -> None:
+    class LegacyHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt: str, *args: object) -> None:
+            return
+
+        def do_GET(self) -> None:  # noqa: N802
+            assert self.path == "/admin/status"
+            assert self.headers.get("Authorization") == f"Bearer {TOKEN}"
+            body = b'{"object":"list","data":[]}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), LegacyHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    home = tmp_path / "runtime"
+    _write_runtime_key(home)
+    try:
+        with pytest.raises(ValueError, match="does not support the required control contract"):
+            chatgpt_web_connection.check_connection(home=home, status=_status(server.server_port))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_provider_selection_uses_enabled_gateway_models_and_preserves_legacy_default(
