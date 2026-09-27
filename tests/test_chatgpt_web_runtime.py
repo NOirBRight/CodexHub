@@ -196,10 +196,32 @@ if command == "login":
     raise SystemExit(0)
 if command == "serve":
     if {delayed_failure!r}:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        config = json.loads((home / "config.json").read_text(encoding="utf-8"))
+
+        class UnhealthyHandler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                return
+
+            def do_GET(self):
+                self.send_response(503)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        server = ThreadingHTTPServer((config["host"], int(config["port"])), UnhealthyHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
         Path({str(marker)!r}).parent.mkdir(parents=True, exist_ok=True)
         Path({str(marker)!r}).touch()
-        while not (home / "fail-startup").is_file():
-            time.sleep(0.01)
+        try:
+            while not (home / "fail-startup").is_file():
+                time.sleep(0.01)
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
         print("codex-chatgpt-web: simulated delayed startup failure", file=sys.stderr, flush=True)
         raise SystemExit(1)
     if {startup_diagnostics!r} and os.environ.get("STARTUP_CAUSE"):
@@ -373,9 +395,11 @@ def _prepare_full_tunnel(home: Path, pin: Path) -> tuple[Path, Path]:
     if os.name == "nt":
         from pip._vendor.distlib.scripts import ScriptMaker
 
-        source = binary.with_suffix(".py")
+        source_dir = home / "tunnel-client-fixture"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        source = source_dir / "tunnel-client.py"
         source.write_text(fake_client, encoding="utf-8")
-        maker = ScriptMaker(str(binary.parent), str(binary.parent))
+        maker = ScriptMaker(str(source_dir), str(binary.parent))
         maker.clobber = True
         maker.executable = sys._base_executable
         maker.variants = {""}
@@ -563,7 +587,8 @@ def test_settings_api_redacts_runtime_key_and_supports_explicit_secret_actions(t
     assert initial["saved"]["tunnel"]["runtime_key_configured"] is True
     assert SECRET not in json.dumps(initial)
     saved_file = home / "runtime-settings.json"
-    assert saved_file.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert saved_file.stat().st_mode & 0o777 == 0o600
 
     kept = _run(home, "settings-save", stdin=json.dumps({"tunnel": {"runtime_key": {"action": "keep"}}}))
     assert kept["_exit_code"] == 0
@@ -711,7 +736,10 @@ def test_full_mode_starts_and_stops_owned_tunnel_with_spaced_mcp_paths(
         assert state["runtime_state"] == "ready"
         assert owner["alias"] == config["tunnel"]["alias"]
         assert owner["pid"] == state["pid"]
-        assert (chatgpt_web_runtime._managed_runtime_key(home).stat().st_mode & 0o777) == 0o600
+        if os.name != "nt":
+            assert (
+                chatgpt_web_runtime._managed_runtime_key(home).stat().st_mode & 0o777
+            ) == 0o600
         assert shlex.split(state["mcp_command"]) == [
             str(entry),
             "mcp",
@@ -1157,7 +1185,12 @@ def test_launch_leaves_client_config_bytes_unchanged(tmp_path: Path) -> None:
         assert started["login"]["state"] == "unknown"
         config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
         assert config["mode"] == "browser-only"
-        assert config["chromeExecutablePath"] == "/usr/bin/chromium"
+        if os.name == "nt":
+            assert Path(config["chromeExecutablePath"]).is_absolute() or (
+                config["chromeExecutablePath"] == "chrome.exe"
+            )
+        else:
+            assert config["chromeExecutablePath"] == "/usr/bin/chromium"
         assert "purpose" not in config
         assert config["runtimeCommand"] == [str(home / "current" / "runtime" / ENTRY_NAME)]
         assert not (home / "web-home" / "browser" / "storage-state.json").exists()
