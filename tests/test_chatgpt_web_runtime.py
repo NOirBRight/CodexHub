@@ -67,6 +67,44 @@ def _pin_for(directory: Path, payload: bytes) -> Path:
     return path
 
 
+def _fixture_health_server() -> str:
+    return '''
+import json
+import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+home = Path(os.environ["CODEX_CHATGPT_WEB_HOME"])
+config = json.loads((home / "config.json").read_text(encoding="utf-8"))
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        return
+
+    def do_GET(self):
+        if self.path != "/healthz":
+            self.send_error(404)
+            return
+        body = json.dumps({
+            "status": "ok",
+            "service": "codex-chatgpt-web",
+            "version": config["releaseVersion"],
+            "mode": config["mode"],
+            "pid": os.getpid(),
+            "port": int(config["port"]),
+            "accepting_turns": True,
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+server = ThreadingHTTPServer((config["host"], int(config["port"])), Handler)
+server.serve_forever()
+'''
+
+
 def _fixture_script(marker: Path) -> str:
     return f"""#!/bin/sh
 set -eu
@@ -97,10 +135,26 @@ if [ "$1" = "login" ]; then
 fi
 if [ "$1" = "serve" ]; then
   printf executed > '{marker}'
-  trap 'exit 0' TERM INT
-  while true; do
-    sleep 1
+  exec {shlex.quote(sys.executable)} -c {shlex.quote(_fixture_health_server())} "$0" "$@"
+fi
+exit 0
+"""
+
+
+def _delayed_start_failure_script(marker: Path) -> str:
+    return f"""#!/bin/sh
+set -eu
+if [ "$1" = "doctor" ]; then
+  printf '%s\\n' '{{"ok":false}}'
+  exit 0
+fi
+if [ "$1" = "serve" ]; then
+  : > {shlex.quote(str(marker))}
+  while [ ! -f "$CODEX_CHATGPT_WEB_HOME/fail-startup" ]; do
+    sleep 0.01
   done
+  printf '%s\\n' 'codex-chatgpt-web: simulated delayed startup failure' >&2
+  exit 1
 fi
 exit 0
 """
@@ -650,6 +704,62 @@ def test_repeated_start_uses_one_entry_and_doctor_layers_stay_distinct(tmp_path:
         assert "--replace-codex-route" not in log
     finally:
         _stop(home, pin)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable fixture")
+def test_start_does_not_acknowledge_a_child_that_fails_during_initialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "runtime"
+    child_started = home / "web-home" / "child-started"
+    archive = _archive(tmp_path, _delayed_start_failure_script(child_started))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(pin))
+
+    status_response_ready = threading.Event()
+    release_status_response = threading.Event()
+    real_urlopen = chatgpt_web_runtime.urllib.request.urlopen
+
+    def hold_supervisor_status(url: object, *args: object, **kwargs: object) -> object:
+        response = real_urlopen(url, *args, **kwargs)
+        if isinstance(url, str) and url.endswith("/status") and not status_response_ready.is_set():
+            status_response_ready.set()
+            if not release_status_response.wait(10):
+                response.close()
+                raise TimeoutError("test status-response gate timed out")
+        return response
+
+    monkeypatch.setattr(chatgpt_web_runtime.urllib.request, "urlopen", hold_supervisor_status)
+    startup: dict[str, object] = {}
+
+    def start() -> None:
+        try:
+            startup["status"] = chatgpt_web_runtime.start_runtime(home)
+        except Exception as exc:
+            startup["error"] = exc
+
+    worker = threading.Thread(target=start)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not child_started.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert child_started.is_file(), "upstream serve child did not start"
+        assert status_response_ready.wait(10), "supervisor loopback status did not respond"
+
+        (home / "web-home" / "fail-startup").touch()
+        deadline = time.monotonic() + 10
+        while (home / "process.json").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not (home / "process.json").exists(), "failed child did not complete supervisor shutdown"
+    finally:
+        release_status_response.set()
+        worker.join(timeout=10)
+
+    assert not worker.is_alive(), "start call did not finish after child failure"
+    assert "error" in startup, f"start reported a running child after it exited: {startup.get('status')}"
+    assert "simulated delayed startup failure" in str(startup["error"])
 
 
 def test_owned_login_starts_cancels_and_does_not_claim_authentication(tmp_path: Path) -> None:
