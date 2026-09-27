@@ -734,7 +734,7 @@ def _write_minimum_config(home: Path, entry: Path) -> int:
             "manualAppName": ZERO_RISK_CONNECTOR_NAME,
             "browserHost": "managed-chrome",
             "browserInteractionMode": "automatic",
-            "chromeExecutablePath": "/usr/bin/google-chrome",
+            "chromeExecutablePath": "/usr/bin/chromium",
             "storageStatePath": str(web_home / "browser" / "storage-state.json"),
             "brokerSocketPath": str(web_home / "socket" / "turn-broker.sock"),
             "headed": True,

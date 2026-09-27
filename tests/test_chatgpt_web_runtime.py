@@ -358,6 +358,7 @@ def test_launch_leaves_client_config_bytes_unchanged(tmp_path: Path) -> None:
         assert started["login"]["state"] == "signed_out"
         config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
         assert config["mode"] == "browser-only"
+        assert config["chromeExecutablePath"] == "/usr/bin/chromium"
         assert "purpose" not in config
         assert config["runtimeCommand"] == [str(home / "current" / "runtime" / ENTRY_NAME)]
         assert not (home / "web-home" / "browser" / "storage-state.json").exists()
