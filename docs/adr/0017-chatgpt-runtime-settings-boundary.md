@@ -27,10 +27,11 @@ runtime or Gateway. The user handles the restart separately. Until the new
 configuration is loaded, the UI must distinguish saved settings from active
 settings and must not report the pending change as already effective.
 
-This is a target boundary, not evidence that an upstream settings web server
-already exists or that connector setup is implemented. The current three-stage
-native onboarding and read-only connector diagnostic do not fulfill it.
-Implementation and acceptance evidence remain outstanding.
+The original three-stage native onboarding and read-only connector diagnostic
+did not fulfill this boundary. The browser adapter and separated Provider
+Connection are now implemented; [settings acceptance evidence](../evidence/issue-588/settings-acceptance.md)
+records the candidate-specific verification. The upstream renderer still
+requires an adapter, and the separate #567–#575 client/V2 gates remain open.
 
 Source inspection at pinned upstream commit
 `a13cd09950969f43e3b7e25c71fa43efaf5446c5` finds that
