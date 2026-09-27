@@ -21,6 +21,7 @@ import pytest
 import chatgpt_web_collab
 import chatgpt_web_route
 import chatgpt_web_runtime
+import test_chatgpt_web_route as web
 from gateway_errors import ModelIdentityResolutionError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -683,11 +684,11 @@ def test_incompatible_pin_and_version_mismatch_are_refused(tmp_path: Path) -> No
     status = _run(home, "status", pin=pin)
     assert status["component"]["compatible"] is False
     assert status["ready"] is False
-    assert status["login"]["state"] == "signed_out"
+    assert status["login"]["state"] == "unknown"
     assert status["upstream_executed"] is False
 
 
-def test_repeated_start_uses_one_entry_and_doctor_layers_stay_distinct(tmp_path: Path) -> None:
+def test_repeated_start_uses_one_entry_and_status_does_not_trust_doctor(tmp_path: Path) -> None:
     home = tmp_path / "runtime"
     marker = home / "executed-marker"
     archive = _archive(tmp_path, _fixture_script(marker))
@@ -698,11 +699,13 @@ def test_repeated_start_uses_one_entry_and_doctor_layers_stay_distinct(tmp_path:
         (home / "web-home" / "doctor.json").write_text(
             json.dumps(
                 {
-                    "ok": False,
+                    "ok": True,
+                    "models": [{"id": "chatgpt-web/gpt-5.6-sol", "efforts": ["high"]}],
                     "checks": [
-                        {"id": "login", "status": "error", "message": "missing"},
+                        {"id": "login", "status": "ok"},
+                        {"id": "browser-smoke", "status": "ok"},
                         {"id": "tunnel-runtime", "status": "ok", "message": SECRET},
-                        {"id": "connector", "status": "warning", "message": "not attached"},
+                        {"id": "connector", "status": "ok"},
                     ],
                 }
             ),
@@ -718,17 +721,17 @@ def test_repeated_start_uses_one_entry_and_doctor_layers_stay_distinct(tmp_path:
         with socket.create_connection(("127.0.0.1", first["process"]["diagnostic_port"]), timeout=2):
             pass
         status = _run(home, "status", pin=pin)
-        assert status["login"]["state"] == "signed_out"
+        assert status["login"]["state"] == "unknown"
         assert status["browser_smoke"]["state"] == "not_run"
-        assert status["tunnel"]["state"] == "ready"
+        assert status["tunnel"]["state"] == "not_started"
         assert status["connector"]["selectable"] is False
         assert status["ready"] is False
         assert SECRET not in json.dumps(status)
-        assert "[redacted]" in json.dumps(status["tunnel"])
         log = (home / "web-home" / "argv.log").read_text(encoding="utf-8")
         assert "\nsetup\n" not in f"\n{log}"
         assert " dev\n" not in log
         assert "--replace-codex-route" not in log
+        assert "doctor" not in log.splitlines()
     finally:
         _stop(home, pin)
 
@@ -869,7 +872,7 @@ def test_owned_login_starts_cancels_and_does_not_claim_authentication(tmp_path: 
     try:
         opened = _run(home, "open-login", pin=pin)
         assert opened["_exit_code"] == 0
-        assert opened["login"]["state"] == "signed_out"
+        assert opened["login"]["state"] == "unknown"
         assert opened["login"]["window"] == "open"
         assert opened["ready"] is False
         assert "login_url" not in opened
@@ -897,7 +900,7 @@ def test_owned_login_starts_cancels_and_does_not_claim_authentication(tmp_path: 
         assert SECRET not in captured.value.read().decode("utf-8")
         closed = _run(home, "close-login", pin=pin)
         assert closed["login"]["window"] == "closed"
-        assert closed["login"]["state"] == "signed_out"
+        assert closed["login"]["state"] == "unknown"
         stopped = _run(home, "stop", pin=pin)
         assert stopped["restart_required"] is True
         assert stopped["process"]["running"] is False
@@ -944,7 +947,7 @@ def test_launch_leaves_client_config_bytes_unchanged(tmp_path: Path) -> None:
         started = _run(home, "start", pin=pin, extra_env=env)
         assert started["_exit_code"] == 0
         assert started["upstream_executed"] is False
-        assert started["login"]["state"] == "signed_out"
+        assert started["login"]["state"] == "unknown"
         config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
         assert config["mode"] == "browser-only"
         assert config["chromeExecutablePath"] == "/usr/bin/chromium"
@@ -1230,18 +1233,7 @@ def test_upgrade_revokes_an_open_tool_permit(tmp_path: Path, monkeypatch: pytest
     try:
         started = chatgpt_web_runtime.start_runtime(home)
         assert started["process"]["running"] is True
-        doctor = {
-            "ok": True,
-            "models": [{"id": model_id, "display_name": "Sol", "efforts": ["high"], "image_input": False}],
-            "checks": [
-                {"id": "login", "status": "ok"},
-                {"id": "browser-smoke", "status": "ok"},
-                {"id": "tunnel-runtime", "status": "ok"},
-                {"id": "connector", "status": "ok"},
-            ],
-        }
-        doctor_path = home / "web-home" / "doctor.json"
-        doctor_path.write_text(json.dumps(doctor), encoding="utf-8")
+        assert web._seed_check(home, monkeypatch)["state"] == "ready"
         upstream = {"model_id": model_id, "upstream_model": model_id, "provider_id": "chatgpt-web"}
         metadata = json.dumps({"thread_id": thread_id, "turn_id": turn_id, "request_kind": "turn"})
         issue = {
@@ -1292,6 +1284,7 @@ def test_upgrade_revokes_an_open_tool_permit(tmp_path: Path, monkeypatch: pytest
         assert upgraded["component"]["compatible"] is True
         if upgraded["process"]["running"] is not True:
             chatgpt_web_runtime.start_runtime(home)
+        assert web._seed_check(home, monkeypatch)["state"] == "ready"
         continuation = {
             "model": model_id,
             "input": [
@@ -1385,7 +1378,7 @@ def test_login_completion_requires_explicit_restart_and_stop_cancels_login(tmp_p
                 break
         assert finished["restart_required"] is True
         assert finished["admitting"] is False
-        assert finished["login"]["state"] == "signed_out"  # Exit zero never fabricates authentication.
+        assert finished["login"]["state"] == "unknown"  # Exit zero never fabricates authentication.
         assert finished["process"]["pid"] == pid
         restarted = _run(home, "start", pin=pin)
         assert restarted["process"]["pid"] != pid

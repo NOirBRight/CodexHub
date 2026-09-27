@@ -23,6 +23,16 @@ cost to retain the implementation already exercised by the Spike. A narrow local
 versioned contract separates readiness, account-visible Web model identity,
 request submission, cancellation, and drain from Gateway's public client protocols.
 
+Readiness and connection checks use the runtime's authenticated
+`GET /admin/status` control endpoint. Contract version 1 reports accepting
+state, active-turn counts, account capabilities, and account-visible Web model
+metadata. These checks fail closed if the contract is unavailable, unsupported,
+or invalid; they never treat the native `/v1/models` passthrough as control
+status. `/v1/models` remains a separate OpenAI-compatible client endpoint, and
+the control token is not valid for that passthrough. Explicit account checks
+must also confirm that browser-observed capabilities match the active runtime
+before cached model routes can be admitted.
+
 The implementation must preserve ADR-0002's fixed selected route and client-owned
 execution, ADR-0004's client configuration ownership, and ADR-0006/0010's owning
 modules and command registry. Browser state is not a refreshable OAuth token under
