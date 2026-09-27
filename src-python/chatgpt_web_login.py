@@ -33,12 +33,18 @@ class LoginSession:
                     subprocess.run(["taskkill", "/PID", str(self.child.pid), "/T", "/F"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
                 else:
-                    os.killpg(self.child.pid, signal.SIGTERM)
+                    try:
+                        os.killpg(self.child.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
                 try:
                     self.child.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     if os.name != "nt":
-                        os.killpg(self.child.pid, signal.SIGKILL)
+                        try:
+                            os.killpg(self.child.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                     self.child.kill()
                     self.child.wait(timeout=3)
             self.child = None

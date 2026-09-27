@@ -1308,17 +1308,30 @@ def open_login(home: Path) -> dict[str, Any]:
 
 
 def _login_command(home: Path, action: str) -> dict[str, Any]:
-    request_id = secrets.token_hex(16)
-    _write_json(home / "login-command.json", {"action": action, "request_id": request_id})
-    deadline = time.monotonic() + 12
-    while time.monotonic() < deadline:
-        window = _read_json(home / "window.json") or {}
-        if window.get("request_id") == request_id:
-            if window.get("error"):
-                raise RuntimeError_("ChatGPT browser login could not start; check the local browser installation")
-            return build_status(home)
-        time.sleep(0.05)
-    raise RuntimeError_("ChatGPT login supervisor did not respond")
+    # Serialize callers across app windows and CLI processes, including the
+    # acknowledgement: the supervisor consumes one private mailbox at a time.
+    deadline = time.monotonic() + 20
+    with (home / "login-command.lock").open("a+") as lock:
+        while True:
+            try:
+                _try_lock(lock)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError_("Another ChatGPT login command is still running")
+                time.sleep(0.05)
+        request_id = secrets.token_hex(16)
+        _write_json(home / "login-command.json", {"action": action, "request_id": request_id}, mode=0o600)
+        while time.monotonic() < deadline:
+            window = _read_json(home / "window.json") or {}
+            if window.get("request_id") == request_id:
+                if window.get("error"):
+                    raise RuntimeError_("ChatGPT browser login could not start; check the local browser installation")
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError_("ChatGPT login supervisor did not respond")
+    return build_status(home)
 
 
 def close_login(home: Path) -> dict[str, Any]:

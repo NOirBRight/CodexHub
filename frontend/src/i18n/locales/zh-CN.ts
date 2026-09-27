@@ -628,6 +628,8 @@ const zhCN = {
     chatgptWebAdvanced: "高级 · 组件、账号与诊断",
     chatgptWebDeleteHelp: "停止或禁用会保留登录状态。删除本机账号后需要重新登录。",
     chatgptWebDeleteConfirm: "确认删除此组件的本机登录信息？",
+    chatgptWebLoginVerified: "ChatGPT 登录已验证。请重启 ChatGPT Web 组件，使此账号生效。",
+    chatgptWebStatusUnknown: "暂时无法获取状态",
     chatgptWebTitle: "ChatGPT Web Runtime",
     chatgptWebBody: "使用 ChatGPT 网页账号接入，由 CodexHub 管理本机连接，无需填写 API Key 或 Base URL。",
     chatgptWebEnable: "安装并启动",

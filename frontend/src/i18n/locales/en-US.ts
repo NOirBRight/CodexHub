@@ -630,6 +630,8 @@ const enUS = {
     chatgptWebAdvanced: "Advanced · component, account and diagnostics",
     chatgptWebDeleteHelp: "Stopping or disabling keeps your login. Deleting the local account requires signing in again.",
     chatgptWebDeleteConfirm: "Delete the local login for this component?",
+    chatgptWebLoginVerified: "ChatGPT login verified. Restart the ChatGPT Web component to use this account.",
+    chatgptWebStatusUnknown: "Status unavailable",
     chatgptWebTitle: "ChatGPT Web Runtime",
     chatgptWebBody: "Use your ChatGPT browser account. CodexHub manages the local connection; no API key or Base URL is needed.",
     chatgptWebEnable: "Install and start",

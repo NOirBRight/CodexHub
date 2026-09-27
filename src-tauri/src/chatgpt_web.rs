@@ -6,7 +6,6 @@
 use crate::{config, runtime_paths};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::process::Command;
 
 const SCRIPT_NAME: &str = "chatgpt_web_runtime.py";
 const PIN_NAME: &str = "chatgpt_web_runtime_pin.json";
