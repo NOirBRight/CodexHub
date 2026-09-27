@@ -1676,6 +1676,11 @@ def relay_upstream_response(
             line_ending = b"\n"
             events: list[Mapping[str, Any]] = []
             incomplete_frame = False
+            observe_web_client = None
+            if upstream_name == "chatgpt_web":
+                import chatgpt_web_client_session as _chatgpt_web_client_session
+
+                observe_web_client = _chatgpt_web_client_session.observe_upstream_event
             try:
                 for frame in iter_upstream_sse_events(
                     response,
@@ -1691,6 +1696,8 @@ def relay_upstream_response(
                     if event is None or event == "[DONE]":
                         continue
                     events.append(event)
+                    if observe_web_client is not None and isinstance(event, Mapping):
+                        observe_web_client(event, event_context)
                     if usage_policy == UsagePolicy.ASYNC_TAP:
                         gateway_events.offer_usage_observed_sse_line(
                             usage_context,

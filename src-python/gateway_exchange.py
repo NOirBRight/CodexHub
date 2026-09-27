@@ -531,6 +531,10 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
     import gateway_compat.official_passthrough as _passthrough
 
     if str(request.upstream.get("name") or "") == "chatgpt_web":
+        if request.inbound.inbound_format == "chat_completions":
+            import chatgpt_web_client_session
+
+            return chatgpt_web_client_session.prepare_attempt_body(request, attempt)
         import chatgpt_web_route
 
         bound = chatgpt_web_route.bind_responses_body(request.prepared_body)
@@ -699,15 +703,28 @@ def execute_exchange(request: ExchangeRequest, ports: ExchangePorts, *, progress
     web_replay: bytes | None = None
     web_guard: Any = nullcontext()
     if str(request.upstream.get("name") or "") == "chatgpt_web":
-        import chatgpt_web_route
+        web_payload = request.inbound_payload if isinstance(request.inbound_payload, Mapping) else None
+        web_admission = _gateway_admission.active_gateway_request()
+        if request.inbound.inbound_format == "chat_completions":
+            import chatgpt_web_client_session
 
-        web_replay = chatgpt_web_route.prepare_responses_exchange(
-            request.upstream,
-            request.inbound_payload if isinstance(request.inbound_payload, Mapping) else None,
-            request.event_context,
-            _gateway_admission.active_gateway_request(),
-        )
-        web_guard = chatgpt_web_route.submission_guard(request.event_context)
+            web_replay = chatgpt_web_client_session.prepare_responses_exchange(
+                request.upstream,
+                web_payload,
+                request.event_context,
+                web_admission,
+            )
+            web_guard = chatgpt_web_client_session.submission_guard(request.event_context)
+        else:
+            import chatgpt_web_route
+
+            web_replay = chatgpt_web_route.prepare_responses_exchange(
+                request.upstream,
+                web_payload,
+                request.event_context,
+                web_admission,
+            )
+            web_guard = chatgpt_web_route.submission_guard(request.event_context)
 
     transport = ports.transport
     downstream = ports.downstream
@@ -807,8 +824,10 @@ def execute_exchange(request: ExchangeRequest, ports: ExchangePorts, *, progress
                         )) as response:
                             if request.upstream_name == "chatgpt_web":
                                 import chatgpt_web_route as _chatgpt_web_route
+                                import chatgpt_web_client_session as _chatgpt_web_client_session
 
                                 _chatgpt_web_route.note_upstream_submitted(request.event_context)
+                                _chatgpt_web_client_session.note_upstream_submitted(request.event_context)
                             downstream.perform(DownstreamAction.ATTACH_UPSTREAM, response=response)
                             status = downstream.relay(response, RelayExchangeRequest(
                                 attempt=attempt, relay_plan=state.relay_execution_plan,
