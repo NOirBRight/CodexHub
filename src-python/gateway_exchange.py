@@ -531,7 +531,7 @@ def _prepare_attempt_body(request: ExchangeRequest, attempt: RouteAttemptLike, o
     import gateway_compat.official_passthrough as _passthrough
 
     if str(request.upstream.get("name") or "") == "chatgpt_web":
-        if request.inbound.inbound_format == "chat_completions":
+        if request.inbound.inbound_format in {"chat_completions", "anthropic_messages"}:
             import chatgpt_web_client_session
 
             return chatgpt_web_client_session.prepare_attempt_body(request, attempt)
@@ -705,7 +705,7 @@ def execute_exchange(request: ExchangeRequest, ports: ExchangePorts, *, progress
     if str(request.upstream.get("name") or "") == "chatgpt_web":
         web_payload = request.inbound_payload if isinstance(request.inbound_payload, Mapping) else None
         web_admission = _gateway_admission.active_gateway_request()
-        if request.inbound.inbound_format == "chat_completions":
+        if request.inbound.inbound_format in {"chat_completions", "anthropic_messages"}:
             import chatgpt_web_client_session
 
             web_replay = chatgpt_web_client_session.prepare_responses_exchange(

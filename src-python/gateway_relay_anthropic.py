@@ -125,6 +125,7 @@ def relay_inbound_anthropic_sse(
     upstream_format: str,
     inbound_format: str,
     status: int,
+    observe_response_event: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> int:
     if not send_headers():
         return finish_closed(
@@ -185,6 +186,8 @@ def relay_inbound_anthropic_sse(
             if responses_converter is not None:
                 if not isinstance(payload, Mapping):
                     continue
+                if observe_response_event is not None:
+                    observe_response_event(payload)
                 if payload.get("type") in {"error", "response.failed", "response.incomplete"}:
                     error_bytes = anthropic_messages_prototype.adapt_upstream_response(
                         "responses",

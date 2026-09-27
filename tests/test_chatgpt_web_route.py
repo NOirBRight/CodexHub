@@ -139,12 +139,31 @@ class Handler(BaseHTTPRequestHandler):
         has_output = any(isinstance(item, dict) and item.get("type") == "function_call_output" for item in items())
         declares_tools = isinstance(parsed, dict) and isinstance(parsed.get("tools"), list) and any(isinstance(tool, dict) for tool in parsed["tools"])
         has_call = any(isinstance(item, dict) and item.get("type") == "function_call" for item in items())
+        if mode == "error":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            emit({{"type": "error", "error": {{"type": "server_error", "message": "upstream failed"}}}})
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
-        if mode == "tool-hold" or (mode != "hold" and (declares_tools or has_call) and not has_output):
+        toolish = mode == "tool-hold" or (mode != "hold" and (declares_tools or has_call) and not has_output)
+        emit({{
+            "type": "response.created",
+            "response": {{
+                "id": "resp_web_tool" if toolish else "resp_web",
+                "object": "response",
+                "status": "in_progress",
+                "model": {MODEL_ID!r},
+                "output": [],
+            }},
+        }})
+        if toolish:
             turn = turn_id()
             call_id = "call_" + turn
             item_id = "fc_" + turn

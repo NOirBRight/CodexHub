@@ -1254,6 +1254,13 @@ def relay_upstream_response(
 
     if is_event_stream:
         if want_anthropic_output:
+            observe_response_event = None
+            if upstream_name == "chatgpt_web":
+                import chatgpt_web_client_session as _chatgpt_web_client_session
+
+                def observe_response_event(event: Mapping[str, Any]) -> None:
+                    _chatgpt_web_client_session.observe_upstream_event(event, event_context)
+
             return gateway_relay_anthropic.relay_inbound_anthropic_sse(
                 handler=self,
                 response=response,
@@ -1267,6 +1274,7 @@ def relay_upstream_response(
                 upstream_format=upstream_format,
                 inbound_format=inbound_format,
                 status=status,
+                observe_response_event=observe_response_event,
             )
         if (
             streaming_policy == StreamingPolicy.TRANSPARENT_CONVERTED

@@ -1,7 +1,8 @@
-"""Non-Codex Chat Completions session binding for ChatGPT Web.
+"""Non-Codex session binding for ChatGPT Web.
 
-A web turn is bound only from an explicit client session id. The same id
-keeps one thread. Tool results stay on the call id that session already owns.
+Chat Completions and Anthropic Messages share this table. A web turn is bound
+only from an explicit client session id. The same id keeps one thread. Tool
+results stay on the call id that session already owns.
 """
 
 from __future__ import annotations
@@ -72,7 +73,7 @@ def prepare_responses_exchange(
     event_context: dict[str, Any] | None,
     admission: Any | None,
 ) -> bytes | None:
-    """Admit one Chat Completions turn. Return recorded SSE when a tool result is replayed."""
+    """Admit one non-Codex turn. Return recorded SSE when a tool result is replayed."""
     slug = _slug(upstream)
     session_id = client_session_id(payload, event_context)
     if session_id is None:
@@ -114,7 +115,7 @@ def prepare_responses_exchange(
 
 
 def prepare_attempt_body(request: Any, attempt: Any) -> tuple[Any, bytes]:
-    """Convert Chat Completions to Responses and stamp this session's thread."""
+    """Convert the caller body to Responses and stamp this session's thread."""
     payload = request.inbound_payload if isinstance(request.inbound_payload, Mapping) else None
     event_context = request.event_context if isinstance(request.event_context, Mapping) else None
     session_id = client_session_id(payload, event_context)
@@ -283,13 +284,25 @@ def _tool_result_ids(payload: Mapping[str, Any] | None) -> tuple[str, ...] | Non
         return ()
     call_ids: list[str] = []
     for message in messages:
-        if not isinstance(message, Mapping) or message.get("role") != "tool":
+        if not isinstance(message, Mapping):
             continue
-        call_id = message.get("tool_call_id")
-        if not isinstance(call_id, str) or not call_id.strip():
-            return None
-        if call_id not in call_ids:
-            call_ids.append(call_id)
+        if message.get("role") == "tool":
+            call_id = message.get("tool_call_id")
+            if not isinstance(call_id, str) or not call_id.strip():
+                return None
+            if call_id not in call_ids:
+                call_ids.append(call_id)
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, Mapping) or block.get("type") != "tool_result":
+                continue
+            call_id = block.get("tool_use_id")
+            if not isinstance(call_id, str) or not call_id.strip():
+                return None
+            if call_id not in call_ids:
+                call_ids.append(call_id)
     return tuple(call_ids)
 
 
