@@ -372,6 +372,8 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         Command::ChatGptWebEnable => to_value(chatgpt_web::chatgpt_web_enable_blocking()),
         Command::ChatGptWebStop => to_value(chatgpt_web::chatgpt_web_stop_blocking()),
         Command::ChatGptWebDisable => to_value(chatgpt_web::chatgpt_web_disable_blocking()),
+        Command::ChatGptWebUpgrade => to_value(chatgpt_web::chatgpt_web_upgrade_blocking()),
+        Command::ChatGptWebDeleteAccount => to_value(chatgpt_web::chatgpt_web_delete_account_blocking()),
         Command::ChatGptWebOpenLogin => to_value(chatgpt_web::chatgpt_web_open_login_blocking()),
         Command::ChatGptWebCloseLogin => to_value(chatgpt_web::chatgpt_web_close_login_blocking()),
         // These commands are registered for the desktop handler or retained

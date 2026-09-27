@@ -162,6 +162,8 @@ macro_rules! desktop_command_registry {
             ChatGptWebEnable => "chatgpt_web_enable" => $crate::chatgpt_web::chatgpt_web_enable, true, true, true, false, NO_ALIASES;
             ChatGptWebStop => "chatgpt_web_stop" => $crate::chatgpt_web::chatgpt_web_stop, true, true, true, false, NO_ALIASES;
             ChatGptWebDisable => "chatgpt_web_disable" => $crate::chatgpt_web::chatgpt_web_disable, true, true, true, false, NO_ALIASES;
+            ChatGptWebUpgrade => "chatgpt_web_upgrade" => $crate::chatgpt_web::chatgpt_web_upgrade, true, true, true, false, NO_ALIASES;
+            ChatGptWebDeleteAccount => "chatgpt_web_delete_account" => $crate::chatgpt_web::chatgpt_web_delete_account, true, true, true, false, NO_ALIASES;
             ChatGptWebOpenLogin => "chatgpt_web_open_login" => $crate::chatgpt_web::chatgpt_web_open_login, true, true, true, false, NO_ALIASES;
             ChatGptWebCloseLogin => "chatgpt_web_close_login" => $crate::chatgpt_web::chatgpt_web_close_login, true, true, true, false, NO_ALIASES;
         }

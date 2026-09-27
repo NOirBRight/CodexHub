@@ -28,6 +28,14 @@ pub fn chatgpt_web_disable_blocking() -> Result<Value, String> {
     run_cli(&["disable"])
 }
 
+pub fn chatgpt_web_upgrade_blocking() -> Result<Value, String> {
+    run_cli(&["upgrade"])
+}
+
+pub fn chatgpt_web_delete_account_blocking() -> Result<Value, String> {
+    run_cli(&["delete-account"])
+}
+
 pub fn chatgpt_web_open_login_blocking() -> Result<Value, String> {
     let value = run_cli(&["open-login"])?;
     if let Some(url) = value.get("login_url").and_then(Value::as_str) {
@@ -59,6 +67,16 @@ pub async fn chatgpt_web_stop() -> Result<Value, String> {
 #[tauri::command]
 pub async fn chatgpt_web_disable() -> Result<Value, String> {
     spawn_cli(chatgpt_web_disable_blocking).await
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_upgrade() -> Result<Value, String> {
+    spawn_cli(chatgpt_web_upgrade_blocking).await
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_delete_account() -> Result<Value, String> {
+    spawn_cli(chatgpt_web_delete_account_blocking).await
 }
 
 #[tauri::command]

@@ -101,6 +101,22 @@ export function ChatGptWebRuntimeCard() {
           className="ws-button"
           type="button"
           disabled={busy}
+          onClick={() => void run(t("providers.chatgptWebUpgrading"), () => api.chatgptWebUpgrade(), t("providers.chatgptWebUpgraded"), () => void refresh())}
+        >
+          {t("providers.chatgptWebUpgrade")}
+        </button>
+        <button
+          className="ws-button"
+          type="button"
+          disabled={busy}
+          onClick={() => void run(t("providers.chatgptWebDeletingAccount"), () => api.chatgptWebDeleteAccount(), t("providers.chatgptWebAccountDeleted"), () => void refresh())}
+        >
+          {t("providers.chatgptWebDeleteAccount")}
+        </button>
+        <button
+          className="ws-button"
+          type="button"
+          disabled={busy}
           onClick={() => void run(t("providers.chatgptWebOpeningLogin"), () => api.chatgptWebOpenLogin(), t("providers.chatgptWebLoginOpened"), () => void refresh())}
         >
           {t("providers.chatgptWebOpenLogin")}

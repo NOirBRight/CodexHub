@@ -15,7 +15,10 @@ from pathlib import Path
 
 import pytest
 
+import chatgpt_web_collab
+import chatgpt_web_route
 import chatgpt_web_runtime
+from gateway_errors import ModelIdentityResolutionError
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "src-python" / "chatgpt_web_runtime.py"
@@ -383,3 +386,322 @@ def test_remote_bind_is_refused(tmp_path: Path) -> None:
     assert "127.0.0.1" in refused["error"]
     assert _entry_pids(home) == []
     assert not marker.exists()
+
+
+def _login_files(home: Path) -> dict[Path, bytes]:
+    files = {
+        home / "account" / "profile.json": b'{"login":"kept"}\n',
+        home / "web-home" / "browser" / "storage-state.json": b'{"cookies":[]}\n',
+    }
+    for path, body in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+    return files
+
+
+def _assert_login_kept(files: dict[Path, bytes]) -> None:
+    for path, body in files.items():
+        assert path.read_bytes() == body
+
+
+def _rejected_absent(log: str) -> None:
+    for rejected in ("setup", "install.sh", "install-launcher.sh"):
+        assert rejected not in log
+    assert "\ndev\n" not in f"\n{log}"
+
+
+def test_upgrade_bad_checksum_does_not_replace_current(tmp_path: Path) -> None:
+    home = tmp_path / "runtime"
+    marker = home / "executed-marker"
+    archive = _archive(tmp_path, _fixture_script(marker))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    entry = home / "current" / "runtime" / ENTRY_NAME
+    good = entry.read_bytes()
+    login = _login_files(home)
+    bad = _archive(tmp_path / "bad", _fixture_script(marker) + "\n# tampered\n")
+
+    failed = _run(home, "upgrade", "--source", str(bad), pin=pin)
+
+    assert failed["_exit_code"] != 0
+    assert "checksum mismatch" in failed["error"]
+    assert "not executed" in failed["error"]
+    assert entry.read_bytes() == good
+    _assert_login_kept(login)
+    assert not marker.exists()
+    assert not (home / "staging" / "payload.partial").exists()
+    try:
+        started = _run(home, "start", pin=pin)
+        assert started["_exit_code"] == 0
+        assert started["process"]["running"] is True
+        assert entry.read_bytes() == good
+    finally:
+        _stop(home, pin)
+
+
+def test_upgrade_interrupted_download_can_be_retried(tmp_path: Path) -> None:
+    home = tmp_path / "runtime"
+    marker = home / "executed-marker"
+    archive = _archive(tmp_path, _fixture_script(marker))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    entry = home / "current" / "runtime" / ENTRY_NAME
+    good = entry.read_bytes()
+    login = _login_files(home)
+    partial = home / "staging" / "payload.partial"
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial.write_bytes(b"interrupted")
+    incomplete = partial.with_name(partial.name + ".incomplete")
+    incomplete.write_text("incomplete\n", encoding="utf-8")
+
+    retried = _run(home, "upgrade", "--source", str(archive), pin=pin)
+
+    assert retried["_exit_code"] == 0, retried
+    assert not partial.exists()
+    assert not incomplete.exists()
+    assert entry.read_bytes() == good
+    _assert_login_kept(login)
+    assert not marker.exists()
+
+
+def test_upgrade_downloads_only_the_pinned_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "runtime"
+    marker = home / "executed-marker"
+    archive = _archive(tmp_path, _fixture_script(marker))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    document = json.loads(pin.read_text(encoding="utf-8"))
+    url = document["artifacts"][chatgpt_web_runtime.artifact_key()]["url"]
+    assert "/releases/latest/" not in url
+    assert url.startswith("https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.1/")
+    monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(pin))
+    monkeypatch.delenv("CODEX_WEB_GPT_DEV_HOME", raising=False)
+
+    class _Response:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+            self._offset = 0
+
+        def geturl(self) -> str:
+            return url
+
+        def read(self, size: int) -> bytes:
+            chunk = self._payload[self._offset : self._offset + size]
+            self._offset += len(chunk)
+            return chunk
+
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    seen: list[str] = []
+
+    def _urlopen(request: urllib.request.Request, timeout: int = 60) -> _Response:
+        seen.append(request.full_url)
+        return _Response(archive.read_bytes())
+
+    monkeypatch.setattr(chatgpt_web_runtime.urllib.request, "urlopen", _urlopen)
+
+    status = chatgpt_web_runtime.upgrade_runtime(home)
+
+    assert seen == [url]
+    assert status["component"]["compatible"] is True
+    assert status["component"]["version"] == "6.1.1"
+    assert (home / "current" / "runtime" / ENTRY_NAME).read_bytes() == (tmp_path / "tree" / ENTRY_NAME).read_bytes()
+    assert not marker.exists()
+    assert os.stat(home / "current" / "payload").st_mode & 0o111 == 0
+
+
+def test_failed_promotion_keeps_previous_good(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "runtime"
+    marker = home / "executed-marker"
+    archive = _archive(tmp_path, _fixture_script(marker))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(pin))
+    monkeypatch.delenv("CODEX_WEB_GPT_DEV_HOME", raising=False)
+    assert chatgpt_web_runtime.install_runtime(home, archive)["installed"] is True
+    first = home / "current" / "runtime" / "generation.txt"
+    first.write_text("first", encoding="utf-8")
+    assert chatgpt_web_runtime.install_runtime(home, archive)["installed"] is True
+    assert (home / "previous-good" / "runtime" / "generation.txt").read_text(encoding="utf-8") == "first"
+    (home / "current" / "runtime" / "generation.txt").write_text("second", encoding="utf-8")
+    login = _login_files(home)
+    real_rename = chatgpt_web_runtime.os.rename
+
+    def _rename(src: object, dst: object) -> None:
+        if Path(src).name == "incoming" and Path(dst).name == "current":
+            raise OSError("simulated promotion failure")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(chatgpt_web_runtime.os, "rename", _rename)
+
+    with pytest.raises(RuntimeError, match="previous good install was kept"):
+        chatgpt_web_runtime.upgrade_runtime(home, archive)
+
+    assert (home / "current" / "runtime" / "generation.txt").read_text(encoding="utf-8") == "second"
+    assert (home / "previous-good" / "runtime" / "generation.txt").read_text(encoding="utf-8") == "first"
+    assert (home / "current" / "runtime" / ENTRY_NAME).read_bytes() == (tmp_path / "tree" / ENTRY_NAME).read_bytes()
+    _assert_login_kept(login)
+    assert not marker.exists()
+    try:
+        started = chatgpt_web_runtime.start_runtime(home)
+        assert started["process"]["running"] is True
+        assert (home / "current" / "runtime" / "generation.txt").read_text(encoding="utf-8") == "second"
+    finally:
+        chatgpt_web_runtime.stop_runtime(home, disable=False)
+
+
+def test_upgrade_revokes_an_open_tool_permit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "runtime"
+    marker = home / "executed-marker"
+    archive = _archive(tmp_path, _fixture_script(marker))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_HOME", str(home))
+    monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(pin))
+    monkeypatch.delenv("CODEX_WEB_GPT_DEV_HOME", raising=False)
+    assert chatgpt_web_runtime.install_runtime(home, archive)["installed"] is True
+    model_id = "chatgpt-web/gpt-5.6-sol"
+    thread_id = "thread_upgrade_permit"
+    turn_id = "turn_upgrade_permit"
+    call_id = "call_upgrade_permit"
+    try:
+        started = chatgpt_web_runtime.start_runtime(home)
+        assert started["process"]["running"] is True
+        doctor = {
+            "ok": True,
+            "models": [{"id": model_id, "display_name": "Sol", "efforts": ["high"], "image_input": False}],
+            "checks": [
+                {"id": "login", "status": "ok"},
+                {"id": "browser-smoke", "status": "ok"},
+                {"id": "tunnel-runtime", "status": "ok"},
+                {"id": "connector", "status": "ok"},
+            ],
+        }
+        doctor_path = home / "web-home" / "doctor.json"
+        doctor_path.write_text(json.dumps(doctor), encoding="utf-8")
+        upstream = {"model_id": model_id, "upstream_model": model_id, "provider_id": "chatgpt-web"}
+        metadata = json.dumps({"thread_id": thread_id, "turn_id": turn_id, "request_kind": "turn"})
+        issue = {
+            "model": model_id,
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "prompt_cache_key": thread_id,
+            "client_metadata": {"x-codex-turn-metadata": metadata},
+            "reasoning": {"effort": "high"},
+            "tools": [{"type": "function", "name": "shell", "parameters": {"type": "object"}}],
+        }
+        event_context: dict[str, object] = {}
+        with chatgpt_web_route.submission_guard(event_context):
+            assert chatgpt_web_route.prepare_responses_exchange(upstream, issue, event_context, None) is None
+            chatgpt_web_route.observe_upstream_event(
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_upgrade_permit",
+                        "call_id": call_id,
+                        "name": "shell",
+                        "arguments": "{\"cmd\":\"pwd\"}",
+                    },
+                },
+                event_context,
+            )
+            chatgpt_web_route.observe_upstream_event({"type": "response.completed", "response": {}}, event_context)
+            chatgpt_web_route.note_upstream_submitted(event_context)
+        login = _login_files(home)
+        calls = {"tool": 0, "collab": 0}
+        real_tool = chatgpt_web_route.revoke_all_tool_permissions
+        real_collab = chatgpt_web_collab.revoke_all_permissions
+
+        def _tool() -> None:
+            calls["tool"] += 1
+            real_tool()
+
+        def _collab() -> None:
+            calls["collab"] += 1
+            real_collab()
+
+        monkeypatch.setattr(chatgpt_web_route, "revoke_all_tool_permissions", _tool)
+        monkeypatch.setattr(chatgpt_web_collab, "revoke_all_permissions", _collab)
+        upgraded = chatgpt_web_runtime.upgrade_runtime(home, archive)
+        assert calls["tool"] >= 1
+        assert calls["collab"] >= 1
+        _assert_login_kept(login)
+        assert upgraded["component"]["compatible"] is True
+        if upgraded["process"]["running"] is not True:
+            chatgpt_web_runtime.start_runtime(home)
+        continuation = {
+            "model": model_id,
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                {
+                    "type": "function_call",
+                    "id": "fc_upgrade_permit",
+                    "call_id": call_id,
+                    "name": "shell",
+                    "arguments": "{\"cmd\":\"pwd\"}",
+                },
+                {"type": "function_call_output", "call_id": call_id, "output": "{\"ok\":true}"},
+            ],
+            "prompt_cache_key": thread_id,
+            "client_metadata": {"x-codex-turn-metadata": metadata},
+            "reasoning": {"effort": "high"},
+        }
+        with pytest.raises(ModelIdentityResolutionError, match="tool call expired"):
+            chatgpt_web_route.prepare_responses_exchange(upstream, continuation, {}, None)
+    finally:
+        chatgpt_web_runtime.stop_runtime(home, disable=True)
+
+
+def test_disable_removes_process_json_and_leaves_account_files(tmp_path: Path) -> None:
+    home = tmp_path / "runtime"
+    marker = home / "executed-marker"
+    archive = _archive(tmp_path, _fixture_script(marker))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    try:
+        started = _run(home, "start", pin=pin)
+        assert started["_exit_code"] == 0
+        assert (home / "process.json").is_file()
+        login = _login_files(home)
+        log_before = (home / "web-home" / "argv.log").read_text(encoding="utf-8")
+        disabled = _run(home, "disable", pin=pin)
+        assert disabled["_exit_code"] == 0, disabled
+        assert disabled["disabled"] is True
+        assert disabled["process"]["running"] is False
+        assert not (home / "process.json").exists()
+        _assert_login_kept(login)
+        assert (home / "current" / "runtime" / ENTRY_NAME).is_file()
+        log_after = (home / "web-home" / "argv.log").read_text(encoding="utf-8")
+        _rejected_absent(log_after)
+        assert log_after.startswith(log_before)
+    finally:
+        _stop(home, pin)
+
+
+def test_delete_account_removes_account_files_and_does_not_run_during_disable(tmp_path: Path) -> None:
+    home = tmp_path / "runtime"
+    marker = home / "executed-marker"
+    archive = _archive(tmp_path, _fixture_script(marker))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    try:
+        assert _run(home, "start", pin=pin)["_exit_code"] == 0
+        login = _login_files(home)
+        disabled = _run(home, "disable", pin=pin)
+        assert disabled["_exit_code"] == 0, disabled
+        assert not (home / "process.json").exists()
+        _assert_login_kept(login)
+        log_before = (home / "web-home" / "argv.log").read_text(encoding="utf-8")
+        deleted = _run(home, "delete-account", pin=pin)
+        assert deleted["_exit_code"] == 0, deleted
+        assert SECRET not in json.dumps(deleted)
+        for path in login:
+            assert not path.exists()
+        assert not (home / "account").exists()
+        assert (home / "current" / "runtime" / ENTRY_NAME).is_file()
+        log_after = (home / "web-home" / "argv.log").read_text(encoding="utf-8")
+        assert log_after == log_before
+        _rejected_absent(log_after)
+    finally:
+        _stop(home, pin)

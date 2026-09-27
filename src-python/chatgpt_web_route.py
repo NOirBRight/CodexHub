@@ -137,6 +137,7 @@ def upstream_for_model(slug: str) -> dict[str, Any]:
 
 def ensure_exchange_allowed(upstream: Mapping[str, Any], payload: Mapping[str, Any] | None) -> None:
     """Re-check readiness and effort immediately before the upstream request is opened."""
+    _consume_runtime_drain()
     identity = canonical_model_id(str(upstream.get("model_id") or upstream.get("upstream_model") or ""))
     status = read_status()
     sync_process_generation(status)
@@ -277,6 +278,8 @@ def _text_runtime_admitted(status: Mapping[str, Any]) -> bool:
     ):
         return False
     if status.get("disabled") is True or status.get("restart_required") is True:
+        return False
+    if status.get("admitting") is False:
         return False
     login = status.get("login")
     if not isinstance(login, Mapping) or login.get("state") != "signed_in":
@@ -702,6 +705,24 @@ def revoke_all_tool_permissions() -> None:
             if permit.state in {"open", "forwarding", "recorded"}:
                 permit.state = "revoked"
                 permit.response_body = None
+
+
+_DRAIN_SEEN: str | None = None
+
+
+def _consume_runtime_drain() -> None:
+    """Revoke once when the supervisor records a version switch."""
+    global _DRAIN_SEEN
+    document = chatgpt_web_runtime._read_json(chatgpt_web_runtime.default_home() / "drain.json") or {}
+    token = document.get("id")
+    if not isinstance(token, str) or not token or token == _DRAIN_SEEN:
+        return
+    _DRAIN_SEEN = token
+    revoke_all_tool_permissions()
+    chatgpt_web_collab.revoke_all_permissions()
+    import chatgpt_web_client_session
+
+    chatgpt_web_client_session.revoke_all_tool_permissions()
 
 
 def _claim_tool_outputs(thread_id: str, turn_id: str, call_ids: tuple[str, ...], slug: str) -> bytes | None:

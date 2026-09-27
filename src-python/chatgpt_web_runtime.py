@@ -5,7 +5,8 @@ Upstream ``setup`` always calls ``installCodexIntegration``. ``dev`` refuses
 to start a Responses listener, and the upstream installer scripts are not
 used. After the archive checksum matches, this module extracts it and starts
 ``bin/codex-chatgpt-web serve`` with config and homes kept inside the private
-runtime directory.
+runtime directory. Upgrade downloads only that pinned archive. Disable stops
+the supervisor and keeps the private account directory.
 """
 
 from __future__ import annotations
@@ -281,14 +282,34 @@ def _lifecycle(home: Path) -> dict[str, Any]:
     return {
         "enabled": payload.get("enabled") is not False,
         "restart_required": payload.get("restart_required") is True,
+        "admitting": payload.get("admitting") is not False,
     }
 
 
-def _write_lifecycle(home: Path, *, enabled: bool, restart_required: bool) -> None:
+def _write_lifecycle(
+    home: Path,
+    *,
+    enabled: bool,
+    restart_required: bool,
+    admitting: bool = True,
+) -> None:
     _write_json(
         home / "lifecycle.json",
-        {"enabled": enabled, "restart_required": restart_required},
+        {
+            "enabled": enabled,
+            "restart_required": restart_required,
+            "admitting": admitting,
+        },
     )
+
+
+def _account_dir(home: Path) -> Path:
+    """Private login profile. Upgrade and disable never remove it."""
+    return home / "account"
+
+
+def _storage_state(home: Path) -> Path:
+    return _web_home(home) / "browser" / "storage-state.json"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -439,31 +460,62 @@ def _promote(home: Path, incoming: Path) -> None:
     os.rename(incoming, current)
 
 
+def _partial_marker(dest: Path) -> Path:
+    return dest.with_name(dest.name + ".incomplete")
+
+
+def _mark_partial(dest: Path) -> None:
+    marker = _partial_marker(dest)
+    marker.write_text("incomplete\n", encoding="utf-8")
+    os.chmod(marker, 0o644)
+
+
+def _clear_partial_marker(dest: Path) -> None:
+    _partial_marker(dest).unlink(missing_ok=True)
+
+
+def _discard_interrupted_partial(dest: Path) -> None:
+    """Drop a killed download. The bytes are not extracted or executed."""
+    if _partial_marker(dest).exists():
+        dest.unlink(missing_ok=True)
+        _clear_partial_marker(dest)
+
+
 def _copy_to_partial(source: Path, dest: Path) -> None:
     if not source.is_file():
         raise RuntimeError_("runtime source is not a file")
     _mkdir(dest.parent)
-    with source.open("rb") as incoming, dest.open("wb") as outgoing:
-        remaining = MAX_DOWNLOAD_BYTES
-        for chunk in iter(lambda: incoming.read(1024 * 64), b""):
-            remaining -= len(chunk)
-            if remaining < 0:
-                raise RuntimeError_("runtime source exceeds the size limit")
-            outgoing.write(chunk)
-        outgoing.flush()
-        os.fsync(outgoing.fileno())
-    os.chmod(dest, 0o644)
+    _discard_interrupted_partial(dest)
+    _mark_partial(dest)
+    try:
+        with source.open("rb") as incoming, dest.open("wb") as outgoing:
+            remaining = MAX_DOWNLOAD_BYTES
+            for chunk in iter(lambda: incoming.read(1024 * 64), b""):
+                remaining -= len(chunk)
+                if remaining < 0:
+                    raise RuntimeError_("runtime source exceeds the size limit")
+                outgoing.write(chunk)
+            outgoing.flush()
+            os.fsync(outgoing.fileno())
+        os.chmod(dest, 0o644)
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
 
 
 def _download_to_partial(url: str, dest: Path, version: str) -> None:
     _assert_pinned_url(url, version)
     request = urllib.request.Request(url, headers={"User-Agent": "CodexHub"})
     _mkdir(dest.parent)
+    _discard_interrupted_partial(dest)
+    _mark_partial(dest)
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             final = urllib.parse.urlparse(response.geturl())
             if final.hostname not in ALLOWED_DOWNLOAD_HOSTS:
                 raise RuntimeError_("runtime download host is not pinned")
+            if "latest" in final.path:
+                raise RuntimeError_("runtime download URL must be an exact release, not latest")
             with dest.open("wb") as handle:
                 remaining = MAX_DOWNLOAD_BYTES
                 while True:
@@ -482,27 +534,31 @@ def _download_to_partial(url: str, dest: Path, version: str) -> None:
         raise
 
 
-def install_runtime(home: Path, source: Path | None = None) -> dict[str, Any]:
-    home = _assert_private_home(home)
-    _mkdir(home)
-    _restore_install(home)
-    pin = load_pin()
+def _stage_verified_tree(home: Path, source: Path | None, pin: dict[str, Any]) -> Path:
+    """Copy or download the pinned archive, verify it, and extract aside.
+
+    A checksum failure or an interrupted partial is deleted and never executed.
+    The current install is left in place. ``incoming`` is returned for promote.
+    """
     artifact = _artifact(pin)
     partial = home / "staging" / "payload.partial"
     incoming = home / "incoming"
     try:
+        _discard_interrupted_partial(partial)
+        if incoming.exists():
+            shutil.rmtree(incoming)
         if source is None:
             _download_to_partial(str(artifact["url"]), partial, PINNED_VERSION)
         else:
             _copy_to_partial(source, partial)
+        if not partial.is_file() or not _partial_marker(partial).is_file():
+            raise RuntimeError_("interrupted runtime download was not executed")
         digest = _sha256(partial)
         expected = str(artifact["sha256"])
         if not hmac.compare_digest(digest, expected):
-            partial.unlink(missing_ok=True)
             raise RuntimeError_("checksum mismatch; payload was not executed")
         os.chmod(partial, 0o644)
-        if incoming.exists():
-            shutil.rmtree(incoming)
+        _clear_partial_marker(partial)
         runtime_dest = incoming / "runtime"
         _extract_archive(partial, runtime_dest)
         entry = _find_entry(runtime_dest)
@@ -521,15 +577,118 @@ def install_runtime(home: Path, source: Path | None = None) -> dict[str, Any]:
                 "entry": str(entry.relative_to(runtime_dest)),
             },
         )
-        _promote(home, incoming)
     except Exception:
         partial.unlink(missing_ok=True)
+        _clear_partial_marker(partial)
+        if incoming.exists():
+            shutil.rmtree(incoming, ignore_errors=True)
+        raise
+    return incoming
+
+
+def install_runtime(home: Path, source: Path | None = None) -> dict[str, Any]:
+    home = _assert_private_home(home)
+    _mkdir(home)
+    _restore_install(home)
+    pin = load_pin()
+    incoming = _stage_verified_tree(home, source, pin)
+    try:
+        _promote(home, incoming)
+    except Exception:
         if incoming.exists():
             shutil.rmtree(incoming, ignore_errors=True)
         raise
     _append_log(home, "extracted pinned runtime; archive was not executed")
-    _write_lifecycle(home, enabled=True, restart_required=False)
+    _write_lifecycle(home, enabled=True, restart_required=False, admitting=True)
     return build_status(home, pin)
+
+
+def _close_admission(home: Path) -> None:
+    state = _lifecycle(home)
+    _write_lifecycle(
+        home,
+        enabled=state["enabled"],
+        restart_required=state["restart_required"],
+        admitting=False,
+    )
+
+
+def _revoke_inflight_permits(home: Path) -> None:
+    """Stop in-flight tool and collaboration permits before the install moves."""
+    _write_json(home / "drain.json", {"id": secrets.token_hex(16), "reason": "upgrade"})
+    import chatgpt_web_collab
+    import chatgpt_web_client_session
+    import chatgpt_web_route
+
+    chatgpt_web_route.revoke_all_tool_permissions()
+    chatgpt_web_collab.revoke_all_permissions()
+    chatgpt_web_client_session.revoke_all_tool_permissions()
+
+
+def _restore_after_failed_switch(home: Path, incoming: Path, previous: dict[str, Any], was_running: bool) -> None:
+    if incoming.exists():
+        shutil.rmtree(incoming, ignore_errors=True)
+    _restore_install(home)
+    _write_lifecycle(
+        home,
+        enabled=bool(previous["enabled"]),
+        restart_required=bool(previous["restart_required"]) and not was_running,
+        admitting=True,
+    )
+    if was_running:
+        try:
+            start_runtime(home)
+        except Exception:
+            _write_lifecycle(home, enabled=True, restart_required=True, admitting=False)
+            _append_log(home, "previous good install was restored but did not restart")
+
+
+def upgrade_runtime(home: Path, source: Path | None = None) -> dict[str, Any]:
+    """Replace the install with the pinned archive only.
+
+    Login files under the private home stay. A bad or interrupted download is
+    not executed. Promotion failure puts the previous install back.
+    """
+    home = _assert_private_home(home)
+    _mkdir(home)
+    _restore_install(home)
+    pin = load_pin()
+    was_running = _process_record(home) is not None
+    previous = _lifecycle(home)
+    incoming = _stage_verified_tree(home, source, pin)
+    _close_admission(home)
+    try:
+        _revoke_inflight_permits(home)
+        if was_running:
+            stop_runtime(home, disable=False)
+        _promote(home, incoming)
+    except Exception as exc:
+        _restore_after_failed_switch(home, incoming, previous, was_running)
+        if isinstance(exc, RuntimeError_):
+            raise
+        raise RuntimeError_("upgrade promotion failed; previous good install was kept") from exc
+    _append_log(home, "upgraded pinned runtime; archive was not executed")
+    _write_lifecycle(
+        home,
+        enabled=True,
+        restart_required=was_running,
+        admitting=not was_running,
+    )
+    return build_status(home, pin)
+
+
+def delete_account(home: Path) -> dict[str, Any]:
+    """Remove login files. Disable does not call this."""
+    home = _assert_private_home(home)
+    _mkdir(home)
+    account = _account_dir(home)
+    if account.is_symlink() or account.is_file():
+        account.unlink()
+    elif account.exists():
+        shutil.rmtree(account)
+    _storage_state(home).unlink(missing_ok=True)
+    _append_log(home, "deleted ChatGPT Web account files")
+    return build_status(home)
 
 
 def _bind_host() -> str:
@@ -788,6 +947,7 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
         "capacity": capacity,
         "models": doctor_models,
         "restart_required": lifecycle["restart_required"],
+        "admitting": lifecycle["admitting"],
         "disabled": not lifecycle["enabled"],
         "installed": installed is not None,
         "entry": "codex-chatgpt-web serve",
@@ -1069,7 +1229,16 @@ def stop_runtime(home: Path, *, disable: bool) -> dict[str, Any]:
         kill_deadline = time.time() + 2
         while time.time() < kill_deadline and _pid_alive(runtime_pid):
             time.sleep(0.05)
-    _write_lifecycle(home, enabled=not disable, restart_required=not disable)
+    if not runtime_pid or not _pid_alive(runtime_pid):
+        (home / "process.json").unlink(missing_ok=True)
+    state = _lifecycle(home)
+    # Disable stops the supervisor only. Account files stay until delete-account.
+    _write_lifecycle(
+        home,
+        enabled=not disable,
+        restart_required=not disable,
+        admitting=False if disable else state["admitting"],
+    )
     _append_log(home, "disabled runtime" if disable else "stopped runtime; restart required")
     return build_status(home)
 
@@ -1139,6 +1308,10 @@ def main(argv: list[str] | None = None) -> int:
             _emit(home, stop_runtime(home, disable=False))
         elif command == "disable":
             _emit(home, stop_runtime(home, disable=True))
+        elif command == "upgrade":
+            _emit(home, upgrade_runtime(home, source))
+        elif command == "delete-account":
+            _emit(home, delete_account(home))
         elif command == "status":
             home = _assert_private_home(home)
             _emit(home, build_status(home))

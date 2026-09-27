@@ -405,6 +405,8 @@ export const api = {
   chatgptWebEnable: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebEnable),
   chatgptWebStop: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebStop),
   chatgptWebDisable: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebDisable),
+  chatgptWebUpgrade: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebUpgrade),
+  chatgptWebDeleteAccount: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebDeleteAccount),
   chatgptWebOpenLogin: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebOpenLogin),
   chatgptWebCloseLogin: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebCloseLogin),
 };
