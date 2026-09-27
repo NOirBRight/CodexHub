@@ -646,6 +646,7 @@ const enUS = {
     chatgptWebConnectionChecking: "Checking the managed ChatGPT Web connection",
     chatgptWebConnectionSuccess: "Connected to {address}",
     chatgptWebRuntimeSettingsHint: "ChatGPT account, Tunnel, and connector settings belong in ChatGPT Runtime Settings.",
+    chatgptWebSettingsPendingRestart: "ChatGPT Runtime Settings have changed. Restart the ChatGPT Web component in CodexHub to apply them.",
     chatgptWebOpenSettings: "Open original settings page",
     chatgptWebSettingsOpening: "Opening ChatGPT Runtime Settings",
     chatgptWebSettingsOpened: "Opened ChatGPT Runtime Settings in your browser",

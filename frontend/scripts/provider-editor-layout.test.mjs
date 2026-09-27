@@ -132,10 +132,24 @@ test("model settings overlay is a nested dialog that consumes Escape", async () 
 
 test("ChatGPT Provider Connection keeps service credentials masked and exposes model choices", async () => {
   const source = await readFile(new URL("../src/components/providers/ChatGptWebRuntimeCard.tsx", import.meta.url), "utf8");
+  const types = await readFile(new URL("../src/lib/types.ts", import.meta.url), "utf8");
+  const [english, chinese] = await Promise.all([
+    readFile(new URL("../src/i18n/locales/en-US.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/i18n/locales/zh-CN.ts", import.meta.url), "utf8"),
+  ]);
   assert.match(source, /type="password"/);
   assert.match(source, /api\.chatgptWebConnectionCheck\(provider\.base_url\.trim\(\), provider\.api_key \?\? ""\)/);
   assert.match(source, /function toggleModel/);
   assert.match(source, /gateway_exported: true/);
   assert.match(source, /onProviderChange\(\{ \.\.\.provider, models: nextModels \}\)/);
   assert.doesNotMatch(source, /api\.chatgptWebOpenLogin|api\.chatgptWebDeleteAccount/);
+  assert.match(types, /settings_pending_restart: boolean/);
+  assert.match(source, /status\?\.settings_pending_restart/);
+  assert.match(source, /timeoutMs: null/);
+  assert.match(source, /dismissToast\(settingsRestartToast\.current\)/);
+  assert.match(english, /Restart the ChatGPT Web component in CodexHub/);
+  assert.match(english, /chatgptWebSettingsPendingRestart:/);
+  assert.match(chinese, /chatgptWebSettingsPendingRestart:/);
+  const readiness = source.slice(source.indexOf("const textReady ="), source.indexOf("const stateKey ="));
+  assert.doesNotMatch(readiness, /settings_pending_restart/);
 });

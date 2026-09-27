@@ -260,8 +260,14 @@ def test_settings_page_status_reads_cached_checks_without_running_explicit_check
         ({"browser_smoke": {"state": "failed"}}, {}, "full", False, False),
         ({"tunnel": {"state": "not_ready"}}, {}, "full", True, False),
         ({"connector": {"selectable": False}}, {}, "full", True, False),
-        ({}, {"pending_restart": True}, "full", False, False),
-        ({}, {}, "browser-only", True, False),
+        (
+            {},
+            {"pending_restart": True, "saved": {"mode": "browser-only", "configuration_complete": True}},
+            "full",
+            True,
+            True,
+        ),
+        ({}, {"saved": {"mode": "full", "configuration_complete": True}}, "browser-only", True, False),
     ],
 )
 def test_status_readiness_requires_live_compatible_runtime_and_active_mode(
@@ -309,10 +315,13 @@ def test_status_readiness_requires_live_compatible_runtime_and_active_mode(
 
     status, _headers, body = _call(server, "/api/status", session=session)
     assert status == 200, body
-    readiness = json.loads(body)["readiness"]
+    payload = json.loads(body)
+    readiness = payload["readiness"]
     assert readiness["text_ready"] is expected_text
     assert readiness["tools_ready"] is expected_tools
-    assert json.loads(body)["runtime"]["active_mode"] == active_mode
+    assert payload["runtime"]["active_mode"] == active_mode
+    assert payload["runtime"]["settings_pending_restart"] is (settings["pending_restart"] is True)
+    assert payload["settings"]["pending_restart"] is (settings["pending_restart"] is True)
 
 
 def test_login_routes_open_and_cancel_separately(settings_server, monkeypatch):
