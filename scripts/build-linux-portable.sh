@@ -139,12 +139,28 @@ if [[ ! -x "$binary" ]]; then
 fi
 cp -a "$binary" "$portable_dir/$executableBaseName"
 
-for resource in config src-python python scripts; do
-  src="$targetRoot/release/$resource"
-  if [[ -e "$src" ]]; then
-    cp -a "$src" "$portable_dir/"
-  fi
-done
+# Copy declared source resources, never stale files from Cargo's output tree.
+"$repo_root/scripts/codexhub-python.sh" - "$repo_root" "$portable_dir" "$generated_config" <<'PY'
+import glob
+import json
+from pathlib import Path
+import shutil
+import sys
+
+repo, portable, config = map(Path, sys.argv[1:])
+resources = json.loads(config.read_text(encoding="utf-8"))["bundle"]["resources"]
+for pattern, destination in resources.items():
+    for match in glob.glob(str(repo / "src-tauri" / pattern), include_hidden=True):
+        source = Path(match)
+        target = portable / destination
+        if glob.has_magic(pattern):
+            target /= source.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, target)
+        else:
+            shutil.copy2(source, target)
+PY
 if [[ -n "$chatgpt_web_runtime" ]]; then
   "$repo_root/scripts/codexhub-python.sh" - "$portable_dir" "$chatgpt_web_runtime" "$chatgpt_web_revision" "$executableBaseName" <<'PY'
 import hashlib
@@ -202,7 +218,7 @@ optional and picked up automatically when present.
 NOTE
 fi
 
-tar -C "$output_root" -czf "$portable_archive" "$portable_name"
+tar --exclude='__pycache__' --exclude='*.pyc' -C "$output_root" -czf "$portable_archive" "$portable_name"
 sha256="$(sha256sum "$portable_archive" | awk '{print $1}')"
 echo "Linux portable ready:"
 echo "  Directory: $portable_dir"
