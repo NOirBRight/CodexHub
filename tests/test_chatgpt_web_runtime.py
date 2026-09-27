@@ -109,7 +109,8 @@ server.serve_forever()
 '''
 
 
-def _fixture_script(marker: Path) -> str:
+def _fixture_script(marker: Path, health_server: str | None = None) -> str:
+    health_server = _fixture_health_server() if health_server is None else health_server
     return f"""#!/bin/sh
 set -eu
 mkdir -p "$CODEX_CHATGPT_WEB_HOME"
@@ -139,7 +140,7 @@ if [ "$1" = "login" ]; then
 fi
 if [ "$1" = "serve" ]; then
   printf executed > '{marker}'
-  exec {shlex.quote(sys.executable)} -c {shlex.quote(_fixture_health_server())} "$0" "$@"
+  exec {shlex.quote(sys.executable)} -c {shlex.quote(health_server)} "$0" "$@"
 fi
 exit 0
 """

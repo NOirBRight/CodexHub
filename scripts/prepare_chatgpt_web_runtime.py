@@ -45,9 +45,9 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _run(args: list[str], *, cwd: Path | None = None) -> str:
+def _run(args: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> str:
     print("+ " + " ".join(args), flush=True)
-    result = subprocess.run(args, cwd=cwd, check=False, text=True, capture_output=True)
+    result = subprocess.run(args, cwd=cwd, env=env, check=False, text=True, capture_output=True)
     if result.stdout:
         print(result.stdout, end="", flush=True)
     if result.stderr:
@@ -117,6 +117,9 @@ def _bun_executable(repo: Path, expected_version: str) -> str:
 def _build_runtime_source(repo: Path, output: Path, source: dict[str, Any]) -> None:
     patch = _patch_path(repo, source)
     bun = _bun_executable(repo, str(source["bun_version"]))
+    bun_env = os.environ.copy()
+    bun_dir = str(Path(bun).resolve().parent)
+    bun_env["PATH"] = os.pathsep.join(filter(None, (bun_dir, bun_env.get("PATH", ""))))
     with tempfile.TemporaryDirectory(prefix="codexhub-chatgpt-web-source-") as temporary:
         source_dir = Path(temporary) / "source"
         source_dir.mkdir()
@@ -135,19 +138,19 @@ def _build_runtime_source(repo: Path, output: Path, source: dict[str, Any]) -> N
         if tree != PATCHED_TREE:
             raise RuntimeError("reviewed runtime patch did not produce the pinned source tree")
 
-        _run([bun, "install", "--frozen-lockfile", "--ignore-scripts"], cwd=source_dir)
+        _run([bun, "install", "--frozen-lockfile", "--ignore-scripts"], cwd=source_dir, env=bun_env)
         launcher = source_dir / "launcher"
-        _run([bun, "install", "--frozen-lockfile", "--ignore-scripts"], cwd=launcher)
-        _run([bun, "run", "typecheck"], cwd=source_dir)
+        _run([bun, "install", "--frozen-lockfile", "--ignore-scripts"], cwd=launcher, env=bun_env)
+        _run([bun, "run", "typecheck"], cwd=source_dir, env=bun_env)
         runtime_dir = source_dir / "dist" / "runtime"
-        _run([bun, "run", "scripts/build-runtime-bundle.ts", str(runtime_dir)], cwd=source_dir)
-        _run([bun, "run", "scripts/smoke-release.ts", str(runtime_dir)], cwd=source_dir)
+        _run([bun, "run", "scripts/build-runtime-bundle.ts", str(runtime_dir)], cwd=source_dir, env=bun_env)
+        _run([bun, "run", "scripts/smoke-release.ts", str(runtime_dir)], cwd=source_dir, env=bun_env)
         _pack_runtime(runtime_dir, output)
 
         with tempfile.TemporaryDirectory(prefix="codexhub-chatgpt-web-smoke-") as smoke_temp:
             unpacked = Path(smoke_temp) / "unpacked"
             _extract_runtime(output, unpacked)
-            _run([bun, "run", "scripts/smoke-release.ts", str(unpacked)], cwd=source_dir)
+            _run([bun, "run", "scripts/smoke-release.ts", str(unpacked)], cwd=source_dir, env=bun_env)
 
 
 def _pack_runtime(source: Path, destination: Path) -> None:
