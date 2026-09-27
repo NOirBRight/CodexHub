@@ -326,17 +326,52 @@ def test_repo_pin_is_the_accepted_upstream_release() -> None:
 
     assert document["commit"] == chatgpt_web_runtime.PINNED_COMMIT == "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
     assert document["version"] == chatgpt_web_runtime.PINNED_VERSION == "6.1.1"
+    source = document["runtime_source"]
+    assert source["commit"] == document["commit"]
+    assert source["build_revision"] == "9c2892af646f36752cc131dedd90af6586e6e4ce"
+    assert source["git_tree"] == "2d49d1dca11aa21a340348bb2a356c4078ef50ab"
+    assert source["contract"] == "admin-status-v1"
+    assert source["patch_sha256"] == "50577ded0e5b012ec7ea893f98dcd1635705470c0f093e4cb192c9cadd638c35"
+    patch = ROOT / source["patch_file"]
+    assert hashlib.sha256(patch.read_bytes()).hexdigest() == source["patch_sha256"]
     assert document["license"] == "MIT"
     assert "setup" in document["rejected_entries"]
     assert "dev" in document["rejected_entries"]
     assert "--replace-codex-route" in document["rejected_entries"]
-    assert document["artifacts"]["linux-x64"]["sha256"] == "e86371aa677722811c34e4ac9b8984a3859f24f57c5ad0e3e1d6014a96298531"
-    assert document["artifacts"]["windows-x64"]["sha256"] == "88341bd2818894799be98f1283f64a2124de0f43193ee2dc1d2a774362ea59d5"
+    assert set(document["artifacts"]) == {"linux-x64", "windows-x64"}
+    assert document["artifacts"]["linux-x64"]["sha256"] == "ab118da7d08baae8d1cd8496a2951e6e613a8827ccdc411a11ba52ba36a62c1d"
+    assert document["artifacts"]["windows-x64"]["sha256"] == "780bbb9b63888379cc41c77ba5dc293a30d93d375a4d0c98af659629bb04ec0e"
     for artifact in document["artifacts"].values():
-        assert "/releases/latest/" not in artifact["url"]
-        assert artifact["url"].startswith(
-            "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.1/"
-        )
+        assert artifact["bundled_only"] is True
+        assert artifact["build_revision"] == source["build_revision"]
+        assert artifact["git_tree"] == source["git_tree"]
+        assert "url" not in artifact
+
+
+def test_bundled_only_runtime_never_falls_back_to_upstream_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "runtime"
+    archive = _archive(tmp_path, _fixture_script(tmp_path / "executed-marker"))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    document = json.loads(pin.read_text(encoding="utf-8"))
+    artifact = document["artifacts"][chatgpt_web_runtime.artifact_key()]
+    artifact["bundled_filename"] = archive.name
+    artifact["bundled_only"] = True
+    artifact.pop("url", None)
+    pin.write_text(json.dumps(document), encoding="utf-8")
+    archive.unlink()
+
+    def reject_download(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("bundled-only runtime attempted a download")
+
+    monkeypatch.setattr(chatgpt_web_runtime.urllib.request, "urlopen", reject_download)
+    result = _run(home, "install", pin=pin)
+
+    assert result["_exit_code"] != 0
+    assert result["error"] == "required patched ChatGPT Web Runtime bundle is missing"
+    assert not (home / "current").exists()
 
 
 def test_settings_api_redacts_runtime_key_and_supports_explicit_secret_actions(tmp_path: Path) -> None:
@@ -1035,7 +1070,12 @@ def test_bundled_runtime_installs_only_verified_local_bytes(tmp_path: Path, scen
     assert not executed.exists()
     assert (home / "current" / "runtime" / ENTRY_NAME).exists() is (scenario == "valid")
     if scenario != "valid":
-        assert {"missing": "not a file", "corrupt": "checksum mismatch", "traversal": "filename beside"}[scenario] in installed["error"]
+        expected_errors = {
+            "missing": "required patched ChatGPT Web Runtime bundle is missing",
+            "corrupt": "checksum mismatch",
+            "traversal": "filename beside",
+        }
+        assert expected_errors[scenario] in installed["error"]
 
 
 def test_remote_bind_is_refused(tmp_path: Path) -> None:
@@ -1135,7 +1175,16 @@ def test_upgrade_downloads_only_the_pinned_artifact(tmp_path: Path, monkeypatch:
     archive = _archive(tmp_path, _fixture_script(marker))
     pin = _pin_for(tmp_path, archive.read_bytes())
     document = json.loads(pin.read_text(encoding="utf-8"))
-    url = document["artifacts"][chatgpt_web_runtime.artifact_key()]["url"]
+    artifact = document["artifacts"][chatgpt_web_runtime.artifact_key()]
+    # Keep the legacy public-release path covered for ordinary upstream pins.
+    artifact.pop("bundled_only", None)
+    artifact.pop("bundled_filename", None)
+    artifact["url"] = (
+        "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.1/"
+        "codex-chatgpt-web-linux-amd64.tar.gz"
+    )
+    url = artifact["url"]
+    pin.write_text(json.dumps(document), encoding="utf-8")
     assert "/releases/latest/" not in url
     assert url.startswith("https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.1/")
     monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(pin))

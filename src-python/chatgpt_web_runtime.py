@@ -311,10 +311,8 @@ def load_pin(path: Path | None = None) -> dict[str, Any]:
     if not isinstance(artifact, dict):
         raise RuntimeError_("ChatGPT Web Runtime pin artifact is invalid")
     sha = str(artifact.get("sha256") or "")
-    url = str(artifact.get("url") or "")
     if len(sha) != 64 or any(character not in "0123456789abcdef" for character in sha):
         raise RuntimeError_("ChatGPT Web Runtime pin checksum is invalid")
-    _assert_pinned_url(url, PINNED_VERSION)
     bundled_filename = artifact.get("bundled_filename")
     if bundled_filename is not None and (
         not isinstance(bundled_filename, str)
@@ -325,6 +323,13 @@ def load_pin(path: Path | None = None) -> dict[str, Any]:
         or ":" in bundled_filename
     ):
         raise RuntimeError_("bundled runtime must be a filename beside its pin")
+    if artifact.get("bundled_only") is True:
+        if not isinstance(bundled_filename, str):
+            raise RuntimeError_("bundled-only runtime pin has no bundled archive")
+        if artifact.get("url") is not None:
+            raise RuntimeError_("bundled-only runtime pin cannot have a download URL")
+    else:
+        _assert_pinned_url(str(artifact.get("url") or ""), PINNED_VERSION)
     return payload
 
 
@@ -966,7 +971,12 @@ def _stage_verified_tree(home: Path, source: Path | None, pin: dict[str, Any]) -
     """
     artifact = _artifact(pin)
     if source is None and artifact.get("bundled_filename"):
-        source = default_pin_path().parent / artifact["bundled_filename"]
+        bundled_source = default_pin_path().parent / artifact["bundled_filename"]
+        if artifact.get("bundled_only") is True and not bundled_source.is_file():
+            raise RuntimeError_("required patched ChatGPT Web Runtime bundle is missing")
+        source = bundled_source
+    if source is None and artifact.get("bundled_only") is True:
+        raise RuntimeError_("required patched ChatGPT Web Runtime bundle is not configured")
     partial = home / "staging" / "payload.partial"
     incoming = home / "incoming"
     try:
