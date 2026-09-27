@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import chatgpt_web_checks as checks
+import chatgpt_web_route
 import pytest
 
 
@@ -60,11 +61,29 @@ class _FakeBrowser:
         raise AssertionError(operation)
 
 
-def _install_fake_runtime(monkeypatch, home: Path, *, active_http: int = 0, active_browser: int = 0):
+def _install_fake_runtime(
+    monkeypatch,
+    home: Path,
+    *,
+    active_http: int = 0,
+    active_browser: int = 0,
+    accepting_turns: bool = True,
+    runtime_capabilities: dict[str, bool] | None = None,
+    models: list[dict] | None = None,
+):
     import chatgpt_web_runtime as runtime
 
-    monkeypatch.setattr(runtime, "_process_record", lambda _home: {"port": 18090})
+    monkeypatch.setattr(runtime, "_process_record", lambda _home: {
+        "pid": 4301,
+        "supervisor_pid": 4300,
+        "port": 18090,
+        "diagnostic_port": 18091,
+        "executable": "/synthetic/entry",
+        "ownership": "codexhub-supervisor",
+        "login_control": runtime.LOGIN_CONTROL,
+    })
     monkeypatch.setattr(runtime, "_pin_compatible", lambda *_args: True)
+    monkeypatch.setattr(runtime, "_install_document", lambda _home: {"sha256": "synthetic"})
     monkeypatch.setattr(checks, "_PinnedBrowserSession", _FakeBrowser)
     monkeypatch.setattr(
         runtime,
@@ -73,18 +92,27 @@ def _install_fake_runtime(monkeypatch, home: Path, *, active_http: int = 0, acti
     )
     monkeypatch.setattr(runtime, "_find_entry", lambda _root: Path("/synthetic/entry"))
     monkeypatch.setattr(runtime, "_runtime_root", lambda _home: Path("/synthetic/runtime"))
-    def request(url: str, _token: str, *, timeout: float = 5.0):
-        if url.endswith("/healthz"):
-            return {"active_http_turns": active_http, "active_browser_turns": active_browser}
-        if url.endswith("/v1/models"):
-            return {"models": [
-                {"slug": "official/gpt-5.6-sol", "name": "official model"},
-                {"slug": "chatgpt-web/gpt-5.6-sol", "display_name": "GPT 5.6 Sol",
-                 "supported_reasoning_levels": [{"effort": "medium"}, {"effort": "high"}],
-                 "input_modalities": ["text", "image"]},
-                {"slug": "chatgpt-web/gpt-5.6-luna", "name": "GPT 5.6 Luna", "efforts": ["low"]},
-            ]}
-        raise AssertionError(url)
+    def request(url: str, token: str, *, timeout: float = 5.0):
+        assert url.endswith("/admin/status")
+        assert token == "synthetic-control-token-for-tests-only"
+        return {
+            "control_contract_version": 1,
+            "status": "ok",
+            "accepting_turns": accepting_turns,
+            "active_http_turns": active_http,
+            "active_browser_turns": active_browser,
+            "account_capabilities": runtime_capabilities or {
+                "sol_available": True,
+                "extra_high_available": True,
+                "pro_available": False,
+            },
+            "models": models if models is not None else [
+                {"id": "chatgpt-web/gpt-5.6-sol", "display_name": "GPT 5.6 Sol",
+                 "efforts": ["medium", "high"], "image_input": True},
+                {"id": "chatgpt-web/gpt-5.6-luna", "display_name": "GPT 5.6 Luna",
+                 "efforts": ["low"], "image_input": False},
+            ],
+        }
     monkeypatch.setattr(checks, "_request_json", request)
 
 
@@ -103,6 +131,10 @@ def test_explicit_check_reports_independent_evidence_and_only_web_models(monkeyp
     assert result["connector"] == {"state": "selectable", "name": "Codex Native2"}
     assert result["text_ready"] is True
     assert result["tools_ready"] is True
+    assert result["runtime_capabilities"] == {
+        "solAvailable": True, "extraHighAvailable": True, "proAvailable": False,
+    }
+    assert result["capabilities_match"] is True
     assert result["models"] == [
         {"id": "chatgpt-web/gpt-5.6-sol", "display_name": "GPT 5.6 Sol",
          "efforts": ["medium", "high"], "image_input": True},
@@ -110,6 +142,109 @@ def test_explicit_check_reports_independent_evidence_and_only_web_models(monkeyp
          "efforts": ["low"], "image_input": False},
     ]
     assert checks.cached_checks(home)["cache_state"] == "current"
+
+
+def test_changed_browser_capabilities_revoke_runtime_models_until_restart(monkeypatch, tmp_path):
+    home = _home(tmp_path)
+    _install_fake_runtime(monkeypatch, home)
+
+    class ChangedCapabilities(_FakeBrowser):
+        def operation(self, operation: str, *, detect_capabilities: bool = False):
+            value = super().operation(operation, detect_capabilities=detect_capabilities)
+            if operation == "inspect" and detect_capabilities:
+                value["value"]["proAvailable"] = True
+            return value
+
+    monkeypatch.setattr(checks, "_PinnedBrowserSession", ChangedCapabilities)
+    result = checks.check_runtime(home)
+
+    assert result["state"] == "failed"
+    assert result["reason"] == "account_capabilities_changed"
+    assert result["login"]["state"] == "signed_in"
+    assert result["capabilities_match"] is False
+    assert result["models"] == []
+    assert result["model_state"] == "capabilities_mismatch"
+    monkeypatch.setattr(checks.runtime, "default_home", lambda: home)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    status = checks.runtime.build_status(home)
+    assert status["ready"] is False
+    assert status["login"]["state"] == "signed_in"
+    from gateway_errors import ModelIdentityResolutionError
+
+    with pytest.raises(ModelIdentityResolutionError, match="runtime is not ready"):
+        chatgpt_web_route.upstream_for_model("chatgpt-web/gpt-5.6-sol")
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_state"),
+    [("not_authenticated", "signed_out"), ("session_expired", "signed_out"),
+     ("browser_check_unavailable", "unknown")],
+)
+def test_explicit_auth_failures_revoke_readiness_without_mislabeling_other_failures(
+    monkeypatch, tmp_path, failure, expected_state
+):
+    home = _home(tmp_path)
+    _install_fake_runtime(monkeypatch, home)
+    assert checks.check_runtime(home)["state"] == "ready"
+
+    class FailedInspect(_FakeBrowser):
+        def operation(self, operation: str, *, detect_capabilities: bool = False):
+            if operation == "inspect" and detect_capabilities:
+                raise RuntimeError(failure)
+            return super().operation(operation, detect_capabilities=detect_capabilities)
+
+    monkeypatch.setattr(checks, "_PinnedBrowserSession", FailedInspect)
+    result = checks.check_runtime(home)
+
+    assert result["login"]["state"] == ("failed" if failure == "browser_check_unavailable" else "signed_out")
+    assert checks.cached_checks(home)["state"] == "failed"
+    status = checks.runtime.build_status(home)
+    assert status["ready"] is False
+    assert status["login"]["state"] == expected_state
+
+
+def test_cached_readiness_reaches_gateway_and_stale_binding_fails_closed(monkeypatch, tmp_path):
+    home = _home(tmp_path)
+    _install_fake_runtime(monkeypatch, home)
+    assert checks.check_runtime(home)["state"] == "ready"
+    monkeypatch.setattr(checks.runtime, "default_home", lambda: home)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+
+    status = checks.runtime.build_status(home)
+
+    assert status["readiness_checks"]["cache_state"] == "current"
+    assert status["ready"] is True
+    upstream = chatgpt_web_route.upstream_for_model("chatgpt-web/gpt-5.6-sol")
+    assert upstream["supported_reasoning_levels"] == ("medium", "high")
+    assert upstream["input_modalities"] == ("text", "image")
+
+    (home / "lifecycle.json").write_text(
+        json.dumps({"enabled": True, "restart_required": False, "admitting": False}),
+        encoding="utf-8",
+    )
+    blocked = checks.runtime.build_status(home)
+    assert blocked["ready"] is True
+    assert blocked["admitting"] is False
+    from gateway_errors import ModelIdentityResolutionError
+
+    with pytest.raises(ModelIdentityResolutionError, match="runtime is not ready"):
+        chatgpt_web_route.upstream_for_model("chatgpt-web/gpt-5.6-sol")
+    (home / "lifecycle.json").write_text(
+        json.dumps({"enabled": True, "restart_required": False, "admitting": True}),
+        encoding="utf-8",
+    )
+
+    config_path = home / "web-home" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["automaticAppName"] = "Changed connector"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    stale = checks.runtime.build_status(home)
+
+    assert stale["readiness_checks"]["cache_state"] == "stale"
+    assert stale["ready"] is False
+    assert stale["models"] == []
+    with pytest.raises(ModelIdentityResolutionError, match="login has not been verified"):
+        chatgpt_web_route.upstream_for_model("chatgpt-web/gpt-5.6-sol")
 
 
 def test_busy_check_does_not_open_browser_and_keeps_model_evidence(monkeypatch, tmp_path):
@@ -190,10 +325,20 @@ def test_cached_evidence_does_not_expire_while_account_and_runtime_are_unchanged
     assert cached["state"] == "ready"
 
 
-def test_unavailable_active_turn_count_fails_closed_without_browser(monkeypatch, tmp_path):
+def test_invalid_control_status_fails_closed_without_browser(monkeypatch, tmp_path):
     home = _home(tmp_path)
     _install_fake_runtime(monkeypatch, home)
-    monkeypatch.setattr(checks, "_request_json", lambda *_args, **_kwargs: {"active_http_turns": 0})
+    monkeypatch.setattr(checks, "_request_json", lambda *_args, **_kwargs: {
+        "control_contract_version": 1,
+        "status": "ok",
+        "accepting_turns": True,
+        "account_capabilities": {
+            "sol_available": True,
+            "extra_high_available": True,
+            "pro_available": False,
+        },
+        "models": [],
+    })
     monkeypatch.setattr(
         checks,
         "_PinnedBrowserSession",
@@ -203,7 +348,7 @@ def test_unavailable_active_turn_count_fails_closed_without_browser(monkeypatch,
     result = checks.check_runtime(home)
 
     assert result["state"] == "blocked"
-    assert result["reason"] == "active_turn_state_unavailable"
+    assert result["reason"] == "runtime_control_contract_invalid"
     assert result["tools_ready"] is False
 
 
@@ -251,7 +396,7 @@ def test_loopback_redirect_does_not_forward_runtime_control_token(monkeypatch, t
         source_thread.join(timeout=2)
         destination_thread.join(timeout=2)
 
-    assert result["reason"] == "active_turn_state_unavailable"
+    assert result["reason"] == "runtime_control_contract_unavailable"
     assert captured == []
 
 

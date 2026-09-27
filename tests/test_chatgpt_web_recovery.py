@@ -17,13 +17,9 @@ import test_chatgpt_web_route as web
 
 
 @pytest.fixture
-def runtime(tmp_path: Path):
+def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home, pin = web._install(tmp_path)
-    web._write_doctor(
-        home,
-        web._doctor([{"id": web.MODEL_ID, "display_name": "Sol", "efforts": ["medium", "high"]}]),
-    )
-    web._start(home, pin)
+    web._start(home, pin, monkeypatch)
     try:
         yield home, pin
     finally:
@@ -108,7 +104,9 @@ def _output(thread_id: str, turn_id: str, call_id: str, *, effort: str = "high",
     return body
 
 
-def test_image_part_is_forwarded_only_when_the_doctor_lists_it(runtime, tmp_path: Path) -> None:
+def test_image_part_is_forwarded_only_when_the_account_status_lists_it(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     home, pin = runtime
     with web._gateway(home, pin, tmp_path / "codex-client") as port:
         assert _catalog_entry()["input_modalities"] == ["text"]
@@ -119,19 +117,7 @@ def test_image_part_is_forwarded_only_when_the_doctor_lists_it(runtime, tmp_path
         assert b"recognized" not in payload.lower()
         assert len(web._requests(home)) == before
 
-        web._write_doctor(
-            home,
-            web._doctor(
-                [
-                    {
-                        "id": web.MODEL_ID,
-                        "display_name": "Sol",
-                        "efforts": ["medium", "high"],
-                        "input_modalities": ["text", "image"],
-                    }
-                ]
-            ),
-        )
+        web._seed_check(home, monkeypatch, image_input=True)
         assert _catalog_entry()["input_modalities"] == ["text", "image"]
         status, payload = web._post(port, _image_body("with_image"))
         assert status == 200, payload
@@ -217,16 +203,17 @@ def test_compaction_keeps_the_call_and_does_not_resend_the_prior_message(runtime
         assert len(web._requests(home)) == after_compact + 1
 
 
-def test_effort_or_model_change_revokes_the_old_call(runtime, tmp_path: Path) -> None:
+def test_effort_or_model_change_revokes_the_old_call(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     home, pin = runtime
-    web._write_doctor(
+    web._seed_check(
         home,
-        web._doctor(
-            [
-                {"id": web.MODEL_ID, "display_name": "Sol", "efforts": ["medium", "high"]},
-                {"id": web.OTHER_MODEL_ID, "display_name": "Luna", "efforts": ["medium", "high"]},
-            ]
-        ),
+        monkeypatch,
+        models=[
+            {"id": web.MODEL_ID, "display_name": "Sol", "efforts": ["medium", "high"], "image_input": False},
+            {"id": web.OTHER_MODEL_ID, "display_name": "Luna", "efforts": ["medium", "high"], "image_input": False},
+        ],
     )
     with web._gateway(home, pin, tmp_path / "codex-client") as port:
         issued = web._with_tools(
@@ -269,7 +256,9 @@ def test_effort_or_model_change_revokes_the_old_call(runtime, tmp_path: Path) ->
         assert len(web._requests(home)) == before
 
 
-def test_runtime_faults_reject_a_new_request_and_do_not_repost(runtime, tmp_path: Path) -> None:
+def test_runtime_faults_reject_a_new_request_and_do_not_repost(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     home, pin = runtime
     text = web._request_body(
         web.MODEL_ID,
@@ -287,7 +276,6 @@ def test_runtime_faults_reject_a_new_request_and_do_not_repost(runtime, tmp_path
             effort="high",
         )
     )
-    healthy = web._doctor([{"id": web.MODEL_ID, "display_name": "Sol", "efforts": ["high"]}])
     with web._gateway(home, pin, tmp_path / "codex-client") as port:
         status, payload = web._post(port, text)
         assert status == 200, payload
@@ -301,26 +289,13 @@ def test_runtime_faults_reject_a_new_request_and_do_not_repost(runtime, tmp_path
                 assert absent not in response
             assert len(web._requests(home)) == accepted
 
-        web._write_doctor(home, web._doctor([{"id": web.MODEL_ID, "display_name": "Sol", "efforts": ["high"]}], login="error"))
+        web._seed_check(home, monkeypatch, authenticated=False)
         fail_new(text, b"signed out", b"browser smoke failed")
-        web._write_doctor(
-            home,
-            {
-                "ok": False,
-                "models": [{"id": web.MODEL_ID, "display_name": "Sol", "efforts": ["high"]}],
-                "checks": [
-                    {"id": "login", "status": "ok"},
-                    {"id": "browser-smoke", "status": "error"},
-                    {"id": "tunnel-runtime", "status": "ok"},
-                    {"id": "connector", "status": "ok"},
-                ],
-            },
-        )
+        web._seed_check(home, monkeypatch, browser=False)
         fail_new(text, b"browser smoke failed", b"signed out")
-        web._write_doctor(home, healthy)
-        web._write_doctor(home, web._doctor_layers(tunnel="error", connector="ok"))
+        web._seed_check(home, monkeypatch, tunnel=False)
         fail_new(tool, b"tool tunnel is not ready", b"tool connector is not selectable")
-        web._write_doctor(home, web._doctor_layers(tunnel="ok", connector="error"))
+        web._seed_check(home, monkeypatch, connector=False)
         fail_new(tool, b"tool connector is not selectable", b"tool tunnel is not ready")
 
     web._run(home, "stop", pin=pin)
@@ -364,7 +339,9 @@ def test_runtime_faults_reject_a_new_request_and_do_not_repost(runtime, tmp_path
         canary_thread.join(timeout=2)
 
 
-def test_accepted_text_is_not_posted_again_when_login_drops(runtime, tmp_path: Path) -> None:
+def test_accepted_text_is_not_posted_again_when_login_drops(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     home, pin = runtime
     (home / "web-home" / "serve-mode").write_text("hold", encoding="utf-8")
     body = web._request_body(
@@ -397,7 +374,7 @@ def test_accepted_text_is_not_posted_again_when_login_drops(runtime, tmp_path: P
             seen += chunk
         assert b"hello web" in seen
         assert len(web._requests(home)) == 1
-        web._write_doctor(home, web._doctor([{"id": web.MODEL_ID, "display_name": "Sol", "efforts": ["high"]}], login="error"))
+        web._seed_check(home, monkeypatch, authenticated=False)
         time.sleep(0.2)
         assert len(web._requests(home)) == 1
         client.shutdown(socket.SHUT_RDWR)
@@ -408,7 +385,9 @@ def test_accepted_text_is_not_posted_again_when_login_drops(runtime, tmp_path: P
         assert len(web._requests(home)) == 1
 
 
-def test_restart_accepts_a_new_text_turn_and_rejects_the_old_call(runtime, tmp_path: Path) -> None:
+def test_restart_accepts_a_new_text_turn_and_rejects_the_old_call(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     home, pin = runtime
     with web._gateway(home, pin, tmp_path / "codex-client") as port:
         issued = web._with_tools(
@@ -426,7 +405,7 @@ def test_restart_accepts_a_new_text_turn_and_rejects_the_old_call(runtime, tmp_p
         issued_count = len(web._requests(home))
         stopped = web._run(home, "stop", pin=pin)
         assert stopped.get("process", {}).get("running") is not True
-        web._start(home, pin)
+        web._start(home, pin, monkeypatch)
         status, payload = web._post(
             port,
             web._request_body(

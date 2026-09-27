@@ -81,7 +81,7 @@ def check_connection(
     endpoint = urlsplit(resolved_url)
     try:
         connection = http.client.HTTPConnection(LOOPBACK_HOST, endpoint.port, timeout=3)
-        connection.request("GET", "/v1/models", headers={"Authorization": f"Bearer {resolved_key}"})
+        connection.request("GET", "/admin/status", headers={"Authorization": f"Bearer {resolved_key}"})
         response = connection.getresponse()
         body = response.read(1_048_577)
     except (OSError, http.client.HTTPException) as exc:
@@ -92,23 +92,25 @@ def check_connection(
     if response.status != 200:
         raise ValueError("ChatGPT Web service rejected the connection check")
     if len(body) > 1_048_576:
-        raise ValueError("ChatGPT Web service returned an invalid model list")
+        raise ValueError("ChatGPT Web service returned an invalid control status")
     try:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("ChatGPT Web service returned an invalid model list") from exc
-    model_rows = payload.get("data") if isinstance(payload, Mapping) else None
-    if not isinstance(model_rows, list) or any(
-        not isinstance(item, Mapping) or not isinstance(item.get("id"), str)
-        for item in model_rows
-    ):
-        raise ValueError("ChatGPT Web service returned an invalid model list")
+        raise ValueError("ChatGPT Web service returned an invalid control status") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("ChatGPT Web service returned an invalid control status")
+    from chatgpt_web_checks import normalize_control_status
+
+    try:
+        control_status = normalize_control_status(payload)
+    except ValueError as exc:
+        raise ValueError("ChatGPT Web service does not support the required control contract") from exc
     return {
         "ok": True,
         "reachable": True,
         "base_url": resolved_url,
         "credential_configured": bool(resolved_key),
-        "model_count": len(model_rows),
+        "model_count": len(control_status["models"]),
     }
 
 

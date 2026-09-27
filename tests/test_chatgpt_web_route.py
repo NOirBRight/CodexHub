@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
+import chatgpt_web_checks
 import chatgpt_web_runtime
 import gateway_admission
 import gateway_events
@@ -130,7 +131,7 @@ class Handler(BaseHTTPRequestHandler):
         if header != expected:
             self.send_error(401)
             return
-        body = json.dumps({{"object":"list","data":[{{"id":{MODEL_ID!r}}}]}}).encode("utf-8")
+        body = json.dumps({{"models":[{{"slug":{MODEL_ID!r},"supported_reasoning_levels":[{{"effort":"high"}}]}}]}}).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -325,22 +326,87 @@ def _archive(directory: Path) -> Path:
     return archive
 
 
-def _doctor(models: list[dict] | None, *, login: str = "ok") -> dict:
-    checks = [
-        {"id": "login", "status": login},
-        {"id": "browser-smoke", "status": "ok"},
-        {"id": "tunnel-runtime", "status": "ok"},
-        {"id": "connector", "status": "ok"},
-    ]
-    if login != "ok":
-        checks[0]["status"] = "error"
-    return {"ok": login == "ok", "models": models or [], "checks": checks}
+def _seed_check(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    authenticated: bool = True,
+    browser: bool = True,
+    tunnel: bool = True,
+    connector: bool = True,
+    image_input: bool = False,
+    models: list[dict] | None = None,
+) -> dict:
+    config_path = home / "web-home" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["mode"] = "full"
+    config["automaticAppName"] = "Codex Native2"
+    storage = Path(config["storageStatePath"])
+    storage.parent.mkdir(parents=True, exist_ok=True)
+    storage.write_text('{"cookies":[],"origins":[]}\n', encoding="utf-8")
+    storage.with_name(storage.name + ".verified.json").write_text(
+        json.dumps({"version": 1, "authenticated": authenticated, "verifiedAt": "synthetic"}),
+        encoding="utf-8",
+    )
+    config_path.write_text(json.dumps(config), encoding="utf-8")
 
+    class Browser:
+        def __init__(self, _home: Path, _config: dict):
+            pass
 
-def _write_doctor(home: Path, document: dict) -> None:
-    path = home / "web-home" / "doctor.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document), encoding="utf-8")
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+        def operation(self, operation: str, *, detect_capabilities: bool = False):
+            if operation == "inspect" and detect_capabilities:
+                if not authenticated:
+                    raise RuntimeError("not_authenticated")
+                return {"value": {
+                    "authenticated": True,
+                    "temporary": True,
+                    "solAvailable": True,
+                    "extraHighAvailable": False,
+                    "proAvailable": False,
+                }}
+            if operation == "verify":
+                return {"text": "Codex Native2" if connector else "Other connector"}
+            if operation == "smoke":
+                if not browser:
+                    raise RuntimeError("browser_check_failed")
+                return {"value": {"response": "synthetic check"}}
+            raise AssertionError(operation)
+
+    monkeypatch.setattr(chatgpt_web_checks, "_PinnedBrowserSession", Browser)
+
+    def request(url: str, _token: str, *, timeout: float = 5.0):
+        assert url.endswith("/admin/status")
+        return {
+            "control_contract_version": 1,
+            "status": "ok",
+            "accepting_turns": True,
+            "active_http_turns": 0,
+            "active_browser_turns": 0,
+            "account_capabilities": {
+                "sol_available": True,
+                "extra_high_available": False,
+                "pro_available": False,
+            },
+            "models": models if models is not None else [
+                {"id": MODEL_ID, "display_name": "Sol",
+                 "efforts": ["medium", "high"], "image_input": image_input},
+            ],
+        }
+
+    monkeypatch.setattr(chatgpt_web_checks, "_request_json", request)
+    monkeypatch.setattr(
+        chatgpt_web_runtime,
+        "_run_doctor",
+        lambda *_args: {"checks": [{"id": "tunnel-runtime", "status": "ok" if tunnel else "error"}]},
+    )
+    return chatgpt_web_checks.check_runtime(home)
 
 
 def _requests(home: Path) -> list[dict]:
@@ -508,10 +574,13 @@ def _wait_ready(home: Path, pin: Path) -> None:
     raise AssertionError(f"runtime did not become ready: {last}")
 
 
-def _start(home: Path, pin: Path) -> None:
+def _start(home: Path, pin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     started = _run(home, "start", pin=pin)
     assert started["_exit_code"] == 0, started
     try:
+        monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_HOME", str(home))
+        monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(pin))
+        assert _seed_check(home, monkeypatch)["state"] == "ready"
         _wait_ready(home, pin)
     except Exception:
         _run(home, "stop", pin=pin)
@@ -519,21 +588,9 @@ def _start(home: Path, pin: Path) -> None:
 
 
 @pytest.fixture
-def runtime(tmp_path: Path):
+def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home, pin = _install(tmp_path)
-    _write_doctor(
-        home,
-        _doctor(
-            [
-                {
-                    "id": MODEL_ID,
-                    "display_name": "Sol",
-                    "efforts": ["medium", "high"],
-                }
-            ]
-        ),
-    )
-    _start(home, pin)
+    _start(home, pin, monkeypatch)
     try:
         yield home, pin
     finally:
@@ -606,15 +663,17 @@ def test_streamed_turns_keep_caller_identity_and_do_not_share_a_web_turn(runtime
         )
         status, body = _post(port, rejected)
         assert status == 400, body
-        assert b"effort is not in the runtime doctor list" in body
+        assert b"effort is not in the model's reported effort list" in body
         assert b"hello web" not in body
         assert len(_requests(home)) == before
 
 
-def test_not_ready_unknown_model_pin_and_dead_process_do_not_open_responses(runtime, tmp_path: Path) -> None:
+def test_not_ready_unknown_model_pin_and_dead_process_do_not_open_responses(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     home, pin = runtime
     with _gateway(home, pin, tmp_path / "codex-client") as port:
-        _write_doctor(home, _doctor([{"id": MODEL_ID, "display_name": "Sol", "efforts": ["high"]}], login="error"))
+        _seed_check(home, monkeypatch, authenticated=False)
         body = _request_body(
             MODEL_ID,
             [_message("msg_signed_out", "turn_signed_out", PROMPT)],
@@ -630,7 +689,7 @@ def test_not_ready_unknown_model_pin_and_dead_process_do_not_open_responses(runt
         assert b"hello web" not in payload
         assert len(_requests(home)) == before
 
-        _write_doctor(home, _doctor([{"id": MODEL_ID, "display_name": "Sol", "efforts": ["high"]}]))
+        _seed_check(home, monkeypatch)
         deadline = time.time() + 5
         while time.time() < deadline:
             status_payload = _run(home, "status", pin=pin)
@@ -649,13 +708,13 @@ def test_not_ready_unknown_model_pin_and_dead_process_do_not_open_responses(runt
         unknown["model"] = OTHER_MODEL_ID
         status, payload = _post(port, unknown)
         assert status == 400, payload
-        assert b"not in the runtime doctor list" in payload
+        assert b"not in the account-visible runtime model list" in payload
         assert len(_requests(home)) == before
 
-        _write_doctor(home, _doctor([]))
+        _seed_check(home, monkeypatch, models=[])
         status, payload = _post(port, body)
         assert status == 400, payload
-        assert b"not in the runtime doctor list" in payload
+        assert b"not in the account-visible runtime model list" in payload
         assert len(_requests(home)) == before
         catalog = _get_models(port)
         assert all(not str(item["id"]).startswith("chatgpt-web/") for item in catalog["data"])
@@ -711,20 +770,11 @@ def test_not_ready_unknown_model_pin_and_dead_process_do_not_open_responses(runt
         assert canary_hits == []
 
 
-def test_text_route_ignores_tunnel_and_connector_when_login_and_smoke_passed(runtime, tmp_path: Path) -> None:
+def test_text_route_ignores_tunnel_and_connector_when_login_and_smoke_passed(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     home, pin = runtime
-    _write_doctor(
-        home,
-        {
-            "ok": False,
-            "models": [{"id": MODEL_ID, "display_name": "Sol", "efforts": ["high"]}],
-            "checks": [
-                {"id": "login", "status": "ok"},
-                {"id": "browser-smoke", "status": "ok"},
-                {"id": "connector", "status": "error", "message": "not attached"},
-            ],
-        },
-    )
+    _seed_check(home, monkeypatch, tunnel=False, connector=False)
     supervisor = _run(home, "status", pin=pin)
     assert supervisor["ready"] is False
     assert supervisor["tunnel"]["state"] != "ready"
@@ -901,22 +951,11 @@ def _function_output(thread_id: str, turn_id: str, call_id: str, *, item_id: str
     )
 
 
-def _doctor_layers(*, tunnel: str, connector: str) -> dict:
-    return {
-        "ok": False,
-        "models": [{"id": MODEL_ID, "display_name": "Sol", "efforts": ["high"]}],
-        "checks": [
-            {"id": "login", "status": "ok"},
-            {"id": "browser-smoke", "status": "ok"},
-            {"id": "tunnel-runtime", "status": tunnel, "message": "down"},
-            {"id": "connector", "status": connector, "message": "not attached"},
-        ],
-    }
-
-
-def test_tool_request_without_a_ready_tunnel_or_connector_does_not_open_responses(runtime, tmp_path: Path) -> None:
+def test_tool_request_without_a_ready_tunnel_or_connector_does_not_open_responses(
+    runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     home, _pin = runtime
-    _write_doctor(home, _doctor_layers(tunnel="error", connector="ok"))
+    _seed_check(home, monkeypatch, tunnel=False)
     with _gateway(home, _pin, tmp_path / "codex-client") as port:
         before = len(_requests(home))
         tool = _with_tools(
@@ -946,7 +985,7 @@ def test_tool_request_without_a_ready_tunnel_or_connector_does_not_open_response
         assert b"hello web" in payload
         assert len(_requests(home)) == before + 1
 
-        _write_doctor(home, _doctor_layers(tunnel="ok", connector="error"))
+        _seed_check(home, monkeypatch, connector=False)
         status, payload = _post(port, tool)
         assert status == 400, payload
         assert b"tool connector is not selectable" in payload
