@@ -6,7 +6,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +77,38 @@ def _session(server: chatgpt_web_settings._SettingsHTTPServer) -> str:
     assert b'"ok":true' in payload
     assert headers.get_all("Set-Cookie", []) == []
     return json.loads(payload)["session"]
+
+
+@contextmanager
+def _failing_runtime_startup(home: Path, entered: Path) -> Iterator[Callable[[], None]]:
+    fail_startup = home / "web-home" / "fail-startup"
+    startup: dict[str, str] = {}
+
+    def start_runtime():
+        try:
+            runtime.start_runtime(home)
+        except runtime.RuntimeError_ as error:
+            startup["error"] = str(error)
+
+    worker = threading.Thread(target=start_runtime)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not entered.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert entered.exists(), startup.get("error", "fake runtime did not start")
+
+        def fail():
+            fail_startup.touch()
+            worker.join(timeout=10)
+            assert not worker.is_alive(), "failed startup did not finish"
+            assert "error" in startup
+
+        yield fail
+    finally:
+        fail_startup.parent.mkdir(parents=True, exist_ok=True)
+        fail_startup.touch()
+        worker.join(timeout=10)
 
 
 def _fixture_streaming_health_server() -> str:
@@ -240,42 +274,21 @@ def test_settings_http_does_not_claim_failed_first_startup_config_is_active(
     assert runtime.install_runtime(home, archive)["installed"] is True
     runtime.save_settings(home, {"options": {"context_window": 131072}})
 
-    startup: dict[str, str] = {}
-
-    def start_runtime():
-        try:
-            runtime.start_runtime(home)
-        except runtime.RuntimeError_ as error:
-            startup["error"] = str(error)
-
-    worker = threading.Thread(target=start_runtime)
-    worker.start()
-    fail_startup = home / "web-home" / "fail-startup"
     try:
-        deadline = time.monotonic() + 10
-        while not entered.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert entered.exists(), startup.get("error", "fake runtime did not start")
+        with _failing_runtime_startup(home, entered) as fail:
+            config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
+            assert config["contextWindow"] == 131072
+            fail()
 
-        config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
-        assert config["contextWindow"] == 131072
-        fail_startup.touch()
-        worker.join(timeout=10)
-        assert not worker.is_alive(), "failed startup did not finish"
-        assert "error" in startup
-
-        session = _session(server)
-        status, _headers, body = _call(server, "/api/settings", session=session)
-        assert status == 200, body
-        snapshot = json.loads(body)
-        assert snapshot["active"] is None
-        assert snapshot["active_state"] == "unavailable"
-        assert snapshot["saved"]["options"]["context_window"] == 131072
-        assert snapshot["pending_restart"] is True
+            session = _session(server)
+            status, _headers, body = _call(server, "/api/settings", session=session)
+            assert status == 200, body
+            snapshot = json.loads(body)
+            assert snapshot["active"] is None
+            assert snapshot["active_state"] == "unavailable"
+            assert snapshot["saved"]["options"]["context_window"] == 131072
+            assert snapshot["pending_restart"] is True
     finally:
-        fail_startup.parent.mkdir(parents=True, exist_ok=True)
-        fail_startup.touch()
-        worker.join(timeout=10)
         runtime.stop_runtime(home, disable=True)
 
 
@@ -293,8 +306,6 @@ def test_settings_http_keeps_last_loaded_values_after_failed_restart(
     runtime.save_settings(home, {"options": {"context_window": 131072}})
     runtime.start_runtime(home)
 
-    fail_startup = home / "web-home" / "fail-startup"
-    worker: threading.Thread | None = None
     try:
         session = _session(server)
         active_path = home / "active-runtime-settings.json"
@@ -330,39 +341,19 @@ def test_settings_http_keeps_last_loaded_values_after_failed_restart(
         bad_pin = runtime_fixtures._pin_for(bad_dir, bad_archive.read_bytes())
         monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(bad_pin))
         assert runtime.install_runtime(home, bad_archive)["installed"] is True
-        startup: dict[str, str] = {}
+        with _failing_runtime_startup(home, entered) as fail:
+            config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
+            assert config["contextWindow"] == 262144
+            fail()
 
-        def start_failed_runtime():
-            try:
-                runtime.start_runtime(home)
-            except runtime.RuntimeError_ as error:
-                startup["error"] = str(error)
-
-        worker = threading.Thread(target=start_failed_runtime)
-        worker.start()
-        deadline = time.monotonic() + 10
-        while not entered.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert entered.exists(), startup.get("error", "fake runtime did not start")
-        config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
-        assert config["contextWindow"] == 262144
-        fail_startup.touch()
-        worker.join(timeout=10)
-        assert not worker.is_alive(), "failed restart did not finish"
-        assert "error" in startup
-
-        status, _headers, body = _call(server, "/api/settings", session=session)
-        assert status == 200, body
-        snapshot = json.loads(body)
-        assert snapshot["active_state"] == "loaded"
-        assert snapshot["active"]["options"]["context_window"] == 131072
-        assert snapshot["saved"]["options"]["context_window"] == 262144
-        assert snapshot["pending_restart"] is True
+            status, _headers, body = _call(server, "/api/settings", session=session)
+            assert status == 200, body
+            snapshot = json.loads(body)
+            assert snapshot["active_state"] == "loaded"
+            assert snapshot["active"]["options"]["context_window"] == 131072
+            assert snapshot["saved"]["options"]["context_window"] == 262144
+            assert snapshot["pending_restart"] is True
     finally:
-        fail_startup.parent.mkdir(parents=True, exist_ok=True)
-        fail_startup.touch()
-        if worker is not None:
-            worker.join(timeout=10)
         runtime.stop_runtime(home, disable=True)
 
 
