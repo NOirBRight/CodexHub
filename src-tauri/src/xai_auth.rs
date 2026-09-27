@@ -107,7 +107,7 @@ pub(crate) fn pin_https_xai_url(url: &str) -> Result<String, String> {
     Ok(parsed.as_str().to_string())
 }
 
-fn spawn_system_browser(url: &str) -> Result<(), String> {
+pub(crate) fn spawn_system_browser(url: &str) -> Result<(), String> {
     wait_for_browser_launcher(system_browser_command(url), Duration::from_secs(10))
 }
 

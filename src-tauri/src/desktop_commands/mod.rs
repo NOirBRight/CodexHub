@@ -167,6 +167,7 @@ macro_rules! desktop_command_registry {
             ChatGptWebDeleteAccount => "chatgpt_web_delete_account" => $crate::chatgpt_web::chatgpt_web_delete_account, true, true, true, false, NO_ALIASES;
             ChatGptWebOpenLogin => "chatgpt_web_open_login" => $crate::chatgpt_web::chatgpt_web_open_login, true, true, true, false, NO_ALIASES;
             ChatGptWebCloseLogin => "chatgpt_web_close_login" => $crate::chatgpt_web::chatgpt_web_close_login, true, true, true, false, NO_ALIASES;
+            ChatGptWebOpenSettings => "chatgpt_web_open_settings" => $crate::chatgpt_web::chatgpt_web_open_settings, true, true, true, false, NO_ALIASES;
         }
     };
 }

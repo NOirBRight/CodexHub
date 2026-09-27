@@ -29,6 +29,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "src-python/chatgpt_web_checks.py",
     "src-python/chatgpt_web_runtime.py",
     "src-python/chatgpt_web_connection.py",
+    "src-python/chatgpt_web_settings.py",
     "src-python/codex_proxy.py",
     "src-python/config_overlay.py",
     "src-python/global_state_repair.py",
