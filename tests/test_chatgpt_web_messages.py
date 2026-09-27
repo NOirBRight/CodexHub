@@ -9,6 +9,8 @@ import socket
 import time
 from pathlib import Path
 
+import pytest
+
 from test_chatgpt_web_route import (
     MODEL_ID,
     PROMPT,
@@ -235,7 +237,14 @@ def test_missing_session_id_is_rejected_and_records_no_responses_post(tmp_path: 
         _run(home, "stop", pin=pin)
 
 
-def test_sessions_keep_distinct_threads_and_one_session_reuses_its_thread(tmp_path: Path) -> None:
+@pytest.mark.parametrize("model", [
+    MODEL_ID,
+    "claude-codexhub-chatgpt-web-gpt-5.6-sol",
+    "claude-codexhub-role/fable/chatgpt-web/gpt-5.6-sol",
+])
+def test_sessions_keep_distinct_threads_and_one_session_reuses_its_thread(
+    tmp_path: Path, model: str,
+) -> None:
     home, pin = runtime(tmp_path)
     try:
         with _gateway(home, pin, tmp_path / "codex-client") as port:
@@ -251,6 +260,7 @@ def test_sessions_keep_distinct_threads_and_one_session_reuses_its_thread(tmp_pa
             assert _thread_id(_requests(home)[0]["body"]) == "thread_codex"
 
             first = _messages_body([_user_turn()])
+            first["model"] = model
             status, body = _post_messages(port, first, session_header="session-alpha")
             assert status == 200, body
             assert _text_deltas(body) == "hello web"
@@ -259,9 +269,11 @@ def test_sessions_keep_distinct_threads_and_one_session_reuses_its_thread(tmp_pa
             assert b'"type":"error"' not in body
 
             other = _messages_body([_user_turn()], session_field="session-beta")
+            other["model"] = model
             status, body = _post_messages(port, other)
             assert status == 200, body
             captured = _requests(home)
+            assert all(item["body"]["model"] == MODEL_ID for item in captured)
             assert [item["path"].split("?", 1)[0] for item in captured] == [
                 "/v1/responses",
                 "/v1/responses",
@@ -289,6 +301,7 @@ def test_sessions_keep_distinct_threads_and_one_session_reuses_its_thread(tmp_pa
                     {"role": "user", "content": "continue"},
                 ]
             )
+            second["model"] = model
             status, body = _post_messages(port, second, session_header="session-alpha")
             assert status == 200, body
             continued = _requests(home)[3]["body"]
