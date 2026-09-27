@@ -1,0 +1,25 @@
+{
+  "issue": 571,
+  "candidate_sha": "31e119ad5b17948a3ca707141f00192b4d3f263f",
+  "runtime": {
+    "version": "6.1.1",
+    "commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
+  },
+  "protocol": "chat_completions",
+  "checks": [
+    "/home/noirbright/Workstation/CodexHub/.venv-ci/bin/python -m pytest tests/test_chatgpt_web_client_session.py -q --tb=short",
+    "/home/noirbright/Workstation/CodexHub/.venv-ci/bin/python -m pytest tests/test_chatgpt_web_route.py -q --tb=short",
+    "git diff --check"
+  ],
+  "verified": [
+    "a Chat Completions request with no X-Session-Id header and no sessionID or session_id is rejected before POST /v1/responses",
+    "an unscoped tool_call_id does not create a session and records no POST",
+    "two sessions with the same prompt and the same prompt_cache_key get different thread_id values",
+    "the second turn of one session reuses its thread_id",
+    "a tool call then tool result stays on that session and that call id",
+    "a copied tool_call_id from another session is rejected and adds no POST",
+    "replaying the same tool result on the same session adds no POST",
+    "client-declared tools are preserved and no environment_context or sandbox permission is injected"
+  ],
+  "live_opencode": "not_run"
+}
