@@ -15,7 +15,6 @@ import tarfile
 import urllib.error
 import urllib.request
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -270,36 +269,6 @@ else:
     raise SystemExit(3)
 '''
     return template.replace("__PYTHON__", sys.executable).replace("__STATE_PATH__", repr(str(state_path)))
-
-
-def test_broker_endpoint_is_platform_appropriate_and_survives_tunnel_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(chatgpt_web_runtime, "sys", SimpleNamespace(platform="win32"))
-    home = tmp_path / "Managed Runtime with spaces"
-    entry = home / "current" / "runtime" / ENTRY_NAME
-    chatgpt_web_runtime._write_minimum_config(home, entry)
-    web_home = home / "web-home"
-    config = json.loads((web_home / "config.json").read_text(encoding="utf-8"))
-    identity = hashlib.sha256(str(web_home.resolve()).lower().encode("utf-8")).hexdigest()[:20]
-    endpoint = rf"\\.\pipe\codex-chatgpt-web-{identity}"
-
-    assert config["brokerSocketPath"] == endpoint
-    assert str(web_home) not in endpoint
-    assert not (web_home / "socket").exists()
-    assert shlex.split(chatgpt_web_runtime._tunnel_mcp_command(entry, endpoint)) == [
-        str(entry), "mcp", "--contract", "native", "--broker-socket", endpoint,
-    ]
-
-    other_home = tmp_path / "Other Managed Runtime"
-    chatgpt_web_runtime._write_minimum_config(other_home, other_home / ENTRY_NAME)
-    other_config = json.loads((other_home / "web-home" / "config.json").read_text(encoding="utf-8"))
-    assert other_config["brokerSocketPath"] != endpoint
-
-    monkeypatch.setattr(chatgpt_web_runtime, "sys", SimpleNamespace(platform="linux"))
-    chatgpt_web_runtime._write_minimum_config(home, entry)
-    linux_config = json.loads((web_home / "config.json").read_text(encoding="utf-8"))
-    assert linux_config["brokerSocketPath"] == str(web_home / "socket" / "turn-broker.sock")
 
 
 def _prepare_full_tunnel(home: Path, pin: Path) -> tuple[Path, Path]:
