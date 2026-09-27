@@ -61,7 +61,8 @@ class LoginSession:
                 if self.child is None:
                     try:
                         self.child = subprocess.Popen(
-                            [str(self.entry), "login"], env=runtime._runtime_env(self.home),
+                            runtime._runtime_process_args(self.entry, "login"),
+                            env=runtime._runtime_env(self.home, self.entry),
                             cwd=str(runtime._web_home(self.home)), start_new_session=True,
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         )

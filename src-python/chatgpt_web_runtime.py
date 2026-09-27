@@ -819,13 +819,14 @@ def save_settings(home: Path, payload: dict[str, Any]) -> dict[str, Any]:
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
-    if os.name != "nt":
-        try:
-            state = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(") ", 1)[1].split(maxsplit=1)[0]
-            if state in {"Z", "X"}:
-                return False
-        except (OSError, IndexError):
-            pass
+    if os.name == "nt":
+        return _windows_pid_alive(pid)
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(") ", 1)[1].split(maxsplit=1)[0]
+        if state in {"Z", "X"}:
+            return False
+    except (OSError, IndexError):
+        pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -835,6 +836,33 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        # OpenProcess reports ERROR_INVALID_PARAMETER for a PID that no longer
+        # exists. Access denied and other failures leave liveness unknown, so
+        # keep the conservative behavior without sending any signal.
+        return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return True
+        return exit_code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _cmdline(pid: int) -> str:
@@ -936,6 +964,34 @@ def _find_entry(runtime_root: Path) -> Path:
         if candidate.is_file() and not candidate.is_symlink():
             return candidate
     raise RuntimeError_("extracted runtime has no bin/codex-chatgpt-web entry")
+
+
+def _runtime_manifest_file(runtime_root: Path, relative: Any, label: str) -> Path:
+    if not isinstance(relative, str) or not relative.strip():
+        raise RuntimeError_(f"runtime manifest {label} is invalid")
+    _reject_archive_path(relative)
+    root = runtime_root.resolve()
+    candidate = (runtime_root / relative).resolve()
+    if root not in candidate.parents or not candidate.is_file() or candidate.is_symlink():
+        raise RuntimeError_(f"runtime manifest {label} is unavailable")
+    return candidate
+
+
+def _runtime_process_args(entry: Path, *args: str) -> list[str]:
+    if sys.platform != "win32":
+        return [str(entry), *args]
+    runtime_root = entry.parent.parent
+    manifest = _read_json(runtime_root / "manifest.json") or {}
+    if "entrypoint" not in manifest:
+        if entry.suffix.lower() == ".cmd":
+            raise RuntimeError_("Windows runtime manifest has no app entrypoint")
+        return [str(entry), *args]
+    launcher = _runtime_manifest_file(runtime_root, manifest.get("launcher"), "launcher")
+    if launcher != entry.resolve():
+        raise RuntimeError_("Windows runtime manifest launcher does not match the installed entry")
+    bun = _runtime_manifest_file(runtime_root, "runtime/bun.exe", "Bun executable")
+    app = _runtime_manifest_file(runtime_root, manifest.get("entrypoint"), "app entrypoint")
+    return [str(bun), str(app), *args]
 
 
 def _restore_install(home: Path) -> None:
@@ -1227,11 +1283,13 @@ def _free_port() -> int:
         return int(handle.getsockname()[1])
 
 
-def _runtime_env(home: Path) -> dict[str, str]:
+def _runtime_env(home: Path, runtime_entry: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env["CODEX_CHATGPT_WEB_HOME"] = str(_web_home(home))
     env["CODEX_HOME"] = str(_codex_home(home))
     env.pop("CODEX_WEB_GPT_DEV_HOME", None)
+    if sys.platform == "win32" and runtime_entry is not None:
+        env["CODEX_CHATGPT_WEB_LAUNCHER"] = str(runtime_entry)
     return env
 
 
@@ -1470,7 +1528,10 @@ def _tunnel_config(home: Path) -> dict[str, str]:
 def _tunnel_mcp_command(entry: Path, broker_socket: str, contract: str = "native") -> str:
     if contract not in {"native", "safe"}:
         raise RuntimeError_("Unsupported Tunnel MCP contract")
-    command = [str(entry), "mcp", "--contract", contract, "--broker-socket", str(broker_socket)]
+    command = [
+        *_runtime_process_args(entry, "mcp"),
+        "--contract", contract, "--broker-socket", broker_socket,
+    ]
     if any("\r" in item or "\n" in item for item in command):
         raise RuntimeError_("Tunnel MCP command contains a newline")
     return " ".join('"' + item.replace("\\", "\\\\").replace('"', '\\"') + '"' for item in command)
@@ -1482,6 +1543,7 @@ def _run_tunnel_command(
     args: list[str],
     *,
     timeout: float,
+    runtime_entry: Path | None = None,
 ) -> tuple[int, str, str]:
     try:
         result = subprocess.run(
@@ -1489,7 +1551,7 @@ def _run_tunnel_command(
             check=False,
             capture_output=True,
             text=True,
-            env=_runtime_env(home),
+            env=_runtime_env(home, runtime_entry),
             cwd=tunnel["profile_dir"],
             timeout=timeout,
         )
@@ -1684,7 +1746,7 @@ def _start_tunnel_runtime(home: Path, pin: dict[str, Any], entry: Path) -> dict[
     ]
     try:
         code, stdout, stderr = _run_tunnel_command(
-            home, tunnel, args, timeout=TUNNEL_CONNECT_TIMEOUT_SECONDS
+            home, tunnel, args, timeout=TUNNEL_CONNECT_TIMEOUT_SECONDS, runtime_entry=entry
         )
         try:
             result = json.loads(stdout) if stdout else None
@@ -1731,11 +1793,11 @@ def _cleanup_tunnel_start(home: Path, tunnel: dict[str, str], start_id: str) -> 
 def _run_doctor(home: Path, entry: Path) -> dict[str, Any] | None:
     try:
         completed = subprocess.run(
-            [str(entry), "doctor", "--json"],
+            _runtime_process_args(entry, "doctor", "--json"),
             check=False,
             capture_output=True,
             text=True,
-            env=_runtime_env(home),
+            env=_runtime_env(home, entry),
             cwd=str(_web_home(home)),
             timeout=20,
         )
@@ -2046,8 +2108,8 @@ def supervise(home: Path) -> int:
         if config.get("mode") == "full":
             tunnel = _start_tunnel_runtime(home, pin, entry)
         child = subprocess.Popen(
-            [str(entry), "serve"],
-            env=_runtime_env(home),
+            _runtime_process_args(entry, "serve"),
+            env=_runtime_env(home, entry),
             cwd=str(_web_home(home)),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
