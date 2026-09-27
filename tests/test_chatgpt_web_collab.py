@@ -39,13 +39,9 @@ COLLAB_TOOLS = [
 
 
 @pytest.fixture
-def runtime(tmp_path: Path):
+def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home, pin = web._install(tmp_path)
-    web._write_doctor(
-        home,
-        web._doctor([{"id": web.MODEL_ID, "display_name": "Sol", "efforts": ["medium", "high"]}]),
-    )
-    web._start(home, pin)
+    web._start(home, pin, monkeypatch)
     try:
         yield home, pin
     finally:
