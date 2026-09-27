@@ -389,6 +389,7 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         }
         Command::ChatGptWebOpenLogin => to_value(chatgpt_web::chatgpt_web_open_login_blocking()),
         Command::ChatGptWebCloseLogin => to_value(chatgpt_web::chatgpt_web_close_login_blocking()),
+        Command::ChatGptWebOpenSettings => to_value(chatgpt_web::chatgpt_web_open_settings_blocking()),
         // These commands are registered for the desktop handler or retained
         // as an internal compatibility entry, but deliberately have no Web
         // Bridge implementation. Keep them explicit so adding a registry row

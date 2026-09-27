@@ -92,6 +92,7 @@ export const COMMANDS = {
   chatgptWebDeleteAccount: "chatgpt_web_delete_account",
   chatgptWebOpenLogin: "chatgpt_web_open_login",
   chatgptWebCloseLogin: "chatgpt_web_close_login",
+  chatgptWebOpenSettings: "chatgpt_web_open_settings",
 } as const;
 
 export type CommandName = (typeof COMMANDS)[keyof typeof COMMANDS];

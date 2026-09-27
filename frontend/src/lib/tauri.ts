@@ -420,6 +420,7 @@ export const api = {
   chatgptWebDeleteAccount: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebDeleteAccount),
   chatgptWebOpenLogin: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebOpenLogin),
   chatgptWebCloseLogin: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebCloseLogin),
+  chatgptWebOpenSettings: () => call<{ opened: boolean }>(COMMANDS.chatgptWebOpenSettings),
 };
 
 export function messageFromError(error: unknown): string {
