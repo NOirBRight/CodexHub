@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -14,6 +15,7 @@ import pytest
 import chatgpt_web_checks
 import chatgpt_web_runtime as runtime
 import chatgpt_web_settings
+import test_chatgpt_web_runtime as runtime_fixtures
 
 
 @pytest.fixture
@@ -73,6 +75,31 @@ def _session(server: chatgpt_web_settings._SettingsHTTPServer) -> str:
     assert b'"ok":true' in payload
     assert headers.get_all("Set-Cookie", []) == []
     return json.loads(payload)["session"]
+
+
+def _fixture_streaming_health_server() -> str:
+    source = runtime_fixtures._fixture_health_server()
+    needle = '    def do_GET(self):\n        if self.path != "/healthz":'
+    replacement = '''    def do_GET(self):
+        if self.path == "/stream":
+            import time
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for phase in ("before", "after"):
+                if phase == "after":
+                    deadline = time.monotonic() + 15
+                    while not (home / "release-stream").exists():
+                        if time.monotonic() > deadline:
+                            return
+                        time.sleep(0.02)
+                value = {"phase": phase, "context_window": config["contextWindow"]}
+                self.wfile.write(("data: " + json.dumps(value) + "\\n\\n").encode())
+                self.wfile.flush()
+            return
+        if self.path != "/healthz":'''
+    assert needle in source
+    return source.replace(needle, replacement, 1)
 
 
 def test_page_is_local_and_bootstrap_fragment_is_one_use(settings_server):
@@ -199,6 +226,81 @@ def test_settings_http_preserves_replaces_and_clears_secret_without_returning_it
     assert status == 200, body
     assert json.loads(body)["saved"]["tunnel"]["runtime_key_configured"] is False
     assert secret.encode() not in (home / "runtime-settings.json").read_bytes()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable runtime fixture")
+def test_settings_save_preserves_an_open_runtime_stream_until_explicit_restart(
+    settings_server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    server, home = settings_server
+    archive = runtime_fixtures._archive(
+        tmp_path,
+        runtime_fixtures._fixture_script(
+            tmp_path / "executed-marker", health_server=_fixture_streaming_health_server()
+        ),
+    )
+    pin = runtime_fixtures._pin_for(tmp_path, archive.read_bytes())
+    monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(pin))
+    assert runtime.install_runtime(home, archive)["installed"] is True
+    runtime.save_settings(home, {"options": {"context_window": 131072}})
+    started = runtime.start_runtime(home)
+    release_stream = home / "web-home" / "release-stream"
+
+    try:
+        session = _session(server)
+        config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{config['port']}/stream", timeout=10) as stream:
+            before_line = stream.readline()
+            assert before_line.startswith(b"data: ")
+            before = json.loads(before_line.removeprefix(b"data: "))
+            assert stream.readline() == b"\n"
+            assert before == {"phase": "before", "context_window": 131072}
+
+            save_started = time.monotonic()
+            status, _headers, body = _call(
+                server,
+                "/api/settings",
+                method="POST",
+                body={"options": {"context_window": 262144}},
+                headers={"Origin": server.origin},
+                session=session,
+            )
+            save_duration = time.monotonic() - save_started
+            assert status == 200, body
+            saved = json.loads(body)
+            assert save_duration < 3
+            assert saved["pending_restart"] is True
+            assert saved["active"]["options"]["context_window"] == 131072
+            assert saved["saved"]["options"]["context_window"] == 262144
+            assert not release_stream.exists()
+
+            release_stream.touch()
+            after_line = stream.readline()
+            assert after_line.startswith(b"data: ")
+            after = json.loads(after_line.removeprefix(b"data: "))
+            assert stream.readline() == b"\n"
+            assert after == {"phase": "after", "context_window": 131072}
+
+        time.sleep(2)
+        status, _headers, body = _call(server, "/api/settings", session=session)
+        pending = json.loads(body)
+        assert status == 200
+        assert pending["pending_restart"] is True
+        assert runtime.build_status(home)["process"]["pid"] == started["process"]["pid"]
+
+        runtime.stop_runtime(home, disable=False)
+        restarted = runtime.start_runtime(home)
+        status, _headers, body = _call(server, "/api/settings", session=session)
+        active = json.loads(body)
+        assert status == 200
+        assert restarted["process"]["pid"] != started["process"]["pid"]
+        assert active["pending_restart"] is False
+        assert active["active"]["options"]["context_window"] == 262144
+    finally:
+        release_stream.parent.mkdir(parents=True, exist_ok=True)
+        release_stream.touch()
+        runtime.stop_runtime(home, disable=True)
 
 
 def test_invalid_save_keeps_last_configuration_and_runtime_lifecycle_files(settings_server):
