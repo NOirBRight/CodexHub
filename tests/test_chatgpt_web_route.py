@@ -661,8 +661,22 @@ def test_public_start_status_health_and_stop_keep_runtime_identity(tmp_path: Pat
         process_record = json.loads((home / "process.json").read_text(encoding="utf-8"))
         assert process_record["pid"] == runtime_pid
         assert isinstance(process_record.get("supervisor_pid"), int)
+        stop_request = home / "supervisor-stop-request.json"
+        if os.name == "nt":
+            assert isinstance(process_record.get("instance_id"), str)
+            stale_instance_id = "f" * 32
+            if stale_instance_id == process_record.get("instance_id"):
+                stale_instance_id = "e" * 32
+            stop_request.write_text(
+                json.dumps({
+                    "supervisor_pid": process_record["supervisor_pid"],
+                    "runtime_pid": runtime_pid,
+                    "instance_id": stale_instance_id,
+                }),
+                encoding="utf-8",
+            )
 
-        # Repeated public status calls must not disturb the serving process.
+        # Repeated status and health checks must ignore an old-instance stop.
         for _ in range(3):
             status = _run(home, "status", pin=pin)
             assert status["_exit_code"] == 0, status
@@ -679,11 +693,15 @@ def test_public_start_status_health_and_stop_keep_runtime_identity(tmp_path: Pat
             assert health["status"] == "ok"
             assert health["accepting_turns"] is True
             assert health["pid"] == runtime_pid
+        if os.name == "nt":
+            assert stop_request.is_file()
 
         stopped = _run(home, "stop", pin=pin)
         assert stopped["_exit_code"] == 0, stopped
         assert stopped["process"]["running"] is False
         assert not (home / "process.json").exists()
+        if os.name == "nt":
+            assert not stop_request.exists()
     finally:
         if (home / "process.json").exists():
             _run(home, "stop", pin=pin)
