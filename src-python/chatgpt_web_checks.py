@@ -11,6 +11,7 @@ import http.server
 import json
 import os
 import queue
+import re
 import secrets
 import signal
 import subprocess
@@ -28,6 +29,7 @@ import chatgpt_web_runtime as runtime
 
 _CACHE_NAME = "readiness-checks.json"
 _BROWSER_HELPER_NAME = "browser-helper.cjs"
+_ACCOUNT_KEY_RE = re.compile(r"[0-9a-f]{64}")
 _HELPER_OPERATION_TIMEOUT = 120
 _SMOKE_OPERATION_TIMEOUT = 240
 _IDLE_URL = (
@@ -45,6 +47,35 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _storage_state_path(home: Path, config: Mapping[str, Any]) -> Path:
+    storage_path = Path(str(config.get("storageStatePath") or runtime._storage_state(home)))
+    if not storage_path.is_absolute():
+        storage_path = (runtime._web_home(home) / storage_path).resolve()
+    return storage_path
+
+
+def _account_identity_path(storage_path: Path) -> Path:
+    return storage_path.with_name(storage_path.name + ".identity.json")
+
+
+def _attested_account_key(storage_path: Path, account_state: bytes) -> str | None:
+    attestation = runtime._read_json(_account_identity_path(storage_path))
+    if not isinstance(attestation, dict):
+        return None
+    account_key = attestation.get("accountKey")
+    state_digest = attestation.get("storageStateSha256")
+    version = attestation.get("version")
+    if (
+        version != 1
+        or isinstance(version, bool)
+        or not isinstance(account_key, str)
+        or _ACCOUNT_KEY_RE.fullmatch(account_key) is None
+        or state_digest != _sha256(account_state)
+    ):
+        return None
+    return account_key
+
+
 def _binding(home: Path) -> dict[str, str] | None:
     """Fingerprint the loaded config and account files without returning either."""
     config_path = runtime._web_home(home) / "config.json"
@@ -55,9 +86,7 @@ def _binding(home: Path) -> dict[str, str] | None:
         return None
     if not isinstance(config, dict):
         return None
-    storage_path = Path(str(config.get("storageStatePath") or runtime._storage_state(home)))
-    if not storage_path.is_absolute():
-        storage_path = (runtime._web_home(home) / storage_path).resolve()
+    storage_path = _storage_state_path(home, config)
     verified_path = storage_path.with_name(storage_path.name + ".verified.json")
     try:
         account = storage_path.read_bytes()
@@ -71,11 +100,33 @@ def _binding(home: Path) -> dict[str, str] | None:
         key: process.get(key)
         for key in ("pid", "supervisor_pid", "port", "diagnostic_port", "executable", "ownership")
     }
+    account_key = _attested_account_key(storage_path, account)
+    account_binding = (
+        b"identity:" + account_key.encode("ascii")
+        if account_key is not None
+        else account
+    )
     return {
         "active_config_sha256": _sha256(raw_config),
-        "account_state_sha256": _sha256(account + b"\0" + verified),
+        "account_state_sha256": _sha256(account_binding + b"\0" + verified),
         "runtime_instance_sha256": _sha256(json.dumps(process_identity, sort_keys=True).encode("utf-8")),
     }
+
+
+def _write_account_identity_attestation(
+    storage_path: Path, account_key: str, state_digest: str,
+) -> bool:
+    if _ACCOUNT_KEY_RE.fullmatch(account_key) is None:
+        return False
+    try:
+        runtime._write_json(
+            _account_identity_path(storage_path),
+            {"version": 1, "accountKey": account_key, "storageStateSha256": state_digest},
+            mode=0o600,
+        )
+    except OSError:
+        return False
+    return True
 
 
 def _empty_result(*, cache_state: str, reason: str) -> dict[str, Any]:
@@ -611,6 +662,15 @@ def check_runtime(home: Path) -> dict[str, Any]:
     if binding is None:
         result.update(state="blocked", reason="active_account_state_unavailable")
         return result
+    storage_path = _storage_state_path(home, config)
+    try:
+        initial_state_digest = _sha256(storage_path.read_bytes())
+    except OSError:
+        result.update(state="blocked", reason="active_account_state_unavailable")
+        return result
+    if _binding(home) != binding:
+        result.update(state="stale", cache_state="stale", reason="active_config_or_account_changed_during_check")
+        return result
     try:
         pin = runtime.load_pin()
         if not runtime._pin_compatible(home, pin):
@@ -657,18 +717,56 @@ def check_runtime(home: Path) -> dict[str, Any]:
             try:
                 inspected = browser.operation("inspect", detect_capabilities=True).get("value")
                 if isinstance(inspected, dict) and inspected.get("authenticated") is True and inspected.get("temporary") is True:
-                    capabilities = {
-                        key: inspected.get(key) is True
-                        for key in ("solAvailable", "extraHighAvailable", "proAvailable")
-                        if isinstance(inspected.get(key), bool)
-                    }
-                    result["login"] = {"state": "signed_in", "capabilities": capabilities}
-                    if len(capabilities) == 3:
-                        matches = capabilities == result["runtime_capabilities"]
-                        result["capabilities_match"] = matches
-                        if not matches:
-                            result["models"] = []
-                            result["model_state"] = "capabilities_mismatch"
+                    account_key = inspected.get("accountKey")
+                    if not isinstance(account_key, str) or _ACCOUNT_KEY_RE.fullmatch(account_key) is None:
+                        result["login"] = _error_result("account_identity_unverified")
+                    else:
+                        try:
+                            current_state_digest = _sha256(storage_path.read_bytes())
+                        except OSError:
+                            current_state_digest = ""
+                        if current_state_digest != initial_state_digest or _binding(home) != binding:
+                            result.update(
+                                state="stale",
+                                cache_state="stale",
+                                reason="active_config_or_account_changed_during_check",
+                            )
+                            return result
+                        if not _write_account_identity_attestation(
+                            storage_path, account_key, initial_state_digest
+                        ):
+                            result["login"] = _error_result("account_identity_unverified")
+                        else:
+                            attested_binding = _binding(home)
+                            try:
+                                attested_state = storage_path.read_bytes()
+                            except OSError:
+                                attested_state = b""
+                            if (
+                                attested_binding is None
+                                or attested_binding["active_config_sha256"] != binding["active_config_sha256"]
+                                or attested_binding["runtime_instance_sha256"] != binding["runtime_instance_sha256"]
+                                or _attested_account_key(storage_path, attested_state) != account_key
+                            ):
+                                result.update(
+                                    state="stale",
+                                    cache_state="stale",
+                                    reason="active_config_or_account_changed_during_check",
+                                )
+                                return result
+                            binding = attested_binding
+                            capabilities = {
+                                key: inspected.get(key) is True
+                                for key in ("solAvailable", "extraHighAvailable", "proAvailable")
+                                if isinstance(inspected.get(key), bool)
+                            }
+                            result["login"] = {"state": "signed_in", "capabilities": capabilities}
+                            if len(capabilities) == 3:
+                                matches = capabilities == result["runtime_capabilities"]
+                                result["capabilities_match"] = matches
+                                if not matches:
+                                    result["models"] = []
+                                    result["model_state"] = "capabilities_mismatch"
                 else:
                     result["login"] = _error_result("session_unconfirmed")
             except RuntimeError as exc:
