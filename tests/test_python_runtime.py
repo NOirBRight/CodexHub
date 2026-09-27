@@ -76,6 +76,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/e2e_third_party_collaboration.py",
     "scripts/generate_wayfinder_final_audit.py",
     "scripts/issue_278_fixture_mcp.py",
+    "scripts/prepare_chatgpt_web_runtime.py",
     "scripts/probe_claude_role_identity.py",
     "scripts/qualify_authenticated_provider_cli.py",
     "scripts/qualify_beta3_protocol_cli.py",

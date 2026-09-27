@@ -28,7 +28,7 @@ def test_builder_cli_keeps_selected_bun_on_child_path(tmp_path: Path):
         "import sys\n"
         "from pathlib import Path\n"
         f"if 'rev-parse' in sys.argv: print('a13cd09950969f43e3b7e25c71fa43efaf5446c5')\n"
-        f"elif 'write-tree' in sys.argv: print('2d49d1dca11aa21a340348bb2a356c4078ef50ab')\n"
+        f"elif 'write-tree' in sys.argv: print('641caaf875fcf908dfaa919c242f24fdede26a69')\n"
         "elif 'checkout' in sys.argv:\n"
         "    (Path(sys.argv[sys.argv.index('-C') + 1]) / 'launcher').mkdir()\n",
         encoding="utf-8",
