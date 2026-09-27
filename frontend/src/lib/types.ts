@@ -270,6 +270,7 @@ export interface ChatGptWebStatus {
   ok?: boolean;
   ready: boolean;
   restart_required: boolean;
+  settings_pending_restart: boolean;
   disabled: boolean;
   installed: boolean;
   entry?: string;
