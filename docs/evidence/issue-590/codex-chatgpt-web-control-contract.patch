@@ -63,6 +63,62 @@ index 9b86a7f30533fefeded41b6d1205a0777bd4aaac..d047be8c23726b23699ad724f9f4d411
      body: JSON.stringify({ model: "chatgpt-web/high", reasoning: { effort: "high" }, input: "test", stream: false }),
    });
    if (rejectedWhileDraining.status !== 503) {
+diff --git a/src/adapters/chatgpt-web/browser-worker.ts b/src/adapters/chatgpt-web/browser-worker.ts
+index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..4522c97ac1645cae7ebc0e9dabf55abb5a7c8728 100644
+--- a/src/adapters/chatgpt-web/browser-worker.ts
++++ b/src/adapters/chatgpt-web/browser-worker.ts
+@@ -65,7 +65,7 @@ import {
+   detectChatGptAccountCapabilities,
+   readChatGptEffortSnapshot,
+ } from "../../chatgpt-session";
+-import { loginVerificationMarkerPath } from "../../browser-login";
++import { loginVerificationMarkerPath, writeChatGptAccountState } from "../../browser-login";
+ import {
+   connectLauncherBrowserHost,
+   LauncherBrowserTurnCancelledError,
+@@ -2306,6 +2306,7 @@ export class ChatGptBrowserWorker {
+     authenticated: true;
+     temporary: true;
+     url: string;
++    accountKey?: string;
+     solAvailable?: boolean;
+     extraHighAvailable?: boolean;
+     proAvailable?: boolean;
+@@ -3926,6 +3927,7 @@ export class ChatGptBrowserWorker {
+     authenticated: true;
+     temporary: true;
+     url: string;
++    accountKey?: string;
+     solAvailable?: boolean;
+     extraHighAvailable?: boolean;
+     proAvailable?: boolean;
+@@ -3934,8 +3936,9 @@ export class ChatGptBrowserWorker {
+     await this.prepareChatSurface(page);
+     const url = page.url();
+     if (!detectCapabilities) return { authenticated: true, temporary: true, url };
++    const account = await readChatGptUsageAccount(page);
+     const capabilities = await detectChatGptAccountCapabilities(page);
+-    return { authenticated: true, temporary: true, url, ...capabilities };
++    return { authenticated: true, temporary: true, url, accountKey: account.accountKey, ...capabilities };
+   }
+ 
+   private async smokeTestExclusive(abortSignal?: AbortSignal): Promise<{ effort: string; response: string }> {
+@@ -5470,8 +5473,14 @@ export class ChatGptBrowserWorker {
+       const finalRejection = await submissionRejection.failure();
+       if (finalRejection) throw finalRejection;
+       if (this.context && this.config.browserHost === "managed-chrome") {
++        let accountKey: string | undefined;
++        try {
++          accountKey = (await readChatGptUsageAccount(page)).accountKey;
++        } catch {
++          // Save the rotated state but revoke its identity attestation when the account cannot be reverified.
++        }
+         const state = await this.context.storageState();
+-        atomicWriteFile(this.config.storageStatePath, `${JSON.stringify(state)}\n`);
++        writeChatGptAccountState(this.config.storageStatePath, `${JSON.stringify(state)}\n`, accountKey);
+       }
+       await diagnostics.capture(page, "turn-completed");
+       console.info(
 diff --git a/src/adapters/chatgpt-web/model-selection.ts b/src/adapters/chatgpt-web/model-selection.ts
 index 4529117d72ed49f6d976f096e6088e2a35b4efde..95a085d4ca54fc0c30d442ca5bfbe3d2dfb11d4c 100644
 --- a/src/adapters/chatgpt-web/model-selection.ts
@@ -111,6 +167,43 @@ index 4529117d72ed49f6d976f096e6088e2a35b4efde..95a085d4ca54fc0c30d442ca5bfbe3d2
      if (Date.now() >= deadline) break;
      await new Promise(resolve => setTimeout(resolve, 50));
    } while (true);
+diff --git a/src/browser-login.ts b/src/browser-login.ts
+index db4ffd6d762fff88c95f38ada0a2e6a5f1de1c63..e5093b538a7033d231bccb65ea282b69eff77220 100644
+--- a/src/browser-login.ts
++++ b/src/browser-login.ts
+@@ -1,4 +1,5 @@
+ import { spawn, type ChildProcess } from "node:child_process";
++import { createHash } from "node:crypto";
+ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+ import { dirname, join } from "node:path";
+ import { chromium, type BrowserContext, type BrowserContextOptions } from "playwright-core";
+@@ -140,6 +141,26 @@ export function loginVerificationMarkerPath(storageStatePath: string): string {
+   return `${storageStatePath}.verified.json`;
+ }
+ 
++export function accountIdentityAttestationPath(storageStatePath: string): string {
++  return `${storageStatePath}.identity.json`;
++}
++
++export function writeChatGptAccountState(
++  storageStatePath: string,
++  serializedStorageState: string,
++  accountKey?: string,
++): void {
++  const attestationPath = accountIdentityAttestationPath(storageStatePath);
++  rmSync(attestationPath, { force: true });
++  atomicWriteFile(storageStatePath, serializedStorageState);
++  if (!accountKey || !/^[a-f0-9]{64}$/.test(accountKey)) return;
++  atomicWriteFile(attestationPath, `${JSON.stringify({
++    version: 1,
++    accountKey,
++    storageStateSha256: createHash("sha256").update(serializedStorageState).digest("hex"),
++  })}\n`);
++}
++
+ function writeVerificationMarker(
+   storageStatePath: string,
+   capabilities: ChatGptWebAccountCapabilities,
 diff --git a/src/server.ts b/src/server.ts
 index 8bae1ac704926551eb3b7ac05ce77b9d2b5720f4..2aba7c8ec58c2b6a7596770602b407c3b5e183e2 100644
 --- a/src/server.ts
@@ -230,6 +323,60 @@ index 8bae1ac704926551eb3b7ac05ce77b9d2b5720f4..2aba7c8ec58c2b6a7596770602b407c3
          if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
          const endpoint: NativeImageEndpoint = url.pathname === "/v1/images/generations"
            ? "images/generations"
+diff --git a/tests/browser-login.test.ts b/tests/browser-login.test.ts
+index d74b125babea249bf157d9c8d6b9214d1aacb7bf..8e04b969c68c734f390a2ea81c28a7b255b3349e 100644
+--- a/tests/browser-login.test.ts
++++ b/tests/browser-login.test.ts
+@@ -1,4 +1,5 @@
+ import { expect, test } from "bun:test";
++import { createHash } from "node:crypto";
+ import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+@@ -7,6 +8,8 @@ import {
+   captureSystemBrowserLogin,
+   loginToChatGpt,
+   loginVerificationMarkerPath,
++  accountIdentityAttestationPath,
++  writeChatGptAccountState,
+   sanitizeBrowserLoginStorageState,
+ } from "../src/browser-login";
+ import { CHATGPT_TEMPORARY_CHAT_URL } from "../src/chatgpt-session";
+@@ -147,3 +150,34 @@ test("a storage-state file is not trusted without a verification marker", () =>
+     rmSync(root, { recursive: true, force: true });
+   }
+ });
++
++test("rotated account state gets an identity attestation bound to its exact bytes", () => {
++  const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-identity-state-"));
++  try {
++    const statePath = join(root, "storage-state.json");
++    const accountKey = "a".repeat(64);
++    const firstState = '{"cookies":[{"name":"first"}],"origins":[]}\n';
++    writeChatGptAccountState(statePath, firstState, accountKey);
++    const first = JSON.parse(readFileSync(accountIdentityAttestationPath(statePath), "utf8"));
++    expect(first).toEqual({
++      version: 1,
++      accountKey,
++      storageStateSha256: createHash("sha256").update(firstState).digest("hex"),
++    });
++
++    const rotatedState = '{"cookies":[{"name":"rotated"}],"origins":[]}\n';
++    writeChatGptAccountState(statePath, rotatedState, accountKey);
++    const rotated = JSON.parse(readFileSync(accountIdentityAttestationPath(statePath), "utf8"));
++    expect(readFileSync(statePath, "utf8")).toBe(rotatedState);
++    expect(rotated).toEqual({
++      version: 1,
++      accountKey,
++      storageStateSha256: createHash("sha256").update(rotatedState).digest("hex"),
++    });
++
++    writeChatGptAccountState(statePath, '{"cookies":[],"origins":[]}\n');
++    expect(existsSync(accountIdentityAttestationPath(statePath))).toBe(false);
++  } finally {
++    rmSync(root, { recursive: true, force: true });
++  }
++});
 diff --git a/tests/chatgpt-model-selection.test.ts b/tests/chatgpt-model-selection.test.ts
 index c839662be4bfbb56efe8426331c8efb7a0e0165f..672c731b500d963406d8252f0cbc55949afb45ab 100644
 --- a/tests/chatgpt-model-selection.test.ts

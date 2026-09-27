@@ -9,12 +9,14 @@ The source pin remains the public `miuuyy/codex-chatgpt-web` repository at
 `a13cd09950969f43e3b7e25c71fa43efaf5446c5` (v6.1.1). The reviewed combined
 patch is
 [`codex-chatgpt-web-control-contract.patch`](../issue-590/codex-chatgpt-web-control-contract.patch),
-SHA-256 `50577ded0e5b012ec7ea893f98dcd1635705470c0f093e4cb192c9cadd638c35`.
+SHA-256 `6e89c190cd6d01126a3d64d52bf09cb6a5fde8f24361f37e3056f8d1729104e1`.
 Applying it to the public commit produces Git tree
-`2d49d1dca11aa21a340348bb2a356c4078ef50ab`; the resulting source revision is
-`9c2892af646f36752cc131dedd90af6586e6e4ce`. It retains the prior model
-selection repair and adds the protected read-only admin contract. Bun is pinned
-to 1.4.0; dependency installation is frozen and lifecycle scripts are disabled.
+`641caaf875fcf908dfaa919c242f24fdede26a69`; the resulting source revision is
+`93b8e6fc3eda8a81176964be87f8c7b8fc637a7f`. It retains the model selection
+repair and protected read-only admin contract, and attests successful-turn
+cookie rotation to a server-confirmed account key plus the exact storage-state
+digest. Bun is pinned to 1.4.0; dependency installation is frozen and lifecycle
+scripts are disabled.
 
 Run `scripts/prepare_chatgpt_web_runtime.py` with the repository Python
 launcher before creating a platform package. It fetches only the exact public
@@ -33,13 +35,9 @@ fails with a clear error instead of downloading the upstream v6.1.1 binary.
 Only Linux x64 and Windows x64 are currently supported by this patched runtime;
 other architectures fail closed.
 
-The paired control-contract artifacts prepared for this candidate were:
-
-| Platform | SHA-256 |
-| --- | --- |
-| Linux x64 | `ab118da7d08baae8d1cd8496a2951e6e613a8827ccdc411a11ba52ba36a62c1d` |
-| Windows x64 | `780bbb9b63888379cc41c77ba5dc293a30d93d375a4d0c98af659629bb04ec0e` |
-
-These are packaging provenance and empty-account/runtime smoke inputs. They do
-not establish real account login, connector authorization, client tool calls,
-or final Linux/Windows application package qualification.
+The earlier control-contract candidate's Linux and Windows archives are
+superseded by the account-attestation source change and are no longer pinned.
+Paired builds and runtime smoke checks for the new source revision are pending;
+the prebuilt/install pin is not qualified until those checks finish. Packaging
+smokes do not establish real account login, connector authorization, or client
+tool calls.

@@ -24,23 +24,40 @@ to inspect the browser while the runtime is not accepting turns or has active
 turns, and browser-helper operations use a temporary profile and isolated CDP
 context.
 
+The account binding uses the server-confirmed ChatGPT identity from the
+same-origin `/api/auth/session` response. Only a SHA-256 `accountKey` derived
+from its user and account IDs is returned by the browser helper; IDs, cookies,
+and session tokens remain in the page. An `.identity.json` sidecar binds that
+key to the SHA-256 of the exact saved storage-state bytes. A successful managed
+turn refreshes both files after checking the current account, so cookie
+rotation for the same account preserves readiness. A different account key,
+missing attestation, or storage-state bytes that do not match the attested
+digest invalidate cached readiness. The first explicit readiness check
+establishes an attestation for existing login files.
+
 ## Runtime patch and smoke evidence
 
 The companion runtime patch is
 [`codex-chatgpt-web-control-contract.patch`](codex-chatgpt-web-control-contract.patch),
 SHA-256
-`50577ded0e5b012ec7ea893f98dcd1635705470c0f093e4cb192c9cadd638c35`. It
-applies the control contract to upstream `a13cd09950969f43e3b7e25c71fa43efaf5446c5`
-through `9c2892af646f36752cc131dedd90af6586e6e4ce`; `git apply --check`
-passed at the base revision.
+`6e89c190cd6d01126a3d64d52bf09cb6a5fde8f24361f37e3056f8d1729104e1`. It
+applies the model repair, control contract, and account-identity attestation to
+upstream `a13cd09950969f43e3b7e25c71fa43efaf5446c5` through
+`93b8e6fc3eda8a81176964be87f8c7b8fc637a7f`, producing tree
+`641caaf875fcf908dfaa919c242f24fdede26a69`.
 
-The extracted Linux runtime archive smoke passed with SHA-256
+The previous control-contract candidate's extracted Linux runtime archive
+smoke passed with SHA-256
 `ab118da7d08baae8d1cd8496a2951e6e613a8827ccdc411a11ba52ba36a62c1d`:
 health returned 200, unauthenticated admin status returned 401, authenticated
 admin status returned 200 with contract version 1 and five Web models, and the
 control token was rejected by `/v1/models`. The paired Windows x64 runtime
 archive has SHA-256
 `780bbb9b63888379cc41c77ba5dc293a30d93d375a4d0c98af659629bb04ec0e`.
+Both hashes belong to source revision `9c2892af646f36752cc131dedd90af6586e6e4ce`
+and are superseded by the account-identity attestation change above. They are
+not qualified artifacts for revision `93b8e6fc3eda8a81176964be87f8c7b8fc637a7f`;
+paired source builds and their smoke checks are pending.
 
 The focused readiness, connection, recovery, route, and runtime tests passed:
 62 passed, 1 skipped. These tests use synthetic account and runtime data; no

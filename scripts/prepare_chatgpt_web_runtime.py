@@ -29,10 +29,10 @@ from typing import Any
 
 UPSTREAM_URL = "https://github.com/miuuyy/codex-chatgpt-web.git"
 UPSTREAM_COMMIT = "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
-PATCHED_REVISION = "9c2892af646f36752cc131dedd90af6586e6e4ce"
-PATCHED_TREE = "2d49d1dca11aa21a340348bb2a356c4078ef50ab"
+PATCHED_REVISION = "93b8e6fc3eda8a81176964be87f8c7b8fc637a7f"
+PATCHED_TREE = "641caaf875fcf908dfaa919c242f24fdede26a69"
 PATCH_PATH = Path("docs/evidence/issue-590/codex-chatgpt-web-control-contract.patch")
-EXPECTED_PATCH_SHA256 = "50577ded0e5b012ec7ea893f98dcd1635705470c0f093e4cb192c9cadd638c35"
+EXPECTED_PATCH_SHA256 = "6e89c190cd6d01126a3d64d52bf09cb6a5fde8f24361f37e3056f8d1729104e1"
 PIN_PATH = Path("config/chatgpt_web_runtime_pin.json")
 MAX_ARCHIVE_BYTES = 200 * 1024 * 1024
 

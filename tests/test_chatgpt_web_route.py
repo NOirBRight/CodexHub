@@ -367,6 +367,7 @@ def _seed_check(
                 return {"value": {
                     "authenticated": True,
                     "temporary": True,
+                    "accountKey": "a" * 64,
                     "solAvailable": True,
                     "extraHighAvailable": False,
                     "proAvailable": False,
