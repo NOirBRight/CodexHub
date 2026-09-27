@@ -332,7 +332,7 @@ enabled = true
             planned = json.loads(preview["next_redacted"])
             assert preview["can_apply"] is True
             assert planned["env"]["ANTHROPIC_MODEL"] == "claude-codexhub-e2e-alpha"
-            assert planned["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-codexhub-e2e-beta"
+            assert planned["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-codexhub-role/haiku/e2e/beta"
             assert "ANTHROPIC_AUTH_TOKEN" not in planned["env"]
             assert planned["env"]["ANTHROPIC_CUSTOM_HEADERS"] == "***"
 
@@ -372,7 +372,7 @@ enabled = true
             updated = json.loads(claude_path.read_text())
             assert updated["env"]["ANTHROPIC_MODEL"] == "claude-codexhub-e2e-beta"
             assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in updated["env"]
-            assert updated["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-codexhub-e2e-alpha"
+            assert updated["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-codexhub-role/sonnet/e2e/alpha"
             assert claude_info(port)["claude_settings"]["default_model"] == "e2e/beta"
 
             snapshot = claude_path.read_bytes()
@@ -441,7 +441,7 @@ enabled = true
             assert remembered["role_mappings"]["sonnet"] == "e2e/alpha"
             accepted(port, "switch_gateway_client_route", {"client_id": "claude", "mode": "hub"})
             reconnected = json.loads(claude_path.read_text())
-            assert reconnected["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-codexhub-e2e-alpha"
+            assert reconnected["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-codexhub-role/sonnet/e2e/alpha"
             assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in reconnected["env"]
             assert "ANTHROPIC_MODEL" not in reconnected["env"], "reconnect changed the restored default"
             last_applied = claude_path.read_bytes()

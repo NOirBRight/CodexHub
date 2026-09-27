@@ -121,8 +121,36 @@ def test_valid_role_mapping_projects_env_alias() -> None:
         mappings={"haiku": "xai/grok-4.6", "subagent": "volc/glm-5.2"},
     )
     assert all(binding.valid for binding in bindings)
-    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == projected_model_id("xai/grok-4.6")
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-codexhub-role/haiku/xai/grok-4.6"
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == projected_model_id("volc/glm-5.2")
+
+
+def test_family_bindings_do_not_reclassify_manual_model_choices() -> None:
+    catalog = _catalog("gpt-6-astra")
+    env, _ = client_environment(
+        catalog, default_model="gpt-6-astra",
+        mappings={"fable": "gpt-6-astra", "opus": "gpt-6-astra"},
+    )
+    manual = projected_model_id("gpt-6-astra")
+    fable = env["ANTHROPIC_DEFAULT_FABLE_MODEL"]
+    opus = env["ANTHROPIC_DEFAULT_OPUS_MODEL"]
+    assert len({manual, fable, opus}) == 3
+    assert fable == "claude-codexhub-role/fable/gpt-6-astra"
+    assert env["ANTHROPIC_MODEL"] == manual
+    assert [row["id"] for row in claude_model_list(catalog)["data"]] == [manual]
+    for model in (manual, fable, opus):
+        assert resolve_projected_model_id(model, catalog) == "gpt-6-astra"
+    assert resolve_projected_model_id("claude-fable-5-1", catalog) == "claude-fable-5-1"
+
+
+@pytest.mark.parametrize("alias", [
+    "claude-codexhub-role/fable/removed/model",
+    "claude-codexhub-role/unknown/gpt-6-astra",
+    "claude-codexhub-role/fable/",
+])
+def test_invalid_role_identity_never_falls_back_to_another_model(alias: str) -> None:
+    with pytest.raises(Exception, match="role"):
+        resolve_projected_model_id(alias, _catalog("gpt-6-astra"))
 
 
 @pytest.fixture
@@ -154,7 +182,11 @@ def test_models_with_anthropic_version_project_every_id(harness: GatewayHarness)
     assert projected in ids
 
 
-def test_messages_accepts_projected_model_id(harness: GatewayHarness) -> None:
+@pytest.mark.parametrize("projected", [
+    "claude-codexhub-volc-glm-5.2",
+    "claude-codexhub-role/fable/volc/glm-5.2",
+])
+def test_messages_accepts_projected_model_id(harness: GatewayHarness, projected: str) -> None:
     harness.set_json_response(
         {
             "id": "chat_char_1",
@@ -170,7 +202,6 @@ def test_messages_accepts_projected_model_id(harness: GatewayHarness) -> None:
             "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
         }
     )
-    projected = projected_model_id("volc/glm-5.2")
     response = request_gateway(
         harness.host,
         harness.port,

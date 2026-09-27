@@ -106,7 +106,7 @@ pub(in crate::gateway) fn read_claude_settings(
             .unwrap_or("");
         exported
             .iter()
-            .find(|model| projected_claude_model_id(&model.id) == raw)
+            .find(|model| matches_projected_claude_model_id(&model.id, raw))
             .map(|model| model.id.clone())
             .unwrap_or_else(|| raw.to_string())
     };
@@ -162,7 +162,7 @@ fn resolved_external_model(
     }
     if let Some(model) = super::super::gateway_models_from_config(settings, providers)
         .into_iter()
-        .find(|model| model.id == requested || projected_claude_model_id(&model.id) == requested)
+        .find(|model| model.id == requested || matches_projected_claude_model_id(&model.id, requested))
     {
         return Ok(model.id);
     }
@@ -217,6 +217,24 @@ pub(in crate::gateway) fn projected_claude_model_id(canonical: &str) -> String {
         })
         .collect();
     format!("claude-codexhub-{}", safe.trim_matches('-'))
+}
+
+fn projected_claude_role_model_id(role: &str, canonical: &str) -> String {
+    match role {
+        // Family values classify client model identities, including billing
+        // policy. Keep them distinct from explicit picker/default selections.
+        "opus" | "sonnet" | "haiku" | "fable" => {
+            format!("claude-codexhub-role/{role}/{canonical}")
+        }
+        _ => projected_claude_model_id(canonical),
+    }
+}
+
+fn matches_projected_claude_model_id(canonical: &str, requested: &str) -> bool {
+    projected_claude_model_id(canonical) == requested
+        || ROLE_ENV.iter().any(|(role, _)| {
+            projected_claude_role_model_id(role, canonical) == requested
+        })
 }
 
 fn env_object(value: &Value) -> Option<&Map<String, Value>> {
@@ -860,11 +878,12 @@ pub(in crate::gateway) fn claude_settings_text(
                 continue;
             }
             let existing = env_map.get(*env_key).and_then(Value::as_str).unwrap_or("");
-            if canonical == existing {
-                continue;
-            }
-            let resolved = resolved_external_model(settings, providers, canonical)?;
-            let projected = projected_claude_model_id(&resolved);
+            let resolved = match resolved_external_model(settings, providers, canonical) {
+                Ok(resolved) => resolved,
+                Err(_) if canonical == existing => continue,
+                Err(error) => return Err(error),
+            };
+            let projected = projected_claude_role_model_id(role, &resolved);
             if projected == existing {
                 continue;
             }
@@ -924,7 +943,7 @@ fn alias_change_note(
             .map(|value| {
                 exported
                     .iter()
-                    .find(|entry| projected_claude_model_id(&entry.id) == value)
+                    .find(|entry| matches_projected_claude_model_id(&entry.id, value))
                     .map(|entry| entry.id.clone())
                     .unwrap_or_else(|| value.to_string())
             })
@@ -1215,7 +1234,7 @@ mod tests {
         assert_eq!(readback.role_mappings["opus"], "gpt-5.5");
         let preview = preview_claude_config_with_path(&path, &settings, &[], PRESERVE_DEFAULT_MODEL, &BTreeMap::new()).unwrap();
         let next: Value = serde_json::from_str(&preview.next_redacted).unwrap();
-        assert_eq!(next["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-codexhub-gpt-5.5");
+        assert_eq!(next["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-codexhub-role/opus/gpt-5.5");
         assert_eq!(next["model"], "claude-opus-5-5");
         let clear = BTreeMap::from([("opus".into(), String::new())]);
         let preview = preview_claude_config_with_path(&path, &settings, &[], PRESERVE_DEFAULT_MODEL, &clear).unwrap();
@@ -1242,7 +1261,7 @@ mod tests {
             value
                 .pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL")
                 .and_then(Value::as_str),
-            Some("claude-codexhub-gpt-5.5")
+            Some("claude-codexhub-role/opus/gpt-5.5")
         );
     }
 
@@ -1419,7 +1438,7 @@ mod tests {
             value
                 .pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL")
                 .and_then(Value::as_str),
-            Some("claude-codexhub-deepseek-deepseek-chat")
+            Some("claude-codexhub-role/haiku/deepseek/deepseek-chat")
         );
         assert_eq!(
             value
@@ -1508,7 +1527,7 @@ mod tests {
             value
                 .pointer("/env/ANTHROPIC_DEFAULT_HAIKU_MODEL")
                 .and_then(Value::as_str),
-            Some("claude-codexhub-gpt-5.5"),
+            Some("claude-codexhub-role/haiku/gpt-5.5"),
         );
         let native_default =
             claude_settings_text(None, &native, &[], "claude-opus-5-5[1m]", &BTreeMap::new())
@@ -1713,8 +1732,49 @@ mod tests {
         assert_eq!(
             env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
                 .and_then(Value::as_str),
-            Some("claude-codexhub-gpt-5.5")
+            Some("claude-codexhub-role/haiku/gpt-5.5")
         );
+    }
+
+    #[test]
+    fn family_mapping_migration_preserves_manual_picker_identity_and_readback() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
+        let dir = std::env::temp_dir().join(format!("claude-family-identity-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"model":"claude-codexhub-gpt-5.5","env":{"ANTHROPIC_DEFAULT_FABLE_MODEL":"claude-codexhub-gpt-5.5"}}"#).unwrap();
+        let mut settings = settings();
+        settings.claude_native_picker.as_mut().unwrap().push(json!({
+            "model": "claude-fable-5-1", "label": "Fable"
+        }));
+        settings.claude_model_mappings = Some(BTreeMap::from([
+            ("fable".into(), "gpt-5.5".into()),
+            ("opus".into(), "gpt-5.5".into()),
+        ]));
+        let plan = plan_claude_apply(&path, &settings, &[], PRESERVE_DEFAULT_MODEL, BTreeMap::new()).unwrap();
+        let value: Value = serde_json::from_str(&plan.next).unwrap();
+        assert_eq!(value["model"], "claude-codexhub-gpt-5.5");
+        assert_eq!(value["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"], "claude-codexhub-role/fable/gpt-5.5");
+        assert_eq!(value["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-codexhub-role/opus/gpt-5.5");
+        let ids: Vec<&str> = value["modelPicker"]["options"].as_array().unwrap().iter()
+            .filter_map(|row| row["model"].as_str()).collect();
+        assert!(ids.contains(&"claude-fable-5-1"));
+        assert!(ids.contains(&"claude-codexhub-gpt-5.5"));
+        assert!(!ids.iter().any(|id| id.starts_with("claude-codexhub-role/")));
+        publish_claude_apply(&plan, &[(dir.join("backup"), BackupChannel::Stable)]).unwrap();
+        let repeat = plan_claude_apply(&path, &settings, &[], PRESERVE_DEFAULT_MODEL, BTreeMap::new()).unwrap();
+        assert_eq!(repeat.next, plan.next);
+        // Check decoding from the client file independently of stored preferences.
+        settings.claude_model_mappings = None;
+        let readback = read_claude_settings(&path, &settings, &[]);
+        assert_eq!(readback.default_model, "gpt-5.5");
+        assert_eq!(readback.role_mappings["fable"], "gpt-5.5");
+        assert_eq!(readback.role_mappings["opus"], "gpt-5.5");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
