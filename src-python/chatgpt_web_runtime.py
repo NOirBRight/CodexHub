@@ -840,7 +840,8 @@ def _doctor_lists_image(value: dict[str, Any]) -> bool:
     return value.get("image_input") is True or value.get("supports_image_input") is True
 
 
-def _doctor_model_entry(value: Any) -> dict[str, Any] | None:
+def normalize_runtime_model(value: Any) -> dict[str, Any] | None:
+    """Normalize a model row from either the runtime doctor or its API."""
     if isinstance(value, str):
         model_id = value.strip()
         efforts: list[Any] = []
@@ -890,7 +891,7 @@ def _models_from_doctor(report: dict[str, Any] | None) -> list[dict[str, Any]]:
     models: list[dict[str, Any]] = []
     seen: set[str] = set()
     for value in raw_models:
-        entry = _doctor_model_entry(value)
+        entry = normalize_runtime_model(value)
         if entry is None or entry["id"] in seen:
             continue
         seen.add(entry["id"])
