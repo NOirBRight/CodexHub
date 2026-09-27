@@ -39,3 +39,13 @@ Source inspection at pinned upstream commit
 `loadFile`. Opening its HTML in an ordinary browser therefore does not provide
 working settings: a browser-accessible control adapter is needed to reuse that
 surface. This source finding does not change the accepted external-browser UX.
+
+## Managed-runtime option boundary
+
+The pinned upstream `runtime/app/cli.js` validates `browserInteractionMode:
+"manual"` only for full mode with `browserHost: "launcher"`. Its model
+selection uses `zeroRiskProEnabled` only in the manual-interaction branch.
+CodexHub's managed supervisor runs automatic interaction with
+`browserHost: "managed-chrome"`, so it cannot provide Zero Risk Pro. The
+settings API preserves that legacy value for display with an unsupported
+reason, rejects attempts to enable it, and refuses to start with it enabled.
