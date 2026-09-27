@@ -1,0 +1,23 @@
+{
+  "issue": 573,
+  "candidate_sha": "e485acffe5d1a784490fac845ac64572a9870342",
+  "runtime": {
+    "version": "6.1.1",
+    "commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
+  },
+  "verified": [
+    "plaintext collaboration.spawn_agent is forwarded with its namespace, call id, item id, arguments, and empty encrypted_function_args marker",
+    "the following function_call_output stays on that call id and is not renamed to a V1 operation",
+    "replaying the same result does not add another POST",
+    "encrypted collaboration arguments are rejected before POST /v1/responses",
+    "a sixth in-flight web collaboration submission is rejected while five are open",
+    "a child request on a different thread id returns while its parent turn is still waiting",
+    "cancel then a late result is rejected and adds no POST",
+    "git diff --check"
+  ],
+  "commands": [
+    "/home/noirbright/Workstation/CodexHub/.venv-ci/bin/python -m pytest tests/test_chatgpt_web_collab.py tests/test_chatgpt_web_route.py -q"
+  ],
+  "result": "12 passed",
+  "live_v2": "not_run"
+}

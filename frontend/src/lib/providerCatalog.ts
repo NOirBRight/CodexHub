@@ -37,6 +37,13 @@ export function subscriptionAuthAdapter(preset: Provider | null | undefined): st
   return capability?.slice("subscription:".length) || null;
 }
 
+export function runtimeCapability(preset: Provider | null | undefined): string | null {
+  const capability = (preset?.auth_capabilities ?? []).find((candidate) =>
+    candidate.startsWith("runtime:"),
+  );
+  return capability?.slice("runtime:".length) || null;
+}
+
 export function instantiateCatalogProvider(preset: Provider, sortOrder: number): Provider {
   return {
     ...preset,

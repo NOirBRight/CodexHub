@@ -9,6 +9,9 @@ ports.
 
 from __future__ import annotations
 
+import select
+import socket
+import threading
 import time as _time
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
@@ -117,21 +120,28 @@ class LiveDownstream:
         self._handler = live.handler
 
     def relay(self, response: UpstreamResponseLike, relay_request: RelayExchangeRequest) -> int:
-        return self._handler._relay_upstream_response(
-            response,
-            relay_request.upstream_name,
-            request_id=relay_request.request_id,
-            model=relay_request.model,
-            inbound_format=relay_request.inbound_format,
-            caller_stream=relay_request.caller_stream,
-            event_context=relay_request.event_context,
-            usage_capture=relay_request.usage_capture,
-            headers_already_sent=relay_request.headers_already_sent,
-            defer_stream_errors=relay_request.defer_stream_errors,
-            mark_downstream_sse_started=relay_request.mark_downstream_sse_started,
-            response_lifecycle_state=relay_request.response_lifecycle_state,
-            relay_execution_plan=relay_request.relay_plan,
-        )
+        stop_disconnect_watch = None
+        if relay_request.upstream_name == "chatgpt_web":
+            stop_disconnect_watch = _watch_chatgpt_web_downstream_disconnect(self._handler)
+        try:
+            return self._handler._relay_upstream_response(
+                response,
+                relay_request.upstream_name,
+                request_id=relay_request.request_id,
+                model=relay_request.model,
+                inbound_format=relay_request.inbound_format,
+                caller_stream=relay_request.caller_stream,
+                event_context=relay_request.event_context,
+                usage_capture=relay_request.usage_capture,
+                headers_already_sent=relay_request.headers_already_sent,
+                defer_stream_errors=relay_request.defer_stream_errors,
+                mark_downstream_sse_started=relay_request.mark_downstream_sse_started,
+                response_lifecycle_state=relay_request.response_lifecycle_state,
+                relay_execution_plan=relay_request.relay_plan,
+            )
+        finally:
+            if stop_disconnect_watch is not None:
+                stop_disconnect_watch.set()
 
     def state(self) -> DownstreamState:
         exposed = _gateway_exchange_bindings.downstream_has_been_exposed(self._handler)
@@ -161,6 +171,40 @@ class LiveDownstream:
             if not self._handler._send_sse_headers(200, ""):
                 return False
         return self._handler._write_sse_event("codexhub.retry", payload)
+
+
+def _watch_chatgpt_web_downstream_disconnect(handler: Any) -> threading.Event:
+    """Abort the upstream body when the caller disconnects or cancels."""
+    stop = threading.Event()
+    sock = getattr(handler, "connection", None)
+    admission = _gateway_admission.active_gateway_request()
+    if sock is None or admission is None:
+        return stop
+
+    def watch() -> None:
+        while not stop.is_set() and not admission.cancelled:
+            try:
+                readable, _, errored = select.select([sock], [], [sock], 0.2)
+            except (OSError, ValueError):
+                admission.cancel()
+                return
+            if stop.is_set() or not readable and not errored:
+                continue
+            try:
+                peeked = sock.recv(1, socket.MSG_PEEK)
+            except OSError:
+                admission.cancel()
+                return
+            if peeked == b"" or errored:
+                admission.cancel()
+                return
+
+    threading.Thread(
+        target=watch,
+        name="chatgpt-web-downstream-cancel",
+        daemon=True,
+    ).start()
+    return stop
 
 
 def live_finish_downstream_failure(handler: Any) -> None:

@@ -1,0 +1,35 @@
+{
+  "issue": 575,
+  "candidate_sha": "0be32d3994fec602412dd9dcef9a631b04d4a8cd",
+  "runtime": {
+    "version": "6.1.1",
+    "commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
+  },
+  "release_gate": "not_run",
+  "checks": [
+    "/home/noirbright/Workstation/CodexHub/.venv-ci/bin/python -m pytest tests/test_chatgpt_web_runtime.py tests/test_chatgpt_web_route.py -q --tb=line",
+    "git diff --check"
+  ],
+  "results": {
+    "pytest": "23 passed",
+    "git diff --check": "clean"
+  },
+  "fixture_checks": [
+    "bad checksum does not replace current",
+    "interrupted download can be retried",
+    "failed promotion keeps previous-good",
+    "upgrade revokes an open tool permit recorded by chatgpt_web_route",
+    "disable removes process.json and leaves account files",
+    "delete-account removes account files and does not run during disable"
+  ],
+  "not_performed": [
+    "Linux/Windows same-SHA client verification",
+    "yoga checkout",
+    "real Codex CLI",
+    "real Codex Desktop",
+    "Claude Code",
+    "OpenCode",
+    "image recognition",
+    "live V2 parent/child runs"
+  ]
+}

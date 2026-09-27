@@ -1,0 +1,23 @@
+{
+  "issue": 569,
+  "candidate_sha": "e820db82831e5ca5c866587de148df9e33ea4328",
+  "runtime": {
+    "version": "6.1.1",
+    "commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
+  },
+  "verified": [
+    "public Gateway HTTP/SSE fixture: one streamed text turn",
+    "same session second turn keeps caller thread, turn, and item identity",
+    "a second session with the same prompt uses a different turn",
+    "text turns proceed when login and browser smoke passed even if tunnel and connector are not ready",
+    "signed-out runtime fails before POST /v1/responses",
+    "model missing from the doctor list fails before POST /v1/responses",
+    "incompatible pin fails before POST /v1/responses",
+    "dead process fails before POST /v1/responses",
+    "client disconnect closes the upstream response body",
+    "an already sent turn is not automatically retried"
+  ],
+  "live_codex_cli_turns": "not_run",
+  "live_codex_desktop_turns": "not_run",
+  "blocked_reason": "doctor login is signed out, so real Codex CLI and Desktop two-turn text conversations were not run"
+}

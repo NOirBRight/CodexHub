@@ -1,0 +1,93 @@
+{
+  "issue": 568,
+  "command": [
+    "/home/noirbright/Workstation/CodexHub/.venv-ci/bin/python",
+    "/home/noirbright/Workstation/.worktrees/codexhub-chatgpt-web/568/src-python/chatgpt_web_runtime.py",
+    "start",
+    "--home",
+    "<private-home-outside-tmp>"
+  ],
+  "install_command": [
+    "/home/noirbright/Workstation/CodexHub/.venv-ci/bin/python",
+    "/home/noirbright/Workstation/.worktrees/codexhub-chatgpt-web/568/src-python/chatgpt_web_runtime.py",
+    "install",
+    "--source",
+    "codex-chatgpt-web-linux-amd64.tar.gz",
+    "--home",
+    "<private-home-outside-tmp>"
+  ],
+  "runtime_argv": [
+    "bin/codex-chatgpt-web",
+    "serve"
+  ],
+  "supervisor_sha256": "38e3ad49b64accd00d9cb93d75e0048f791619d61276c4abb2218caf3250f031",
+  "archive_sha256": "e86371aa677722811c34e4ac9b8984a3859f24f57c5ad0e3e1d6014a96298531",
+  "pinned_commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5",
+  "pinned_version": "6.1.1",
+  "payload_kind": "pinned upstream linux-amd64 runtime archive, extracted after checksum match",
+  "product_entry": "codex-chatgpt-web serve",
+  "upstream_executed": false,
+  "rejected_entries": [
+    "setup",
+    "dev",
+    "--replace-codex-route",
+    "install.sh",
+    "install-launcher.sh"
+  ],
+  "process": {
+    "running_at_observation": true,
+    "listen_host": "127.0.0.1",
+    "ownership": "codexhub-supervisor",
+    "executable_basename": "codex-chatgpt-web"
+  },
+  "healthz": {
+    "service": "codex-chatgpt-web",
+    "status": "ok",
+    "version": "6.1.1",
+    "mode": "browser-only"
+  },
+  "ready": false,
+  "login_state": "signed_out",
+  "browser_smoke": "not_run",
+  "tunnel": "not_started",
+  "connector_selectable": false,
+  "component_compatible": true,
+  "stopped_after_observation": true,
+  "real_config_sha256": {
+    "before": {
+      "codex_config_toml": "c6c176a150a41e648746f75505e233545c15bc7646c3089f8dff5c49c5392bde",
+      "claude_settings_json": "6c2ddb107f3c2ce756aa8d5708d5d88e7aa0fc3a026483214e6b66c0953136e2",
+      "opencode_json": "f2e407032af1ed069eff43357fce24346d8c8edc31cb736ab9091c063f0ea0f9"
+    },
+    "after": {
+      "codex_config_toml": "c6c176a150a41e648746f75505e233545c15bc7646c3089f8dff5c49c5392bde",
+      "claude_settings_json": "6c2ddb107f3c2ce756aa8d5708d5d88e7aa0fc3a026483214e6b66c0953136e2",
+      "opencode_json": "f2e407032af1ed069eff43357fce24346d8c8edc31cb736ab9091c063f0ea0f9"
+    }
+  },
+  "fixture_config_sha256": {
+    "before": {
+      "codex_config_toml": "8654e96fbba12393e35c3f276bdd299cc7f8b65f7113c7a470e1a4f348d2a403",
+      "claude_settings_json": "2dc9472ccc8a218a2cf9e5af066af31329597eeb9ec10e301cff530c3c022106",
+      "opencode_json": "058343b59dad15f7af473ee9f658d72afc72872b89783f9344010dc74743fcc9",
+      "dev_home_secret": "5ff574726c4e684789fd6d36e01c851c40572b5a8806435fb4c004015d979ad8"
+    },
+    "after": {
+      "codex_config_toml": "8654e96fbba12393e35c3f276bdd299cc7f8b65f7113c7a470e1a4f348d2a403",
+      "claude_settings_json": "2dc9472ccc8a218a2cf9e5af066af31329597eeb9ec10e301cff530c3c022106",
+      "opencode_json": "058343b59dad15f7af473ee9f658d72afc72872b89783f9344010dc74743fcc9",
+      "dev_home_secret": "5ff574726c4e684789fd6d36e01c851c40572b5a8806435fb4c004015d979ad8"
+    }
+  },
+  "not_performed": [
+    "real ChatGPT login",
+    "browser smoke against chatgpt.com",
+    "connector verification",
+    "upstream setup",
+    "upstream dev",
+    "--replace-codex-route",
+    "install.sh",
+    "install-launcher.sh",
+    "pinned launcher binary start"
+  ]
+}

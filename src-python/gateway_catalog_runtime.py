@@ -848,6 +848,10 @@ def choose_upstream(model_id: str) -> UpstreamFacts:
         current_catalog_data(),
         extra_slugs=exported_gateway_model_ids(),
     )
+    import chatgpt_web_route
+
+    if chatgpt_web_route.is_web_slug(slug):
+        return chatgpt_web_route.upstream_for_model(slug)
     policy = _policy_reader(_facts().policy_path)
     official_fast = _official_fast_variant(slug, policy)
     if official_fast is not None:
@@ -919,6 +923,15 @@ def _external_upstream(
     slug: str, external_model: Mapping[str, Any], policy: Any
 ) -> UpstreamFacts:
     provider_hint = str(external_model.get("provider_alias") or "") or None
+    import chatgpt_web_route
+
+    if (
+        canonical_model_id(provider_hint or "") == chatgpt_web_route.PROVIDER_ID
+        or chatgpt_web_route.is_web_slug(slug)
+    ):
+        # The providers.toml row is identity-only. Never use its empty base URL
+        # or fall through to an official model.
+        return chatgpt_web_route.upstream_for_model(canonical_model_id(slug))
     if is_internal_route_identity(slug) or is_internal_route_identity(external_model):
         raise _identity_failure(
             f"model identity is internal and cannot be routed: {slug}",
@@ -1005,23 +1018,27 @@ def _external_upstream(
 def current_catalog_data() -> CatalogDocument:
     catalog_path = _resolved_catalog_path(_facts().generated_catalog_path)
     if not catalog_path.exists():
-        return {"models": []}
-    published_budgets = (
-        _published_budget_reader or published_official_context_budgets
-    )(catalog_path)
-    catalog = json.loads(_text_reader(catalog_path, "utf-8-sig"))
-    fast_projection = (
-        _official_fast_projection_reader or catalog_with_official_fast_variants
-    )
-    published_context_projection = _published_context_projection_reader or catalog_with_published_official_budgets
-    vision_projection = (
-        _vision_projection_reader or catalog_with_vision_proxy_capabilities
-    )
-    return vision_projection(
-        published_context_projection(
-            fast_projection(catalog), published_budgets, require_published_snapshot=True
+        projected: CatalogDocument = {"models": []}
+    else:
+        published_budgets = (
+            _published_budget_reader or published_official_context_budgets
+        )(catalog_path)
+        catalog = json.loads(_text_reader(catalog_path, "utf-8-sig"))
+        fast_projection = (
+            _official_fast_projection_reader or catalog_with_official_fast_variants
         )
-    )
+        published_context_projection = _published_context_projection_reader or catalog_with_published_official_budgets
+        vision_projection = (
+            _vision_projection_reader or catalog_with_vision_proxy_capabilities
+        )
+        projected = vision_projection(
+            published_context_projection(
+                fast_projection(catalog), published_budgets, require_published_snapshot=True
+            )
+        )
+    import chatgpt_web_route
+
+    return chatgpt_web_route.project_catalog(projected)
 
 
 def openai_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:

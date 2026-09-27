@@ -820,6 +820,10 @@ class GatewayHandlerMixin:
                 prompt_cache_key=prompt_cache_key,
             )
             primary_route_attempt = route_plan.attempts[0]
+            if upstream_name == "chatgpt_web" and isinstance(inbound_payload, Mapping):
+                import chatgpt_web_route as _chatgpt_web_route
+
+                _chatgpt_web_route.reject_unlisted_image(upstream, inbound_payload)
             usage_capture: dict[str, Any] = {}
             vision_proxy_payload_format = (
                 route_plan.prepared_request_protocol.value
@@ -904,9 +908,7 @@ class GatewayHandlerMixin:
                     or live.downstream_sse_started
                     or downstream_sse_started
                 )
-                self._active_prepared_exchange = (
-                    exchange_progress.active_prepared_exchange
-                )
+                self._active_prepared_exchange = exchange_progress.active_prepared_exchange
             terminal = terminal_result(exchange_result)
             if terminal.handled and not terminal.completed:
                 return
