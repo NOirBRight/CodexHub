@@ -329,10 +329,10 @@ def test_repo_pin_is_the_accepted_upstream_release() -> None:
     assert document["version"] == chatgpt_web_runtime.PINNED_VERSION == "6.1.1"
     source = document["runtime_source"]
     assert source["commit"] == document["commit"]
-    assert source["build_revision"] == "9c2892af646f36752cc131dedd90af6586e6e4ce"
-    assert source["git_tree"] == "2d49d1dca11aa21a340348bb2a356c4078ef50ab"
+    assert source["build_revision"] == "93b8e6fc3eda8a81176964be87f8c7b8fc637a7f"
+    assert source["git_tree"] == "641caaf875fcf908dfaa919c242f24fdede26a69"
     assert source["contract"] == "admin-status-v1"
-    assert source["patch_sha256"] == "50577ded0e5b012ec7ea893f98dcd1635705470c0f093e4cb192c9cadd638c35"
+    assert source["patch_sha256"] == "6e89c190cd6d01126a3d64d52bf09cb6a5fde8f24361f37e3056f8d1729104e1"
     patch = ROOT / source["patch_file"]
     assert hashlib.sha256(patch.read_bytes()).hexdigest() == source["patch_sha256"]
     assert document["license"] == "MIT"
@@ -340,12 +340,11 @@ def test_repo_pin_is_the_accepted_upstream_release() -> None:
     assert "dev" in document["rejected_entries"]
     assert "--replace-codex-route" in document["rejected_entries"]
     assert set(document["artifacts"]) == {"linux-x64", "windows-x64"}
-    assert document["artifacts"]["linux-x64"]["sha256"] == "ab118da7d08baae8d1cd8496a2951e6e613a8827ccdc411a11ba52ba36a62c1d"
-    assert document["artifacts"]["windows-x64"]["sha256"] == "780bbb9b63888379cc41c77ba5dc293a30d93d375a4d0c98af659629bb04ec0e"
     for artifact in document["artifacts"].values():
         assert artifact["bundled_only"] is True
-        assert artifact["build_revision"] == source["build_revision"]
-        assert artifact["git_tree"] == source["git_tree"]
+        assert "sha256" not in artifact
+        assert "build_revision" not in artifact
+        assert "git_tree" not in artifact
         assert "url" not in artifact
 
 
