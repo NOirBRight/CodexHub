@@ -22,7 +22,7 @@ import urllib.request
 from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import chatgpt_web_runtime as runtime
 
@@ -89,6 +89,8 @@ def _empty_result(*, cache_state: str, reason: str) -> dict[str, Any]:
         "connector": {"state": "not_checked", "name": None},
         "models": [],
         "model_state": "not_checked",
+        "runtime_capabilities": {},
+        "capabilities_match": None,
         "text_ready": False,
         "tools_ready": False,
         "tunnel": {"state": "not_checked"},
@@ -158,21 +160,6 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _models_from_runtime(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    values = payload.get("models")
-    if not isinstance(values, list):
-        return []
-    result: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for value in values:
-        model = runtime.normalize_runtime_model(value)
-        if model is None or model["id"] in seen:
-            continue
-        seen.add(model["id"])
-        result.append(model)
-    return result
-
-
 def _active_turn_counts(payload: dict[str, Any]) -> tuple[int, int] | None:
     http_turns = payload.get("active_http_turns")
     browser_turns = payload.get("active_browser_turns")
@@ -180,6 +167,75 @@ def _active_turn_counts(payload: dict[str, Any]) -> tuple[int, int] | None:
            for value in (http_turns, browser_turns)):
         return None
     return int(http_turns), int(browser_turns)
+
+
+def normalize_control_status(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and normalize the versioned, authenticated runtime status contract."""
+    version = payload.get("control_contract_version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise ValueError("runtime_control_contract_invalid")
+    if version != 1 or payload.get("status") != "ok":
+        raise ValueError("runtime_control_contract_unsupported")
+    if not isinstance(payload.get("accepting_turns"), bool):
+        raise ValueError("runtime_control_contract_invalid")
+    capabilities = payload.get("account_capabilities")
+    if not isinstance(capabilities, Mapping):
+        raise ValueError("runtime_control_contract_invalid")
+    capability_fields = {
+        "solAvailable": "sol_available",
+        "extraHighAvailable": "extra_high_available",
+        "proAvailable": "pro_available",
+    }
+    normalized_capabilities: dict[str, bool] = {}
+    for public_name, source_name in capability_fields.items():
+        value = capabilities.get(source_name)
+        if not isinstance(value, bool):
+            raise ValueError("runtime_control_contract_invalid")
+        normalized_capabilities[public_name] = value
+    raw_models = payload.get("models")
+    if not isinstance(raw_models, list):
+        raise ValueError("runtime_control_contract_invalid")
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in raw_models:
+        if not isinstance(value, Mapping):
+            raise ValueError("runtime_control_contract_invalid")
+        model_id = value.get("id")
+        display_name = value.get("display_name")
+        efforts = value.get("efforts")
+        image_input = value.get("image_input")
+        if (
+            not isinstance(model_id, str)
+            or not model_id.startswith("chatgpt-web/")
+            or not isinstance(display_name, str)
+            or not isinstance(efforts, list)
+            or any(not isinstance(effort, str) or not effort.strip() for effort in efforts)
+            or not isinstance(image_input, bool)
+        ):
+            raise ValueError("runtime_control_contract_invalid")
+        model = runtime.normalize_runtime_model(value)
+        if model is None or model["id"] in seen:
+            raise ValueError("runtime_control_contract_invalid")
+        seen.add(model["id"])
+        models.append(model)
+    counts = _active_turn_counts(payload)
+    if counts is None:
+        raise ValueError("runtime_control_contract_invalid")
+    return {
+        "accepting_turns": payload["accepting_turns"],
+        "active_turns": {"http": counts[0], "browser": counts[1]},
+        "account_capabilities": normalized_capabilities,
+        "models": models,
+    }
+
+
+def read_control_status(port: int, token: str) -> dict[str, Any]:
+    """Fetch the protected v1 control contract from the current loopback instance."""
+    payload = _request_json(f"http://127.0.0.1:{port}/admin/status", token)
+    try:
+        return normalize_control_status(payload)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 class _ControlHandler(http.server.BaseHTTPRequestHandler):
@@ -572,19 +628,26 @@ def check_runtime(home: Path) -> dict[str, Any]:
     port = int(record["port"])
     token = config.get("controlToken") if isinstance(config.get("controlToken"), str) else ""
     try:
-        health = _request_json(f"http://127.0.0.1:{port}/healthz", token)
-        counts = _active_turn_counts(health)
-    except RuntimeError:
-        counts = None
-    if counts is None:
-        result.update(state="blocked", reason="active_turn_state_unavailable")
+        control_status = read_control_status(port, token)
+    except RuntimeError as exc:
+        reason = str(exc)
+        if reason not in {"runtime_control_contract_unsupported", "runtime_control_contract_invalid"}:
+            reason = "runtime_control_contract_unavailable"
+        result.update(state="blocked", reason=reason)
         _save_if_binding_unchanged(home, binding, result)
         return result
-    http_turns, browser_turns = counts
-    result["active_turns"] = {"http": http_turns, "browser": browser_turns}
+    result["active_turns"] = control_status["active_turns"]
+    result["runtime_capabilities"] = control_status["account_capabilities"]
+    result["models"] = control_status["models"]
+    result["model_state"] = "available" if result["models"] else "none"
+    if not control_status["accepting_turns"]:
+        result.update(state="blocked", reason="runtime_not_accepting_turns")
+        _save_if_binding_unchanged(home, binding, result)
+        return result
+    http_turns = result["active_turns"]["http"]
+    browser_turns = result["active_turns"]["browser"]
     if http_turns or browser_turns:
         result.update(state="blocked", reason="active_turns")
-        _collect_models(result, port, token)
         _save_if_binding_unchanged(home, binding, result)
         return result
 
@@ -599,6 +662,12 @@ def check_runtime(home: Path) -> dict[str, Any]:
                         if isinstance(inspected.get(key), bool)
                     }
                     result["login"] = {"state": "signed_in", "capabilities": capabilities}
+                    if len(capabilities) == 3:
+                        matches = capabilities == result["runtime_capabilities"]
+                        result["capabilities_match"] = matches
+                        if not matches:
+                            result["models"] = []
+                            result["model_state"] = "capabilities_mismatch"
                 else:
                     result["login"] = _error_result("session_unconfirmed")
             except RuntimeError as exc:
@@ -635,14 +704,18 @@ def check_runtime(home: Path) -> dict[str, Any]:
         result["login"] = _error_result(reason)
         result["connector"] = _error_result(reason)
 
-    _collect_models(result, port, token)
     try:
         doctor = runtime._run_doctor(home, runtime._find_entry(runtime._runtime_root(home)))
     except (OSError, RuntimeError):
         doctor = None
     tunnel_ok = _doctor_tunnel_ready(doctor)
     result["tunnel"] = {"state": "ready" if tunnel_ok else "not_ready"}
-    text_ready = result["login"]["state"] == "signed_in" and result["browser"]["state"] == "passed" and bool(result["models"])
+    text_ready = (
+        result["login"]["state"] == "signed_in"
+        and result["browser"]["state"] == "passed"
+        and bool(result["models"])
+        and result["capabilities_match"] is True
+    )
     tools_ready = (
         text_ready
         and result["connector"]["state"] == "selectable"
@@ -653,20 +726,12 @@ def check_runtime(home: Path) -> dict[str, Any]:
     result["tools_ready"] = bool(tools_ready)
     result["state"] = "ready" if text_ready and tools_ready else "partial" if text_ready else "failed"
     result["reason"] = None if result["state"] == "ready" else (
-        "tools_not_ready" if text_ready else "readiness_evidence_incomplete"
+        "tools_not_ready" if text_ready else
+        "account_capabilities_changed" if result["capabilities_match"] is False else
+        "readiness_evidence_incomplete"
     )
     _save_if_binding_unchanged(home, binding, result)
     return result
-
-
-def _collect_models(result: dict[str, Any], port: int, token: str) -> None:
-    try:
-        payload = _request_json(f"http://127.0.0.1:{port}/v1/models", token)
-        result["models"] = _models_from_runtime(payload)
-        result["model_state"] = "available" if result["models"] else "none"
-    except RuntimeError:
-        result["models"] = []
-        result["model_state"] = "unavailable"
 
 
 def _doctor_tunnel_ready(report: dict[str, Any] | None) -> bool:

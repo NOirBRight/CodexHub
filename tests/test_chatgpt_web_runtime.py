@@ -21,6 +21,7 @@ import pytest
 import chatgpt_web_collab
 import chatgpt_web_route
 import chatgpt_web_runtime
+import test_chatgpt_web_route as web
 from gateway_errors import ModelIdentityResolutionError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,7 @@ def _fixture_health_server() -> str:
     return '''
 import json
 import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -99,6 +101,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        if os.environ.get("STARTUP_RUNTIME_OUTPUT"):
+            print(os.environ["STARTUP_CONTROL_TOKEN"], os.environ["STARTUP_RUNTIME_KEY"], file=sys.stderr, flush=True)
 
 server = ThreadingHTTPServer((config["host"], int(config["port"])), Handler)
 server.serve_forever()
@@ -158,6 +162,30 @@ if [ "$1" = "serve" ]; then
 fi
 exit 0
 """
+
+
+def _startup_diagnostics_failure_script() -> str:
+    script = """#!/bin/sh
+set -eu
+if [ "$1" = "doctor" ]; then
+  printf '%s\\n' '{"ok":false}'
+  exit 0
+fi
+if [ "$1" = "serve" ]; then
+  if [ -n "${STARTUP_CAUSE-}" ]; then
+    for attempt in 1 2 3 4; do
+      printf '%4096s' '' | tr ' ' x >&2
+    done
+    printf '\\n%s\\n' "$STARTUP_CAUSE $STARTUP_CONTROL_TOKEN $STARTUP_RUNTIME_KEY" >&2
+    exit 1
+  fi
+  exec __PYTHON__ -c __HEALTH_SERVER__ "$0" "$@"
+fi
+exit 0
+"""
+    return script.replace("__PYTHON__", shlex.quote(sys.executable)).replace(
+        "__HEALTH_SERVER__", shlex.quote(_fixture_health_server())
+    )
 
 
 def _archive(directory: Path, script: str) -> Path:
@@ -689,11 +717,11 @@ def test_incompatible_pin_and_version_mismatch_are_refused(tmp_path: Path) -> No
     status = _run(home, "status", pin=pin)
     assert status["component"]["compatible"] is False
     assert status["ready"] is False
-    assert status["login"]["state"] == "signed_out"
+    assert status["login"]["state"] == "unknown"
     assert status["upstream_executed"] is False
 
 
-def test_repeated_start_uses_one_entry_and_doctor_layers_stay_distinct(tmp_path: Path) -> None:
+def test_repeated_start_uses_one_entry_and_status_does_not_trust_doctor(tmp_path: Path) -> None:
     home = tmp_path / "runtime"
     marker = home / "executed-marker"
     archive = _archive(tmp_path, _fixture_script(marker))
@@ -704,11 +732,13 @@ def test_repeated_start_uses_one_entry_and_doctor_layers_stay_distinct(tmp_path:
         (home / "web-home" / "doctor.json").write_text(
             json.dumps(
                 {
-                    "ok": False,
+                    "ok": True,
+                    "models": [{"id": "chatgpt-web/gpt-5.6-sol", "efforts": ["high"]}],
                     "checks": [
-                        {"id": "login", "status": "error", "message": "missing"},
+                        {"id": "login", "status": "ok"},
+                        {"id": "browser-smoke", "status": "ok"},
                         {"id": "tunnel-runtime", "status": "ok", "message": SECRET},
-                        {"id": "connector", "status": "warning", "message": "not attached"},
+                        {"id": "connector", "status": "ok"},
                     ],
                 }
             ),
@@ -724,17 +754,17 @@ def test_repeated_start_uses_one_entry_and_doctor_layers_stay_distinct(tmp_path:
         with socket.create_connection(("127.0.0.1", first["process"]["diagnostic_port"]), timeout=2):
             pass
         status = _run(home, "status", pin=pin)
-        assert status["login"]["state"] == "signed_out"
+        assert status["login"]["state"] == "unknown"
         assert status["browser_smoke"]["state"] == "not_run"
-        assert status["tunnel"]["state"] == "ready"
+        assert status["tunnel"]["state"] == "not_started"
         assert status["connector"]["selectable"] is False
         assert status["ready"] is False
         assert SECRET not in json.dumps(status)
-        assert "[redacted]" in json.dumps(status["tunnel"])
         log = (home / "web-home" / "argv.log").read_text(encoding="utf-8")
         assert "\nsetup\n" not in f"\n{log}"
         assert " dev\n" not in log
         assert "--replace-codex-route" not in log
+        assert "doctor" not in log.splitlines()
     finally:
         _stop(home, pin)
 
@@ -795,6 +825,77 @@ def test_start_does_not_acknowledge_a_child_that_fails_during_initialization(
     assert "simulated delayed startup failure" in str(startup["error"])
 
 
+@pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable fixture")
+def test_startup_diagnostics_are_current_bounded_and_secret_safe(tmp_path: Path) -> None:
+    home = tmp_path / "runtime"
+    runtime_key = "synthetic-tunnel-runtime-key-DO-NOT-LOG"
+    control_token = "synthetic-control-token-0123456789-DO-NOT-LOG"
+    archive = _archive(tmp_path, _startup_diagnostics_failure_script())
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    assert _run(
+        home,
+        "settings-save",
+        pin=pin,
+        stdin=json.dumps({"tunnel": {"runtime_key": {"action": "replace", "value": runtime_key}}}),
+    )["_exit_code"] == 0
+    web_home = home / "web-home"
+    web_home.mkdir(exist_ok=True)
+    (web_home / "config.json").write_text(json.dumps({"controlToken": control_token}), encoding="utf-8")
+
+    causes = ("first attempt: stale ephemeral path", "second attempt: current ephemeral path")
+    for index, cause in enumerate(causes):
+        result = _run(
+            home,
+            "start",
+            pin=pin,
+            extra_env={
+                "STARTUP_CAUSE": cause,
+                "STARTUP_CONTROL_TOKEN": control_token,
+                "STARTUP_RUNTIME_KEY": runtime_key,
+            },
+        )
+        assert result["_exit_code"] == 1
+        error = json.dumps(result)
+        assert cause in error
+        assert runtime_key not in error
+        assert control_token not in error
+        if index:
+            assert causes[0] not in error
+
+    diagnostic = (home / "startup-diagnostic.log").read_text(encoding="utf-8")
+    assert causes[1] in diagnostic
+    assert causes[0] not in diagnostic
+    assert (home / "startup-diagnostic.log").stat().st_size <= 8192
+    assert not (home / "runtime-entry.log").exists()
+
+    try:
+        healthy = _run(
+            home,
+            "start",
+            pin=pin,
+            extra_env={
+                "STARTUP_CONTROL_TOKEN": control_token,
+                "STARTUP_RUNTIME_KEY": runtime_key,
+                "STARTUP_RUNTIME_OUTPUT": "1",
+            },
+        )
+        assert healthy["_exit_code"] == 0
+        assert not (home / "startup-diagnostic.log").exists()
+    finally:
+        _stop(home, pin)
+
+    log_files = [
+        path for path in home.rglob("*")
+        if path.is_file() and (path.suffix == ".log" or "diagnostic" in path.name)
+    ]
+    assert log_files
+    for path in log_files:
+        payload = path.read_bytes()
+        assert runtime_key.encode() not in payload, path
+        assert control_token.encode() not in payload, path
+
+
 def test_owned_login_starts_cancels_and_does_not_claim_authentication(tmp_path: Path) -> None:
     home = tmp_path / "runtime"
     marker = home / "executed-marker"
@@ -804,7 +905,7 @@ def test_owned_login_starts_cancels_and_does_not_claim_authentication(tmp_path: 
     try:
         opened = _run(home, "open-login", pin=pin)
         assert opened["_exit_code"] == 0
-        assert opened["login"]["state"] == "signed_out"
+        assert opened["login"]["state"] == "unknown"
         assert opened["login"]["window"] == "open"
         assert opened["ready"] is False
         assert "login_url" not in opened
@@ -832,7 +933,7 @@ def test_owned_login_starts_cancels_and_does_not_claim_authentication(tmp_path: 
         assert SECRET not in captured.value.read().decode("utf-8")
         closed = _run(home, "close-login", pin=pin)
         assert closed["login"]["window"] == "closed"
-        assert closed["login"]["state"] == "signed_out"
+        assert closed["login"]["state"] == "unknown"
         stopped = _run(home, "stop", pin=pin)
         assert stopped["restart_required"] is True
         assert stopped["process"]["running"] is False
@@ -879,7 +980,7 @@ def test_launch_leaves_client_config_bytes_unchanged(tmp_path: Path) -> None:
         started = _run(home, "start", pin=pin, extra_env=env)
         assert started["_exit_code"] == 0
         assert started["upstream_executed"] is False
-        assert started["login"]["state"] == "signed_out"
+        assert started["login"]["state"] == "unknown"
         config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
         assert config["mode"] == "browser-only"
         assert config["chromeExecutablePath"] == "/usr/bin/chromium"
@@ -1179,18 +1280,7 @@ def test_upgrade_revokes_an_open_tool_permit(tmp_path: Path, monkeypatch: pytest
     try:
         started = chatgpt_web_runtime.start_runtime(home)
         assert started["process"]["running"] is True
-        doctor = {
-            "ok": True,
-            "models": [{"id": model_id, "display_name": "Sol", "efforts": ["high"], "image_input": False}],
-            "checks": [
-                {"id": "login", "status": "ok"},
-                {"id": "browser-smoke", "status": "ok"},
-                {"id": "tunnel-runtime", "status": "ok"},
-                {"id": "connector", "status": "ok"},
-            ],
-        }
-        doctor_path = home / "web-home" / "doctor.json"
-        doctor_path.write_text(json.dumps(doctor), encoding="utf-8")
+        assert web._seed_check(home, monkeypatch)["state"] == "ready"
         upstream = {"model_id": model_id, "upstream_model": model_id, "provider_id": "chatgpt-web"}
         metadata = json.dumps({"thread_id": thread_id, "turn_id": turn_id, "request_kind": "turn"})
         issue = {
@@ -1240,7 +1330,9 @@ def test_upgrade_revokes_an_open_tool_permit(tmp_path: Path, monkeypatch: pytest
         _assert_login_kept(login)
         assert upgraded["component"]["compatible"] is True
         if upgraded["process"]["running"] is not True:
+            web._set_browser_only_mode(home)
             chatgpt_web_runtime.start_runtime(home)
+        assert web._seed_check(home, monkeypatch)["state"] == "ready"
         continuation = {
             "model": model_id,
             "input": [
@@ -1334,7 +1426,7 @@ def test_login_completion_requires_explicit_restart_and_stop_cancels_login(tmp_p
                 break
         assert finished["restart_required"] is True
         assert finished["admitting"] is False
-        assert finished["login"]["state"] == "signed_out"  # Exit zero never fabricates authentication.
+        assert finished["login"]["state"] == "unknown"  # Exit zero never fabricates authentication.
         assert finished["process"]["pid"] == pid
         restarted = _run(home, "start", pin=pin)
         assert restarted["process"]["pid"] != pid

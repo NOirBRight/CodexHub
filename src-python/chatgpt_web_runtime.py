@@ -49,6 +49,7 @@ LOGIN_CONTROL = "owned-browser-v1"
 RUNTIME_HEALTH_TIMEOUT_SECONDS = 2
 RUNTIME_STARTUP_HEALTH_TIMEOUT_SECONDS = 30
 RUNTIME_STARTUP_TIMEOUT_SECONDS = 180
+MAX_STARTUP_DIAGNOSTIC_BYTES = 8192
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_DOWNLOAD_HOSTS = {
     "github.com",
@@ -1733,62 +1734,6 @@ def normalize_runtime_model(value: Any) -> dict[str, Any] | None:
     }
 
 
-def _models_from_doctor(report: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Return only model rows the runtime doctor listed. Missing means none."""
-    if not isinstance(report, dict):
-        return []
-    raw_models = report.get("models")
-    if not isinstance(raw_models, list):
-        raw_models = []
-        for check in report.get("checks") or []:
-            if isinstance(check, dict) and check.get("id") == "models" and isinstance(check.get("models"), list):
-                raw_models = check["models"]
-                break
-    models: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for value in raw_models:
-        entry = normalize_runtime_model(value)
-        if entry is None or entry["id"] in seen:
-            continue
-        seen.add(entry["id"])
-        models.append(entry)
-    return models
-
-
-def _layers_from_doctor(report: dict[str, Any] | None) -> dict[str, Any]:
-    checks: dict[str, dict[str, Any]] = {}
-    if report:
-        for check in report.get("checks") or []:
-            if isinstance(check, dict) and isinstance(check.get("id"), str):
-                checks[str(check["id"])] = check
-    login = checks.get("login")
-    smoke = checks.get("browser-smoke")
-    tunnel = checks.get("tunnel-runtime")
-    connector = checks.get("connector")
-    if smoke is None:
-        browser = "not_run"
-    elif smoke.get("status") == "ok":
-        browser = "passed"
-    else:
-        browser = "failed"
-    if tunnel is None:
-        tunnel_state = "not_started"
-    elif tunnel.get("status") == "ok":
-        tunnel_state = "ready"
-    else:
-        tunnel_state = "failed"
-    detail = tunnel.get("message") if isinstance(tunnel, dict) else ""
-    if not isinstance(detail, str):
-        detail = ""
-    return {
-        "login": "signed_in" if login and login.get("status") == "ok" else "signed_out",
-        "browser_smoke": browser,
-        "tunnel": tunnel_state,
-        "tunnel_detail": detail,
-        "connector_selectable": bool(connector and connector.get("status") == "ok"),
-    }
-
-
 def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
         settings_status = read_settings(home)
@@ -1800,16 +1745,38 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
     compatible = _pin_compatible(home, loaded)
     record = _process_record(home)
     running = record is not None
-    layers = _layers_from_doctor(None)
-    doctor_models: list[dict[str, Any]] = []
-    report: dict[str, Any] | None = None
-    if running and installed is not None:
-        entry = _find_entry(_runtime_root(home))
-        report = _run_doctor(home, entry)
-        layers = _layers_from_doctor(report)
-        doctor_models = _models_from_doctor(report)
-    raw_capacity = report.get("capacity") if isinstance(report, dict) else None
-    capacity = raw_capacity if isinstance(raw_capacity, str) and raw_capacity else "available"
+    from chatgpt_web_checks import cached_checks
+
+    checks = cached_checks(home)
+    checks_current = checks.get("cache_state") == "current"
+    login = checks.get("login")
+    browser = checks.get("browser")
+    tunnel = checks.get("tunnel")
+    connector = checks.get("connector")
+    login_state = (
+        login.get("state")
+        if checks_current and isinstance(login, dict) and login.get("state") in {"signed_in", "signed_out"}
+        else "unknown"
+    )
+    layers = {
+        "login": login_state,
+        "browser_smoke": (
+            "passed" if checks_current and isinstance(browser, dict) and browser.get("state") == "passed"
+            else "failed" if checks_current and isinstance(browser, dict) and browser.get("state") == "failed"
+            else "not_run"
+        ),
+        "tunnel": (
+            "ready" if checks_current and isinstance(tunnel, dict) and tunnel.get("state") == "ready"
+            else "failed" if checks_current and isinstance(tunnel, dict) and tunnel.get("state") == "not_ready"
+            else "not_started"
+        ),
+        "connector_selectable": (
+            checks_current and isinstance(connector, dict) and connector.get("state") == "selectable"
+        ),
+    }
+    check_models = checks.get("models")
+    models = check_models if checks_current and isinstance(check_models, list) else []
+    capabilities_match = checks.get("capabilities_match") is True if checks_current else False
     lifecycle = _lifecycle(home)
     window = _read_json(home / "window.json") or {}
     window_error = window.get("error")
@@ -1825,6 +1792,8 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
         and not restart_required
         and layers["login"] == "signed_in"
         and layers["browser_smoke"] == "passed"
+        and capabilities_match
+        and bool(models)
         and layers["tunnel"] == "ready"
         and layers["connector_selectable"] is True
     )
@@ -1842,12 +1811,12 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
         "login": {
             "state": layers["login"],
             "window": "open" if running and window.get("open") is True else "closed",
-            "error": window_error,
+            "error": window_error or (login.get("reason") if isinstance(login, dict) else None),
             "control": None if record is None else record.get("login_control"),
             "account_id": None,
         },
         "browser_smoke": {"state": layers["browser_smoke"]},
-        "tunnel": {"state": layers["tunnel"], "detail": layers["tunnel_detail"]},
+        "tunnel": {"state": layers["tunnel"], "detail": ""},
         "connector": {"selectable": layers["connector_selectable"]},
         "process": {
             "pid": None if record is None else record.get("pid"),
@@ -1859,9 +1828,16 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
             "ownership": "codexhub-supervisor",
             "listen_host": LOOPBACK_HOST if running else None,
         },
+        "readiness_checks": {
+            key: checks.get(key)
+            for key in (
+                "state", "cache_state", "checked_at", "reason",
+                "runtime_capabilities", "capabilities_match",
+            )
+        },
         "ready": ready,
-        "capacity": capacity,
-        "models": doctor_models,
+        "capacity": "available",
+        "models": models,
         "restart_required": restart_required,
         "settings_pending_restart": settings_status["pending_restart"],
         "settings_restart_target": settings_status["restart_target"],
@@ -1884,8 +1860,8 @@ def _diagnostic_page() -> bytes:
         "<p>The login window is the pinned Codex Web GPT launcher for this release. "
         "CodexHub does not run upstream setup, dev, or the installer scripts.</p>"
         f"<p><a href=\"{url}\">Pinned launcher v{PINNED_VERSION}</a></p>"
-        "<p>Login, browser smoke, tunnel, and connector stay unready until "
-        "<code>codex-chatgpt-web doctor</code> reports them.</p></body></html>"
+        "<p>Login, browser smoke, tunnel, and connector stay unready until an "
+        "explicit readiness check verifies them.</p></body></html>"
     )
     return page.encode("utf-8")
 
@@ -1942,19 +1918,27 @@ def _fail(home: Path, message: str) -> int:
     return 1
 
 
+def _startup_fail(home: Path, message: str) -> int:
+    _write_startup_diagnostic(home, message)
+    return _fail(home, message)
+
+
 def supervise(home: Path) -> int:
     home = _assert_private_home(home)
     _mkdir(home)
     pin = load_pin()
     if not _pin_compatible(home, pin):
-        return _fail(home, "version mismatch; refusing to start an incompatible ChatGPT Web Runtime pin")
+        return _startup_fail(
+            home,
+            "version mismatch; refusing to start an incompatible ChatGPT Web Runtime pin",
+        )
     if not _lifecycle(home)["enabled"]:
-        return _fail(home, "ChatGPT Web Runtime is disabled")
+        return _startup_fail(home, "ChatGPT Web Runtime is disabled")
     host = _bind_host()
     try:
         entry = _find_entry(_runtime_root(home))
     except RuntimeError_ as exc:
-        return _fail(home, str(exc))
+        return _startup_fail(home, str(exc))
     from chatgpt_web_login import LoginSession
 
     lock_handle = (home / "supervisor.lock").open("a+")
@@ -1962,9 +1946,12 @@ def supervise(home: Path) -> int:
         _try_lock(lock_handle)
     except BlockingIOError:
         lock_handle.close()
-        return _fail(home, "ChatGPT Web Runtime supervisor is already running")
-    entry_log = None
+        return _startup_fail(home, "ChatGPT Web Runtime supervisor is already running")
     child = None
+    child_output = bytearray()
+    child_output_lock = threading.Lock()
+    child_output_reader = None
+    startup_healthy = threading.Event()
     server = None
     thread = None
     login = None
@@ -1975,15 +1962,27 @@ def supervise(home: Path) -> int:
         config = _read_json(_web_home(home) / "config.json") or {}
         if config.get("mode") == "full":
             tunnel = _start_tunnel_runtime(home, pin, entry)
-        entry_log = (home / "runtime-entry.log").open("ab")
         child = subprocess.Popen(
             [str(entry), "serve"],
             env=_runtime_env(home),
             cwd=str(_web_home(home)),
             stdin=subprocess.DEVNULL,
-            stdout=entry_log,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
+
+        def _capture_startup_output() -> None:
+            assert child is not None and child.stdout is not None
+            while chunk := child.stdout.read1(1024):
+                with child_output_lock:
+                    if startup_healthy.is_set():
+                        continue
+                    child_output.extend(chunk)
+                    if len(child_output) > MAX_STARTUP_DIAGNOSTIC_BYTES:
+                        del child_output[:-MAX_STARTUP_DIAGNOSTIC_BYTES]
+
+        child_output_reader = threading.Thread(target=_capture_startup_output, daemon=True)
+        child_output_reader.start()
         server = ThreadingHTTPServer((host, 0), _StatusHandler)
         bound_host, diagnostic_port = server.server_address[:2]
         if bound_host != LOOPBACK_HOST:
@@ -2021,6 +2020,13 @@ def supervise(home: Path) -> int:
         thread.start()
         while child.poll() is None:
             login.tick()
+            if not startup_healthy.is_set():
+                if _runtime_healthy(
+                    home,
+                    {"process": {"pid": child.pid, "port": runtime_port}},
+                ):
+                    with child_output_lock:
+                        startup_healthy.set()
             time.sleep(0.2)
         _append_log(home, f"runtime entry exited {child.returncode}")
     except Exception as exc:
@@ -2042,8 +2048,15 @@ def supervise(home: Path) -> int:
             server.server_close()
         if thread is not None:
             thread.join(timeout=2)
-        if entry_log is not None:
-            entry_log.close()
+        if child_output_reader is not None:
+            child_output_reader.join(timeout=2)
+        if not startup_healthy.is_set() and (child is not None or startup_error is not None):
+            with child_output_lock:
+                output = child_output.decode("utf-8", "replace").strip()
+            detail = "\n".join(
+                part for part in (output, str(startup_error) if startup_error else "") if part
+            )
+            _write_startup_diagnostic(home, detail)
         if tunnel is not None:
             try:
                 _stop_tunnel_runtime(home, tunnel)
@@ -2134,20 +2147,21 @@ def _runtime_healthy(home: Path, status: dict[str, Any]) -> bool:
 
 
 def _startup_log_detail(home: Path) -> str:
-    lines: list[str] = []
-    for name in ("runtime-entry.log", "supervisor.log"):
-        path = home / name
+    try:
+        detail = (home / "startup-diagnostic.log").read_bytes()[-MAX_STARTUP_DIAGNOSTIC_BYTES:]
+    except OSError:
+        return ""
+    return redact(detail.decode("utf-8", "replace"), _secrets(home)).replace("\n", " ")[-2000:]
+
+
+def _write_startup_diagnostic(home: Path, detail: str) -> None:
+    safe = redact(detail, _secrets(home)).strip()
+    if safe:
+        payload = safe.encode("utf-8")[-MAX_STARTUP_DIAGNOSTIC_BYTES:]
         try:
-            with path.open("rb") as handle:
-                handle.seek(0, os.SEEK_END)
-                size = handle.tell()
-                handle.seek(max(0, size - 8192))
-                tail = handle.read().decode("utf-8", "replace")
+            _write_private_bytes(home / "startup-diagnostic.log", payload)
         except OSError:
-            continue
-        lines.extend(line.strip() for line in tail.splitlines() if line.strip())
-    detail = redact(" | ".join(lines[-8:]), _secrets(home))
-    return detail.replace("\n", " ")[-2000:]
+            pass
 
 
 def _startup_failure_message(home: Path, supervisor_exit: int | None) -> str:
@@ -2181,6 +2195,8 @@ def start_runtime(home: Path) -> dict[str, Any]:
     env = os.environ.copy()
     env["CODEXHUB_CHATGPT_WEB_HOME"] = str(home)
     env.pop("CODEX_WEB_GPT_DEV_HOME", None)
+    (home / "startup-diagnostic.log").unlink(missing_ok=True)
+    (home / "runtime-entry.log").unlink(missing_ok=True)
     process = subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve()), "supervise", "--home", str(home)],
         env=env,
@@ -2206,8 +2222,8 @@ def start_runtime(home: Path) -> dict[str, Any]:
         existing = _running_status(home)
         if existing is not None and _runtime_healthy(home, existing):
             return existing
-        raise RuntimeError_(_startup_failure_message(home, process.poll()))
-    except Exception:
+        raise RuntimeError_("ChatGPT Web Runtime did not become healthy")
+    except Exception as exc:
         if process.poll() is None:
             record = _read_json(home / "process.json") or {}
             if record.get("supervisor_pid") == process.pid:
@@ -2220,6 +2236,8 @@ def start_runtime(home: Path) -> dict[str, Any]:
             elif _process_record(home) is None:
                 process.kill()
                 process.wait(timeout=2)
+        if isinstance(exc, RuntimeError_) and str(exc) == "ChatGPT Web Runtime did not become healthy":
+            raise RuntimeError_(_startup_failure_message(home, process.poll())) from exc
         raise
 
 

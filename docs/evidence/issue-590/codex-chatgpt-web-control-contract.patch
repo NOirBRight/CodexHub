@@ -1,0 +1,431 @@
+diff --git a/scripts/smoke-release.ts b/scripts/smoke-release.ts
+index 9b86a7f30533fefeded41b6d1205a0777bd4aaac..d047be8c23726b23699ad724f9f4d411a0fba9e9 100644
+--- a/scripts/smoke-release.ts
++++ b/scripts/smoke-release.ts
+@@ -103,19 +103,47 @@ try {
+     throw new Error(`unexpected health payload: ${JSON.stringify(payload)}`);
+   }
+ 
++  const untrustedAdminStatus = await fetch(`http://127.0.0.1:${port}/admin/status`);
++  if (untrustedAdminStatus.status !== 401) {
++    throw new Error(`admin status accepted an unauthenticated request: HTTP ${untrustedAdminStatus.status}`);
++  }
++  const adminStatus = await fetch(`http://127.0.0.1:${port}/admin/status`, {
++    headers: { authorization: `Bearer ${config.controlToken}` },
++  });
++  const adminPayload = await adminStatus.json() as {
++    control_contract_version?: number;
++    status?: string;
++    models?: unknown[];
++  };
++  if (!adminStatus.ok || adminPayload.control_contract_version !== 1
++    || adminPayload.status !== "ok" || !Array.isArray(adminPayload.models)
++    || adminPayload.models.length === 0
++    || JSON.stringify(adminPayload).includes(config.controlToken)) {
++    throw new Error(`authenticated admin status returned an invalid control contract: ${JSON.stringify(adminPayload)}`);
++  }
++
+   const unauthenticatedModels = await fetch(`http://127.0.0.1:${port}/v1/models`);
+   const unauthenticatedModelsBody = await unauthenticatedModels.json() as { error?: { message?: string } };
+   if (unauthenticatedModels.status !== 502
+     || !unauthenticatedModelsBody.error?.message?.includes("incoming Bearer authorization")) {
+     throw new Error(`native model passthrough did not fail closed without Codex auth: ${JSON.stringify(unauthenticatedModelsBody)}`);
+   }
++  const serviceCredentialModels = await fetch(`http://127.0.0.1:${port}/v1/models`, {
++    headers: { authorization: `Bearer ${config.controlToken}` },
++  });
++  if (serviceCredentialModels.status !== 401) {
++    throw new Error(`service credential entered native model passthrough: HTTP ${serviceCredentialModels.status}`);
++  }
+   const websocketNegotiation = await fetch(`http://127.0.0.1:${port}/v1/responses`);
+   if (websocketNegotiation.status !== 426) {
+     throw new Error(`Responses WebSocket negotiation did not select Codex HTTP/SSE fallback: HTTP ${websocketNegotiation.status}`);
+   }
+   const invalid = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+     method: "POST",
+-    headers: { "content-type": "application/json" },
++    headers: {
++      "content-type": "application/json",
++      authorization: `Bearer ${config.controlToken}`,
++    },
+     body: JSON.stringify({ model: "chatgpt-web/not-enabled", input: "test", stream: false }),
+   });
+   if (invalid.status !== 400) throw new Error(`unsupported model did not fail closed: HTTP ${invalid.status}`);
+@@ -137,7 +165,10 @@ try {
+   }
+   const rejectedWhileDraining = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+     method: "POST",
+-    headers: { "content-type": "application/json" },
++    headers: {
++      "content-type": "application/json",
++      authorization: `Bearer ${config.controlToken}`,
++    },
+     body: JSON.stringify({ model: "chatgpt-web/high", reasoning: { effort: "high" }, input: "test", stream: false }),
+   });
+   if (rejectedWhileDraining.status !== 503) {
+diff --git a/src/adapters/chatgpt-web/model-selection.ts b/src/adapters/chatgpt-web/model-selection.ts
+index 4529117d72ed49f6d976f096e6088e2a35b4efde..95a085d4ca54fc0c30d442ca5bfbe3d2dfb11d4c 100644
+--- a/src/adapters/chatgpt-web/model-selection.ts
++++ b/src/adapters/chatgpt-web/model-selection.ts
+@@ -73,11 +73,17 @@ export function chatGptModelFamilyMatches(
+   // Latest uses 5.6 for the existing lower-effort multipart acknowledgements and 6 for Pro.
+   // Never interpret a future Latest Pro model as 6, or a lower effort as the final Pro response.
+   const expected = family === "6" && effort !== "max" ? "5.6" : family;
+-  const states = descriptions.flatMap(text => {
+-    const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^,，]+)(?:[,，]|$)/i
+-      .exec(text.replace(/\s+/g, " ").trim());
+-    return match ? [{ version: match[1], name: match[2]?.toLowerCase(), mode: match[3]!.trim() }] : [];
+-  });
++  const states = [];
++  for (const text of descriptions) {
++    const normalized = text.replace(/\s+/g, " ").trim();
++    const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^,，]+?)(?:[,，]\s*\d+\s+of\s+\d+\.?)?$/i.exec(normalized);
++    if (!match) {
++      // A malformed version assertion must not be masked by another valid label.
++      if (/^(?:GPT[-\s]?)?\d/i.test(normalized)) return false;
++      continue;
++    }
++    states.push({ version: match[1], name: match[2]?.toLowerCase(), mode: match[3]!.trim() });
++  }
+   return states.length > 0 && states.every(state => state.version === expected
+     && (!state.name || state.name === (expected === "5.6" ? "sol" : "astra"))
+     && (effort === "max" ? /^Pro$/i.test(state.mode) : !/^Pro$/i.test(state.mode)));
+@@ -102,7 +108,19 @@ export async function assertChatGptModelFamily(
+       (element.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)
+         .map(id => element.ownerDocument.getElementById(id)?.textContent ?? "")
+     ));
+-    if (checked && state && state.value === state.min + effortIndex && chatGptModelFamilyMatches(descriptions, family, effort)) return;
++    // The current picker announces only effort ("Pro, 5 of 5."). Its visible
++    // model toggle still identifies the version and effort in separate spans.
++    const labels = await menu.menu.locator('[data-model-picker-view-toggle="true"][aria-hidden="false"]')
++      .filter({ visible: true }).evaluateAll(elements => elements.map(element => {
++        const efforts = element.querySelectorAll('[data-effort-only="false"]');
++        if (efforts.length !== 1) return "";
++        const mode = efforts[0]!;
++        return `${mode.previousElementSibling?.textContent ?? ""} ${mode.textContent ?? ""}`.trim();
++      }));
++    const labelVerified = labels.length === 0
++      || (labels.length === 1 && chatGptModelFamilyMatches(labels, family, effort));
++    if (checked && state && state.value === state.min + effortIndex && labelVerified
++      && chatGptModelFamilyMatches([...descriptions, ...labels], family, effort)) return;
+     if (Date.now() >= deadline) break;
+     await new Promise(resolve => setTimeout(resolve, 50));
+   } while (true);
+diff --git a/src/server.ts b/src/server.ts
+index 8bae1ac704926551eb3b7ac05ce77b9d2b5720f4..2aba7c8ec58c2b6a7596770602b407c3b5e183e2 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -30,6 +30,8 @@ import {
+   type CodexModelContextOverride,
+ } from "./codex-integration";
+ import {
++  availableChatGptWebModelRoutes,
++  chatGptWebRouteEfforts,
+   CHATGPT_WEB_LUNA_BACKEND_MODEL,
+   isChatGptWebModelSlug,
+   requireChatGptWebModelRoute,
+@@ -423,6 +425,35 @@ export async function modelsRequest(
+   return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
+ }
+ 
++function webModelsForControlStatus(config: AppConfig): Array<{
++  id: string;
++  display_name: string;
++  efforts: string[];
++  image_input: boolean;
++}> {
++  return availableChatGptWebModelRoutes(config, true).map(route => ({
++    id: route.slug,
++    display_name: route.displayName,
++    efforts: [...chatGptWebRouteEfforts(route, config)],
++    image_input: route.interactionMode === "automatic",
++  }));
++}
++
++async function requestUsesWebModel(request: Request): Promise<boolean> {
++  try {
++    const body = await readJsonRequestBody(request.clone());
++    return Boolean(body && typeof body === "object" && !Array.isArray(body)
++      && typeof (body as { model?: unknown }).model === "string"
++      && isChatGptWebModelSlug((body as { model: string }).model));
++  } catch {
++    return false;
++  }
++}
++
++function unauthorizedControlRequest(): Response {
++  return new Response("Unauthorized", { status: 401 });
++}
++
+ export async function nativeSearchRequest(
+   req: Request,
+   fetchUpstream?: NativeFetch,
+@@ -855,6 +886,27 @@ export function startServer(
+           ...activity(),
+         });
+       }
++      if (req.method === "GET" && url.pathname === "/admin/status") {
++        if (!controlAuthorized(req)) return unauthorizedControlRequest();
++        return Response.json({
++          control_contract_version: 1,
++          status: "ok",
++          service: "codex-chatgpt-web",
++          version: VERSION,
++          mode: config.mode,
++          pid: process.pid,
++          port: config.port,
++          uptime: (Date.now() - startedAt) / 1_000,
++          accepting_turns: !draining,
++          account_capabilities: {
++            sol_available: config.solAvailable,
++            extra_high_available: config.extraHighAvailable === true,
++            pro_available: config.proAvailable,
++          },
++          models: webModelsForControlStatus(config),
++          ...activity(),
++        });
++      }
+       if (req.method === "POST" && (url.pathname === "/admin/drain" || url.pathname === "/admin/resume")) {
+         if (!controlAuthorized(req)) return new Response("Unauthorized", { status: 401 });
+         draining = url.pathname === "/admin/drain";
+@@ -996,6 +1048,7 @@ export function startServer(
+         return Response.json({ status: "ok", accepting_turns: false, ...current });
+       }
+       if (req.method === "GET" && url.pathname === "/v1/models") {
++        if (controlAuthorized(req)) return unauthorizedControlRequest();
+         if (draining) {
+           return formatErrorResponse(
+             503,
+@@ -1052,6 +1105,8 @@ export function startServer(
+         });
+       }
+       if (req.method === "POST" && url.pathname === "/v1/responses") {
++        const usesWebModel = await requestUsesWebModel(req);
++        if (controlAuthorized(req) !== usesWebModel) return unauthorizedControlRequest();
+         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+         return httpTurns.track(
+           (signal, bindIdentity) => responseRequest(
+@@ -1066,6 +1121,8 @@ export function startServer(
+         );
+       }
+       if (req.method === "POST" && url.pathname === "/v1/responses/compact") {
++        const usesWebModel = await requestUsesWebModel(req);
++        if (controlAuthorized(req) !== usesWebModel) return unauthorizedControlRequest();
+         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+         return httpTurns.track(
+           (signal, bindIdentity) => compactRequest(
+@@ -1080,6 +1137,7 @@ export function startServer(
+         );
+       }
+       if (req.method === "POST" && url.pathname === "/v1/alpha/search") {
++        if (controlAuthorized(req)) return unauthorizedControlRequest();
+         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+         return httpTurns.track(
+           signal => nativeSearchRequest(new Request(req, { signal }), dependencies.fetchUpstream),
+@@ -1090,6 +1148,7 @@ export function startServer(
+       }
+       if (req.method === "POST"
+         && (url.pathname === "/v1/images/generations" || url.pathname === "/v1/images/edits")) {
++        if (controlAuthorized(req)) return unauthorizedControlRequest();
+         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+         const endpoint: NativeImageEndpoint = url.pathname === "/v1/images/generations"
+           ? "images/generations"
+diff --git a/tests/chatgpt-model-selection.test.ts b/tests/chatgpt-model-selection.test.ts
+index c839662be4bfbb56efe8426331c8efb7a0e0165f..672c731b500d963406d8252f0cbc55949afb45ab 100644
+--- a/tests/chatgpt-model-selection.test.ts
++++ b/tests/chatgpt-model-selection.test.ts
+@@ -1,5 +1,39 @@
+ import { expect, test } from "bun:test";
+-import { chatGptModelFamilyMatches, selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
++import { chromium } from "playwright-core";
++import { assertChatGptModelFamily, chatGptModelFamilyMatches, selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
++
++test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("model confirmation reads the visible version when the announcement contains only effort", async () => {
++  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
++  try {
++    const page = await browser.newPage();
++    await page.setContent(`<div role="menu">
++      <div role="menuitem" data-model-picker-view-toggle="true" aria-hidden="false">
++        <span><span id="version">6</span><span data-effort-only="false">Pro</span></span>
++      </div>
++      <div role="menuitemradio" aria-checked="true">Latest</div>
++      <span id="announcement">Pro, 5 of 5.</span>
++      <div role="menuitem" aria-describedby="announcement"><div data-model-picker-power-slider>
++        <span role="slider" aria-valuemin="0" aria-valuemax="4" aria-valuenow="4"></span>
++      </div></div>
++    </div>`);
++    const menu = {
++      method: "already-open" as const,
++      menu: page.getByRole("menu"), slider: page.getByRole("slider"),
++      sliderContainer: page.locator("[data-model-picker-power-slider]"),
++    };
++    await assertChatGptModelFamily(menu, "6", "max", 4);
++    for (const version of ["7", "5.6", "", "Latest"]) {
++      await page.locator("#version").evaluate((node, text) => { node.textContent = text; }, version);
++      await expect(assertChatGptModelFamily(menu, "6", "max", 4)).rejects.toThrow("could not be selected and verified");
++    }
++    await page.locator("#version").evaluate(node => { node.textContent = "6"; });
++    await page.locator("#announcement").evaluate(node => { node.textContent = "5.6 Pro, 5 of 5."; });
++    await expect(assertChatGptModelFamily(menu, "6", "max", 4)).rejects.toThrow("could not be selected and verified");
++    await page.locator("#announcement").evaluate(node => { node.textContent = "Pro, 5 of 5."; });
++    await page.getByRole("menuitemradio").evaluate(node => node.setAttribute("aria-checked", "false"));
++    await expect(assertChatGptModelFamily(menu, "6", "max", 4)).rejects.toThrow("could not be selected and verified");
++  } finally { await browser.close(); }
++}, 60_000);
+ 
+ test("model selection recognizes Latest in the launcher languages without accepting other model names", async () => {
+   for (const [label, accepted] of [
+@@ -26,7 +60,9 @@ test("family confirmation separates Latest staging from the actual Pro response"
+   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "6", "max")).toBe(true);
+   expect(chatGptModelFamilyMatches(["GPT-5.6 Sol Pro, 5 of 5."], "5.6", "max")).toBe(true);
+   for (const descriptions of [[], ["Try Pro for more reasoning"], ["5.6 High, 3 of 5."], ["5.6 Pro, 5 of 5."],
+-    ["7 Pro, 5 of 5."], ["6 Sol Pro, 5 of 5."], ["6 Pro, 5 of 5.", "5.6 Pro, 5 of 5."], ["6 Pro for better answers"]]) {
++    ["7 Pro, 5 of 5."], ["6 Sol Pro, 5 of 5."], ["6 Pro, 5 of 5.", "5.6 Pro, 5 of 5."], ["6 Pro for better answers"],
++    ["6 Pro, 5 of 5. GPT-7 Pro, 5 of 5."], ["6 Pro, GPT-7 Pro"],
++    ["6 Pro", "6 Pro, 5 of 5. GPT-7 Pro, 5 of 5."]]) {
+     expect(chatGptModelFamilyMatches(descriptions, "6", "max")).toBe(false);
+   }
+   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "5.6", "max")).toBe(false);
+diff --git a/tests/server-control-contract.test.ts b/tests/server-control-contract.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4433a062f15c7a06be42a69d79a554a3651688ce
+--- /dev/null
++++ b/tests/server-control-contract.test.ts
+@@ -0,0 +1,113 @@
++import { expect, test } from "bun:test";
++import { defaultConfig } from "../src/config";
++import { availableChatGptWebModelRoutes, chatGptWebRouteEfforts } from "../src/chatgpt-web-models";
++import { startServer } from "../src/server";
++
++test("read-only admin status requires the service credential and reports configured Web routes", async () => {
++  const config = { ...defaultConfig("browser-only"), port: 0 };
++  config.solAvailable = false;
++  const server = startServer(config);
++  const endpoint = `http://127.0.0.1:${server.port}`;
++  const headers = { authorization: `Bearer ${config.controlToken}` };
++
++  try {
++    expect((await fetch(`${endpoint}/admin/status`)).status).toBe(401);
++    expect((await fetch(`${endpoint}/admin/status`, { headers: { authorization: "Bearer wrong" } })).status).toBe(401);
++
++    const response = await fetch(`${endpoint}/admin/status`, { headers });
++    expect(response.status).toBe(200);
++    const body = await response.json() as {
++      control_contract_version: number;
++      status: string;
++      accepting_turns: boolean;
++      active_http_turns: number;
++      active_browser_turns: number;
++      account_capabilities: { sol_available: boolean };
++      models: Array<{ id: string; display_name: string; efforts: string[]; image_input: boolean }>;
++    };
++    expect(body).toMatchObject({
++      control_contract_version: 1,
++      status: "ok",
++      accepting_turns: true,
++      active_http_turns: 0,
++      active_browser_turns: 0,
++      account_capabilities: { sol_available: false },
++    });
++    expect(body.models).toEqual(availableChatGptWebModelRoutes(config, true).map(route => ({
++      id: route.slug,
++      display_name: route.displayName,
++      efforts: [...chatGptWebRouteEfforts(route, config)],
++      image_input: route.interactionMode === "automatic",
++    })));
++    expect(JSON.stringify(body)).not.toContain(config.controlToken);
++  } finally {
++    await server.stop(true);
++  }
++});
++
++test("the service credential authorizes Web Responses and is rejected before native passthrough", async () => {
++  const config = { ...defaultConfig("browser-only"), port: 0 };
++  let adapterCalls = 0;
++  const upstreamAuthorizations: string[] = [];
++  const server = startServer(config, {
++    fetchUpstream: async request => {
++      upstreamAuthorizations.push(request.headers.get("authorization") ?? "");
++      return Response.json({ id: "native-response", status: "completed", output: [] });
++    },
++    adapterFactory: () => {
++      adapterCalls += 1;
++      return {
++        name: "control-contract-test",
++        runTurn: async (_request, _context, emit) => {
++          emit({ type: "text_delta", text: "ok", phase: "final_answer" });
++        },
++      };
++    },
++  });
++  const endpoint = `http://127.0.0.1:${server.port}`;
++  const webBody = JSON.stringify({
++    model: "chatgpt-web/high",
++    stream: false,
++    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
++  });
++  const nativeBody = JSON.stringify({ model: "gpt-5.6-sol", input: [] });
++  const serviceHeaders = { "content-type": "application/json", authorization: `Bearer ${config.controlToken}` };
++
++  try {
++    const deniedWeb = await fetch(`${endpoint}/v1/responses`, {
++      method: "POST", headers: { "content-type": "application/json" }, body: webBody,
++    });
++    expect(deniedWeb.status).toBe(401);
++    expect(adapterCalls).toBe(0);
++
++    const allowedWeb = await fetch(`${endpoint}/v1/responses`, {
++      method: "POST", headers: serviceHeaders, body: webBody,
++    });
++    expect(allowedWeb.status).toBe(200);
++    expect(adapterCalls).toBe(1);
++    expect(upstreamAuthorizations).toEqual([]);
++
++    const deniedNative = await fetch(`${endpoint}/v1/responses`, {
++      method: "POST", headers: serviceHeaders, body: nativeBody,
++    });
++    expect(deniedNative.status).toBe(401);
++    expect(upstreamAuthorizations).toEqual([]);
++
++    for (const [path, body] of [
++      ["/v1/models", undefined],
++      ["/v1/responses/compact", nativeBody],
++      ["/v1/alpha/search", JSON.stringify({ query: "private" })],
++      ["/v1/images/generations", JSON.stringify({ prompt: "private" })],
++    ] as const) {
++      const response = await fetch(`${endpoint}${path}`, {
++        method: path === "/v1/models" ? "GET" : "POST",
++        headers: serviceHeaders,
++        ...(body === undefined ? {} : { body }),
++      });
++      expect(response.status).toBe(401);
++    }
++    expect(upstreamAuthorizations).toEqual([]);
++  } finally {
++    await server.stop(true);
++  }
++});
+diff --git a/tests/server-lifecycle.test.ts b/tests/server-lifecycle.test.ts
+index 81e4b1d59f90c3ba8dcc9ff594f7f747cdfb73ba..bbb2b7e352d68bf075df58f08ddb76799740a9f8 100644
+--- a/tests/server-lifecycle.test.ts
++++ b/tests/server-lifecycle.test.ts
+@@ -414,7 +414,10 @@ test("authenticated Interrupt hook endpoint releases the exact routed Web turn",
+   const endpoint = `http://127.0.0.1:${server.port}`;
+   const response = fetch(`${endpoint}/v1/responses`, {
+     method: "POST",
+-    headers: { "content-type": "application/json" },
++    headers: {
++      "content-type": "application/json",
++      authorization: `Bearer ${config.controlToken}`,
++    },
+     body: JSON.stringify({
+       model: "chatgpt-web/high",
+       stream: true,
+@@ -483,6 +486,7 @@ test("authenticated Interrupt hook endpoint also releases the exact native compa
+     method: "POST",
+     headers: {
+       "content-type": "application/json",
++      authorization: `Bearer ${config.controlToken}`,
+       "x-codex-turn-metadata": JSON.stringify({ thread_id: threadId, turn_id: turnId }),
+     },
+     body: JSON.stringify({
