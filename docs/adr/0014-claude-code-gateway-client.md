@@ -65,6 +65,20 @@ disabled mapping targets become visibly invalid and never silently fall back.
 Exact supported role names, discovery format, and refresh/restart behavior are
 facts to establish against the pinned CLI in #74/#77, not assumptions here.
 
+Family mappings use dedicated internal IDs of the form
+`claude-codexhub-role/<family>/<exported-model-id>`; explicit model-picker IDs
+keep their existing `claude-codexhub-...` projection. Claude Code 2.1.283 can
+classify a manual model as Fable when its ID equals
+`ANTHROPIC_DEFAULT_FABLE_MODEL`, applying Fable's credits gate to the mapped
+target. Different families mapped to the same target also keep distinct IDs.
+The Gateway validates internal targets against the exported catalog and resolves
+them to the same Provider/model as the corresponding explicit selection.
+These internal IDs are not additional picker entries. Native full Claude IDs,
+the explicit default, and the separate subagent default retain their existing
+identities. Apply migrates family environment values while preserving the user's
+stored target choices; Claude Code must be restarted to read changed environment
+settings. See the [bounded identity evidence](../research/2026-09-27-claude-role-selection-identity.md).
+
 ## Claude Code activation exception
 
 Unlike provider-map clients, Claude Code's selected integration uses current-user

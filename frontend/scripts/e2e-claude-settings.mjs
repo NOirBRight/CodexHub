@@ -35,7 +35,7 @@ try {
   await dialog.getByRole("checkbox").check();
   await dialog.getByRole("button", { name: "Connect", exact: true }).click();
   await expect.poll(() => settings().env?.ANTHROPIC_MODEL).toBe("claude-codexhub-e2e-alpha");
-  await expect.poll(() => settings().env?.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-codexhub-e2e-beta");
+  await expect.poll(() => settings().env?.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-codexhub-role/haiku/e2e/beta");
   await expect(dialog.getByRole("button", { name: "Disconnect" })).toBeEnabled();
   await dialog.getByRole("button", { name: "Close" }).click();
   await expect(dialog).toBeHidden();
@@ -49,7 +49,7 @@ try {
   await picker("Sonnet").selectOption("e2e/alpha");
   await dialog.getByRole("button", { name: "Apply changes" }).click();
   await expect.poll(() => settings().env?.ANTHROPIC_MODEL).toBe("claude-codexhub-e2e-beta");
-  await expect.poll(() => settings().env?.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("claude-codexhub-e2e-alpha");
+  await expect.poll(() => settings().env?.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("claude-codexhub-role/sonnet/e2e/alpha");
   assert(!("ANTHROPIC_DEFAULT_HAIKU_MODEL" in settings().env));
   await expect(dialog.getByRole("button", { name: "Disconnect" })).toBeEnabled();
   await dialog.getByRole("button", { name: "Close" }).click();
