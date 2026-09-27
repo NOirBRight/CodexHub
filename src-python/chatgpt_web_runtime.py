@@ -376,6 +376,13 @@ def _web_home(home: Path) -> Path:
     return home / "web-home"
 
 
+def _broker_socket_path(web_home: Path) -> str:
+    if sys.platform != "win32":
+        return str(web_home / "socket" / "turn-broker.sock")
+    identity = hashlib.sha256(str(web_home.resolve()).lower().encode("utf-8")).hexdigest()[:20]
+    return rf"\\.\pipe\codex-chatgpt-web-{identity}"
+
+
 def _settings_path(home: Path) -> Path:
     return home / "runtime-settings.json"
 
@@ -1250,7 +1257,8 @@ def _write_minimum_config(home: Path, entry: Path) -> tuple[int, dict[str, Any]]
         web_config_path = web_home / "config.json"
         previous = _read_json(web_config_path) or {}
         _mkdir(web_home / "browser")
-        _mkdir(web_home / "socket")
+        if sys.platform != "win32":
+            _mkdir(web_home / "socket")
         _mkdir(_codex_home(home))
         port = _free_port()
         old_token = previous.get("controlToken")
@@ -1284,7 +1292,7 @@ def _write_minimum_config(home: Path, entry: Path) -> tuple[int, dict[str, Any]]
             "browserInteractionMode": "automatic",
             "chromeExecutablePath": _browser_executable(),
             "storageStatePath": str(storage_state),
-            "brokerSocketPath": str(web_home / "socket" / "turn-broker.sock"),
+            "brokerSocketPath": _broker_socket_path(web_home),
             "headed": options["headed"],
             "solAvailable": sol_available,
             "extraHighAvailable": sol_available and capabilities.get("extraHighAvailable") is True,
@@ -1459,7 +1467,7 @@ def _tunnel_config(home: Path) -> dict[str, str]:
     }
 
 
-def _tunnel_mcp_command(entry: Path, broker_socket: Path, contract: str = "native") -> str:
+def _tunnel_mcp_command(entry: Path, broker_socket: str, contract: str = "native") -> str:
     if contract not in {"native", "safe"}:
         raise RuntimeError_("Unsupported Tunnel MCP contract")
     command = [str(entry), "mcp", "--contract", contract, "--broker-socket", str(broker_socket)]
@@ -1671,7 +1679,7 @@ def _start_tunnel_runtime(home: Path, pin: dict[str, Any], entry: Path) -> dict[
         "--tunnel-client-bin", tunnel["binary"],
         "--tunnel-id", tunnel["tunnel_id"],
         "--runtime-api-key", f"file:{tunnel['key']}",
-        "--mcp-command", _tunnel_mcp_command(entry, Path(config["brokerSocketPath"]), contract),
+        "--mcp-command", _tunnel_mcp_command(entry, config["brokerSocketPath"], contract),
         "--json",
     ]
     try:
