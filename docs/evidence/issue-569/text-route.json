@@ -9,6 +9,7 @@
     "public Gateway HTTP/SSE fixture: one streamed text turn",
     "same session second turn keeps caller thread, turn, and item identity",
     "a second session with the same prompt uses a different turn",
+    "text turns proceed when login and browser smoke passed even if tunnel and connector are not ready",
     "signed-out runtime fails before POST /v1/responses",
     "model missing from the doctor list fails before POST /v1/responses",
     "incompatible pin fails before POST /v1/responses",

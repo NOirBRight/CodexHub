@@ -554,6 +554,47 @@ def test_not_ready_unknown_model_pin_and_dead_process_do_not_open_responses(runt
         assert canary_hits == []
 
 
+def test_text_route_ignores_tunnel_and_connector_when_login_and_smoke_passed(runtime, tmp_path: Path) -> None:
+    home, pin = runtime
+    _write_doctor(
+        home,
+        {
+            "ok": False,
+            "models": [{"id": MODEL_ID, "display_name": "Sol", "efforts": ["high"]}],
+            "checks": [
+                {"id": "login", "status": "ok"},
+                {"id": "browser-smoke", "status": "ok"},
+                {"id": "connector", "status": "error", "message": "not attached"},
+            ],
+        },
+    )
+    supervisor = _run(home, "status", pin=pin)
+    assert supervisor["ready"] is False
+    assert supervisor["tunnel"]["state"] != "ready"
+    assert supervisor["connector"]["selectable"] is False
+    assert supervisor["login"]["state"] == "signed_in"
+    assert supervisor["browser_smoke"]["state"] == "passed"
+    before = len(_requests(home))
+    with _gateway(home, pin, tmp_path / "codex-client") as port:
+        catalog = _get_models(port)
+        ids = {item["id"] for item in catalog["data"]}
+        assert MODEL_ID in ids
+        body = _request_body(
+            MODEL_ID,
+            [_message("msg_text_only", "turn_text_only", PROMPT)],
+            thread_id="thread_text_only",
+            turn_id="turn_text_only",
+            effort="high",
+        )
+        status, payload = _post(port, body)
+        assert status == 200, payload
+        assert b"hello web" in payload
+    captured = _requests(home)
+    assert len(captured) == before + 1
+    assert captured[-1]["path"].split("?", 1)[0] == "/v1/responses"
+    assert captured[-1]["body"]["model"] == MODEL_ID
+
+
 def test_client_disconnect_closes_the_upstream_body(runtime, tmp_path: Path) -> None:
     home, pin = runtime
     (home / "web-home" / "serve-mode").write_text("hold", encoding="utf-8")

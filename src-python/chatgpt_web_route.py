@@ -80,7 +80,7 @@ def project_catalog(catalog: Mapping[str, Any]) -> dict[str, Any]:
         status = read_status()
     except Exception:
         return dict(catalog)
-    if status.get("ready") is not True:
+    if not _text_runtime_admitted(status):
         return dict(catalog)
     models = catalog.get("models")
     projected = [item for item in models if isinstance(item, Mapping)] if isinstance(models, list) else []
@@ -210,7 +210,7 @@ def _raise_for_status(status: Mapping[str, Any], slug: str) -> None:
             provider_id=PROVIDER_ID,
             model_slug=slug,
         )
-    if status.get("ready") is not True:
+    if not _text_runtime_admitted(status):
         login = status.get("login")
         signed_out = isinstance(login, Mapping) and login.get("state") != "signed_in"
         message = (
@@ -224,6 +224,35 @@ def _raise_for_status(status: Mapping[str, Any], slug: str) -> None:
             provider_id=PROVIDER_ID,
             model_slug=slug,
         )
+
+
+def _text_runtime_admitted(status: Mapping[str, Any]) -> bool:
+    """Text turns need login and browser smoke, not tunnel or connector readiness.
+
+    ``status["ready"]`` stays the provider-card flag for every layer. This
+    admission does not read it.
+    """
+    component = status.get("component")
+    if not (isinstance(component, Mapping) and component.get("compatible") is True):
+        return False
+    process = status.get("process")
+    if not isinstance(process, Mapping) or process.get("running") is not True:
+        return False
+    port = process.get("port")
+    if (
+        process.get("listen_host") != LOOPBACK_HOST
+        or not isinstance(port, int)
+        or isinstance(port, bool)
+        or port <= 0
+    ):
+        return False
+    if status.get("disabled") is True or status.get("restart_required") is True:
+        return False
+    login = status.get("login")
+    if not isinstance(login, Mapping) or login.get("state") != "signed_in":
+        return False
+    smoke = status.get("browser_smoke")
+    return isinstance(smoke, Mapping) and smoke.get("state") == "passed"
 
 
 def _upstream_facts(status: Mapping[str, Any], model: Mapping[str, Any]) -> dict[str, Any]:
