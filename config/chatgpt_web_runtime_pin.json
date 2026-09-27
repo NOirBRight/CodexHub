@@ -9,9 +9,9 @@
     "repository": "https://github.com/miuuyy/codex-chatgpt-web",
     "commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5",
     "patch_file": "docs/evidence/issue-590/codex-chatgpt-web-control-contract.patch",
-    "patch_sha256": "50577ded0e5b012ec7ea893f98dcd1635705470c0f093e4cb192c9cadd638c35",
-    "build_revision": "9c2892af646f36752cc131dedd90af6586e6e4ce",
-    "git_tree": "2d49d1dca11aa21a340348bb2a356c4078ef50ab",
+    "patch_sha256": "6e89c190cd6d01126a3d64d52bf09cb6a5fde8f24361f37e3056f8d1729104e1",
+    "build_revision": "93b8e6fc3eda8a81176964be87f8c7b8fc637a7f",
+    "git_tree": "641caaf875fcf908dfaa919c242f24fdede26a69",
     "bun_version": "1.4.0",
     "contract": "admin-status-v1"
   },
@@ -21,18 +21,12 @@
     "linux-x64": {
       "filename": "codexhub-chatgpt-web-runtime-linux-x64.tar.gz",
       "bundled_filename": "codexhub-chatgpt-web-runtime-linux-x64.tar.gz",
-      "bundled_only": true,
-      "build_revision": "9c2892af646f36752cc131dedd90af6586e6e4ce",
-      "git_tree": "2d49d1dca11aa21a340348bb2a356c4078ef50ab",
-      "sha256": "ab118da7d08baae8d1cd8496a2951e6e613a8827ccdc411a11ba52ba36a62c1d"
+      "bundled_only": true
     },
     "windows-x64": {
       "filename": "codexhub-chatgpt-web-runtime-windows-x64.zip",
       "bundled_filename": "codexhub-chatgpt-web-runtime-windows-x64.zip",
-      "bundled_only": true,
-      "build_revision": "9c2892af646f36752cc131dedd90af6586e6e4ce",
-      "git_tree": "2d49d1dca11aa21a340348bb2a356c4078ef50ab",
-      "sha256": "780bbb9b63888379cc41c77ba5dc293a30d93d375a4d0c98af659629bb04ec0e"
+      "bundled_only": true
     }
   },
   "tunnel_client": {

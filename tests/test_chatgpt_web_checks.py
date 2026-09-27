@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -50,6 +51,7 @@ class _FakeBrowser:
             return {"value": {
                 "authenticated": True,
                 "temporary": True,
+                "accountKey": "a" * 64,
                 "solAvailable": True,
                 "extraHighAvailable": True,
                 "proAvailable": False,
@@ -73,6 +75,7 @@ def _install_fake_runtime(
 ):
     import chatgpt_web_runtime as runtime
 
+    _install_synthetic_pin(home, monkeypatch, runtime)
     monkeypatch.setattr(runtime, "_process_record", lambda _home: {
         "pid": 4301,
         "supervisor_pid": 4300,
@@ -114,6 +117,34 @@ def _install_fake_runtime(
             ],
         }
     monkeypatch.setattr(checks, "_request_json", request)
+
+
+def _install_synthetic_pin(home: Path, monkeypatch, runtime) -> None:
+    pin_path = home.parent / "synthetic-runtime-pin.json"
+    pin_path.write_text(json.dumps({
+        "commit": runtime.PINNED_COMMIT,
+        "version": runtime.PINNED_VERSION,
+        "artifacts": {
+            runtime.artifact_key(): {
+                "sha256": "a" * 64,
+                "bundled_filename": "synthetic-runtime.tar.gz",
+                "bundled_only": True,
+            },
+        },
+    }), encoding="utf-8")
+    monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(pin_path))
+
+
+def _write_account_attestation(storage: Path, account_key: str) -> None:
+    payload = storage.read_bytes()
+    storage.with_name(storage.name + ".identity.json").write_text(
+        json.dumps({
+            "version": 1,
+            "accountKey": account_key,
+            "storageStateSha256": hashlib.sha256(payload).hexdigest(),
+        }) + "\n",
+        encoding="utf-8",
+    )
 
 
 def test_explicit_check_reports_independent_evidence_and_only_web_models(monkeypatch, tmp_path):
@@ -294,6 +325,84 @@ def test_cached_evidence_is_invalidated_when_managed_account_state_changes(monke
     assert stale["reason"] == "active_config_or_account_changed"
 
 
+def test_readiness_survives_attested_cookie_rotation_but_not_external_replacement(monkeypatch, tmp_path):
+    home = _home(tmp_path)
+    _install_fake_runtime(monkeypatch, home)
+
+    assert checks.check_runtime(home)["state"] == "ready"
+    storage = home / "web-home" / "browser" / "storage-state.json"
+    initial_attestation = json.loads(
+        storage.with_name(storage.name + ".identity.json").read_text(encoding="utf-8")
+    )
+    assert initial_attestation["accountKey"] == "a" * 64
+    assert initial_attestation["storageStateSha256"] == hashlib.sha256(storage.read_bytes()).hexdigest()
+    assert checks.cached_checks(home)["cache_state"] == "current"
+
+    storage.write_text('{"cookies":[{"name":"rotated"}],"origins":[]}\n', encoding="utf-8")
+    _write_account_attestation(storage, "a" * 64)
+    assert checks.cached_checks(home)["cache_state"] == "current"
+
+    storage.write_text('{"cookies":[{"name":"externally-replaced"}],"origins":[]}\n', encoding="utf-8")
+    stale = checks.cached_checks(home)
+    assert stale["cache_state"] == "stale"
+    assert stale["reason"] == "active_config_or_account_changed"
+
+
+def test_readiness_binding_changes_when_fresh_attestation_names_another_account(monkeypatch, tmp_path):
+    home = _home(tmp_path)
+    _install_fake_runtime(monkeypatch, home)
+
+    assert checks.check_runtime(home)["state"] == "ready"
+    storage = home / "web-home" / "browser" / "storage-state.json"
+    storage.write_text('{"cookies":[{"name":"account-b"}],"origins":[]}\n', encoding="utf-8")
+    _write_account_attestation(storage, "b" * 64)
+
+    stale = checks.cached_checks(home)
+    assert stale["cache_state"] == "stale"
+    assert stale["reason"] == "active_config_or_account_changed"
+
+
+def test_explicit_check_without_verified_account_identity_revokes_cached_readiness(monkeypatch, tmp_path):
+    home = _home(tmp_path)
+    _install_fake_runtime(monkeypatch, home)
+    assert checks.check_runtime(home)["state"] == "ready"
+
+    class MissingIdentity(_FakeBrowser):
+        def operation(self, operation: str, *, detect_capabilities: bool = False):
+            value = super().operation(operation, detect_capabilities=detect_capabilities)
+            if operation == "inspect" and detect_capabilities:
+                value["value"].pop("accountKey")
+            return value
+
+    monkeypatch.setattr(checks, "_PinnedBrowserSession", MissingIdentity)
+    result = checks.check_runtime(home)
+
+    assert result["state"] == "failed"
+    assert result["login"] == {"state": "failed", "reason": "account_identity_unverified"}
+    assert checks.cached_checks(home)["state"] == "failed"
+
+
+def test_external_state_replacement_during_attestation_cannot_be_blessed(monkeypatch, tmp_path):
+    home = _home(tmp_path)
+    _install_fake_runtime(monkeypatch, home)
+    assert checks.check_runtime(home)["state"] == "ready"
+    storage = home / "web-home" / "browser" / "storage-state.json"
+    write_json = checks.runtime._write_json
+
+    def replace_state_before_attestation(path, payload, mode=0o644):
+        if path == storage.with_name(storage.name + ".identity.json"):
+            storage.write_text('{"cookies":[{"name":"external"}],"origins":[]}\n', encoding="utf-8")
+        return write_json(path, payload, mode=mode)
+
+    monkeypatch.setattr(checks.runtime, "_write_json", replace_state_before_attestation)
+
+    result = checks.check_runtime(home)
+
+    assert result["state"] == "stale"
+    assert result["reason"] == "active_config_or_account_changed_during_check"
+    assert checks.cached_checks(home)["cache_state"] == "stale"
+
+
 def test_cached_evidence_is_invalidated_after_runtime_process_changes(monkeypatch, tmp_path):
     home = _home(tmp_path)
     _install_fake_runtime(monkeypatch, home)
@@ -383,6 +492,7 @@ def test_loopback_redirect_does_not_forward_runtime_control_token(monkeypatch, t
     source_thread.start()
     import chatgpt_web_runtime as runtime
 
+    _install_synthetic_pin(home, monkeypatch, runtime)
     monkeypatch.setattr(runtime, "_process_record", lambda _home: {"port": source.server_port, "pid": 4301})
     monkeypatch.setattr(runtime, "_pin_compatible", lambda *_args: True)
 
