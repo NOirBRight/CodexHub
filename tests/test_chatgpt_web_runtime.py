@@ -374,6 +374,55 @@ def test_launch_leaves_client_config_bytes_unchanged(tmp_path: Path) -> None:
             assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
 
 
+@pytest.mark.parametrize("login_change", [
+    "unchanged", "downgraded", "missing-state", "missing-marker", "malformed-marker",
+    "unverified", "invalid-capabilities",
+])
+def test_restart_restores_only_verified_login_capabilities(tmp_path: Path, login_change: str) -> None:
+    home = tmp_path / "runtime"
+    archive = _archive(tmp_path, _fixture_script(home / "executed-marker"))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    state = home / "web-home" / "browser" / "storage-state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text('{"cookies": [], "origins": []}', encoding="utf-8")
+    marker = state.with_name(state.name + ".verified.json")
+    verified = {
+        "version": 1, "authenticated": True, "verifiedAt": "2026-09-27T04:00:00Z",
+        "solAvailable": True, "extraHighAvailable": True, "proAvailable": True,
+    }
+    marker.write_text(json.dumps(verified), encoding="utf-8")
+    config_path = home / "web-home" / "config.json"
+    try:
+        assert _run(home, "start", pin=pin)["_exit_code"] == 0
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        for key in ("solAvailable", "extraHighAvailable", "proAvailable"):
+            assert config[key] is True, key
+        _stop(home, pin)
+        # A later login change must supersede the old config, including a downgrade.
+        if login_change == "missing-state":
+            state.unlink()
+        elif login_change == "missing-marker":
+            marker.unlink()
+        elif login_change == "malformed-marker":
+            marker.write_text("{", encoding="utf-8")
+        else:
+            if login_change == "unverified":
+                verified["authenticated"] = False
+            elif login_change == "invalid-capabilities":
+                verified.update(solAvailable=False, extraHighAvailable="true", proAvailable=1)
+            elif login_change == "downgraded":
+                verified.update(extraHighAvailable=False, proAvailable=False)
+            marker.write_text(json.dumps(verified), encoding="utf-8")
+        assert _run(home, "start", pin=pin)["_exit_code"] == 0
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        for key in ("solAvailable", "extraHighAvailable", "proAvailable"):
+            expected = login_change == "unchanged" or (login_change == "downgraded" and key == "solAvailable")
+            assert config[key] is expected, key
+    finally:
+        _stop(home, pin)
+
+
 def test_remote_bind_is_refused(tmp_path: Path) -> None:
     home = tmp_path / "runtime"
     marker = home / "executed-marker"

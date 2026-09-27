@@ -719,6 +719,16 @@ def _write_minimum_config(home: Path, entry: Path) -> int:
     _mkdir(_codex_home(home))
     port = _free_port()
     token = secrets.token_urlsafe(48)
+    storage_state = web_home / "browser" / "storage-state.json"
+    # Match the pinned runtime's login marker contract, never a stale config.json.
+    capabilities = _read_json(storage_state.with_name(storage_state.name + ".verified.json")) or {}
+    verified = (
+        storage_state.is_file()
+        and capabilities.get("version") == 1
+        and capabilities.get("authenticated") is True
+        and isinstance(capabilities.get("verifiedAt"), str)
+    )
+    sol_available = verified and capabilities.get("solAvailable") is True
     _write_json(
         web_home / "config.json",
         {
@@ -735,12 +745,12 @@ def _write_minimum_config(home: Path, entry: Path) -> int:
             "browserHost": "managed-chrome",
             "browserInteractionMode": "automatic",
             "chromeExecutablePath": "/usr/bin/chromium",
-            "storageStatePath": str(web_home / "browser" / "storage-state.json"),
+            "storageStatePath": str(storage_state),
             "brokerSocketPath": str(web_home / "socket" / "turn-broker.sock"),
             "headed": True,
-            "solAvailable": True,
-            "extraHighAvailable": False,
-            "proAvailable": False,
+            "solAvailable": sol_available,
+            "extraHighAvailable": sol_available and capabilities.get("extraHighAvailable") is True,
+            "proAvailable": sol_available and capabilities.get("proAvailable") is True,
             "experimentalBiggerContext": False,
             "experimentalSkillAttachments": False,
             "experimentalFreshConversationPerTurn": False,
