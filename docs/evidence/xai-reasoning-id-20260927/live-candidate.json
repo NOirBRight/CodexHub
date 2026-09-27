@@ -1,41 +1,35 @@
 {
-  "checked_at_utc": "2026-09-27T15:53:27.266409+00:00",
+  "checked_at_utc": "2026-09-27T16:03:42.209364+00:00",
   "gateway": "candidate worktree on isolated loopback port",
-  "candidate_source_sha256": "8faee411a5a05cd397d779e4c2b3330704cb5513c627f6eb7738087f37ba5e42",
+  "auth_mode": "xai_oauth",
+  "candidate_source_sha256": "505ed6fb7cd41394cea83a23f5ba57fa6e9c021641398938ab5ae200c0538a9d",
   "first_turn": {
     "http_status": 200,
     "terminal": "response.completed",
-    "output_count": 12,
-    "search_call_count": 4,
+    "output_count": 14,
+    "search_call_count": 5,
     "reasoning_ids_unique": true,
-    "annotation_event_count": 10,
+    "annotation_event_count": 3,
     "citation_urls": [
-      "https://store.playstation.com/pt-br/concept/221973",
-      "https://store.playstation.com/zh-hans-hk/product/UP0751-CUSA05868_00-ASIAREZINFINITE0",
       "https://store.playstation.com/zh-hant-hk/product/HP0797-PPSA09164_00-REZINFINITE00PS5",
-      "https://www.jp.playstation.com/en-hk/games/rez-infinite/",
-      "https://www.playstation.com/ar-qa/games/rez-infinite/",
-      "https://www.playstation.com/ja-jp/games/rez-infinite/",
-      "https://www.playstation.com/nl-nl/games/rez-infinite/",
-      "https://www.playstation.com/th-th/games/rez-infinite/",
       "https://www.playstation.com/zh-hans-hk/games/rez-infinite/",
       "https://www.playstation.com/zh-hant-hk/games/rez-infinite/"
     ],
     "usage": {
-      "input_tokens": 31057,
+      "input_tokens": 33798,
       "input_tokens_details": {
-        "cached_tokens": 4736
+        "cached_tokens": 16640
       },
-      "output_tokens": 1044,
+      "output_tokens": 1308,
       "output_tokens_details": {
-        "reasoning_tokens": 550
+        "reasoning_tokens": 605
       },
-      "total_tokens": 32101,
+      "total_tokens": 35106,
       "num_sources_used": 0,
-      "num_server_side_tools_used": 4,
-      "cost_in_usd_ticks": 408331600,
+      "num_server_side_tools_used": 5,
+      "cost_in_usd_ticks": 421645600,
       "server_side_tool_usage_details": {
-        "web_search_calls": 4,
+        "web_search_calls": 5,
         "x_search_calls": 0,
         "x_posts_fetched": 0,
         "x_users_fetched": 0,
@@ -46,8 +40,8 @@
         "image_generation_calls": 0
       },
       "context_details": {
-        "input_tokens": 16742,
-        "output_tokens": 759
+        "input_tokens": 19415,
+        "output_tokens": 999
       }
     }
   },
@@ -55,21 +49,21 @@
     "http_status": 200,
     "status": "completed",
     "usage": {
-      "input_tokens": 2479,
+      "input_tokens": 2823,
       "input_tokens_details": {
-        "cached_tokens": 1152
+        "cached_tokens": 1280
       },
-      "output_tokens": 144,
+      "output_tokens": 171,
       "output_tokens_details": {
-        "reasoning_tokens": 109
+        "reasoning_tokens": 122
       },
-      "total_tokens": 2623,
+      "total_tokens": 2994,
       "num_sources_used": 0,
       "num_server_side_tools_used": 0,
-      "cost_in_usd_ticks": 13919600,
+      "cost_in_usd_ticks": 16156800,
       "context_details": {
-        "input_tokens": 2479,
-        "output_tokens": 153
+        "input_tokens": 2823,
+        "output_tokens": 178
       }
     }
   }

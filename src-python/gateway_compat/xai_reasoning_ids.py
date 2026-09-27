@@ -22,6 +22,14 @@ def _client_id(response_id: str, index: int, wire_id: str) -> str:
     return PREFIX + digest
 
 
+def _record_raw_id(seen: dict[str, Any], item_id: Any, item_type: Any, surface: str) -> None:
+    if not isinstance(item_id, str) or not item_id:
+        return
+    if item_id in seen and (seen[item_id] != "reasoning" or item_type != "reasoning"):
+        raise _error("duplicate_item_identity", surface)
+    seen[item_id] = item_type
+
+
 def normalize_response(response: Mapping[str, Any], *, surface: str = "response") -> dict[str, Any]:
     """Map each reasoning occurrence, rejecting raw cross-family collisions."""
     result = dict(response)
@@ -29,7 +37,7 @@ def normalize_response(response: Mapping[str, Any], *, surface: str = "response"
     if not isinstance(output, list):
         return result
     response_id = response.get("id")
-    raw_types: dict[str, str] = {}
+    raw_types: dict[str, Any] = {}
     mapped: list[Any] = []
     for index, item in enumerate(output):
         if not isinstance(item, Mapping):
@@ -37,11 +45,7 @@ def normalize_response(response: Mapping[str, Any], *, surface: str = "response"
             continue
         item_type = item.get("type")
         item_id = item.get("id")
-        if isinstance(item_id, str) and item_id:
-            previous = raw_types.get(item_id)
-            if item_id in raw_types and (previous != "reasoning" or item_type != "reasoning"):
-                raise _error("duplicate_item_identity", surface)
-            raw_types[item_id] = item_type
+        _record_raw_id(raw_types, item_id, item_type, surface)
         if item_type == "reasoning" and isinstance(item_id, str) and item_id:
             if not isinstance(response_id, str) or not response_id:
                 raise _error("missing_stream_identity", surface)
@@ -57,7 +61,7 @@ class StreamIds:
 
     def __init__(self) -> None:
         self.response_id: str | None = None
-        self.raw_types: dict[str, str] = {}
+        self.raw_types: dict[str, Any] = {}
         self.added: dict[int, str] = {}
         self.done: set[int] = set()
 
@@ -89,11 +93,7 @@ class StreamIds:
         if event_type == "response.output_item.added" and isinstance(item, Mapping):
             raw_id = item.get("id")
             item_type = item.get("type")
-            if isinstance(raw_id, str) and raw_id:
-                previous = self.raw_types.get(raw_id)
-                if raw_id in self.raw_types and (previous != "reasoning" or item_type != "reasoning"):
-                    raise _error("duplicate_item_identity", "stream")
-                self.raw_types[raw_id] = item_type
+            _record_raw_id(self.raw_types, raw_id, item_type, "stream")
             if item_type == "reasoning":
                 if type(index) is not int or index < 0 or not isinstance(raw_id, str) or not raw_id or index in self.added or not self.response_id:
                     raise _error("ambiguous_native_identity", "stream")
