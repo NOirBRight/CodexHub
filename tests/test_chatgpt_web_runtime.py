@@ -340,11 +340,15 @@ def test_repo_pin_is_the_accepted_upstream_release() -> None:
     assert "dev" in document["rejected_entries"]
     assert "--replace-codex-route" in document["rejected_entries"]
     assert set(document["artifacts"]) == {"linux-x64", "windows-x64"}
-    for artifact in document["artifacts"].values():
+    expected_artifacts = {
+        "linux-x64": "e370f6916e1d9e4bc60af81ef79269f16970e34c985db3f625e20c891dfc2782",
+        "windows-x64": "5cbb11d6d848018d1f079c89151f4dd46cc7d5ebb83a878970626b5120b35a95",
+    }
+    for key, artifact in document["artifacts"].items():
         assert artifact["bundled_only"] is True
-        assert "sha256" not in artifact
-        assert "build_revision" not in artifact
-        assert "git_tree" not in artifact
+        assert artifact["sha256"] == expected_artifacts[key]
+        assert artifact["build_revision"] == source["build_revision"]
+        assert artifact["git_tree"] == source["git_tree"]
         assert "url" not in artifact
 
 

@@ -653,7 +653,7 @@ def _error_result(reason: str) -> dict[str, Any]:
 
 
 def check_runtime(home: Path) -> dict[str, Any]:
-    """Run explicit, read-only browser/login/connector/model checks on the active instance."""
+    """Check active runtime readiness and seed private account identity evidence as needed."""
     home = runtime._assert_private_home(Path(home))
     binding = _binding(home)
     config = runtime._read_json(runtime._web_home(home) / "config.json") or {}
