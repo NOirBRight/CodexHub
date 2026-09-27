@@ -18,6 +18,7 @@ import chatgpt_web_checks
 import chatgpt_web_runtime as runtime
 import chatgpt_web_settings
 import test_chatgpt_web_runtime as runtime_fixtures
+from tests.gateway_harness import GATEWAY_CLIENT_KEY, GatewayHarness, request_gateway
 
 
 @pytest.fixture
@@ -260,6 +261,74 @@ def test_settings_http_preserves_replaces_and_clears_secret_without_returning_it
     assert status == 200, body
     assert json.loads(body)["saved"]["tunnel"]["runtime_key_configured"] is False
     assert secret.encode() not in (home / "runtime-settings.json").read_bytes()
+
+
+def test_settings_save_does_not_disrupt_inflight_gateway_request(settings_server):
+    server, _home = settings_server
+    response_body = {
+        "id": "chatcmpl_settings_concurrency",
+        "object": "chat.completion",
+        "model": "glm-5.2",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "hello-chat"},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+    with GatewayHarness() as gateway:
+        assert gateway.stub is not None
+        gateway.set_json_response(response_body)
+        gateway.stub.hold_after_headers = threading.Event()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            request = pool.submit(
+                request_gateway,
+                gateway.host,
+                gateway.port,
+                "POST",
+                "/v1/responses",
+                body=json.dumps(
+                    {"model": "volc/glm-5.2", "input": "hello", "stream": False}
+                ).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {GATEWAY_CLIENT_KEY}",
+                    "Content-Type": "application/json",
+                    "Connection": "close",
+                },
+                timeout=8.0,
+            )
+            try:
+                assert gateway.stub.headers_sent.wait(timeout=3)
+                session = _session(server)
+                status, _headers, body = _call(
+                    server,
+                    "/api/settings",
+                    method="POST",
+                    body={"connector_name": "CodexHub edited during request"},
+                    headers={"Origin": server.origin},
+                    session=session,
+                )
+                assert status == 200, body
+                assert json.loads(body)["saved"]["connector_name"] == (
+                    "CodexHub edited during request"
+                )
+            finally:
+                gateway.stub.hold_after_headers.set()
+
+            response = request.result(timeout=8)
+
+        assert response.status == 200, response.body
+        payload = json.loads(response.body)
+        assert payload["output"][0]["content"][0]["text"] == "hello-chat"
+        assert gateway.stub.captures[0].path.endswith("/chat/completions")
+        sent = json.loads(gateway.stub.captures[0].body)
+        assert sent["model"] == "glm-5.2"
+        assert gateway.stub.captures[0].headers["authorization"] == (
+            "Bearer volc-test-token"
+        )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable runtime fixture")
