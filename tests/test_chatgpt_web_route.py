@@ -6,7 +6,6 @@ import hashlib
 import http.client
 import json
 import os
-import shutil
 import socket
 import subprocess
 import sys
@@ -22,6 +21,7 @@ import pytest
 
 import chatgpt_web_checks
 import chatgpt_web_runtime
+import chatgpt_web_test_support
 import gateway_admission
 import gateway_events
 import gateway_transport
@@ -40,11 +40,7 @@ def _run(home: Path, *args: str, pin: Path) -> dict:
     env = os.environ.copy()
     env["CODEXHUB_CHATGPT_WEB_HOME"] = str(home)
     env["CODEXHUB_CHATGPT_WEB_PIN"] = str(pin)
-    python = sys.executable
-    if os.name == "nt":
-        python = sys._base_executable
-        env["PYTHONHOME"] = sys.base_prefix
-        env["PATH"] = os.pathsep.join((str(Path(python).parent), env.get("PATH", "")))
+    python = chatgpt_web_test_support.fixture_python(env)
     completed = subprocess.run(
         [python, str(SCRIPT), *args, "--home", str(home)],
         check=False,
@@ -53,6 +49,7 @@ def _run(home: Path, *args: str, pin: Path) -> dict:
         env=env,
         timeout=30,
     )
+    _prepare_command_trampolines(home)
     payload = json.loads(completed.stdout or "{}")
     payload["_exit_code"] = completed.returncode
     payload["_stderr"] = completed.stderr
@@ -68,7 +65,8 @@ def _pin_for(directory: Path, payload: bytes) -> Path:
 
 
 def _fixture_script() -> str:
-    return f"""#!{sys.executable}
+    shebang = "" if os.name == "nt" else f"#!{sys.executable}\n"
+    return f"""{shebang}
 import hashlib
 import hmac
 import json
@@ -322,45 +320,23 @@ server.serve_forever()
 
 
 def _archive(directory: Path) -> Path:
+    if os.name == "nt":
+        return chatgpt_web_test_support.write_windows_runtime_archive(
+            directory, ENTRY_NAME, _fixture_script()
+        )
     tree = directory / "tree"
     entry = tree / ENTRY_NAME
     entry.parent.mkdir(parents=True, exist_ok=True)
     archive = directory / "runtime.tar.gz"
     with tarfile.open(archive, "w:gz") as bundle:
-        if os.name == "nt":
-            shutil.copyfile(sys._base_executable, entry)
-            payload = entry.with_name("fixture_payload.py")
-            payload.write_text(_fixture_script(), encoding="utf-8")
-            manifest = tree / "manifest.json"
-            manifest.write_text(json.dumps({"launcher": ENTRY_NAME}), encoding="utf-8")
-            bundle.add(entry, arcname=ENTRY_NAME)
-            bundle.add(payload, arcname=f"{Path(ENTRY_NAME).parent.as_posix()}/fixture_payload.py")
-            bundle.add(manifest, arcname="manifest.json")
-        else:
-            entry.write_text(_fixture_script(), encoding="utf-8")
-            entry.chmod(0o755)
-            bundle.add(entry, arcname=ENTRY_NAME)
+        entry.write_text(_fixture_script(), encoding="utf-8")
+        entry.chmod(0o755)
+        bundle.add(entry, arcname=ENTRY_NAME)
     return archive
 
 
 def _prepare_command_trampolines(home: Path) -> None:
-    payload = home / "current" / "runtime" / Path(ENTRY_NAME).parent / "fixture_payload.py"
-    if os.name != "nt" or not payload.is_file():
-        return
-    web_home = home / "web-home"
-    web_home.mkdir(parents=True, exist_ok=True)
-    trampoline = """import os
-import runpy
-import sys
-from pathlib import Path
-
-payload = Path(os.environ["CODEX_CHATGPT_WEB_LAUNCHER"]).with_name("fixture_payload.py")
-sys.argv.insert(1, sys.argv[0])
-sys.argv[0] = str(payload)
-runpy.run_path(str(payload), run_name="__main__")
-"""
-    for command in ("doctor", "serve", "login"):
-        (web_home / command).write_text(trampoline, encoding="utf-8")
+    chatgpt_web_test_support.prepare_windows_runtime_trampolines(home, ENTRY_NAME)
 
 
 def _seed_check(
