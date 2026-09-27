@@ -78,17 +78,30 @@ def prepare_responses_exchange(
     session_id = client_session_id(payload, event_context)
     if session_id is None:
         _session_failure(slug)
+    chatgpt_web_route.clear_message_filter()
     chatgpt_web_route.ensure_exchange_allowed(upstream, _readiness_payload(payload))
     thread_id = thread_id_for(session_id)
+    compaction = chatgpt_web_route._is_compaction_request(payload, event_context)
+    if not compaction:
+        effort = chatgpt_web_route._requested_effort(payload) if isinstance(payload, Mapping) else None
+        chatgpt_web_route.note_turn_epoch(thread_id, slug, effort)
     call_ids = _tool_result_ids(payload)
     replay_body: bytes | None = None
     turn_id: str | None = None
-    if call_ids is None:
+    if call_ids is None and not compaction:
+        chatgpt_web_route.clear_message_filter()
         _tool_failure("ChatGPT Web tool call is unknown", slug)
+    if compaction:
+        call_ids = ()
     if call_ids:
         replay_body, turn_id = _claim_tool_results(session_id, call_ids, slug)
     if turn_id is None:
         turn_id = "turn_" + uuid.uuid4().hex
+    suppress_keys, forward_keys = chatgpt_web_route.plan_message_filter(
+        thread_id,
+        payload if isinstance(payload, Mapping) else None,
+        compaction=compaction,
+    )
     if isinstance(event_context, dict):
         event_context[_BINDING_KEY] = {
             "session_id": session_id,
@@ -96,15 +109,24 @@ def prepare_responses_exchange(
             "turn_id": turn_id,
         }
     if replay_body is not None:
+        chatgpt_web_route.clear_message_filter()
         return replay_body
     if not isinstance(event_context, dict):
         return None
+    if compaction:
+        phase = "compact"
+    elif call_ids:
+        phase = "continue"
+    else:
+        phase = "issue"
     inflight = _Inflight(
         session_id=session_id,
         thread_id=thread_id,
         turn_id=turn_id,
-        phase="continue" if call_ids else "issue",
+        phase=phase,
         call_ids=call_ids,
+        suppress_keys=suppress_keys,
+        forward_keys=forward_keys,
     )
     event_context[_INFLIGHT_KEY] = inflight
     if admission is not None:
@@ -145,6 +167,7 @@ def prepare_attempt_body(request: Any, attempt: Any) -> tuple[Any, bytes]:
         )
     }
     _stamp_user_messages(responses, session_id, binding["turn_id"])
+    chatgpt_web_route.apply_message_filter(responses)
     body = json.dumps(responses, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     prepared = replace(prepared, upstream_body=body)
     return prepared, body
@@ -156,6 +179,9 @@ def note_upstream_submitted(event_context: Mapping[str, Any] | None) -> None:
         return
     with _LOCK:
         inflight.submitted = True
+        forward_keys = inflight.forward_keys
+        thread_id = inflight.thread_id
+    chatgpt_web_route.remember_forwarded_messages(thread_id, forward_keys)
 
 
 @contextmanager
@@ -177,6 +203,7 @@ def observe_upstream_event(event: Mapping[str, Any], event_context: Mapping[str,
         return
     if not isinstance(copied, dict):
         return
+    compact_done: tuple[str, frozenset[str]] | None = None
     with _LOCK:
         if inflight.phase == "issue":
             for call_id in _function_call_ids(copied):
@@ -192,18 +219,21 @@ def observe_upstream_event(event: Mapping[str, Any], event_context: Mapping[str,
         if copied.get("type") != "response.completed":
             return
         inflight.terminal_seen = True
-        if inflight.phase != "continue":
-            return
-        body = _encode_sse(inflight.events)
-        for call_id in inflight.call_ids:
-            permit = _CALLS.get(call_id)
-            if (
-                permit is not None
-                and permit.state == "forwarding"
-                and permit.session_id == inflight.session_id
-            ):
-                permit.state = "recorded"
-                permit.response_body = body
+        if inflight.phase == "compact":
+            compact_done = (inflight.thread_id, inflight.suppress_keys)
+        elif inflight.phase == "continue":
+            body = _encode_sse(inflight.events)
+            for call_id in inflight.call_ids:
+                permit = _CALLS.get(call_id)
+                if (
+                    permit is not None
+                    and permit.state == "forwarding"
+                    and permit.session_id == inflight.session_id
+                ):
+                    permit.state = "recorded"
+                    permit.response_body = body
+    if compact_done is not None:
+        chatgpt_web_route.complete_compaction(compact_done[0], compact_done[1])
 
 
 @dataclass
@@ -223,6 +253,8 @@ class _Inflight:
     turn_id: str
     phase: str
     call_ids: tuple[str, ...] = ()
+    suppress_keys: frozenset[str] = frozenset()
+    forward_keys: frozenset[str] = frozenset()
     observed: set[str] = field(default_factory=set)
     events: list[dict[str, Any]] = field(default_factory=list)
     submitted: bool = False
@@ -233,6 +265,31 @@ class _Inflight:
 
 _LOCK = threading.Lock()
 _CALLS: dict[str, _Permit] = {}
+
+
+def revoke_all_tool_permissions() -> None:
+    with _LOCK:
+        for permit in _CALLS.values():
+            if permit.state in {"open", "forwarding", "recorded"}:
+                permit.state = "revoked"
+                permit.response_body = None
+
+
+def revoke_thread(thread_id: str) -> None:
+    if not thread_id:
+        return
+    with _LOCK:
+        for permit in _CALLS.values():
+            if permit.thread_id != thread_id:
+                continue
+            if permit.state in {"open", "forwarding", "recorded"}:
+                permit.state = "revoked"
+                permit.response_body = None
+
+
+def turn_was_submitted(event_context: Mapping[str, Any] | None) -> bool:
+    inflight = _inflight_from(event_context)
+    return inflight is not None and inflight.submitted
 
 
 def _text(value: Any) -> str | None:

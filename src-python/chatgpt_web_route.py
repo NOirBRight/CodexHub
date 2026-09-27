@@ -7,6 +7,7 @@ session, thread, turn, and item identities intact.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from contextlib import contextmanager
@@ -28,8 +29,14 @@ REASON_NOT_READY = "chatgpt_web_not_ready"
 REASON_MODEL_NOT_LISTED = "chatgpt_web_model_not_listed"
 REASON_PIN_INCOMPATIBLE = "chatgpt_web_pin_incompatible"
 REASON_PROCESS_NOT_RUNNING = "chatgpt_web_process_not_running"
+REASON_BROWSER_SMOKE_FAILED = "chatgpt_web_browser_smoke_failed"
+REASON_TUNNEL_NOT_READY = "chatgpt_web_tunnel_not_ready"
+REASON_CONNECTOR_NOT_SELECTABLE = "chatgpt_web_connector_not_selectable"
 REASON_TOOL_RUNTIME_NOT_READY = "chatgpt_web_tool_runtime_not_ready"
 REASON_TOOL_CALL_REJECTED = "chatgpt_web_tool_call_rejected"
+REASON_IMAGE_INPUT_UNLISTED = "chatgpt_web_image_input_unlisted"
+REASON_ALREADY_SUBMITTED = "chatgpt_web_already_submitted"
+_COMPACT_KINDS = frozenset({"compact", "compaction"})
 _TOOL_ITEM_TYPES = frozenset({"function_call", "function_call_output"})
 _PRESERVE_IF_PRESENT = ("tools", "tool_choice", "environment", "sandbox")
 
@@ -77,6 +84,7 @@ def listed_models(status: Mapping[str, Any] | None = None) -> tuple[dict[str, An
                 "id": canonical_model_id(model_id),
                 "display_name": display_name.strip() if isinstance(display_name, str) else "",
                 "efforts": parsed_efforts,
+                "image_input": item.get("image_input") is True,
             }
         )
     return tuple(models)
@@ -131,6 +139,7 @@ def ensure_exchange_allowed(upstream: Mapping[str, Any], payload: Mapping[str, A
     """Re-check readiness and effort immediately before the upstream request is opened."""
     identity = canonical_model_id(str(upstream.get("model_id") or upstream.get("upstream_model") or ""))
     status = read_status()
+    sync_process_generation(status)
     _raise_for_status(status, identity)
     selected = next((model for model in listed_models(status) if model["id"] == identity), None)
     if selected is None:
@@ -140,20 +149,18 @@ def ensure_exchange_allowed(upstream: Mapping[str, Any], payload: Mapping[str, A
             provider_id=PROVIDER_ID,
             model_slug=identity,
         )
-    if payload is None:
-        return
-    requested = _requested_effort(payload)
-    if requested is None:
-        return
-    if requested not in selected["efforts"]:
-        raise identity_failure(
-            f"ChatGPT Web effort is not in the runtime doctor list: {requested}",
-            reason=REASON_MODEL_NOT_LISTED,
-            provider_id=PROVIDER_ID,
-            model_slug=identity,
-        )
-    if _request_needs_tools(payload):
-        _raise_for_tool_runtime(status, identity)
+    if payload is not None:
+        requested = _requested_effort(payload)
+        if requested is not None and requested not in selected["efforts"]:
+            raise identity_failure(
+                f"ChatGPT Web effort is not in the runtime doctor list: {requested}",
+                reason=REASON_MODEL_NOT_LISTED,
+                provider_id=PROVIDER_ID,
+                model_slug=identity,
+            )
+        _raise_if_image_unlisted(selected, payload, identity)
+        if _request_needs_tools(payload):
+            _raise_for_tool_runtime(status, identity)
 
 
 def bind_responses_body(body: bytes) -> bytes:
@@ -201,6 +208,7 @@ def bind_responses_body(body: bytes) -> bytes:
     for key in _PRESERVE_IF_PRESENT:
         if key in payload:
             bound[key] = _json_copy(payload.get(key))
+    apply_message_filter(bound)
     return json.dumps(bound, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
@@ -225,14 +233,23 @@ def _raise_for_status(status: Mapping[str, Any], slug: str) -> None:
         )
     if not _text_runtime_admitted(status):
         login = status.get("login")
-        signed_out = isinstance(login, Mapping) and login.get("state") != "signed_in"
-        message = (
-            "ChatGPT Web runtime is signed out and not ready"
-            if signed_out
-            else "ChatGPT Web runtime is not ready"
-        )
+        if not isinstance(login, Mapping) or login.get("state") != "signed_in":
+            raise identity_failure(
+                "ChatGPT Web runtime is signed out and not ready",
+                reason=REASON_NOT_READY,
+                provider_id=PROVIDER_ID,
+                model_slug=slug,
+            )
+        smoke = status.get("browser_smoke")
+        if not isinstance(smoke, Mapping) or smoke.get("state") != "passed":
+            raise identity_failure(
+                "ChatGPT Web browser smoke failed",
+                reason=REASON_BROWSER_SMOKE_FAILED,
+                provider_id=PROVIDER_ID,
+                model_slug=slug,
+            )
         raise identity_failure(
-            message,
+            "ChatGPT Web runtime is not ready",
             reason=REASON_NOT_READY,
             provider_id=PROVIDER_ID,
             model_slug=slug,
@@ -306,7 +323,7 @@ def _upstream_facts(status: Mapping[str, Any], model: Mapping[str, Any]) -> dict
         "reports_cached_input_tokens": False,
         "supports_developer_role": True,
         "supported_reasoning_levels": tuple(model["efforts"]),
-        "input_modalities": ("text",),
+        "input_modalities": _input_modalities(model),
     }
 
 
@@ -346,7 +363,7 @@ def _catalog_entry(model: Mapping[str, Any]) -> dict[str, Any]:
         "description": "ChatGPT Web model listed by the runtime doctor.",
         "visibility": "list",
         "supported_in_api": True,
-        "input_modalities": ["text"],
+        "input_modalities": list(_input_modalities(model)),
         "supported_reasoning_levels": efforts,
         "codex_proxy_metadata": {
             "provider": PROVIDER_ID,
@@ -390,14 +407,18 @@ def _raise_for_tool_runtime(status: Mapping[str, Any], slug: str) -> None:
     connector_ready = isinstance(connector, Mapping) and connector.get("selectable") is True
     if tunnel_ready and connector_ready:
         return
-    missing: list[str] = []
-    if not tunnel_ready:
-        missing.append("tool tunnel is not ready")
-    if not connector_ready:
-        missing.append("tool connector is not selectable")
+    if not tunnel_ready and not connector_ready:
+        message = "ChatGPT Web tool tunnel is not ready and tool connector is not selectable"
+        reason = REASON_TOOL_RUNTIME_NOT_READY
+    elif not tunnel_ready:
+        message = "ChatGPT Web tool tunnel is not ready"
+        reason = REASON_TUNNEL_NOT_READY
+    else:
+        message = "ChatGPT Web tool connector is not selectable"
+        reason = REASON_CONNECTOR_NOT_SELECTABLE
     raise identity_failure(
-        "ChatGPT Web " + " and ".join(missing),
-        reason=REASON_TOOL_RUNTIME_NOT_READY,
+        message,
+        reason=reason,
         provider_id=PROVIDER_ID,
         model_slug=slug,
     )
@@ -472,6 +493,8 @@ class _Inflight:
     turn_id: str
     phase: str
     call_ids: tuple[str, ...] = ()
+    suppress_keys: frozenset[str] = frozenset()
+    forward_keys: frozenset[str] = frozenset()
     observed: set[str] = field(default_factory=set)
     events: list[dict[str, Any]] = field(default_factory=list)
     submitted: bool = False
@@ -522,6 +545,11 @@ class _RecordedUpstreamResponse:
 
 _TOOL_LOCK = threading.Lock()
 _CALLS: dict[str, _CallPermit] = {}
+_FORWARDED: dict[str, set[str]] = {}
+_SUPPRESSED: dict[str, set[str]] = {}
+_EPOCHS: dict[str, tuple[str, str | None]] = {}
+_PROCESS_GENERATION: str | None = None
+_BIND_FILTER = threading.local()
 
 
 def recorded_upstream_response(body: bytes) -> _RecordedUpstreamResponse:
@@ -539,28 +567,53 @@ def prepare_responses_exchange(
     A returned body must be relayed without opening ``/v1/responses``. ``None``
     means the caller should forward the bound request once.
     """
+    clear_message_filter()
     ensure_exchange_allowed(upstream, payload)
-    if not isinstance(payload, Mapping) or not _request_needs_tools(payload):
+    if not isinstance(payload, Mapping):
         return None
     slug = canonical_model_id(str(upstream.get("model_id") or upstream.get("upstream_model") or ""))
     identity = _caller_turn(payload)
-    if _malformed_tool_output(payload):
-        _tool_failure("ChatGPT Web tool call is unknown", slug)
-    outputs = _output_call_ids(payload)
-    if outputs and identity is None:
-        _tool_failure("ChatGPT Web tool call cannot be bound to this turn", slug)
+    compaction = _is_compaction_request(payload, event_context)
+    if identity is not None and not compaction:
+        note_turn_epoch(identity[0], slug, _requested_effort(payload))
+    suppress_keys: frozenset[str] = frozenset()
+    forward_keys: frozenset[str] = frozenset()
+    if identity is not None:
+        suppress_keys, forward_keys = plan_message_filter(identity[0], payload, compaction=compaction)
+    elif not compaction and not _request_needs_tools(payload):
+        return None
+    outputs: tuple[str, ...] = ()
     replay_body: bytes | None = None
-    if outputs and identity is not None:
-        replay_body = _claim_tool_outputs(identity[0], identity[1], outputs, slug)
-        if replay_body is not None:
-            return replay_body
+    if not compaction and _request_needs_tools(payload):
+        if _malformed_tool_output(payload):
+            clear_message_filter()
+            _tool_failure("ChatGPT Web tool call is unknown", slug)
+        outputs = _output_call_ids(payload)
+        if outputs and identity is None:
+            clear_message_filter()
+            _tool_failure("ChatGPT Web tool call cannot be bound to this turn", slug)
+        if outputs and identity is not None:
+            replay_body = _claim_tool_outputs(identity[0], identity[1], outputs, slug)
+            if replay_body is not None:
+                clear_message_filter()
+                return replay_body
     if identity is None or not isinstance(event_context, dict):
         return None
+    if compaction:
+        phase = "compact"
+    elif outputs:
+        phase = "continue"
+    elif _request_needs_tools(payload):
+        phase = "issue"
+    else:
+        phase = "text"
     inflight = _Inflight(
         thread_id=identity[0],
         turn_id=identity[1],
-        phase="continue" if outputs else "issue",
+        phase=phase,
         call_ids=outputs,
+        suppress_keys=suppress_keys,
+        forward_keys=forward_keys,
     )
     event_context["chatgpt_web_inflight"] = inflight
     if admission is not None:
@@ -576,6 +629,8 @@ def note_upstream_submitted(event_context: Mapping[str, Any] | None) -> None:
         return
     with _TOOL_LOCK:
         inflight.submitted = True
+        if inflight.forward_keys:
+            _FORWARDED.setdefault(inflight.thread_id, set()).update(inflight.forward_keys)
 
 
 @contextmanager
@@ -621,6 +676,10 @@ def observe_upstream_event(event: Mapping[str, Any], event_context: Mapping[str,
         if copied.get("type") != "response.completed":
             return
         inflight.terminal_seen = True
+        if inflight.phase == "compact":
+            if inflight.suppress_keys:
+                _SUPPRESSED.setdefault(inflight.thread_id, set()).update(inflight.suppress_keys)
+            return
         if inflight.phase != "continue":
             return
         body = _encode_sse(inflight.events)
@@ -640,7 +699,7 @@ def revoke_all_tool_permissions() -> None:
     """Drop tool-result permission for turns the Gateway can no longer finish."""
     with _TOOL_LOCK:
         for permit in _CALLS.values():
-            if permit.state in {"open", "forwarding"}:
+            if permit.state in {"open", "forwarding", "recorded"}:
                 permit.state = "revoked"
                 permit.response_body = None
 
@@ -761,6 +820,290 @@ def _encode_sse(events: list[dict[str, Any]]) -> bytes:
         for event in events
     ]
     return b"".join(chunks)
+
+
+def _input_modalities(model: Mapping[str, Any]) -> tuple[str, ...]:
+    if model.get("image_input") is True:
+        return ("text", "image")
+    return ("text",)
+
+
+def _contains_image(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        if value.get("type") in {"input_image", "image_url", "image"}:
+            return True
+        return any(_contains_image(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_image(item) for item in value)
+    return False
+
+
+def _raise_if_image_unlisted(selected: Mapping[str, Any], payload: Mapping[str, Any] | None, identity: str) -> None:
+    if not isinstance(payload, Mapping) or not _contains_image(payload):
+        return
+    if selected.get("image_input") is True:
+        return
+    raise identity_failure(
+        "ChatGPT Web model does not list image input",
+        reason=REASON_IMAGE_INPUT_UNLISTED,
+        provider_id=PROVIDER_ID,
+        model_slug=identity or None,
+    )
+
+
+def reject_unlisted_image(upstream: Mapping[str, Any], payload: Mapping[str, Any] | None) -> None:
+    """Reject image input before Vision Proxy can describe or drop the part."""
+    if not isinstance(payload, Mapping) or not _contains_image(payload):
+        return
+    identity = canonical_model_id(str(upstream.get("model_id") or upstream.get("upstream_model") or ""))
+    selected = next((model for model in listed_models(read_status()) if model["id"] == identity), None)
+    if selected is None:
+        return
+    _raise_if_image_unlisted(selected, payload, identity)
+
+
+def _process_generation(status: Mapping[str, Any]) -> str | None:
+    process = status.get("process")
+    if not isinstance(process, Mapping) or process.get("running") is not True:
+        return None
+    pid = process.get("pid")
+    port = process.get("port")
+    if isinstance(pid, bool) or isinstance(port, bool):
+        return None
+    if not isinstance(pid, int) or not isinstance(port, int):
+        return None
+    return f"{pid}:{port}"
+
+
+def sync_process_generation(status: Mapping[str, Any]) -> None:
+    """Revoke tool permission when the supervised process identity changes."""
+    global _PROCESS_GENERATION
+    generation = _process_generation(status)
+    with _TOOL_LOCK:
+        if generation == _PROCESS_GENERATION:
+            return
+        _PROCESS_GENERATION = generation
+        for permit in _CALLS.values():
+            if permit.state in {"open", "forwarding", "recorded"}:
+                permit.state = "revoked"
+                permit.response_body = None
+        _EPOCHS.clear()
+        _FORWARDED.clear()
+        _SUPPRESSED.clear()
+    import chatgpt_web_client_session
+    import chatgpt_web_collab
+
+    chatgpt_web_client_session.revoke_all_tool_permissions()
+    chatgpt_web_collab.revoke_all_permissions()
+
+
+def _revoke_thread_locked(thread_id: str) -> None:
+    for permit in _CALLS.values():
+        if permit.thread_id != thread_id:
+            continue
+        if permit.state in {"open", "forwarding", "recorded"}:
+            permit.state = "revoked"
+            permit.response_body = None
+
+
+def note_turn_epoch(thread_id: str, model_id: str, effort: str | None) -> bool:
+    """Start a new epoch when model or effort changes. Return True if permits were revoked."""
+    if not thread_id or not model_id:
+        return False
+    changed = False
+    with _TOOL_LOCK:
+        previous = _EPOCHS.get(thread_id)
+        if previous is None:
+            _EPOCHS[thread_id] = (model_id, effort)
+        else:
+            resolved = effort if effort is not None else previous[1]
+            current = (model_id, resolved)
+            if current != previous:
+                _EPOCHS[thread_id] = current
+                _revoke_thread_locked(thread_id)
+                changed = True
+    if not changed:
+        return False
+    import chatgpt_web_client_session
+    import chatgpt_web_collab
+
+    chatgpt_web_client_session.revoke_thread(thread_id)
+    chatgpt_web_collab.revoke_thread(thread_id)
+    return True
+
+
+def _payload_request_kind(payload: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    metadata = payload.get("client_metadata")
+    raw = metadata.get("x-codex-turn-metadata") if isinstance(metadata, Mapping) else None
+    parsed: Any = None
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+    elif isinstance(raw, Mapping):
+        parsed = raw
+    if isinstance(parsed, Mapping):
+        kind = parsed.get("request_kind")
+        if isinstance(kind, str) and kind.strip():
+            return kind.strip().lower()
+    kind = payload.get("request_kind")
+    if isinstance(kind, str) and kind.strip():
+        return kind.strip().lower()
+    return None
+
+
+def _is_compaction_request(payload: Mapping[str, Any] | None, event_context: Mapping[str, Any] | None) -> bool:
+    if isinstance(event_context, Mapping):
+        kind = event_context.get("request_kind")
+        if isinstance(kind, str) and kind.strip().lower() in _COMPACT_KINDS:
+            return True
+        path = event_context.get("path")
+        if isinstance(path, str) and path.split("?", 1)[0].rstrip("/").endswith("/responses/compact"):
+            return True
+    if _payload_request_kind(payload) in _COMPACT_KINDS:
+        return True
+    if not isinstance(payload, Mapping):
+        return False
+    from gateway_stream_semantics import is_compact_summary_payload
+
+    return is_compact_summary_payload(payload, "responses") or is_compact_summary_payload(payload, "chat_completions")
+
+
+def _message_text(item: Mapping[str, Any]) -> str:
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+            continue
+        if not isinstance(part, Mapping):
+            continue
+        if part.get("type") in {"input_text", "text", "output_text"} and isinstance(part.get("text"), str):
+            parts.append(part["text"])
+    return "\n".join(parts)
+
+
+def _user_message_keys(item: Mapping[str, Any]) -> set[str]:
+    item_type = item.get("type")
+    role = item.get("role")
+    if item_type not in {None, "message"}:
+        return set()
+    if item_type == "message" and role not in {None, "user"}:
+        return set()
+    if item_type is None and role != "user":
+        return set()
+    keys: set[str] = set()
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id:
+        keys.add("id:" + item_id)
+    text = _message_text(item)
+    if text:
+        keys.add("hash:" + hashlib.sha256(text.encode("utf-8")).hexdigest())
+    return keys
+
+
+def _payload_user_items(payload: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
+    if not isinstance(payload, Mapping):
+        return []
+    items = list(_input_items(payload))
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        items.extend(message for message in messages if isinstance(message, Mapping))
+    return items
+
+
+def clear_message_filter() -> None:
+    _BIND_FILTER.suppress = frozenset()
+
+
+def _arm_message_filter(suppress: frozenset[str]) -> None:
+    _BIND_FILTER.suppress = suppress
+
+
+def _take_message_filter() -> frozenset[str]:
+    suppress = getattr(_BIND_FILTER, "suppress", frozenset())
+    if not isinstance(suppress, frozenset):
+        suppress = frozenset()
+    _BIND_FILTER.suppress = frozenset()
+    return suppress
+
+
+def plan_message_filter(
+    thread_id: str,
+    payload: Mapping[str, Any] | None,
+    *,
+    compaction: bool,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Arm removal of user messages that must not be sent on this turn."""
+    with _TOOL_LOCK:
+        source = _FORWARDED if compaction else _SUPPRESSED
+        suppress = frozenset(source.get(thread_id, ()))
+    forward: set[str] = set()
+    for item in _payload_user_items(payload):
+        keys = _user_message_keys(item)
+        if not keys or keys & suppress:
+            continue
+        forward.update(keys)
+    _arm_message_filter(suppress)
+    return suppress, frozenset(forward)
+
+
+def _drop_suppressed_items(items: list[Any], suppress: frozenset[str]) -> list[Any]:
+    if not suppress:
+        return items
+    kept: list[Any] = []
+    for item in items:
+        if isinstance(item, Mapping) and _user_message_keys(item) & suppress:
+            continue
+        kept.append(item)
+    return kept
+
+
+def apply_message_filter(payload: dict[str, Any]) -> None:
+    suppress = _take_message_filter()
+    items = payload.get("input")
+    if suppress and isinstance(items, list):
+        payload["input"] = _drop_suppressed_items(items, suppress)
+
+
+def remember_forwarded_messages(thread_id: str, keys: frozenset[str] | set[str]) -> None:
+    if not thread_id or not keys:
+        return
+    with _TOOL_LOCK:
+        _FORWARDED.setdefault(thread_id, set()).update(keys)
+
+
+def complete_compaction(thread_id: str, keys: frozenset[str] | set[str]) -> None:
+    if not thread_id or not keys:
+        return
+    with _TOOL_LOCK:
+        _SUPPRESSED.setdefault(thread_id, set()).update(keys)
+
+
+def refuse_submitted_retry(event_context: Mapping[str, Any] | None) -> None:
+    """Do not open another POST for a turn that was already submitted."""
+    inflight = _inflight_from(event_context)
+    submitted = inflight is not None and inflight.submitted
+    if not submitted:
+        import chatgpt_web_client_session
+
+        submitted = chatgpt_web_client_session.turn_was_submitted(event_context)
+    if not submitted:
+        return
+    _raise_for_status(read_status(), "")
+    raise identity_failure(
+        "ChatGPT Web request was already submitted",
+        reason=REASON_ALREADY_SUBMITTED,
+        provider_id=PROVIDER_ID,
+        model_slug=None,
+    )
 
 
 chatgpt_web_collab.install(globals())

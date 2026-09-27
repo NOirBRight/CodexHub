@@ -816,6 +816,10 @@ class GatewayHandlerMixin:
                 prompt_cache_key=prompt_cache_key,
             )
             primary_route_attempt = route_plan.attempts[0]
+            if upstream_name == "chatgpt_web" and isinstance(inbound_payload, Mapping):
+                import chatgpt_web_route as _chatgpt_web_route
+
+                _chatgpt_web_route.reject_unlisted_image(upstream, inbound_payload)
             usage_capture: dict[str, Any] = {}
             vision_proxy_payload_format = (
                 route_plan.prepared_request_protocol.value

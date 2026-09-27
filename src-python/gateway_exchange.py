@@ -221,6 +221,8 @@ def parse_inbound_request(request: InboundRequest, hooks: InboundRequestHooks) -
     except (UnicodeDecodeError, json.JSONDecodeError):
         payload = None
     request_kind = hooks.request_kind(request.headers, payload, request.inbound_format)
+    if request.path.split("?", 1)[0].rstrip("/") == "/v1/responses/compact":
+        request_kind = hooks.compact_request_kind
     proxy_context = dict(request.proxy_request_context)
     if request_kind == hooks.compact_request_kind:
         proxy_context = hooks.event_context_for_kind(request.request_context, request_kind)
@@ -791,6 +793,10 @@ def execute_exchange(request: ExchangeRequest, ports: ExchangePorts, *, progress
             relay_attempt = 1
             try:
                 while relay_attempt <= max_relay_attempts:
+                    if relay_attempt > 1 and request.upstream_name == "chatgpt_web":
+                        import chatgpt_web_route as _chatgpt_web_route
+
+                        _chatgpt_web_route.refuse_submitted_retry(request.event_context)
                     _passthrough.begin_tool_attempt(request.event_context)
                     attempt_body = body_for(attempt)
                     upstream_request = _gateway_transport.build_request_url(

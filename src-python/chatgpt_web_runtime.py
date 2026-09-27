@@ -619,11 +619,27 @@ def _run_doctor(home: Path, entry: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _doctor_lists_image(value: dict[str, Any]) -> bool:
+    """True only when the doctor row lists image input. Missing means text only."""
+    modalities = value.get("input_modalities", value.get("modalities"))
+    if isinstance(modalities, list):
+        for item in modalities:
+            if isinstance(item, str) and item.strip().lower() == "image":
+                return True
+    capabilities = value.get("capabilities")
+    if isinstance(capabilities, list):
+        for item in capabilities:
+            if isinstance(item, str) and item.strip().lower() in {"image", "image_input", "vision"}:
+                return True
+    return value.get("image_input") is True or value.get("supports_image_input") is True
+
+
 def _doctor_model_entry(value: Any) -> dict[str, Any] | None:
     if isinstance(value, str):
         model_id = value.strip()
         efforts: list[Any] = []
         display_name = ""
+        image_input = False
     elif isinstance(value, dict):
         raw_id = value.get("id", value.get("slug"))
         model_id = raw_id.strip() if isinstance(raw_id, str) else ""
@@ -631,6 +647,7 @@ def _doctor_model_entry(value: Any) -> dict[str, Any] | None:
         display_name = display_name.strip() if isinstance(display_name, str) else ""
         raw_efforts = value.get("efforts", value.get("supported_reasoning_levels"))
         efforts = raw_efforts if isinstance(raw_efforts, list) else []
+        image_input = _doctor_lists_image(value)
     else:
         return None
     if not model_id.startswith("chatgpt-web/"):
@@ -649,6 +666,7 @@ def _doctor_model_entry(value: Any) -> dict[str, Any] | None:
         "id": model_id,
         "display_name": display_name,
         "efforts": parsed_efforts,
+        "image_input": image_input,
     }
 
 

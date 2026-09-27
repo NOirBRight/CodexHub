@@ -119,6 +119,18 @@ def install(namespace: dict[str, Any]) -> None:
     namespace["bind_responses_body"] = bind_responses_body
 
 
+def revoke_thread(thread_id: str) -> None:
+    with _LOCK:
+        _revoke_thread_locked(thread_id, keep=set())
+
+
+def revoke_all_permissions() -> None:
+    with _LOCK:
+        for permit in _PERMITS.values():
+            if permit.state in {"open", "consumed"}:
+                permit.state = "revoked"
+
+
 def reset_process_state() -> None:
     """Drop in-process turn slots and call permission. Tests only."""
     global _NEXT_SLOT
