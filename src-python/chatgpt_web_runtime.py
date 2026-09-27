@@ -49,6 +49,7 @@ LOGIN_CONTROL = "owned-browser-v1"
 RUNTIME_HEALTH_TIMEOUT_SECONDS = 2
 RUNTIME_STARTUP_HEALTH_TIMEOUT_SECONDS = 30
 RUNTIME_STARTUP_TIMEOUT_SECONDS = 180
+MAX_STARTUP_DIAGNOSTIC_BYTES = 8192
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_DOWNLOAD_HOSTS = {
     "github.com",
@@ -1932,19 +1933,27 @@ def _fail(home: Path, message: str) -> int:
     return 1
 
 
+def _startup_fail(home: Path, message: str) -> int:
+    _write_startup_diagnostic(home, message)
+    return _fail(home, message)
+
+
 def supervise(home: Path) -> int:
     home = _assert_private_home(home)
     _mkdir(home)
     pin = load_pin()
     if not _pin_compatible(home, pin):
-        return _fail(home, "version mismatch; refusing to start an incompatible ChatGPT Web Runtime pin")
+        return _startup_fail(
+            home,
+            "version mismatch; refusing to start an incompatible ChatGPT Web Runtime pin",
+        )
     if not _lifecycle(home)["enabled"]:
-        return _fail(home, "ChatGPT Web Runtime is disabled")
+        return _startup_fail(home, "ChatGPT Web Runtime is disabled")
     host = _bind_host()
     try:
         entry = _find_entry(_runtime_root(home))
     except RuntimeError_ as exc:
-        return _fail(home, str(exc))
+        return _startup_fail(home, str(exc))
     from chatgpt_web_login import LoginSession
 
     lock_handle = (home / "supervisor.lock").open("a+")
@@ -1952,9 +1961,12 @@ def supervise(home: Path) -> int:
         _try_lock(lock_handle)
     except BlockingIOError:
         lock_handle.close()
-        return _fail(home, "ChatGPT Web Runtime supervisor is already running")
-    entry_log = None
+        return _startup_fail(home, "ChatGPT Web Runtime supervisor is already running")
     child = None
+    child_output = bytearray()
+    child_output_lock = threading.Lock()
+    child_output_reader = None
+    startup_healthy = threading.Event()
     server = None
     thread = None
     login = None
@@ -1965,15 +1977,27 @@ def supervise(home: Path) -> int:
         config = _read_json(_web_home(home) / "config.json") or {}
         if config.get("mode") == "full":
             tunnel = _start_tunnel_runtime(home, pin, entry)
-        entry_log = (home / "runtime-entry.log").open("ab")
         child = subprocess.Popen(
             [str(entry), "serve"],
             env=_runtime_env(home),
             cwd=str(_web_home(home)),
             stdin=subprocess.DEVNULL,
-            stdout=entry_log,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
+
+        def _capture_startup_output() -> None:
+            assert child is not None and child.stdout is not None
+            while chunk := child.stdout.read1(1024):
+                with child_output_lock:
+                    if startup_healthy.is_set():
+                        continue
+                    child_output.extend(chunk)
+                    if len(child_output) > MAX_STARTUP_DIAGNOSTIC_BYTES:
+                        del child_output[:-MAX_STARTUP_DIAGNOSTIC_BYTES]
+
+        child_output_reader = threading.Thread(target=_capture_startup_output, daemon=True)
+        child_output_reader.start()
         server = ThreadingHTTPServer((host, 0), _StatusHandler)
         bound_host, diagnostic_port = server.server_address[:2]
         if bound_host != LOOPBACK_HOST:
@@ -2011,6 +2035,13 @@ def supervise(home: Path) -> int:
         thread.start()
         while child.poll() is None:
             login.tick()
+            if not startup_healthy.is_set():
+                if _runtime_healthy(
+                    home,
+                    {"process": {"pid": child.pid, "port": runtime_port}},
+                ):
+                    with child_output_lock:
+                        startup_healthy.set()
             time.sleep(0.2)
         _append_log(home, f"runtime entry exited {child.returncode}")
     except Exception as exc:
@@ -2032,8 +2063,15 @@ def supervise(home: Path) -> int:
             server.server_close()
         if thread is not None:
             thread.join(timeout=2)
-        if entry_log is not None:
-            entry_log.close()
+        if child_output_reader is not None:
+            child_output_reader.join(timeout=2)
+        if not startup_healthy.is_set() and (child is not None or startup_error is not None):
+            with child_output_lock:
+                output = child_output.decode("utf-8", "replace").strip()
+            detail = "\n".join(
+                part for part in (output, str(startup_error) if startup_error else "") if part
+            )
+            _write_startup_diagnostic(home, detail)
         if tunnel is not None:
             try:
                 _stop_tunnel_runtime(home, tunnel)
@@ -2124,20 +2162,21 @@ def _runtime_healthy(home: Path, status: dict[str, Any]) -> bool:
 
 
 def _startup_log_detail(home: Path) -> str:
-    lines: list[str] = []
-    for name in ("runtime-entry.log", "supervisor.log"):
-        path = home / name
+    try:
+        detail = (home / "startup-diagnostic.log").read_bytes()[-MAX_STARTUP_DIAGNOSTIC_BYTES:]
+    except OSError:
+        return ""
+    return redact(detail.decode("utf-8", "replace"), _secrets(home)).replace("\n", " ")[-2000:]
+
+
+def _write_startup_diagnostic(home: Path, detail: str) -> None:
+    safe = redact(detail, _secrets(home)).strip()
+    if safe:
+        payload = safe.encode("utf-8")[-MAX_STARTUP_DIAGNOSTIC_BYTES:]
         try:
-            with path.open("rb") as handle:
-                handle.seek(0, os.SEEK_END)
-                size = handle.tell()
-                handle.seek(max(0, size - 8192))
-                tail = handle.read().decode("utf-8", "replace")
+            _write_private_bytes(home / "startup-diagnostic.log", payload)
         except OSError:
-            continue
-        lines.extend(line.strip() for line in tail.splitlines() if line.strip())
-    detail = redact(" | ".join(lines[-8:]), _secrets(home))
-    return detail.replace("\n", " ")[-2000:]
+            pass
 
 
 def _startup_failure_message(home: Path, supervisor_exit: int | None) -> str:
@@ -2171,6 +2210,8 @@ def start_runtime(home: Path) -> dict[str, Any]:
     env = os.environ.copy()
     env["CODEXHUB_CHATGPT_WEB_HOME"] = str(home)
     env.pop("CODEX_WEB_GPT_DEV_HOME", None)
+    (home / "startup-diagnostic.log").unlink(missing_ok=True)
+    (home / "runtime-entry.log").unlink(missing_ok=True)
     process = subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve()), "supervise", "--home", str(home)],
         env=env,
@@ -2196,8 +2237,8 @@ def start_runtime(home: Path) -> dict[str, Any]:
         existing = _running_status(home)
         if existing is not None and _runtime_healthy(home, existing):
             return existing
-        raise RuntimeError_(_startup_failure_message(home, process.poll()))
-    except Exception:
+        raise RuntimeError_("ChatGPT Web Runtime did not become healthy")
+    except Exception as exc:
         if process.poll() is None:
             record = _read_json(home / "process.json") or {}
             if record.get("supervisor_pid") == process.pid:
@@ -2210,6 +2251,8 @@ def start_runtime(home: Path) -> dict[str, Any]:
             elif _process_record(home) is None:
                 process.kill()
                 process.wait(timeout=2)
+        if isinstance(exc, RuntimeError_) and str(exc) == "ChatGPT Web Runtime did not become healthy":
+            raise RuntimeError_(_startup_failure_message(home, process.poll())) from exc
         raise
 
 

@@ -71,6 +71,7 @@ def _fixture_health_server() -> str:
     return '''
 import json
 import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -99,6 +100,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        if os.environ.get("STARTUP_RUNTIME_OUTPUT"):
+            print(os.environ["STARTUP_CONTROL_TOKEN"], os.environ["STARTUP_RUNTIME_KEY"], file=sys.stderr, flush=True)
 
 server = ThreadingHTTPServer((config["host"], int(config["port"])), Handler)
 server.serve_forever()
@@ -158,6 +161,30 @@ if [ "$1" = "serve" ]; then
 fi
 exit 0
 """
+
+
+def _startup_diagnostics_failure_script() -> str:
+    script = """#!/bin/sh
+set -eu
+if [ "$1" = "doctor" ]; then
+  printf '%s\\n' '{"ok":false}'
+  exit 0
+fi
+if [ "$1" = "serve" ]; then
+  if [ -n "${STARTUP_CAUSE-}" ]; then
+    for attempt in 1 2 3 4; do
+      printf '%4096s' '' | tr ' ' x >&2
+    done
+    printf '\\n%s\\n' "$STARTUP_CAUSE $STARTUP_CONTROL_TOKEN $STARTUP_RUNTIME_KEY" >&2
+    exit 1
+  fi
+  exec __PYTHON__ -c __HEALTH_SERVER__ "$0" "$@"
+fi
+exit 0
+"""
+    return script.replace("__PYTHON__", shlex.quote(sys.executable)).replace(
+        "__HEALTH_SERVER__", shlex.quote(_fixture_health_server())
+    )
 
 
 def _archive(directory: Path, script: str) -> Path:
@@ -760,6 +787,77 @@ def test_start_does_not_acknowledge_a_child_that_fails_during_initialization(
     assert not worker.is_alive(), "start call did not finish after child failure"
     assert "error" in startup, f"start reported a running child after it exited: {startup.get('status')}"
     assert "simulated delayed startup failure" in str(startup["error"])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable fixture")
+def test_startup_diagnostics_are_current_bounded_and_secret_safe(tmp_path: Path) -> None:
+    home = tmp_path / "runtime"
+    runtime_key = "synthetic-tunnel-runtime-key-DO-NOT-LOG"
+    control_token = "synthetic-control-token-0123456789-DO-NOT-LOG"
+    archive = _archive(tmp_path, _startup_diagnostics_failure_script())
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    assert _run(
+        home,
+        "settings-save",
+        pin=pin,
+        stdin=json.dumps({"tunnel": {"runtime_key": {"action": "replace", "value": runtime_key}}}),
+    )["_exit_code"] == 0
+    web_home = home / "web-home"
+    web_home.mkdir(exist_ok=True)
+    (web_home / "config.json").write_text(json.dumps({"controlToken": control_token}), encoding="utf-8")
+
+    causes = ("first attempt: stale ephemeral path", "second attempt: current ephemeral path")
+    for index, cause in enumerate(causes):
+        result = _run(
+            home,
+            "start",
+            pin=pin,
+            extra_env={
+                "STARTUP_CAUSE": cause,
+                "STARTUP_CONTROL_TOKEN": control_token,
+                "STARTUP_RUNTIME_KEY": runtime_key,
+            },
+        )
+        assert result["_exit_code"] == 1
+        error = json.dumps(result)
+        assert cause in error
+        assert runtime_key not in error
+        assert control_token not in error
+        if index:
+            assert causes[0] not in error
+
+    diagnostic = (home / "startup-diagnostic.log").read_text(encoding="utf-8")
+    assert causes[1] in diagnostic
+    assert causes[0] not in diagnostic
+    assert (home / "startup-diagnostic.log").stat().st_size <= 8192
+    assert not (home / "runtime-entry.log").exists()
+
+    try:
+        healthy = _run(
+            home,
+            "start",
+            pin=pin,
+            extra_env={
+                "STARTUP_CONTROL_TOKEN": control_token,
+                "STARTUP_RUNTIME_KEY": runtime_key,
+                "STARTUP_RUNTIME_OUTPUT": "1",
+            },
+        )
+        assert healthy["_exit_code"] == 0
+        assert not (home / "startup-diagnostic.log").exists()
+    finally:
+        _stop(home, pin)
+
+    log_files = [
+        path for path in home.rglob("*")
+        if path.is_file() and (path.suffix == ".log" or "diagnostic" in path.name)
+    ]
+    assert log_files
+    for path in log_files:
+        payload = path.read_bytes()
+        assert runtime_key.encode() not in payload, path
+        assert control_token.encode() not in payload, path
 
 
 def test_owned_login_starts_cancels_and_does_not_claim_authentication(tmp_path: Path) -> None:
