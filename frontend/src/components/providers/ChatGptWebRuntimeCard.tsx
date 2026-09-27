@@ -218,7 +218,7 @@ export function ChatGptWebRuntimeCard({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-base font-semibold text-ink">ChatGPT</h3>
-            <span className="ws-status-chip inline-flex h-6 items-center border border-line bg-panel px-2 text-xs" role="status">{t(`providers.${stateKey}`)}</span>
+            <span className="ws-status-chip inline-flex h-6 items-center border border-line bg-panel px-2 text-[11px] font-semibold leading-none" role="status">{t(`providers.${stateKey}`)}</span>
           </div>
           <p className="mt-1 text-xs leading-5 text-slate-600">{t("providers.chatgptWebBody")}</p>
         </div>
