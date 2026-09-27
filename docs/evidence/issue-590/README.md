@@ -49,3 +49,21 @@ prepared artifacts, not yet published by #588 or selected by the released
 runtime pin. Until publication and pin update, a runtime missing
 `/admin/status` remains blocked and readiness does not use the legacy model
 endpoint as a fallback.
+
+## Isolated account inspection — 2026-09-28
+
+A separate read-only inspection reused the saved login state already copied
+into the isolated runtime. The active runtime setting was `headed=true`, but
+the readiness browser launcher always forced `--headless=new`. That launch
+reached `chatgpt.com` on the temporary-chat path and remained on a
+`Just a moment...` challenge page with no visible composer for 30 seconds; this
+was not evidence of an expired login. With the browser opened in the configured
+headed mode, a first attempt still found no composer, then the next inspection
+confirmed the account and temporary-chat surface. After the launcher was
+changed to honor the active `headed` setting, two consecutive inspections
+confirmed the account and exposed the expected capability metadata.
+
+These checks only inspected the logged-in page. They did not verify the
+connector, submit a message, invoke a tool, or establish text/tool readiness.
+The source login files and the separately edited settings page were not changed
+or read by this diagnostic.
