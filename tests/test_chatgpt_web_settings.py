@@ -87,7 +87,7 @@ def _failing_runtime_startup(home: Path, entered: Path) -> Iterator[Callable[[],
 
     def start_runtime():
         try:
-            runtime.start_runtime(home)
+            runtime_fixtures._start_runtime(home)
         except runtime.RuntimeError_ as error:
             startup["error"] = str(error)
 
@@ -331,7 +331,6 @@ def test_settings_save_does_not_disrupt_inflight_gateway_request(settings_server
         )
 
 
-@pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable runtime fixture")
 def test_settings_http_does_not_claim_failed_first_startup_config_is_active(
     settings_server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -361,7 +360,6 @@ def test_settings_http_does_not_claim_failed_first_startup_config_is_active(
         runtime.stop_runtime(home, disable=True)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="uses Unix executable runtime fixtures")
 def test_settings_http_keeps_last_loaded_values_after_failed_restart(
     settings_server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -373,7 +371,7 @@ def test_settings_http_keeps_last_loaded_values_after_failed_restart(
     monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(good_pin))
     assert runtime.install_runtime(home, good_archive)["installed"] is True
     runtime.save_settings(home, {"options": {"context_window": 131072}})
-    runtime.start_runtime(home)
+    runtime_fixtures._start_runtime(home)
 
     try:
         session = _session(server)
@@ -426,7 +424,6 @@ def test_settings_http_keeps_last_loaded_values_after_failed_restart(
         runtime.stop_runtime(home, disable=True)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable runtime fixture")
 def test_settings_save_preserves_an_open_runtime_stream_until_explicit_restart(
     settings_server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -441,7 +438,7 @@ def test_settings_save_preserves_an_open_runtime_stream_until_explicit_restart(
     monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(pin))
     assert runtime.install_runtime(home, archive)["installed"] is True
     runtime.save_settings(home, {"options": {"context_window": 131072}})
-    started = runtime.start_runtime(home)
+    started = runtime_fixtures._start_runtime(home)
     release_stream = home / "web-home" / "release-stream"
 
     try:
@@ -488,7 +485,7 @@ def test_settings_save_preserves_an_open_runtime_stream_until_explicit_restart(
         assert runtime.build_status(home)["process"]["pid"] == started["process"]["pid"]
 
         runtime.stop_runtime(home, disable=False)
-        restarted = runtime.start_runtime(home)
+        restarted = runtime_fixtures._start_runtime(home)
         status, _headers, body = _call(server, "/api/settings", session=session)
         active = json.loads(body)
         assert status == 200
