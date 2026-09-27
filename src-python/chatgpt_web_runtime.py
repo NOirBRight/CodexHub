@@ -50,6 +50,7 @@ RUNTIME_HEALTH_TIMEOUT_SECONDS = 2
 RUNTIME_STARTUP_HEALTH_TIMEOUT_SECONDS = 30
 RUNTIME_STARTUP_TIMEOUT_SECONDS = 180
 MAX_STARTUP_DIAGNOSTIC_BYTES = 8192
+SUPERVISOR_STOP_REQUEST_NAME = "supervisor-stop-request.json"
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_DOWNLOAD_HOSTS = {
     "github.com",
@@ -2092,6 +2093,14 @@ def supervise(home: Path) -> int:
     except BlockingIOError:
         lock_handle.close()
         return _startup_fail(home, "ChatGPT Web Runtime supervisor is already running")
+    instance_id = secrets.token_hex(16) if os.name == "nt" else None
+    if instance_id is not None:
+        # The exclusive supervisor lock proves this request has no live owner.
+        try:
+            (home / SUPERVISOR_STOP_REQUEST_NAME).unlink(missing_ok=True)
+        except OSError as exc:
+            lock_handle.close()
+            return _startup_fail(home, f"ChatGPT Web Runtime stop state could not be reset: {exc}")
     child = None
     child_output = bytearray()
     child_output_lock = threading.Lock()
@@ -2148,6 +2157,7 @@ def supervise(home: Path) -> int:
                 "ownership": "codexhub-supervisor",
                 "tunnel_alias": tunnel.get("alias") if tunnel else None,
                 "tunnel_pid": tunnel_owner.get("pid") if tunnel else None,
+                **({"instance_id": instance_id} if instance_id is not None else {}),
             },
         )
         _write_lifecycle(home, enabled=True, restart_required=False)
@@ -2164,6 +2174,16 @@ def supervise(home: Path) -> int:
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
         thread.start()
         while child.poll() is None:
+            if (
+                instance_id is not None
+                and _supervisor_stop_requested(
+                    home,
+                    supervisor_pid=os.getpid(),
+                    runtime_pid=child.pid,
+                    instance_id=instance_id,
+                )
+            ):
+                break
             login.tick()
             if not startup_healthy.is_set():
                 if _runtime_healthy(
@@ -2175,7 +2195,8 @@ def supervise(home: Path) -> int:
                     with child_output_lock:
                         startup_healthy.set()
             time.sleep(0.2)
-        _append_log(home, f"runtime entry exited {child.returncode}")
+        if child.returncode is not None:
+            _append_log(home, f"runtime entry exited {child.returncode}")
     except Exception as exc:
         startup_error = exc if isinstance(exc, RuntimeError_) else RuntimeError_(
             f"ChatGPT Web Runtime supervisor failed: {exc.__class__.__name__}"
@@ -2209,6 +2230,16 @@ def supervise(home: Path) -> int:
                 _stop_tunnel_runtime(home, tunnel)
             except Exception as exc:
                 _append_log(home, f"owned Tunnel shutdown could not be confirmed: {exc}")
+        if instance_id is not None and child is not None:
+            request_path = home / SUPERVISOR_STOP_REQUEST_NAME
+            if _supervisor_stop_requested(
+                home,
+                supervisor_pid=os.getpid(),
+                runtime_pid=child.pid,
+                instance_id=instance_id,
+            ):
+                with contextlib.suppress(OSError):
+                    request_path.unlink(missing_ok=True)
         (home / "process.json").unlink(missing_ok=True)
         lock_handle.close()
     if startup_error is not None:
@@ -2319,6 +2350,20 @@ def _startup_failure_message(home: Path, supervisor_exit: int | None) -> str:
     return f"{status}: {detail}" if detail else status
 
 
+def _supervisor_stop_requested(
+    home: Path,
+    *,
+    supervisor_pid: int,
+    runtime_pid: int,
+    instance_id: str,
+) -> bool:
+    return _read_json(home / SUPERVISOR_STOP_REQUEST_NAME) == {
+        "supervisor_pid": supervisor_pid,
+        "runtime_pid": runtime_pid,
+        "instance_id": instance_id,
+    }
+
+
 def start_runtime(home: Path) -> dict[str, Any]:
     home = _assert_private_home(home)
     _mkdir(home)
@@ -2408,11 +2453,32 @@ def _signal_supervisor(home: Path) -> None:
         supervisor_pid = int(record.get("supervisor_pid") or 0)
     except (TypeError, ValueError):
         supervisor_pid = 0
+    if os.name == "nt":
+        runtime_pid = record.get("pid")
+        instance_id = record.get("instance_id")
+        if (
+            supervisor_pid > 1
+            and type(record.get("supervisor_pid")) is int
+            and _pid_alive(supervisor_pid)
+            and type(runtime_pid) is int and runtime_pid > 1
+            and isinstance(instance_id, str)
+            and re.fullmatch(r"[0-9a-f]{32}", instance_id) is not None
+            and record.get("ownership") == "codexhub-supervisor"
+            and record.get("private_home") == str(home)
+        ):
+            _write_json(
+                home / SUPERVISOR_STOP_REQUEST_NAME,
+                {
+                    "supervisor_pid": supervisor_pid,
+                    "runtime_pid": runtime_pid,
+                    "instance_id": instance_id,
+                },
+                mode=0o600,
+            )
+        return
     if supervisor_pid and _pid_alive(supervisor_pid):
         command = _cmdline(supervisor_pid)
-        if os.name == "nt" or (
-            "chatgpt_web_runtime.py" in command and "supervise" in command and str(home) in command
-        ):
+        if "chatgpt_web_runtime.py" in command and "supervise" in command and str(home) in command:
             os.kill(supervisor_pid, signal.SIGTERM)
             return
     runtime = _process_record(home)
