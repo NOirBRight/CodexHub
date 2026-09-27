@@ -423,6 +423,14 @@ def _seed_check(
     return chatgpt_web_checks.check_runtime(home)
 
 
+def _set_browser_only_mode(home: Path) -> None:
+    """Restore a restartable fixture mode after synthetic full-mode readiness."""
+    config_path = home / "web-home" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["mode"] = "browser-only"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+
 def _requests(home: Path) -> list[dict]:
     path = home / "web-home" / "requests.jsonl"
     if not path.is_file():

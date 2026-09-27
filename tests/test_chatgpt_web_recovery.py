@@ -405,6 +405,7 @@ def test_restart_accepts_a_new_text_turn_and_rejects_the_old_call(
         issued_count = len(web._requests(home))
         stopped = web._run(home, "stop", pin=pin)
         assert stopped.get("process", {}).get("running") is not True
+        web._set_browser_only_mode(home)
         web._start(home, pin, monkeypatch)
         status, payload = web._post(
             port,

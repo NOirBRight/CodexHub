@@ -1,4 +1,4 @@
-# ADR-0015: Managed ChatGPT Web Runtime behind the existing Gateway
+# ADR-0016: Managed ChatGPT Web Runtime behind the existing Gateway
 
 Date: 2026-09-27
 Status: Accepted — scope, responsibilities, eight slices, and Codex CLI/Desktop acceptance approved
