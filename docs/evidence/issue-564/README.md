@@ -1,12 +1,20 @@
 # Claude coexistence live candidate evidence (#564)
 
-## Current continuation: 631a5478 packages
+## Published 0.2.28 candidate: d7508997
 
-[Current real-client results and Windows blocker resolution](631a5478/README.md)
-cover the matching Linux/Windows packages: CLI 8/8 and independent Chat 2/2 on
-each OS. [Earlier bounded Claude evidence](e0a2289b/README.md) retains its
-original SHA and scope. Publication and installation remain on
-hold while the other session stabilizes its fixes. No gate waiver is granted.
+[CodexHub 0.2.28](https://github.com/NOirBRight/CodexHub/releases/tag/v0.2.28)
+was built for Linux and Windows from
+`d7508997ee15baad2cad08f1993af0b9cfd7ed1e`. Its [bilingual release
+notes](../../releases/0.2.28.md) record the exact-SHA gates, verified CLI
+versions, supported scenarios and unverified limits. Both platforms passed the
+four-client × two-provider CLI gate 8/8 and independent Chat 2/2. Linux native
+Claude switching and the rendered packaged Usage row also passed. The
+published release has nine assets, including the merged two-platform updater
+manifest and SHA256SUMS. Issue #564 remains open for the explicitly unverified
+scope; no such row is counted as a pass.
+
+[631a5478](631a5478/README.md) and [e0a2289b](e0a2289b/README.md) retain
+their original SHA and scope as earlier candidate evidence.
 
 ## Live source switching candidate `b1ce405a` (2026-09-26)
 
