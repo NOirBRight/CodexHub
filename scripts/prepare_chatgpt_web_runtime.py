@@ -121,6 +121,8 @@ def _build_runtime_source(repo: Path, output: Path, source: dict[str, Any]) -> N
         source_dir = Path(temporary) / "source"
         source_dir.mkdir()
         _run(["git", "init", "--quiet", str(source_dir)])
+        _run(["git", "-C", str(source_dir), "config", "core.autocrlf", "false"])
+        _run(["git", "-C", str(source_dir), "config", "core.filemode", "false"])
         _run(["git", "-C", str(source_dir), "remote", "add", "origin", UPSTREAM_URL])
         _run(["git", "-C", str(source_dir), "fetch", "--quiet", "--depth=1", "origin", UPSTREAM_COMMIT])
         _run(["git", "-C", str(source_dir), "checkout", "--quiet", "--detach", "FETCH_HEAD"])
