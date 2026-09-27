@@ -97,7 +97,6 @@ def _public_status(home: Path) -> dict[str, Any]:
         and status.get("admitting") is True
         and not disabled
         and not restart_required
-        and not settings_pending_restart
         and login.get("state") == "signed_in"
         and browser.get("state") == "passed"
     )

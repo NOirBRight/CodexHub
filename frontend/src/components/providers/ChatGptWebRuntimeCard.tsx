@@ -19,7 +19,7 @@ export function ChatGptWebRuntimeCard({
   unsaved?: boolean;
 }) {
   const { t } = useTranslation();
-  const { showToast, updateToast } = useToasts();
+  const { dismissToast, showToast, updateToast } = useToasts();
   const [status, setStatus] = useState<ChatGptWebStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -29,6 +29,30 @@ export function ChatGptWebRuntimeCard({
   const [refreshIndex, setRefreshIndex] = useState(0);
   const request = useRef<Promise<ChatGptWebStatus> | null>(null);
   const actionRunning = useRef(false);
+  const settingsRestartToast = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (status?.settings_pending_restart) {
+      const reminder = {
+        text: t("providers.chatgptWebSettingsPendingRestart"),
+        tone: "info" as const,
+        timeoutMs: null,
+        dedupeKey: "chatgpt-web-settings-restart",
+      };
+      if (settingsRestartToast.current) {
+        updateToast(settingsRestartToast.current, reminder);
+      } else {
+        settingsRestartToast.current = showToast(reminder);
+      }
+    } else if (settingsRestartToast.current) {
+      dismissToast(settingsRestartToast.current);
+      settingsRestartToast.current = null;
+    }
+  }, [dismissToast, showToast, status?.settings_pending_restart, t, updateToast]);
+
+  useEffect(() => () => {
+    if (settingsRestartToast.current) dismissToast(settingsRestartToast.current);
+  }, [dismissToast]);
 
   function readStatus() {
     request.current ??= api.chatgptWebStatus().finally(() => { request.current = null; });
