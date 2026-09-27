@@ -717,11 +717,14 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
     running = record is not None
     layers = _layers_from_doctor(None)
     doctor_models: list[dict[str, Any]] = []
+    report: dict[str, Any] | None = None
     if running and installed is not None:
         entry = _find_entry(_runtime_root(home))
         report = _run_doctor(home, entry)
         layers = _layers_from_doctor(report)
         doctor_models = _models_from_doctor(report)
+    raw_capacity = report.get("capacity") if isinstance(report, dict) else None
+    capacity = raw_capacity if isinstance(raw_capacity, str) and raw_capacity else "available"
     lifecycle = _lifecycle(home)
     window = _read_json(home / "window.json") or {}
     ready = bool(
@@ -764,6 +767,7 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
             "listen_host": LOOPBACK_HOST if running else None,
         },
         "ready": ready,
+        "capacity": capacity,
         "models": doctor_models,
         "restart_required": lifecycle["restart_required"],
         "disabled": not lifecycle["enabled"],

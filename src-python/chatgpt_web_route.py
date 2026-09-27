@@ -16,6 +16,7 @@ from typing import Any, Iterator, Mapping
 from catalog import canonical_model_id, compose_flat_label
 from gateway_errors import identity_failure
 
+import chatgpt_web_collab
 import chatgpt_web_runtime
 
 PROVIDER_ID = "chatgpt-web"
@@ -760,3 +761,6 @@ def _encode_sse(events: list[dict[str, Any]]) -> bytes:
         for event in events
     ]
     return b"".join(chunks)
+
+
+chatgpt_web_collab.install(globals())
