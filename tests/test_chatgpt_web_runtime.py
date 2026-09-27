@@ -841,3 +841,22 @@ def test_login_failure_is_visible_without_exposing_process_output(tmp_path: Path
         assert SECRET not in json.dumps(status)
     finally:
         _stop(home, pin)
+
+
+def test_concurrent_login_commands_are_acknowledged_without_duplicate_browser(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    home = tmp_path / "runtime"
+    archive = _archive(tmp_path, _fixture_script(home / "marker"))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    assert _run(home, "start", pin=pin)["_exit_code"] == 0
+    try:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = list(pool.map(lambda _: _run(home, "open-login", pin=pin), range(3)))
+        assert all(result["_exit_code"] == 0 for result in results), results
+        assert all(result["login"]["window"] == "open" for result in results)
+        assert (home / "web-home" / "argv.log").read_text().splitlines().count("login") == 1
+        assert _run(home, "close-login", pin=pin)["login"]["window"] == "closed"
+    finally:
+        _stop(home, pin)

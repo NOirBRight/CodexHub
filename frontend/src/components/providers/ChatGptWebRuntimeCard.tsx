@@ -6,6 +6,8 @@ import { ProviderLogo } from "../../lib/providerLogos";
 import { api, messageFromError } from "../../lib/tauri";
 import type { ChatGptWebStatus } from "../../lib/types";
 
+let runtimeActionVersion = 0;
+
 export function ChatGptWebRuntimeCard({ unsaved = false }: { unsaved?: boolean }) {
   const { t } = useTranslation();
   const { showToast, updateToast } = useToasts();
@@ -16,6 +18,41 @@ export function ChatGptWebRuntimeCard({ unsaved = false }: { unsaved?: boolean }
   const [confirmDelete, setConfirmDelete] = useState(false);
   const request = useRef<Promise<ChatGptWebStatus> | null>(null);
   const actionRunning = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  function readStatus() {
+    request.current ??= api.chatgptWebStatus().finally(() => { request.current = null; });
+    return request.current;
+  }
+
+  async function followLogin(toastId: string, version: number) {
+    try {
+      while (runtimeActionVersion === version) {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        if (runtimeActionVersion !== version) return;
+        const next = await readStatus();
+        if (runtimeActionVersion !== version) return;
+        if (mounted.current) setStatus(next);
+        if (next.login.window === "open") continue;
+        updateToast(toastId, { action: null,
+          text: t(`providers.${next.login.error || next.login.state !== "signed_in" ? "chatgptWebLoginFailed" : "chatgptWebLoginVerified"}`),
+          tone: next.login.error || next.login.state !== "signed_in" ? "error" : "success" });
+        return;
+      }
+    } catch (cause) {
+      if (runtimeActionVersion === version) updateToast(toastId, {
+        action: { label: t("common.retry"), onClick: () => {
+          if (runtimeActionVersion !== version) return;
+          updateToast(toastId, { action: null, text: t("providers.chatgptWebWaitingLogin"), tone: "loading" });
+          void followLogin(toastId, version);
+        } }, text: messageFromError(cause), tone: "error",
+      });
+    }
+  }
 
   // Poll serially: doctor may take longer than the refresh interval.
   useEffect(() => {
@@ -24,8 +61,7 @@ export function ChatGptWebRuntimeCard({ unsaved = false }: { unsaved?: boolean }
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
       try {
-        request.current ??= api.chatgptWebStatus().finally(() => { request.current = null; });
-        const next = await request.current;
+        const next = await readStatus();
         if (!cancelled) { setStatus(next); setError(null); }
       } catch (cause) {
         if (!cancelled) setError(messageFromError(cause));
@@ -37,20 +73,29 @@ export function ChatGptWebRuntimeCard({ unsaved = false }: { unsaved?: boolean }
     return () => { cancelled = true; clearTimeout(timer); };
   }, [busy, refreshIndex, unsaved]);
 
-  async function run(label: string, action: () => Promise<ChatGptWebStatus>, success: string) {
+  async function run(label: string, action: () => Promise<ChatGptWebStatus>, success: string, monitorLogin = false) {
     if (actionRunning.current || unsaved) return;
     actionRunning.current = true;
+    const version = ++runtimeActionVersion;
     setBusy(true);
     const toastId = showToast({ text: label, tone: "loading", dedupeKey: "chatgpt-web-runtime" });
     try {
       await request.current?.catch(() => undefined);
-      setStatus(await action());
+      const next = await action();
+      if (mounted.current) setStatus(next);
       setError(null);
       setConfirmDelete(false);
-      updateToast(toastId, { action: null, text: success, tone: "success" });
+      if (monitorLogin && next.login.window === "open") {
+        updateToast(toastId, { action: null, text: t("providers.chatgptWebWaitingLogin"), tone: "loading" });
+        void followLogin(toastId, version);
+      } else {
+        updateToast(toastId, { action: null, text: monitorLogin ? t("providers.chatgptWebLoginFailed") : success, tone: monitorLogin ? "error" : "success" });
+      }
     } catch (cause) {
       updateToast(toastId, {
-        action: { label: t("common.retry"), onClick: () => void run(label, action, success) },
+        action: { label: t("common.retry"), onClick: () => {
+          if (runtimeActionVersion === version) void run(label, action, success, monitorLogin);
+        } },
         text: messageFromError(cause), tone: "error",
       });
     } finally {
@@ -62,15 +107,15 @@ export function ChatGptWebRuntimeCard({ unsaved = false }: { unsaved?: boolean }
   const prepared = Boolean(status?.installed && status.component.compatible && status.process.running && !status.disabled);
   const signedIn = status?.login.state === "signed_in";
   const loginOpen = status?.login.window === "open";
-  const textReady = Boolean(prepared && signedIn && !status?.restart_required && status?.admitting !== false
+  const textReady = Boolean(!error && prepared && signedIn && !status?.restart_required && status?.admitting !== false
     && status?.browser_smoke.state === "passed" && status.process.listen_host === "127.0.0.1"
     && status.process.port && status.process.port > 0 && status.process.port <= 65535);
-  const stateKey = !status ? "chatgptWebChecking" : status.disabled ? "chatgptWebDisabled"
-    : status.restart_required ? "chatgptWebRestartRequired" : status.ready ? "chatgptWebReady"
+  const stateKey = error ? "chatgptWebStatusUnknown" : !status ? "chatgptWebChecking" : status.disabled ? "chatgptWebDisabled"
+    : status.restart_required ? "chatgptWebRestartRequired" : status.ready && textReady ? "chatgptWebReady"
     : textReady ? "chatgptWebTextReady" : "chatgptWebNotReady";
   const disabled = busy || unsaved || !status || Boolean(error);
-  const action = (loading: string, task: () => Promise<ChatGptWebStatus>, success: string) =>
-    () => void run(t(`providers.${loading}`), task, t(`providers.${success}`));
+  const action = (loading: string, task: () => Promise<ChatGptWebStatus>, success: string, monitorLogin = false) =>
+    () => void run(t(`providers.${loading}`), task, t(`providers.${success}`), monitorLogin);
 
   return (
     <section className="grid gap-5" aria-label={t("providers.chatgptWebTitle")}>
@@ -102,7 +147,7 @@ export function ChatGptWebRuntimeCard({ unsaved = false }: { unsaved?: boolean }
           <p className="my-2 text-xs leading-5 text-slate-600">{t(`providers.${loginOpen ? "chatgptWebLoginInstructions" : signedIn ? "chatgptWebSignedIn" : "chatgptWebSignInBody"}`)}</p>
           {status?.login.error ? <p role="alert" className="mb-2 text-xs text-red-700">{t("providers.chatgptWebLoginFailed")}</p> : null}
           {!signedIn || loginOpen ? <button type="button" className="ws-button" disabled={disabled || !prepared || loginOpen}
-            onClick={action("chatgptWebOpeningLogin", () => api.chatgptWebOpenLogin(), "chatgptWebLoginOpened")}>
+            onClick={action("chatgptWebOpeningLogin", () => api.chatgptWebOpenLogin(), "chatgptWebLoginOpened", true)}>
             {t(`providers.${loginOpen ? "chatgptWebWaitingLogin" : "chatgptWebOpenLogin"}`)}
           </button> : null}
         </li>
