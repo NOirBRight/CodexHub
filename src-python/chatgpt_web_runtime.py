@@ -37,7 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
@@ -2238,7 +2238,7 @@ def supervise(home: Path) -> int:
                 runtime_pid=child.pid,
                 instance_id=instance_id,
             ):
-                with contextlib.suppress(OSError):
+                with suppress(OSError):
                     request_path.unlink(missing_ok=True)
         (home / "process.json").unlink(missing_ok=True)
         lock_handle.close()
