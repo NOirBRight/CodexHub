@@ -29,6 +29,13 @@ export function ChatGptWebRuntimeCard({ unsaved = false }: { unsaved?: boolean }
     return request.current;
   }
 
+  function finishLogin(toastId: string, next: ChatGptWebStatus) {
+    const failed = Boolean(next.login.error) || next.login.state !== "signed_in";
+    updateToast(toastId, { action: null,
+      text: t(`providers.${failed ? "chatgptWebLoginFailed" : "chatgptWebLoginVerified"}`),
+      tone: failed ? "error" : "success" });
+  }
+
   async function followLogin(toastId: string, version: number) {
     try {
       while (runtimeActionVersion === version) {
@@ -38,9 +45,7 @@ export function ChatGptWebRuntimeCard({ unsaved = false }: { unsaved?: boolean }
         if (runtimeActionVersion !== version) return;
         if (mounted.current) setStatus(next);
         if (next.login.window === "open") continue;
-        updateToast(toastId, { action: null,
-          text: t(`providers.${next.login.error || next.login.state !== "signed_in" ? "chatgptWebLoginFailed" : "chatgptWebLoginVerified"}`),
-          tone: next.login.error || next.login.state !== "signed_in" ? "error" : "success" });
+        finishLogin(toastId, next);
         return;
       }
     } catch (cause) {
@@ -88,8 +93,10 @@ export function ChatGptWebRuntimeCard({ unsaved = false }: { unsaved?: boolean }
       if (monitorLogin && next.login.window === "open") {
         updateToast(toastId, { action: null, text: t("providers.chatgptWebWaitingLogin"), tone: "loading" });
         void followLogin(toastId, version);
+      } else if (monitorLogin) {
+        finishLogin(toastId, next);
       } else {
-        updateToast(toastId, { action: null, text: monitorLogin ? t("providers.chatgptWebLoginFailed") : success, tone: monitorLogin ? "error" : "success" });
+        updateToast(toastId, { action: null, text: success, tone: "success" });
       }
     } catch (cause) {
       updateToast(toastId, {
