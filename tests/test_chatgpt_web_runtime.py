@@ -860,3 +860,26 @@ def test_concurrent_login_commands_are_acknowledged_without_duplicate_browser(tm
         assert _run(home, "close-login", pin=pin)["login"]["window"] == "closed"
     finally:
         _stop(home, pin)
+
+
+def test_legacy_supervisor_requires_explicit_restart_before_owned_login(tmp_path: Path) -> None:
+    home = tmp_path / "runtime"
+    archive = _archive(tmp_path, _fixture_script(home / "marker"))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    try:
+        first = _run(home, "start", pin=pin)
+        path = home / "process.json"
+        record = json.loads(path.read_text())
+        record.pop("login_control")
+        path.write_text(json.dumps(record))
+        assert _run(home, "status", pin=pin)["restart_required"] is True
+        refused = _run(home, "open-login", pin=pin)
+        assert refused["_exit_code"] != 0
+        assert "Restart" in refused["error"]
+        restarted = _run(home, "start", pin=pin)
+        assert restarted["process"]["pid"] != first["process"]["pid"]
+        assert restarted["restart_required"] is False
+        assert _run(home, "open-login", pin=pin)["login"]["window"] == "open"
+    finally:
+        _stop(home, pin)

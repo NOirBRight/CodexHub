@@ -40,6 +40,7 @@ from typing import Any
 PINNED_COMMIT = "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
 PINNED_VERSION = "6.1.1"
 LOOPBACK_HOST = "127.0.0.1"
+LOGIN_CONTROL = "owned-browser-v1"
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_DOWNLOAD_HOSTS = {
     "github.com",
@@ -950,11 +951,14 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
     capacity = raw_capacity if isinstance(raw_capacity, str) and raw_capacity else "available"
     lifecycle = _lifecycle(home)
     window = _read_json(home / "window.json") or {}
+    restart_required = lifecycle["restart_required"] or bool(
+        running and record.get("login_control") != LOGIN_CONTROL
+    )
     ready = bool(
         compatible
         and running
         and lifecycle["enabled"]
-        and not lifecycle["restart_required"]
+        and not restart_required
         and layers["login"] == "signed_in"
         and layers["browser_smoke"] == "passed"
         and layers["tunnel"] == "ready"
@@ -975,6 +979,7 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
             "state": layers["login"],
             "window": "open" if running and window.get("open") is True else "closed",
             "error": window.get("error"),
+            "control": None if record is None else record.get("login_control"),
             "account_id": None,
         },
         "browser_smoke": {"state": layers["browser_smoke"]},
@@ -993,7 +998,7 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
         "ready": ready,
         "capacity": capacity,
         "models": doctor_models,
-        "restart_required": lifecycle["restart_required"],
+        "restart_required": restart_required,
         "admitting": lifecycle["admitting"],
         "disabled": not lifecycle["enabled"],
         "installed": installed is not None,
@@ -1117,6 +1122,7 @@ def supervise(home: Path) -> int:
         {
             "pid": child.pid,
             "supervisor_pid": os.getpid(),
+            "login_control": LOGIN_CONTROL,
             "port": runtime_port,
             "diagnostic_port": diagnostic_port,
             "executable": str(entry),
@@ -1209,7 +1215,7 @@ def start_runtime(home: Path) -> dict[str, Any]:
     _find_entry(_runtime_root(home))
     existing = _running_status(home)
     if existing is not None:
-        if not existing.get("restart_required"):
+        if not existing.get("restart_required") and existing.get("login", {}).get("control") == LOGIN_CONTROL:
             return existing
         stop_runtime(home, disable=False)
     if (_read_json(home / "lifecycle.json") or {}).get("enabled") is False:
@@ -1304,6 +1310,8 @@ def open_login(home: Path) -> dict[str, Any]:
     status = _running_status(home)
     if status is None:
         status = start_runtime(home)
+    if status.get("login", {}).get("control") != LOGIN_CONTROL or status.get("restart_required"):
+        raise RuntimeError_("Restart the ChatGPT Web component before opening its login window")
     return _login_command(home, "open")
 
 
@@ -1336,7 +1344,8 @@ def _login_command(home: Path, action: str) -> dict[str, Any]:
 
 def close_login(home: Path) -> dict[str, Any]:
     home = _assert_private_home(home)
-    if _process_record(home) is None:
+    record = _process_record(home)
+    if record is None or record.get("login_control") != LOGIN_CONTROL:
         return build_status(home)
     return _login_command(home, "close")
 
