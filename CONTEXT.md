@@ -12,6 +12,12 @@ _Avoid_: Proxy, runtime proxy, local proxy
 The CodexHub-managed local capability that connects a signed-in ChatGPT webpage to a selected Gateway model route. Its browser account is separate from the existing official Codex subscription credential.
 _Avoid_: Official account, API subscription, second Gateway
 
+**ChatGPT Runtime Settings**:
+The separate settings surface for the ChatGPT Web Runtime's browser account, tunnel, connector, and runtime options. It owns the credentials needed by those capabilities.
+
+**ChatGPT Provider Connection**:
+The CodexHub-side connection to the ChatGPT Web Runtime, consisting of its service address, service access credential, and selected model routes. Its service address is distinct from the Runtime Settings address, and its access credential is distinct from account and tunnel credentials.
+
 **Vision Proxy**:
 The Gateway feature that lets a non-vision target model handle image requests by using a configured image-capable model to produce text visual context.
 _Avoid_: Image conversion, image workaround
