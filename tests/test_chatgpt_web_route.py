@@ -6,6 +6,7 @@ import hashlib
 import http.client
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -28,18 +29,24 @@ import gateway_transport
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "src-python" / "chatgpt_web_runtime.py"
 PIN_PATH = ROOT / "config" / "chatgpt_web_runtime_pin.json"
-ENTRY_NAME = "bin/codex-chatgpt-web"
+ENTRY_NAME = "bin/codex-chatgpt-web.exe" if os.name == "nt" else "bin/codex-chatgpt-web"
 MODEL_ID = "chatgpt-web/gpt-5.6-sol"
 OTHER_MODEL_ID = "chatgpt-web/gpt-5.6-luna"
 PROMPT = "same prompt"
 
 
 def _run(home: Path, *args: str, pin: Path) -> dict:
+    _prepare_command_trampolines(home)
     env = os.environ.copy()
     env["CODEXHUB_CHATGPT_WEB_HOME"] = str(home)
     env["CODEXHUB_CHATGPT_WEB_PIN"] = str(pin)
+    python = sys.executable
+    if os.name == "nt":
+        python = sys._base_executable
+        env["PYTHONHOME"] = sys.base_prefix
+        env["PATH"] = os.pathsep.join((str(Path(python).parent), env.get("PATH", "")))
     completed = subprocess.run(
-        [sys.executable, str(SCRIPT), *args, "--home", str(home)],
+        [python, str(SCRIPT), *args, "--home", str(home)],
         check=False,
         capture_output=True,
         text=True,
@@ -318,12 +325,42 @@ def _archive(directory: Path) -> Path:
     tree = directory / "tree"
     entry = tree / ENTRY_NAME
     entry.parent.mkdir(parents=True, exist_ok=True)
-    entry.write_text(_fixture_script(), encoding="utf-8")
-    entry.chmod(0o755)
     archive = directory / "runtime.tar.gz"
     with tarfile.open(archive, "w:gz") as bundle:
-        bundle.add(entry, arcname=ENTRY_NAME)
+        if os.name == "nt":
+            shutil.copyfile(sys._base_executable, entry)
+            payload = entry.with_name("fixture_payload.py")
+            payload.write_text(_fixture_script(), encoding="utf-8")
+            manifest = tree / "manifest.json"
+            manifest.write_text(json.dumps({"launcher": ENTRY_NAME}), encoding="utf-8")
+            bundle.add(entry, arcname=ENTRY_NAME)
+            bundle.add(payload, arcname=f"{Path(ENTRY_NAME).parent.as_posix()}/fixture_payload.py")
+            bundle.add(manifest, arcname="manifest.json")
+        else:
+            entry.write_text(_fixture_script(), encoding="utf-8")
+            entry.chmod(0o755)
+            bundle.add(entry, arcname=ENTRY_NAME)
     return archive
+
+
+def _prepare_command_trampolines(home: Path) -> None:
+    payload = home / "current" / "runtime" / Path(ENTRY_NAME).parent / "fixture_payload.py"
+    if os.name != "nt" or not payload.is_file():
+        return
+    web_home = home / "web-home"
+    web_home.mkdir(parents=True, exist_ok=True)
+    trampoline = """import os
+import runpy
+import sys
+from pathlib import Path
+
+payload = Path(os.environ["CODEX_CHATGPT_WEB_LAUNCHER"]).with_name("fixture_payload.py")
+sys.argv.insert(1, sys.argv[0])
+sys.argv[0] = str(payload)
+runpy.run_path(str(payload), run_name="__main__")
+"""
+    for command in ("doctor", "serve", "login"):
+        (web_home / command).write_text(trampoline, encoding="utf-8")
 
 
 def _seed_check(
@@ -594,6 +631,70 @@ def _start(home: Path, pin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     except Exception:
         _run(home, "stop", pin=pin)
         raise
+
+
+def test_public_start_uses_stable_isolated_broker_endpoints(tmp_path: Path) -> None:
+    endpoints = []
+    for name in ("first home", "second home"):
+        directory = tmp_path / name
+        directory.mkdir()
+        home, pin = _install(directory)
+        try:
+            started = _run(home, "start", pin=pin)
+            assert started["_exit_code"] == 0, started
+            config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
+            endpoint = config["brokerSocketPath"]
+            if os.name == "nt":
+                identity = hashlib.sha256(
+                    str((home / "web-home").resolve()).lower().encode("utf-8")
+                ).hexdigest()[:20]
+                assert endpoint == rf"\\.\pipe\codex-chatgpt-web-{identity}"
+                assert str(home).casefold() not in endpoint.casefold()
+            else:
+                assert endpoint == str(home / "web-home" / "socket" / "turn-broker.sock")
+            endpoints.append(endpoint)
+        finally:
+            _run(home, "stop", pin=pin)
+
+    assert endpoints[0] != endpoints[1]
+
+
+def test_public_start_status_health_and_stop_keep_runtime_identity(tmp_path: Path) -> None:
+    home, pin = _install(tmp_path)
+    try:
+        started = _run(home, "start", pin=pin)
+        assert started["_exit_code"] == 0, started
+        runtime_pid = started["process"]["pid"]
+        assert isinstance(runtime_pid, int) and runtime_pid > 1
+        process_record = json.loads((home / "process.json").read_text(encoding="utf-8"))
+        assert process_record["pid"] == runtime_pid
+        assert isinstance(process_record.get("supervisor_pid"), int)
+
+        # Repeated public status calls must not disturb the serving process.
+        for _ in range(3):
+            status = _run(home, "status", pin=pin)
+            assert status["_exit_code"] == 0, status
+            assert status["process"]["running"] is True
+            assert status["process"]["pid"] == runtime_pid
+            connection = http.client.HTTPConnection("127.0.0.1", status["process"]["port"], timeout=2)
+            try:
+                connection.request("GET", "/healthz")
+                response = connection.getresponse()
+                health = json.loads(response.read().decode("utf-8"))
+            finally:
+                connection.close()
+            assert response.status == 200
+            assert health["status"] == "ok"
+            assert health["accepting_turns"] is True
+            assert health["pid"] == runtime_pid
+
+        stopped = _run(home, "stop", pin=pin)
+        assert stopped["_exit_code"] == 0, stopped
+        assert stopped["process"]["running"] is False
+        assert not (home / "process.json").exists()
+    finally:
+        if (home / "process.json").exists():
+            _run(home, "stop", pin=pin)
 
 
 @pytest.fixture
