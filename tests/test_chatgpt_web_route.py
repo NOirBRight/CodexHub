@@ -152,6 +152,55 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
+        if mode in {{"collab", "collab-hold"}} and not has_output:
+            turn = turn_id()
+            call_id = "call_" + turn
+            item_id = "fc_" + turn
+            arguments = '{{"task_name":"child","message":"draw"}}'
+            partial = {{
+                "type": "function_call",
+                "id": item_id,
+                "call_id": call_id,
+                "namespace": "collaboration",
+                "name": "spawn_agent",
+                "arguments": "",
+                "encrypted_function_args": [],
+                "status": "in_progress",
+            }}
+            full = {{
+                "type": "function_call",
+                "id": item_id,
+                "call_id": call_id,
+                "namespace": "collaboration",
+                "name": "spawn_agent",
+                "arguments": arguments,
+                "encrypted_function_args": [],
+                "status": "completed",
+            }}
+            emit({{"type": "response.output_item.added", "output_index": 0, "item": partial}})
+            emit({{"type": "response.function_call_arguments.delta", "item_id": item_id, "call_id": call_id, "output_index": 0, "delta": arguments}})
+            emit({{"type": "response.function_call_arguments.done", "item_id": item_id, "call_id": call_id, "output_index": 0, "arguments": arguments}})
+            emit({{"type": "response.output_item.done", "output_index": 0, "item": full}})
+            if mode == "collab-hold":
+                try:
+                    while True:
+                        self.wfile.write(b'data: {{"type":"response.output_text.delta","delta":"."}}\\n\\n')
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                except Exception:
+                    (home / "upstream-closed").write_text("closed", encoding="utf-8")
+                return
+            emit({{
+                "type": "response.completed",
+                "response": {{
+                    "id": "resp_web_collab",
+                    "object": "response",
+                    "status": "completed",
+                    "model": {MODEL_ID!r},
+                    "output": [full],
+                }},
+            }})
+            return
         toolish = mode == "tool-hold" or (mode != "hold" and (declares_tools or has_call) and not has_output)
         emit({{
             "type": "response.created",
