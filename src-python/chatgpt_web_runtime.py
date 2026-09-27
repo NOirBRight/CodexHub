@@ -380,6 +380,10 @@ def _settings_path(home: Path) -> Path:
     return home / "runtime-settings.json"
 
 
+def _active_settings_path(home: Path) -> Path:
+    return home / "active-runtime-settings.json"
+
+
 def _settings_lock_path(home: Path) -> Path:
     return home / "runtime-settings.lock"
 
@@ -619,9 +623,79 @@ def _read_saved_settings_locked(home: Path) -> dict[str, Any]:
     return _settings_from_upstream(home, old_config) if old_config else _default_settings()
 
 
+def _runtime_key_fingerprint(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _persist_active_settings_locked(home: Path, settings: dict[str, Any]) -> None:
+    saved = {
+        **settings,
+        "tunnel": {key: value for key, value in settings["tunnel"].items() if key != "runtime_key"},
+    }
+    _write_json(
+        _active_settings_path(home),
+        {
+            "version": 1,
+            "settings": saved,
+            "runtime_key_sha256": _runtime_key_fingerprint(settings["tunnel"]["runtime_key"]),
+        },
+        mode=0o600,
+    )
+
+
 def _active_settings_locked(home: Path) -> dict[str, Any] | None:
+    snapshot = _read_json(_active_settings_path(home))
+    if snapshot and snapshot.get("version") == 1:
+        settings = snapshot.get("settings")
+        key_fingerprint = snapshot.get("runtime_key_sha256")
+        if (
+            isinstance(settings, dict)
+            and isinstance(key_fingerprint, str)
+            and re.fullmatch(r"[0-9a-f]{64}", key_fingerprint)
+            and isinstance(settings.get("tunnel"), dict)
+        ):
+            active = {
+                **settings,
+                "tunnel": {
+                    **settings["tunnel"],
+                    "runtime_key": "active-runtime-key" if key_fingerprint != _runtime_key_fingerprint("") else "",
+                },
+                "_runtime_key_sha256": key_fingerprint,
+            }
+            try:
+                validated = _validate_settings(active, require_full=False, allow_unsupported_options=True)
+                validated["_runtime_key_sha256"] = key_fingerprint
+                return validated
+            except RuntimeError_:
+                return None
+
     config = _read_json(_web_home(home) / "config.json")
-    return _settings_from_upstream(home, config) if config else None
+    process = _process_record(home)
+    if config is None or process is None or not _runtime_healthy(
+        home,
+        {"process": {"pid": process.get("pid"), "port": process.get("port")}},
+    ):
+        return None
+    active = _settings_from_upstream(home, config)
+    _persist_active_settings_locked(home, active)
+    active["_runtime_key_sha256"] = _runtime_key_fingerprint(active["tunnel"]["runtime_key"])
+    return active
+
+
+def _active_settings_match(saved: dict[str, Any], active: dict[str, Any]) -> bool:
+    return (
+        _public_settings(saved) == _public_settings(active)
+        and _runtime_key_fingerprint(saved["tunnel"]["runtime_key"])
+        == active.get("_runtime_key_sha256")
+    )
+
+
+def _active_settings_match_config_locked(home: Path) -> bool:
+    config = _read_json(_web_home(home) / "config.json")
+    active = _active_settings_locked(home)
+    return config is not None and active is not None and _active_settings_match(
+        _settings_from_upstream(home, config), active
+    )
 
 
 def _public_settings(settings: dict[str, Any]) -> dict[str, Any]:
@@ -666,7 +740,8 @@ def _settings_snapshot_locked(home: Path) -> dict[str, Any]:
         "saved": _public_settings(saved),
         "active": None if active is None else _public_settings(active),
         "active_state": active_state,
-        "pending_restart": (active is not None and saved != active) or active_state == "unavailable",
+        "pending_restart": (active is not None and not _active_settings_match(saved, active))
+        or active_state == "unavailable",
         "restart_target": "ChatGPT Web Runtime",
     }
 
@@ -1168,7 +1243,7 @@ def _browser_executable() -> str:
     return "/usr/bin/chromium" if os.name != "nt" else "chrome.exe"
 
 
-def _write_minimum_config(home: Path, entry: Path) -> int:
+def _write_minimum_config(home: Path, entry: Path) -> tuple[int, dict[str, Any]]:
     web_home = _web_home(home)
     with _settings_lock(home):
         settings = _validate_settings(_read_saved_settings_locked(home), require_full=True)
@@ -1238,7 +1313,7 @@ def _write_minimum_config(home: Path, entry: Path) -> int:
                 "alias": _owned_tunnel_alias(home, tunnel["alias"]),
             }
         _write_json(web_config_path, config, mode=0o600)
-    return port
+    return port, settings
 
 
 def _tunnel_manifest_path(home: Path) -> Path:
@@ -1958,7 +2033,7 @@ def supervise(home: Path) -> int:
     tunnel = None
     startup_error: Exception | None = None
     try:
-        runtime_port = _write_minimum_config(home, entry)
+        runtime_port, startup_settings = _write_minimum_config(home, entry)
         config = _read_json(_web_home(home) / "config.json") or {}
         if config.get("mode") == "full":
             tunnel = _start_tunnel_runtime(home, pin, entry)
@@ -2025,6 +2100,8 @@ def supervise(home: Path) -> int:
                     home,
                     {"process": {"pid": child.pid, "port": runtime_port}},
                 ):
+                    with _settings_lock(home):
+                        _persist_active_settings_locked(home, startup_settings)
                     with child_output_lock:
                         startup_healthy.set()
             time.sleep(0.2)
@@ -2205,12 +2282,26 @@ def start_runtime(home: Path) -> dict[str, Any]:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+    def _startup_snapshot_matches(status: dict[str, Any]) -> bool:
+        process_info = status.get("process")
+        record = _process_record(home)
+        if (
+            not isinstance(process_info, dict)
+            or record is None
+            or record.get("supervisor_pid") != process.pid
+            or record.get("pid") != process_info.get("pid")
+        ):
+            return False
+        with _settings_lock(home):
+            return _active_settings_match_config_locked(home)
+
     deadline = time.monotonic() + RUNTIME_STARTUP_TIMEOUT_SECONDS
     health_deadline: float | None = None
     try:
         while time.monotonic() < deadline:
             existing = _running_status(home)
-            if existing is not None and _runtime_healthy(home, existing):
+            if existing is not None and _runtime_healthy(home, existing) and _startup_snapshot_matches(existing):
                 return existing
             if existing is not None and health_deadline is None:
                 health_deadline = time.monotonic() + RUNTIME_STARTUP_HEALTH_TIMEOUT_SECONDS
@@ -2220,7 +2311,7 @@ def start_runtime(home: Path) -> dict[str, Any]:
                 break
             time.sleep(0.05)
         existing = _running_status(home)
-        if existing is not None and _runtime_healthy(home, existing):
+        if existing is not None and _runtime_healthy(home, existing) and _startup_snapshot_matches(existing):
             return existing
         raise RuntimeError_("ChatGPT Web Runtime did not become healthy")
     except Exception as exc:
