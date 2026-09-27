@@ -4,7 +4,7 @@
   "codexhub_base": "cc1b36b3",
   "upstream_base": "a13cd09950969f43e3b7e25c71fa43efaf5446c5",
   "upstream_version": "6.1.1",
-  "patch_sha256": "72d9891520e45ed99a879832c8289d3d480ba2cd1f532f86ba018c4858f88997",
+  "patch_sha256": "e5df9134de75eadf7e241ba23ae2de4f4671293996dcc9ceedd9cb963fd4ffe8",
   "reused_existing_login": true,
   "installed_release_modified": false,
   "observed_failure": {
@@ -30,5 +30,24 @@
       "status": "completed",
       "final_text": "ACCEPT7K3"
     }
-  ]
+  ],
+  "upstream_revision": "81b270efbd561835c1d4b78e30bb488944e0c790",
+  "portable_source_revision": "683e5b4a",
+  "portable_archive": "CodexHub_0.2.27_linux_portable_683e5b4a.tar.gz",
+  "portable_sha256": "8500ab5ef6ec03484957788baa3b9cdbeba72f48b8a58242b94a86c6f78d4403",
+  "runtime_sha256": "4c5fc30299820e078a9df4d1dc6bef725855d29c0981770335d421e1bd70f075",
+  "packaged_turns": [
+    {
+      "model": "chatgpt-web/gpt-5.6-sol",
+      "status": "completed",
+      "final_text": "ACCEPT7K3"
+    },
+    {
+      "model": "chatgpt-web/gpt-6-pro",
+      "status": "completed",
+      "final_text": "ACCEPT7K3"
+    }
+  ],
+  "packaged_initial_pro_attempt": "composer unavailable; after Sol initialized page successfully, Pro retry completed",
+  "owned_test_runtime_stopped": true
 }
