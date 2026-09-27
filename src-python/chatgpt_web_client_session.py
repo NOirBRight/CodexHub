@@ -153,6 +153,8 @@ def prepare_attempt_body(request: Any, attempt: Any) -> tuple[Any, bytes]:
         return prepared, prepared.upstream_body
     if not isinstance(responses, dict):
         return prepared, prepared.upstream_body
+    # Client picker/family aliases identify the selected route, not runtime models.
+    responses["model"] = _slug(request.upstream)
     binding = _binding(event_context, session_id)
     responses["prompt_cache_key"] = binding["thread_id"]
     responses["client_metadata"] = {
