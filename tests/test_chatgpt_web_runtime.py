@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -15,12 +16,14 @@ import tarfile
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import chatgpt_web_collab
 import chatgpt_web_route
 import chatgpt_web_runtime
+import chatgpt_web_test_support
 import test_chatgpt_web_route as web
 from gateway_errors import ModelIdentityResolutionError
 
@@ -28,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "src-python" / "chatgpt_web_runtime.py"
 PIN_PATH = ROOT / "config" / "chatgpt_web_runtime_pin.json"
 SECRET = "sk-chatgpt-web-test-secret-DO-NOT-LOG"
-ENTRY_NAME = "bin/codex-chatgpt-web"
+ENTRY_NAME = "bin/codex-chatgpt-web.exe" if os.name == "nt" else "bin/codex-chatgpt-web"
 
 
 def _run(
@@ -38,15 +41,16 @@ def _run(
     extra_env: dict[str, str] | None = None,
     stdin: str | None = None,
 ) -> dict:
-    command = [sys.executable, str(SCRIPT), *args, "--home", str(home)]
     env = os.environ.copy()
     env["CODEXHUB_CHATGPT_WEB_HOME"] = str(home)
     if pin is not None:
         env["CODEXHUB_CHATGPT_WEB_PIN"] = str(pin)
     if extra_env:
         env.update(extra_env)
+    python = chatgpt_web_test_support.fixture_python(env)
+    web._prepare_command_trampolines(home)
     completed = subprocess.run(
-        command,
+        [python, str(SCRIPT), *args, "--home", str(home)],
         check=False,
         capture_output=True,
         text=True,
@@ -54,6 +58,7 @@ def _run(
         input=stdin,
         timeout=30,
     )
+    web._prepare_command_trampolines(home)
     payload = json.loads(completed.stdout)
     payload["_exit_code"] = completed.returncode
     payload["_stderr"] = completed.stderr
@@ -110,6 +115,8 @@ server.serve_forever()
 
 
 def _fixture_script(marker: Path, health_server: str | None = None) -> str:
+    if os.name == "nt":
+        return _windows_fixture_script(marker, health_server)
     health_server = _fixture_health_server() if health_server is None else health_server
     return f"""#!/bin/sh
 set -eu
@@ -146,7 +153,95 @@ exit 0
 """
 
 
+def _windows_fixture_script(
+    marker: Path,
+    health_server: str | None = None,
+    *,
+    login_failure: bool = False,
+    delayed_failure: bool = False,
+    startup_diagnostics: bool = False,
+) -> str:
+    health_server = _fixture_health_server() if health_server is None else health_server
+    return f'''import json
+import os
+import sys
+import time
+from pathlib import Path
+
+home = Path(os.environ["CODEX_CHATGPT_WEB_HOME"])
+home.mkdir(parents=True, exist_ok=True)
+args = sys.argv[1:]
+command = args[0] if args else ""
+with (home / "argv.log").open("a", encoding="utf-8") as handle:
+    handle.write(" ".join(args) + "\\n")
+    handle.write(f"CODEX_HOME={{os.environ.get('CODEX_HOME', '')}}\\n")
+    handle.write(f"WEB_HOME={{os.environ.get('CODEX_CHATGPT_WEB_HOME', '')}}\\n")
+    if os.environ.get("CODEX_WEB_GPT_DEV_HOME"):
+        handle.write(f"DEV={{os.environ['CODEX_WEB_GPT_DEV_HOME']}}\\n")
+
+if command in {{"setup", "dev"}}:
+    raise SystemExit(3)
+if command == "doctor":
+    doctor = home / "doctor.json"
+    print(doctor.read_text(encoding="utf-8") if doctor.is_file() else
+          '{{"ok":false,"checks":[{{"id":"login","status":"error","message":"missing"}}]}}')
+    raise SystemExit(0)
+if command == "login":
+    if {login_failure!r}:
+        print({SECRET!r}, file=sys.stderr, flush=True)
+        time.sleep(0.4)
+        raise SystemExit(9)
+    while not (home / "finish-login").is_file():
+        time.sleep(0.1)
+    raise SystemExit(0)
+if command == "serve":
+    if {delayed_failure!r}:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        config = json.loads((home / "config.json").read_text(encoding="utf-8"))
+
+        class UnhealthyHandler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                return
+
+            def do_GET(self):
+                self.send_response(503)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        server = ThreadingHTTPServer((config["host"], int(config["port"])), UnhealthyHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        Path({str(marker)!r}).parent.mkdir(parents=True, exist_ok=True)
+        Path({str(marker)!r}).touch()
+        try:
+            while not (home / "fail-startup").is_file():
+                time.sleep(0.01)
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+        print("codex-chatgpt-web: simulated delayed startup failure", file=sys.stderr, flush=True)
+        raise SystemExit(1)
+    if {startup_diagnostics!r} and os.environ.get("STARTUP_CAUSE"):
+        for _ in range(4):
+            sys.stderr.write("x" * 4096)
+        sys.stderr.write("\\n" + os.environ["STARTUP_CAUSE"] + " " +
+                         os.environ["STARTUP_CONTROL_TOKEN"] + " " +
+                         os.environ["STARTUP_RUNTIME_KEY"] + "\\n")
+        sys.stderr.flush()
+        raise SystemExit(1)
+    Path({str(marker)!r}).parent.mkdir(parents=True, exist_ok=True)
+    Path({str(marker)!r}).write_text("executed", encoding="utf-8")
+    exec(compile({health_server!r}, "<fixture-health-server>", "exec"), globals())
+raise SystemExit(0)
+'''
+
+
 def _delayed_start_failure_script(marker: Path) -> str:
+    if os.name == "nt":
+        return _windows_fixture_script(marker, delayed_failure=True)
     return f"""#!/bin/sh
 set -eu
 if [ "$1" = "doctor" ]; then
@@ -166,6 +261,10 @@ exit 0
 
 
 def _startup_diagnostics_failure_script() -> str:
+    if os.name == "nt":
+        return _windows_fixture_script(
+            Path("unused-startup-marker"), startup_diagnostics=True
+        )
     script = """#!/bin/sh
 set -eu
 if [ "$1" = "doctor" ]; then
@@ -190,6 +289,10 @@ exit 0
 
 
 def _archive(directory: Path, script: str) -> Path:
+    if os.name == "nt":
+        return chatgpt_web_test_support.write_windows_runtime_archive(
+            directory, ENTRY_NAME, script
+        )
     tree = directory / "tree"
     entry = tree / ENTRY_NAME
     entry.parent.mkdir(parents=True, exist_ok=True)
@@ -202,6 +305,7 @@ def _archive(directory: Path, script: str) -> Path:
 
 
 def _fake_tunnel_client_script(state_path: Path) -> str:
+    interpreter = "python" if os.name == "nt" else sys.executable
     template = '''#!__PYTHON__
 import json
 import os
@@ -268,7 +372,9 @@ else:
     print("unexpected tunnel command", file=sys.stderr)
     raise SystemExit(3)
 '''
-    return template.replace("__PYTHON__", sys.executable).replace("__STATE_PATH__", repr(str(state_path)))
+    return template.replace("__PYTHON__", interpreter).replace(
+        "__STATE_PATH__", repr(str(state_path))
+    )
 
 
 def _prepare_full_tunnel(home: Path, pin: Path) -> tuple[Path, Path]:
@@ -288,8 +394,23 @@ def _prepare_full_tunnel(home: Path, pin: Path) -> tuple[Path, Path]:
     chatgpt_web_runtime._write_minimum_config(home, entry)
     binary = chatgpt_web_runtime._managed_tunnel_binary(home)
     binary.parent.mkdir(parents=True, exist_ok=True)
-    binary.write_text(_fake_tunnel_client_script(home / "web-home" / "tunnel-state.json"), encoding="utf-8")
-    binary.chmod(0o700)
+    fake_client = _fake_tunnel_client_script(home / "web-home" / "tunnel-state.json")
+    if os.name == "nt":
+        from pip._vendor.distlib.scripts import ScriptMaker
+
+        source_dir = home / "tunnel-client-fixture"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        source = source_dir / "tunnel-client.py"
+        source.write_text(fake_client, encoding="utf-8")
+        maker = ScriptMaker(str(source_dir), str(binary.parent))
+        maker.clobber = True
+        maker.executable = sys._base_executable
+        maker.variants = {""}
+        generated = maker.make(source.name)
+        assert str(binary.resolve()) in {str(Path(path).resolve()) for path in generated}
+    else:
+        binary.write_text(fake_client, encoding="utf-8")
+        binary.chmod(0o700)
     pin_document = json.loads(pin.read_text(encoding="utf-8"))
     artifact = pin_document["tunnel_client"]["artifacts"][chatgpt_web_runtime.artifact_key()]
     manifest = {
@@ -304,7 +425,51 @@ def _prepare_full_tunnel(home: Path, pin: Path) -> tuple[Path, Path]:
 
 
 def _entry_pids(home: Path) -> list[int]:
-    needle = str(home / "current" / "runtime" / ENTRY_NAME)
+    executable = (home / "current" / "runtime" / ENTRY_NAME).resolve()
+    if os.name == "nt":
+        fixture_home = str(home.resolve()).replace("'", "''")
+        query = rf"""
+$ErrorActionPreference = 'Stop'
+$fixtureHomePath = '{fixture_home}'
+$fixtureProcesses = @(Get-CimInstance Win32_Process | Where-Object {{
+  $_.ExecutablePath -like ($fixtureHomePath + '*') -or
+  $_.CommandLine -like ('*' + $fixtureHomePath + '*')
+}})
+$fixtureProcesses |
+  Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine |
+  ConvertTo-Json -Compress
+"""
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", query],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert completed.returncode == 0, completed.stderr
+        processes = json.loads(completed.stdout or "[]")
+        if isinstance(processes, dict):
+            processes = [processes]
+        expected_executable = os.path.normcase(str(executable))
+        expected_home = os.path.normcase(str(home.resolve()))
+        found: list[int] = []
+        for process in processes:
+            if not isinstance(process, dict):
+                continue
+            command = str(process.get("CommandLine") or "")
+            executable_path = process.get("ExecutablePath")
+            executable_matches = (
+                isinstance(executable_path, str)
+                and os.path.normcase(str(Path(executable_path).resolve())) == expected_executable
+            )
+            command_matches = expected_executable in os.path.normcase(command)
+            if (
+                (executable_matches or command_matches)
+                and expected_home in os.path.normcase(command)
+                and re.search(r"(?<!\S)serve(?:\s|$)", command, re.IGNORECASE)
+            ):
+                found.append(int(process["ProcessId"]))
+        return found
     found: list[int] = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -313,13 +478,48 @@ def _entry_pids(home: Path) -> list[int]:
             command = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
         except OSError:
             continue
-        if needle in command and " serve" in f" {command}":
+        if str(executable) in command and " serve" in f" {command}":
             found.append(int(entry.name))
     return found
 
 
+def _login_failure_fixture_script(marker: Path) -> str:
+    if os.name == "nt":
+        return _windows_fixture_script(marker, login_failure=True)
+    return _fixture_script(marker).replace(
+        'if [ "$1" = "login" ]; then',
+        f'if [ "$1" = "login" ]; then\n  printf "{SECRET}" >&2\n  sleep 0.4\n  exit 9',
+    )
+
+
 def _stop(home: Path, pin: Path) -> None:
     _run(home, "stop", pin=pin)
+
+
+def _start_runtime(home: Path) -> dict[str, Any]:
+    web._prepare_command_trampolines(home)
+    if os.name != "nt":
+        return chatgpt_web_runtime.start_runtime(home)
+    real_popen = subprocess.Popen
+
+    def popen(command: Any, *args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
+        if (
+            isinstance(command, (list, tuple))
+            and len(command) >= 3
+            and Path(os.fspath(command[1])).resolve() == SCRIPT.resolve()
+            and command[2] == "supervise"
+        ):
+            env = dict(kwargs.get("env") or os.environ)
+            python = chatgpt_web_test_support.fixture_python(env)
+            kwargs["env"] = env
+            command = [python, *command[1:]]
+        return real_popen(command, *args, **kwargs)
+
+    subprocess.Popen = popen
+    try:
+        return chatgpt_web_runtime.start_runtime(home)
+    finally:
+        subprocess.Popen = real_popen
 
 
 def test_repo_pin_is_the_accepted_upstream_release() -> None:
@@ -390,7 +590,8 @@ def test_settings_api_redacts_runtime_key_and_supports_explicit_secret_actions(t
     assert initial["saved"]["tunnel"]["runtime_key_configured"] is True
     assert SECRET not in json.dumps(initial)
     saved_file = home / "runtime-settings.json"
-    assert saved_file.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert saved_file.stat().st_mode & 0o777 == 0o600
 
     kept = _run(home, "settings-save", stdin=json.dumps({"tunnel": {"runtime_key": {"action": "keep"}}}))
     assert kept["_exit_code"] == 0
@@ -466,7 +667,7 @@ def test_start_migrates_legacy_options_and_preserves_service_token(
     config_path.write_text(json.dumps(legacy), encoding="utf-8")
 
     try:
-        first = chatgpt_web_runtime.start_runtime(home)
+        first = _start_runtime(home)
         generated = json.loads(config_path.read_text(encoding="utf-8"))
         assert generated["automaticAppName"] == "Legacy Connector"
         assert generated["contextWindow"] == 131072
@@ -475,7 +676,7 @@ def test_start_migrates_legacy_options_and_preserves_service_token(
         assert generated["controlToken"] == old_token
         (home / "runtime-settings.json").unlink(missing_ok=True)
         chatgpt_web_runtime.stop_runtime(home, disable=False)
-        second = chatgpt_web_runtime.start_runtime(home)
+        second = _start_runtime(home)
         generated_again = json.loads(config_path.read_text(encoding="utf-8"))
         assert second["process"]["running"] is True
         assert generated_again["automaticAppName"] == "Legacy Connector"
@@ -518,7 +719,6 @@ def test_legacy_zero_risk_pro_is_visible_but_not_enabled_by_managed_serve(tmp_pa
     assert not (home / "process.json").exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable fixture for the pinned Tunnel client")
 def test_full_mode_starts_and_stops_owned_tunnel_with_spaced_mcp_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -531,7 +731,7 @@ def test_full_mode_starts_and_stops_owned_tunnel_with_spaced_mcp_paths(
     entry, state_path = _prepare_full_tunnel(home, pin)
 
     try:
-        started = chatgpt_web_runtime.start_runtime(home)
+        started = _start_runtime(home)
         assert started["process"]["running"] is True
         config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
         state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -539,7 +739,10 @@ def test_full_mode_starts_and_stops_owned_tunnel_with_spaced_mcp_paths(
         assert state["runtime_state"] == "ready"
         assert owner["alias"] == config["tunnel"]["alias"]
         assert owner["pid"] == state["pid"]
-        assert (chatgpt_web_runtime._managed_runtime_key(home).stat().st_mode & 0o777) == 0o600
+        if os.name != "nt":
+            assert (
+                chatgpt_web_runtime._managed_runtime_key(home).stat().st_mode & 0o777
+            ) == 0o600
         assert shlex.split(state["mcp_command"]) == [
             str(entry),
             "mcp",
@@ -556,7 +759,6 @@ def test_full_mode_starts_and_stops_owned_tunnel_with_spaced_mcp_paths(
     assert not (home / "tunnel-ownership.json").exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable fixture for the pinned Tunnel client")
 def test_settings_saved_during_startup_remain_pending_until_next_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -573,7 +775,7 @@ def test_settings_saved_during_startup_remain_pending_until_next_start(
 
     def start() -> None:
         try:
-            startup["status"] = chatgpt_web_runtime.start_runtime(home)
+            startup["status"] = _start_runtime(home)
         except Exception as exc:
             startup["error"] = exc
 
@@ -609,7 +811,6 @@ def test_settings_saved_during_startup_remain_pending_until_next_start(
             chatgpt_web_runtime.stop_runtime(home, disable=True)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable fixture for the pinned Tunnel client")
 @pytest.mark.parametrize("connect_mode", ["nonzero", "timeout"])
 def test_failed_full_mode_connect_cleans_its_started_tunnel(
     tmp_path: Path,
@@ -754,7 +955,7 @@ def test_repeated_start_uses_one_entry_and_status_does_not_trust_doctor(tmp_path
         assert first["_exit_code"] == 0
         assert second["_exit_code"] == 0
         assert first["process"]["pid"] == second["process"]["pid"]
-        assert first["process"]["executable"].endswith(ENTRY_NAME)
+        assert Path(first["process"]["executable"]).as_posix().endswith(ENTRY_NAME)
         assert _entry_pids(home) == [first["process"]["pid"]]
         assert marker.is_file()
         with socket.create_connection(("127.0.0.1", first["process"]["diagnostic_port"]), timeout=2):
@@ -775,7 +976,6 @@ def test_repeated_start_uses_one_entry_and_status_does_not_trust_doctor(tmp_path
         _stop(home, pin)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable fixture")
 def test_start_does_not_acknowledge_a_child_that_fails_during_initialization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -804,7 +1004,7 @@ def test_start_does_not_acknowledge_a_child_that_fails_during_initialization(
 
     def start() -> None:
         try:
-            startup["status"] = chatgpt_web_runtime.start_runtime(home)
+            startup["status"] = _start_runtime(home)
         except Exception as exc:
             startup["error"] = exc
 
@@ -831,7 +1031,6 @@ def test_start_does_not_acknowledge_a_child_that_fails_during_initialization(
     assert "simulated delayed startup failure" in str(startup["error"])
 
 
-@pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable fixture")
 def test_startup_diagnostics_are_current_bounded_and_secret_safe(tmp_path: Path) -> None:
     home = tmp_path / "runtime"
     runtime_key = "synthetic-tunnel-runtime-key-DO-NOT-LOG"
@@ -989,7 +1188,12 @@ def test_launch_leaves_client_config_bytes_unchanged(tmp_path: Path) -> None:
         assert started["login"]["state"] == "unknown"
         config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
         assert config["mode"] == "browser-only"
-        assert config["chromeExecutablePath"] == "/usr/bin/chromium"
+        if os.name == "nt":
+            assert Path(config["chromeExecutablePath"]).is_absolute() or (
+                config["chromeExecutablePath"] == "chrome.exe"
+            )
+        else:
+            assert config["chromeExecutablePath"] == "/usr/bin/chromium"
         assert "purpose" not in config
         assert config["runtimeCommand"] == [str(home / "current" / "runtime" / ENTRY_NAME)]
         assert not (home / "web-home" / "browser" / "storage-state.json").exists()
@@ -1263,7 +1467,7 @@ def test_failed_promotion_keeps_previous_good(tmp_path: Path, monkeypatch: pytes
     _assert_login_kept(login)
     assert not marker.exists()
     try:
-        started = chatgpt_web_runtime.start_runtime(home)
+        started = _start_runtime(home)
         assert started["process"]["running"] is True
         assert (home / "current" / "runtime" / "generation.txt").read_text(encoding="utf-8") == "second"
     finally:
@@ -1284,7 +1488,7 @@ def test_upgrade_revokes_an_open_tool_permit(tmp_path: Path, monkeypatch: pytest
     turn_id = "turn_upgrade_permit"
     call_id = "call_upgrade_permit"
     try:
-        started = chatgpt_web_runtime.start_runtime(home)
+        started = _start_runtime(home)
         assert started["process"]["running"] is True
         assert web._seed_check(home, monkeypatch)["state"] == "ready"
         upstream = {"model_id": model_id, "upstream_model": model_id, "provider_id": "chatgpt-web"}
@@ -1336,7 +1540,8 @@ def test_upgrade_revokes_an_open_tool_permit(tmp_path: Path, monkeypatch: pytest
         _assert_login_kept(login)
         assert upgraded["component"]["compatible"] is True
         if upgraded["process"]["running"] is not True:
-            chatgpt_web_runtime.start_runtime(home)
+            web._set_browser_only_mode(home)
+            _start_runtime(home)
         assert web._seed_check(home, monkeypatch)["state"] == "ready"
         continuation = {
             "model": model_id,
@@ -1446,8 +1651,7 @@ def test_login_completion_requires_explicit_restart_and_stop_cancels_login(tmp_p
 
 def test_login_failure_is_visible_without_exposing_process_output(tmp_path: Path) -> None:
     home = tmp_path / "runtime"
-    script = _fixture_script(home / "marker").replace('if [ "$1" = "login" ]; then',
-        f'if [ "$1" = "login" ]; then\n  printf "{SECRET}" >&2\n  sleep 0.4\n  exit 9')
+    script = _login_failure_fixture_script(home / "marker")
     archive = _archive(tmp_path, script)
     pin = _pin_for(tmp_path, archive.read_bytes())
     assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
