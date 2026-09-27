@@ -1,0 +1,37 @@
+{
+  "issue": 572,
+  "candidate_sha": "cfeb8afbd0039e3d23040db1227d1b2039e83c63",
+  "runtime": {
+    "version": "6.1.1",
+    "commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
+  },
+  "protocol": "anthropic_messages",
+  "upstream_format": "responses",
+  "session_identity": "chatgpt_web_client_session.client_session_id",
+  "metadata_user_id": "not_a_session",
+  "checks": [
+    "/home/noirbright/Workstation/CodexHub/.venv-ci/bin/python -m pytest tests/test_chatgpt_web_messages.py -q --tb=short",
+    "/home/noirbright/Workstation/CodexHub/.venv-ci/bin/python -m pytest tests/test_chatgpt_web_client_session.py tests/test_chatgpt_web_route.py -q --tb=line",
+    "git diff --check"
+  ],
+  "results": {
+    "tests/test_chatgpt_web_messages.py": "5 passed",
+    "tests/test_chatgpt_web_client_session.py tests/test_chatgpt_web_route.py": "10 passed",
+    "git diff --check": "clean"
+  },
+  "verified": [
+    "a Messages request with no X-Session-Id, sessionID, or session_id is rejected before POST /v1/responses, including when metadata.user_id is present",
+    "an unscoped tool_result does not create a session and records no POST",
+    "two Messages sessions with the same prompt get different thread ids",
+    "the second turn of one Messages session reuses its thread id",
+    "system text stays in instructions and user content stays as separate input blocks, not one prompt string",
+    "tool_use is streamed with its id and input_json deltas, one tool_use stop reason, and one message_stop",
+    "a tool_result continues that session and that tool id",
+    "a copied tool id from another session is rejected and adds no POST",
+    "replaying the same tool result adds no POST",
+    "cancel closes the upstream body and a later tool result for that call is rejected",
+    "an upstream error is not also a message_stop success",
+    "a Codex Responses request and a Messages request with different session ids do not share a web thread"
+  ],
+  "live_claude_code": "not_run"
+}

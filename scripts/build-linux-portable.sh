@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Build a release-optimized Linux portable tree for one CodexHub flavor.
-# Usage: scripts/build-linux-portable.sh [--flavor normal|debug] [--dry-run] [--output-root DIR]
+# Optional test runtime: --chatgpt-web-runtime ARCHIVE --chatgpt-web-revision SHA
 set -euo pipefail
 
 flavor="normal"
 output_root=""
 dry_run=0
+chatgpt_web_runtime=""
+chatgpt_web_revision=""
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 while [[ $# -gt 0 ]]; do
@@ -22,12 +24,28 @@ while [[ $# -gt 0 ]]; do
       dry_run=1
       shift
       ;;
+    --chatgpt-web-runtime)
+      chatgpt_web_runtime="${2:-}"
+      shift 2
+      ;;
+    --chatgpt-web-revision)
+      chatgpt_web_revision="${2:-}"
+      shift 2
+      ;;
     *)
       echo "unknown argument: $1" >&2
       exit 2
       ;;
   esac
 done
+
+if [[ -n "$chatgpt_web_runtime" || -n "$chatgpt_web_revision" ]]; then
+  if [[ ! -f "$chatgpt_web_runtime" || ! "$chatgpt_web_revision" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "a ChatGPT Web runtime archive and its full source revision are required together" >&2
+    exit 2
+  fi
+  chatgpt_web_runtime="$(realpath "$chatgpt_web_runtime")"
+fi
 
 if [[ "$flavor" != "normal" && "$flavor" != "debug" ]]; then
   echo "unknown build flavor: $flavor" >&2
@@ -121,12 +139,66 @@ if [[ ! -x "$binary" ]]; then
 fi
 cp -a "$binary" "$portable_dir/$executableBaseName"
 
-for resource in config src-python python scripts; do
-  src="$targetRoot/release/$resource"
-  if [[ -e "$src" ]]; then
-    cp -a "$src" "$portable_dir/"
-  fi
-done
+# Copy declared source resources, never stale files from Cargo's output tree.
+"$repo_root/scripts/codexhub-python.sh" - "$repo_root" "$portable_dir" "$generated_config" <<'PY'
+import glob
+import json
+from pathlib import Path
+import shutil
+import sys
+
+repo, portable, config = map(Path, sys.argv[1:])
+resources = json.loads(config.read_text(encoding="utf-8"))["bundle"]["resources"]
+for pattern, destination in resources.items():
+    for match in glob.glob(str(repo / "src-tauri" / pattern), include_hidden=True):
+        source = Path(match)
+        target = portable / destination
+        if glob.has_magic(pattern):
+            target /= source.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, target)
+        else:
+            shutil.copy2(source, target)
+PY
+if [[ -n "$chatgpt_web_runtime" ]]; then
+  "$repo_root/scripts/codexhub-python.sh" - "$portable_dir" "$chatgpt_web_runtime" "$chatgpt_web_revision" "$executableBaseName" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import sys
+
+portable, archive, revision, executable = sys.argv[1:]
+config = Path(portable) / "config"
+pin_path = config / "chatgpt_web_runtime_pin.json"
+pin = json.loads(pin_path.read_text(encoding="utf-8"))
+filename = "chatgpt-web-runtime-linux-x64.tar.gz"
+shutil.copyfile(archive, config / filename)
+with (config / filename).open("rb") as stream:
+    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+artifact = pin["artifacts"]["linux-x64"]
+artifact.update(upstream_sha256=artifact["sha256"], sha256=digest, filename=filename,
+                bundled_filename=filename, build_revision=revision)
+pin_path.write_text(json.dumps(pin, indent=2) + "\n", encoding="utf-8")
+launcher = Path(portable) / "Start-ChatGPT-Test.sh"
+launcher.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+portable_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export CODEXHUB_CHATGPT_WEB_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/codexhub-portable-test/chatgpt-web"
+export CODEXHUB_CHATGPT_WEB_PIN="$portable_dir/config/chatgpt_web_runtime_pin.json"
+exec "$portable_dir/''' + executable + '''" "$@"
+''', encoding="utf-8")
+launcher.chmod(0o755)
+(Path(portable) / "CHATGPT_TEST.txt").write_text(
+    "Close any running CodexHub, then run Start-ChatGPT-Test.sh.\n"
+    "This test build includes the patched ChatGPT Web runtime. Install/Upgrade uses the bundled archive.\n"
+    "Its browser state is kept in $XDG_STATE_HOME/codexhub-portable-test/chatgpt-web\n"
+    "(default: ~/.local/state/codexhub-portable-test/chatgpt-web), outside this archive.\n"
+    "No account credentials are included. Python 3.13+ and Chromium must be available on the host.\n"
+    f"Runtime source revision: {revision}\n", encoding="utf-8")
+PY
+fi
 if [[ ! -f "$portable_dir/scripts/xai_device_login.py" ]]; then
   echo "portable build is missing scripts/xai_device_login.py" >&2
   exit 1
@@ -146,7 +218,7 @@ optional and picked up automatically when present.
 NOTE
 fi
 
-tar -C "$output_root" -czf "$portable_archive" "$portable_name"
+tar --exclude='__pycache__' --exclude='*.pyc' -C "$output_root" -czf "$portable_archive" "$portable_name"
 sha256="$(sha256sum "$portable_archive" | awk '{print $1}')"
 echo "Linux portable ready:"
 echo "  Directory: $portable_dir"

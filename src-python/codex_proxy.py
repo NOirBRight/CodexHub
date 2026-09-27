@@ -200,7 +200,7 @@ class CodexProxyHandler(GatewayHandlerMixin, BaseHTTPRequestHandler):
             threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
 
-        if parsed.path == "/v1/responses":
+        if parsed.path in {"/v1/responses", "/v1/responses/compact"}:
             self._proxy_post_request(inbound_format="responses")
             return
         provider_hint = provider_scoped_path(parsed.path, "responses")

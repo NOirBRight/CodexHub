@@ -21,11 +21,12 @@ new Function(
   "exports",
   "function sortModelsEnabledFirst(models) { return [...models].sort((left, right) => Number(left.enabled === false) - Number(right.enabled === false)); }\n" +
     jsOutput +
-    "\nexports.applyCatalogPresetDefaults = applyCatalogPresetDefaults; exports.subscriptionAuthAdapter = subscriptionAuthAdapter; exports.usesSubscriptionAuth = usesSubscriptionAuth; exports.applyPresetReasoningDefaults = applyPresetReasoningDefaults; exports.instantiateCatalogProvider = instantiateCatalogProvider; exports.mergeOfficialPresetModels = mergeOfficialPresetModels; exports.editorReasoningLevelOptions = editorReasoningLevelOptions; exports.modelsMissingFromPreset = modelsMissingFromPreset;",
+    "\nexports.applyCatalogPresetDefaults = applyCatalogPresetDefaults; exports.subscriptionAuthAdapter = subscriptionAuthAdapter; exports.runtimeCapability = runtimeCapability; exports.usesSubscriptionAuth = usesSubscriptionAuth; exports.applyPresetReasoningDefaults = applyPresetReasoningDefaults; exports.instantiateCatalogProvider = instantiateCatalogProvider; exports.mergeOfficialPresetModels = mergeOfficialPresetModels; exports.editorReasoningLevelOptions = editorReasoningLevelOptions; exports.modelsMissingFromPreset = modelsMissingFromPreset;",
 )(moduleExports);
 const {
   applyCatalogPresetDefaults,
   subscriptionAuthAdapter,
+  runtimeCapability,
   usesSubscriptionAuth,
   applyPresetReasoningDefaults,
   instantiateCatalogProvider,
@@ -109,6 +110,18 @@ test("saved official DeepSeek provider inherits the new Anthropic endpoint witho
   assert.equal(filled.upstream_format, "responses");
   assert.deepEqual(filled.available_upstream_formats,
     ["responses", "chat_completions", "anthropic_messages"]);
+});
+
+test("runtime capability is declared on the preset, not by provider id", () => {
+  assert.equal(runtimeCapability(makeProvider()), null);
+  assert.equal(
+    runtimeCapability(makeProvider({ auth_capabilities: ["runtime:chatgpt_web"] })),
+    "chatgpt_web",
+  );
+  assert.equal(
+    runtimeCapability(makeProvider({ id: "chatgpt-web" })),
+    null,
+  );
 });
 
 test("subscription auth is declared on the preset, not by provider id", () => {

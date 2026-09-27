@@ -1,0 +1,36 @@
+{
+  "issue": 574,
+  "candidate_sha": "f50a37e2db6fa6bcd72f295743e2a5acfb4fa719",
+  "runtime": {
+    "version": "6.1.1",
+    "commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
+  },
+  "checks": [
+    "/home/noirbright/Workstation/CodexHub/.venv-ci/bin/python -m pytest tests/test_chatgpt_web_recovery.py tests/test_chatgpt_web_route.py tests/test_chatgpt_web_client_session.py tests/test_chatgpt_web_messages.py tests/test_chatgpt_web_collab.py tests/test_chatgpt_web_runtime.py -q --tb=line",
+    "git diff --check"
+  ],
+  "results": {
+    "pytest": "35 passed",
+    "git diff --check": "clean"
+  },
+  "verified": [
+    "an image part is present on the upstream Responses body when the doctor model lists image input",
+    "the same image request is rejected before POST /v1/responses when the doctor model does not list image input",
+    "catalog input_modalities stay text-only unless the doctor lists image input",
+    "POST /v1/responses/compact then a tool continuation keeps the caller thread id and the previous call id",
+    "the pre-compaction user message is not sent again",
+    "a function call minted by the compaction response is not granted as a tool permission",
+    "an effort change on the same thread revokes the old call id and does not open a POST",
+    "a model change on the same thread revokes the old call id and does not open a POST",
+    "signed-out, browser smoke failed, tunnel not ready, connector not selectable, and process not running each fail a new request with their own error and do not add a POST",
+    "a text turn that was already accepted is not posted again after login becomes signed out",
+    "after stop and start, a new text turn succeeds and the old call id stays rejected",
+    "status and the supervisor log do not contain the image URL, the picture prompt, or the control token"
+  ],
+  "live_clients": "not_run",
+  "not_claimed": [
+    "live image recognition",
+    "live compaction",
+    "real client recovery"
+  ]
+}
