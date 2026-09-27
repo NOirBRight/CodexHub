@@ -114,14 +114,72 @@ class Handler(BaseHTTPRequestHandler):
         if not self._record(body):
             self.send_error(401)
             return
+        try:
+            parsed = json.loads(body.decode("utf-8"))
+        except Exception:
+            parsed = None
         mode = (home / "serve-mode").read_text(encoding="utf-8").strip() if (home / "serve-mode").is_file() else "text"
+
+        def emit(payload):
+            self.wfile.write(b"data: " + json.dumps(payload).encode("utf-8") + b"\\n\\n")
+            self.wfile.flush()
+
+        def turn_id():
+            try:
+                meta = json.loads(parsed["client_metadata"]["x-codex-turn-metadata"])
+            except Exception:
+                return "turn"
+            turn = meta.get("turn_id") if isinstance(meta, dict) else None
+            return turn if isinstance(turn, str) and turn else "turn"
+
+        def items():
+            raw_items = parsed.get("input") if isinstance(parsed, dict) else None
+            return raw_items if isinstance(raw_items, list) else []
+
+        has_output = any(isinstance(item, dict) and item.get("type") == "function_call_output" for item in items())
+        declares_tools = isinstance(parsed, dict) and isinstance(parsed.get("tools"), list) and any(isinstance(tool, dict) for tool in parsed["tools"])
+        has_call = any(isinstance(item, dict) and item.get("type") == "function_call" for item in items())
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(b'data: {{"type":"response.output_text.delta","delta":"hello web"}}\\n\\n')
-        self.wfile.flush()
+        if mode == "tool-hold" or (mode != "hold" and (declares_tools or has_call) and not has_output):
+            turn = turn_id()
+            call_id = "call_" + turn
+            item_id = "fc_" + turn
+            arguments = '{{"cmd":"pwd"}}'
+            partial = {{"type": "function_call", "id": item_id, "call_id": call_id, "name": "shell", "arguments": "", "status": "in_progress"}}
+            full = {{"type": "function_call", "id": item_id, "call_id": call_id, "name": "shell", "arguments": arguments, "status": "completed"}}
+            if mode == "tool-hold":
+                emit({{"type": "response.output_text.delta", "delta": "hello web"}})
+            emit({{"type": "response.output_item.added", "output_index": 0, "item": partial}})
+            emit({{"type": "response.function_call_arguments.delta", "item_id": item_id, "call_id": call_id, "output_index": 0, "delta": '{{"cmd":'}})
+            emit({{"type": "response.function_call_arguments.delta", "item_id": item_id, "call_id": call_id, "output_index": 0, "delta": '"pwd"}}'}})
+            emit({{"type": "response.function_call_arguments.done", "item_id": item_id, "call_id": call_id, "output_index": 0, "arguments": arguments}})
+            emit({{"type": "response.output_item.done", "output_index": 0, "item": full}})
+            if mode == "tool-hold":
+                try:
+                    while True:
+                        self.wfile.write(b'data: {{"type":"response.output_text.delta","delta":"."}}\\n\\n')
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                except Exception:
+                    (home / "upstream-closed").write_text("closed", encoding="utf-8")
+                return
+            emit({{
+                "type": "response.completed",
+                "response": {{
+                    "id": "resp_web_tool",
+                    "object": "response",
+                    "status": "completed",
+                    "model": {MODEL_ID!r},
+                    "output": [full],
+                }},
+            }})
+            return
+        text = "tool result accepted" if has_output else "hello web"
+        emit({{"type": "response.output_text.delta", "delta": text}})
         if mode == "hold":
             try:
                 while True:
@@ -143,12 +201,11 @@ class Handler(BaseHTTPRequestHandler):
                     "id": "msg_web",
                     "role": "assistant",
                     "status": "completed",
-                    "content": [{{"type": "output_text", "text": "hello web", "annotations": []}}],
+                    "content": [{{"type": "output_text", "text": text, "annotations": []}}],
                 }}],
             }},
         }}
-        self.wfile.write(b"data: " + json.dumps(completed).encode("utf-8") + b"\\n\\n")
-        self.wfile.flush()
+        emit(completed)
 
 server = ThreadingHTTPServer(("127.0.0.1", int(config["port"])), Handler)
 (home / "listening").write_text(str(config["port"]), encoding="utf-8")
@@ -637,3 +694,237 @@ def test_client_disconnect_closes_the_upstream_body(runtime, tmp_path: Path) -> 
         assert closed.is_file()
         assert len(_requests(home)) == 1
         assert _requests(home)[0]["body"]["client_metadata"]["x-codex-turn-metadata"]
+
+
+SHELL_TOOL = {
+    "type": "function",
+    "name": "shell",
+    "description": "Run one command",
+    "parameters": {
+        "type": "object",
+        "properties": {"cmd": {"type": "string"}},
+        "required": ["cmd"],
+    },
+}
+
+
+def _with_tools(body: dict, *, sandbox: str | None = None, environment: dict | None = None) -> dict:
+    copied = dict(body)
+    copied["tools"] = [dict(SHELL_TOOL)]
+    if sandbox is not None:
+        copied["sandbox"] = sandbox
+    if environment is not None:
+        copied["environment"] = dict(environment)
+    return copied
+
+
+def _function_output(thread_id: str, turn_id: str, call_id: str, *, item_id: str | None = None) -> dict:
+    return _request_body(
+        MODEL_ID,
+        [
+            _message(f"msg_{turn_id}", turn_id, PROMPT),
+            {
+                "type": "function_call",
+                "id": item_id or f"fc_{turn_id}",
+                "call_id": call_id,
+                "name": "shell",
+                "arguments": '{"cmd":"pwd"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": '{"exit_code":0,"stdout":"/workspace"}',
+            },
+        ],
+        thread_id=thread_id,
+        turn_id=turn_id,
+        effort="high",
+    )
+
+
+def _doctor_layers(*, tunnel: str, connector: str) -> dict:
+    return {
+        "ok": False,
+        "models": [{"id": MODEL_ID, "display_name": "Sol", "efforts": ["high"]}],
+        "checks": [
+            {"id": "login", "status": "ok"},
+            {"id": "browser-smoke", "status": "ok"},
+            {"id": "tunnel-runtime", "status": tunnel, "message": "down"},
+            {"id": "connector", "status": connector, "message": "not attached"},
+        ],
+    }
+
+
+def test_tool_request_without_a_ready_tunnel_or_connector_does_not_open_responses(runtime, tmp_path: Path) -> None:
+    home, _pin = runtime
+    _write_doctor(home, _doctor_layers(tunnel="error", connector="ok"))
+    with _gateway(home, _pin, tmp_path / "codex-client") as port:
+        before = len(_requests(home))
+        tool = _with_tools(
+            _request_body(
+                MODEL_ID,
+                [_message("msg_tool_blocked", "turn_tool_blocked", PROMPT)],
+                thread_id="thread_tool_blocked",
+                turn_id="turn_tool_blocked",
+                effort="high",
+            )
+        )
+        status, payload = _post(port, tool)
+        assert status == 400, payload
+        assert b"tool tunnel is not ready" in payload
+        assert b"tool connector is not selectable" not in payload
+        assert len(_requests(home)) == before
+
+        text = _request_body(
+            MODEL_ID,
+            [_message("msg_text_same_status", "turn_text_same_status", PROMPT)],
+            thread_id="thread_text_same_status",
+            turn_id="turn_text_same_status",
+            effort="high",
+        )
+        status, payload = _post(port, text)
+        assert status == 200, payload
+        assert b"hello web" in payload
+        assert len(_requests(home)) == before + 1
+
+        _write_doctor(home, _doctor_layers(tunnel="ok", connector="error"))
+        status, payload = _post(port, tool)
+        assert status == 400, payload
+        assert b"tool connector is not selectable" in payload
+        assert b"tool tunnel is not ready" not in payload
+        assert len(_requests(home)) == before + 1
+
+
+def test_function_call_round_trip_stays_on_one_turn_and_replay_does_not_post(runtime, tmp_path: Path) -> None:
+    home, _pin = runtime
+    with _gateway(home, _pin, tmp_path / "codex-client") as port:
+        environment = {"cwd": "/workspace/demo"}
+        first = _with_tools(
+            _request_body(
+                MODEL_ID,
+                [_message("msg_tool", "turn_tool", PROMPT)],
+                thread_id="thread_tool",
+                turn_id="turn_tool",
+                effort="high",
+            ),
+            sandbox="workspace-write",
+            environment=environment,
+        )
+        status, payload = _post(port, first)
+        assert status == 200, payload
+        events = _sse_events(payload)
+        deltas = [event for event in events if event.get("type") == "response.function_call_arguments.delta"]
+        assert [event.get("call_id") for event in deltas] == ["call_turn_tool", "call_turn_tool"]
+        assert [event.get("item_id") for event in deltas] == ["fc_turn_tool", "fc_turn_tool"]
+        assert "".join(str(event.get("delta") or "") for event in deltas) == '{"cmd":"pwd"}'
+        function_calls = [
+            event["item"]
+            for event in events
+            if isinstance(event.get("item"), dict) and event["item"].get("type") == "function_call"
+        ]
+        assert function_calls
+        assert {item["call_id"] for item in function_calls} == {"call_turn_tool"}
+        assert {item["id"] for item in function_calls} == {"fc_turn_tool"}
+
+        sent = _requests(home)[0]["body"]
+        assert sent["tools"] == [SHELL_TOOL]
+        assert sent["sandbox"] == "workspace-write"
+        assert sent["environment"] == environment
+        assert _identity(sent)["thread_id"] == "thread_tool"
+        assert _identity(sent)["turn_id"] == "turn_tool"
+        assert "environment_context" not in json.dumps(sent)
+
+        unknown = _function_output("thread_tool", "turn_tool", "call_missing")
+        status, payload = _post(port, unknown)
+        assert status == 400, payload
+        assert b"tool call is unknown" in payload
+        assert len(_requests(home)) == 1
+
+        output = _function_output("thread_tool", "turn_tool", "call_turn_tool", item_id="fc_turn_tool")
+        assert "sandbox" not in output
+        assert "environment" not in output
+        status, payload = _post(port, output)
+        assert status == 200, payload
+        assert b"tool result accepted" in payload
+        assert len(_requests(home)) == 2
+        continued = _requests(home)[1]["body"]
+        assert _identity(continued)["thread_id"] == "thread_tool"
+        assert _identity(continued)["turn_id"] == "turn_tool"
+        assert continued["prompt_cache_key"] == "thread_tool"
+        assert "sandbox" not in continued
+        assert "environment" not in continued
+        calls = [item for item in continued["input"] if item.get("type") == "function_call"]
+        results = [item for item in continued["input"] if item.get("type") == "function_call_output"]
+        assert calls[0]["call_id"] == "call_turn_tool"
+        assert calls[0]["id"] == "fc_turn_tool"
+        assert results[0]["call_id"] == "call_turn_tool"
+
+        copied = _function_output("thread_other", "turn_other", "call_turn_tool", item_id="fc_turn_tool")
+        status, payload = _post(port, copied)
+        assert status == 400, payload
+        assert b"another session" in payload
+        assert len(_requests(home)) == 2
+
+        other_turn = _function_output("thread_tool", "turn_tool_other", "call_turn_tool", item_id="fc_turn_tool")
+        status, payload = _post(port, other_turn)
+        assert status == 400, payload
+        assert b"not active on this turn" in payload
+        assert len(_requests(home)) == 2
+
+        status, payload = _post(port, output)
+        assert status == 200, payload
+        assert b"tool result accepted" in payload
+        assert len(_requests(home)) == 2
+
+
+def test_tool_client_disconnect_closes_upstream_and_rejects_later_output(runtime, tmp_path: Path) -> None:
+    home, _pin = runtime
+    (home / "web-home" / "serve-mode").write_text("tool-hold", encoding="utf-8")
+    with _gateway(home, _pin, tmp_path / "codex-client") as port:
+        body = _with_tools(
+            _request_body(
+                MODEL_ID,
+                [_message("msg_cancel_tool", "turn_cancel_tool", PROMPT)],
+                thread_id="thread_cancel_tool",
+                turn_id="turn_cancel_tool",
+                effort="high",
+            )
+        )
+        payload = json.dumps(body).encode("utf-8")
+        key = os.environ["CODEX_PROXY_GATEWAY_CLIENT_KEY"]
+        request = (
+            f"POST /v1/responses HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Content-Type: application/json\r\n"
+            f"Authorization: Bearer {key}\r\n"
+            f"Content-Length: {len(payload)}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii") + payload
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.sendall(request)
+        seen = b""
+        deadline = time.time() + 5
+        while b"call_turn_cancel_tool" not in seen and time.time() < deadline:
+            chunk = client.recv(256)
+            if not chunk:
+                break
+            seen += chunk
+        assert b"call_turn_cancel_tool" in seen
+        assert b"fc_turn_cancel_tool" in seen
+        client.shutdown(socket.SHUT_RDWR)
+        client.close()
+        closed = home / "web-home" / "upstream-closed"
+        deadline = time.time() + 5
+        while not closed.is_file() and time.time() < deadline:
+            time.sleep(0.05)
+        assert closed.is_file()
+        assert len(_requests(home)) == 1
+        (home / "web-home" / "serve-mode").write_text("text", encoding="utf-8")
+        status, payload = _post(
+            port,
+            _function_output("thread_cancel_tool", "turn_cancel_tool", "call_turn_cancel_tool"),
+        )
+        assert status == 400, payload
+        assert b"tool call expired" in payload
+        assert len(_requests(home)) == 1

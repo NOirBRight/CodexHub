@@ -2551,6 +2551,10 @@ def relay_upstream_response(
                     continue
                 original_payload = gateway_sse._parse_sse_json_payload(line) if upstream_name != "official" else None
                 usage_payload = gateway_sse._parse_sse_json_payload(line)
+                if upstream_name == "chatgpt_web" and isinstance(usage_payload, Mapping):
+                    import chatgpt_web_route as _chatgpt_web_route
+
+                    _chatgpt_web_route.observe_upstream_event(usage_payload, event_context)
                 buffer_current_line = False
                 if isinstance(usage_payload, Mapping):
                     remember_response_id(usage_payload)
