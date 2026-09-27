@@ -35,9 +35,18 @@ fails with a clear error instead of downloading the upstream v6.1.1 binary.
 Only Linux x64 and Windows x64 are currently supported by this patched runtime;
 other architectures fail closed.
 
-The earlier control-contract candidate's Linux and Windows archives are
-superseded by the account-attestation source change and are no longer pinned.
-Paired builds and runtime smoke checks for the new source revision are pending;
-the prebuilt/install pin is not qualified until those checks finish. Packaging
-smokes do not establish real account login, connector authorization, or client
-tool calls.
+The paired Linux x64 and Windows x64 source builds for the account-attestation
+revision completed on 2026-09-28 from CodexHub candidate SHA
+`2740520e40793459ff4af0a2fccba76296506f10`. Both use runtime revision
+`93b8e6fc3eda8a81176964be87f8c7b8fc637a7f`, tree
+`641caaf875fcf908dfaa919c242f24fdede26a69`, and Bun 1.4.0. Each build passed
+typecheck and both the in-place and extracted relocatable runtime smokes.
+
+The Linux archive SHA-256 is
+`e370f6916e1d9e4bc60af81ef79269f16970e34c985db3f625e20c891dfc2782`; the
+Windows archive SHA-256 is
+`5cbb11d6d848018d1f079c89151f4dd46cc7d5ebb83a878970626b5120b35a95`. The
+source pin records both platform checksums and the shared runtime revision and
+tree. These are prepared candidate artifacts, not a published CodexHub
+release. Packaging smokes do not establish real account login, connector
+authorization, or client tool calls.
