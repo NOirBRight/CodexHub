@@ -241,7 +241,7 @@ def compatible_sse_line(
         )
 
     decoded_events, runtime_tool_plan = _official_passthrough.decode_tool_events(
-        event_context, payload
+        event_context, payload, upstream_name=upstream_name
     )
     if decoded_events is not None:
         if not decoded_events:

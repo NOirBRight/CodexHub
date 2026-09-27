@@ -1,0 +1,76 @@
+{
+  "checked_at_utc": "2026-09-27T15:53:27.266409+00:00",
+  "gateway": "candidate worktree on isolated loopback port",
+  "candidate_source_sha256": "8faee411a5a05cd397d779e4c2b3330704cb5513c627f6eb7738087f37ba5e42",
+  "first_turn": {
+    "http_status": 200,
+    "terminal": "response.completed",
+    "output_count": 12,
+    "search_call_count": 4,
+    "reasoning_ids_unique": true,
+    "annotation_event_count": 10,
+    "citation_urls": [
+      "https://store.playstation.com/pt-br/concept/221973",
+      "https://store.playstation.com/zh-hans-hk/product/UP0751-CUSA05868_00-ASIAREZINFINITE0",
+      "https://store.playstation.com/zh-hant-hk/product/HP0797-PPSA09164_00-REZINFINITE00PS5",
+      "https://www.jp.playstation.com/en-hk/games/rez-infinite/",
+      "https://www.playstation.com/ar-qa/games/rez-infinite/",
+      "https://www.playstation.com/ja-jp/games/rez-infinite/",
+      "https://www.playstation.com/nl-nl/games/rez-infinite/",
+      "https://www.playstation.com/th-th/games/rez-infinite/",
+      "https://www.playstation.com/zh-hans-hk/games/rez-infinite/",
+      "https://www.playstation.com/zh-hant-hk/games/rez-infinite/"
+    ],
+    "usage": {
+      "input_tokens": 31057,
+      "input_tokens_details": {
+        "cached_tokens": 4736
+      },
+      "output_tokens": 1044,
+      "output_tokens_details": {
+        "reasoning_tokens": 550
+      },
+      "total_tokens": 32101,
+      "num_sources_used": 0,
+      "num_server_side_tools_used": 4,
+      "cost_in_usd_ticks": 408331600,
+      "server_side_tool_usage_details": {
+        "web_search_calls": 4,
+        "x_search_calls": 0,
+        "x_posts_fetched": 0,
+        "x_users_fetched": 0,
+        "code_interpreter_calls": 0,
+        "file_search_calls": 0,
+        "mcp_calls": 0,
+        "document_search_calls": 0,
+        "image_generation_calls": 0
+      },
+      "context_details": {
+        "input_tokens": 16742,
+        "output_tokens": 759
+      }
+    }
+  },
+  "history_followup": {
+    "http_status": 200,
+    "status": "completed",
+    "usage": {
+      "input_tokens": 2479,
+      "input_tokens_details": {
+        "cached_tokens": 1152
+      },
+      "output_tokens": 144,
+      "output_tokens_details": {
+        "reasoning_tokens": 109
+      },
+      "total_tokens": 2623,
+      "num_sources_used": 0,
+      "num_server_side_tools_used": 0,
+      "cost_in_usd_ticks": 13919600,
+      "context_details": {
+        "input_tokens": 2479,
+        "output_tokens": 153
+      }
+    }
+  }
+}
