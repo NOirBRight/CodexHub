@@ -214,6 +214,14 @@ def _chat_reasoning_output(message: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _chat_reasoning_input(message: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Preserve portable reasoning without response-only completion status."""
+    item = _chat_reasoning_output(message)
+    if item is not None:
+        item.pop("status", None)
+    return item
+
+
 def _responses_reasoning_text(item: Mapping[str, Any]) -> str:
     """Return the portable summary text for one Responses reasoning item.
 
@@ -1226,7 +1234,7 @@ def chat_messages_to_responses_input(
                 "Cannot translate a non-list assistant tool_calls payload.",
             )
         if isinstance(tool_calls, list) and role == "assistant":
-            reasoning_output = _chat_reasoning_output(message)
+            reasoning_output = _chat_reasoning_input(message)
             if reasoning_output is not None:
                 input_items.append(reasoning_output)
             content = message.get("content")
@@ -1324,7 +1332,7 @@ def chat_messages_to_responses_input(
                 "Cannot translate unsupported Chat Completions message role to Responses.",
             )
         response_role = role
-        reasoning_output = _chat_reasoning_output(message) if role == "assistant" else None
+        reasoning_output = _chat_reasoning_input(message) if role == "assistant" else None
         if reasoning_output is not None:
             input_items.append(reasoning_output)
         content_parts = chat_content_to_responses_content(message.get("content"))

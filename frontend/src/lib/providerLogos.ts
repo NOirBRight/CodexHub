@@ -13,6 +13,7 @@ import opencodeLogo from "../assets/providers/opencode.svg";
 
 const PROVIDER_LOGOS: Record<string, string> = {
   openai: openaiLogo,
+  "chatgpt-web": openaiLogo,
   anthropic: anthropicLogo,
   deepseek: deepseekLogo,
   "ollama-cloud": ollamaLogo,

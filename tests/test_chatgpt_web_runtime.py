@@ -8,6 +8,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 import tarfile
 import urllib.error
 import urllib.request
@@ -76,6 +77,13 @@ if [ "$1" = "doctor" ]; then
   else
     printf '%s\\n' '{{"ok":false,"checks":[{{"id":"login","status":"error","message":"missing"}}]}}'
   fi
+  exit 0
+fi
+if [ "$1" = "login" ]; then
+  trap 'exit 1' TERM INT
+  while [ ! -f "$CODEX_CHATGPT_WEB_HOME/finish-login" ]; do
+    sleep 0.1
+  done
   exit 0
 fi
 if [ "$1" = "serve" ]; then
@@ -275,7 +283,7 @@ def test_repeated_start_uses_one_entry_and_doctor_layers_stay_distinct(tmp_path:
         _stop(home, pin)
 
 
-def test_diagnostic_page_does_not_become_a_signed_in_account(tmp_path: Path) -> None:
+def test_owned_login_starts_cancels_and_does_not_claim_authentication(tmp_path: Path) -> None:
     home = tmp_path / "runtime"
     marker = home / "executed-marker"
     archive = _archive(tmp_path, _fixture_script(marker))
@@ -287,9 +295,13 @@ def test_diagnostic_page_does_not_become_a_signed_in_account(tmp_path: Path) -> 
         assert opened["login"]["state"] == "signed_out"
         assert opened["login"]["window"] == "open"
         assert opened["ready"] is False
-        assert opened["login_url"].startswith("http://127.0.0.1:")
-        assert opened["login_url"].endswith("/login")
-        with urllib.request.urlopen(opened["login_url"], timeout=2) as response:
+        assert "login_url" not in opened
+        login_url = f"http://127.0.0.1:{opened['process']['diagnostic_port']}/login"
+        again = _run(home, "open-login", pin=pin)
+        assert again["login"]["window"] == "open"
+        log = (home / "web-home" / "argv.log").read_text()
+        assert log.splitlines().count("login") == 1
+        with urllib.request.urlopen(login_url, timeout=2) as response:
             page = response.read().decode("utf-8")
         assert "does not mark the runtime signed in" in page
         assert "/releases/download/v6.1.1/" in page
@@ -297,7 +309,7 @@ def test_diagnostic_page_does_not_become_a_signed_in_account(tmp_path: Path) -> 
         assert SECRET not in page
         assert not (home / "account.json").exists()
         rejected = urllib.request.Request(
-            opened["login_url"].rsplit("/", 1)[0] + "/account",
+            login_url.rsplit("/", 1)[0] + "/account",
             data=json.dumps({"secret": SECRET}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -776,5 +788,56 @@ def test_delete_account_removes_account_files_and_does_not_run_during_disable(tm
         log_after = (home / "web-home" / "argv.log").read_text(encoding="utf-8")
         assert log_after == log_before
         _rejected_absent(log_after)
+    finally:
+        _stop(home, pin)
+
+
+def test_login_completion_requires_explicit_restart_and_stop_cancels_login(tmp_path: Path) -> None:
+    home = tmp_path / "runtime"
+    archive = _archive(tmp_path, _fixture_script(home / "marker"))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    try:
+        opened = _run(home, "open-login", pin=pin)
+        pid = opened["process"]["pid"]
+        (home / "web-home" / "finish-login").touch()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            finished = _run(home, "status", pin=pin)
+            if finished["login"]["window"] == "closed":
+                break
+        assert finished["restart_required"] is True
+        assert finished["admitting"] is False
+        assert finished["login"]["state"] == "signed_out"  # Exit zero never fabricates authentication.
+        assert finished["process"]["pid"] == pid
+        restarted = _run(home, "start", pin=pin)
+        assert restarted["process"]["pid"] != pid
+        assert restarted["restart_required"] is False
+        assert restarted["admitting"] is True
+        (home / "web-home" / "finish-login").unlink()
+        assert _run(home, "open-login", pin=pin)["login"]["window"] == "open"
+        assert _run(home, "stop", pin=pin)["login"]["window"] == "closed"
+    finally:
+        _stop(home, pin)
+
+
+def test_login_failure_is_visible_without_exposing_process_output(tmp_path: Path) -> None:
+    home = tmp_path / "runtime"
+    script = _fixture_script(home / "marker").replace('if [ "$1" = "login" ]; then',
+        f'if [ "$1" = "login" ]; then\n  printf "{SECRET}" >&2\n  sleep 0.4\n  exit 9')
+    archive = _archive(tmp_path, script)
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    try:
+        _run(home, "open-login", pin=pin)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            status = _run(home, "status", pin=pin)
+            if status["login"]["error"]:
+                break
+        assert status["login"]["error"] == "login_failed"
+        assert status["login"]["window"] == "closed"
+        assert status["restart_required"] is False
+        assert SECRET not in json.dumps(status)
     finally:
         _stop(home, pin)

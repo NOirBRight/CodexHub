@@ -439,6 +439,32 @@ export function ProviderDetail({
     }
   }
 
+  if (chatgptWebRuntime) {
+    return (
+      <div className="ws-provider-detail flex h-full min-h-0 flex-col">
+        <div className="border-b border-line px-4 py-3">
+          <HeaderRow title={provider.name} actions={
+            <IconButton title={t("providers.deleteProvider")} danger disabled={busy === "save"} onClick={onDelete}>
+              <Trash2 size={16} />
+            </IconButton>
+          } />
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <ChatGptWebRuntimeCard unsaved={unsaved} />
+        </div>
+        {unsaved ? (
+          <div className="flex items-center justify-between gap-3 border-t border-line px-4 py-3">
+            <p className="text-xs text-slate-600">{t("providers.chatgptWebSaveFirst")}</p>
+            <button type="button" className="ws-button" disabled={busy === "save"}
+              onClick={() => onChange(draft, t("providers.providerAdded", { name: draft.name }))}>
+              <Plus size={14} />{t("providers.chatgptWebAdd")}
+            </button>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
     <div className="ws-provider-detail grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
       <div className="grid gap-2 border-b border-line px-4 py-2.5">
@@ -502,8 +528,6 @@ export function ProviderDetail({
             </>
           }
         />
-
-        {chatgptWebRuntime ? <ChatGptWebRuntimeCard /> : null}
 
         {xaiSubscriptionAuth && !desktopTab ? null : (
           <div className="grid grid-cols-2 gap-2">
