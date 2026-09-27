@@ -45,5 +45,32 @@ reach the same upstream model, while unavailable/unknown family targets fail
 closed. Rust configuration tests verify distinct picker/environment IDs,
 legacy-value migration, idempotent republish, and canonical role readback.
 
-The same-account interactive credits check with the corrected IDs remains
-required before claiming the original popup is fixed in an installed build.
+## Same-account interactive picker comparison
+
+The installed Claude Code 2.1.283 was run in temporary isolated homes using
+the same account metadata/cache and an access-only credential copy (the
+refresh token was removed). Normal account reads remained enabled: disabling
+nonessential traffic had masked the credits UI and was not a valid reproduction.
+Each case opened `/model`, moved with arrow keys, and pressed Enter. No
+inference request or purchase was submitted.
+
+| Family mapping | Manual choice | Observed result | Saved model |
+| --- | --- | --- | --- |
+| Shared Astra picker ID | CodexHub 6 Astra | `Switch to Fable?`, zero-credits gate | Original Opus |
+| Dedicated Fable role ID | CodexHub 6 Astra | `Set model to CodexHub 6 Astra`, no Fable gate | `claude-codexhub-gpt-6-astra` |
+| Dedicated Fable role ID | Native Fable | `Switch to Fable 5.1?`, normal credits gate | Original Opus |
+
+Temporary homes were removed after each case. This comparison reproduces the
+reported popup and verifies the corrected selection behavior for this account
+and CLI version. It does not claim provider inference, billing, or coverage of
+every internal Claude task. The production app still needs the compatible
+Gateway and configuration writer together; changing only its settings while
+running the old Gateway is unsupported.
+
+## Candidate checks
+
+- Python core: 3441 passed, 190 skipped, 283 subtests passed.
+- Rust: 796 passed, 1 ignored, no failures (serial execution).
+- Frontend build, Clippy with warnings denied, Python partition completeness,
+  and Linux physical window/input E2E passed.
+- Report-only quality scan completed with zero parse errors.

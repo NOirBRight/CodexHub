@@ -72,7 +72,8 @@ def probe(binary: Path) -> list[dict]:
                         "--model", requested, "Say OK"], cwd=root, env=env,
                         capture_output=True, text=True, timeout=18)
                     wire = captured[start:]
-                    passed = wire == [expected] and resolve_projected_model_id(expected, catalog) == canonical
+                    passed = (result.returncode == 1 and wire == [expected]
+                              and resolve_projected_model_id(expected, catalog) == canonical)
                     rows.append({"target": target, "requested": requested, "wire_models": wire,
                                  "expected_http_status": 400, "cli_exit": result.returncode, "passed": passed})
     finally:
