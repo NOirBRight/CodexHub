@@ -18,6 +18,7 @@ from catalog import canonical_model_id, compose_flat_label
 from gateway_errors import identity_failure
 
 import chatgpt_web_collab
+import chatgpt_web_connection
 import chatgpt_web_runtime
 
 PROVIDER_ID = "chatgpt-web"
@@ -27,6 +28,7 @@ LOOPBACK_HOST = "127.0.0.1"
 
 REASON_NOT_READY = "chatgpt_web_not_ready"
 REASON_MODEL_NOT_LISTED = "chatgpt_web_model_not_listed"
+REASON_MODEL_NOT_ENABLED = "chatgpt_web_model_not_enabled"
 REASON_PIN_INCOMPATIBLE = "chatgpt_web_pin_incompatible"
 REASON_PROCESS_NOT_RUNNING = "chatgpt_web_process_not_running"
 REASON_BROWSER_SMOKE_FAILED = "chatgpt_web_browser_smoke_failed"
@@ -91,9 +93,10 @@ def listed_models(status: Mapping[str, Any] | None = None) -> tuple[dict[str, An
 
 
 def project_catalog(catalog: Mapping[str, Any]) -> dict[str, Any]:
-    """Append doctor-listed web models. An empty doctor list adds nothing."""
+    """Append only doctor-listed models enabled in the ChatGPT Provider."""
     try:
         status = read_status()
+        enabled_models = chatgpt_web_connection.selected_model_ids(status)
     except Exception:
         return dict(catalog)
     if not _text_runtime_admitted(status):
@@ -107,6 +110,8 @@ def project_catalog(catalog: Mapping[str, Any]) -> dict[str, Any]:
     }
     added = False
     for model in listed_models(status):
+        if model["id"] not in enabled_models:
+            continue
         if model["id"] in seen:
             continue
         projected.append(_catalog_entry(model))
@@ -129,6 +134,13 @@ def upstream_for_model(slug: str) -> dict[str, Any]:
         raise identity_failure(
             f"ChatGPT Web model is not in the runtime doctor list: {identity}",
             reason=REASON_MODEL_NOT_LISTED,
+            provider_id=PROVIDER_ID,
+            model_slug=identity,
+        )
+    if identity not in chatgpt_web_connection.selected_model_ids(status):
+        raise identity_failure(
+            f"ChatGPT Web model is not enabled for Gateway: {identity}",
+            reason=REASON_MODEL_NOT_ENABLED,
             provider_id=PROVIDER_ID,
             model_slug=identity,
         )
@@ -289,29 +301,24 @@ def _text_runtime_admitted(status: Mapping[str, Any]) -> bool:
 
 
 def _upstream_facts(status: Mapping[str, Any], model: Mapping[str, Any]) -> dict[str, Any]:
-    process = status.get("process")
-    port = process.get("port") if isinstance(process, Mapping) else None
-    host = process.get("listen_host") if isinstance(process, Mapping) else None
-    if host != LOOPBACK_HOST or not isinstance(port, int) or isinstance(port, bool) or port <= 0:
+    try:
+        base_url, token = chatgpt_web_connection.resolve_connection(
+            *chatgpt_web_connection.provider_overrides(),
+            home=chatgpt_web_runtime.default_home(),
+            status=status,
+        )
+    except ValueError as exc:
         raise identity_failure(
-            "ChatGPT Web runtime is not ready",
+            str(exc),
             reason=REASON_NOT_READY,
             provider_id=PROVIDER_ID,
             model_slug=str(model["id"]),
-        )
-    token = _control_token()
-    if not token:
-        raise identity_failure(
-            "ChatGPT Web runtime is not ready",
-            reason=REASON_NOT_READY,
-            provider_id=PROVIDER_ID,
-            model_slug=str(model["id"]),
-        )
+        ) from exc
     return {
         "name": UPSTREAM_NAME,
         "provider_id": PROVIDER_ID,
         "model_id": model["id"],
-        "base_url": f"http://{LOOPBACK_HOST}:{port}",
+        "base_url": base_url,
         "auth": "api_key",
         "api_key": token,
         "upstream_model": model["id"],
@@ -328,13 +335,6 @@ def _upstream_facts(status: Mapping[str, Any], model: Mapping[str, Any]) -> dict
         "supported_reasoning_levels": tuple(model["efforts"]),
         "input_modalities": _input_modalities(model),
     }
-
-
-def _control_token() -> str:
-    home = chatgpt_web_runtime.default_home()
-    config = chatgpt_web_runtime._read_json(chatgpt_web_runtime._web_home(home) / "config.json") or {}
-    token = config.get("controlToken")
-    return token if isinstance(token, str) else ""
 
 
 def _requested_effort(payload: Mapping[str, Any]) -> str | None:

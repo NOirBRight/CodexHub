@@ -43,6 +43,7 @@ import type {
   UnifiedHistoryResult,
   UsageQueryWindow,
   ChatGptWebStatus,
+  ChatGptWebConnectionCheck,
   XaiAuthStatus,
   XaiDeviceLogin,
   XaiUsageSnapshot,
@@ -404,6 +405,14 @@ export const api = {
     return snapshot;
   },
   chatgptWebStatus: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebStatus),
+  chatgptWebConnectionCheck: async (baseUrl: string, apiKey: string) => {
+    const result = await desktopCall<ChatGptWebConnectionCheck>(
+      COMMANDS.chatgptWebConnectionCheck,
+      { baseUrl, apiKey },
+    );
+    if (!result) throw new Error("Connection checks require the CodexHub desktop app");
+    return result;
+  },
   chatgptWebEnable: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebEnable),
   chatgptWebStop: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebStop),
   chatgptWebDisable: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebDisable),

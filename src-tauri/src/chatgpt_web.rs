@@ -5,9 +5,12 @@
 
 use crate::{config, runtime_paths};
 use serde_json::Value;
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::Stdio;
 
 const SCRIPT_NAME: &str = "chatgpt_web_runtime.py";
+const CONNECTION_SCRIPT_NAME: &str = "chatgpt_web_connection.py";
 const PIN_NAME: &str = "chatgpt_web_runtime_pin.json";
 
 pub fn chatgpt_web_status_blocking() -> Result<Value, String> {
@@ -83,6 +86,66 @@ pub async fn chatgpt_web_close_login() -> Result<Value, String> {
     spawn_cli(chatgpt_web_close_login_blocking).await
 }
 
+#[tauri::command]
+pub async fn chatgpt_web_connection_check(
+    base_url: String,
+    api_key: String,
+) -> Result<Value, String> {
+    spawn_cli(move || chatgpt_web_connection_check_blocking(&base_url, &api_key)).await
+}
+
+pub fn chatgpt_web_connection_check_blocking(
+    base_url: &str,
+    api_key: &str,
+) -> Result<Value, String> {
+    let python = config::find_python()?;
+    let script = runtime_paths::resource_root()?
+        .join("src-python")
+        .join(CONNECTION_SCRIPT_NAME);
+    if !script.is_file() {
+        return Err(format!(
+            "ChatGPT Web connection checker not found: {}",
+            script.display()
+        ));
+    }
+    let home = private_home()?;
+    let pin = pin_path()?;
+    let mut command = runtime_paths::configured_python_command(&python);
+    command
+        .arg(&script)
+        .arg("check")
+        .env("CODEXHUB_CHATGPT_WEB_HOME", &home)
+        .env("CODEXHUB_CHATGPT_WEB_PIN", &pin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start ChatGPT Web connection check: {error}"))?;
+    let input = serde_json::json!({ "base_url": base_url, "api_key": api_key });
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "ChatGPT Web connection check input was unavailable".to_string())?
+        .write_all(&serde_json::to_vec(&input).map_err(|error| error.to_string())?)
+        .map_err(|error| format!("failed to send ChatGPT Web connection check: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("ChatGPT Web connection check failed: {error}"))?;
+    let stdout = redact_secrets(&String::from_utf8_lossy(&output.stdout));
+    if let Ok(payload) = serde_json::from_str::<Value>(stdout.trim()) {
+        if output.status.success() && payload.get("ok").and_then(Value::as_bool) == Some(true) {
+            return Ok(payload);
+        }
+        return Err(payload
+            .get("error")
+            .and_then(Value::as_str)
+            .map(redact_secrets)
+            .unwrap_or_else(|| "ChatGPT Web connection check failed".to_string()));
+    }
+    Err("ChatGPT Web connection check returned invalid status".to_string())
+}
+
 async fn spawn_cli<F>(task: F) -> Result<Value, String>
 where
     F: FnOnce() -> Result<Value, String> + Send + 'static,
@@ -98,7 +161,8 @@ fn private_home() -> Result<PathBuf, String> {
             return Ok(PathBuf::from(value));
         }
     }
-    let home = dirs::home_dir().ok_or_else(|| "failed to resolve user home directory".to_string())?;
+    let home =
+        dirs::home_dir().ok_or_else(|| "failed to resolve user home directory".to_string())?;
     Ok(home.join(".codexhub").join("chatgpt-web"))
 }
 
@@ -108,7 +172,9 @@ fn pin_path() -> Result<PathBuf, String> {
             return Ok(PathBuf::from(value));
         }
     }
-    Ok(runtime_paths::resource_root()?.join("config").join(PIN_NAME))
+    Ok(runtime_paths::resource_root()?
+        .join("config")
+        .join(PIN_NAME))
 }
 
 fn script_path() -> Result<PathBuf, String> {
@@ -171,7 +237,9 @@ pub(crate) fn redact_secrets(text: &str) -> String {
         let tail = &rest[found + 3..];
         let token_len = tail
             .chars()
-            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_' || *character == '-')
+            .take_while(|character| {
+                character.is_ascii_alphanumeric() || *character == '_' || *character == '-'
+            })
             .map(char::len_utf8)
             .sum::<usize>();
         if token_len > 4 {

@@ -130,32 +130,12 @@ test("model settings overlay is a nested dialog that consumes Escape", async () 
   assert.match(focus, /nested\.contains\(document\.activeElement\)/);
 });
 
-test("browser login action reports immediate verification and waits for an open window", async () => {
-  const { default: ts } = await import("typescript");
-  const { default: vm } = await import("node:vm");
+test("ChatGPT Provider Connection keeps service credentials masked and exposes model choices", async () => {
   const source = await readFile(new URL("../src/components/providers/ChatGptWebRuntimeCard.tsx", import.meta.url), "utf8");
-  const finish = source.slice(source.indexOf("  function finishLogin("), source.indexOf("  async function followLogin("));
-  const run = source.slice(source.indexOf("  async function run("), source.indexOf("  const prepared ="));
-  const code = ts.transpileModule(finish + run + "\nglobalThis.runAction = run;", {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  for (const [state, window, error, tone] of [
-    ["signed_in", "closed", null, "success"],
-    ["signed_out", "closed", "login_failed", "error"],
-    ["signed_out", "open", null, "loading"],
-  ]) {
-    const updates = [];
-    let followed = false;
-    const context = { runtimeActionVersion: 0, actionRunning: { current: false }, mounted: { current: true },
-      request: { current: null }, unsaved: false, setBusy() {}, setStatus() {}, setError() {}, setConfirmDelete() {},
-      showToast: () => "login", updateToast: (id, value) => updates.push({ id, ...value }),
-      t: (key) => key, messageFromError: String, followLogin: () => { followed = true; },
-    };
-    vm.createContext(context); vm.runInContext(code, context);
-    await context.runAction("opening", async () => ({ login: { state, window, error } }), "opened", true);
-    assert.equal(updates.at(-1).tone, tone);
-    assert.equal(updates.at(-1).id, "login");
-    assert.equal(followed, window === "open");
-    if (tone === "success") assert.equal(updates.at(-1).text, "providers.chatgptWebLoginVerified");
-  }
+  assert.match(source, /type="password"/);
+  assert.match(source, /api\.chatgptWebConnectionCheck\(provider\.base_url\.trim\(\), provider\.api_key \?\? ""\)/);
+  assert.match(source, /function toggleModel/);
+  assert.match(source, /gateway_exported: true/);
+  assert.match(source, /onProviderChange\(\{ \.\.\.provider, models: nextModels \}\)/);
+  assert.doesNotMatch(source, /api\.chatgptWebOpenLogin|api\.chatgptWebDeleteAccount/);
 });

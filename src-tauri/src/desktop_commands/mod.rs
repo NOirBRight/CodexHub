@@ -159,6 +159,7 @@ macro_rules! desktop_command_registry {
             XaiUsageSnapshot => "xai_usage_snapshot" => $crate::xai_auth::xai_usage_snapshot, true, true, true, false, NO_ALIASES;
             XaiOpenVerificationUrl => "xai_open_verification_url" => $crate::xai_auth::xai_open_verification_url, true, true, true, false, NO_ALIASES;
             ChatGptWebStatus => "chatgpt_web_status" => $crate::chatgpt_web::chatgpt_web_status, true, true, true, false, NO_ALIASES;
+            ChatGptWebConnectionCheck => "chatgpt_web_connection_check" => $crate::chatgpt_web::chatgpt_web_connection_check, true, false, true, false, ALIASES_BASE_URL_API_KEY;
             ChatGptWebEnable => "chatgpt_web_enable" => $crate::chatgpt_web::chatgpt_web_enable, true, true, true, false, NO_ALIASES;
             ChatGptWebStop => "chatgpt_web_stop" => $crate::chatgpt_web::chatgpt_web_stop, true, true, true, false, NO_ALIASES;
             ChatGptWebDisable => "chatgpt_web_disable" => $crate::chatgpt_web::chatgpt_web_disable, true, true, true, false, NO_ALIASES;

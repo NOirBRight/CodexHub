@@ -301,6 +301,13 @@ export interface ChatGptWebStatus {
   login_url?: string;
 }
 
+export interface ChatGptWebConnectionCheck {
+  ok: true;
+  reachable: true;
+  base_url: string;
+  credential_configured: boolean;
+}
+
 export interface XaiUsageSnapshot {
   signed_in?: boolean;
   limits: OpenAIUsageLimit[];
