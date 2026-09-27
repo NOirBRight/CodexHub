@@ -23,5 +23,26 @@
       "url": "https://github.com/miuuyy/codex-chatgpt-web/releases/download/v6.1.1/codex-chatgpt-web-windows-amd64.zip",
       "sha256": "88341bd2818894799be98f1283f64a2124de0f43193ee2dc1d2a774362ea59d5"
     }
+  },
+  "tunnel_client": {
+    "version": "0.0.12",
+    "repository": "https://github.com/openai/tunnel-client",
+    "artifacts": {
+      "linux-x64": {
+        "filename": "tunnel-client-v0.0.12-linux-amd64.zip",
+        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.12/tunnel-client-v0.0.12-linux-amd64.zip",
+        "sha256": "2bb693bd7b5cd28da7ce09cd9e309529dbb33b7cc9dc0058e62a064688f92c81"
+      },
+      "linux-arm64": {
+        "filename": "tunnel-client-v0.0.12-linux-arm64.zip",
+        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.12/tunnel-client-v0.0.12-linux-arm64.zip",
+        "sha256": "6813878a3edb82ebebb32fe5a859bc6327a81cce5bc7b635a2313174d26365d6"
+      },
+      "windows-x64": {
+        "filename": "tunnel-client-v0.0.12-windows-amd64.zip",
+        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.12/tunnel-client-v0.0.12-windows-amd64.zip",
+        "sha256": "2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356"
+      }
+    }
   }
 }
