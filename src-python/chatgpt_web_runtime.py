@@ -11,6 +11,10 @@ the supervisor and keeps the private account directory.
 
 from __future__ import annotations
 
+from python_runtime_contract import require_python_313
+
+require_python_313(__file__)
+
 import hashlib
 import hmac
 import json
@@ -238,6 +242,16 @@ def load_pin(path: Path | None = None) -> dict[str, Any]:
     if len(sha) != 64 or any(character not in "0123456789abcdef" for character in sha):
         raise RuntimeError_("ChatGPT Web Runtime pin checksum is invalid")
     _assert_pinned_url(url, PINNED_VERSION)
+    bundled_filename = artifact.get("bundled_filename")
+    if bundled_filename is not None and (
+        not isinstance(bundled_filename, str)
+        or not bundled_filename
+        or bundled_filename in {".", ".."}
+        or "/" in bundled_filename
+        or "\\" in bundled_filename
+        or ":" in bundled_filename
+    ):
+        raise RuntimeError_("bundled runtime must be a filename beside its pin")
     return payload
 
 
@@ -541,6 +555,8 @@ def _stage_verified_tree(home: Path, source: Path | None, pin: dict[str, Any]) -
     The current install is left in place. ``incoming`` is returned for promote.
     """
     artifact = _artifact(pin)
+    if source is None and artifact.get("bundled_filename"):
+        source = default_pin_path().parent / artifact["bundled_filename"]
     partial = home / "staging" / "payload.partial"
     incoming = home / "incoming"
     try:
@@ -573,6 +589,7 @@ def _stage_verified_tree(home: Path, source: Path | None, pin: dict[str, Any]) -
                 "version": PINNED_VERSION,
                 "sha256": digest,
                 "filename": artifact.get("filename"),
+                "build_revision": artifact.get("build_revision", PINNED_COMMIT),
                 "archive_executed": False,
                 "entry": str(entry.relative_to(runtime_dest)),
             },

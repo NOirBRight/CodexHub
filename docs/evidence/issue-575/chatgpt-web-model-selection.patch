@@ -1,8 +1,31 @@
-diff --git i/src/adapters/chatgpt-web/model-selection.ts w/src/adapters/chatgpt-web/model-selection.ts
-index 4529117..445b164 100644
---- i/src/adapters/chatgpt-web/model-selection.ts
-+++ w/src/adapters/chatgpt-web/model-selection.ts
-@@ -102,7 +102,19 @@ export async function assertChatGptModelFamily(
+diff --git a/src/adapters/chatgpt-web/model-selection.ts b/src/adapters/chatgpt-web/model-selection.ts
+index 4529117..95a085d 100644
+--- a/src/adapters/chatgpt-web/model-selection.ts
++++ b/src/adapters/chatgpt-web/model-selection.ts
+@@ -73,11 +73,17 @@ export function chatGptModelFamilyMatches(
+   // Latest uses 5.6 for the existing lower-effort multipart acknowledgements and 6 for Pro.
+   // Never interpret a future Latest Pro model as 6, or a lower effort as the final Pro response.
+   const expected = family === "6" && effort !== "max" ? "5.6" : family;
+-  const states = descriptions.flatMap(text => {
+-    const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^,，]+)(?:[,，]|$)/i
+-      .exec(text.replace(/\s+/g, " ").trim());
+-    return match ? [{ version: match[1], name: match[2]?.toLowerCase(), mode: match[3]!.trim() }] : [];
+-  });
++  const states = [];
++  for (const text of descriptions) {
++    const normalized = text.replace(/\s+/g, " ").trim();
++    const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^,，]+?)(?:[,，]\s*\d+\s+of\s+\d+\.?)?$/i.exec(normalized);
++    if (!match) {
++      // A malformed version assertion must not be masked by another valid label.
++      if (/^(?:GPT[-\s]?)?\d/i.test(normalized)) return false;
++      continue;
++    }
++    states.push({ version: match[1], name: match[2]?.toLowerCase(), mode: match[3]!.trim() });
++  }
+   return states.length > 0 && states.every(state => state.version === expected
+     && (!state.name || state.name === (expected === "5.6" ? "sol" : "astra"))
+     && (effort === "max" ? /^Pro$/i.test(state.mode) : !/^Pro$/i.test(state.mode)));
+@@ -102,7 +108,19 @@ export async function assertChatGptModelFamily(
        (element.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)
          .map(id => element.ownerDocument.getElementById(id)?.textContent ?? "")
      ));
@@ -23,10 +46,10 @@ index 4529117..445b164 100644
      if (Date.now() >= deadline) break;
      await new Promise(resolve => setTimeout(resolve, 50));
    } while (true);
-diff --git i/tests/chatgpt-model-selection.test.ts w/tests/chatgpt-model-selection.test.ts
-index c839662..1c8996c 100644
---- i/tests/chatgpt-model-selection.test.ts
-+++ w/tests/chatgpt-model-selection.test.ts
+diff --git a/tests/chatgpt-model-selection.test.ts b/tests/chatgpt-model-selection.test.ts
+index c839662..672c731 100644
+--- a/tests/chatgpt-model-selection.test.ts
++++ b/tests/chatgpt-model-selection.test.ts
 @@ -1,5 +1,39 @@
  import { expect, test } from "bun:test";
 -import { chatGptModelFamilyMatches, selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
@@ -68,3 +91,14 @@ index c839662..1c8996c 100644
  
  test("model selection recognizes Latest in the launcher languages without accepting other model names", async () => {
    for (const [label, accepted] of [
+@@ -26,7 +60,9 @@ test("family confirmation separates Latest staging from the actual Pro response"
+   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "6", "max")).toBe(true);
+   expect(chatGptModelFamilyMatches(["GPT-5.6 Sol Pro, 5 of 5."], "5.6", "max")).toBe(true);
+   for (const descriptions of [[], ["Try Pro for more reasoning"], ["5.6 High, 3 of 5."], ["5.6 Pro, 5 of 5."],
+-    ["7 Pro, 5 of 5."], ["6 Sol Pro, 5 of 5."], ["6 Pro, 5 of 5.", "5.6 Pro, 5 of 5."], ["6 Pro for better answers"]]) {
++    ["7 Pro, 5 of 5."], ["6 Sol Pro, 5 of 5."], ["6 Pro, 5 of 5.", "5.6 Pro, 5 of 5."], ["6 Pro for better answers"],
++    ["6 Pro, 5 of 5. GPT-7 Pro, 5 of 5."], ["6 Pro, GPT-7 Pro"],
++    ["6 Pro", "6 Pro, 5 of 5. GPT-7 Pro, 5 of 5."]]) {
+     expect(chatGptModelFamilyMatches(descriptions, "6", "max")).toBe(false);
+   }
+   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "5.6", "max")).toBe(false);

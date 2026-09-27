@@ -904,9 +904,7 @@ class GatewayHandlerMixin:
                     or live.downstream_sse_started
                     or downstream_sse_started
                 )
-                self._active_prepared_exchange = (
-                    exchange_progress.active_prepared_exchange
-                )
+                self._active_prepared_exchange = exchange_progress.active_prepared_exchange
             terminal = terminal_result(exchange_result)
             if terminal.handled and not terminal.completed:
                 return

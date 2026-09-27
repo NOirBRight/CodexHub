@@ -423,6 +423,29 @@ def test_restart_restores_only_verified_login_capabilities(tmp_path: Path, login
         _stop(home, pin)
 
 
+@pytest.mark.parametrize("scenario", ["valid", "missing", "corrupt", "traversal"])
+def test_bundled_runtime_installs_only_verified_local_bytes(tmp_path: Path, scenario: str) -> None:
+    home = tmp_path / "runtime"
+    executed = home / "executed-marker"
+    archive = _archive(tmp_path, _fixture_script(executed))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    document = json.loads(pin.read_text(encoding="utf-8"))
+    document["artifacts"][chatgpt_web_runtime.artifact_key()]["bundled_filename"] = (
+        "../runtime.tar.gz" if scenario == "traversal" else archive.name
+    )
+    pin.write_text(json.dumps(document), encoding="utf-8")
+    if scenario == "missing":
+        archive.unlink()
+    elif scenario == "corrupt":
+        archive.write_bytes(b"not the pinned archive")
+    installed = _run(home, "install", pin=pin)
+    assert (installed["_exit_code"] == 0) is (scenario == "valid")
+    assert not executed.exists()
+    assert (home / "current" / "runtime" / ENTRY_NAME).exists() is (scenario == "valid")
+    if scenario != "valid":
+        assert {"missing": "not a file", "corrupt": "checksum mismatch", "traversal": "filename beside"}[scenario] in installed["error"]
+
+
 def test_remote_bind_is_refused(tmp_path: Path) -> None:
     home = tmp_path / "runtime"
     marker = home / "executed-marker"

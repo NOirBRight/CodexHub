@@ -25,6 +25,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/e2e_desktop_tool_matrix.py",
     "src-python/bucket_sync.py",
     "src-python/catalog_sync.py",
+    "src-python/chatgpt_web_runtime.py",
     "src-python/codex_proxy.py",
     "src-python/config_overlay.py",
     "src-python/global_state_repair.py",

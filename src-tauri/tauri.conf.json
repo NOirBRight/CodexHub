@@ -36,6 +36,7 @@
       "../config/*.toml": "config",
       "../config/official_model_catalog_metadata.json": "config/official_model_catalog_metadata.json",
       "../config/official_fast_variants.json": "config/official_fast_variants.json",
+      "../config/chatgpt_web_runtime_pin.json": "config/chatgpt_web_runtime_pin.json",
       "../config/resolved_model_limits.json": "config/resolved_model_limits.json",
       "../src-python/*.py": "src-python",
       "../src-python/tool_compatibility/*.py": "src-python/tool_compatibility",
