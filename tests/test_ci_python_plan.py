@@ -282,6 +282,33 @@ def test_checker_runs_without_executing_tests():
     assert "true" in out.stdout.lower()
 
 
+def test_checker_keeps_test_nodeids_containing_collected(monkeypatch, capsys):
+    checker = _load_module(CHECKER_PATH, "check_python_test_partitions_regression")
+    collected_node = (
+        "tests/test_e2e_third_party_collaboration.py::"
+        "test_collected_test_diagnostics_are_linked_to_client_items"
+    )
+    synthetic_node = "tests/test_real_client_e2e.py::test_synthetic_contract"
+
+    def collect(cmd, **_kwargs):
+        if "--ignore" in cmd:
+            nodeids = [collected_node]
+        elif checker.REAL_CLIENT_E2E in cmd:
+            nodeids = [synthetic_node]
+        else:
+            nodeids = [collected_node, synthetic_node]
+        stdout = "\n".join([*nodeids, f"{len(nodeids)} tests collected in 0.01s"])
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(checker.subprocess, "run", collect)
+
+    assert checker.main() == 0
+    output = capsys.readouterr().out
+    assert "full: 2 tests" in output
+    assert "core: 1 tests" in output
+    assert "synthetic: 1 tests" in output
+
+
 def test_ci_yaml_has_full_checkout_for_synthetic_merge_base():
     """Regression: shallow checkout breaks git merge-base on a fresh PR runner."""
     workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
