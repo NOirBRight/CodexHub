@@ -363,7 +363,17 @@ def test_page_asset_is_declared_for_release_packages():
     config = json.loads((repo / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     resources = config["bundle"]["resources"]
     assert resources["../src-python/chatgpt_web_settings.html"] == "src-python/chatgpt_web_settings.html"
+    assert resources[
+        "resources/chatgpt-web-runtime/chatgpt_web_runtime_pin.json"
+    ] == "config/chatgpt_web_runtime_pin.json"
+    assert resources["resources/chatgpt-web-runtime/*.tar.gz"] == "config"
+    assert resources["resources/chatgpt-web-runtime/*.zip"] == "config"
+    assert "../config/chatgpt_web_runtime_pin.json" not in resources
     windows_builder = (repo / "scripts" / "build-windows-portable.ps1").read_text(encoding="utf-8-sig")
     linux_builder = (repo / "scripts" / "build-linux-portable.sh").read_text(encoding="utf-8")
+    windows_release = (repo / "scripts" / "build-windows-release.ps1").read_text(encoding="utf-8-sig")
+    linux_release = (repo / "scripts" / "build-linux-release.sh").read_text(encoding="utf-8")
     assert '"src-python"' in windows_builder
     assert '"bundle"]["resources"]' in linux_builder
+    for builder in (windows_builder, linux_builder, windows_release, linux_release):
+        assert "prepare_chatgpt_web_runtime.py" in builder

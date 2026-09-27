@@ -33,6 +33,8 @@ src-tauri/gen/
 # matches on a clean checkout (otherwise `cargo test` cannot compile).
 src-tauri/resources/python/*
 !src-tauri/resources/python/.keep
+src-tauri/resources/chatgpt-web-runtime/*
+!src-tauri/resources/chatgpt-web-runtime/.keep
 src-tauri/resources/downloads/
 
 # Local worktrees
