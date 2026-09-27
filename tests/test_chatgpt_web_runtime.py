@@ -305,6 +305,7 @@ def _archive(directory: Path, script: str) -> Path:
 
 
 def _fake_tunnel_client_script(state_path: Path) -> str:
+    interpreter = "python" if os.name == "nt" else sys.executable
     template = '''#!__PYTHON__
 import json
 import os
@@ -371,7 +372,9 @@ else:
     print("unexpected tunnel command", file=sys.stderr)
     raise SystemExit(3)
 '''
-    return template.replace("__PYTHON__", sys.executable).replace("__STATE_PATH__", repr(str(state_path)))
+    return template.replace("__PYTHON__", interpreter).replace(
+        "__STATE_PATH__", repr(str(state_path))
+    )
 
 
 def _prepare_full_tunnel(home: Path, pin: Path) -> tuple[Path, Path]:
