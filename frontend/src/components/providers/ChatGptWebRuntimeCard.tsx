@@ -3,6 +3,7 @@ import { ExternalLink, RefreshCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useToasts } from "../PageToast";
 import { Field } from "./ProviderFormControls";
+import { SwitchControl } from "./ProviderModelSection";
 import { ProviderLogo } from "../../lib/providerLogos";
 import { api, messageFromError } from "../../lib/tauri";
 import type { Model, Provider, ChatGptWebStatus } from "../../lib/types";
@@ -143,7 +144,8 @@ export function ChatGptWebRuntimeCard({
   const prepared = Boolean(status?.installed && status.component.compatible && process?.running && !status.disabled);
   const textReady = Boolean(!error && prepared && status?.login.state === "signed_in"
     && !status?.restart_required && status?.admitting !== false
-    && status?.browser_smoke.state === "passed" && managedAddress);
+    && status?.browser_smoke.state === "passed"
+    && status?.readiness_checks?.capabilities_match === true && managedAddress);
   const toolsReady = Boolean(textReady && status?.ready);
   const stateKey = error ? "chatgptWebStatusUnknown" : !status ? "chatgptWebChecking"
     : status.disabled ? "chatgptWebDisabled" : status.restart_required ? "chatgptWebRestartRequired"
@@ -216,7 +218,7 @@ export function ChatGptWebRuntimeCard({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-base font-semibold text-ink">ChatGPT</h3>
-            <span className="rounded-full bg-panel px-2 py-1 text-xs" role="status">{t(`providers.${stateKey}`)}</span>
+            <span className="ws-status-chip inline-flex h-6 items-center border border-line bg-panel px-2 text-xs" role="status">{t(`providers.${stateKey}`)}</span>
           </div>
           <p className="mt-1 text-xs leading-5 text-slate-600">{t("providers.chatgptWebBody")}</p>
         </div>
@@ -265,11 +267,8 @@ export function ChatGptWebRuntimeCard({
         </div>
         {models.length ? <ul className="divide-y divide-line">
           {models.map((model) => <li key={model.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
-            <label className="flex min-w-0 items-center gap-2">
-              <input type="checkbox" checked={modelEnabled(model)}
-                onChange={(event) => toggleModel(model, event.target.checked)} />
-              <span>{model.display_name || model.id}</span>
-            </label>
+            <SwitchControl checked={modelEnabled(model)} label={model.display_name || model.id}
+              onChange={(enabled) => toggleModel(model, enabled)} />
             <code className="break-all text-xs text-slate-500">{model.id}</code>
           </li>)}
         </ul> : <p className="text-xs text-slate-600">{t("providers.chatgptWebNoModels")}</p>}

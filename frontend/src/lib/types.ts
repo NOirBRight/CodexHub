@@ -288,6 +288,7 @@ export interface ChatGptWebStatus {
   capacity?: string;
   admitting?: boolean;
   browser_smoke: { state: string };
+  readiness_checks?: { capabilities_match?: boolean | null };
   tunnel: { state: string; detail?: string };
   connector: { selectable: boolean };
   process: {
