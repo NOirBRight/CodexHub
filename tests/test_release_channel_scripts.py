@@ -2,7 +2,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tomllib
 
 import pytest
@@ -30,6 +32,33 @@ def test_generated_tauri_config_applies_linux_platform_overlay():
     assert "tauri.linux.conf.json" in script
     assert "$IsLinux" in script
     assert "Add-Member -NotePropertyName" in script
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="runs the Linux Tauri config generator")
+def test_linux_tauri_config_generator_includes_only_the_linux_runtime_archive(tmp_path: Path):
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell 7 is required to exercise the public config generator")
+    result = subprocess.run(
+        [
+            pwsh,
+            "-NoProfile",
+            "-File",
+            str(ROOT / "scripts" / "Build-TauriConfig.ps1"),
+            "-RepoRoot",
+            str(ROOT),
+            "-OutputRoot",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = json.loads((tmp_path / "tauri.normal.conf.json").read_text(encoding="utf-8"))
+    resources = generated["bundle"]["resources"]
+    assert resources["resources/chatgpt-web-runtime/*.tar.gz"] == "config"
+    assert "resources/chatgpt-web-runtime/*.zip" not in resources
 
 
 def test_official_transport_wheel_is_pinned_and_packaged():

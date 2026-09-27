@@ -14,7 +14,6 @@ import pytest
 from test_chatgpt_web_route import (
     MODEL_ID,
     PROMPT,
-    _doctor,
     _gateway,
     _install,
     _message,
@@ -23,7 +22,6 @@ from test_chatgpt_web_route import (
     _run,
     _sse_events,
     _start,
-    _write_doctor,
 )
 
 SHELL_TOOL = {
@@ -37,21 +35,9 @@ SYSTEM = [
 ]
 
 
-def runtime(tmp_path: Path):
+def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home, pin = _install(tmp_path)
-    _write_doctor(
-        home,
-        _doctor(
-            [
-                {
-                    "id": MODEL_ID,
-                    "display_name": "Sol",
-                    "efforts": ["medium", "high"],
-                }
-            ]
-        ),
-    )
-    _start(home, pin)
+    _start(home, pin, monkeypatch)
     return home, pin
 
 
@@ -208,8 +194,10 @@ def _user_blocks(payload: dict) -> list[list[str]]:
     return blocks
 
 
-def test_missing_session_id_is_rejected_and_records_no_responses_post(tmp_path: Path) -> None:
-    home, pin = runtime(tmp_path)
+def test_missing_session_id_is_rejected_and_records_no_responses_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, pin = runtime(tmp_path, monkeypatch)
     try:
         with _gateway(home, pin, tmp_path / "codex-client") as port:
             status, body = _post_messages(port, _messages_body([_user_turn()]))
@@ -243,9 +231,9 @@ def test_missing_session_id_is_rejected_and_records_no_responses_post(tmp_path: 
     "claude-codexhub-role/fable/chatgpt-web/gpt-5.6-sol",
 ])
 def test_sessions_keep_distinct_threads_and_one_session_reuses_its_thread(
-    tmp_path: Path, model: str,
+    tmp_path: Path, model: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    home, pin = runtime(tmp_path)
+    home, pin = runtime(tmp_path, monkeypatch)
     try:
         with _gateway(home, pin, tmp_path / "codex-client") as port:
             codex = _request_body(
@@ -314,8 +302,10 @@ def test_sessions_keep_distinct_threads_and_one_session_reuses_its_thread(
         _run(home, "stop", pin=pin)
 
 
-def test_tool_result_stays_on_the_session_and_replay_adds_no_post(tmp_path: Path) -> None:
-    home, pin = runtime(tmp_path)
+def test_tool_result_stays_on_the_session_and_replay_adds_no_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, pin = runtime(tmp_path, monkeypatch)
     try:
         with _gateway(home, pin, tmp_path / "codex-client") as port:
             issued = _messages_body([_user_turn("run pwd")], tools=[SHELL_TOOL])
@@ -402,8 +392,10 @@ def test_tool_result_stays_on_the_session_and_replay_adds_no_post(tmp_path: Path
         _run(home, "stop", pin=pin)
 
 
-def test_cancel_closes_the_upstream_body_and_rejects_a_later_tool_result(tmp_path: Path) -> None:
-    home, pin = runtime(tmp_path)
+def test_cancel_closes_the_upstream_body_and_rejects_a_later_tool_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, pin = runtime(tmp_path, monkeypatch)
     try:
         (home / "web-home" / "serve-mode").write_text("tool-hold", encoding="utf-8")
         with _gateway(home, pin, tmp_path / "codex-client") as port:
@@ -466,8 +458,10 @@ def test_cancel_closes_the_upstream_body_and_rejects_a_later_tool_result(tmp_pat
         _run(home, "stop", pin=pin)
 
 
-def test_upstream_error_is_not_also_a_successful_message(tmp_path: Path) -> None:
-    home, pin = runtime(tmp_path)
+def test_upstream_error_is_not_also_a_successful_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, pin = runtime(tmp_path, monkeypatch)
     try:
         (home / "web-home" / "serve-mode").write_text("error", encoding="utf-8")
         with _gateway(home, pin, tmp_path / "codex-client") as port:
