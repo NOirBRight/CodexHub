@@ -118,6 +118,10 @@ if [[ "$skip_frontend" -eq 0 ]]; then
   )
 fi
 
+"$repo_root/scripts/codexhub-python.sh" \
+  "$repo_root/scripts/prepare_chatgpt_web_runtime.py" \
+  --repo-root "$repo_root"
+
 export TAURI_SIGNING_PRIVATE_KEY="$private_key_path"
 export CODEXHUB_BUILD_FLAVOR="$flavor"
 export TAURI_CONFIG="$generated_config"

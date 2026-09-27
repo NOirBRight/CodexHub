@@ -86,6 +86,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "Python runtime preparation failed with exit code $LASTEXITCODE."
 }
 
+$prepareChatGptRuntime = Join-Path $scriptRoot "prepare_chatgpt_web_runtime.py"
+& (Join-Path $scriptRoot "codexhub-python.cmd") $prepareChatGptRuntime --repo-root $repoRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "ChatGPT Web Runtime preparation failed with exit code $LASTEXITCODE."
+}
+
 $previousFrontendPort = $env:CODEXHUB_FRONTEND_PORT
 Push-Location $frontendDir
 try {
@@ -158,6 +164,12 @@ foreach ($resource in @("config", "src-python", "python", "scripts")) {
 $xaiHelper = Join-Path $portableDir "scripts\xai_device_login.py"
 if (-not (Test-Path -LiteralPath $xaiHelper)) {
     throw "portable build is missing scripts/xai_device_login.py"
+}
+$chatGptRuntimePin = Join-Path $portableDir "config\chatgpt_web_runtime_pin.json"
+$chatGptRuntimeArchive = Join-Path $portableDir "config\codexhub-chatgpt-web-runtime-windows-x64.zip"
+if (-not (Test-Path -LiteralPath $chatGptRuntimePin -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $chatGptRuntimeArchive -PathType Leaf)) {
+    throw "portable build is missing the patched ChatGPT Web Runtime resource"
 }
 Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $portableZip -CompressionLevel Optimal
 

@@ -78,6 +78,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "Python runtime preparation failed with exit code $LASTEXITCODE."
 }
 
+$prepareChatGptRuntime = Join-Path $PSScriptRoot "prepare_chatgpt_web_runtime.py"
+& (Join-Path $PSScriptRoot "codexhub-python.cmd") $prepareChatGptRuntime --repo-root $repoRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "ChatGPT Web Runtime preparation failed with exit code $LASTEXITCODE."
+}
+
 if (-not $SkipFrontendBuild) {
     $previousFrontendPort = $env:CODEXHUB_FRONTEND_PORT
     Push-Location $frontendDir
