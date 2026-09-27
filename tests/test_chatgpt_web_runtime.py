@@ -332,6 +332,8 @@ def test_repo_pin_is_the_accepted_upstream_release() -> None:
     assert source["git_tree"] == "2d49d1dca11aa21a340348bb2a356c4078ef50ab"
     assert source["contract"] == "admin-status-v1"
     assert source["patch_sha256"] == "50577ded0e5b012ec7ea893f98dcd1635705470c0f093e4cb192c9cadd638c35"
+    patch = ROOT / source["patch_file"]
+    assert hashlib.sha256(patch.read_bytes()).hexdigest() == source["patch_sha256"]
     assert document["license"] == "MIT"
     assert "setup" in document["rejected_entries"]
     assert "dev" in document["rejected_entries"]
