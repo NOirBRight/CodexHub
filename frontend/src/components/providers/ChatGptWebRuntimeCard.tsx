@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { RefreshCcw } from "lucide-react";
+import { ExternalLink, RefreshCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useToasts } from "../PageToast";
 import { Field } from "./ProviderFormControls";
@@ -24,6 +24,7 @@ export function ChatGptWebRuntimeCard({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [connectionBusy, setConnectionBusy] = useState(false);
+  const [settingsBusy, setSettingsBusy] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [refreshIndex, setRefreshIndex] = useState(0);
   const request = useRef<Promise<ChatGptWebStatus> | null>(null);
@@ -92,6 +93,23 @@ export function ChatGptWebRuntimeCard({
       updateToast(toastId, { action: null, text: message, tone: "error" });
     } finally {
       setConnectionBusy(false);
+    }
+  }
+
+  async function openRuntimeSettings() {
+    if (settingsBusy) return;
+    setSettingsBusy(true);
+    const toastId = showToast({ text: t("providers.chatgptWebSettingsOpening"), tone: "loading", dedupeKey: "chatgpt-web-settings" });
+    try {
+      await api.chatgptWebOpenSettings();
+      updateToast(toastId, { action: null, text: t("providers.chatgptWebSettingsOpened"), tone: "success" });
+    } catch (cause) {
+      updateToast(toastId, {
+        action: { label: t("common.retry"), onClick: () => void openRuntimeSettings() },
+        text: messageFromError(cause), tone: "error",
+      });
+    } finally {
+      setSettingsBusy(false);
     }
   }
 
@@ -185,9 +203,14 @@ export function ChatGptWebRuntimeCard({
       {error ? <p role="alert" className="text-xs text-red-700">{error}</p> : null}
 
       <section className="grid gap-3 rounded-control border border-line p-4" aria-label={t("providers.chatgptWebConnectionTitle")}>
-        <div>
-          <h4 className="text-sm font-semibold">{t("providers.chatgptWebConnectionTitle")}</h4>
-          <p className="mt-1 text-xs leading-5 text-slate-600">{t("providers.chatgptWebConnectionBody")}</p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <h4 className="text-sm font-semibold">{t("providers.chatgptWebConnectionTitle")}</h4>
+            <p className="mt-1 text-xs leading-5 text-slate-600">{t("providers.chatgptWebConnectionBody")}</p>
+          </div>
+          <button type="button" className="ws-button" disabled={settingsBusy} onClick={() => void openRuntimeSettings()}>
+            <ExternalLink size={14} />{t("providers.chatgptWebOpenSettings")}
+          </button>
         </div>
         <Field label={t("providers.chatgptWebServiceAddress")}>
           <input className="field field-compact" value={provider.base_url}

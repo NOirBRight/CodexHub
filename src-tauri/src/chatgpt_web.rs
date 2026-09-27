@@ -5,12 +5,13 @@
 
 use crate::{config, runtime_paths};
 use serde_json::Value;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
 
 const SCRIPT_NAME: &str = "chatgpt_web_runtime.py";
 const CONNECTION_SCRIPT_NAME: &str = "chatgpt_web_connection.py";
+const SETTINGS_SCRIPT_NAME: &str = "chatgpt_web_settings.py";
 const PIN_NAME: &str = "chatgpt_web_runtime_pin.json";
 
 pub fn chatgpt_web_status_blocking() -> Result<Value, String> {
@@ -44,6 +45,85 @@ pub fn chatgpt_web_open_login_blocking() -> Result<Value, String> {
 
 pub fn chatgpt_web_close_login_blocking() -> Result<Value, String> {
     run_cli(&["close-login"])
+}
+
+pub fn chatgpt_web_open_settings_blocking() -> Result<Value, String> {
+    let python = config::find_python()?;
+    let script = runtime_paths::resource_root()?
+        .join("src-python")
+        .join(SETTINGS_SCRIPT_NAME);
+    if !script.is_file() {
+        return Err("ChatGPT Runtime Settings page was not found".to_string());
+    }
+    let home = private_home()?;
+    let pin = pin_path()?;
+    let mut command = runtime_paths::configured_python_command(&python);
+    command
+        .arg(&script)
+        .arg("serve")
+        .arg("--home")
+        .arg(&home)
+        .env("CODEXHUB_CHATGPT_WEB_HOME", &home)
+        .env("CODEXHUB_CHATGPT_WEB_PIN", &pin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|_| "ChatGPT Runtime Settings could not be started".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "ChatGPT Runtime Settings could not be started".to_string())?;
+    let mut ready = String::new();
+    if BufReader::new(stdout).read_line(&mut ready).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("ChatGPT Runtime Settings could not be started".to_string());
+    }
+    let payload: Value = match serde_json::from_str(ready.trim()) {
+        Ok(payload) => payload,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("ChatGPT Runtime Settings could not be started".to_string());
+        }
+    };
+    let Some(url) = payload.get("url").and_then(Value::as_str) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("ChatGPT Runtime Settings could not be started".to_string());
+    };
+    if !is_settings_bootstrap_url(url) || child.try_wait().ok().flatten().is_some() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("ChatGPT Runtime Settings could not be started".to_string());
+    }
+    if crate::xai_auth::spawn_system_browser(url).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("Could not open Runtime Settings in your default browser".to_string());
+    }
+    Ok(serde_json::json!({"opened": true}))
+}
+
+fn is_settings_bootstrap_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
+        && url.port().is_some()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_some_and(|fragment| {
+            (32..=128).contains(&fragment.len())
+                && fragment.bytes().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, b'_' | b'-')
+                })
+        })
 }
 
 #[tauri::command]
@@ -84,6 +164,11 @@ pub async fn chatgpt_web_open_login() -> Result<Value, String> {
 #[tauri::command]
 pub async fn chatgpt_web_close_login() -> Result<Value, String> {
     spawn_cli(chatgpt_web_close_login_blocking).await
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_open_settings() -> Result<Value, String> {
+    spawn_cli(chatgpt_web_open_settings_blocking).await
 }
 
 #[tauri::command]
@@ -256,7 +341,7 @@ pub(crate) fn redact_secrets(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_secrets;
+    use super::{is_settings_bootstrap_url, redact_secrets};
     use std::path::PathBuf;
 
     #[test]
@@ -280,5 +365,24 @@ mod tests {
         assert!(text.contains("\"setup\""));
         assert!(text.contains("\"dev\""));
         assert!(text.contains("--replace-codex-route"));
+    }
+
+    #[test]
+    fn settings_bootstrap_url_is_loopback_and_uses_a_fragment_capability() {
+        assert!(is_settings_bootstrap_url(
+            "http://127.0.0.1:43125/#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG"
+        ));
+        for url in [
+            "https://127.0.0.1:43125/#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG",
+            "http://localhost:43125/#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG",
+            "http://127.0.0.1/#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG",
+            "http://127.0.0.1:43125/path#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG",
+            "http://127.0.0.1:43125/?token=secret#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG",
+            "http://user@127.0.0.1:43125/#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG",
+            "http://127.0.0.1:43125/#too-short",
+            "http://127.0.0.1:43125/#0123456789abcdefghijklmnopqrstuvwxyz%2FABCDEFG",
+        ] {
+            assert!(!is_settings_bootstrap_url(url), "{url}");
+        }
     }
 }
