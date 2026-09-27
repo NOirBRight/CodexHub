@@ -21,12 +21,18 @@
     "linux-x64": {
       "filename": "codexhub-chatgpt-web-runtime-linux-x64.tar.gz",
       "bundled_filename": "codexhub-chatgpt-web-runtime-linux-x64.tar.gz",
-      "bundled_only": true
+      "bundled_only": true,
+      "build_revision": "93b8e6fc3eda8a81176964be87f8c7b8fc637a7f",
+      "git_tree": "641caaf875fcf908dfaa919c242f24fdede26a69",
+      "sha256": "e370f6916e1d9e4bc60af81ef79269f16970e34c985db3f625e20c891dfc2782"
     },
     "windows-x64": {
       "filename": "codexhub-chatgpt-web-runtime-windows-x64.zip",
       "bundled_filename": "codexhub-chatgpt-web-runtime-windows-x64.zip",
-      "bundled_only": true
+      "bundled_only": true,
+      "build_revision": "93b8e6fc3eda8a81176964be87f8c7b8fc637a7f",
+      "git_tree": "641caaf875fcf908dfaa919c242f24fdede26a69",
+      "sha256": "5cbb11d6d848018d1f079c89151f4dd46cc7d5ebb83a878970626b5120b35a95"
     }
   },
   "tunnel_client": {
