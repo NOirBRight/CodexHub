@@ -106,7 +106,24 @@ class Handler(BaseHTTPRequestHandler):
         return matched
 
     def do_GET(self):
-        if self.path.split("?", 1)[0] != "/v1/models":
+        path = self.path.split("?", 1)[0]
+        if path == "/healthz":
+            body = json.dumps({{
+                "status": "ok",
+                "service": "codex-chatgpt-web",
+                "version": config["releaseVersion"],
+                "mode": config["mode"],
+                "pid": os.getpid(),
+                "port": int(config["port"]),
+                "accepting_turns": True,
+            }}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path != "/v1/models":
             self.send_error(404)
             return
         header = self.headers.get("Authorization", "").encode("utf-8")

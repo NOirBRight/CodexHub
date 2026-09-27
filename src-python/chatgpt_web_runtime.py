@@ -46,6 +46,9 @@ PINNED_COMMIT = "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
 PINNED_VERSION = "6.1.1"
 LOOPBACK_HOST = "127.0.0.1"
 LOGIN_CONTROL = "owned-browser-v1"
+RUNTIME_HEALTH_TIMEOUT_SECONDS = 2
+RUNTIME_STARTUP_HEALTH_TIMEOUT_SECONDS = 30
+RUNTIME_STARTUP_TIMEOUT_SECONDS = 180
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_DOWNLOAD_HOSTS = {
     "github.com",
@@ -2083,6 +2086,68 @@ def _running_status(home: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _runtime_healthy(home: Path, status: dict[str, Any]) -> bool:
+    process = status.get("process")
+    config = _read_json(_web_home(home) / "config.json") or {}
+    pid = process.get("pid") if isinstance(process, dict) else None
+    port = process.get("port") if isinstance(process, dict) else None
+    mode = config.get("mode")
+    if (
+        not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1
+        or not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535
+        or mode not in {"browser-only", "full"}
+        or config.get("releaseVersion") != PINNED_VERSION
+    ):
+        return False
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(
+            f"http://{LOOPBACK_HOST}:{port}/healthz", timeout=RUNTIME_HEALTH_TIMEOUT_SECONDS
+        ) as response:
+            if response.status != 200:
+                return False
+            health = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if not isinstance(health, dict) or not (
+        health.get("service") == "codex-chatgpt-web"
+        and health.get("status") == "ok"
+        and health.get("version") == config["releaseVersion"]
+        and health.get("mode") == mode
+        and health.get("pid") == pid
+        and health.get("port") == port
+        and health.get("accepting_turns") is True
+    ):
+        return False
+    current = _process_record(home)
+    return current is not None and current.get("pid") == pid
+
+
+def _startup_log_detail(home: Path) -> str:
+    lines: list[str] = []
+    for name in ("runtime-entry.log", "supervisor.log"):
+        path = home / name
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - 8192))
+                tail = handle.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        lines.extend(line.strip() for line in tail.splitlines() if line.strip())
+    detail = redact(" | ".join(lines[-8:]), _secrets(home))
+    return detail.replace("\n", " ")[-2000:]
+
+
+def _startup_failure_message(home: Path, supervisor_exit: int | None) -> str:
+    status = "ChatGPT Web Runtime did not become healthy"
+    if supervisor_exit is not None:
+        status += f" (supervisor exited {supervisor_exit})"
+    detail = _startup_log_detail(home)
+    return f"{status}: {detail}" if detail else status
+
+
 def start_runtime(home: Path) -> dict[str, Any]:
     home = _assert_private_home(home)
     _mkdir(home)
@@ -2094,7 +2159,11 @@ def start_runtime(home: Path) -> dict[str, Any]:
     _find_entry(_runtime_root(home))
     existing = _running_status(home)
     if existing is not None:
-        if not existing.get("restart_required") and existing.get("login", {}).get("control") == LOGIN_CONTROL:
+        if (
+            not existing.get("restart_required")
+            and existing.get("login", {}).get("control") == LOGIN_CONTROL
+            and _runtime_healthy(home, existing)
+        ):
             return existing
         stop_runtime(home, disable=False)
     if (_read_json(home / "lifecycle.json") or {}).get("enabled") is False:
@@ -2110,23 +2179,37 @@ def start_runtime(home: Path) -> dict[str, Any]:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    deadline = time.time() + 180
+    deadline = time.monotonic() + RUNTIME_STARTUP_TIMEOUT_SECONDS
+    health_deadline: float | None = None
     try:
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             existing = _running_status(home)
-            if existing is not None:
+            if existing is not None and _runtime_healthy(home, existing):
                 return existing
+            if existing is not None and health_deadline is None:
+                health_deadline = time.monotonic() + RUNTIME_STARTUP_HEALTH_TIMEOUT_SECONDS
             if process.poll() is not None:
+                break
+            if health_deadline is not None and time.monotonic() >= health_deadline:
                 break
             time.sleep(0.05)
         existing = _running_status(home)
-        if existing is not None:
+        if existing is not None and _runtime_healthy(home, existing):
             return existing
-        raise RuntimeError_("ChatGPT Web Runtime entry did not become ready")
+        raise RuntimeError_(_startup_failure_message(home, process.poll()))
     except Exception:
-        if process.poll() is None and _process_record(home) is None:
-            process.kill()
-            process.wait(timeout=2)
+        if process.poll() is None:
+            record = _read_json(home / "process.json") or {}
+            if record.get("supervisor_pid") == process.pid:
+                try:
+                    _signal_supervisor(home)
+                    process.wait(timeout=25)
+                except (OSError, subprocess.TimeoutExpired):
+                    process.kill()
+                    process.wait(timeout=2)
+            elif _process_record(home) is None:
+                process.kill()
+                process.wait(timeout=2)
         raise
 
 
