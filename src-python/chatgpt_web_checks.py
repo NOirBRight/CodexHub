@@ -337,7 +337,8 @@ class _PinnedBrowserSession(AbstractContextManager["_PinnedBrowserSession"]):
         profile = temporary / "chrome-profile"
         profile.mkdir(mode=0o700)
         self.browser = subprocess.Popen(
-            [str(executable), "--headless=new", "--disable-gpu", "--disable-dev-shm-usage",
+            [str(executable), *(["--headless=new"] if self.config.get("headed") is not True else []),
+             "--disable-gpu", "--disable-dev-shm-usage",
              "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
              f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
              *(["--no-sandbox"] if hasattr(os, "geteuid") and os.geteuid() == 0 else []), "about:blank"],
