@@ -536,7 +536,9 @@ def test_linux_portable_packages_the_xai_device_login_helper():
     script = (ROOT / "scripts" / "build-linux-portable.sh").read_text(encoding="utf-8")
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
 
-    assert 'for resource in config src-python python scripts' in script
+    assert '["bundle"]["resources"]' in script
+    assert 'repo / "src-tauri" / pattern' in script
+    assert 'shutil.copy2(source, target)' in script
     assert '"$portable_dir/scripts/xai_device_login.py"' in script
     assert 'scripts/e2e_linux_dock_icon.py' in script
     assert '--bin "$portable_dir/$executableBaseName"' in script
