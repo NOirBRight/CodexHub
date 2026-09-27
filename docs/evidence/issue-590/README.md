@@ -55,15 +55,23 @@ control token was rejected by `/v1/models`. The paired Windows x64 runtime
 archive has SHA-256
 `780bbb9b63888379cc41c77ba5dc293a30d93d375a4d0c98af659629bb04ec0e`.
 Both hashes belong to source revision `9c2892af646f36752cc131dedd90af6586e6e4ce`
-and are superseded by the account-identity attestation change above. They are
-not qualified artifacts for revision `93b8e6fc3eda8a81176964be87f8c7b8fc637a7f`;
-paired source builds and their smoke checks are pending.
+and are superseded by the account-identity attestation change above.
+
+The replacement Linux x64 and Windows x64 archives were built from CodexHub
+candidate SHA `2740520e40793459ff4af0a2fccba76296506f10` using runtime revision
+`93b8e6fc3eda8a81176964be87f8c7b8fc637a7f` and tree
+`641caaf875fcf908dfaa919c242f24fdede26a69`. Both passed typecheck and two
+relocatable runtime smokes. Linux SHA-256:
+`e370f6916e1d9e4bc60af81ef79269f16970e34c985db3f625e20c891dfc2782`;
+Windows SHA-256:
+`5cbb11d6d848018d1f079c89151f4dd46cc7d5ebb83a878970626b5120b35a95`. These
+checksums are recorded in the runtime pin template. They qualify the packaged
+runtime inputs, not real account login or live connector/tool behavior.
 
 The focused readiness, connection, recovery, route, and runtime tests passed:
-62 passed, 1 skipped. These tests use synthetic account and runtime data; no
+68 passed, 1 skipped. These tests use synthetic account and runtime data; no
 real account state or managed runtime was used. The paired payloads are
-prepared artifacts, not yet published by #588 or selected by the released
-runtime pin. Until publication and pin update, a runtime missing
+prepared candidate artifacts, not yet published by #588. A runtime missing
 `/admin/status` remains blocked and readiness does not use the legacy model
 endpoint as a fallback.
 
