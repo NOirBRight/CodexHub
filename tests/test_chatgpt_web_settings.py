@@ -229,6 +229,144 @@ def test_settings_http_preserves_replaces_and_clears_secret_without_returning_it
 
 
 @pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable runtime fixture")
+def test_settings_http_does_not_claim_failed_first_startup_config_is_active(
+    settings_server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    server, home = settings_server
+    entered = tmp_path / "serve-entered"
+    archive = runtime_fixtures._archive(tmp_path, runtime_fixtures._delayed_start_failure_script(entered))
+    pin = runtime_fixtures._pin_for(tmp_path, archive.read_bytes())
+    monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(pin))
+    assert runtime.install_runtime(home, archive)["installed"] is True
+    runtime.save_settings(home, {"options": {"context_window": 131072}})
+
+    startup: dict[str, str] = {}
+
+    def start_runtime():
+        try:
+            runtime.start_runtime(home)
+        except runtime.RuntimeError_ as error:
+            startup["error"] = str(error)
+
+    worker = threading.Thread(target=start_runtime)
+    worker.start()
+    fail_startup = home / "web-home" / "fail-startup"
+    try:
+        deadline = time.monotonic() + 10
+        while not entered.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert entered.exists(), startup.get("error", "fake runtime did not start")
+
+        config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
+        assert config["contextWindow"] == 131072
+        fail_startup.touch()
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "failed startup did not finish"
+        assert "error" in startup
+
+        session = _session(server)
+        status, _headers, body = _call(server, "/api/settings", session=session)
+        assert status == 200, body
+        snapshot = json.loads(body)
+        assert snapshot["active"] is None
+        assert snapshot["active_state"] == "unavailable"
+        assert snapshot["saved"]["options"]["context_window"] == 131072
+        assert snapshot["pending_restart"] is True
+    finally:
+        fail_startup.parent.mkdir(parents=True, exist_ok=True)
+        fail_startup.touch()
+        worker.join(timeout=10)
+        runtime.stop_runtime(home, disable=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses Unix executable runtime fixtures")
+def test_settings_http_keeps_last_loaded_values_after_failed_restart(
+    settings_server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    server, home = settings_server
+    good_dir = tmp_path / "good"
+    good_dir.mkdir()
+    good_archive = runtime_fixtures._archive(good_dir, runtime_fixtures._fixture_script(good_dir / "served"))
+    good_pin = runtime_fixtures._pin_for(good_dir, good_archive.read_bytes())
+    monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(good_pin))
+    assert runtime.install_runtime(home, good_archive)["installed"] is True
+    runtime.save_settings(home, {"options": {"context_window": 131072}})
+    runtime.start_runtime(home)
+
+    fail_startup = home / "web-home" / "fail-startup"
+    worker: threading.Thread | None = None
+    try:
+        session = _session(server)
+        active_path = home / "active-runtime-settings.json"
+        assert active_path.is_file()
+
+        # A healthy legacy runtime can establish its active snapshot without restarting.
+        active_path.unlink()
+        status, _headers, body = _call(server, "/api/settings", session=session)
+        assert status == 200, body
+        migrated = json.loads(body)
+        assert migrated["active_state"] == "loaded"
+        assert migrated["active"]["options"]["context_window"] == 131072
+        assert active_path.is_file()
+
+        status, _headers, body = _call(
+            server,
+            "/api/settings",
+            method="POST",
+            body={"options": {"context_window": 262144}},
+            headers={"Origin": server.origin},
+            session=session,
+        )
+        assert status == 200, body
+        assert json.loads(body)["pending_restart"] is True
+        runtime.stop_runtime(home, disable=False)
+
+        bad_dir = tmp_path / "bad"
+        bad_dir.mkdir()
+        entered = bad_dir / "serve-entered"
+        bad_archive = runtime_fixtures._archive(
+            bad_dir, runtime_fixtures._delayed_start_failure_script(entered)
+        )
+        bad_pin = runtime_fixtures._pin_for(bad_dir, bad_archive.read_bytes())
+        monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(bad_pin))
+        assert runtime.install_runtime(home, bad_archive)["installed"] is True
+        startup: dict[str, str] = {}
+
+        def start_failed_runtime():
+            try:
+                runtime.start_runtime(home)
+            except runtime.RuntimeError_ as error:
+                startup["error"] = str(error)
+
+        worker = threading.Thread(target=start_failed_runtime)
+        worker.start()
+        deadline = time.monotonic() + 10
+        while not entered.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert entered.exists(), startup.get("error", "fake runtime did not start")
+        config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
+        assert config["contextWindow"] == 262144
+        fail_startup.touch()
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "failed restart did not finish"
+        assert "error" in startup
+
+        status, _headers, body = _call(server, "/api/settings", session=session)
+        assert status == 200, body
+        snapshot = json.loads(body)
+        assert snapshot["active_state"] == "loaded"
+        assert snapshot["active"]["options"]["context_window"] == 131072
+        assert snapshot["saved"]["options"]["context_window"] == 262144
+        assert snapshot["pending_restart"] is True
+    finally:
+        fail_startup.parent.mkdir(parents=True, exist_ok=True)
+        fail_startup.touch()
+        if worker is not None:
+            worker.join(timeout=10)
+        runtime.stop_runtime(home, disable=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a Unix executable runtime fixture")
 def test_settings_save_preserves_an_open_runtime_stream_until_explicit_restart(
     settings_server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -477,8 +615,12 @@ def test_page_asset_is_declared_for_release_packages():
     assert resources[
         "resources/chatgpt-web-runtime/chatgpt_web_runtime_pin.json"
     ] == "config/chatgpt_web_runtime_pin.json"
-    assert resources["resources/chatgpt-web-runtime/*.tar.gz"] == "config"
-    assert resources["resources/chatgpt-web-runtime/*.zip"] == "config"
+    assert "resources/chatgpt-web-runtime/*.tar.gz" not in resources
+    assert "resources/chatgpt-web-runtime/*.zip" not in resources
+    linux = json.loads((repo / "src-tauri" / "tauri.linux.conf.json").read_text(encoding="utf-8"))
+    windows = json.loads((repo / "src-tauri" / "tauri.windows.conf.json").read_text(encoding="utf-8"))
+    assert linux["bundle"]["resources"]["resources/chatgpt-web-runtime/*.tar.gz"] == "config"
+    assert windows["bundle"]["resources"]["resources/chatgpt-web-runtime/*.zip"] == "config"
     assert "../config/chatgpt_web_runtime_pin.json" not in resources
     windows_builder = (repo / "scripts" / "build-windows-portable.ps1").read_text(encoding="utf-8-sig")
     linux_builder = (repo / "scripts" / "build-linux-portable.sh").read_text(encoding="utf-8")

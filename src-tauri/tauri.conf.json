@@ -37,8 +37,6 @@
       "../config/official_model_catalog_metadata.json": "config/official_model_catalog_metadata.json",
       "../config/official_fast_variants.json": "config/official_fast_variants.json",
       "resources/chatgpt-web-runtime/chatgpt_web_runtime_pin.json": "config/chatgpt_web_runtime_pin.json",
-      "resources/chatgpt-web-runtime/*.tar.gz": "config",
-      "resources/chatgpt-web-runtime/*.zip": "config",
       "../config/resolved_model_limits.json": "config/resolved_model_limits.json",
       "../src-python/*.py": "src-python",
       "../src-python/chatgpt_web_settings.html": "src-python/chatgpt_web_settings.html",
