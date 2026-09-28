@@ -5,8 +5,8 @@ Runtime Settings, the daily browser, OpenAI Platform, and CodexHub?
 
 Product decision: [ADR-0019](../docs/adr/0019-chatgpt-coding-setup-wizard.md).
 Coding capability is the only completion target. Saving returns immediately;
-manual restart and status checking are separate steps. Layout selection remains
-open; no variant is approved for production.
+manual restart and status checking are separate steps. The user selected layout A on 2026-09-28. Its visual refinement is still
+under review; the prototype is not production implementation.
 
 From the repository root:
 
@@ -43,3 +43,9 @@ Verification class: fast, docs plus isolated throwaway UI. Browser walkthrough
 and diff hygiene only; no production test suite or real-client acceptance claim.
 Preserve this source on `prototype/chatgpt-coding-wizard`, outside main. Track
 feedback on #592; #567 remains responsible for the real integration acceptance.
+
+Selected A, visual iteration 2: light studio canvas, existing CodexHub/ChatGPT
+SVG assets, connected step navigation, a focused service sheet, compact credential
+preparation actions, and explicit save/next-step footer. Original B/C remain for
+historical comparison. Desktop and 390px browser inspection found no horizontal
+overflow. The revised save action still leaves runtime inactive and restart manual.
