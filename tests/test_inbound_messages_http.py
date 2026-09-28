@@ -204,6 +204,45 @@ def test_prepare_exchange_keeps_named_adaptations() -> None:
     assert "synthetic" not in repr(prepared.adaptations)
 
 
+@pytest.mark.parametrize("outbound", ["chat_completions", "responses"])
+def test_model_switch_preserves_image_in_tool_result(outbound: str) -> None:
+    from protocol_translation import prepare_exchange
+
+    body = json.dumps({
+        "model": "volc/glm-5.2",
+        "max_tokens": 32,
+        "messages": [
+            {"role": "user", "content": "inspect"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call_1", "name": "read", "input": {}},
+            ]},
+            {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "call_1", "content": [
+                    {"type": "text", "text": "screenshot"},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "AA==",
+                    }},
+                ],
+            }]},
+        ],
+    }).encode()
+    prepared = prepare_exchange(body, inbound_format="anthropic_messages", outbound_format=outbound)
+    payload = json.loads(prepared.upstream_body)
+    if outbound == "chat_completions":
+        tool, image = payload["messages"][-2:]
+        assert tool == {"role": "tool", "tool_call_id": "call_1", "content": "screenshot"}
+        assert image["content"][1] == {
+            "type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="},
+        }
+    else:
+        tool, image = payload["input"][-2:]
+        assert tool == {"type": "function_call_output", "call_id": "call_1", "output": "screenshot"}
+        assert image["content"][1] == {"type": "input_image", "image_url": "data:image/png;base64,AA=="}
+    assert image["role"] == "user"
+    assert "call_1" in image["content"][0]["text"]
+    assert any(policy == "tool_result_image_lifted_to_user_message" for _, policy, _ in prepared.adaptations)
+
+
 def test_chat_conversion_refusal_names_unmodelled_fields() -> None:
     from protocol_translation import NonForwardable, prepare_exchange
 
