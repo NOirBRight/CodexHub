@@ -464,11 +464,17 @@ def _to_chat_request(request: AnthropicRequest) -> Adapted | NotForwardable:
             images = tuple(block for block in message.content if block.type == "image")
             messages.append({"role": "system", "content": _chat_text(text_blocks, declared, label=label)})
             if images:
-                content: list[dict[str, Any]] = []
-                for position, image in enumerate(images, start=1):
-                    content.append({"type": "text", "text": f"Image from prior system context ({position}/{len(images)})."})
-                    content.extend(_chat_user_content((image,), declared, label=label))
-                messages.append({"role": "user", "content": content})
+                messages.extend(
+                    _captioned_image_user_messages(
+                        images,
+                        declared,
+                        label=label,
+                        caption=lambda index, total: source_caption(
+                            index, total, prefix="Image from prior system context"
+                        ),
+                        combine=True,
+                    )
+                )
                 declared.adapt(
                     f"{label}.content",
                     "mid_conversation_system_image_lifted_to_user_message",
@@ -753,6 +759,53 @@ def _chat_tool_call(block: ContentBlock, index: int, declared: _Declared) -> dic
     }
 
 
+def _as_chat_content_parts(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return list(content)
+    if isinstance(content, dict):
+        return [content]
+    if isinstance(content, str) and content:
+        return [{"type": "text", "text": content}]
+    return []
+
+
+def _captioned_image_user_messages(
+    images: tuple[ContentBlock, ...],
+    declared: _Declared,
+    *,
+    label: str,
+    caption: Callable[[int, int], str],
+    combine: bool = False,
+) -> list[dict[str, Any]]:
+    """Lift image blocks into captioned user messages for Chat Completions."""
+
+    if not images:
+        return []
+    total = len(images)
+    if combine:
+        content: list[dict[str, Any]] = []
+        for index, image in enumerate(images, start=1):
+            content.append({"type": "text", "text": caption(index, total)})
+            content.extend(
+                _as_chat_content_parts(_chat_user_content((image,), declared, label=label))
+            )
+        return [{"role": "user", "content": content}]
+    messages: list[dict[str, Any]] = []
+    for index, image in enumerate(images, start=1):
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": caption(index, total)},
+                    *_as_chat_content_parts(
+                        _chat_user_content((image,), declared, label=label)
+                    ),
+                ],
+            }
+        )
+    return messages
+
+
 def _tool_result_message(
     block: ContentBlock, declared: _Declared, *, label: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -769,12 +822,14 @@ def _tool_result_message(
         images = tuple(part for part in blocks if part.type == "image")
         text = _chat_text(tuple(part for part in blocks if part.type != "image"), declared, label=label)
         if images:
-            for index, image in enumerate(images, start=1):
-                parts = _chat_user_content((image,), declared, label=label)
-                image_messages.append({"role": "user", "content": [
-                    {"type": "text", "text": source_caption(index, len(images), tool_use_id)},
-                    *parts,
-                ]})
+            image_messages.extend(
+                _captioned_image_user_messages(
+                    images,
+                    declared,
+                    label=label,
+                    caption=lambda index, total: source_caption(index, total, tool_use_id),
+                )
+            )
             declared.adapt(
                 f"{label}.content",
                 "tool_result_image_lifted_to_user_message",

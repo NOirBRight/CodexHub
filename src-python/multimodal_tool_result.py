@@ -270,9 +270,15 @@ def _placeholder_line(kind: str, index: int, total: int, call_id: str | None) ->
     return f"{_OMITTED_NOTE_PREFIX} {kind} {index}/{total}{source}]"
 
 
-def source_caption(index: int, total: int, call_id: str | None) -> str:
+def source_caption(
+    index: int,
+    total: int,
+    call_id: str | None = None,
+    *,
+    prefix: str = _SOURCE_NOTE_PREFIX,
+) -> str:
     source = f" from call_id={call_id}" if call_id else ""
-    return f"{_SOURCE_NOTE_PREFIX} {index}/{total}{source}."
+    return f"{prefix} {index}/{total}{source}."
 
 
 def _responses_image_part(part: Mapping[str, Any]) -> dict[str, Any]:
