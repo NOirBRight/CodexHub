@@ -72,6 +72,17 @@ def _public_readiness(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _login_blocked_reason(status: dict[str, Any]) -> str | None:
+    if status.get("installed") and (status.get("component") or {}).get("compatible") is False:
+        return "component_upgrade_required"
+    if (status.get("process") or {}).get("running") and (
+        status.get("restart_required")
+        or (status.get("login") or {}).get("control") != runtime.LOGIN_CONTROL
+    ):
+        return "component_restart_required"
+    return None
+
+
 def _public_status(home: Path) -> dict[str, Any]:
     settings = runtime.read_settings(home)
     status = runtime.build_status(home)
@@ -125,6 +136,7 @@ def _public_status(home: Path) -> dict[str, Any]:
             "login_state": _safe_reason(login.get("state")) or "not_checked",
             "login_window_open": login.get("window") == "open",
             "login_error": _safe_reason(login.get("error")),
+            "login_blocked_reason": _login_blocked_reason(status),
         },
         "readiness": readiness,
     }
@@ -393,6 +405,14 @@ class _SettingsHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/login":
             try:
+                reason = _login_blocked_reason(runtime.build_status(self.service.home))
+                if reason:
+                    action = "Upgrade and start" if reason == "component_upgrade_required" else "Restart"
+                    self._json(HTTPStatus.CONFLICT, {
+                        "ok": False, "error_code": reason,
+                        "error": f"{action} the ChatGPT component from CodexHub before opening sign-in.",
+                    })
+                    return
                 runtime.open_login(self.service.home)
             except runtime.RuntimeError_:
                 self._json(HTTPStatus.CONFLICT, {"ok": False, "error": "ChatGPT sign-in could not start. Check that the component is installed and available."})
