@@ -1,0 +1,68 @@
+{
+  "runtime_revision": "5a307bb48de3d96465305288a2fff5c4086299fb",
+  "client_version": "codex-cli 0.157.1",
+  "platform": "linux-x64",
+  "provider": "chatgpt-web",
+  "model": "gpt-5.6-sol",
+  "isolated_client": true,
+  "account_reuse_authorized": true,
+  "steps": [
+    {
+      "name": "text1",
+      "exit_code": 0,
+      "final_matches_expected": true,
+      "command_count": 0,
+      "tool_result_matches_file": false,
+      "sse_responses": 1,
+      "elapsed_seconds": 17.75,
+      "readiness": {
+        "cache_state": "current",
+        "text_ready": true,
+        "tools_ready": true
+      },
+      "passed": true
+    },
+    {
+      "name": "context2",
+      "exit_code": 0,
+      "final_matches_expected": true,
+      "command_count": 0,
+      "tool_result_matches_file": false,
+      "sse_responses": 1,
+      "elapsed_seconds": 19.22,
+      "readiness": {
+        "cache_state": "current",
+        "text_ready": true,
+        "tools_ready": true
+      },
+      "passed": true
+    },
+    {
+      "name": "tool3",
+      "exit_code": 0,
+      "final_matches_expected": true,
+      "command_count": 1,
+      "tool_result_matches_file": true,
+      "sse_responses": 2,
+      "elapsed_seconds": 25.76,
+      "readiness": {
+        "cache_state": "current",
+        "text_ready": true,
+        "tools_ready": true
+      },
+      "passed": true
+    }
+  ],
+  "same_codex_thread": true,
+  "passed": true,
+  "recorded_candidate_label": "e9232f88",
+  "gateway_checkout_sha": "65c48d16f6e0fcb84dbdacb1f110bf00222ca3fe",
+  "candidate_label_note": "Recorder retained an earlier label. Gateway was loaded from the repair worktree; F1/F2 route source is unchanged from e9232f88 through15a00228.",
+  "per_client_call_timeout_seconds": 180,
+  "prior_attempt": {
+    "first_turn_failed": true,
+    "reason": "ChatGPT connector menu did not open after 3 complete mention trigger attempt(s)",
+    "retry_condition": "readiness helper had completed and browser was idle; new isolated client/thread",
+    "not_claimed_fixed": true
+  }
+}

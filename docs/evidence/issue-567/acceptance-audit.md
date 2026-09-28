@@ -12,6 +12,13 @@ application sources are identical. The user-confirmed review baseline remains
 `aad053cf4f953fc57b523aefe3b3c701bb00836e` → `11119246` for reproducibility and
 also reads the cumulative implementation already present at the boundary.
 
+## Repair follow-up
+
+F1–F3 now have source repairs and scoped revalidation; see
+[the repair report](blocker-repairs.md). The original observations below remain
+historical evidence, not a claim that these three bugs are still unfixed.
+The complete campaign remains unaccepted and all child Issues remain open.
+
 ## Evidence policy
 
 The original Issue criteria remain authoritative, with the user-approved
@@ -30,7 +37,7 @@ criterion to `verified`, `partial`, `not_verified`, or `blocked`. `verified`
 only covers the named criterion and its stated evidence scope; it does not
 close its parent Issue. No completion percentage is inferred from test counts.
 
-## Current acceptance by Issue
+## Acceptance at the original audit
 
 | Issue | Supported by existing or new evidence | Required before closure |
 |---|---|---|
@@ -47,7 +54,7 @@ close its parent Issue. No completion percentage is inferred from test counts.
 and partial acceptance; they are not eight untouched tasks. Conversely,
 settings acceptance in #584–#590 does not complete these broader requirements.
 
-## Spec — three reproduced blocking defects
+## Spec — original reproduced defects (before repair)
 
 ### F1 / #569: resumed Codex CLI turn is rejected
 

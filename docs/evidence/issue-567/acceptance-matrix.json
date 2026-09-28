@@ -19,7 +19,9 @@
       "title": "Codex CLI resume fails after a successful first text turn",
       "kind": "real_provider_client_failure",
       "evidence": "live-codex-context.json",
-      "details": "Codex CLI 0.157.1 against packaged7608: first text passes, resume --last uses same thread but fails with missing cwd in trusted Codex environment context. Six SSE responses reflect client retries; tool step was not run. Scope correct preservation/derivation of real trusted environment on continuation; do not fabricate cwd or permissions."
+      "details": "Codex CLI 0.157.1 against packaged7608: first text passes, resume --last uses same thread but fails with missing cwd in trusted Codex environment context. Six SSE responses reflect client retries; tool step was not run. Scope correct preservation/derivation of real trusted environment on continuation; do not fabricate cwd or permissions.",
+      "repair_status": "implemented_with_scoped_revalidation",
+      "repair_evidence": "blocker-repairs.md"
     },
     {
       "id": "F2",
@@ -32,7 +34,9 @@
       "title": "Current Claude Code session header is not recognized",
       "kind": "real_client_contract_mismatch",
       "evidence": "client-request-contracts.json",
-      "details": "Claude2.1.283 sends x-claude-code-session-id and session metadata.user_id; gateway_request.request_context_from_headers and chatgpt_web_client_session.client_session_id resolve no session. OpenCode1.18.32 X-Session-Id resolves. Local endpoint intentionally returns400; this proves request-contract mismatch, not live model success."
+      "details": "Claude2.1.283 sends x-claude-code-session-id and session metadata.user_id; gateway_request.request_context_from_headers and chatgpt_web_client_session.client_session_id resolve no session. OpenCode1.18.32 X-Session-Id resolves. Local endpoint intentionally returns400; this proves request-contract mismatch, not live model success.",
+      "repair_status": "implemented_with_scoped_revalidation",
+      "repair_evidence": "blocker-repairs.md"
     },
     {
       "id": "F3",
@@ -44,7 +48,9 @@
       "title": "Successful promotion followed by failed startup does not restore previous-good",
       "kind": "public_api_synthetic_failure_injection",
       "evidence": "startup-rollback.json",
-      "details": "Known-good runtime starts; verified replacement is promoted; replacement exits17 and startup fails. Previous-good remains, current is not restored, no runtime running. Probe cleanup passed. Test uses synthetic archives and no account."
+      "details": "Known-good runtime starts; verified replacement is promoted; replacement exits17 and startup fails. Previous-good remains, current is not restored, no runtime running. Probe cleanup passed. Test uses synthetic archives and no account.",
+      "repair_status": "implemented_with_scoped_revalidation",
+      "repair_evidence": "blocker-repairs.md"
     }
   ],
   "issues": [
@@ -118,7 +124,7 @@
           "id": "569.2",
           "requirement": "Gateway 公共 Responses 路径贯通受管运行组件；保留精确选定 Provider/model，发送前验证网页模型，不可用时明确失败。",
           "status": "partial",
-          "assessment": "当前 portable 的 Codex CLI 首轮真实 Responses/SSE 通过；续聊被 F1 阻塞。"
+          "assessment": "历史 portable 首轮通过；修复候选的 Linux Codex CLI 同线程文本/续聊/文件工具链现已通过，其他客户端与平台范围仍未齐。"
         },
         {
           "id": "569.3",
@@ -135,8 +141,8 @@
         {
           "id": "569.5",
           "requirement": "在真实 Codex CLI 和 Desktop 上各完成至少两轮上下文相关的文本对话，并切回已有官方模型。",
-          "status": "blocked",
-          "assessment": "F1：同一 Codex CLI thread 的第二轮真实 resume 失败；Desktop 尚无验收。"
+          "status": "partial",
+          "assessment": "F1 已修复：Linux 真实 Codex CLI 同一 thread 首轮、续聊与文件工具链通过；Desktop、模型切换及其他矩阵仍未完成。见 blocker-repairs.md。"
         },
         {
           "id": "569.6",
@@ -161,13 +167,13 @@
           "id": "570.1",
           "requirement": "真实 Codex CLI/Desktop 在隔离测试工作区执行受限命令/文件操作，结果经 Tunnel/MCP/Gateway 返回网页并产生可验证最终答案。",
           "status": "partial",
-          "assessment": "历史 f2 Linux Codex CLI 真工具读随机文件通过；本轮同线程第三步因 F1 未运行，Desktop 未验收。"
+          "assessment": "修复候选 Linux Codex CLI 同线程第三步已实际读随机文件并给出准确答案；Desktop 与其余工具矩阵未验收。"
         },
         {
           "id": "570.2",
           "requirement": "透传当前客户端工具声明与可信执行环境，不硬编码通用工具集，不复制 Spike 的固定身份或合成 read-only 环境作为生产权限。",
           "status": "partial",
-          "assessment": "工具与可信环境透传已有实现/合同测试；F1 表明续聊的环境合同仍有缺陷。"
+          "assessment": "F1 的普通续聊环境合同已修复并通过真实工具续传；压缩/模型切换等其他环境路径仍须验收。"
         },
         {
           "id": "570.3",
@@ -246,7 +252,7 @@
           "id": "571.7",
           "requirement": "提供可供 Messages 路径复用的非 Codex 会话合同和公共测试，记录实际客户端版本及协议选择。",
           "status": "partial",
-          "assessment": "共享非 Codex 模块和公开合同测试存在；真实 OpenCode 版本/头已记录，Messages 受 F2 阻塞。"
+          "assessment": "共享非 Codex 模块和公开合同测试存在；真实 OpenCode 与 Claude 标头均已识别，完整真实工具验收仍未齐。"
         }
       ]
     },
@@ -258,8 +264,8 @@
         {
           "id": "572.1",
           "requirement": "基于真实 Claude Code 请求固定身份来源，复用非 Codex 会话合同，保留 Messages 的 system、content block、tool_use/tool_result 语义。",
-          "status": "blocked",
-          "assessment": "F2：Claude Code 2.1.283 发送 X-Claude-Code-Session-Id；Gateway 未提取，Web 适配器得到空身份。"
+          "status": "verified",
+          "assessment": "实际 Claude Code 2.1.283 标头现已识别；Claude/generic 会话隔离、优先级及 Messages 内容/工具语义公开 HTTP 回归通过。这一条不代表后续真实模型/工具条目完成。"
         },
         {
           "id": "572.2",
@@ -271,7 +277,7 @@
           "id": "572.3",
           "requirement": "真实 Claude Code 完成至少两轮文本以及受限真实文件/命令工具，回执抵达原网页回合。",
           "status": "not_verified",
-          "assessment": "尚无真实 Claude Code 网页多轮和文件/命令工具成功证据；先解决 F2。"
+          "assessment": "F2 会话识别已修复；尚无真实 Claude Code 网页多轮和文件/命令工具成功证据。"
         },
         {
           "id": "572.4",
@@ -369,7 +375,7 @@
           "id": "574.2",
           "requirement": "Codex 原生压缩及第三方客户端实际使用的压缩/缩减历史路径完成后，下一轮文本和工具续传正确。",
           "status": "not_verified",
-          "assessment": "原生压缩和第三方历史缩减后的真实工具续传未验收；普通 resume 已受 F1 阻塞。"
+          "assessment": "普通 Codex CLI resume 与随后文件工具已通过；原生压缩和第三方历史缩减后的真实工具续传仍未验收。"
         },
         {
           "id": "574.3",
@@ -423,8 +429,8 @@
         {
           "id": "575.3",
           "requirement": "下载中断、损坏、启动失败和不兼容版本可恢复旧可用版，单账号登录资料不被意外删除。",
-          "status": "blocked",
-          "assessment": "F3：验证过的新 archive 升级成功但启动失败，previous-good 保留却没有恢复为 current。"
+          "status": "partial",
+          "assessment": "F3 已修复：Linux/Windows 公共 API 故障注入覆盖新旧 pin、账号/设置保留、替换/启动失败恢复、再次启动及损坏拒绝；两平台组件管理模块各47项通过。完整发行/实际账号恢复矩阵仍未齐。"
         },
         {
           "id": "575.4",
@@ -454,9 +460,11 @@
           "id": "575.8",
           "requirement": "完成选定的 strict 本地检查、安装/升级回滚证据和版本/许可清单；记录不支持的密文输入、单账号与容量限制。",
           "status": "partial",
-          "assessment": "工程检查与正常包生命周期有效；原规格要求的完整真实矩阵和失败回滚仍未通过。"
+          "assessment": "工程检查与正常包生命周期有效；失败恢复已补充修复和故障注入，原规格要求的完整真实客户端/V2矩阵仍未完成。"
         }
       ]
     }
-  ]
+  ],
+  "repair_source_sha": "48df83453c68355007860ded3db30e11d07a8a5d",
+  "repair_evidence": "blocker-repairs.md"
 }

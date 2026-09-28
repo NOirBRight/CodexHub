@@ -1,0 +1,81 @@
+{
+  "source_sha": "48df83453c68355007860ded3db30e11d07a8a5d",
+  "platforms": {
+    "linux": {
+      "runtime_manager_module_passed": 47,
+      "recovery_cases": [
+        {
+          "name": "test_failed_promotion_keeps_previous_good[False]",
+          "seconds": "0.324",
+          "passed": true
+        },
+        {
+          "name": "test_failed_promotion_keeps_previous_good[True]",
+          "seconds": "0.328",
+          "passed": true
+        },
+        {
+          "name": "test_failed_upgraded_start_restores_verified_generation_and_can_restart[False]",
+          "seconds": "1.558",
+          "passed": true
+        },
+        {
+          "name": "test_failed_upgraded_start_restores_verified_generation_and_can_restart[True]",
+          "seconds": "1.570",
+          "passed": true
+        },
+        {
+          "name": "test_failed_upgrade_never_runs_unverified_previous_generation[pin]",
+          "seconds": "0.513",
+          "passed": true
+        },
+        {
+          "name": "test_failed_upgrade_never_runs_unverified_previous_generation[payload]",
+          "seconds": "0.512",
+          "passed": true
+        }
+      ]
+    },
+    "windows": {
+      "runtime_manager_module_passed": 47,
+      "recovery_cases": [
+        {
+          "name": "test_failed_promotion_keeps_previous_good[False]",
+          "seconds": "1.348",
+          "passed": true
+        },
+        {
+          "name": "test_failed_promotion_keeps_previous_good[True]",
+          "seconds": "1.342",
+          "passed": true
+        },
+        {
+          "name": "test_failed_upgraded_start_restores_verified_generation_and_can_restart[False]",
+          "seconds": "6.290",
+          "passed": true
+        },
+        {
+          "name": "test_failed_upgraded_start_restores_verified_generation_and_can_restart[True]",
+          "seconds": "6.292",
+          "passed": true
+        },
+        {
+          "name": "test_failed_upgrade_never_runs_unverified_previous_generation[pin]",
+          "seconds": "2.777",
+          "passed": true
+        },
+        {
+          "name": "test_failed_upgrade_never_runs_unverified_previous_generation[payload]",
+          "seconds": "2.766",
+          "passed": true
+        }
+      ]
+    }
+  },
+  "windows_initial_environment_failures_covered": true,
+  "windows_resolved_tests": [
+    "test_prepare_runtime_check_ignores_host_python_environment",
+    "test_prepare_runtime_check_is_compatible_with_windows_powershell_51",
+    "test_relative_windows_entrypoints_keep_the_repository_runtime_contract"
+  ]
+}
