@@ -5,8 +5,9 @@ Runtime Settings, the daily browser, OpenAI Platform, and CodexHub?
 
 Product decision: [ADR-0019](../docs/adr/0019-chatgpt-coding-setup-wizard.md).
 Coding capability is the only completion target. Saving returns immediately;
-manual restart and status checking are separate steps. The user selected layout A on 2026-09-28. Its visual refinement is still
-under review; the prototype is not production implementation.
+manual restart and status checking are separate steps. The user finalized layout A and its refined visual design on 2026-09-28.
+The approved visual reference is commit `1c1b4a98`; the prototype is not production
+implementation. B/C are retained only as historical alternatives.
 
 From the repository root:
 
@@ -49,3 +50,8 @@ SVG assets, connected step navigation, a focused service sheet, compact credenti
 preparation actions, and explicit save/next-step footer. Original B/C remain for
 historical comparison. Desktop and 390px browser inspection found no horizontal
 overflow. The revised save action still leaves runtime inactive and restart manual.
+
+Verdict: A won. The user accepted its one-task-at-a-time structure and then
+approved the refined visual treatment without further changes. Use this exact
+revision as the implementation reference; remove prototype-only controls and
+replace mock actions with verified production behavior during implementation.

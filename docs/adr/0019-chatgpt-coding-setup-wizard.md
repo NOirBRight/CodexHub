@@ -1,7 +1,7 @@
 # ADR-0019: A coding-only ChatGPT setup wizard
 
 Date: 2026-09-28
-Status: Accepted product goal, responsibility boundary, and setup sequence; single-step layout A accepted; visual refinement pending prototype review.
+Status: Accepted — product goal, responsibility boundary, setup sequence, and refined single-step layout A finalized by the user on 2026-09-28.
 
 Tracking: [ChatGPT integration #567](https://github.com/NOirBRight/CodexHub/issues/567), [daily-browser connection #592](https://github.com/NOirBRight/CodexHub/issues/592). Refines [ADR-0017](0017-chatgpt-runtime-settings-boundary.md) and preserves [ADR-0018](0018-daily-browser-chatgpt-authentication.md).
 
@@ -21,8 +21,10 @@ Show current progress, one clear next action, and actionable reasons for blocked
 
 We reject a flat configuration form and a text-only/full-mode choice because both move dependency discovery onto users. A guided flow costs more explicit state handling, but preserves the upstream setup order and makes account, tool authorization, and restart boundaries understandable. Account/workspace restrictions may still prevent full tool use; the UI must state that constraint rather than imply the wizard can bypass it.
 
-The next artifact is a throwaway, in-memory UI prototype with three layouts on the existing standalone settings surface. It exercises existing-account reuse, fresh sign-in, saved-but-inactive credentials, blocked connector authorization, and failed tool verification. Its simulated success is design evidence only. Prototype code stays on a separate branch; only accepted decisions and a subsequently implemented/reviewed design belong in production. No release, installation, real credential entry, or automatic component restart is authorized by creating this prototype.
+The design artifact is a throwaway, in-memory UI prototype with three layouts on the existing standalone settings surface. It exercises existing-account reuse, fresh sign-in, saved-but-inactive credentials, blocked connector authorization, and failed tool verification. Its simulated success is design evidence only. Prototype code stays on a separate branch; only accepted decisions and a subsequently implemented/reviewed design belong in production. No release, installation, real credential entry, or automatic component restart is authorized by creating this prototype.
 
 Primary upstream sources: [Full harness setup](https://github.com/miuuyy/codex-chatgpt-web/blob/a13cd09950969f43e3b7e25c71fa43efaf5446c5/README.md#full-harness), [MCP wizard wording](https://github.com/miuuyy/codex-chatgpt-web/blob/a13cd09950969f43e3b7e25c71fa43efaf5446c5/launcher/src/i18n.ts).
 
-Prototype decision (2026-09-28): the user selected A, the single-step focused flow. Keep one active task, a visible five-step progress indicator, and a clear next action. Refine its visual design within that structure. B and C remain historical alternatives on the prototype branch; this choice does not accept simulated results as production verification.
+Prototype decision (2026-09-28): the user selected A, the single-step focused flow. Keep one active task, a visible five-step progress indicator, and a clear next action. The user subsequently approved the refined visual design at prototype commit `1c1b4a98` as final. B and C remain historical alternatives on the prototype branch; this choice does not accept simulated results as production verification.
+
+Final design reference: [selected A at 1c1b4a98](https://github.com/NOirBRight/CodexHub/blob/1c1b4a98/src-python/chatgpt_web_settings.prototype.html). Implement the light studio canvas, restrained deep-green primary actions, existing CodexHub/ChatGPT marks, connected five-step navigation, focused service sheet, credential preparation links and readiness cues, and explicit save/next-step footer. Preserve narrow-screen stacking and keyboard focus visibility. The prototype switcher, scenario drawer, simulation buttons, and dummy credentials are design tools and must not ship. Production implementation must replace simulations with real settings and fresh runtime evidence; design approval is not completion of that implementation or its acceptance gates.
