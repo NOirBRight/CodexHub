@@ -243,6 +243,38 @@ def test_model_switch_preserves_image_in_tool_result(outbound: str) -> None:
     assert any(policy == "tool_result_image_lifted_to_user_message" for _, policy, _ in prepared.adaptations)
 
 
+@pytest.mark.parametrize("outbound", ["chat_completions", "responses"])
+def test_parallel_tool_results_keep_replies_before_lifted_images(outbound: str) -> None:
+    from protocol_translation import prepare_exchange
+
+    image = {"type": "image", "source": {"type": "url", "url": "https://example.test/image.png"}}
+    body = json.dumps({
+        "model": "volc/glm-5.2", "max_tokens": 32,
+        "messages": [
+            {"role": "user", "content": "inspect"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call_1", "name": "read", "input": {}},
+                {"type": "tool_use", "id": "call_2", "name": "read", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": [image, image]},
+                {"type": "tool_result", "tool_use_id": "call_2", "content": [image]},
+            ]},
+        ],
+    }).encode()
+    prepared = prepare_exchange(body, inbound_format="anthropic_messages", outbound_format=outbound)
+    payload = json.loads(prepared.upstream_body)
+    items = payload["messages"] if outbound == "chat_completions" else payload["input"]
+    tail = items[-5:]
+    id_field = "tool_call_id" if outbound == "chat_completions" else "call_id"
+    assert [item[id_field] for item in tail[:2]] == ["call_1", "call_2"]
+    assert [item["content"][0]["text"] for item in tail[2:]] == [
+        "Tool result image 1/2 from call_id=call_1.",
+        "Tool result image 2/2 from call_id=call_1.",
+        "Tool result image 1/1 from call_id=call_2.",
+    ]
+
+
 def test_chat_conversion_refusal_names_unmodelled_fields() -> None:
     from protocol_translation import NonForwardable, prepare_exchange
 

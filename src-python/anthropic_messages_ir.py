@@ -410,9 +410,10 @@ def _to_chat_request(request: AnthropicRequest) -> Adapted | NotForwardable:
     pending_tool_results: list[dict[str, Any]] = []
     pending_tool_images: list[dict[str, Any]] = []
 
-    def flush_tool_results() -> None:
+    def flush_tool_results_and_images() -> None:
         # Anthropic carries several tool results in one user message; Chat
-        # Completions has one role:"tool" message per result. Order is preserved.
+        # Completions needs every role:"tool" reply before the lifted user
+        # images; interleaving a user message would break parallel tool calls.
         for result in pending_tool_results:
             messages.append({"role": "tool", **result})
         pending_tool_results.clear()
@@ -434,21 +435,20 @@ def _to_chat_request(request: AnthropicRequest) -> Adapted | NotForwardable:
                         continue
                     if content:
                         declared.refuse("user_content_before_tool_result")
-                    result, image = _tool_result_message(block, declared, label=f"{label}.content[{position}]")
+                    result, images = _tool_result_message(block, declared, label=f"{label}.content[{position}]")
                     pending_tool_results.append(result)
-                    if image is not None:
-                        pending_tool_images.append(image)
+                    pending_tool_images.extend(images)
                 if content:
-                    flush_tool_results()
+                    flush_tool_results_and_images()
                     messages.append({
                         "role": "user",
                         "content": _chat_user_content(tuple(content), declared, label=label),
                     })
                 continue
-            flush_tool_results()
+            flush_tool_results_and_images()
             messages.append({"role": "user", "content": _chat_user_content(message.content, declared, label=label)})
             continue
-        flush_tool_results()
+        flush_tool_results_and_images()
         if message.role == "assistant":
             messages.append(_chat_assistant_message(message.content, declared, label=label))
             continue
@@ -462,7 +462,7 @@ def _to_chat_request(request: AnthropicRequest) -> Adapted | NotForwardable:
             messages.append({"role": "system", "content": _chat_text(message.content, declared, label=label)})
             continue
         declared.refuse(f"message_role:{message.role}")
-    flush_tool_results()
+    flush_tool_results_and_images()
 
     for name, value in request.options.items():
         if name == "model":
@@ -741,7 +741,7 @@ def _chat_tool_call(block: ContentBlock, index: int, declared: _Declared) -> dic
 
 def _tool_result_message(
     block: ContentBlock, declared: _Declared, *, label: str
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     tool_use_id = block.data.get("tool_use_id")
     if not isinstance(tool_use_id, str) or not tool_use_id:
         declared.refuse(f"{label}.tool_use_id")
@@ -749,21 +749,22 @@ def _tool_result_message(
         block, {"type", "tool_use_id", "content", "is_error"}, label=label, declared=declared
     )
     content = block.data.get("content")
-    image_message = None
+    image_messages: list[dict[str, Any]] = []
     if isinstance(content, list):
         blocks = tuple(_block(entry) for entry in content)
         images = tuple(part for part in blocks if part.type == "image")
         text = _chat_text(tuple(part for part in blocks if part.type != "image"), declared, label=label)
         if images:
-            parts = _chat_user_content(images, declared, label=label)
-            image_message = {"role": "user", "content": [
-                {"type": "text", "text": f"Tool result image from call_id={tool_use_id}."},
-                *parts,
-            ]}
+            for index, image in enumerate(images, start=1):
+                parts = _chat_user_content((image,), declared, label=label)
+                image_messages.append({"role": "user", "content": [
+                    {"type": "text", "text": f"Tool result image {index}/{len(images)} from call_id={tool_use_id}."},
+                    *parts,
+                ]})
             declared.adapt(
                 f"{label}.content",
                 "tool_result_image_lifted_to_user_message",
-                "Tool text stays in the tool result; ordered images follow in a user message.",
+                "Tool text stays in its result; all tool replies precede ordered image messages.",
             )
     elif isinstance(content, str):
         text = content
@@ -777,7 +778,7 @@ def _tool_result_message(
             "Chat Completions has no tool-result error flag; prefix the content.",
         )
         text = f"[tool_error] {text}"
-    return {"tool_call_id": tool_use_id, "content": text}, image_message
+    return {"tool_call_id": tool_use_id, "content": text}, image_messages
 
 
 def _chat_text(blocks: tuple[ContentBlock, ...], declared: _Declared, *, label: str) -> str:
