@@ -3,7 +3,7 @@
 Date: 2026-09-28
 Branch: `feat/chatgpt-coding-wizard`
 Base for review: `a6d6b79b` (feat/chatgpt-daily-browser-login)
-HEAD at evidence write: will match the commit that lands this note.
+HEAD: `18e517bf` (includes final review delta).
 
 ## Deterministic seams
 
