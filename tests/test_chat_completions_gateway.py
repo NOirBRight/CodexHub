@@ -2467,6 +2467,30 @@ class ChatCompletionsEndpointTests(unittest.TestCase):
         self.assertEqual(child.get("type"), "object")
         self.assertNotIn("$ref", child)
 
+    def test_normalize_tool_schema_keeps_boolean_metadata_next_to_ref(self):
+        body = json.dumps({
+            "model": "gpt-6-astra",
+            "tools": [{
+                "type": "function",
+                "name": "create_label",
+                "parameters": {
+                    "type": "object",
+                    "$defs": {"Color": {"type": "object"}},
+                    "properties": {
+                        "color": {"$ref": "#/$defs/Color", "deprecated": True},
+                        "optional": True,
+                    },
+                },
+            }],
+        }).encode("utf-8")
+
+        next_body, rewritten = gateway_compat.normalize_transparent_tool_schema_booleans(body)
+
+        self.assertGreater(rewritten, 0)
+        properties = json.loads(next_body)["tools"][0]["parameters"]["properties"]
+        self.assertIs(properties["color"]["deprecated"], True)
+        self.assertEqual(properties["optional"], {})
+
     def test_normalize_preserves_boolean_applicators_on_strict_read_tools(self):
         body = json.dumps({
             "model": "muse-spark-1.2-contributor",
