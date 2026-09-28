@@ -23,7 +23,7 @@ Review corrections also prevent a cancelled probe's late success from overwritin
 
 ## Outstanding acceptance
 
-The default local runtime is installed and signed in, but its Tunnel state is `failed` and its connector is not selectable. A real account + Tunnel + connector tool roundtrip was therefore **not executed**. The isolated browser run covered first-run presentation, not the saved-awaiting-restart, expired-account, connector-restriction, or tool-failure UI flows on an actual account. Deterministic HTTP/probe tests cover their underlying status and failure contracts, but do not replace the #599 manual and live evidence. Keep PR #600 draft and #599 open until those checks are recorded. The broader #567 real-client matrix and #592 daily-browser acceptance remain open.
+The default local runtime is installed and signed in, but its saved and active modes are both `browser-only`, no Tunnel ID is configured, its Tunnel state is `failed`, and its connector is not selectable. A real account + Tunnel + connector tool roundtrip was therefore **not executed**. The isolated browser run covered first-run presentation, not the saved-awaiting-restart, expired-account, connector-restriction, or tool-failure UI flows on an actual account. Deterministic HTTP/probe tests cover their underlying status and failure contracts, but do not replace the #599 manual and live evidence. Keep PR #600 draft and #599 open until those checks are recorded. The broader #567 real-client matrix and #592 daily-browser acceptance remain open.
 
 ## Review
 
