@@ -135,6 +135,29 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
       verifyPassed:"Tool roundtrip succeeded. Coding setup is complete for the current configuration.",
       verifyFailed:"Tool result did not return. Coding setup is still incomplete. Check the tunnel, connector, and client tool permissions.",
       verifyUnavailable:"The real tool probe is not available in this build yet. Coding setup stays incomplete until a real roundtrip can pass.",
+      verifyReason:"Reason: {{reason}}",
+      probeReasons:{
+        "tool_result_incomplete":"The model turn ended before the tool result completed.",
+        "tool_correlation_missing":"The tool result was not confirmed in the completed turn.",
+        "tool_call_missing":"The model did not request the setup probe tool.",
+        "tool_call_unexpected":"The model requested an unexpected tool.",
+        "tool_result_rejected":"The runtime rejected the tool result.",
+        "probe_request_rejected":"The runtime rejected the probe request.",
+        "probe_timeout":"The tool roundtrip timed out.",
+        "probe_cancelled":"The probe was cancelled.",
+        "runtime_unreachable":"The ChatGPT component could not be reached.",
+        "runtime_not_running":"The ChatGPT component is not running.",
+        "tunnel_not_ready":"The tool tunnel is not ready.",
+        "connector_not_selectable":"The ChatGPT connector is not authorized.",
+        "tool_runtime_not_ready":"The tool tunnel and connector are not ready.",
+        "login_required":"ChatGPT account login is required.",
+        "full_mode_required":"Full coding mode is required.",
+        "component_restart_required":"Restart the ChatGPT component, then try again.",
+        "component_unavailable":"The ChatGPT component is unavailable or incompatible.",
+        "model_unavailable":"No model is available for the probe.",
+        "missing_call_identity":"The tool call had no Call identity.",
+        "probe_failed":"The tool probe failed."
+      },
       doneBadge:"Coding tools ready", doneH1:"You can start coding.",
       doneP:"Account, active tunnel, connector, and a real tool roundtrip are complete for this configuration.",
       doneNext:"Next: return to CodexHub, choose a model, and connect your coding client.",
@@ -208,6 +231,29 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
       verifyPassed:"工具往返成功。当前配置的编程设置已完成。",
       verifyFailed:"工具结果没有返回。编程设置尚未完成。请检查通道、连接器与客户端工具权限。",
       verifyUnavailable:"当前版本尚无真实工具探测接口。在真实往返通过前，编程设置保持未完成。",
+      verifyReason:"原因：{{reason}}",
+      probeReasons:{
+        "tool_result_incomplete":"模型回合在工具结果完成前就结束了。",
+        "tool_correlation_missing":"已完成的回合中未能确认工具结果。",
+        "tool_call_missing":"模型没有请求设置探测工具。",
+        "tool_call_unexpected":"模型请求了非预期工具。",
+        "tool_result_rejected":"运行时拒绝了工具结果。",
+        "probe_request_rejected":"运行时拒绝了探测请求。",
+        "probe_timeout":"工具往返超时。",
+        "probe_cancelled":"探测已取消。",
+        "runtime_unreachable":"无法连接 ChatGPT 组件。",
+        "runtime_not_running":"ChatGPT 组件未在运行。",
+        "tunnel_not_ready":"工具通道尚未就绪。",
+        "connector_not_selectable":"ChatGPT 连接器尚未授权。",
+        "tool_runtime_not_ready":"工具通道与连接器尚未就绪。",
+        "login_required":"需要先登录 ChatGPT 账号。",
+        "full_mode_required":"需要完整编程模式。",
+        "component_restart_required":"请重启 ChatGPT 组件后再试。",
+        "component_unavailable":"ChatGPT 组件不可用或不兼容。",
+        "model_unavailable":"没有可用于探测的模型。",
+        "missing_call_identity":"工具调用缺少 Call identity。",
+        "probe_failed":"工具探测失败。"
+      },
       doneBadge:"编程工具已就绪", doneH1:"可以开始编程了。",
       doneP:"账号、运行中的通道、连接器和真实工具往返均已完成。",
       doneNext:"下一步：回到 CodexHub，选择模型并接入你的编程客户端。",
@@ -226,6 +272,15 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     }
   };
   const text = copy[language];
+  const probeReasonMessage = (reason) => {
+    if (!reason) return "";
+    const mapped = (text.probeReasons && text.probeReasons[reason]) || reason;
+    return (text.verifyReason || "Reason: {{reason}}").replace("{{reason}}", mapped);
+  };
+  const verifyFailureMessage = (reason) => {
+    const detail = probeReasonMessage(reason);
+    return detail ? `${text.verifyFailed} ${detail}` : text.verifyFailed;
+  };
   document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
   document.querySelectorAll("[data-i18n]").forEach((node) => {
     if (text[node.dataset.i18n]) node.textContent = text[node.dataset.i18n];
@@ -371,8 +426,14 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     if (data.settings?.pending_restart || runtime.settings_pending_restart || runtime.active_mode === legacyBrowserOnly) {
       if (probe.state === "passed") probe = { state: "not_run" };
     }
-    if (data.tool_probe?.state) probe.state = data.tool_probe.state;
-    else if (data.coding_setup_complete === true) probe.state = "passed";
+    if (data.tool_probe?.state) {
+      probe = {
+        state: data.tool_probe.state,
+        reason: data.tool_probe.reason || null,
+      };
+    } else if (data.coding_setup_complete === true) {
+      probe = { state: "passed", reason: null };
+    }
     const pending = firstPending(data);
     if (initial) step = Math.min(pending, 4);
     else if (step > pending) step = pending;
@@ -457,9 +518,11 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     try {
       const result = await request("/api/tool-probe", "POST", {});
       if (result.passed === true || result.state === "passed") {
-        probe = { state: "passed" }; showToast(text.verifyPassed);
+        probe = { state: "passed", reason: null }; showToast(text.verifyPassed);
       } else {
-        probe = { state: "failed" }; showToast(text.verifyFailed, "error");
+        const reason = result.reason || null;
+        probe = { state: result.state === "blocked" ? "blocked" : result.state === "stale" ? "stale" : "failed", reason };
+        showToast(verifyFailureMessage(reason), "error");
       }
       await refresh(false).catch(() => {});
       step = firstPending(current || {});
@@ -497,11 +560,12 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
       const blocked = runtime.login_blocked_reason ? (text.errors[runtime.login_blocked_reason] || runtime.login_blocked_reason) : "";
       return `<div class="place">${esc(text.placeAccount)}</div><h2>${esc(text.accountH2)}</h2><p>${esc(text.accountP)}</p>
         ${ready ? `<div class="notice success">${esc(text.accountReady)}</div>` : `<div class="notice">${esc(text.accountNeed)}</div>`}
-        <p><small>${esc(text.extensionHelp)}</small></p><p><small>${esc(text.accountConnectorNote)}</small></p>
+        ${ready ? "" : `<p><small>${esc(text.extensionHelp)}</small></p>`}
+        <p><small>${esc(text.accountConnectorNote)}</small></p>
         ${blocked ? `<div class="notice error">${esc(blocked)}</div>` : ""}
         <div class="actions">
-          <button type="button" data-action="extension" class="primary"${busy?" disabled":""}>${esc(text.extensionDownload)}</button>
-          <button type="button" data-action="open-chatgpt"${busy?" disabled":""}>${esc(text.openChatgpt)}</button>
+          ${ready ? "" : `<button type="button" data-action="extension" class="primary"${busy?" disabled":""}>${esc(text.extensionDownload)}</button>
+          <button type="button" data-action="open-chatgpt"${busy?" disabled":""}>${esc(text.openChatgpt)}</button>`}
           ${ready ? `<button type="button" data-action="continue" class="primary"${busy?" disabled":""}>${esc(text.continueLabel)} →</button>` : ""}
         </div>`;
     }
@@ -533,7 +597,7 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
           <label class="check-row ${form.key_configured?"":"hidden"}"><input id="clear-key" type="checkbox" ${form.clear_key?"checked":""} ${busy?"disabled":""}> ${esc(text.clearKey)}</label>
         </div>
         ${form.unsupported_zero_risk ? `<div class="notice warn">${esc(text.unsupportedWarning)} <button type="button" data-action="disable-unsupported" class="linkish">${esc(text.disableUnsupported)}</button></div>` : ""}
-        <details class="advanced"><summary>${esc(text.advanced)}</summary>
+        ${form.key_configured || (saved.mode === "full" && Boolean((saved.tunnel || {}).tunnel_id)) ? `<details class="advanced"><summary>${esc(text.advanced)}</summary>
           <div class="adv-grid">
             <div class="field"><label for="context-window">${esc(text.contextWindow)}</label><input id="context-window" type="number" min="1" step="1" value="${esc(form.context_window)}" ${busy?"disabled":""}></div>
             <div class="field"><label for="stall-timeout">${esc(text.stallTimeout)}</label><input id="stall-timeout" type="number" min="1" step="1" value="${esc(form.stall_timeout_sec)}" ${busy?"disabled":""}></div>
@@ -544,7 +608,7 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
           <label class="check-row"><input id="bigger-context" type="checkbox" ${form.experimental_bigger_context?"checked":""} ${busy?"disabled":""}> ${esc(text.biggerContext)}</label>
           <label class="check-row"><input id="skill-attachments" type="checkbox" ${form.experimental_skill_attachments?"checked":""} ${busy?"disabled":""}> ${esc(text.skillAttachments)}</label>
           <label class="check-row"><input id="fresh-conversation" type="checkbox" ${form.experimental_fresh_conversation_per_turn?"checked":""} ${busy?"disabled":""}> ${esc(text.freshConversation)}</label>
-        </details>
+        </details>` : ""}
         <div class="studio-bottom">
           <p><strong>${esc(text.saveNext)}</strong><br>${esc(text.saveNextDetail)}</p>
           <button type="button" data-action="save" class="primary" ${busy||!tunnelReady||(!keyReady&&!form.clear_key)?"disabled":""}>${esc(text.saveContinue)} <span aria-hidden="true">→</span></button>
@@ -574,7 +638,7 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     }
     return `<div class="place">${esc(text.placeVerify)}</div><h2>${esc(text.verifyH2)}</h2><p>${esc(text.verifyP)}</p>
       <div class="notice">${esc(text.verifyNote)}</div>
-      ${probe.state === "failed" ? `<div class="notice error">${esc(text.verifyFailed)}</div>` : ""}
+      ${probe.state === "failed" || probe.state === "blocked" || probe.state === "stale" ? `<div class="notice error">${esc(verifyFailureMessage(probe.reason))}</div>` : ""}
       ${probe.state === "unavailable" ? `<div class="notice warn">${esc(text.verifyUnavailable)}</div>` : ""}
       <div class="actions">
         <button type="button" data-action="verify" class="primary"${busy||probe.state==="running"?" disabled":""}>${esc(probe.state==="running"?text.verifyRunning:text.verifyRun)}</button>

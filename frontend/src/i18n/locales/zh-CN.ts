@@ -645,7 +645,7 @@ const zhCN = {
     chatgptWebConnectionSuccess: "已连接到 {address}",
     chatgptWebRuntimeSettingsHint: "在 ChatGPT Runtime Settings 打开编程能力向导：账号、Tunnel、连接器授权与真实工具验证。",
     chatgptWebSettingsPendingRestart: "ChatGPT Runtime Settings 已更改。请在 CodexHub 中重启 ChatGPT Web 组件以应用更改。",
-    chatgptWebOpenSettings: "打开原版设置网页",
+    chatgptWebOpenSettings: "打开编程设置向导",
     chatgptWebSettingsOpening: "正在打开 ChatGPT Runtime Settings",
     chatgptWebSettingsOpened: "已在外部浏览器打开 ChatGPT Runtime Settings",
     chatgptWebToolsReady: "工具已就绪",

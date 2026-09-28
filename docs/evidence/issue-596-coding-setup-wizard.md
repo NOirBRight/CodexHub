@@ -6,9 +6,14 @@ SHA: record at merge time from `feat/chatgpt-coding-wizard`.
 ## Deterministic seams
 
 - `tests/test_chatgpt_web_settings.py` and `tests/test_chatgpt_web_tool_probe.py` on the implementation branch.
-- Combined local run: 44 passed (settings + tool probe).
+- Combined local run after review fixes: **47 passed** (settings + tool probe).
 - Probe success is independent of `readiness.tools_ready` / doctor flags.
 - Generation invalidation covers account/config/runtime process changes.
+- Review fixes on top of `a6d6b79b...HEAD`:
+  - Call identity only (`call_id`); never copy Item identity `id` into `call_id`.
+  - `response.incomplete` never counts as success; correlation token/`probe_id` required.
+  - Prior `passed` becomes `stale` when tunnel/connector/runtime preconditions fail.
+  - Wizard shows actionable probe reason codes; extension help only when account is not connected; advanced options only on return visits; Provider entry opens “coding setup”.
 
 ## Live account tool roundtrip
 

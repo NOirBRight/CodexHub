@@ -387,3 +387,148 @@ def test_browser_only_mode_blocks_probe(tmp_path, monkeypatch):
     result = probe.start_probe(home, exchange=lambda req: probe._ProbeOutcome(ok=True), wait=True)
     assert result["state"] == "blocked"
     assert result["reason"] == "full_mode_required"
+
+
+def test_function_calls_require_call_identity_not_item_id():
+    body = (
+        b'data: {"type":"response.output_item.done","item":'
+        b'{"type":"function_call","name":"codexhub_setup_probe","id":"item_only"}}\n\n'
+        b'data: {"type":"response.completed","response":{"output":['
+        b'{"type":"function_call","name":"codexhub_setup_probe","id":"item_only"}]}}\n\n'
+    )
+    events = probe._parse_sse_events(body)
+    assert probe._function_calls(events) == []
+
+
+def test_default_exchange_rejects_incomplete_and_missing_correlation(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    _seed_settings(home)
+    _patch_common(monkeypatch, home)
+
+    responses = [
+        (
+            200,
+            (
+                b'data: {"type":"response.output_item.done","item":'
+                b'{"type":"function_call","name":"codexhub_setup_probe","call_id":"call_1"}}\n\n'
+                b'data: {"type":"response.completed","response":{"output":[]}}\n\n'
+            ),
+        ),
+        (
+            200,
+            b'data: {"type":"response.incomplete","response":{"status":"incomplete"}}\n\n',
+        ),
+    ]
+
+    def fake_post(**kwargs):
+        assert responses
+        return responses.pop(0)
+
+    monkeypatch.setattr(probe, "_post_responses", fake_post)
+    monkeypatch.setattr(probe, "_select_model", lambda _home: "gpt-test")
+    request = probe._ProbeRequest(
+        home=home,
+        probe_id="probe1234",
+        token="token-value",
+        base_url="http://127.0.0.1:9",
+        service_key="key",
+        timeout_seconds=5,
+        cancel_event=threading.Event(),
+    )
+    outcome = probe._default_exchange(request)
+    assert outcome.ok is False
+    assert outcome.reason == "tool_result_incomplete"
+
+    responses.extend(
+        [
+            (
+                200,
+                (
+                    b'data: {"type":"response.output_item.done","item":'
+                    b'{"type":"function_call","name":"codexhub_setup_probe","call_id":"call_2"}}\n\n'
+                    b'data: {"type":"response.completed","response":{"output":[]}}\n\n'
+                ),
+            ),
+            (
+                200,
+                (
+                    b'data: {"type":"response.output_text.delta","delta":"ready"}\n\n'
+                    b'data: {"type":"response.completed","response":{"output":[]}}\n\n'
+                ),
+            ),
+        ]
+    )
+    outcome = probe._default_exchange(request)
+    assert outcome.ok is False
+    assert outcome.reason == "tool_correlation_missing"
+
+    responses.extend(
+        [
+            (
+                200,
+                (
+                    b'data: {"type":"response.output_item.done","item":'
+                    b'{"type":"function_call","name":"codexhub_setup_probe","call_id":"call_3"}}\n\n'
+                    b'data: {"type":"response.completed","response":{"output":[]}}\n\n'
+                ),
+            ),
+            (
+                200,
+                (
+                    b'data: {"type":"response.output_text.delta","delta":"token-value"}\n\n'
+                    b'data: {"type":"response.completed","response":{"output":[]}}\n\n'
+                ),
+            ),
+        ]
+    )
+    outcome = probe._default_exchange(request)
+    assert outcome.ok is True
+    assert outcome.reason is None
+
+
+def test_passed_probe_stales_when_connector_becomes_unselectable(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _seed_settings(home)
+    status = {"value": _ready_status()}
+
+    def build_status(_home, pin=None):
+        return dict(status["value"])
+
+    binding = _binding("a")
+    monkeypatch.setattr(chatgpt_web_checks, "_binding", lambda _home: dict(binding))
+    monkeypatch.setattr(runtime, "build_status", build_status)
+    monkeypatch.setattr(
+        chatgpt_web_checks,
+        "cached_checks",
+        lambda _home: {
+            "tunnel": {"state": "ready"},
+            "connector": {"state": "selectable"},
+            "cache_state": "current",
+        },
+    )
+    monkeypatch.setattr(
+        "chatgpt_web_connection.resolve_connection",
+        lambda *args, **kwargs: ("http://127.0.0.1:32123", "service-key"),
+    )
+    result = probe.start_probe(
+        home,
+        exchange=lambda req: probe._ProbeOutcome(ok=True, live_attempted=False),
+        wait=True,
+    )
+    assert result["state"] == "passed"
+    assert probe.coding_setup_complete(home) is True
+
+    status["value"] = _ready_status(connector={"selectable": False})
+    monkeypatch.setattr(
+        chatgpt_web_checks,
+        "cached_checks",
+        lambda _home: {
+            "tunnel": {"state": "ready"},
+            "connector": {"state": "missing"},
+            "cache_state": "current",
+        },
+    )
+    public = probe.public_status(home)
+    assert public["state"] == "stale"
+    assert public["reason"] == "connector_not_selectable"
+    assert probe.coding_setup_complete(home) is False

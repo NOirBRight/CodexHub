@@ -647,7 +647,7 @@ const enUS = {
     chatgptWebConnectionSuccess: "Connected to {address}",
     chatgptWebRuntimeSettingsHint: "Open ChatGPT Runtime Settings for the coding setup wizard: account, Tunnel, connector authorization, and real tool verification.",
     chatgptWebSettingsPendingRestart: "ChatGPT Runtime Settings have changed. Restart the ChatGPT Web component in CodexHub to apply them.",
-    chatgptWebOpenSettings: "Open original settings page",
+    chatgptWebOpenSettings: "Open coding setup",
     chatgptWebSettingsOpening: "Opening ChatGPT Runtime Settings",
     chatgptWebSettingsOpened: "Opened ChatGPT Runtime Settings in your browser",
     chatgptWebToolsReady: "Tools ready",

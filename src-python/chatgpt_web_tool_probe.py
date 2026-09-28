@@ -158,7 +158,17 @@ def public_status(home: Path) -> dict[str, Any]:
     """Sanitized probe status for Runtime Settings. Never includes secrets."""
     home = Path(home).expanduser().resolve()
     binding = chatgpt_web_checks._binding(home)
-    return _public_from_document(_load_document(home), binding)
+    status = _public_from_document(_load_document(home), binding)
+    # A prior pass is not current if tunnel/connector/runtime preconditions fail.
+    if status.get("state") == "passed":
+        blocked = _precondition_reason(home)
+        if blocked is not None:
+            status = {
+                **status,
+                "state": "stale",
+                "reason": blocked,
+            }
+    return status
 
 
 def coding_setup_complete(home: Path) -> bool:
@@ -270,6 +280,14 @@ def _parse_sse_events(body: bytes) -> list[dict[str, Any]]:
     return events
 
 
+def _call_id_from_item(item: Mapping[str, Any]) -> str | None:
+    """Return Call identity only. Never copy Item identity (`id`) into call_id."""
+    call_id = item.get("call_id")
+    if isinstance(call_id, str) and call_id.strip():
+        return call_id.strip()
+    return None
+
+
 def _function_calls(events: list[Mapping[str, Any]]) -> list[dict[str, str]]:
     found: list[dict[str, str]] = []
     for event in events:
@@ -278,8 +296,8 @@ def _function_calls(events: list[Mapping[str, Any]]) -> list[dict[str, str]]:
             item = event.get("item")
             if isinstance(item, Mapping) and item.get("type") == "function_call":
                 name = item.get("name")
-                call_id = item.get("call_id") or item.get("id")
-                if isinstance(name, str) and isinstance(call_id, str):
+                call_id = _call_id_from_item(item)
+                if isinstance(name, str) and call_id is not None:
                     found.append({"name": name, "call_id": call_id})
         if event_type == "response.completed":
             response = event.get("response")
@@ -289,8 +307,8 @@ def _function_calls(events: list[Mapping[str, Any]]) -> list[dict[str, str]]:
                     if not isinstance(item, Mapping) or item.get("type") != "function_call":
                         continue
                     name = item.get("name")
-                    call_id = item.get("call_id") or item.get("id")
-                    if isinstance(name, str) and isinstance(call_id, str):
+                    call_id = _call_id_from_item(item)
+                    if isinstance(name, str) and call_id is not None:
                         found.append({"name": name, "call_id": call_id})
     # De-duplicate while preserving order.
     seen: set[str] = set()
@@ -434,14 +452,12 @@ def _default_exchange(request: _ProbeRequest) -> _ProbeOutcome:
     if status != 200:
         return _ProbeOutcome(ok=False, reason="tool_result_rejected", live_attempted=True)
     events = _parse_sse_events(body)
-    completed = any(event.get("type") == "response.completed" for event in events)
-    if not completed:
-        # Some runtimes finish with response.done; accept either terminal marker.
-        completed = any(event.get("type") in {"response.done", "response.incomplete"} for event in events)
+    if any(event.get("type") == "response.incomplete" for event in events):
+        return _ProbeOutcome(ok=False, reason="tool_result_incomplete", live_attempted=True)
+    # Accept only a clean terminal completion. response.incomplete never counts.
+    completed = any(event.get("type") in {"response.completed", "response.done"} for event in events)
     if not completed:
         return _ProbeOutcome(ok=False, reason="tool_result_incomplete", live_attempted=True)
-    # Prefer seeing the correlation token in final text when present; require at
-    # least a completed response after the result was accepted.
     text_blobs: list[str] = []
     for event in events:
         if event.get("type") == "response.output_text.delta" and isinstance(event.get("delta"), str):
@@ -460,9 +476,7 @@ def _default_exchange(request: _ProbeRequest) -> _ProbeOutcome:
                                 text_blobs.append(block["text"])
     joined = "".join(text_blobs)
     if request.token not in joined and request.probe_id not in joined:
-        # Result delivery succeeded; final echo is best-effort. Still count as a
-        # real request/result roundtrip when the second leg completed cleanly.
-        return _ProbeOutcome(ok=True, reason=None, live_attempted=True)
+        return _ProbeOutcome(ok=False, reason="tool_correlation_missing", live_attempted=True)
     return _ProbeOutcome(ok=True, reason=None, live_attempted=True)
 
 
