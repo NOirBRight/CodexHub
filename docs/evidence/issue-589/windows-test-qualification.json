@@ -1,0 +1,37 @@
+{
+  "application_candidate_sha": "7608bb175c03bba3df73014fd295e562696d93ef",
+  "test_repair_sha": "8707366f9b491bf5bd09436b93367104ec76b951",
+  "application_sources_unchanged_after_test_repair": true,
+  "initial_full_pytest": {
+    "passed": 3853,
+    "failed": 14,
+    "skipped": 68,
+    "subtests_passed": 283,
+    "exit_zero": false
+  },
+  "initial_core_partition": {
+    "passed": 3689,
+    "failed": 14,
+    "skipped": 68
+  },
+  "synthetic_partition": {
+    "passed": 164,
+    "failed": 0
+  },
+  "failures": {
+    "missing_pip_in_isolated_test_venv": 4,
+    "utf8_fixture_read_as_windows_gbk": 10
+  },
+  "corrections": [
+    "ensurepip --upgrade in isolated development venv",
+    "Explicit UTF-8 fixture decoding in test source"
+  ],
+  "affected_module_rerun": {
+    "passed": 52,
+    "failed": 0,
+    "seconds": 79.12,
+    "exit_zero": true
+  },
+  "all_14_initial_failures_have_passing_rerun_evidence": true,
+  "unresolved_failures": 0
+}
