@@ -56,7 +56,7 @@ def _post_messages(
             "anthropic-version": "2023-06-01",
         }
         if session_header is not None:
-            headers["X-Session-Id"] = session_header
+            headers["X-Claude-Code-Session-Id"] = session_header
         connection.request(
             "POST",
             "/v1/messages",
@@ -408,7 +408,7 @@ def test_cancel_closes_the_upstream_body_and_rejects_a_later_tool_result(
                 f"Host: 127.0.0.1:{port}\r\n"
                 "Content-Type: application/json\r\n"
                 f"Authorization: Bearer {key}\r\n"
-                "X-Session-Id: session-cancel\r\n"
+                "X-Claude-Code-Session-Id: session-cancel\r\n"
                 "anthropic-version: 2023-06-01\r\n"
                 f"Content-Length: {len(payload)}\r\n"
                 "Connection: close\r\n"

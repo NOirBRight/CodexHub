@@ -36,27 +36,35 @@ def client_session_id(
     payload: Mapping[str, Any] | None,
     event_context: Mapping[str, Any] | None,
 ) -> str | None:
-    """Return the explicit session id, or None when the caller did not send one.
+    """Return a source-scoped explicit session key, or None when absent.
 
     Header copies win over an OpenCode body field. Prompt text, the HTTP
     connection, and an unscoped call id are not session identities.
     """
+    def scoped(value: str) -> str:
+        namespace = "claude-code" if isinstance(event_context, Mapping) and event_context.get("session_source") == "claude-code" else "generic"
+        return json.dumps([namespace, value], separators=(",", ":"))
+
+    if isinstance(event_context, Mapping) and event_context.get("session_source") == "claude-code":
+        found = _text(event_context.get("session_id"))
+        if found:
+            return scoped(found)
     for source in (event_context, payload):
         if not isinstance(source, Mapping):
             continue
         for key in _HEADER_COPIES:
             found = _text(source.get(key))
             if found:
-                return found
+                return scoped(found)
     if isinstance(event_context, Mapping):
         found = _text(event_context.get("session_id"))
         if found:
-            return found
+            return scoped(found)
     if isinstance(payload, Mapping):
         for key in _BODY_FIELDS:
             found = _text(payload.get(key))
             if found:
-                return found
+                return scoped(found)
     return None
 
 

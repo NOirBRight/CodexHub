@@ -8,30 +8,34 @@
   "runtime_source": {
     "repository": "https://github.com/miuuyy/codex-chatgpt-web",
     "commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5",
-    "patch_file": "docs/evidence/issue-590/codex-chatgpt-web-control-contract.patch",
-    "patch_sha256": "6e89c190cd6d01126a3d64d52bf09cb6a5fde8f24361f37e3056f8d1729104e1",
-    "build_revision": "93b8e6fc3eda8a81176964be87f8c7b8fc637a7f",
-    "git_tree": "641caaf875fcf908dfaa919c242f24fdede26a69",
+    "patch_file": "docs/evidence/issue-567/codex-chatgpt-web-runtime.patch",
+    "patch_sha256": "7b2c91dcec4e3d4c5bd977f6eeaf3082f11feddd3a8558e8b02c36addddcd717",
+    "build_revision": "5a307bb48de3d96465305288a2fff5c4086299fb",
+    "git_tree": "b4ea65a73c4b481497a012c1a9f569e024f6f9ce",
     "bun_version": "1.4.0",
     "contract": "admin-status-v1"
   },
   "product_entry": "codexhub-supervisor",
-  "rejected_entries": ["setup", "dev", "--replace-codex-route"],
+  "rejected_entries": [
+    "setup",
+    "dev",
+    "--replace-codex-route"
+  ],
   "artifacts": {
     "linux-x64": {
       "filename": "codexhub-chatgpt-web-runtime-linux-x64.tar.gz",
       "bundled_filename": "codexhub-chatgpt-web-runtime-linux-x64.tar.gz",
       "bundled_only": true,
-      "build_revision": "93b8e6fc3eda8a81176964be87f8c7b8fc637a7f",
-      "git_tree": "641caaf875fcf908dfaa919c242f24fdede26a69",
-      "sha256": "e370f6916e1d9e4bc60af81ef79269f16970e34c985db3f625e20c891dfc2782"
+      "build_revision": "5a307bb48de3d96465305288a2fff5c4086299fb",
+      "git_tree": "b4ea65a73c4b481497a012c1a9f569e024f6f9ce",
+      "sha256": "2422e62c875714a5627420367b2526887fe0b36ab71144e8e984400087e8be8f"
     },
     "windows-x64": {
       "filename": "codexhub-chatgpt-web-runtime-windows-x64.zip",
       "bundled_filename": "codexhub-chatgpt-web-runtime-windows-x64.zip",
       "bundled_only": true,
-      "build_revision": "93b8e6fc3eda8a81176964be87f8c7b8fc637a7f",
-      "git_tree": "641caaf875fcf908dfaa919c242f24fdede26a69",
+      "build_revision": "5a307bb48de3d96465305288a2fff5c4086299fb",
+      "git_tree": "b4ea65a73c4b481497a012c1a9f569e024f6f9ce",
       "sha256": "5cbb11d6d848018d1f079c89151f4dd46cc7d5ebb83a878970626b5120b35a95"
     }
   },

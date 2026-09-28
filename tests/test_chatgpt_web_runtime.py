@@ -529,10 +529,10 @@ def test_repo_pin_is_the_accepted_upstream_release() -> None:
     assert document["version"] == chatgpt_web_runtime.PINNED_VERSION == "6.1.1"
     source = document["runtime_source"]
     assert source["commit"] == document["commit"]
-    assert source["build_revision"] == "93b8e6fc3eda8a81176964be87f8c7b8fc637a7f"
-    assert source["git_tree"] == "641caaf875fcf908dfaa919c242f24fdede26a69"
+    assert source["build_revision"] == "5a307bb48de3d96465305288a2fff5c4086299fb"
+    assert source["git_tree"] == "b4ea65a73c4b481497a012c1a9f569e024f6f9ce"
     assert source["contract"] == "admin-status-v1"
-    assert source["patch_sha256"] == "6e89c190cd6d01126a3d64d52bf09cb6a5fde8f24361f37e3056f8d1729104e1"
+    assert source["patch_sha256"] == "7b2c91dcec4e3d4c5bd977f6eeaf3082f11feddd3a8558e8b02c36addddcd717"
     patch = ROOT / source["patch_file"]
     assert hashlib.sha256(patch.read_bytes()).hexdigest() == source["patch_sha256"]
     assert document["license"] == "MIT"
@@ -541,7 +541,7 @@ def test_repo_pin_is_the_accepted_upstream_release() -> None:
     assert "--replace-codex-route" in document["rejected_entries"]
     assert set(document["artifacts"]) == {"linux-x64", "windows-x64"}
     expected_artifacts = {
-        "linux-x64": "e370f6916e1d9e4bc60af81ef79269f16970e34c985db3f625e20c891dfc2782",
+        "linux-x64": "2422e62c875714a5627420367b2526887fe0b36ab71144e8e984400087e8be8f",
         "windows-x64": "5cbb11d6d848018d1f079c89151f4dd46cc7d5ebb83a878970626b5120b35a95",
     }
     for key, artifact in document["artifacts"].items():
@@ -1710,3 +1710,55 @@ def test_legacy_supervisor_requires_explicit_restart_before_owned_login(tmp_path
         assert _run(home, "open-login", pin=pin)["login"]["window"] == "open"
     finally:
         _stop(home, pin)
+
+
+def test_failed_upgraded_start_restores_verified_generation_and_can_restart(tmp_path, monkeypatch):
+    home = tmp_path / 'runtime'
+    good = _archive(tmp_path / 'good', _fixture_script(home / 'good-started'))
+    good_pin = _pin_for(tmp_path / 'good', good.read_bytes())
+    monkeypatch.setenv('CODEXHUB_CHATGPT_WEB_PIN', str(good_pin))
+    chatgpt_web_runtime.install_runtime(home, good)
+    chatgpt_web_runtime.save_settings(home, {'mode': 'browser-only'})
+    assert _start_runtime(home)['process']['running']
+    chatgpt_web_runtime.stop_runtime(home, disable=False)
+    original = (home / 'current/runtime' / ENTRY_NAME).read_bytes()
+    bad = _archive(tmp_path / 'bad', _fixture_script(home / 'bad-started', 'raise SystemExit(17)'))
+    bad_pin = _pin_for(tmp_path / 'bad', bad.read_bytes())
+    monkeypatch.setenv('CODEXHUB_CHATGPT_WEB_PIN', str(bad_pin))
+    chatgpt_web_runtime.upgrade_runtime(home, bad)
+    try:
+        with pytest.raises(RuntimeError, match='restored'):
+            _start_runtime(home)
+        assert (home / 'current/runtime' / ENTRY_NAME).read_bytes() == original
+        assert chatgpt_web_runtime.build_status(home)['process']['running']
+        chatgpt_web_runtime.stop_runtime(home, disable=False)
+        assert _start_runtime(home)['process']['running']
+    finally:
+        chatgpt_web_runtime.stop_runtime(home, disable=True)
+
+
+@pytest.mark.parametrize('corrupt', ['pin', 'payload'])
+def test_failed_upgrade_never_runs_unverified_previous_generation(tmp_path, monkeypatch, corrupt):
+    home = tmp_path / 'runtime'
+    good = _archive(tmp_path / 'good', _fixture_script(home / 'good-started'))
+    monkeypatch.setenv('CODEXHUB_CHATGPT_WEB_PIN', str(_pin_for(tmp_path / 'good', good.read_bytes())))
+    chatgpt_web_runtime.install_runtime(home, good)
+    chatgpt_web_runtime.save_settings(home, {'mode': 'browser-only'})
+    bad = _archive(tmp_path / 'bad', _fixture_script(home / 'bad-started', 'raise SystemExit(17)'))
+    monkeypatch.setenv('CODEXHUB_CHATGPT_WEB_PIN', str(_pin_for(tmp_path / 'bad', bad.read_bytes())))
+    chatgpt_web_runtime.upgrade_runtime(home, bad)
+    previous = home / 'previous-good'
+    if corrupt == 'payload':
+        (previous / 'payload').write_bytes(b'corrupted')
+    else:
+        path = previous / 'pin.json'
+        value = json.loads(path.read_text(encoding='utf-8'))
+        value['version'] = 'unsupported'
+        path.write_text(json.dumps(value), encoding='utf-8')
+    try:
+        with pytest.raises(RuntimeError, match='incompatible|verification failed'):
+            _start_runtime(home)
+        assert not (home / 'good-started').exists()
+        assert not chatgpt_web_runtime.build_status(home)['process']['running']
+    finally:
+        chatgpt_web_runtime.stop_runtime(home, disable=True)

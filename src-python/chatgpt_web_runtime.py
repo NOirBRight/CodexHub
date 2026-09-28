@@ -438,6 +438,15 @@ def _pin_compatible(home: Path, pin: dict[str, Any]) -> bool:
     )
 
 
+def _runtime_pin(home: Path) -> dict[str, Any]:
+    """A recovered generation is valid only for the exact failed upgrade pin."""
+    requested = load_pin()
+    recovery = _read_json(home / "current" / "recovery.json") or {}
+    if recovery.get("failed_sha256") == _artifact(requested).get("sha256"):
+        return load_pin(home / "current" / "pin.json")
+    return requested
+
+
 def _lifecycle(home: Path) -> dict[str, Any]:
     payload = _read_json(home / "lifecycle.json") or {}
     return {
@@ -1153,6 +1162,7 @@ def _stage_verified_tree(home: Path, source: Path | None, pin: dict[str, Any]) -
                 "entry": str(entry.relative_to(runtime_dest)),
             },
         )
+        _write_json(incoming / "pin.json", pin)
     except Exception:
         partial.unlink(missing_ok=True)
         _clear_partial_marker(partial)
@@ -1237,6 +1247,7 @@ def upgrade_runtime(home: Path, source: Path | None = None) -> dict[str, Any]:
         _revoke_inflight_permits(home)
         if was_running:
             stop_runtime(home, disable=False)
+        _write_json(incoming / "pending-start.json", {"sha256": _artifact(pin)["sha256"]})
         _promote(home, incoming)
     except Exception as exc:
         _restore_after_failed_switch(home, incoming, previous, was_running)
@@ -1885,7 +1896,7 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
         settings_status = read_settings(home)
     except RuntimeError_:
         settings_status = {"pending_restart": True, "restart_target": "ChatGPT Web Runtime"}
-    loaded = pin or load_pin()
+    loaded = pin or _runtime_pin(home)
     artifact = _artifact(loaded)
     installed = _install_document(home)
     compatible = _pin_compatible(home, loaded)
@@ -2072,7 +2083,7 @@ def _startup_fail(home: Path, message: str) -> int:
 def supervise(home: Path) -> int:
     home = _assert_private_home(home)
     _mkdir(home)
-    pin = load_pin()
+    pin = _runtime_pin(home)
     if not _pin_compatible(home, pin):
         return _startup_fail(
             home,
@@ -2364,11 +2375,48 @@ def _supervisor_stop_requested(
     }
 
 
+def _recover_failed_upgrade(home: Path, pin: dict[str, Any]) -> bool:
+    pending = _read_json(home / "current" / "pending-start.json") or {}
+    if pending.get("sha256") != _artifact(pin).get("sha256"):
+        return False
+    previous = home / "previous-good"
+    if not (previous / "pin.json").is_file():
+        return False
+    # load_pin enforces this supervisor's supported version and config contract.
+    prior_pin = load_pin(previous / "pin.json")
+    prior_install = _read_json(previous / "install.json") or {}
+    if (
+        prior_install.get("sha256") != _artifact(prior_pin)["sha256"]
+        or prior_install.get("commit") != prior_pin["commit"]
+        or prior_install.get("version") != prior_pin["version"]
+        or _sha256(previous / "payload") != _artifact(prior_pin)["sha256"]
+    ):
+        raise RuntimeError_("previous runtime verification failed; recovery refused")
+    stop_runtime(home, disable=False)
+    failed = home / "failed-startup"
+    if failed.exists():
+        shutil.rmtree(failed)
+    os.rename(home / "current", failed)
+    try:
+        os.rename(previous, home / "current")
+    except OSError:
+        os.rename(failed, home / "current")
+        raise
+    (home / "current" / "pending-start.json").unlink(missing_ok=True)
+    _write_json(home / "current" / "recovery.json", {"failed_sha256": _artifact(pin)["sha256"]})
+    try:
+        start_runtime(home)
+    except Exception as exc:
+        raise RuntimeError_("previous runtime was restored but could not restart") from exc
+    _append_log(home, "failed upgrade; previous verified runtime restored and running")
+    return True
+
+
 def start_runtime(home: Path) -> dict[str, Any]:
     home = _assert_private_home(home)
     _mkdir(home)
     _restore_install(home)
-    pin = load_pin()
+    pin = _runtime_pin(home)
     if not _pin_compatible(home, pin):
         raise RuntimeError_("version mismatch; refusing to start an incompatible ChatGPT Web Runtime pin")
     _bind_host()
@@ -2417,6 +2465,7 @@ def start_runtime(home: Path) -> dict[str, Any]:
         while time.monotonic() < deadline:
             existing = _running_status(home)
             if existing is not None and _runtime_healthy(home, existing) and _startup_snapshot_matches(existing):
+                (home / "current" / "pending-start.json").unlink(missing_ok=True)
                 return existing
             if existing is not None and health_deadline is None:
                 health_deadline = time.monotonic() + RUNTIME_STARTUP_HEALTH_TIMEOUT_SECONDS
@@ -2427,6 +2476,7 @@ def start_runtime(home: Path) -> dict[str, Any]:
             time.sleep(0.05)
         existing = _running_status(home)
         if existing is not None and _runtime_healthy(home, existing) and _startup_snapshot_matches(existing):
+            (home / "current" / "pending-start.json").unlink(missing_ok=True)
             return existing
         raise RuntimeError_("ChatGPT Web Runtime did not become healthy")
     except Exception as exc:
@@ -2442,6 +2492,8 @@ def start_runtime(home: Path) -> dict[str, Any]:
             elif _process_record(home) is None:
                 process.kill()
                 process.wait(timeout=2)
+        if _recover_failed_upgrade(home, pin):
+            raise RuntimeError_("upgraded runtime failed to start; previous runtime restored and running") from exc
         if isinstance(exc, RuntimeError_) and str(exc) == "ChatGPT Web Runtime did not become healthy":
             raise RuntimeError_(_startup_failure_message(home, process.poll())) from exc
         raise
