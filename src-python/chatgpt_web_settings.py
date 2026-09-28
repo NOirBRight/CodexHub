@@ -144,7 +144,7 @@ def _public_status(home: Path) -> dict[str, Any]:
         },
         "readiness": readiness,
         "tool_probe": tool_probe,
-        "coding_setup_complete": tool_probe.get("state") == "passed",
+        "coding_setup_complete": chatgpt_web_tool_probe.coding_setup_complete(home),
     }
 
 
@@ -513,17 +513,11 @@ class _SettingsHandler(BaseHTTPRequestHandler):
                         ),
                     }
             except chatgpt_web_tool_probe.ProbeError as exc:
-                conflict = exc.reason in {
-                    "probe_already_running",
-                    "full_mode_required",
-                    "component_restart_required",
-                    "runtime_not_running",
-                    "tunnel_not_ready",
-                    "connector_not_selectable",
-                    "tool_runtime_not_ready",
-                    "login_required",
-                }
-                status = HTTPStatus.CONFLICT if conflict else HTTPStatus.BAD_REQUEST
+                status = (
+                    HTTPStatus.CONFLICT
+                    if exc.reason in chatgpt_web_tool_probe.HTTP_CONFLICT_REASONS
+                    else HTTPStatus.BAD_REQUEST
+                )
                 self._json(status, {"ok": False, "error": "The coding setup tool check could not run.", "error_code": exc.reason})
                 return
             except Exception:  # noqa: BLE001

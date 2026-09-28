@@ -16,6 +16,7 @@ from python_runtime_contract import require_python_313
 
 require_python_313(__file__)
 
+import hashlib
 import json
 import secrets
 import threading
@@ -41,6 +42,22 @@ _REASON_MAX = 80
 # Public states exposed to Runtime Settings.
 _STATES = frozenset(
     {"not_run", "running", "passed", "failed", "stale", "blocked", "cancelled"}
+)
+
+# Reasons that map to HTTP 409 when start is refused before/while probing.
+HTTP_CONFLICT_REASONS = frozenset(
+    {
+        "probe_already_running",
+        "full_mode_required",
+        "component_restart_required",
+        "runtime_not_running",
+        "runtime_disabled",
+        "tunnel_not_ready",
+        "connector_not_selectable",
+        "tool_runtime_not_ready",
+        "login_required",
+        "component_unavailable",
+    }
 )
 
 ExchangeFn = Callable[["_ProbeRequest"], "_ProbeOutcome"]
@@ -93,8 +110,6 @@ def _generation_from_binding(binding: Mapping[str, str] | None) -> str | None:
         return None
     # Short stable fingerprint for UI; full binding stays on disk only.
     material = "|".join(parts).encode("utf-8")
-    import hashlib
-
     return hashlib.sha256(material).hexdigest()[:16]
 
 
