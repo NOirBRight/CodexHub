@@ -40,7 +40,7 @@ pub fn chatgpt_web_delete_account_blocking() -> Result<Value, String> {
 }
 
 pub fn chatgpt_web_open_login_blocking() -> Result<Value, String> {
-    run_cli(&["open-login"])
+    chatgpt_web_open_settings_blocking()
 }
 
 pub fn chatgpt_web_close_login_blocking() -> Result<Value, String> {

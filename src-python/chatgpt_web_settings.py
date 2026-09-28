@@ -9,11 +9,13 @@ require_python_313(__file__)
 
 import argparse
 import hmac
+import io
 import json
 import secrets
 import sys
 import threading
 import time
+import zipfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,6 +24,7 @@ from urllib.parse import urlsplit
 
 import chatgpt_web_checks
 import chatgpt_web_runtime as runtime
+import chatgpt_web_tool_probe
 
 _HOST = "127.0.0.1"
 _SESSION_HEADER = "Authorization"
@@ -72,6 +75,17 @@ def _public_readiness(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _login_blocked_reason(status: dict[str, Any]) -> str | None:
+    if status.get("installed") and (status.get("component") or {}).get("compatible") is False:
+        return "component_upgrade_required"
+    if (status.get("process") or {}).get("running") and (
+        status.get("restart_required")
+        or (status.get("login") or {}).get("control") != runtime.LOGIN_CONTROL
+    ):
+        return "component_restart_required"
+    return None
+
+
 def _public_status(home: Path) -> dict[str, Any]:
     settings = runtime.read_settings(home)
     status = runtime.build_status(home)
@@ -110,6 +124,7 @@ def _public_status(home: Path) -> dict[str, Any]:
         and connector.get("selectable") is True
         and readiness["tools_ready"]
     )
+    tool_probe = chatgpt_web_tool_probe.public_status(home)
     return {
         "ok": True,
         "settings": settings,
@@ -125,8 +140,11 @@ def _public_status(home: Path) -> dict[str, Any]:
             "login_state": _safe_reason(login.get("state")) or "not_checked",
             "login_window_open": login.get("window") == "open",
             "login_error": _safe_reason(login.get("error")),
+            "login_blocked_reason": _login_blocked_reason(status),
         },
         "readiness": readiness,
+        "tool_probe": tool_probe,
+        "coding_setup_complete": chatgpt_web_tool_probe.coding_setup_complete(home),
     }
 
 
@@ -168,6 +186,16 @@ class _SettingsHTTPServer(ThreadingHTTPServer):
             self.page = page_path.read_text(encoding="utf-8")
         except OSError as exc:
             raise RuntimeError("ChatGPT Runtime Settings page is unavailable") from exc
+        self.static_assets = {
+            "/codexhub.svg": (
+                Path(__file__).with_name("chatgpt_web_settings_codexhub.svg"),
+                "image/svg+xml; charset=utf-8",
+            ),
+            "/openai.svg": (
+                Path(__file__).with_name("chatgpt_web_settings_openai.svg"),
+                "image/svg+xml; charset=utf-8",
+            ),
+        }
         self.bootstrap_token: str | None = secrets.token_urlsafe(32)
         self.bootstrap_expires_at = time.monotonic() + bootstrap_ttl
         self.sessions: dict[str, tuple[float, float]] = {}
@@ -233,6 +261,7 @@ class _SettingsHTTPServer(ThreadingHTTPServer):
 
 class _SettingsHandler(BaseHTTPRequestHandler):
     server_version = "CodexHubRuntimeSettings/1"
+    timeout = 5
 
     @property
     def service(self) -> _SettingsHTTPServer:
@@ -313,13 +342,38 @@ class _SettingsHandler(BaseHTTPRequestHandler):
             page = self.service.page.replace("__CODEXHUB_CSP_NONCE__", nonce).encode("utf-8")
             self._send_bytes(HTTPStatus.OK, page, "text/html; charset=utf-8", nonce=nonce)
             return
-        if path not in {"/api/settings", "/api/status"}:
+        if path in self.service.static_assets:
+            asset_path, content_type = self.service.static_assets[path]
+            try:
+                payload = asset_path.read_bytes()
+            except OSError:
+                self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Page not found."})
+                return
+            self._send_bytes(HTTPStatus.OK, payload, content_type)
+            return
+        if path not in {"/api/settings", "/api/status", "/api/browser-extension", "/api/tool-probe"}:
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Page not found."})
             return
         if not self._authenticated():
             return
+        if path == "/api/browser-extension":
+            try:
+                root = Path(__file__).resolve().parents[1] / "browser-extension"
+                output = io.BytesIO()
+                with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+                    for name in ("manifest.json", "popup.html", "popup.js", "popup.css", "README.md"):
+                        archive.write(root / name, name)
+                self._send_bytes(HTTPStatus.OK, output.getvalue(), "application/zip")
+            except OSError:
+                self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "Browser connector files are unavailable. Update CodexHub."})
+            return
         try:
-            payload = runtime.read_settings(self.service.home) if path == "/api/settings" else _public_status(self.service.home)
+            if path == "/api/settings":
+                payload = runtime.read_settings(self.service.home)
+            elif path == "/api/tool-probe":
+                payload = {"ok": True, **chatgpt_web_tool_probe.public_status(self.service.home)}
+            else:
+                payload = _public_status(self.service.home)
         except runtime.RuntimeError_:
             self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "Runtime Settings are temporarily unavailable."})
             return
@@ -327,16 +381,22 @@ class _SettingsHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         self.service.mark_activity()
-        if not self._allowed(mutation=True):
-            return
         path = self._path()
         try:
+            # Consume the bounded body before rejecting its origin. Closing with
+            # unread bytes can reset the socket on Windows and lose the response.
             payload = _read_request_json(self)
+        except TimeoutError:
+            self._json(HTTPStatus.REQUEST_TIMEOUT, {"ok": False, "error": "The settings request timed out."})
+            return
         except OverflowError:
             self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"ok": False, "error": "The settings request is too large."})
             return
         except ValueError:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "The settings request is invalid."})
+            return
+
+        if not self._allowed(mutation=True):
             return
 
         if path == "/api/session":
@@ -350,6 +410,20 @@ class _SettingsHandler(BaseHTTPRequestHandler):
         if not self._authenticated():
             return
 
+        if path == "/api/browser-session":
+            from chatgpt_web_browser_account import import_session
+            try:
+                result = import_session(self.service.home, payload.get("cookies"))
+            except ValueError as exc:
+                reason = str(exc)
+                allowed = {"invalid_browser_session", "component_upgrade_required", "component_start_required",
+                           "browser_sign_in_required", "browser_session_verification_failed", "browser_session_changed"}
+                self._json(HTTPStatus.CONFLICT, {"ok": False,
+                    "error_code": reason if reason in allowed else "browser_session_verification_failed",
+                    "error": "The browser session could not be connected. Your existing account is unchanged."})
+                return
+            self._json(HTTPStatus.OK, result)
+            return
         if path == "/api/settings":
             try:
                 result = runtime.save_settings(self.service.home, payload)
@@ -393,6 +467,14 @@ class _SettingsHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/login":
             try:
+                reason = _login_blocked_reason(runtime.build_status(self.service.home))
+                if reason:
+                    action = "Upgrade and start" if reason == "component_upgrade_required" else "Restart"
+                    self._json(HTTPStatus.CONFLICT, {
+                        "ok": False, "error_code": reason,
+                        "error": f"{action} the ChatGPT component from CodexHub before opening sign-in.",
+                    })
+                    return
                 runtime.open_login(self.service.home)
             except runtime.RuntimeError_:
                 self._json(HTTPStatus.CONFLICT, {"ok": False, "error": "ChatGPT sign-in could not start. Check that the component is installed and available."})
@@ -406,6 +488,42 @@ class _SettingsHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.CONFLICT, {"ok": False, "error": "The sign-in window could not be closed. You can close it manually and refresh status."})
                 return
             self._json(HTTPStatus.OK, {"ok": True, "cancelled": True})
+            return
+        if path == "/api/tool-probe":
+            action = payload.get("action")
+            if action is None:
+                action = "start"
+            if action not in {"start", "cancel", "status"}:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Unknown tool probe action.", "error_code": "probe_action_invalid"})
+                return
+            try:
+                if action == "status":
+                    result = {"ok": True, **chatgpt_web_tool_probe.public_status(self.service.home)}
+                elif action == "cancel":
+                    result = {"ok": True, **chatgpt_web_tool_probe.cancel_probe(self.service.home)}
+                else:
+                    # Bound wait keeps the HTTP handler from hanging forever; the
+                    # probe module still enforces its own exchange timeout.
+                    result = {
+                        "ok": True,
+                        **chatgpt_web_tool_probe.start_probe(
+                            self.service.home,
+                            timeout_seconds=90.0,
+                            wait=True,
+                        ),
+                    }
+            except chatgpt_web_tool_probe.ProbeError as exc:
+                status = (
+                    HTTPStatus.CONFLICT
+                    if exc.reason in chatgpt_web_tool_probe.HTTP_CONFLICT_REASONS
+                    else HTTPStatus.BAD_REQUEST
+                )
+                self._json(status, {"ok": False, "error": "The coding setup tool check could not run.", "error_code": exc.reason})
+                return
+            except Exception:  # noqa: BLE001
+                self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "The coding setup tool check could not finish."})
+                return
+            self._json(HTTPStatus.OK, result)
             return
         self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Action not found."})
 

@@ -148,15 +148,36 @@ def test_page_is_local_and_bootstrap_fragment_is_one_use(settings_server):
     assert headers.get("Cache-Control") == "no-store"
     assert headers.get("Referrer-Policy") == "no-referrer"
     assert "script-src 'nonce-" in headers.get("Content-Security-Policy", "")
+    assert "img-src 'self' data:" in headers.get("Content-Security-Policy", "")
     assert b'nonce="__CODEXHUB_CSP_NONCE__"' not in body
     assert b'history.replaceState(null, "", window.location.pathname)' in body
     assert b'const key = "codexhub.runtime-settings.session"' in body
     assert b'sessionStorage.setItem(key, result.session)' in body
     assert b'finish-login-button' not in body
     assert b'/api/login/finish' not in body
-    assert b'runtime.active_mode === "browser-only"' in body
+    assert b'id="mode"' not in body
+    assert b'name="mode"' not in body
+    assert b"browser-only" not in body or b'legacyBrowserOnly' in body
+    assert b"studio-steps" in body
+    assert b"Codex Native2" in body
+    assert b"Tunnels Read + Use" in body or b"Tunnels Read + Use" in body.lower()
+    assert b"platform.openai.com/tunnels" in body
+    assert b"platform.openai.com/api-keys" in body
+    assert b"simulate-" not in body
+    assert b"prototype-banner" not in body
     assert b"check_runtime" not in body
     assert b"cdn." not in body
+    assert b'mode: "full"' in body
+    assert b"/codexhub.svg" in body
+    assert b"/openai.svg" in body
+    assert b"/api/tool-probe" in body
+    assert b"data.tool_probe" in body or b"tool_probe" in body
+
+    for asset_path, needle in (("/codexhub.svg", b"<svg"), ("/openai.svg", b"<svg")):
+        status, asset_headers, asset_body = _call(server, asset_path)
+        assert status == 200, asset_body
+        assert "svg" in asset_headers.get("Content-Type", "")
+        assert needle in asset_body
 
     session = _session(server)
     status, _headers, _payload = _call(server, "/api/settings", session=session)
@@ -170,6 +191,69 @@ def test_page_is_local_and_bootstrap_fragment_is_one_use(settings_server):
     )
     assert status == 401
     assert b"expired" in payload.lower()
+
+
+def test_coding_setup_save_forces_full_mode_and_reuses_secret(settings_server):
+    server, home = settings_server
+    session = _session(server)
+    secret = "sk-local-runtime-secret-do-not-return"
+    update = {
+        "mode": "full",
+        "connector_name": "Codex Native2",
+        "tunnel": {
+            "tunnel_id": "tunnel_" + ("a" * 32),
+            "runtime_key": {"action": "replace", "value": secret},
+        },
+    }
+    status, _headers, body = _call(
+        server,
+        "/api/settings",
+        method="POST",
+        body=update,
+        headers={"Origin": server.origin},
+        session=session,
+    )
+    assert status == 200, body
+    assert secret.encode() not in body
+    payload = json.loads(body)
+    assert payload["saved"]["mode"] == "full"
+    assert payload["saved"]["connector_name"] == "Codex Native2"
+    assert payload["saved"]["configuration_complete"] is True
+    assert payload["saved"]["tunnel"]["runtime_key_configured"] is True
+    assert "runtime_key" not in payload["saved"]["tunnel"]
+
+    status, _headers, body = _call(server, "/api/status", session=session)
+    assert status == 200, body
+    assert secret.encode() not in body
+    status_payload = json.loads(body)
+    assert status_payload["settings"]["saved"]["mode"] == "full"
+    assert "tool_probe" in status_payload
+    assert status_payload["tool_probe"]["state"] in {
+        "not_run", "running", "passed", "failed", "stale", "blocked", "cancelled"
+    }
+    assert status_payload["coding_setup_complete"] is False
+
+    keep = {
+        "mode": "full",
+        "connector_name": "Codex Native2",
+        "tunnel": {
+            "tunnel_id": "tunnel_" + ("a" * 32),
+            "runtime_key": {"action": "keep"},
+        },
+    }
+    status, _headers, body = _call(
+        server,
+        "/api/settings",
+        method="POST",
+        body=keep,
+        headers={"Origin": server.origin},
+        session=session,
+    )
+    assert status == 200, body
+    assert secret.encode() not in body
+    assert json.loads(body)["saved"]["tunnel"]["runtime_key_configured"] is True
+    disk = (home / "runtime-settings.json").read_text(encoding="utf-8")
+    assert secret in disk
 
 
 def test_bootstrap_token_is_consumed_atomically_under_concurrent_exchange(settings_server):
@@ -192,7 +276,8 @@ def test_bootstrap_token_is_consumed_atomically_under_concurrent_exchange(settin
     assert sorted(result[0] for result in results) == [200, 401]
 
 
-def test_origin_and_host_checks_reject_foreign_mutations(settings_server):
+@pytest.mark.parametrize("attempt", range(20 if os.name == "nt" else 1))
+def test_origin_and_host_checks_reject_foreign_mutations(settings_server, attempt):
     server, _home = settings_server
     status, _headers, _body = _call(
         server,
@@ -621,6 +706,37 @@ def test_status_readiness_requires_live_compatible_runtime_and_active_mode(
     assert payload["settings"]["pending_restart"] is (settings["pending_restart"] is True)
 
 
+@pytest.mark.parametrize(
+    ("compatible", "running", "restart", "control", "reason"),
+    [
+        (False, True, True, None, "component_upgrade_required"),
+        (False, False, False, None, "component_upgrade_required"),
+        (True, True, True, runtime.LOGIN_CONTROL, "component_restart_required"),
+        (True, True, False, None, "component_restart_required"),
+    ],
+)
+def test_login_reports_component_action_without_starting(
+    settings_server, monkeypatch, compatible, running, restart, control, reason
+):
+    server, _home = settings_server
+    session = _session(server)
+    monkeypatch.setattr(runtime, "build_status", lambda home: {
+        "installed": True, "component": {"compatible": compatible},
+        "process": {"running": running}, "restart_required": restart,
+        "login": {"control": control},
+    })
+    calls = []
+    monkeypatch.setattr(runtime, "open_login", lambda home: calls.append(home))
+    status, _, body = _call(server, "/api/login", method="POST", body={},
+                            headers={"Origin": server.origin}, session=session)
+    assert status == 409
+    assert json.loads(body)["error_code"] == reason
+    assert calls == []
+    status, _, body = _call(server, "/api/status", session=session)
+    assert status == 200
+    assert json.loads(body)["runtime"]["login_blocked_reason"] == reason
+
+
 def test_login_routes_open_and_cancel_separately(settings_server, monkeypatch):
     server, home = settings_server
     session = _session(server)
@@ -654,6 +770,43 @@ def test_login_routes_open_and_cancel_separately(settings_server, monkeypatch):
     assert calls == [("open", home), ("cancel", home)]
 
 
+def test_browser_import_requires_settings_origin_and_session(settings_server, monkeypatch):
+    import chatgpt_web_browser_account as accounts
+    server, home = settings_server
+    calls = []
+    def imported(request_home, cookies):
+        calls.append((request_home, cookies))
+        return {"ok": True, "authenticated": True, "restart_required": True}
+    monkeypatch.setattr(accounts, "import_session", imported)
+    session = _session(server)
+    for origin, credential, expected in [("https://attacker.test", session, 403),
+                                         (server.origin, None, 401)]:
+        status, _, _ = _call(server, "/api/browser-session", method="POST",
+                            body={"cookies": []}, headers={"Origin": origin}, session=credential)
+        assert status == expected
+    assert calls == []
+    status, _, body = _call(server, "/api/browser-session", method="POST",
+                            body={"cookies": []}, headers={"Origin": server.origin}, session=session)
+    assert status == 200
+    assert json.loads(body)["restart_required"] is True
+    assert calls == [(home, [])]
+
+
+def test_browser_connector_download_is_authenticated_and_scoped(settings_server):
+    import io
+    import zipfile
+    server, _ = settings_server
+    status, _, _ = _call(server, "/api/browser-extension")
+    assert status == 401
+    status, _, body = _call(server, "/api/browser-extension", session=_session(server))
+    assert status == 200
+    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["host_permissions"] == ["https://chatgpt.com/*"]
+        assert set(manifest["permissions"]) == {"activeTab", "scripting", "cookies"}
+        assert "background" not in manifest
+
+
 @pytest.mark.parametrize("settings_server", [{"session_ttl": 0.01}], indirect=True)
 def test_expired_session_cannot_read_settings(settings_server):
     server, _home = settings_server
@@ -669,6 +822,12 @@ def test_page_asset_is_declared_for_release_packages():
     config = json.loads((repo / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     resources = config["bundle"]["resources"]
     assert resources["../src-python/chatgpt_web_settings.html"] == "src-python/chatgpt_web_settings.html"
+    assert resources[
+        "../src-python/chatgpt_web_settings_codexhub.svg"
+    ] == "src-python/chatgpt_web_settings_codexhub.svg"
+    assert resources[
+        "../src-python/chatgpt_web_settings_openai.svg"
+    ] == "src-python/chatgpt_web_settings_openai.svg"
     assert resources[
         "resources/chatgpt-web-runtime/chatgpt_web_runtime_pin.json"
     ] == "config/chatgpt_web_runtime_pin.json"

@@ -155,13 +155,18 @@ if (Test-Path -LiteralPath $portableZip) {
 New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
 
 Copy-Item -LiteralPath (Join-Path $targetRoot "release\codexhub.exe") -Destination (Join-Path $portableDir $portableExecutable)
-foreach ($resource in @("config", "src-python", "python", "scripts")) {
+foreach ($resource in @("config", "src-python", "python", "scripts", "browser-extension")) {
     $source = Join-Path $targetRoot "release\$resource"
     if (Test-Path -LiteralPath $source) {
         Copy-Item -LiteralPath $source -Destination $portableDir -Recurse
     }
 }
 $xaiHelper = Join-Path $portableDir "scripts\xai_device_login.py"
+foreach ($file in @("manifest.json", "popup.html", "popup.js", "popup.css", "README.md")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $portableDir "browser-extension\$file") -PathType Leaf)) {
+        throw "portable build is missing browser-extension/$file"
+    }
+}
 if (-not (Test-Path -LiteralPath $xaiHelper)) {
     throw "portable build is missing scripts/xai_device_login.py"
 }
