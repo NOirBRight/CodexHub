@@ -172,6 +172,23 @@ def test_page_is_local_and_bootstrap_fragment_is_one_use(settings_server):
     assert b"/openai.svg" in body
     assert b"/api/tool-probe" in body
     assert b"data.tool_probe" in body or b"tool_probe" in body
+    # Managed browser is the default account path; daily-browser extension is optional.
+    assert b"/api/login" in body
+    assert b'action === "open-login"' in body
+    assert b"const openLogin" in body
+    assert b"Open sign-in window" in body
+    assert "打开登录窗口".encode() in body
+    assert b"dailyBrowserOption" in body
+    assert b"Prefer your daily Chrome session?" in body
+    assert b"Where: CodexHub sign-in window" in body
+    assert "操作位置：CodexHub 登录窗口".encode() in body
+    account_js = body.split(b"const stepContent", 1)[1].split(b"if (step === 1)", 1)[0]
+    assert b'"open-login"' in account_js
+    assert b"dailyBrowserOption" in account_js
+    assert account_js.find(b'"open-login"') < account_js.find(b"dailyBrowserOption")
+    assert b'"open-chatgpt"' in account_js
+    assert account_js.find(b"dailyBrowserOption") < account_js.find(b'"open-chatgpt"')
+    assert b"details class=\"advanced\"" in account_js or b"details class='advanced'" in account_js or b'details class="advanced"' in account_js
 
     for asset_path, needle in (("/codexhub.svg", b"<svg"), ("/openai.svg", b"<svg")):
         status, asset_headers, asset_body = _call(server, asset_path)
