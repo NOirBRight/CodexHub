@@ -11,7 +11,8 @@
     "test:provider-comparison": "node --test scripts/provider-comparison.test.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "prototype:ui": "vite --host 127.0.0.1 --port 1422 --open /?prototype=overview",
-    "check:design": "node scripts/design-audit.mjs"
+    "check:design": "node scripts/design-audit.mjs",
+    "prototype:chatgpt-setup": "node ../scripts/serve-chatgpt-setup-prototype.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
