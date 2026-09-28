@@ -88,16 +88,18 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
       steps:["Connect account","Prepare tunnel","Activate tunnel","Authorize tools","Verify coding"],
       sheetCodes:["ACCOUNT","TUNNEL","ACTIVATE","AUTHORIZE","VERIFY"],
       serviceName:"ChatGPT", serviceCaption:"Your account, your coding workflow",
-      placeAccount:"Where: your daily browser", placeTunnel:"Where: OpenAI Platform → return here",
+      placeAccount:"Where: CodexHub sign-in window", placeTunnel:"Where: OpenAI Platform → return here",
       placeActivate:"Where: CodexHub main window → return here", placeAuthorize:"Where: ChatGPT → return here",
       placeVerify:"Where: this page → return to CodexHub",
       accountH2:"Connect your existing ChatGPT account",
-      accountP:"Keep using Google or Passkey in your daily browser. A valid login can be reused; you do not need a separate account.",
+      accountP:"Sign in once in CodexHub's private browser window. An existing valid login is reused automatically.",
       accountReady:"A connected ChatGPT account was detected. You can continue to the tool tunnel.",
-      accountNeed:"Sign in to ChatGPT in this browser, then use the CodexHub browser extension on a chatgpt.com tab to connect that session here.",
-      extensionHelp:"First time only: download the connector, extract it, and load it as an unpacked extension in Chrome or Edge. This browser connector is not the ChatGPT tool connector.",
+      accountNeed:"Open the private sign-in window, complete ChatGPT login there, then return and check the account.",
+      loginOpen:"Open sign-in window", loginOpened:"The sign-in window is open. Complete login there, then return here.",
+      loginRecheck:"Check sign-in", loginPending:"ChatGPT sign-in is not complete yet.",
+      dailyBrowserOption:"Prefer your daily Chrome session?", extensionHelp:"Optional: download the browser connector, extract it, and load it as an unpacked extension in Chrome or Edge. Then connect from this settings page.",
       extensionDownload:"Download browser connector", openChatgpt:"Open ChatGPT", continueLabel:"Continue",
-      accountConnectorNote:"Account connection (browser extension) is separate from tool authorization (Codex Native2 connector).",
+      accountConnectorNote:"Signing in to the account is separate from authorizing the Codex Native2 tool connector.",
       browserVerifying:"Verifying the account from this browser…",
       browserSaved:"Account verified and saved. Restart the ChatGPT component from CodexHub before tools can use it. It was not restarted automatically.",
       browserFailed:"Could not connect this browser account. Your previous account is unchanged.",
@@ -194,16 +196,18 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
       steps:["连接账号","准备通道","启用通道","授权工具","完成验证"],
       sheetCodes:["ACCOUNT","TUNNEL","ACTIVATE","AUTHORIZE","VERIFY"],
       serviceName:"ChatGPT", serviceCaption:"你的账号，你的编程工作流",
-      placeAccount:"操作位置：你的日常浏览器", placeTunnel:"操作位置：OpenAI 平台 → 返回本页",
+      placeAccount:"操作位置：CodexHub 登录窗口", placeTunnel:"操作位置：OpenAI 平台 → 返回本页",
       placeActivate:"操作位置：CodexHub 主界面 → 返回本页", placeAuthorize:"操作位置：ChatGPT → 返回本页",
       placeVerify:"操作位置：本页检查 → 返回 CodexHub",
       accountH2:"连接已有的 ChatGPT 账号",
-      accountP:"继续使用日常浏览器里的 Google / Passkey。有效登录可以复用，不需要另开一套账号。",
+      accountP:"在 CodexHub 的独立浏览器窗口登录一次。已有的有效登录会自动复用。",
       accountReady:"已检测到连接的账号，可以继续配置工具通道。",
-      accountNeed:"在当前浏览器登录 ChatGPT，然后在 chatgpt.com 标签页点击 CodexHub 浏览器扩展，把该会话连接到这里。",
-      extensionHelp:"仅首次需要：下载扩展并解压，在 Chrome / Edge 中加载已解压的扩展。此浏览器扩展不是 ChatGPT 工具连接器。",
+      accountNeed:"打开独立登录窗口，在其中完成 ChatGPT 登录，再返回本页检查账号。",
+      loginOpen:"打开登录窗口", loginOpened:"登录窗口已打开。请在窗口中完成登录，然后返回本页。",
+      loginRecheck:"检查登录状态", loginPending:"尚未完成 ChatGPT 登录。",
+      dailyBrowserOption:"想复用日常 Chrome 登录吗？", extensionHelp:"可选：下载并解压浏览器扩展，在 Chrome / Edge 加载已解压的扩展，然后从本设置页连接。",
       extensionDownload:"下载浏览器连接扩展", openChatgpt:"打开 ChatGPT", continueLabel:"继续",
-      accountConnectorNote:"账号连接（浏览器扩展）与工具授权（Codex Native2 连接器）是不同步骤。",
+      accountConnectorNote:"登录账号与授权 Codex Native2 工具连接器是不同步骤。",
       browserVerifying:"正在验证此浏览器的账号…",
       browserSaved:"账号已验证并保存。请在 CodexHub 中重启 ChatGPT 组件后才能用于工具；没有自动重启。",
       browserFailed:"未能连接此浏览器账号，原有账号保持不变。",
@@ -571,6 +575,28 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     } catch (error) { showToast(error.message, "error"); render(); }
   };
 
+  const openLogin = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await request("/api/login", "POST", {});
+      await refresh(false);
+      showToast(text.loginOpened, "info");
+    } catch (error) { showToast(error.message, "error"); }
+    finally { setBusy(false); }
+  };
+
+  const recheckLogin = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await refresh(false);
+      if (accountConnected(current)) { step = firstPending(current); showToast(text.accountReady); }
+      else showToast(text.loginPending, "warn");
+    } catch (error) { showToast(error.message, "error"); }
+    finally { setBusy(false); }
+  };
+
   const stepContent = (data) => {
     const runtime = data?.runtime || {};
     const saved = data?.settings?.saved || {};
@@ -582,14 +608,13 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
       const blocked = runtime.login_blocked_reason ? (text.errors[runtime.login_blocked_reason] || runtime.login_blocked_reason) : "";
       return `<div class="place">${esc(text.placeAccount)}</div><h2>${esc(text.accountH2)}</h2><p>${esc(text.accountP)}</p>
         ${ready ? `<div class="notice success">${esc(text.accountReady)}</div>` : `<div class="notice">${esc(text.accountNeed)}</div>`}
-        ${ready ? "" : `<p><small>${esc(text.extensionHelp)}</small></p>`}
         <p><small>${esc(text.accountConnectorNote)}</small></p>
         ${blocked ? `<div class="notice error">${esc(blocked)}</div>` : ""}
         <div class="actions">
-          ${ready ? "" : `<button type="button" data-action="open-chatgpt" class="primary"${busy?" disabled":""}>${esc(text.openChatgpt)}</button>
-          <button type="button" data-action="extension"${busy?" disabled":""}>${esc(text.extensionDownload)}</button>`}
+          ${ready ? "" : `<button type="button" data-action="${runtime.login_window_open || blocked ? "recheck-login" : "open-login"}" class="primary"${busy?" disabled":""}>${esc(runtime.login_window_open || blocked ? text.loginRecheck : text.loginOpen)}</button>`}
           ${ready ? `<button type="button" data-action="continue" class="primary"${busy?" disabled":""}>${esc(text.continueLabel)} →</button>` : ""}
-        </div>`;
+        </div>
+        ${ready ? "" : `<details class="advanced"><summary>${esc(text.dailyBrowserOption)}</summary><p>${esc(text.extensionHelp)}</p><div class="actions"><button type="button" data-action="open-chatgpt"${busy?" disabled":""}>${esc(text.openChatgpt)}</button><button type="button" data-action="extension"${busy?" disabled":""}>${esc(text.extensionDownload)}</button></div></details>`}`;
     }
     if (step === 1) {
       const tunnelReady = Boolean(form.tunnel_id.trim());
@@ -720,6 +745,8 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     if (action === "goto-auth") { step = 3; toast = ""; render(); return; }
     if (action === "extension") { void downloadExtension(); return; }
     if (action === "open-chatgpt") { window.open("https://chatgpt.com/", "_blank", "noopener,noreferrer"); return; }
+    if (action === "open-login") { void openLogin(); return; }
+    if (action === "recheck-login") { void recheckLogin(); return; }
     if (action === "save") { void save(false); return; }
     if (action === "disable-unsupported") { void save(true); return; }
     if (action === "recheck-runtime") { void recheckRuntime(); return; }
