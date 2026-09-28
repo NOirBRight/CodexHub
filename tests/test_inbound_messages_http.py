@@ -275,6 +275,64 @@ def test_parallel_tool_results_keep_replies_before_lifted_images(outbound: str) 
     ]
 
 
+@pytest.mark.parametrize("outbound", ["chat_completions", "responses"])
+def test_image_tool_result_reaches_upstream_over_http(
+    harness: GatewayHarness, monkeypatch: pytest.MonkeyPatch, outbound: str,
+) -> None:
+    import gateway_catalog_runtime
+
+    upstream = {
+        "name": "fixture", "provider_id": "fixture", "model_id": "fixture/model",
+        "base_url": harness.stub_base_url, "auth": "api_key", "api_key": "synthetic",
+        "upstream_model": "model", "upstream_format": outbound, "tool_protocol": "auto",
+        "input_modalities": ("text", "image"),
+    }
+    monkeypatch.setattr(gateway_catalog_runtime, "choose_upstream", lambda *args, **kwargs: upstream)
+    if outbound == "chat_completions":
+        harness.set_json_response({
+            "id": "chat_fixture", "object": "chat.completion", "model": "model",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5},
+        })
+    else:
+        harness.set_json_response({
+            "id": "resp_fixture", "object": "response", "status": "completed", "model": "model",
+            "output": [{"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "ok", "annotations": []},
+            ]}],
+            "usage": {"input_tokens": 4, "output_tokens": 1, "total_tokens": 5},
+        })
+    body = {
+        "model": "volc/glm-5.2", "max_tokens": 32,
+        "tools": [{"name": "read", "description": "Read an image", "input_schema": {"type": "object"}}],
+        "messages": [
+            {"role": "user", "content": "inspect"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call_1", "name": "read", "input": {}},
+            ]},
+            {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "call_1", "content": [
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "AA==",
+                    }},
+                ],
+            }]},
+        ],
+    }
+    response = request_gateway(
+        harness.host, harness.port, "POST", "/v1/messages",
+        body=json.dumps(body).encode(), headers=_auth_headers(), timeout=8.0,
+    )
+    assert response.status == 200, response.body[:500]
+    assert harness.stub is not None and len(harness.stub.captures) == 1
+    sent = json.loads(harness.stub.captures[0].body)
+    items = sent["messages"] if outbound == "chat_completions" else sent["input"]
+    tool, image = items[-2:]
+    assert (tool.get("tool_call_id") or tool.get("call_id")) == "call_1"
+    image_part = image["content"][1]
+    assert "data:image/png;base64,AA==" in json.dumps(image_part)
+
+
 def test_chat_conversion_refusal_names_unmodelled_fields() -> None:
     from protocol_translation import NonForwardable, prepare_exchange
 
