@@ -472,6 +472,8 @@ class _SettingsHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/tool-probe":
             action = payload.get("action")
+            if action is None:
+                action = "start"
             if action not in {"start", "cancel", "status"}:
                 self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Unknown tool probe action.", "error_code": "probe_action_invalid"})
                 return
