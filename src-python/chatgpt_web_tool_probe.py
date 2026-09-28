@@ -568,7 +568,11 @@ def start_probe(
             "live_attempted": exchange is None,
             "token_fingerprint": token[:4],
         }
-        _write_document(home, document)
+        try:
+            _write_document(home, document)
+        except OSError:
+            _active.pop(home_key, None)
+            raise
 
     request = _ProbeRequest(
         home=home,
@@ -618,8 +622,10 @@ def start_probe(
                 "binding": dict(current_binding or binding),
                 "live_attempted": outcome.live_attempted,
             }
-            _write_document(home, document)
-            _active.pop(home_key, None)
+            try:
+                _write_document(home, document)
+            finally:
+                _active.pop(home_key, None)
         return public_status(home)
 
     if not wait:

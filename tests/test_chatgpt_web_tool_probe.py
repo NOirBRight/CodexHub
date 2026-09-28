@@ -313,6 +313,22 @@ def test_interrupted_running_probe_can_be_retried(tmp_path, monkeypatch):
     assert result["state"] == "passed"
 
 
+def test_probe_write_failure_does_not_leave_an_active_worker(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _seed_settings(home)
+    _patch_common(monkeypatch, home)
+    write_document = probe._write_document
+
+    def fail_write(_home, _document):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(probe, "_write_document", fail_write)
+    with pytest.raises(OSError):
+        probe.start_probe(home, exchange=lambda _request: probe._ProbeOutcome(ok=True))
+    monkeypatch.setattr(probe, "_write_document", write_document)
+    assert probe.start_probe(home, exchange=lambda _request: probe._ProbeOutcome(ok=True))["state"] == "passed"
+
+
 def test_stale_after_generation_change(tmp_path, monkeypatch):
     home = tmp_path / "home"
     _seed_settings(home)
