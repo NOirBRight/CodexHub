@@ -1229,6 +1229,24 @@ def _restore_after_failed_switch(home: Path, incoming: Path, previous: dict[str,
             _append_log(home, "previous good install was restored but did not restart")
 
 
+def _retain_installed_pin(home: Path, requested: dict[str, Any]) -> None:
+    """Migrate older verified installs which did not retain their pin document."""
+    path = home / "current" / "pin.json"
+    installed = _install_document(home)
+    if path.exists() or installed is None:
+        return
+    # The supervisor only supports this upstream version/config contract. A
+    # different version must never inherit the current tunnel/config defaults.
+    prior = json.loads(json.dumps(requested))
+    prior.pop("runtime_source", None)
+    artifact = _artifact(prior)
+    artifact["sha256"] = installed.get("sha256")
+    artifact["build_revision"] = installed.get("build_revision")
+    artifact.pop("git_tree", None)
+    if _pin_compatible(home, prior) and _sha256(home / "current" / "payload") == artifact["sha256"]:
+        _write_json(path, prior)
+
+
 def upgrade_runtime(home: Path, source: Path | None = None) -> dict[str, Any]:
     """Replace the install with the pinned archive only.
 
@@ -1244,6 +1262,7 @@ def upgrade_runtime(home: Path, source: Path | None = None) -> dict[str, Any]:
     incoming = _stage_verified_tree(home, source, pin)
     _close_admission(home)
     try:
+        _retain_installed_pin(home, pin)
         _revoke_inflight_permits(home)
         if was_running:
             stop_runtime(home, disable=False)
@@ -2389,6 +2408,7 @@ def _recover_failed_upgrade(home: Path, pin: dict[str, Any]) -> bool:
         prior_install.get("sha256") != _artifact(prior_pin)["sha256"]
         or prior_install.get("commit") != prior_pin["commit"]
         or prior_install.get("version") != prior_pin["version"]
+        or prior_install.get("archive_executed") is not False
         or _sha256(previous / "payload") != _artifact(prior_pin)["sha256"]
     ):
         raise RuntimeError_("previous runtime verification failed; recovery refused")

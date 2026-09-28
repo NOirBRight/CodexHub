@@ -1712,7 +1712,8 @@ def test_legacy_supervisor_requires_explicit_restart_before_owned_login(tmp_path
         _stop(home, pin)
 
 
-def test_failed_upgraded_start_restores_verified_generation_and_can_restart(tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy_pin", [False, True])
+def test_failed_upgraded_start_restores_verified_generation_and_can_restart(tmp_path, monkeypatch, legacy_pin):
     home = tmp_path / 'runtime'
     good = _archive(tmp_path / 'good', _fixture_script(home / 'good-started'))
     good_pin = _pin_for(tmp_path / 'good', good.read_bytes())
@@ -1722,6 +1723,11 @@ def test_failed_upgraded_start_restores_verified_generation_and_can_restart(tmp_
     assert _start_runtime(home)['process']['running']
     chatgpt_web_runtime.stop_runtime(home, disable=False)
     original = (home / 'current/runtime' / ENTRY_NAME).read_bytes()
+    if legacy_pin:
+        (home / 'current/pin.json').unlink()
+    account = home / 'web-home/account-marker'
+    account.write_bytes(b'preserved-login')
+    settings = (home / 'settings.json').read_bytes() if (home / 'settings.json').exists() else None
     bad = _archive(tmp_path / 'bad', _fixture_script(home / 'bad-started', 'raise SystemExit(17)'))
     bad_pin = _pin_for(tmp_path / 'bad', bad.read_bytes())
     monkeypatch.setenv('CODEXHUB_CHATGPT_WEB_PIN', str(bad_pin))
@@ -1730,6 +1736,9 @@ def test_failed_upgraded_start_restores_verified_generation_and_can_restart(tmp_
         with pytest.raises(RuntimeError, match='restored'):
             _start_runtime(home)
         assert (home / 'current/runtime' / ENTRY_NAME).read_bytes() == original
+        assert account.read_bytes() == b'preserved-login'
+        if settings is not None:
+            assert (home / 'settings.json').read_bytes() == settings
         assert chatgpt_web_runtime.build_status(home)['process']['running']
         chatgpt_web_runtime.stop_runtime(home, disable=False)
         assert _start_runtime(home)['process']['running']
