@@ -1215,6 +1215,10 @@ def _restore_after_failed_switch(home: Path, incoming: Path, previous: dict[str,
     if incoming.exists():
         shutil.rmtree(incoming, ignore_errors=True)
     _restore_install(home)
+    requested = load_pin()
+    if not _pin_compatible(home, requested) and (home / "current" / "pin.json").is_file():
+        _verify_installed_generation(home / "current")
+        _write_json(home / "current" / "recovery.json", {"failed_sha256": _artifact(requested)["sha256"]})
     _write_lifecycle(
         home,
         enabled=bool(previous["enabled"]),
@@ -2394,6 +2398,20 @@ def _supervisor_stop_requested(
     }
 
 
+def _verify_installed_generation(directory: Path) -> None:
+    # load_pin enforces this supervisor's supported version and config contract.
+    prior_pin = load_pin(directory / "pin.json")
+    prior_install = _read_json(directory / "install.json") or {}
+    if (
+        prior_install.get("sha256") != _artifact(prior_pin)["sha256"]
+        or prior_install.get("commit") != prior_pin["commit"]
+        or prior_install.get("version") != prior_pin["version"]
+        or prior_install.get("archive_executed") is not False
+        or _sha256(directory / "payload") != _artifact(prior_pin)["sha256"]
+    ):
+        raise RuntimeError_("previous runtime verification failed; recovery refused")
+
+
 def _recover_failed_upgrade(home: Path, pin: dict[str, Any]) -> bool:
     pending = _read_json(home / "current" / "pending-start.json") or {}
     if pending.get("sha256") != _artifact(pin).get("sha256"):
@@ -2401,17 +2419,7 @@ def _recover_failed_upgrade(home: Path, pin: dict[str, Any]) -> bool:
     previous = home / "previous-good"
     if not (previous / "pin.json").is_file():
         return False
-    # load_pin enforces this supervisor's supported version and config contract.
-    prior_pin = load_pin(previous / "pin.json")
-    prior_install = _read_json(previous / "install.json") or {}
-    if (
-        prior_install.get("sha256") != _artifact(prior_pin)["sha256"]
-        or prior_install.get("commit") != prior_pin["commit"]
-        or prior_install.get("version") != prior_pin["version"]
-        or prior_install.get("archive_executed") is not False
-        or _sha256(previous / "payload") != _artifact(prior_pin)["sha256"]
-    ):
-        raise RuntimeError_("previous runtime verification failed; recovery refused")
+    _verify_installed_generation(previous)
     stop_runtime(home, disable=False)
     failed = home / "failed-startup"
     if failed.exists():

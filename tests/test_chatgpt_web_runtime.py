@@ -1435,7 +1435,8 @@ def test_upgrade_downloads_only_the_pinned_artifact(tmp_path: Path, monkeypatch:
     assert os.stat(home / "current" / "payload").st_mode & 0o111 == 0
 
 
-def test_failed_promotion_keeps_previous_good(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("replacement_pin", [False, True])
+def test_failed_promotion_keeps_previous_good(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement_pin: bool) -> None:
     home = tmp_path / "runtime"
     marker = home / "executed-marker"
     archive = _archive(tmp_path, _fixture_script(marker))
@@ -1457,9 +1458,14 @@ def test_failed_promotion_keeps_previous_good(tmp_path: Path, monkeypatch: pytes
         real_rename(src, dst)
 
     monkeypatch.setattr(chatgpt_web_runtime.os, "rename", _rename)
+    if replacement_pin:
+        replacement = _archive(tmp_path / "replacement", _fixture_script(home / "replacement-marker"))
+        monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(_pin_for(tmp_path / "replacement", replacement.read_bytes())))
+    else:
+        replacement = archive
 
     with pytest.raises(RuntimeError, match="previous good install was kept"):
-        chatgpt_web_runtime.upgrade_runtime(home, archive)
+        chatgpt_web_runtime.upgrade_runtime(home, replacement)
 
     assert (home / "current" / "runtime" / "generation.txt").read_text(encoding="utf-8") == "second"
     assert (home / "previous-good" / "runtime" / "generation.txt").read_text(encoding="utf-8") == "first"
