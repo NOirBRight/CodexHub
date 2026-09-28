@@ -1752,6 +1752,14 @@
   gap: 8px;
 }
 
+.ws-provider-balance {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ws-provider-balance span { color: var(--ws-muted); }
+
 .ws-provider-quota .ws-limits:has(> :nth-child(3)) {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -2421,3 +2429,25 @@
   color: var(--ws-warning);
   background: color-mix(in srgb, var(--ws-warning) 10%, var(--ws-surface));
 }
+
+/* Claude settings share the workspace dialog, field and surface tokens. */
+.ws-claude-section { display: grid; gap: 12px; border-top: 1px solid var(--ws-line); padding-top: 16px; }
+.ws-claude-section h3, .ws-claude-conflicts h3 { font-size: 13px; font-weight: 600; }
+.ws-claude-note { color: var(--ws-muted); font-size: 12px; line-height: 1.6; }
+.ws-claude-field { display: grid; gap: 6px; min-width: 0; font-size: 12px; }
+.ws-claude-field :is(input, select) { width: 100%; min-width: 0; border: 1px solid var(--ws-line); border-radius: var(--ws-radius-control); padding: 9px 10px; background: var(--ws-surface); color: inherit; }
+.ws-claude-field :is(input, select):focus-visible { outline: 2px solid var(--ws-accent); outline-offset: 2px; }
+.ws-claude-field [aria-invalid="true"] { border-color: var(--ws-warning); }
+.ws-claude-role-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.ws-claude-confirm { display: flex; align-items: flex-start; gap: 9px; font-size: 12px; line-height: 1.6; }
+.ws-claude-confirm input { margin-top: 3px; flex-shrink: 0; }
+.ws-claude-pending { margin-right: auto; align-self: center; color: var(--ws-muted); font-size: 11px; }
+.ws-claude-conflicts { padding: 12px; border: 1px solid var(--ws-warning); border-radius: var(--ws-radius-control); font-size: 12px; }
+.ws-claude-conflicts ul { padding-left: 18px; list-style: disc; overflow-wrap: anywhere; }
+.ws-claude-catalog { font-size: 12px; }
+.ws-claude-catalog ul { max-height: 180px; overflow-y: auto; }
+.ws-claude-catalog li { display: grid; gap: 3px; padding: 8px 0; border-bottom: 1px solid var(--ws-line); }
+.ws-claude-catalog code, .ws-claude-path { color: var(--ws-muted); font-size: 11px; overflow-wrap: anywhere; }
+.ws-claude-section summary, .ws-claude-catalog summary { cursor: pointer; font-size: 12px; }
+.ws-dialog > footer { gap: 8px; flex-wrap: wrap; }
+@media (max-width: 520px) { .ws-claude-role-grid { grid-template-columns: 1fr; } }

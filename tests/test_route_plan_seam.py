@@ -1218,6 +1218,27 @@ class RoutePlanSeamTests(unittest.TestCase):
             route_primitives.AttemptRequestBodyMode.CONVERT_RESPONSES_TO_ANTHROPIC,
         )
 
+    def test_official_deepseek_auto_uses_matching_wire_endpoint(self):
+        upstream = {
+            "name": "deepseek", "provider_id": "deepseek", "model_id": "deepseek/deepseek-flash",
+            "upstream_model": "deepseek-flash", "base_url": "https://api.deepseek.com",
+            "upstream_format": "auto",
+            "available_upstream_formats": ("responses", "chat_completions", "anthropic_messages"),
+        }
+        for inbound, endpoint in (
+            ("responses", "https://api.deepseek.com/v1/responses"),
+            ("chat_completions", "https://api.deepseek.com/v1/chat/completions"),
+            ("anthropic_messages", "https://api.deepseek.com/anthropic/v1/messages"),
+        ):
+            with self.subTest(inbound=inbound):
+                plan = route_plan.route_plan_for_request(
+                    upstream, {"client_id": "claude-code"}, inbound_format=inbound,
+                    model_requested="deepseek/deepseek-flash", provider_hint="deepseek",
+                )
+                self.assertEqual(len(plan.attempts), 1)
+                self.assertEqual(plan.attempts[0].selected_upstream_format, inbound)
+                self.assertEqual(plan.attempts[0].endpoint_url, endpoint)
+
     def test_route_plan_separates_schema_identity_from_optional_manifest_evidence(self):
         valid_manifest_hash = f"sha256:{'a' * 64}"
         unqualified = route_plan.route_plan_for_request(

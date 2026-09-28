@@ -1,0 +1,470 @@
+{
+  "schema": "codexhub.chatgpt-web-acceptance-audit.v1",
+  "reviewed_source_sha": "11119246457a710daa8b06e22a6754b73dd491c6",
+  "application_candidate_sha": "7608bb175c03bba3df73014fd295e562696d93ef",
+  "date": "2026-09-28",
+  "overall": "not_accepted",
+  "issue_count": 9,
+  "completed_child_issues": 0,
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P1",
+      "issue": 569,
+      "related": [
+        570,
+        574,
+        575
+      ],
+      "title": "Codex CLI resume fails after a successful first text turn",
+      "kind": "real_provider_client_failure",
+      "evidence": "live-codex-context.json",
+      "details": "Codex CLI 0.157.1 against packaged7608: first text passes, resume --last uses same thread but fails with missing cwd in trusted Codex environment context. Six SSE responses reflect client retries; tool step was not run. Scope correct preservation/derivation of real trusted environment on continuation; do not fabricate cwd or permissions.",
+      "repair_status": "implemented_with_scoped_revalidation",
+      "repair_evidence": "blocker-repairs.md"
+    },
+    {
+      "id": "F2",
+      "severity": "P1",
+      "issue": 572,
+      "related": [
+        574,
+        575
+      ],
+      "title": "Current Claude Code session header is not recognized",
+      "kind": "real_client_contract_mismatch",
+      "evidence": "client-request-contracts.json",
+      "details": "Claude2.1.283 sends x-claude-code-session-id and session metadata.user_id; gateway_request.request_context_from_headers and chatgpt_web_client_session.client_session_id resolve no session. OpenCode1.18.32 X-Session-Id resolves. Local endpoint intentionally returns400; this proves request-contract mismatch, not live model success.",
+      "repair_status": "implemented_with_scoped_revalidation",
+      "repair_evidence": "blocker-repairs.md"
+    },
+    {
+      "id": "F3",
+      "severity": "P1",
+      "issue": 575,
+      "related": [
+        568
+      ],
+      "title": "Successful promotion followed by failed startup does not restore previous-good",
+      "kind": "public_api_synthetic_failure_injection",
+      "evidence": "startup-rollback.json",
+      "details": "Known-good runtime starts; verified replacement is promoted; replacement exits17 and startup fails. Previous-good remains, current is not restored, no runtime running. Probe cleanup passed. Test uses synthetic archives and no account.",
+      "repair_status": "implemented_with_scoped_revalidation",
+      "repair_evidence": "blocker-repairs.md"
+    }
+  ],
+  "issues": [
+    {
+      "issue": 568,
+      "title": "[ChatGPT Web 1/8] 自动安装、隔离启动与账号初始化",
+      "status": "open_acceptance_incomplete",
+      "criteria": [
+        {
+          "id": "568.1",
+          "requirement": "提供经校验的 Linux/Windows 预构建运行组件来源、版本绑定和第三方许可；实现并实测最薄的独立启动入口。不能将 Spike DEV 配置当产品 Responses 服务。",
+          "status": "partial",
+          "assessment": "双平台运行组件、pin 和来源已验证；首次安装全流程及许可清单仍需按原条目统一验收。"
+        },
+        {
+          "id": "568.2",
+          "requirement": "启用入口贯通 Provider UI、Rust Desktop Command、组件下载/校验/安装、私有目录和实际进程启动；校验失败不可执行，安装中断可重试。",
+          "status": "partial",
+          "assessment": "安装/中断/坏校验和测试与双平台组件启动已有证据；完整 UI 初装路径未齐。"
+        },
+        {
+          "id": "568.3",
+          "requirement": "CodexHub 打开并管理独立网页登录窗口；首次登录、关闭后重开和正常重启保留单账号状态。",
+          "status": "partial",
+          "assessment": "Linux 已复用真实登录并验证保留；Windows 尚无真实账号验收。"
+        },
+        {
+          "id": "568.4",
+          "requirement": "登录、Browser smoke、Tunnel ready、连接器可选分别报告；不能用端口可达或 Tunnel ready 宣称可用。",
+          "status": "partial",
+          "assessment": "分层 readiness 实现、负例和 Linux 实际就绪已验证；双平台完整授权流程未齐。"
+        },
+        {
+          "id": "568.5",
+          "requirement": "账号需要的授权通过相应页面/私密表单完成；key/cookie 不出现在日志、错误、导出或仓库；不自动迁移 Spike DEV 凭据。",
+          "status": "verified",
+          "assessment": "授权资料在私有目录/页面处理；HTTP secret redaction 与双平台包内无私密状态已验证。"
+        },
+        {
+          "id": "568.6",
+          "requirement": "本地运行契约有版本检查、受限管理接口、独立进程身份与健康状态；不暴露为远程共享服务。",
+          "status": "verified",
+          "assessment": "版本/pin、loopback 管理授权与 Host/Origin、独立 supervisor 生命周期已有检查。"
+        },
+        {
+          "id": "568.7",
+          "requirement": "现有 Codex/Claude/OpenCode 配置、官方订阅凭据和全局 V1/V2 选择保持原归属；未运行上游主 Codex 接管安装器。",
+          "status": "partial",
+          "assessment": "历史配置归属哈希与隔离配置证据存在；最终双平台全部客户端配置前后对照未齐。"
+        },
+        {
+          "id": "568.8",
+          "requirement": "禁用/停止/重新打开的状态、进程归属和重启要求可见，持久操作使用共享 Toast 生命周期。",
+          "status": "partial",
+          "assessment": "共享 Toast/明确组件重启提示与双平台正常 stop/start 已验证；异常进程/账号状态完整矩阵未齐。"
+        }
+      ]
+    },
+    {
+      "issue": 569,
+      "title": "[ChatGPT Web 2/8] Codex 经 Gateway 使用真实网页文本",
+      "status": "open_acceptance_incomplete",
+      "criteria": [
+        {
+          "id": "569.1",
+          "requirement": "新增 Provider 元数据和 Client Projection，只导入当前账号实际可选的 Web 模型/effort，独立于上游官方透传目录。",
+          "status": "partial",
+          "assessment": "账号可见的9个模型及 Provider/模型投影已有证据；全部实际选择与 effort 矩阵未齐。"
+        },
+        {
+          "id": "569.2",
+          "requirement": "Gateway 公共 Responses 路径贯通受管运行组件；保留精确选定 Provider/model，发送前验证网页模型，不可用时明确失败。",
+          "status": "partial",
+          "assessment": "历史 portable 首轮通过；修复候选的 Linux Codex CLI 同线程文本/续聊/文件工具链现已通过，其他客户端与平台范围仍未齐。"
+        },
+        {
+          "id": "569.3",
+          "requirement": "Codex 原始 session/thread/turn/item 身份正确保留；普通多轮不串线，Call identity 与 Item identity 不混用。",
+          "status": "partial",
+          "assessment": "公共身份合同测试通过；真实 resume 保持同一 Codex thread，但后端拒绝可信环境上下文。"
+        },
+        {
+          "id": "569.4",
+          "requirement": "SSE 文本增量、终止和错误符合客户端合同；网页 Markdown 提取不承诺未经验证的逐字节保真。",
+          "status": "partial",
+          "assessment": "真实首轮 SSE 和合成终止/错误合同已覆盖；完整真实多轮未通过。"
+        },
+        {
+          "id": "569.5",
+          "requirement": "在真实 Codex CLI 和 Desktop 上各完成至少两轮上下文相关的文本对话，并切回已有官方模型。",
+          "status": "partial",
+          "assessment": "F1 已修复：Linux 真实 Codex CLI 同一 thread 首轮、续聊与文件工具链通过；Desktop、模型切换及其他矩阵仍未完成。见 blocker-repairs.md。"
+        },
+        {
+          "id": "569.6",
+          "requirement": "客户端停止或断连取消对应网页生成，Gateway 停止不留下无人拥有的网页任务；已发送消息不得盲目重试。",
+          "status": "partial",
+          "assessment": "断连/禁止已发送重试的确定性证据存在；真实取消与浏览器任务清理证据不足。"
+        },
+        {
+          "id": "569.7",
+          "requirement": "失效登录、模型不可用、组件不兼容/退出分别映射准确错误，无空答案、虚假成功或隐式模型切换。",
+          "status": "partial",
+          "assessment": "失效登录/不可用模型/组件退出的合成负例存在；各真实故障与恢复未齐。"
+        }
+      ]
+    },
+    {
+      "issue": 570,
+      "title": "[ChatGPT Web 3/8] Codex 真实工具与回合生命周期",
+      "status": "open_acceptance_incomplete",
+      "criteria": [
+        {
+          "id": "570.1",
+          "requirement": "真实 Codex CLI/Desktop 在隔离测试工作区执行受限命令/文件操作，结果经 Tunnel/MCP/Gateway 返回网页并产生可验证最终答案。",
+          "status": "partial",
+          "assessment": "修复候选 Linux Codex CLI 同线程第三步已实际读随机文件并给出准确答案；Desktop 与其余工具矩阵未验收。"
+        },
+        {
+          "id": "570.2",
+          "requirement": "透传当前客户端工具声明与可信执行环境，不硬编码通用工具集，不复制 Spike 的固定身份或合成 read-only 环境作为生产权限。",
+          "status": "partial",
+          "assessment": "F1 的普通续聊环境合同已修复并通过真实工具续传；压缩/模型切换等其他环境路径仍须验收。"
+        },
+        {
+          "id": "570.3",
+          "requirement": "流式工具参数、调用/结果顺序、Call identity/Item identity 和续传在两次 HTTP 请求间完整保留。",
+          "status": "partial",
+          "assessment": "历史真实工具流与合成 call/item 配对、续传已验证；CLI/Desktop 完整矩阵未齐。"
+        },
+        {
+          "id": "570.4",
+          "requirement": "不同会话即使提示词相同也隔离；同一回合重放复用正确任务；重复/过期/跨会话回执不获得额外执行权。",
+          "status": "partial",
+          "assessment": "同文会话、跨会话/过期/重复回执有确定性测试；真实并行/重放证据未齐。"
+        },
+        {
+          "id": "570.5",
+          "requirement": "网页提交前与提交后的失败分类明确；不因通用 retry 策略重复网页消息或真实工具副作用。",
+          "status": "partial",
+          "assessment": "提交阶段与去重有合同测试；真实工具副作用的各失败阶段未齐。"
+        },
+        {
+          "id": "570.6",
+          "requirement": "等待工具时取消、客户端断连、broker 失联、Gateway 停止会撤销本回合权限并清理在途回调。",
+          "status": "partial",
+          "assessment": "取消后撤销回执权限的合成证据存在；真实客户端断连、broker/Gateway 退出未齐。"
+        },
+        {
+          "id": "570.7",
+          "requirement": "Gateway 不执行工具、不伪造结果，也不放宽客户端审批；失败与取消的 UI/诊断状态准确。",
+          "status": "partial",
+          "assessment": "真实工具由 Codex CLI 执行已证实；全部失败/取消 UI 与审批路径未齐。"
+        }
+      ]
+    },
+    {
+      "issue": 571,
+      "title": "[ChatGPT Web 4/8] OpenCode Chat 多轮与真实工具",
+      "status": "open_acceptance_incomplete",
+      "criteria": [
+        {
+          "id": "571.1",
+          "requirement": "采集并脱敏固定真实 OpenCode 版本的请求约定，明确 session、turn、客户端作用域及请求重放/工具续传的身份来源。",
+          "status": "partial",
+          "assessment": "本轮捕获真实 OpenCode 1.18.32 的 X-Session-Id，适配器可以解析；完整 turn/replay/续传合同未齐。"
+        },
+        {
+          "id": "571.2",
+          "requirement": "Web 特有身份适配集中在独立模块；不按提示词、HTTP 连接或无作用域 call_id 猜测会话。无可靠身份时采用明确隔离或拒绝策略。",
+          "status": "partial",
+          "assessment": "显式 session 绑定和缺失身份拒绝有实现及测试；完整客户端作用域待真实并发验收。"
+        },
+        {
+          "id": "571.3",
+          "requirement": "通过现有 Provider Injection/Client Projection 接入，保留其他 Provider、模型选择与用户配置。",
+          "status": "partial",
+          "assessment": "Provider Injection/Client Projection 有实现；真实客户端配置读回与切回旧模型未齐。"
+        },
+        {
+          "id": "571.4",
+          "requirement": "真实 OpenCode 使用 Chat Completions 路径完成至少两轮文本、流式工具参数、实际工具执行和最终答复。",
+          "status": "not_verified",
+          "assessment": "只有真实客户端请求格式捕获；没有真实 OpenCode 网页两轮+工具最终答复。"
+        },
+        {
+          "id": "571.5",
+          "requirement": "OpenCode 的工具和权限继续由其自身负责；Gateway 不伪造 Codex 环境权限或 Collaboration 调度器。",
+          "status": "verified",
+          "assessment": "Gateway 源码只转发声明/回执，不执行 OpenCode 工具，也不为其新增 Codex 调度器。"
+        },
+        {
+          "id": "571.6",
+          "requirement": "并行同文会话、工具续传、重试、取消、错误终止均不串线、不重复执行，并保留正确 call pairing。",
+          "status": "partial",
+          "assessment": "HTTP/SSE 合成隔离、回执、重放和错误测试存在；真实并发/取消未齐。"
+        },
+        {
+          "id": "571.7",
+          "requirement": "提供可供 Messages 路径复用的非 Codex 会话合同和公共测试，记录实际客户端版本及协议选择。",
+          "status": "partial",
+          "assessment": "共享非 Codex 模块和公开合同测试存在；真实 OpenCode 与 Claude 标头均已识别，完整真实工具验收仍未齐。"
+        }
+      ]
+    },
+    {
+      "issue": 572,
+      "title": "[ChatGPT Web 5/8] Claude Code Messages 多轮与真实工具",
+      "status": "open_acceptance_incomplete",
+      "criteria": [
+        {
+          "id": "572.1",
+          "requirement": "基于真实 Claude Code 请求固定身份来源，复用非 Codex 会话合同，保留 Messages 的 system、content block、tool_use/tool_result 语义。",
+          "status": "verified",
+          "assessment": "实际 Claude Code 2.1.283 标头现已识别；Claude/generic 会话隔离、优先级及 Messages 内容/工具语义公开 HTTP 回归通过。这一条不代表后续真实模型/工具条目完成。"
+        },
+        {
+          "id": "572.2",
+          "requirement": "通过现有 Claude Connect/Activation 和 Model Mapping 行为接入，不另建模型目录或覆盖用户不归属 CodexHub 的配置。",
+          "status": "partial",
+          "assessment": "Claude Connect/模型投影有实现；正常手动模型选择后的真实 Web 请求未通过验收。"
+        },
+        {
+          "id": "572.3",
+          "requirement": "真实 Claude Code 完成至少两轮文本以及受限真实文件/命令工具，回执抵达原网页回合。",
+          "status": "not_verified",
+          "assessment": "F2 会话识别已修复；尚无真实 Claude Code 网页多轮和文件/命令工具成功证据。"
+        },
+        {
+          "id": "572.4",
+          "requirement": "文本和工具参数增量、块边界、Call identity、stop reason、错误与唯一终止语义符合 Messages 合同。",
+          "status": "partial",
+          "assessment": "Messages 文本、tool_use/result、stop reason 与唯一终止有合成测试。"
+        },
+        {
+          "id": "572.5",
+          "requirement": "重复请求、并行会话、缺失/跨会话工具结果、取消和网页退出均有明确结果，无混用上下文或伪造成功。",
+          "status": "partial",
+          "assessment": "错误、回执配对和取消有合成测试；真实并行/重试/网页退出未齐。"
+        },
+        {
+          "id": "572.6",
+          "requirement": "工具执行和审批保留在 Claude Code；不声明 Claude Code 获得 Codex V2 调度器。",
+          "status": "verified",
+          "assessment": "工具和审批仍归 Claude Code；Gateway 没有替它执行或调度 Codex V2。"
+        },
+        {
+          "id": "572.7",
+          "requirement": "与 OpenCode、Codex 同时连接同一账号时，会话身份仍隔离，用户可切回原有模型配置。",
+          "status": "not_verified",
+          "assessment": "Codex/OpenCode/Claude Code 同账号并发及切回配置尚无完整真实记录。"
+        }
+      ]
+    },
+    {
+      "issue": 573,
+      "title": "[ChatGPT Web 6/8] Codex 完整 V2 明文生命周期",
+      "status": "open_acceptance_incomplete",
+      "criteria": [
+        {
+          "id": "573.1",
+          "requirement": "固定真实 Codex CLI/Desktop 版本和完整 namespace/schema；识别遵守现有运行时合同，不靠模型名或单个 spawn_agent 推断 V2。",
+          "status": "partial",
+          "assessment": "V2 namespace/schema 常量及调用保留已实现；真实 CLI/Desktop 完整版本合同未齐。"
+        },
+        {
+          "id": "573.2",
+          "requirement": "实测 collaboration.spawn_agent、list_agents、send_message、followup_task、wait_agent、interrupt_agent；真实子代理执行受限任务并将结果交还父代理。",
+          "status": "not_verified",
+          "assessment": "六类操作尚无真实父子代理逐项效果证据。"
+        },
+        {
+          "id": "573.3",
+          "requirement": "调用命名空间、明文标记、Call identity/Item identity、agent_message 作者/接收方、参数和结果在流式与历史中保留。",
+          "status": "partial",
+          "assessment": "已有 spawn/call/result/明文标记合同；全部操作、作者/接收方及跨轮历史未实证。"
+        },
+        {
+          "id": "573.4",
+          "requirement": "同一 Web Provider 的父→子以及多子代理能推进；上游有限网页容量下，饱和请求有明确拒绝或可证终止的推进路径，无无限排队或父子等待环。",
+          "status": "partial",
+          "assessment": "五槽容量和父子推进有合成检查；真实同 Web 父子、多子及饱和未验收。"
+        },
+        {
+          "id": "573.5",
+          "requirement": "父取消、子中断、追加任务、等待超时、重复/迟到结果和组件退出能正确收敛并撤销旧回合权限。",
+          "status": "partial",
+          "assessment": "合成取消/迟到回执有覆盖；实际父子中断、追加、超时、组件退出未齐。"
+        },
+        {
+          "id": "573.6",
+          "requirement": "验证官方↔Web 和第三方 Provider↔Web 的可明文交接；未支持的不透明加密输入在提交前明确拒绝，不能伪造解密或降为 V1。",
+          "status": "not_verified",
+          "assessment": "官方↔Web、第三方↔Web 的真实明文多代理交接未验收。"
+        },
+        {
+          "id": "573.7",
+          "requirement": "Gateway 不创建/调度代理、不修改用户全局 V1/V2 选择、不偷偷换 Provider/model，真实 agent 生命周期归 Codex 客户端。",
+          "status": "verified",
+          "assessment": "实现保留客户端调度归属，未增加 Gateway 代理执行器或全局 V1 降级。"
+        },
+        {
+          "id": "573.8",
+          "requirement": "逐能力留存固定版本真实证据，参照 #324 的矩阵约束；首版不得通过隐藏 V2 或模拟回执绕过本任务。",
+          "status": "not_verified",
+          "assessment": "缺六项真实能力矩阵；不得以 spawn 合成回执或隐藏 V2 关闭。"
+        }
+      ]
+    },
+    {
+      "issue": 574,
+      "title": "[ChatGPT Web 7/8] 图片、压缩、会话切换和恢复",
+      "status": "open_acceptance_incomplete",
+      "criteria": [
+        {
+          "id": "574.1",
+          "requirement": "按模型声明的能力通过真实网页识别测试图片，不静默丢图或以未披露近似代替；目录能力与验收证据一致。",
+          "status": "partial",
+          "assessment": "图片转发/未声明拒绝和目录能力有确定性检查；真实识图未验收。"
+        },
+        {
+          "id": "574.2",
+          "requirement": "Codex 原生压缩及第三方客户端实际使用的压缩/缩减历史路径完成后，下一轮文本和工具续传正确。",
+          "status": "not_verified",
+          "assessment": "普通 Codex CLI resume 与随后文件工具已通过；原生压缩和第三方历史缩减后的真实工具续传仍未验收。"
+        },
+        {
+          "id": "574.3",
+          "requirement": "切换模型或 effort 后保留选定身份并正确隔离会话 epoch，不继承旧回合的工具权限或待处理 call。",
+          "status": "partial",
+          "assessment": "model/effort epoch 撤销旧回执有合同测试；真实切换未齐。"
+        },
+        {
+          "id": "574.4",
+          "requirement": "三客户端并发、父子代理及账号容量限制共存时，错误/排队策略有界且不会跨会话串流。",
+          "status": "partial",
+          "assessment": "合成会话隔离和容量检查存在；真实三客户端+父子并发未齐。"
+        },
+        {
+          "id": "574.5",
+          "requirement": "登录失效、网页关闭、自动化检查超时、Tunnel 断开和组件退出给出对应可恢复状态，不盲目重发已提交任务。",
+          "status": "partial",
+          "assessment": "失效登录/网页/Tunnel/组件状态负例存在；真实中断后的恢复未齐。"
+        },
+        {
+          "id": "574.6",
+          "requirement": "界面区分网页未就绪、连接器没有匹配项和隧道未就绪，不用一个泛化端口检查掩盖根因。",
+          "status": "verified",
+          "assessment": "界面区分 browser、Tunnel、connector，并以明确 capability/readiness 结果判定可用。"
+        },
+        {
+          "id": "574.7",
+          "requirement": "恢复后再次使用模型和工具能成功，旧会话和 broker 权限已清理；导出诊断不含凭据或私人对话。",
+          "status": "partial",
+          "assessment": "正常隔离升级/启动保留账号已验证；真实故障后恢复、旧权限撤销和诊断导出未齐。"
+        }
+      ]
+    },
+    {
+      "issue": 575,
+      "title": "[ChatGPT Web 8/8] 受管升级回滚与双平台发行验收",
+      "status": "open_acceptance_incomplete",
+      "criteria": [
+        {
+          "id": "575.1",
+          "requirement": "运行组件与应用版本兼容性明确；固定、校验并保留第三方许可，禁止直接执行未验证 latest。",
+          "status": "partial",
+          "assessment": "双平台固定 runtime pin、来源与校验已有证据；原条目的统一版本/许可验收清单仍待归并。"
+        },
+        {
+          "id": "575.2",
+          "requirement": "升级/停止先停止接收新回合，收敛或明确取消 HTTP、网页任务和 MCP 等待者，然后切换组件版本。",
+          "status": "partial",
+          "assessment": "close-admission、drain、撤销权限和 stop 已实现；真实在途 HTTP/网页/MCP 收敛未齐。"
+        },
+        {
+          "id": "575.3",
+          "requirement": "下载中断、损坏、启动失败和不兼容版本可恢复旧可用版，单账号登录资料不被意外删除。",
+          "status": "partial",
+          "assessment": "F3 已修复：Linux/Windows 公共 API 故障注入覆盖新旧 pin、账号/设置保留、替换/启动失败恢复、再次启动及损坏拒绝；两平台组件管理模块各47项通过。完整发行/实际账号恢复矩阵仍未齐。"
+        },
+        {
+          "id": "575.4",
+          "requirement": "禁用清理受管进程和端口，保留账号资料；删除账号资料是独立明确操作。持久操作与重启要求使用统一用户反馈。",
+          "status": "partial",
+          "assessment": "正常双平台 stop 和合成账号保留已验证；禁用/删除的完整真实账号矩阵未齐。"
+        },
+        {
+          "id": "575.5",
+          "requirement": "Linux/Windows 从同一候选 SHA 构建；Windows 在 yoga 隔离 checkout；不把单平台成功算产品发布通过。",
+          "status": "verified",
+          "assessment": "Linux 与 Yoga 隔离构建的 Windows 包同为7608bb17，资源及归档哈希已核对。"
+        },
+        {
+          "id": "575.6",
+          "requirement": "完整记录 Codex CLI/Desktop、Claude Code、OpenCode 的模型选择、文本、多轮、真实工具、流式、取消、图片/压缩与恢复矩阵。",
+          "status": "not_verified",
+          "assessment": "CLI/Desktop/Claude/OpenCode 模型、多轮、工具、取消、图片/压缩及恢复矩阵不完整。"
+        },
+        {
+          "id": "575.7",
+          "requirement": "Codex 完整 V2 明文、同 Web 父子及跨 Provider 交接通过；所有首版任务完成，没有用隐藏必选能力代替验收。",
+          "status": "not_verified",
+          "assessment": "完整 V2、同 Web 父子及跨 Provider 门禁未完成。"
+        },
+        {
+          "id": "575.8",
+          "requirement": "完成选定的 strict 本地检查、安装/升级回滚证据和版本/许可清单；记录不支持的密文输入、单账号与容量限制。",
+          "status": "partial",
+          "assessment": "工程检查与正常包生命周期有效；失败恢复已补充修复和故障注入，原规格要求的完整真实客户端/V2矩阵仍未完成。"
+        }
+      ]
+    }
+  ],
+  "repair_source_sha": "48df83453c68355007860ded3db30e11d07a8a5d",
+  "repair_evidence": "blocker-repairs.md"
+}

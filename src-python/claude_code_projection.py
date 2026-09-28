@@ -1,9 +1,7 @@
-"""Claude Code discovery aliases for Gateway-exported models.
+"""Claude Code model-picker aliases for Gateway-exported models.
 
-Claude Code 2.1.278 keeps GET /v1/models entries only when the id matches
-``claude|anthropic``. Project a stable alias for every other exported slug so
-the picker lists the whole catalog. Canonical ``provider/model`` remains the
-routing identity.
+Keep Gateway selections in a reserved namespace so external Claude-named
+models cannot collide with Claude subscription model IDs.
 """
 
 from __future__ import annotations
@@ -18,6 +16,8 @@ from gateway_errors import identity_failure
 
 CLAUDE_DISCOVERY_RE = re.compile(r"claude|anthropic", re.IGNORECASE)
 _ALIAS_PREFIX = "claude-codexhub-"
+_ROLE_ALIAS_PREFIX = _ALIAS_PREFIX + "role/"
+_FAMILY_ROLES = frozenset(("opus", "sonnet", "haiku", "fable"))
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 ROLE_ENV = {
     "main": "ANTHROPIC_MODEL",
@@ -43,9 +43,17 @@ def projected_model_id(canonical: str) -> str:
     slug = canonical_model_id(canonical)
     if not slug:
         raise identity_failure("model is required", reason="unsupported_model", model_slug=slug)
-    if CLAUDE_DISCOVERY_RE.search(slug):
-        return slug
     return _ALIAS_PREFIX + _UNSAFE.sub("-", slug).strip("-")
+
+
+def projected_role_model_id(role: str, canonical: str) -> str:
+    # Claude classifies models by equality with its family environment values.
+    # Sharing those values with picker IDs subjects manual choices to family
+    # policy (notably Fable's credits gate). Internal calls need their own IDs.
+    slug = canonical_model_id(canonical)
+    if role in _FAMILY_ROLES and slug:
+        return f"{_ROLE_ALIAS_PREFIX}{role}/{slug}"
+    return projected_model_id(slug)
 
 
 def projection_map(
@@ -87,6 +95,15 @@ def resolve_projected_model_id(
     if not slug:
         raise identity_failure("model is required", reason="unsupported_model", model_slug=slug)
     mapping = projection_map(catalog, extra_slugs)
+    if slug.startswith(_ROLE_ALIAS_PREFIX):
+        role, _, target = slug[len(_ROLE_ALIAS_PREFIX):].partition("/")
+        if role not in _FAMILY_ROLES or target not in mapping.values():
+            raise identity_failure(
+                "Claude role alias target is not in the exported catalog",
+                reason="unsupported_model",
+                model_slug=slug,
+            )
+        return target
     return mapping.get(slug, slug)
 
 
@@ -156,7 +173,7 @@ def bind_role_mappings(
                 model_slug=str(canonical),
             )
         slug = canonical_model_id(str(canonical))
-        projected = projected_model_id(slug) if slug else ""
+        projected = projected_role_model_id(role, slug) if slug else ""
         if role == "main" and default_slug and slug != default_slug:
             raise identity_failure(
                 "main role mapping contradicts the default model",

@@ -1,0 +1,104 @@
+diff --git a/src/adapters/chatgpt-web/model-selection.ts b/src/adapters/chatgpt-web/model-selection.ts
+index 4529117..95a085d 100644
+--- a/src/adapters/chatgpt-web/model-selection.ts
++++ b/src/adapters/chatgpt-web/model-selection.ts
+@@ -73,11 +73,17 @@ export function chatGptModelFamilyMatches(
+   // Latest uses 5.6 for the existing lower-effort multipart acknowledgements and 6 for Pro.
+   // Never interpret a future Latest Pro model as 6, or a lower effort as the final Pro response.
+   const expected = family === "6" && effort !== "max" ? "5.6" : family;
+-  const states = descriptions.flatMap(text => {
+-    const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^,，]+)(?:[,，]|$)/i
+-      .exec(text.replace(/\s+/g, " ").trim());
+-    return match ? [{ version: match[1], name: match[2]?.toLowerCase(), mode: match[3]!.trim() }] : [];
+-  });
++  const states = [];
++  for (const text of descriptions) {
++    const normalized = text.replace(/\s+/g, " ").trim();
++    const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^,，]+?)(?:[,，]\s*\d+\s+of\s+\d+\.?)?$/i.exec(normalized);
++    if (!match) {
++      // A malformed version assertion must not be masked by another valid label.
++      if (/^(?:GPT[-\s]?)?\d/i.test(normalized)) return false;
++      continue;
++    }
++    states.push({ version: match[1], name: match[2]?.toLowerCase(), mode: match[3]!.trim() });
++  }
+   return states.length > 0 && states.every(state => state.version === expected
+     && (!state.name || state.name === (expected === "5.6" ? "sol" : "astra"))
+     && (effort === "max" ? /^Pro$/i.test(state.mode) : !/^Pro$/i.test(state.mode)));
+@@ -102,7 +108,19 @@ export async function assertChatGptModelFamily(
+       (element.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)
+         .map(id => element.ownerDocument.getElementById(id)?.textContent ?? "")
+     ));
+-    if (checked && state && state.value === state.min + effortIndex && chatGptModelFamilyMatches(descriptions, family, effort)) return;
++    // The current picker announces only effort ("Pro, 5 of 5."). Its visible
++    // model toggle still identifies the version and effort in separate spans.
++    const labels = await menu.menu.locator('[data-model-picker-view-toggle="true"][aria-hidden="false"]')
++      .filter({ visible: true }).evaluateAll(elements => elements.map(element => {
++        const efforts = element.querySelectorAll('[data-effort-only="false"]');
++        if (efforts.length !== 1) return "";
++        const mode = efforts[0]!;
++        return `${mode.previousElementSibling?.textContent ?? ""} ${mode.textContent ?? ""}`.trim();
++      }));
++    const labelVerified = labels.length === 0
++      || (labels.length === 1 && chatGptModelFamilyMatches(labels, family, effort));
++    if (checked && state && state.value === state.min + effortIndex && labelVerified
++      && chatGptModelFamilyMatches([...descriptions, ...labels], family, effort)) return;
+     if (Date.now() >= deadline) break;
+     await new Promise(resolve => setTimeout(resolve, 50));
+   } while (true);
+diff --git a/tests/chatgpt-model-selection.test.ts b/tests/chatgpt-model-selection.test.ts
+index c839662..672c731 100644
+--- a/tests/chatgpt-model-selection.test.ts
++++ b/tests/chatgpt-model-selection.test.ts
+@@ -1,5 +1,39 @@
+ import { expect, test } from "bun:test";
+-import { chatGptModelFamilyMatches, selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
++import { chromium } from "playwright-core";
++import { assertChatGptModelFamily, chatGptModelFamilyMatches, selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
++
++test.skipIf(!process.env.CHATGPT_DOM_TEST_BROWSER)("model confirmation reads the visible version when the announcement contains only effort", async () => {
++  const browser = await chromium.launch({ executablePath: process.env.CHATGPT_DOM_TEST_BROWSER, headless: true });
++  try {
++    const page = await browser.newPage();
++    await page.setContent(`<div role="menu">
++      <div role="menuitem" data-model-picker-view-toggle="true" aria-hidden="false">
++        <span><span id="version">6</span><span data-effort-only="false">Pro</span></span>
++      </div>
++      <div role="menuitemradio" aria-checked="true">Latest</div>
++      <span id="announcement">Pro, 5 of 5.</span>
++      <div role="menuitem" aria-describedby="announcement"><div data-model-picker-power-slider>
++        <span role="slider" aria-valuemin="0" aria-valuemax="4" aria-valuenow="4"></span>
++      </div></div>
++    </div>`);
++    const menu = {
++      method: "already-open" as const,
++      menu: page.getByRole("menu"), slider: page.getByRole("slider"),
++      sliderContainer: page.locator("[data-model-picker-power-slider]"),
++    };
++    await assertChatGptModelFamily(menu, "6", "max", 4);
++    for (const version of ["7", "5.6", "", "Latest"]) {
++      await page.locator("#version").evaluate((node, text) => { node.textContent = text; }, version);
++      await expect(assertChatGptModelFamily(menu, "6", "max", 4)).rejects.toThrow("could not be selected and verified");
++    }
++    await page.locator("#version").evaluate(node => { node.textContent = "6"; });
++    await page.locator("#announcement").evaluate(node => { node.textContent = "5.6 Pro, 5 of 5."; });
++    await expect(assertChatGptModelFamily(menu, "6", "max", 4)).rejects.toThrow("could not be selected and verified");
++    await page.locator("#announcement").evaluate(node => { node.textContent = "Pro, 5 of 5."; });
++    await page.getByRole("menuitemradio").evaluate(node => node.setAttribute("aria-checked", "false"));
++    await expect(assertChatGptModelFamily(menu, "6", "max", 4)).rejects.toThrow("could not be selected and verified");
++  } finally { await browser.close(); }
++}, 60_000);
+ 
+ test("model selection recognizes Latest in the launcher languages without accepting other model names", async () => {
+   for (const [label, accepted] of [
+@@ -26,7 +60,9 @@ test("family confirmation separates Latest staging from the actual Pro response"
+   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "6", "max")).toBe(true);
+   expect(chatGptModelFamilyMatches(["GPT-5.6 Sol Pro, 5 of 5."], "5.6", "max")).toBe(true);
+   for (const descriptions of [[], ["Try Pro for more reasoning"], ["5.6 High, 3 of 5."], ["5.6 Pro, 5 of 5."],
+-    ["7 Pro, 5 of 5."], ["6 Sol Pro, 5 of 5."], ["6 Pro, 5 of 5.", "5.6 Pro, 5 of 5."], ["6 Pro for better answers"]]) {
++    ["7 Pro, 5 of 5."], ["6 Sol Pro, 5 of 5."], ["6 Pro, 5 of 5.", "5.6 Pro, 5 of 5."], ["6 Pro for better answers"],
++    ["6 Pro, 5 of 5. GPT-7 Pro, 5 of 5."], ["6 Pro, GPT-7 Pro"],
++    ["6 Pro", "6 Pro, 5 of 5. GPT-7 Pro, 5 of 5."]]) {
+     expect(chatGptModelFamilyMatches(descriptions, "6", "max")).toBe(false);
+   }
+   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "5.6", "max")).toBe(false);

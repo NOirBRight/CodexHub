@@ -314,6 +314,30 @@ def test_gateway_compatibility_replaces_inbound_client_user_agent() -> None:
     assert headers["x-session-id"] == "e2e-image-compact"
 
 
+@pytest.mark.parametrize("protocol", ["chat_completions", "responses", "anthropic_messages"])
+@pytest.mark.parametrize("other_beta", ["", "claude-code-20250219, "])
+@pytest.mark.parametrize("native", [False, True])
+def test_claude_server_classifier_beta_follows_its_protocol(protocol: str, other_beta: str, native: bool) -> None:
+    value = other_beta + "dangerous-tool-use-2026-09-03"
+    with patch("gateway_events.write_proxy_event") as record:
+        headers = build_upstream_headers(
+            {"Anthropic-Beta": value},
+            {"auth": "api_key", "name": "external", "api_key": "synthetic", "upstream_format": protocol, "native_anthropic_subscription": native},
+        )
+    if native:
+        assert headers["Anthropic-Beta"] == value
+        record.assert_not_called()
+    elif other_beta:
+        assert headers["Anthropic-Beta"] == other_beta.rstrip(", ")
+    else:
+        assert "Anthropic-Beta" not in headers
+    if not native:
+        record.assert_called_once()
+        assert record.call_args.kwargs["field"] == "headers.anthropic-beta.dangerous-tool-use-2026-09-03"
+        assert record.call_args.kwargs["policy"] == "claude_server_classifier_beta_omitted_for_non_anthropic"
+        assert "synthetic" not in repr(record.call_args)
+
+
 def test_gateway_compat_replaces_caller_user_agent() -> None:
     headers = build_upstream_headers(
         {

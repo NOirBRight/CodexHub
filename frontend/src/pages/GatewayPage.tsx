@@ -269,7 +269,7 @@ function GatewayPageImpl({
     if (gatewayCatalog.length > 0) {
       return gatewayCatalog.map((model) => ({
         id: model.id,
-        label: model.display_name || model.id,
+        label: `${model.display_name || model.id} · ${model.source}`,
       }));
     }
     return providers.flatMap((provider) =>
@@ -283,7 +283,7 @@ function GatewayPageImpl({
                 provider.id === "openai" || provider.id === "official"
                   ? model.id
                   : `${provider.id}/${model.id}`;
-              return { id, label: model.display_name || id };
+              return { id, label: `${model.display_name || id} · ${provider.name}` };
             })
         : [],
     );
@@ -454,7 +454,7 @@ function GatewayPageImpl({
     selectedModel?: string | null,
     roleMappings?: Record<string, string> | null,
   ) {
-    setClientBusy(`${clientId}:switch:${owner}`);
+    setClientBusy(`${clientId}:${clientId === "claude" && roleMappings ? "apply" : "switch"}:${owner}`);
     const clientName =
       clientInfoById.get(clientId)?.name ??
       clients.find((client) => client.id === clientId)?.name ??
@@ -478,7 +478,7 @@ function GatewayPageImpl({
           const result = await api.switchGatewayClientRoute(
             clientId,
             owner,
-            selectedModel || defaultModel,
+            clientId === "claude" ? selectedModel ?? "" : selectedModel || defaultModel,
             shouldForceTakeover,
             roleMappings,
           );
@@ -486,6 +486,7 @@ function GatewayPageImpl({
             throw new Error(result.message);
           }
           await onRefreshClients({ force: true });
+          if (clientId === "claude" && roleMappings) setClientBusy(null);
         },
         success: () => ({
           text: t("gateway.switchClientDone", { routeName }),

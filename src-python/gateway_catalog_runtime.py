@@ -13,6 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+import re
 import tomllib
 from types import MappingProxyType
 from typing import Any, Protocol, TypedDict
@@ -92,6 +93,7 @@ class CatalogUpstream(TypedDict, total=False):
     capability_manifest_hash: str
     capability_manifest_state: str
     capability_binding: Mapping[str, Any]
+    native_anthropic_subscription: bool
 
 
 UpstreamFacts = CatalogUpstream
@@ -111,6 +113,12 @@ class OllamaModelReader(Protocol):
 CatalogBySlugReader = Callable[[], dict[str, dict[str, Any]]]
 OllamaRuntimeReader = Callable[[str, Any], UpstreamFacts | None]
 TextReader = Callable[[Path, str], str]
+
+_NATIVE_CLAUDE_MODEL_RE = re.compile(
+    r"claude-(?:(?:opus|sonnet|haiku|fable)-\d+(?:-\d+)*(?:-(?:latest|\d{8}))?"
+    r"|\d+(?:-\d+)?-(?:opus|sonnet|haiku|fable)(?:-(?:latest|\d{8}))?)\Z",
+    re.IGNORECASE,
+)
 
 
 def _read_text(path: Path, encoding: str) -> str:
@@ -815,6 +823,22 @@ def choose_upstream(model_id: str) -> UpstreamFacts:
     slug = canonical_model_id(str(model_id))
     if not slug:
         raise ValueError("model is required")
+    if _NATIVE_CLAUDE_MODEL_RE.fullmatch(slug):
+        return {
+            "name": "anthropic_native",
+            "provider_id": "anthropic",
+            "model_id": slug,
+            "base_url": "https://api.anthropic.com/v1",
+            "auth": "anthropic_oauth",
+            "upstream_model": slug,
+            "upstream_format": "anthropic_messages",
+            "native_anthropic_subscription": True,
+            "tool_protocol": "auto",
+            "tool_surface_strategy": "eager",
+            "native_responses_tool_codec": "none",
+            "reports_cached_input_tokens": True,
+            "input_modalities": ("text", "image"),
+        }
     import claude_code_projection
 
     from providers_config import exported_gateway_model_ids
@@ -824,6 +848,10 @@ def choose_upstream(model_id: str) -> UpstreamFacts:
         current_catalog_data(),
         extra_slugs=exported_gateway_model_ids(),
     )
+    import chatgpt_web_route
+
+    if chatgpt_web_route.is_web_slug(slug):
+        return chatgpt_web_route.upstream_for_model(slug)
     policy = _policy_reader(_facts().policy_path)
     official_fast = _official_fast_variant(slug, policy)
     if official_fast is not None:
@@ -895,6 +923,15 @@ def _external_upstream(
     slug: str, external_model: Mapping[str, Any], policy: Any
 ) -> UpstreamFacts:
     provider_hint = str(external_model.get("provider_alias") or "") or None
+    import chatgpt_web_route
+
+    if (
+        canonical_model_id(provider_hint or "") == chatgpt_web_route.PROVIDER_ID
+        or chatgpt_web_route.is_web_slug(slug)
+    ):
+        # The providers.toml row is identity-only. Never use its empty base URL
+        # or fall through to an official model.
+        return chatgpt_web_route.upstream_for_model(canonical_model_id(slug))
     if is_internal_route_identity(slug) or is_internal_route_identity(external_model):
         raise _identity_failure(
             f"model identity is internal and cannot be routed: {slug}",
@@ -958,6 +995,7 @@ def _external_upstream(
         "api_key": external_model["api_key"],
         "upstream_model": external_model["upstream_model"],
         "upstream_format": external_model.get("upstream_format", "responses"),
+        "available_upstream_formats": external_model.get("available_upstream_formats", ()),
         "tool_protocol": external_model.get("tool_protocol", "auto"),
         "tool_surface_strategy": external_model.get("tool_surface_strategy", "eager"),
         "native_responses_tool_codec": external_model.get(
@@ -980,23 +1018,27 @@ def _external_upstream(
 def current_catalog_data() -> CatalogDocument:
     catalog_path = _resolved_catalog_path(_facts().generated_catalog_path)
     if not catalog_path.exists():
-        return {"models": []}
-    published_budgets = (
-        _published_budget_reader or published_official_context_budgets
-    )(catalog_path)
-    catalog = json.loads(_text_reader(catalog_path, "utf-8-sig"))
-    fast_projection = (
-        _official_fast_projection_reader or catalog_with_official_fast_variants
-    )
-    published_context_projection = _published_context_projection_reader or catalog_with_published_official_budgets
-    vision_projection = (
-        _vision_projection_reader or catalog_with_vision_proxy_capabilities
-    )
-    return vision_projection(
-        published_context_projection(
-            fast_projection(catalog), published_budgets, require_published_snapshot=True
+        projected: CatalogDocument = {"models": []}
+    else:
+        published_budgets = (
+            _published_budget_reader or published_official_context_budgets
+        )(catalog_path)
+        catalog = json.loads(_text_reader(catalog_path, "utf-8-sig"))
+        fast_projection = (
+            _official_fast_projection_reader or catalog_with_official_fast_variants
         )
-    )
+        published_context_projection = _published_context_projection_reader or catalog_with_published_official_budgets
+        vision_projection = (
+            _vision_projection_reader or catalog_with_vision_proxy_capabilities
+        )
+        projected = vision_projection(
+            published_context_projection(
+                fast_projection(catalog), published_budgets, require_published_snapshot=True
+            )
+        )
+    import chatgpt_web_route
+
+    return chatgpt_web_route.project_catalog(projected)
 
 
 def openai_model_list(catalog: Mapping[str, Any]) -> dict[str, Any]:

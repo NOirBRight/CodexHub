@@ -1,0 +1,83 @@
+{
+  "candidate_sha": "11119246457a710daa8b06e22a6754b73dd491c6",
+  "kind": "real-client request capture against local rejection endpoint",
+  "real_provider_calls": false,
+  "credential_source": "synthetic only",
+  "cases": [
+    {
+      "exit_code": 1,
+      "timeout": false,
+      "client": "claude",
+      "version": "2.1.283 (Claude Code)",
+      "requests": [
+        {
+          "path": "/v1/messages",
+          "body_keys": [
+            "context_management",
+            "max_tokens",
+            "messages",
+            "metadata",
+            "model",
+            "output_config",
+            "stream",
+            "system",
+            "thinking",
+            "tools"
+          ],
+          "session_header_names": [
+            "x-claude-code-session-id"
+          ],
+          "body_has_explicit_session": false,
+          "metadata_user_id_contains_session": true,
+          "gateway_context_has_session": false,
+          "web_adapter_resolves_session": false
+        }
+      ]
+    },
+    {
+      "exit_code": 1,
+      "timeout": false,
+      "client": "opencode",
+      "version": "1.18.32",
+      "requests": [
+        {
+          "path": "/v1/chat/completions",
+          "body_keys": [
+            "max_tokens",
+            "messages",
+            "model",
+            "stream",
+            "stream_options"
+          ],
+          "session_header_names": [
+            "x-session-affinity",
+            "x-session-id"
+          ],
+          "body_has_explicit_session": false,
+          "metadata_user_id_contains_session": false,
+          "gateway_context_has_session": true,
+          "web_adapter_resolves_session": true
+        },
+        {
+          "path": "/v1/chat/completions",
+          "body_keys": [
+            "max_tokens",
+            "messages",
+            "model",
+            "reasoning_effort",
+            "stream",
+            "stream_options"
+          ],
+          "session_header_names": [
+            "x-session-affinity",
+            "x-session-id"
+          ],
+          "body_has_explicit_session": false,
+          "metadata_user_id_contains_session": false,
+          "gateway_context_has_session": true,
+          "web_adapter_resolves_session": true
+        }
+      ]
+    }
+  ]
+}

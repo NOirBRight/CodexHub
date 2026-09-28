@@ -8,6 +8,16 @@ CodexHub is a local model-routing utility for the Codex ecosystem. This glossary
 The user-facing local OpenAI-compatible HTTP service that exposes official Codex subscription models and configured third-party models through one endpoint.
 _Avoid_: Proxy, runtime proxy, local proxy
 
+**ChatGPT Web Runtime**:
+The CodexHub-managed local capability that connects a signed-in ChatGPT webpage to a selected Gateway model route. Its browser account is separate from the existing official Codex subscription credential.
+_Avoid_: Official account, API subscription, second Gateway
+
+**ChatGPT Runtime Settings**:
+The separate settings surface for the ChatGPT Web Runtime's browser account, tunnel, connector, and runtime options. It owns the credentials needed by those capabilities.
+
+**ChatGPT Provider Connection**:
+The CodexHub-side connection to the ChatGPT Web Runtime, consisting of its service address, service access credential, and selected model routes. Its service address is distinct from the Runtime Settings address, and its access credential is distinct from account and tunnel credentials.
+
 **Vision Proxy**:
 The Gateway feature that lets a non-vision target model handle image requests by using a configured image-capable model to produce text visual context.
 _Avoid_: Image conversion, image workaround
@@ -80,7 +90,7 @@ Pointing a client's default route or model selection at the Injected Block. User
 _Avoid_: enabling, switching on
 
 **Claude Model Mapping**:
-A user-selected association from a Claude Code fixed model name or role alias to one Gateway-exported model. Separate from the complete Client Projection and from explicit model selection; it does not define a second model catalog.
+A user-selected association from a Claude Code model-family alias to one Gateway-exported model. It does not replace an explicitly selected complete native model ID and is separate from the default model, Default subagent, and complete Client Projection.
 
 **Compatibility Adaptation**:
 A declared transformation between a client's model protocol and an upstream model protocol. Equivalent transformations preserve meaning; best-effort transformations disclose approximations without silently losing essential content, breaking Call identity, or fabricating success.

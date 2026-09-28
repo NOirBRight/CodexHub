@@ -1,0 +1,70 @@
+{
+  "checked_at_utc": "2026-09-27T16:03:42.209364+00:00",
+  "gateway": "candidate worktree on isolated loopback port",
+  "auth_mode": "xai_oauth",
+  "candidate_source_sha256": "505ed6fb7cd41394cea83a23f5ba57fa6e9c021641398938ab5ae200c0538a9d",
+  "first_turn": {
+    "http_status": 200,
+    "terminal": "response.completed",
+    "output_count": 14,
+    "search_call_count": 5,
+    "reasoning_ids_unique": true,
+    "annotation_event_count": 3,
+    "citation_urls": [
+      "https://store.playstation.com/zh-hant-hk/product/HP0797-PPSA09164_00-REZINFINITE00PS5",
+      "https://www.playstation.com/zh-hans-hk/games/rez-infinite/",
+      "https://www.playstation.com/zh-hant-hk/games/rez-infinite/"
+    ],
+    "usage": {
+      "input_tokens": 33798,
+      "input_tokens_details": {
+        "cached_tokens": 16640
+      },
+      "output_tokens": 1308,
+      "output_tokens_details": {
+        "reasoning_tokens": 605
+      },
+      "total_tokens": 35106,
+      "num_sources_used": 0,
+      "num_server_side_tools_used": 5,
+      "cost_in_usd_ticks": 421645600,
+      "server_side_tool_usage_details": {
+        "web_search_calls": 5,
+        "x_search_calls": 0,
+        "x_posts_fetched": 0,
+        "x_users_fetched": 0,
+        "code_interpreter_calls": 0,
+        "file_search_calls": 0,
+        "mcp_calls": 0,
+        "document_search_calls": 0,
+        "image_generation_calls": 0
+      },
+      "context_details": {
+        "input_tokens": 19415,
+        "output_tokens": 999
+      }
+    }
+  },
+  "history_followup": {
+    "http_status": 200,
+    "status": "completed",
+    "usage": {
+      "input_tokens": 2823,
+      "input_tokens_details": {
+        "cached_tokens": 1280
+      },
+      "output_tokens": 171,
+      "output_tokens_details": {
+        "reasoning_tokens": 122
+      },
+      "total_tokens": 2994,
+      "num_sources_used": 0,
+      "num_server_side_tools_used": 0,
+      "cost_in_usd_ticks": 16156800,
+      "context_details": {
+        "input_tokens": 2823,
+        "output_tokens": 178
+      }
+    }
+  }
+}

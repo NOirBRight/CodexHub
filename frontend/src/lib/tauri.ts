@@ -42,6 +42,8 @@ import type {
   UpstreamFormatProbeResult,
   UnifiedHistoryResult,
   UsageQueryWindow,
+  ChatGptWebStatus,
+  ChatGptWebConnectionCheck,
   XaiAuthStatus,
   XaiDeviceLogin,
   XaiUsageSnapshot,
@@ -297,9 +299,11 @@ export const api = {
   dshClientConnect: () => call<DshLifecycleReport>(COMMANDS.dshClientConnect),
   dshClientDisconnect: () => call<DshLifecycleReport>(COMMANDS.dshClientDisconnect),
   dshClientReadback: () => call<DshLifecycleReport>(COMMANDS.dshClientReadback),
-  previewGatewayClientConfig: (clientId: string, model?: string | null) =>
+  previewGatewayClientConfig: (clientId: string, model?: string | null, roleMappings?: Record<string, string> | null) =>
     call<GatewayClientConfigPreview>(COMMANDS.previewGatewayClientConfig, {
       clientId,
+      roleMappings: roleMappings ?? null,
+      role_mappings: roleMappings ?? null,
       model: model ?? null,
     }),
   applyGatewayClientConfig: (clientId: string, model?: string | null) =>
@@ -400,6 +404,23 @@ export const api = {
     writeQuotaCache("xai", snapshot);
     return snapshot;
   },
+  chatgptWebStatus: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebStatus),
+  chatgptWebConnectionCheck: async (baseUrl: string, apiKey: string) => {
+    const result = await desktopCall<ChatGptWebConnectionCheck>(
+      COMMANDS.chatgptWebConnectionCheck,
+      { baseUrl, apiKey },
+    );
+    if (!result) throw new Error("Connection checks require the CodexHub desktop app");
+    return result;
+  },
+  chatgptWebEnable: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebEnable),
+  chatgptWebStop: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebStop),
+  chatgptWebDisable: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebDisable),
+  chatgptWebUpgrade: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebUpgrade),
+  chatgptWebDeleteAccount: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebDeleteAccount),
+  chatgptWebOpenLogin: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebOpenLogin),
+  chatgptWebCloseLogin: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebCloseLogin),
+  chatgptWebOpenSettings: () => call<{ opened: boolean }>(COMMANDS.chatgptWebOpenSettings),
 };
 
 export function messageFromError(error: unknown): string {

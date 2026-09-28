@@ -1,0 +1,132 @@
+{
+  "schema_version": 2,
+  "candidate_sha": "fae658a2c523ec8431ba0959bf4da22756903bb3",
+  "claude_cli_version": "2.1.281 (Claude Code)",
+  "status": "passed",
+  "packaged_usage_ui_requested": false,
+  "packaged_usage_ui_session": "not-requested",
+  "bounds": {
+    "max_live_generation_attempts": 8,
+    "live_generation_attempts": 4,
+    "generation_attempt_budget_scope": "runner-level CLI generation invocation reservations; this is not a hard cap on Gateway request IDs or retries performed internally by a client",
+    "per_generation_timeout_seconds": 90,
+    "overall_timeout_seconds": 480,
+    "max_output_tokens": 128
+  },
+  "verified_routes": [
+    {
+      "case": "claude-deepseek",
+      "request_id": "04957ad45c99",
+      "model": "deepseek/deepseek-flash",
+      "provider": "deepseek",
+      "client": "unknown",
+      "status": 200,
+      "usage_source": "upstream",
+      "duration_ms": 1107,
+      "input_tokens": 15623,
+      "output_tokens": 11,
+      "total_tokens": 15634,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": 0,
+      "reasoning_tokens": null
+    },
+    {
+      "case": "deepseek-chat",
+      "request_id": "0a6b06535612",
+      "model": "deepseek/deepseek-flash",
+      "provider": "deepseek",
+      "client": "unknown",
+      "status": 200,
+      "usage_source": "upstream",
+      "duration_ms": 795,
+      "input_tokens": 43,
+      "output_tokens": 48,
+      "total_tokens": 91,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": null,
+      "reasoning_tokens": 38
+    },
+    {
+      "case": "responses-luna",
+      "request_id": "59725214a0a7",
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "client": "unknown",
+      "status": 200,
+      "usage_source": "upstream",
+      "duration_ms": 2148,
+      "input_tokens": 17,
+      "output_tokens": 22,
+      "total_tokens": 39,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": 0,
+      "reasoning_tokens": 9
+    }
+  ],
+  "route_request_counts": [
+    {
+      "case": "claude-deepseek",
+      "model": "deepseek/deepseek-flash",
+      "inbound_format": "anthropic_messages",
+      "upstream_format": "anthropic_messages",
+      "observed_gateway_request_ids": 1,
+      "gateway_request_id_values": [
+        "04957ad45c99"
+      ],
+      "successful_gateway_route_observed": true
+    },
+    {
+      "case": "deepseek-chat",
+      "model": "deepseek/deepseek-flash",
+      "inbound_format": "chat_completions",
+      "upstream_format": "chat_completions",
+      "observed_gateway_request_ids": 1,
+      "gateway_request_id_values": [
+        "0a6b06535612"
+      ],
+      "successful_gateway_route_observed": true
+    },
+    {
+      "case": "responses-luna",
+      "model": "gpt-6-luna",
+      "inbound_format": "responses",
+      "upstream_format": "responses",
+      "observed_gateway_request_ids": 1,
+      "gateway_request_id_values": [
+        "59725214a0a7"
+      ],
+      "successful_gateway_route_observed": true
+    }
+  ],
+  "total_observed_gateway_request_ids": 3,
+  "usage_statistics_snapshot": {
+    "requests": 4,
+    "successful_requests": 4,
+    "missing_usage_requests": 0,
+    "partial_usage_requests": 0,
+    "total_tokens": 29143,
+    "input_tokens": 28894,
+    "output_tokens": 249,
+    "cached_input_tokens": 0,
+    "cache_write_input_tokens": 0,
+    "cache_hit_rate": 0.0
+  },
+  "failure_diagnostics": [],
+  "rendered_packaged_usage_statistics_ui_verified": false,
+  "packaged_usage_screenshot": null,
+  "acceptance_status": {
+    "native_haiku_through_gateway": "unverified",
+    "native_haiku_persisted_usage": "unverified",
+    "packaged_usage_statistics_ui": "unverified",
+    "picker_coexistence": "unverified",
+    "resumed_session_switching": "unverified",
+    "explicit_model_resume": "unverified",
+    "explicit_native_opus_5_5_identity": "unverified",
+    "deepseek_chat_messages_usage_ui": "unverified",
+    "deepseek_chat_persisted_usage": "verified",
+    "deepseek_messages_persisted_usage": "verified",
+    "codex_luna_responses_persisted_usage": "verified",
+    "codex_luna_responses_usage_ui": "unverified",
+    "tools_compression_cancellation_cache_hit_reuse": "unverified"
+  }
+}

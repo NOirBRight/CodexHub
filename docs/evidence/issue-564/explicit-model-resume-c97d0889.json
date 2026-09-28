@@ -1,0 +1,106 @@
+{
+  "schema_version": 2,
+  "candidate_sha": "c97d08897bdae3f56de6e3ce51235150356d8a43",
+  "claude_cli_version": "2.1.280 (Claude Code)",
+  "status": "passed",
+  "packaged_usage_ui_requested": false,
+  "packaged_usage_ui_session": "not-requested",
+  "bounds": {
+    "max_live_generation_attempts": 2,
+    "live_generation_attempts": 2,
+    "generation_attempt_budget_scope": "runner-level CLI generation invocation reservations; this is not a hard cap on Gateway request IDs or retries performed internally by a client",
+    "per_generation_timeout_seconds": 90,
+    "overall_timeout_seconds": 300,
+    "max_output_tokens": 128
+  },
+  "verified_routes": [
+    {
+      "case": "claude-native-opus-5-5-resume",
+      "request_id": "adea2e75e78b",
+      "model": "claude-opus-5-5",
+      "provider": "claude_subscription",
+      "client": "unknown",
+      "status": 200,
+      "usage_source": "upstream",
+      "duration_ms": 13602,
+      "input_tokens": 22717,
+      "output_tokens": 76,
+      "total_tokens": 22793,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": 22715,
+      "reasoning_tokens": null
+    },
+    {
+      "case": "claude-native-opus-5-5-resume-followup",
+      "request_id": "9c354115e9b9",
+      "model": "claude-opus-5-5",
+      "provider": "claude_subscription",
+      "client": "unknown",
+      "status": 200,
+      "usage_source": "upstream",
+      "duration_ms": 6096,
+      "input_tokens": 22862,
+      "output_tokens": 36,
+      "total_tokens": 22898,
+      "cached_input_tokens": 22715,
+      "cache_write_input_tokens": 145,
+      "reasoning_tokens": null
+    }
+  ],
+  "route_request_counts": [
+    {
+      "case": "claude-native-opus-5-5-resume",
+      "model": "claude-opus-5-5",
+      "inbound_format": "anthropic_messages",
+      "upstream_format": "anthropic_messages",
+      "observed_gateway_request_ids": 2,
+      "gateway_request_id_values": [
+        "93c56e70ca22",
+        "adea2e75e78b"
+      ],
+      "successful_gateway_route_observed": true
+    },
+    {
+      "case": "claude-native-opus-5-5-resume-followup",
+      "model": "claude-opus-5-5",
+      "inbound_format": "anthropic_messages",
+      "upstream_format": "anthropic_messages",
+      "observed_gateway_request_ids": 1,
+      "gateway_request_id_values": [
+        "9c354115e9b9"
+      ],
+      "successful_gateway_route_observed": true
+    }
+  ],
+  "total_observed_gateway_request_ids": 3,
+  "usage_statistics_snapshot": {
+    "requests": 2,
+    "successful_requests": 2,
+    "missing_usage_requests": 0,
+    "partial_usage_requests": 0,
+    "total_tokens": 45691,
+    "input_tokens": 45579,
+    "output_tokens": 112,
+    "cached_input_tokens": 22715,
+    "cache_write_input_tokens": 22860,
+    "cache_hit_rate": 49.8
+  },
+  "failure_diagnostics": [],
+  "rendered_packaged_usage_statistics_ui_verified": false,
+  "packaged_usage_screenshot": null,
+  "acceptance_status": {
+    "native_haiku_through_gateway": "unverified",
+    "native_haiku_persisted_usage": "unverified",
+    "packaged_usage_statistics_ui": "unverified",
+    "picker_coexistence": "unverified",
+    "resumed_session_switching": "unverified",
+    "explicit_model_resume": "verified",
+    "explicit_native_opus_5_5_identity": "verified",
+    "deepseek_chat_messages_usage_ui": "unverified",
+    "deepseek_chat_persisted_usage": "unverified",
+    "deepseek_messages_persisted_usage": "unverified",
+    "codex_luna_responses_persisted_usage": "unverified",
+    "codex_luna_responses_usage_ui": "unverified",
+    "tools_compression_cancellation_cache_hit_reuse": "unverified"
+  }
+}

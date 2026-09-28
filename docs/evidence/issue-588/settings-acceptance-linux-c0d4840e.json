@@ -1,0 +1,38 @@
+{
+  "candidate_sha": "c0d4840ed411e4089cb7f675cb1181dc645e49bd",
+  "platform": "linux-x64",
+  "live_tested_product_candidate": "f2f95fe1aff0294dc28b848ed4b4bfa4d5be429d",
+  "product_source_tree_matches_live_tested_candidate": true,
+  "package_archive_sha256": "e58b0791488e4328c5248884322cc1a6ecd060b314af5eef33a2000ebd036a36",
+  "resource_inspection": {
+    "status": "passed",
+    "source_file_count": 98,
+    "source_mismatch_count": 0,
+    "runtime_hash_matches": true,
+    "private_state_file_count": 0
+  },
+  "isolated_upgrade_and_readiness": {
+    "status": "passed",
+    "account_and_settings_preserved": true,
+    "saved_settings_active": true,
+    "pending_restart": false,
+    "readiness": "ready",
+    "text_ready": true,
+    "tools_ready": true,
+    "model_count": 9
+  },
+  "python_partitions": {
+    "status": "passed",
+    "full_count": 3925,
+    "core_count": 3761,
+    "synthetic_count": 164,
+    "overlap_count": 0,
+    "missing_count": 0
+  },
+  "planner_and_checker_tests": {
+    "status": "passed",
+    "passed": 49
+  },
+  "application_release": false,
+  "production_installation": false
+}

@@ -14,6 +14,21 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+fn claude_mapping_preferences_survive_settings_restart_and_stale_targets() {
+    let root = temp_root("claude-mapping-preferences");
+    let paths = test_paths(&root);
+    fs::create_dir_all(paths.settings_path().parent().unwrap()).unwrap();
+    fs::write(paths.settings_path(), r#"{"claude_model_mappings":{"opus":"removed/model","haiku":"","subagent":"gpt-5.5"}}"#).unwrap();
+    let loaded = get_settings_with_paths(&paths).unwrap();
+    save_settings_with_paths(loaded, &paths).unwrap();
+    let restarted = serde_json::to_value(get_settings_with_paths(&paths).unwrap()).unwrap();
+    assert_eq!(restarted["claude_model_mappings"]["opus"], "removed/model");
+    assert_eq!(restarted["claude_model_mappings"]["haiku"], "");
+    assert_eq!(restarted["claude_model_mappings"]["subagent"], "gpt-5.5");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn projection_transaction_restores_both_channel_backups_and_takeover_metadata() {
     let root = temp_root("projection-cross-channel-rollback");
     let paths = test_paths(&root);
@@ -532,6 +547,9 @@ fn settings_missing_file_returns_defaults_and_roundtrips_saved_values() {
     );
 
     let custom = Settings {
+        claude_native_picker: None,
+        claude_native_picker_source: None,
+        claude_model_mappings: None,
         locale: "zh-CN".to_string(),
         auto_sync_history: false,
         unified_codex_history: false,

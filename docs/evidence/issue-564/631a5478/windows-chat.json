@@ -1,0 +1,42 @@
+{
+  "schema": "codexhub.chat-completions-e2e.v1",
+  "candidate": "CodexHub.exe",
+  "candidate_sha": "631a5478b474d46ea78690767971642de80deda2",
+  "candidate_sha256": "8087ffc0336924797280634eb57770247d5b5dafd8f7e0b64fd12a01910f98e5",
+  "cases": [
+    {
+      "ok": true,
+      "http_status": 200,
+      "saw_sentinel": true,
+      "saw_reasoning_content": false,
+      "saw_encrypted_content": false,
+      "saw_responses_event": false,
+      "body_sha256": "bf5ebb0a468382431c28eb1f1df337facdd6b0172eb77bdf026f56398d2274a4",
+      "error": "",
+      "case_id": "chat-official",
+      "provider_id": "official",
+      "model": "gpt-6-luna",
+      "endpoint_binding": "/v1/chat/completions",
+      "protocol": "chat_completions",
+      "outcome": "passed"
+    },
+    {
+      "ok": true,
+      "http_status": 200,
+      "saw_sentinel": true,
+      "saw_reasoning_content": true,
+      "saw_encrypted_content": false,
+      "saw_responses_event": false,
+      "body_sha256": "628713ed68993bb4ee51084f09be25258fc108c5e2fc29b881976a4ad0bd9132",
+      "error": "",
+      "case_id": "chat-deepseek",
+      "provider_id": "deepseek",
+      "model": "deepseek-flash",
+      "endpoint_binding": "/v1/providers/deepseek/chat/completions",
+      "protocol": "chat_completions",
+      "outcome": "passed"
+    }
+  ],
+  "failures": [],
+  "ok": true
+}

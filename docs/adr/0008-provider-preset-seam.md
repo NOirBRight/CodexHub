@@ -49,9 +49,10 @@ The bundled catalog of Provider Presets is:
 - `commandcode`
 - `opencode-go`
 - `xai`
+- `deepseek`
 
 Catalog-maintained Preset model names, thinking levels, and defaults live in
-the Maintained Catalog (ADR-0009). The standalone xAI Preset owns its rows.
+the Maintained Catalog (ADR-0009). The standalone xAI and DeepSeek Presets own their rows.
 Missing official model ids are inserted additively; other instantiate fields
 stay empty-only.
 

@@ -180,8 +180,11 @@ _redact_identity_in_text = redact_identity_in_text
 
 
 def safe_upstream_error_detail(exc: BaseException, *, redact_identity: str | None = None) -> str:
-    reason = getattr(exc, "reason", None)
-    source = reason if reason is not None else exc
+    if isinstance(exc, ModelIdentityResolutionError):
+        source = exc
+    else:
+        reason = getattr(exc, "reason", None)
+        source = reason if reason is not None else exc
     if isinstance(source, UpstreamPayloadError) or isinstance(getattr(source, "cause", None), UpstreamPayloadError):
         return "Upstream reported an error; provider details omitted from diagnostics."
     detail = f"{type(source).__name__}: {source}"
@@ -205,6 +208,29 @@ def _safe_error_identity(value: Any) -> str | None:
     if any(marker in lowered for marker in ("bearer", "secret", "token", "password", "api_key", "api-key", "authorization", "cookie")):
         return None
     return candidate
+
+
+def model_identity_error_detail(
+    exc: ModelIdentityResolutionError, *, inbound_format: str
+) -> str:
+    """Explain a Claude Code model override without changing its routing identity."""
+
+    model = _safe_error_identity(exc.model_slug)
+    if (
+        inbound_format == "anthropic_messages"
+        and exc.reason == "unsupported_model"
+        and model is not None
+        and model.startswith("claude-")
+        and not model.startswith("claude-codexhub-")
+    ):
+        return (
+            "The requested Claude Code model is not exported by Gateway. "
+            "Use /model to select an exported Gateway model, or disconnect "
+            "Claude Code from Gateway to keep using this model through "
+            "your Anthropic subscription. Resumed sessions and --model "
+            "override the configured default."
+        )
+    return safe_upstream_error_detail(exc)
 
 
 def _exception_failure_class(exc: BaseException) -> str | None:

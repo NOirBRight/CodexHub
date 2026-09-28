@@ -1,0 +1,21 @@
+{
+  "issue": 570,
+  "candidate_sha": "5734ce8c54df9435a8567527e29ae536d28ca432",
+  "runtime": {
+    "version": "6.1.1",
+    "commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5"
+  },
+  "verified": [
+    "a tool request is rejected before POST /v1/responses when the tunnel is not ready, while a text request on that status still streams",
+    "a tool request is rejected before POST /v1/responses when the connector is not selectable",
+    "streamed function-call argument deltas keep call id and item id",
+    "the following function_call_output is one more POST on the same thread, turn, and call id",
+    "a copied call id from another session is rejected and adds no POST",
+    "a call id reused on a different turn is rejected",
+    "replaying the same function_call_output does not add another POST",
+    "client disconnect closes the upstream body and a later output for that call id is rejected",
+    "the Gateway does not insert an environment_context or execute the tool"
+  ],
+  "live_codex_tool_turns": "not_run",
+  "blocked_reason": "doctor login is signed out and the ChatGPT connector was not verified, so real Codex CLI and Desktop tool side effects were not run"
+}

@@ -266,8 +266,9 @@ pub async fn list_gateway_clients(
 pub fn preview_gateway_client_config(
     client_id: String,
     model: Option<String>,
+    role_mappings: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<gateway::GatewayClientConfigPreview, String> {
-    gateway::preview_gateway_client_config(client_id, model)
+    gateway::preview_gateway_client_config(client_id, model, role_mappings)
 }
 
 #[tauri::command]
@@ -448,7 +449,8 @@ pub async fn refresh_official_models(
     .await
 }
 
-pub(crate) fn refresh_official_models_published() -> Result<official_refresh::OfficialRefreshResult, String> {
+pub(crate) fn refresh_official_models_published(
+) -> Result<official_refresh::OfficialRefreshResult, String> {
     codex_desktop::serialize_config_writer(|| {
         official_refresh::refresh_manual().map_err(|error| error.to_string())
     })

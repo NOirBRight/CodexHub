@@ -2274,6 +2274,33 @@ class ProtocolTranslationTests(unittest.TestCase):
             {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
         )
 
+    def test_chat_completion_accepts_positional_tool_index_from_deepseek(self):
+        payload = {"id": "chat_1", "model": "deepseek-flash", "choices": [{
+            "index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None, "tool_calls": [{
+                    "index": 0, "id": "call_1", "type": "function",
+                    "function": {"name": "emit_marker", "arguments": "{\"value\":\"ready\"}"},
+                }],
+            },
+        }]}
+        result = json.loads(protocol_translation.chat_completion_to_response_body(
+            json.dumps(payload).encode()))
+        self.assertEqual(result["output"][0]["type"], "function_call")
+        self.assertEqual(result["output"][0]["call_id"], "call_1")
+        history = {"model": "deepseek-flash", "messages": [
+            {"role": "user", "content": "Run the tool"},
+            payload["choices"][0]["message"],
+            {"role": "tool", "tool_call_id": "call_1", "content": "ready"},
+        ]}
+        translated = json.loads(protocol_translation.chat_completions_request_to_responses_body(
+            json.dumps(history).encode()))
+        self.assertTrue(any(item.get("type") == "function_call" for item in translated["input"]))
+        payload["choices"][0]["message"]["tool_calls"][0]["index"] = 1
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
+            protocol_translation.chat_completion_to_response_body(json.dumps(payload).encode())
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
+            protocol_translation.chat_completions_request_to_responses_body(json.dumps(history).encode())
+
     def test_chat_completion_to_response_maps_commandcode_reasoning_details(self):
         body = json.dumps(
             {
@@ -3215,3 +3242,58 @@ def test_prepare_exchange_rejects_ambiguous_envelope_before_reshaping(field):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RawReasoningStreamTests(unittest.TestCase):
+    def test_deepseek_reasoning_parts_stream_once_in_both_converters(self):
+        identity = {"item_id": "rs_1", "content_index": 0}
+        reasoning = {"id": "rs_1", "type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "think first"}]}
+        events = [
+            {"type": "response.created", "response": {"id": "resp_1", "model": "deepseek-flash"}},
+            {"type": "response.output_item.added", "item": {"id": "rs_1", "type": "reasoning", "summary": []}},
+            {"type": "response.content_part.added", **identity, "part": {"type": "reasoning_text", "text": ""}},
+            {"type": "response.reasoning_text.delta", **identity, "delta": "think "},
+            {"type": "response.reasoning_text.delta", **identity, "delta": "first"},
+            {"type": "response.reasoning_text.done", **identity, "text": "think first"},
+            {"type": "response.content_part.done", **identity, "part": {"type": "reasoning_text", "text": "think first"}},
+            {"type": "response.output_item.done", "item": reasoning},
+            {"type": "response.output_text.delta", "delta": "OK"},
+            {"type": "response.completed", "response": {"id": "resp_1", "status": "completed", "output": [reasoning, {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "OK"}]}]}},
+        ]
+        converter = protocol_translation.ResponsesToChatStreamConverter(preserve_reasoning_history=True)
+        streamed = [chunk for event in events for chunk in converter.chunks_for_event(event)]
+        buffered = protocol_translation.response_events_to_chat_stream_chunks(events, preserve_reasoning_history=True)
+        for chunks in (streamed, buffered):
+            deltas = [choice.get("delta", {}) for chunk in chunks for choice in chunk.get("choices", [])]
+            self.assertEqual("".join(d.get("reasoning_content", "") for d in deltas), "think first")
+            self.assertEqual("".join(d.get("content", "") for d in deltas), "OK")
+        blocked = protocol_translation.ResponsesToChatStreamConverter()
+        with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
+            blocked.chunks_for_event(events[2])
+
+    def test_raw_reasoning_rejects_conflicting_final_and_private_fields(self):
+        for bad_event in (
+            {"type": "response.reasoning_text.done", "text": "PRIVATE_SENTINEL"},
+            {"type": "response.content_part.done", "part": {"type": "reasoning_text", "text": "think", "PRIVATE_SENTINEL": True}},
+            {"type": "response.reasoning_text.delta", "delta": {"PRIVATE_SENTINEL": True}},
+        ):
+            converter = protocol_translation.ResponsesToChatStreamConverter(preserve_reasoning_history=True)
+            converter.chunks_for_event({"type": "response.reasoning_text.delta", "delta": "think"})
+            with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError) as caught:
+                converter.chunks_for_event(bad_event)
+            self.assertNotIn("PRIVATE_SENTINEL", str(caught.exception))
+
+    def test_raw_reasoning_after_terminal_is_rejected(self):
+        terminal = {"type": "response.completed", "response": {"id": "resp_1", "output": []}}
+        for late in (
+            {"type": "response.reasoning_text.delta", "delta": "late"},
+            {"type": "response.reasoning_text.done", "text": "late"},
+            {"type": "response.content_part.added", "part": {"type": "reasoning_text", "text": ""}},
+            {"type": "response.content_part.done", "part": {"type": "reasoning_text", "text": "late"}},
+        ):
+            converter = protocol_translation.ResponsesToChatStreamConverter(preserve_reasoning_history=True)
+            converter.chunks_for_event(terminal)
+            with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
+                converter.chunks_for_event(late)
+            with self.assertRaises(protocol_translation.UnsupportedProtocolTranslationError):
+                protocol_translation.response_events_to_chat_stream_chunks([terminal, late], preserve_reasoning_history=True)

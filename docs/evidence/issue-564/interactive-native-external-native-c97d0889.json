@@ -1,0 +1,63 @@
+{
+  "candidate_sha": "c97d08897bdae3f56de6e3ce51235150356d8a43",
+  "cli_version": "2.1.280 (Claude Code)",
+  "case": "interactive_native_external_native",
+  "bound": {
+    "generation_turns": 3,
+    "overall_seconds": 360,
+    "max_output_tokens": 128
+  },
+  "turns": [
+    {
+      "label": "native_initial",
+      "selected": "claude-haiku-4-5-20251001",
+      "canonical_model": "claude-haiku-4-5-20251001",
+      "provider": "claude_subscription",
+      "request_id": "e7e5ccf58f85",
+      "status": 200,
+      "input_tokens": 917,
+      "output_tokens": 19,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": 0,
+      "marker_in_assistant_transcript": true,
+      "assistant_models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    },
+    {
+      "label": "external_recall",
+      "selected": "claude-codexhub-deepseek-deepseek-flash",
+      "canonical_model": "deepseek/deepseek-flash",
+      "provider": "deepseek",
+      "request_id": "6b168e683c42",
+      "status": 200,
+      "input_tokens": 3410,
+      "output_tokens": 9,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": 0,
+      "marker_in_assistant_transcript": true,
+      "assistant_models": [
+        "deepseek-flash"
+      ]
+    },
+    {
+      "label": "native_recall",
+      "selected": "claude-haiku-4-5-20251001",
+      "canonical_model": "claude-haiku-4-5-20251001",
+      "provider": "claude_subscription",
+      "request_id": "43a3198b7e51",
+      "status": 200,
+      "input_tokens": 4058,
+      "output_tokens": 105,
+      "cached_input_tokens": 0,
+      "cache_write_input_tokens": 0,
+      "marker_in_assistant_transcript": true,
+      "assistant_models": [
+        "claude-haiku-4-5-20251001"
+      ]
+    }
+  ],
+  "status": "passed",
+  "source_account_unchanged": true,
+  "interactive_selection_changed_isolated_settings": true
+}

@@ -30,6 +30,7 @@ interface StackedUsageChartShellProps {
 }
 
 type UsageRange = "7d" | "1m" | "custom";
+type UsageView = "chart" | "requests";
 type UsageGroup = "day" | "week";
 type UsageMetric = "token" | "request";
 type UsageBreakdown = "provider" | "model" | "client";
@@ -119,6 +120,7 @@ export function StackedUsageChartShell({
   const tr = t as Translate;
   const initialCustomRange = useMemo(() => defaultCustomRange(), []);
   const [range, setRange] = useState<UsageRange>("7d");
+  const [view, setView] = useState<UsageView>("chart");
   const [groupBy, setGroupBy] = useState<UsageGroup>("day");
   const [metric, setMetric] = useState<UsageMetric>("token");
   const [breakdown, setBreakdown] = useState<UsageBreakdown>("provider");
@@ -159,6 +161,20 @@ export function StackedUsageChartShell({
       }),
     [breakdown, cacheCapableProviders, customRange, events, hiddenSeriesKeys, providerLabels, range, stacked.series, summary, todayKey, tr],
   );
+  const requestRows = useMemo(() => {
+    const span = rangeToSpan(range, customRange);
+    const startTime = span.start.getTime();
+    const endTime = endOfDay(span.end).getTime();
+    return events
+      .filter((event) => {
+        if (!event.ts) return false;
+        const time = Date.parse(event.ts);
+        return !Number.isNaN(time) && time >= startTime && time <= endTime;
+      })
+      .slice()
+      .sort((left, right) => Date.parse(right.ts ?? "") - Date.parse(left.ts ?? ""))
+      .slice(0, 20);
+  }, [customRange, events, range, todayKey]);
 
   useEffect(() => {
     onWindowChange?.(queryWindow);
@@ -229,6 +245,28 @@ export function StackedUsageChartShell({
           <h2 className="truncate text-sm font-semibold text-ink">{t("usage.usageCost")}</h2>
         </div>
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+          <div className="grid grid-cols-2 rounded-full bg-panel p-0.5 text-[11px] shadow-control">
+            {([
+              ["chart", t("usage.chart")],
+              ["requests", t("usage.requestDetails")],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                className={
+                  view === value
+                    ? "h-7 rounded-full bg-surface px-2 font-semibold text-ink shadow-raised"
+                    : "h-7 rounded-full px-2 font-semibold text-slate-500 hover:text-ink"
+                }
+                aria-pressed={view === value}
+                onClick={() => setView(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {view === "chart" && <>
           <UsageDropdown
             label={t("usage.metric")}
             open={metricOpen}
@@ -292,6 +330,7 @@ export function StackedUsageChartShell({
               setGroupOpen(false);
             }}
           />
+          </>}
 
           <div ref={customRangeRef} className="relative">
             <div className="ws-chart-range grid grid-cols-[44px_44px_64px] rounded-full bg-panel p-0.5 text-[11px] shadow-control">
@@ -329,15 +368,24 @@ export function StackedUsageChartShell({
         </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-2">
-        <Metric label={t("gateway.tokens")} value={visibleSummary?.total_tokens !== null && visibleSummary?.total_tokens !== undefined ? formatNumber(visibleSummary.total_tokens, locale) : t("common.unknown")} />
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
+        <Metric
+          label={t("gateway.tokens")}
+          value={visibleSummary?.total_tokens !== null && visibleSummary?.total_tokens !== undefined ? formatNumber(visibleSummary.total_tokens, locale) : t("common.unknown")}
+          title={visibleSummary?.partial_usage_requests
+            ? t("usage.partialTokenTotal", { count: formatNumber(visibleSummary.partial_usage_requests, locale) })
+            : undefined}
+        />
         <Metric label={t("usage.requests")} value={visibleSummary ? formatNumber(visibleSummary.requests, locale) : t("common.unknown")} />
         <Metric label={t("gateway.estCost")} value={costLabel(visibleSummary, t("workspace.costMissing"))} title={visibleSummary?.estimated_cost_usd == null ? t("workspace.costMissingHint") : visibleSummary.cost_label ?? undefined} />
         <Metric label={t("gateway.cachedInput")} value={cachedInputLabel(visibleSummary, t("common.unknown"))} title={cachedInputTitle(visibleSummary, tr)} />
+        <Metric label={t("gateway.cacheWrite")} value={cacheWriteLabel(visibleSummary, locale, t("common.unknown"))} title={t("gateway.cacheWriteTitle")} />
       </div>
 
       <div className="ws-chart-plot relative min-h-0 overflow-hidden rounded-inner border border-line bg-panel">
-        {metric === "token" && !stacked.hasData ? (
+        {view === "requests" ? (
+          <RequestUsageTable events={requestRows} locale={locale} providerLabels={providerLabels} t={tr} />
+        ) : metric === "token" && !stacked.hasData ? (
           <NoTokenChart axis={axis} pendingMessage={pendingMessage} summary={summary} locale={locale} t={tr} />
         ) : (
           <StackedUsageChart
@@ -355,6 +403,84 @@ export function StackedUsageChartShell({
         )}
       </div>
     </section>
+  );
+}
+
+function RequestUsageTable({
+  events,
+  locale,
+  providerLabels,
+  t,
+}: {
+  events: GatewayUsageEvent[];
+  locale: string;
+  providerLabels: Map<string, string>;
+  t: Translate;
+}) {
+  const timestamp = new Intl.DateTimeFormat(locale, {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const tokenValue = (value: number | null | undefined) =>
+    value === null || value === undefined ? "—" : formatNumber(value, locale);
+
+  return (
+    <div className="h-full min-h-0 overflow-auto">
+      <table className="min-w-full border-collapse text-left text-[11px]" aria-label={t("usage.requestDetails")}>
+        <thead className="sticky top-0 z-10 bg-panel text-[10px] font-semibold uppercase text-slate-500 shadow-hairline">
+          <tr>
+            <th className="whitespace-nowrap px-3 py-2">{t("usage.requestTime")}</th>
+            <th className="min-w-[180px] px-3 py-2">{t("usage.model")}</th>
+            <th className="whitespace-nowrap px-3 py-2">{t("usage.status")}</th>
+            <th className="whitespace-nowrap px-3 py-2">{t("usage.duration")}</th>
+            <th className="whitespace-nowrap px-3 py-2">{t("usage.input")}</th>
+            <th className="whitespace-nowrap px-3 py-2">{t("usage.output")}</th>
+            <th className="whitespace-nowrap px-3 py-2">{t("usage.cacheRead")}</th>
+            <th className="whitespace-nowrap px-3 py-2">{t("usage.cacheWrite")}</th>
+            <th className="whitespace-nowrap px-3 py-2">{t("usage.usageStatus")}</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-line/70">
+          {events.map((event, index) => {
+            const failed = event.status !== null && event.status !== undefined && event.status >= 400;
+            const usageLabel = event.usage_source === "missing"
+              ? t("usage.usageMissing")
+              : event.usage_source === "partial"
+                ? t("usage.usagePartial")
+                : t("usage.usageRecorded");
+            return (
+              <tr key={event.request_id ?? `${event.ts}-${index}`} className="text-ink hover:bg-panel/70">
+                <td className="whitespace-nowrap px-3 py-2 font-mono text-slate-500">
+                  {event.ts ? timestamp.format(new Date(event.ts)) : "—"}
+                </td>
+                <td className="px-3 py-2">
+                  <div className="font-semibold">{providerLabel(event.upstream ?? "", providerLabels, t)}</div>
+                  <div className="truncate font-mono text-[10px] text-slate-500" title={event.model ?? undefined}>
+                    {event.model ? displayModelId(event.model) : t("usage.unknownModel")}
+                  </div>
+                </td>
+                <td className={`whitespace-nowrap px-3 py-2 font-mono font-semibold ${failed ? "text-warn" : "text-ink"}`}>
+                  {event.status ?? t("common.unknown")}
+                </td>
+                <td className="whitespace-nowrap px-3 py-2 font-mono">{event.duration_ms == null ? "—" : `${formatNumber(event.duration_ms, locale)} ms`}</td>
+                <td className="whitespace-nowrap px-3 py-2 font-mono">{tokenValue(event.input_tokens)}</td>
+                <td className="whitespace-nowrap px-3 py-2 font-mono">{tokenValue(event.output_tokens)}</td>
+                <td className="whitespace-nowrap px-3 py-2 font-mono">{tokenValue(event.cached_input_tokens)}</td>
+                <td className="whitespace-nowrap px-3 py-2 font-mono">{tokenValue(event.cache_write_input_tokens)}</td>
+                <td className="whitespace-nowrap px-3 py-2" title={event.usage_missing_reason ?? undefined}>{usageLabel}</td>
+              </tr>
+            );
+          })}
+          {events.length === 0 && (
+            <tr>
+              <td colSpan={9} className="px-3 py-8 text-center text-slate-500">{t("usage.noRequestDetails")}</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -870,6 +996,7 @@ function NoTokenChart({
                   ? t("usage.usageUnavailableMessage", {
                       requests: formatNumber(summary.requests, locale),
                       missing: formatNumber(summary.missing_usage_requests, locale),
+                      partial: formatNumber(summary.partial_usage_requests ?? 0, locale),
                     })
                   : pendingMessage
               }
@@ -1021,11 +1148,14 @@ function visibleUsageSummary({
   let requests = 0;
   let successfulRequests = 0;
   let missingUsageRequests = 0;
+  let partialUsageRequests = 0;
   let totalTokens = 0;
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedInputTokens = 0;
   let hasCachedInput = false;
+  let cacheWriteInputTokens = 0;
+  let hasCacheWriteInputTokens = false;
 
   for (const event of events) {
     if (!event.ts) {
@@ -1044,11 +1174,14 @@ function visibleUsageSummary({
     if (event.status !== null && event.status !== undefined && event.status >= 200 && event.status < 400) {
       successfulRequests += 1;
     }
+    if (event.usage_source === "missing") {
+      missingUsageRequests += 1;
+    } else if (event.usage_source === "partial") {
+      partialUsageRequests += 1;
+    }
 
     const total = tokenTotal(event);
-    if (total === null) {
-      missingUsageRequests += 1;
-    } else {
+    if (total !== null) {
       totalTokens += total;
     }
     inputTokens += event.input_tokens ?? 0;
@@ -1060,6 +1193,14 @@ function visibleUsageSummary({
     ) {
       hasCachedInput = true;
       cachedInputTokens += event.cached_input_tokens;
+    }
+    if (
+      eventReportsCacheUsage(event, cacheCapableProviders) &&
+      event.cache_write_input_tokens !== null &&
+      event.cache_write_input_tokens !== undefined
+    ) {
+      hasCacheWriteInputTokens = true;
+      cacheWriteInputTokens += event.cache_write_input_tokens;
     }
   }
 
@@ -1076,10 +1217,12 @@ function visibleUsageSummary({
     requests,
     successful_requests: successfulRequests,
     missing_usage_requests: missingUsageRequests,
+    partial_usage_requests: partialUsageRequests,
     total_tokens: totalTokens,
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     cached_input_tokens: hasCachedInput ? cachedInputTokens : null,
+    cache_write_input_tokens: hasCacheWriteInputTokens ? cacheWriteInputTokens : null,
     cache_hit_rate: cacheHitRate(events, breakdown, hiddenSeriesKeys, visibleTopKeys, hideOther, providerLabels, cacheCapableProviders, tr, startTime, endTime),
     estimated_cost_usd: estimatedCost,
     cost_label: estimatedCost !== null ? tr("gateway.filteredEstimate") : summary?.cost_label ?? tr("common.unknown"),
@@ -1328,7 +1471,7 @@ function cacheHitRate(
       event.cached_input_tokens !== undefined
     ) {
       inputTokens += event.input_tokens;
-      cachedInputTokens += event.cached_input_tokens;
+      cachedInputTokens += Math.min(event.cached_input_tokens, event.input_tokens);
     }
   }
 
@@ -1462,6 +1605,16 @@ function cachedInputTitle(summary: GatewayUsageSummary | null, t: Translate) {
     return undefined;
   }
   return t("gateway.cachedInputTitle");
+}
+
+function cacheWriteLabel(summary: GatewayUsageSummary | null, locale: string, unknownLabel: string) {
+  if (!summary) {
+    return unknownLabel;
+  }
+  if (summary.cache_write_input_tokens !== null && summary.cache_write_input_tokens !== undefined) {
+    return formatNumber(summary.cache_write_input_tokens, locale);
+  }
+  return summary.requests > 0 ? "N/A" : unknownLabel;
 }
 
 function defaultCustomRange(): DateSpan {

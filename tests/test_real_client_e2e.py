@@ -34,7 +34,7 @@ def _contract_case(*, client: str, provider_id: str) -> dict:
 
 OFFICIAL_CODEX_CASE = _contract_case(client="codex_cli", provider_id="official")
 OFFICIAL_OPENCODE_CASE = _contract_case(client="opencode", provider_id="official")
-THIRD_PARTY_OPENCODE_CASE = _contract_case(client="opencode", provider_id="opencode-go")
+THIRD_PARTY_OPENCODE_CASE = _contract_case(client="opencode", provider_id="deepseek")
 OFFICIAL_CODEX_MODEL = OFFICIAL_CODEX_CASE["models"]["managed"]
 OFFICIAL_GATEWAY_MODEL = OFFICIAL_OPENCODE_CASE["models"]["gateway"]
 THIRD_PARTY_MANAGED_MODEL = THIRD_PARTY_OPENCODE_CASE["models"]["managed"]
@@ -128,13 +128,13 @@ EXPECTED_CASE_BINDINGS = {
         "endpoint_binding": "/v1/responses",
         "protocol": "responses",
     },
-    "desktop-opencode-go": {
+    "desktop-deepseek": {
         "client": "desktop",
-        "provider_id": "opencode-go",
+        "provider_id": "deepseek",
         "client_selector": THIRD_PARTY_MANAGED_MODEL,
         "canonical_model": THIRD_PARTY_MANAGED_MODEL,
         "gateway_model": THIRD_PARTY_MANAGED_MODEL,
-        "endpoint_binding": "/v1/providers/opencode-go/responses",
+        "endpoint_binding": "/v1/providers/deepseek/responses",
         "protocol": "responses",
     },
     "zcode-luna": {
@@ -146,13 +146,13 @@ EXPECTED_CASE_BINDINGS = {
         "endpoint_binding": "/v1/providers/openai/responses",
         "protocol": "responses",
     },
-    "zcode-opencode-go": {
+    "zcode-deepseek": {
         "client": "zcode",
-        "provider_id": "opencode-go",
+        "provider_id": "deepseek",
         "client_selector": THIRD_PARTY_MODEL,
         "canonical_model": THIRD_PARTY_MODEL,
         "gateway_model": THIRD_PARTY_MANAGED_MODEL,
-        "endpoint_binding": "/v1/providers/opencode-go/responses",
+        "endpoint_binding": "/v1/providers/deepseek/responses",
         "protocol": "responses",
     },
 }
@@ -277,11 +277,11 @@ def _prepare_run(
         ),
         encoding="utf-8",
     )
-    (isolation / "credentials" / "opencode-go.json").write_text(
+    (isolation / "credentials" / "deepseek.json").write_text(
         json.dumps(
             {
-                "schema": "codexhub.real-client-opencode-go.v1",
-                "api_key": "fixture-opencode-go-private-token",
+                "schema": "codexhub.real-client-deepseek.v1",
+                "api_key": "fixture-deepseek-private-token",
             }
         ),
         encoding="utf-8",
@@ -376,9 +376,9 @@ def _finalize_manual_evidence(
                 (work / f"gui-{case_id}.launched").is_file()
                 for case_id in (
                     "desktop-luna",
-                    "desktop-opencode-go",
+                    "desktop-deepseek",
                     "zcode-luna",
-                    "zcode-opencode-go",
+                    "zcode-deepseek",
                 )
             )
         ):
@@ -417,6 +417,9 @@ def _run(
     overall_timeout_seconds: int = 180,
     authoritative_paths_with_spaces: bool = False,
     cli_only: bool = False,
+    deepseek_credentials: Path | None = None,
+    upstream_proxy: str | None = None,
+    official_catalog: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     output, isolation, debug_build, materializer_build, host_manifest = _prepare_run(
         tmp_path, candidate_sha, materializer_sha
@@ -525,6 +528,8 @@ def _run(
         LUNA_MODEL,
         "-ThirdPartyModel",
         THIRD_PARTY_MODEL,
+        "-DeepSeekCredentials",
+        str(deepseek_credentials or isolation / "credentials" / "deepseek.json"),
         "-OutputDirectory",
         str(output),
         "-HostEnvironmentManifest",
@@ -537,6 +542,10 @@ def _run(
     command.extend(("-TimeoutSeconds", str(timeout_seconds)))
     if cli_only:
         command.append("-CliOnly")
+    if official_catalog is not None:
+        command.extend(("-OfficialCatalog", str(official_catalog)))
+    if upstream_proxy is not None:
+        command.extend(("-UpstreamProxy", upstream_proxy))
     command.extend(("-ManualEvidenceTimeoutSeconds", str(manual_timeout_seconds)))
     command.extend(("-OverallTimeoutSeconds", str(overall_timeout_seconds)))
     finalizer = None
@@ -652,6 +661,48 @@ def test_baseline_gateway_is_bound_to_exact_current_candidate_materializer(tmp_p
     )
     assert manual_template["candidate_sha"] == baseline_sha
     assert manual_template["managed_client_config_sha"] == materializer_sha
+
+
+@pytest.mark.parametrize("proxy", [None, "http://127.0.0.1:17898"])
+def test_upstream_proxy_is_explicit_and_candidate_only(tmp_path, monkeypatch, proxy):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:19999")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:19999")
+
+    def check_candidate_environment(_output, _isolation, debug_build):
+        checks = (
+            f'if not "%HTTP_PROXY%"=="{proxy}" exit /b 87\n'
+            f'if not "%HTTPS_PROXY%"=="{proxy}" exit /b 88\n'
+            'if not "%NO_PROXY%"=="localhost,127.0.0.1" exit /b 89\n'
+            if proxy else
+            'if defined HTTP_PROXY exit /b 87\nif defined HTTPS_PROXY exit /b 88\n'
+        )
+        debug_build.write_text("@echo off\n" + checks + debug_build.read_text())
+
+    client = tmp_path / "client-without-upstream-proxy.cmd"
+    client.write_text(
+        "@echo off\nif defined HTTP_PROXY exit /b 87\n"
+        "if defined HTTPS_PROXY exit /b 88\n"
+        f'call "{FIXTURES / "fake-client-real-contract.cmd"}" %*\n'
+    )
+    result = _run(
+        tmp_path, fake=str(client), cli_only=True, finalize_manual=False,
+        mutate=check_candidate_environment, upstream_proxy=proxy,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads((tmp_path / "output/summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["counts"]["passed_count"] == CLI_CASE_COUNT
+
+
+@pytest.mark.parametrize("proxy", [
+    "http://example.com:17898", "http://127.0.0.1:9099",
+    "http://user:password@127.0.0.1:17898", "http://127.0.0.1:17898/path",
+])
+def test_upstream_proxy_rejects_nonisolated_or_credential_bearing_urls(tmp_path, proxy):
+    result = _run(tmp_path, upstream_proxy=proxy, cli_only=True, finalize_manual=False)
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output/summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["failure_classification"] == "preflight_upstream_proxy_invalid"
+    assert summary["counts"]["case_count"] == 0
 
 
 def test_runner_invokes_candidate_materializer_for_every_managed_client(tmp_path):
@@ -944,7 +995,7 @@ def test_opencodex_appdata_shim_fails_under_case_local_isolation(tmp_path):
     assert "replaces `%APPDATA%`" in documentation
 
 
-def test_codex_apply_accepts_bounded_present_optional_history_fields(tmp_path):
+def test_apply_accepts_bounded_present_optional_history_and_restart_fields(tmp_path):
     result = _run(
         tmp_path,
         materializer_fake="fake-managed-client-config-present-optionals.cmd",
@@ -1157,11 +1208,11 @@ def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summar
     }
     assert [case["case_id"] for case in summary["cases"]] == [
         "desktop-luna",
-        "desktop-opencode-go",
+        "desktop-deepseek",
         *CLI_WINDOWS_CASE_IDS[:2],
         *CLI_WINDOWS_CASE_IDS[2:4],
         "zcode-luna",
-        "zcode-opencode-go",
+        "zcode-deepseek",
         *CLI_WINDOWS_CASE_IDS[4:],
     ]
     assert {
@@ -1180,7 +1231,7 @@ def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summar
         for case in summary["cases"]
     } == EXPECTED_CASE_BINDINGS
     assert [case["provider_id"] for case in summary["cases"]].count("official") == 6
-    assert [case["provider_id"] for case in summary["cases"]].count("opencode-go") == 6
+    assert [case["provider_id"] for case in summary["cases"]].count("deepseek") == 6
     assert all(case["protocol"] == "responses" for case in summary["cases"])
     assert all("volc" not in case["case_id"] for case in summary["cases"])
     assert all(case["outcome"] == "passed" for case in summary["cases"])
@@ -1198,14 +1249,14 @@ def test_exact_compatibility_floors_pass_and_emit_one_sanitized_sha_bound_summar
     for secret in (
         "fixture-codex-access-token",
         "fixture-codex-refresh-token",
-        "fixture-opencode-go-private-token",
+        "fixture-deepseek-private-token",
         "fixture-gateway-private-key",
     ):
         assert secret not in serialized
     for relative in (
         "isolated/account/profile.json",
         "isolated/account/auth.json",
-        "isolated/credentials/opencode-go.json",
+        "isolated/credentials/deepseek.json",
         "isolated/config/gateway.json",
         "isolated/config/host-environment.json",
         "manual-evidence.json",
@@ -1440,7 +1491,7 @@ def test_zcode_gui_consumes_catalog_from_isolated_roaming_appdata(tmp_path):
         / "isolated"
         / "work"
         / "gui-zcode"
-        / "zcode-opencode-go"
+        / "zcode-deepseek"
     )
     catalog = (
         case_root
@@ -1454,7 +1505,7 @@ def test_zcode_gui_consumes_catalog_from_isolated_roaming_appdata(tmp_path):
     assert not (case_root / "appdata" / "ZCode" / "model-providers" / "codexhub.json").exists()
     payload = json.loads(catalog.read_text(encoding="utf-8-sig"))
     provider_ids = {provider["id"] for provider in payload.get("providers", [])}
-    assert provider_ids == {"codexhub-openai", "codexhub-opencode-go"}
+    assert provider_ids == {"codexhub-openai", "codexhub-deepseek"}
     assert "codexhub-volc" not in provider_ids
 
 
@@ -1542,7 +1593,7 @@ def test_pi_rejects_stop_with_contradictory_error_message(tmp_path):
 def test_empty_account_and_arbitrary_credential_cannot_pass_preflight(tmp_path):
     def invalidate_identity(_output, isolation, _debug):
         (isolation / "account" / "profile.json").write_text("{}", encoding="utf-8")
-        (isolation / "credentials" / "opencode-go.json").write_text(
+        (isolation / "credentials" / "deepseek.json").write_text(
             '{"api_key":"arbitrary"}', encoding="utf-8"
         )
 
@@ -1551,13 +1602,27 @@ def test_empty_account_and_arbitrary_credential_cannot_pass_preflight(tmp_path):
     assert result.returncode != 0
 
 
+def test_deepseek_credentials_must_be_the_run_isolated_input(tmp_path):
+    result = _run(
+        tmp_path,
+        deepseek_credentials=tmp_path / "outside-deepseek.json",
+        finalize_manual=False,
+    )
+
+    assert result.returncode != 0
+    summary = json.loads(
+        (tmp_path / "output" / "summary.json").read_text(encoding="utf-8-sig")
+    )
+    assert summary["failure_classification"] == "preflight_deepseek_credential_path_invalid"
+
+
 def test_preflight_return_does_not_leave_a_manual_finalizer_thread(tmp_path):
     existing_threads = set(threading.enumerate())
 
     result = _run(
         tmp_path,
         mutate=lambda _output, isolation, _debug: (
-            isolation / "credentials" / "opencode-go.json"
+            isolation / "credentials" / "deepseek.json"
         ).unlink(),
     )
 
@@ -2137,7 +2202,7 @@ def test_desktop_gui_cases_open_projects_via_ready_second_instance(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     work = tmp_path / "output" / "isolated" / "work"
     observed = {}
-    for case_id in ("desktop-luna", "desktop-opencode-go"):
+    for case_id in ("desktop-luna", "desktop-deepseek"):
         initial_log = work / f"gui-{case_id}.launched.argv"
         initial_arguments = initial_log.read_text(encoding="ascii").strip()
         project_log = work / f"gui-{case_id}.launched.project.argv"
@@ -2156,7 +2221,7 @@ def test_desktop_gui_cases_open_projects_via_ready_second_instance(tmp_path):
             str(expected_workspace).casefold()
         )
         observed[case_id] = (initial_arguments, project_arguments)
-    assert observed["desktop-luna"] != observed["desktop-opencode-go"]
+    assert observed["desktop-luna"] != observed["desktop-deepseek"]
 
 
 def test_gateway_exit_during_manual_evidence_fails_fast(tmp_path):
@@ -2192,7 +2257,7 @@ def test_zcode_gui_cases_open_their_case_local_workspaces(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     work = tmp_path / "output" / "isolated" / "work"
-    for case_id in ("zcode-luna", "zcode-opencode-go"):
+    for case_id in ("zcode-luna", "zcode-deepseek"):
         arguments = (
             work / f"gui-{case_id}.launched.argv"
         ).read_text(encoding="ascii").strip()
@@ -2202,7 +2267,7 @@ def test_zcode_gui_cases_open_their_case_local_workspaces(tmp_path):
         )
 
 
-def test_candidate_runtime_declares_opencode_go_native_responses_route(tmp_path):
+def test_candidate_runtime_declares_deepseek_native_responses_route(tmp_path):
     result = _run(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -2218,8 +2283,8 @@ def test_candidate_runtime_declares_opencode_go_native_responses_route(tmp_path)
     )
     providers = (runtime_config / "providers.toml").read_text(encoding="utf-8")
     settings = json.loads((runtime_config.parent / "settings.json").read_text(encoding="utf-8-sig"))
-    assert 'id = "opencode-go"' in providers
-    assert 'base_url = "https://opencode.ai/zen/go/v1"' in providers
+    assert 'id = "deepseek"' in providers
+    assert 'base_url = "https://api.deepseek.com"' in providers
     assert 'upstream_format = "responses"' in providers
     assert 'available_upstream_formats = ["responses"]' in providers
     assert "volc" not in providers.lower()
@@ -2227,7 +2292,7 @@ def test_candidate_runtime_declares_opencode_go_native_responses_route(tmp_path)
     assert settings["gateway_enable_chat_completions"] is False
 
 
-def test_release_matrix_uses_opencode_go_native_responses(tmp_path):
+def test_release_matrix_uses_deepseek_native_responses(tmp_path):
     result = _run(tmp_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -2242,8 +2307,8 @@ def test_release_matrix_uses_opencode_go_native_responses(tmp_path):
         / "config"
         / "providers.toml"
     ).read_text(encoding="utf-8")
-    assert 'id = "opencode-go"' in providers
-    assert 'base_url = "https://opencode.ai/zen/go/v1"' in providers
+    assert 'id = "deepseek"' in providers
+    assert 'base_url = "https://api.deepseek.com"' in providers
     assert 'upstream_format = "responses"' in providers
     assert "volc" not in providers.lower()
     assert "localhost:11434" not in providers
@@ -2264,9 +2329,9 @@ def test_release_matrix_uses_opencode_go_native_responses(tmp_path):
             assert event["upstream_format"] == "responses"
             assert event["inbound_format"] == "responses"
             expected_provider = (
-                "opencode_go"
+                "deepseek"
                 if event["model_canonical"] == THIRD_PARTY_MANAGED_MODEL
-                else "official"
+                else OFFICIAL_CODEX_CASE["diagnostic_provider_id"]
             )
             assert event["provider_id"] == expected_provider
 
@@ -2291,14 +2356,14 @@ def test_gui_cases_copy_reusable_state_into_fresh_isolated_roots(tmp_path):
         ("desktop-luna", "desktop-luna", "browser-profile/Preferences", "desktop-luna-state"),
         (
             "desktop-third-party",
-            "desktop-opencode-go",
+            "desktop-deepseek",
             "browser-profile/Preferences",
             "desktop-third-party-state",
         ),
         ("zcode-luna", "zcode-luna", ".zcode/v2/telemetry-state.json", "zcode-luna-state"),
         (
             "zcode-third-party",
-            "zcode-opencode-go",
+            "zcode-deepseek",
             ".zcode/v2/telemetry-state.json",
             "zcode-third-party-state",
         ),
@@ -2327,13 +2392,13 @@ def test_legacy_volc_gui_seed_falls_back_without_mutating_source(tmp_path):
     seeded_files = [
         (
             "desktop-volc",
-            "desktop-opencode-go",
+            "desktop-deepseek",
             "browser-profile/Preferences",
             "legacy-desktop-state",
         ),
         (
             "zcode-volc",
-            "zcode-opencode-go",
+            "zcode-deepseek",
             ".zcode/v2/telemetry-state.json",
             "legacy-zcode-state",
         ),
@@ -2376,7 +2441,7 @@ def test_desktop_gui_seed_preserves_onboarding_without_stale_identity_or_history
 
     seed_cases = (
         ("desktop-luna", "desktop-luna"),
-        ("desktop-third-party", "desktop-opencode-go"),
+        ("desktop-third-party", "desktop-deepseek"),
     )
 
     def seed_gui_state(_output, isolation, _debug):
@@ -2586,7 +2651,7 @@ def test_desktop_gui_preserves_windows_identity_for_sandbox_acl_setup(
 
     assert result.returncode == 0, result.stdout + result.stderr
     work = tmp_path / "output" / "isolated" / "work"
-    for case_id in ("desktop-luna", "desktop-opencode-go"):
+    for case_id in ("desktop-luna", "desktop-deepseek"):
         identity = (work / f"gui-{case_id}.launched.identity").read_text(
             encoding="ascii"
         )
@@ -2607,7 +2672,7 @@ def test_desktop_gui_launches_from_invocation_local_manifest_payload(tmp_path):
     staged_executable = staged_root / source_executable.name
     assert staged_executable.read_bytes() == source_executable.read_bytes()
     assert staged_executable.stat().st_ino != source_executable.stat().st_ino
-    for case_id in ("desktop-luna", "desktop-opencode-go"):
+    for case_id in ("desktop-luna", "desktop-deepseek"):
         launch_path = (
             work / f"gui-{case_id}.launched.executable"
         ).read_text(encoding="ascii")
@@ -2801,7 +2866,7 @@ def test_manual_evidence_cannot_predate_template_and_gui_launch(tmp_path):
 
 def test_preflight_failure_emits_one_bounded_sanitized_summary(tmp_path):
     def remove_credentials(_output, isolation, _debug):
-        (isolation / "credentials" / "opencode-go.json").unlink()
+        (isolation / "credentials" / "deepseek.json").unlink()
 
     result = _run(tmp_path, mutate=remove_credentials, finalize_manual=False)
 
@@ -2815,13 +2880,13 @@ def test_preflight_failure_emits_one_bounded_sanitized_summary(tmp_path):
     assert summary["cases"] == []
     assert summary["artifacts"] == []
     serialized = json.dumps(summary, sort_keys=True)
-    assert "fixture-opencode-go-private-token" not in serialized
+    assert "fixture-deepseek-private-token" not in serialized
     assert str(tmp_path) not in serialized
 
 
 def test_supervisor_preserves_space_containing_authoritative_path_arguments(tmp_path):
     def remove_credentials(_output, isolation, _debug):
-        (isolation / "credentials" / "opencode-go.json").unlink()
+        (isolation / "credentials" / "deepseek.json").unlink()
 
     run_root = tmp_path / "Authoritative Host Run"
     result = _run(
@@ -2932,9 +2997,9 @@ def test_manual_evidence_merge_is_deterministic_for_reordered_input(tmp_path):
     ]
     assert manual_ids == [
         "desktop-luna",
-        "desktop-opencode-go",
+        "desktop-deepseek",
         "zcode-luna",
-        "zcode-opencode-go",
+        "zcode-deepseek",
     ]
 
 
@@ -3048,6 +3113,51 @@ def test_dynamic_client_port_is_rejected_before_candidate_or_gui(tmp_path):
     assert not (tmp_path / "output" / "manual-evidence.template.json").exists()
 
 
+@pytest.mark.parametrize("valid", [True, False])
+def test_explicit_catalog_is_copied_without_refresh_and_validated(tmp_path, valid):
+    catalog = tmp_path / "output" / "isolated" / "config" / "official-catalog.json"
+    content = '{"candidate-managed": true}' if valid else '{}'
+
+    def prepare(_output, _isolation, debug_build):
+        catalog.write_text(content, encoding="utf-8")
+        script = debug_build.read_text(encoding="utf-8")
+        debug_build.write_text(
+            script.replace("@echo off", '@echo off\nif /I "%~1"=="refresh-models" exit /b 89', 1),
+            encoding="utf-8",
+        )
+
+    result = _run(tmp_path, cli_only=True, official_catalog=catalog, mutate=prepare)
+    assert catalog.read_text(encoding="utf-8") == content
+    if not valid:
+        assert result.returncode != 0
+        summary = json.loads((tmp_path / "output/summary.json").read_text(encoding="utf-8-sig"))
+        assert summary["failure_classification"] == "client_configuration_materializer_failed"
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    copied = tmp_path / "output/isolated/work/candidate/runtime/model-catalogs/codexhub-model-catalog.json"
+    assert copied.read_bytes() == catalog.read_bytes()
+    assert copied.stat().st_ino != catalog.stat().st_ino
+    provenance = json.loads((tmp_path / "output/artifacts/official-catalog-input.json").read_text(encoding="utf-8-sig"))
+    assert provenance == {"mode": "explicit_snapshot", "sha256": "sha256:" + hashlib.sha256(catalog.read_bytes()).hexdigest()}
+    summary = json.loads((tmp_path / "output/summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["counts"]["passed_count"] == CLI_CASE_COUNT
+    assert "artifacts/official-catalog-input.json" in summary["artifacts"]
+
+
+@pytest.mark.parametrize("kind", ["outside", "missing", "invalid_json"])
+def test_explicit_catalog_rejects_unsafe_or_invalid_input(tmp_path, kind):
+    catalog = tmp_path / ("host-catalog.json" if kind == "outside" else "output/isolated/config/official-catalog.json")
+
+    def prepare(_output, _isolation, _debug):
+        if kind != "missing":
+            catalog.write_text("not-json" if kind == "invalid_json" else '{"candidate-managed": true}', encoding="utf-8")
+
+    result = _run(tmp_path, cli_only=True, official_catalog=catalog, mutate=prepare)
+    assert result.returncode != 0
+    summary = json.loads((tmp_path / "output/summary.json").read_text(encoding="utf-8-sig"))
+    assert summary["failure_classification"] == ("preflight_host_session_reuse_detected" if kind == "outside" else "preflight_official_catalog_invalid")
+
+
 def test_candidate_bootstraps_official_context_budget_before_gateway_start(tmp_path):
     result = _run(
         tmp_path,
@@ -3141,7 +3251,7 @@ def test_candidate_context_budget_bootstrap_failure_is_bounded_and_sanitized(tmp
     serialized = startup_path.read_text() + summaries[0].read_text()
     assert str(tmp_path) not in serialized
     assert "fixture-codex-access-token" not in serialized
-    assert "fixture-opencode-go-private-token" not in serialized
+    assert "fixture-deepseek-private-token" not in serialized
     assert not list((tmp_path / "output" / "isolated" / "work").glob("gui-*.launched"))
 
 
@@ -3628,14 +3738,14 @@ Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 def test_matrix_documentation_declares_native_responses_release_gate():
     documentation = (ROOT / "docs" / "agents" / "real-client-e2e.md").read_text(encoding="utf-8")
 
-    assert "OpenCode Go" in documentation and THIRD_PARTY_MANAGED_MODEL.split("/", 1)[1] in documentation
+    assert "DeepSeek" in documentation and THIRD_PARTY_MANAGED_MODEL.split("/", 1)[1] in documentation
     assert "-CliOnly" in documentation
     assert THIRD_PARTY_MODEL in documentation
 
 
 def test_missing_credentials_fail_with_sanitized_summary_before_launch(tmp_path):
     def remove_credentials(_output, isolation, _debug):
-        (isolation / "credentials" / "opencode-go.json").unlink()
+        (isolation / "credentials" / "deepseek.json").unlink()
 
     result = _run(tmp_path, mutate=remove_credentials)
 

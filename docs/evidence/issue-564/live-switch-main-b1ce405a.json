@@ -1,0 +1,740 @@
+{
+  "candidate_sha": "b1ce405a1fab287d6e18d3c56dcb4b35d8aa1450",
+  "cli_version": "2.1.283 (Claude Code)",
+  "implementation": "unmodified production source Gateway; real CLI; real HTTPS upstreams",
+  "bounds": {
+    "overall_seconds": 900,
+    "turn_seconds": 120,
+    "gateway_requests": 32,
+    "requested_output_tokens": 2048
+  },
+  "turns": [
+    {
+      "label": "native_initial",
+      "selected": "claude-opus-5-5",
+      "expected_protocol": "anthropic_messages",
+      "status": "passed",
+      "same_session": true,
+      "memory_recalled": true,
+      "fresh_file_recalled": true,
+      "read_calls": 1,
+      "tool_results": 1,
+      "tool_ids_match": true,
+      "cli_is_error": false,
+      "cli_subtype": "success",
+      "gateway_events": [
+        {
+          "event": "request_complete",
+          "request_id": "b9604bf5ca2c",
+          "model": "claude-opus-5-5",
+          "upstream": "anthropic_native",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "anthropic_messages",
+          "route_provider_id": "anthropic",
+          "route_upstream_model": "claude-opus-5-5",
+          "route_endpoint_url": "https://api.anthropic.com/v1/messages",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "anthropic_messages",
+          "request_observability_attempt_index": 0
+        },
+        {
+          "event": "request_complete",
+          "request_id": "33a55544f9f5",
+          "model": "claude-opus-5-5",
+          "upstream": "anthropic_native",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "anthropic_messages",
+          "route_provider_id": "anthropic",
+          "route_upstream_model": "claude-opus-5-5",
+          "route_endpoint_url": "https://api.anthropic.com/v1/messages",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "anthropic_messages",
+          "request_observability_attempt_index": 0
+        }
+      ],
+      "executed_protocols": [
+        "anthropic_messages"
+      ]
+    },
+    {
+      "label": "codex_sol",
+      "selected": "claude-codexhub-gpt-6-sol",
+      "expected_protocol": "responses",
+      "status": "passed",
+      "model_control_success": true,
+      "same_session": true,
+      "memory_recalled": true,
+      "fresh_file_recalled": true,
+      "read_calls": 2,
+      "tool_results": 2,
+      "tool_ids_match": true,
+      "cli_is_error": false,
+      "cli_subtype": "success",
+      "gateway_events": [
+        {
+          "event": "protocol_adaptation",
+          "upstream": "official",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.total_tokens"
+        },
+        {
+          "event": "protocol_adaptation",
+          "upstream": "official",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.attribution"
+        },
+        {
+          "event": "protocol_adaptation",
+          "upstream": "official",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.input_tokens_details"
+        },
+        {
+          "event": "protocol_adaptation",
+          "upstream": "official",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.output_tokens_details"
+        },
+        {
+          "event": "request_complete",
+          "request_id": "7e19ba96c217",
+          "model": "openai/gpt-6-sol",
+          "upstream": "official",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "responses",
+          "request_observability_attempt_index": 0
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.total_tokens"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.prompt_tokens_details"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.completion_tokens_details"
+        },
+        {
+          "event": "request_complete",
+          "request_id": "a47612267de0",
+          "model": "openai/gpt-6-sol",
+          "upstream": "official",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "responses",
+          "request_observability_attempt_index": 0
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.total_tokens"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.prompt_tokens_details"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.completion_tokens_details"
+        },
+        {
+          "event": "request_complete",
+          "request_id": "5fdfa3ccdf6c",
+          "model": "openai/gpt-6-sol",
+          "upstream": "official",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "responses",
+          "request_observability_attempt_index": 0
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.total_tokens"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.prompt_tokens_details"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.completion_tokens_details"
+        },
+        {
+          "event": "request_complete",
+          "request_id": "6d1ac2b2ca21",
+          "model": "openai/gpt-6-sol",
+          "upstream": "official",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "responses",
+          "route_provider_id": "openai",
+          "route_upstream_model": "gpt-6-sol",
+          "route_endpoint_url": "https://chatgpt.com/sha256:d753230e24c7926b/sha256:57de4cf40144bdf7/sha256:e30b3910ffd943c9",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "responses",
+          "request_observability_attempt_index": 0
+        }
+      ],
+      "executed_protocols": [
+        "responses"
+      ]
+    },
+    {
+      "label": "deepseek_chat",
+      "selected": "claude-codexhub-deepseek-deepseek-flash",
+      "expected_protocol": "chat_completions",
+      "status": "passed",
+      "model_control_success": true,
+      "same_session": true,
+      "memory_recalled": true,
+      "fresh_file_recalled": true,
+      "read_calls": 1,
+      "tool_results": 1,
+      "tool_ids_match": true,
+      "cli_is_error": false,
+      "cli_subtype": "success",
+      "gateway_events": [
+        {
+          "event": "protocol_adaptation",
+          "upstream": "deepseek",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "chat_response_via_existing_responses_adapter",
+          "field": "chat_response"
+        },
+        {
+          "event": "protocol_adaptation",
+          "upstream": "deepseek",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.total_tokens"
+        },
+        {
+          "event": "protocol_adaptation",
+          "upstream": "deepseek",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.input_tokens_details"
+        },
+        {
+          "event": "protocol_adaptation",
+          "upstream": "deepseek",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.output_tokens_details"
+        },
+        {
+          "event": "request_complete",
+          "request_id": "9b878cb21081",
+          "model": "deepseek/deepseek-flash",
+          "upstream": "deepseek",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "chat_completions",
+          "request_observability_attempt_index": 0
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "unsigned_reasoning_omitted_for_anthropic",
+          "field": "chat.delta.reasoning_content"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.total_tokens"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.prompt_tokens_details"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.completion_tokens_details"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.prompt_cache_hit_tokens"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.prompt_cache_miss_tokens"
+        },
+        {
+          "event": "request_complete",
+          "request_id": "4c06fb69dc24",
+          "model": "deepseek/deepseek-flash",
+          "upstream": "deepseek",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "chat_completions",
+          "request_observability_attempt_index": 0
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.total_tokens"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.prompt_tokens_details"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.completion_tokens_details"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.prompt_cache_hit_tokens"
+        },
+        {
+          "event": "protocol_adaptation",
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "policy": "usage_detail_not_representable",
+          "field": "usage.prompt_cache_miss_tokens"
+        },
+        {
+          "event": "request_complete",
+          "request_id": "dc83e463e2f9",
+          "model": "deepseek/deepseek-flash",
+          "upstream": "deepseek",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "chat_completions",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/v1/chat/completions",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "chat_completions",
+          "request_observability_attempt_index": 0
+        }
+      ],
+      "executed_protocols": [
+        "chat_completions"
+      ]
+    },
+    {
+      "label": "deepseek_messages",
+      "selected": "claude-codexhub-deepseek-deepseek-flash",
+      "expected_protocol": "anthropic_messages",
+      "status": "passed",
+      "model_control_success": true,
+      "same_session": true,
+      "memory_recalled": true,
+      "fresh_file_recalled": true,
+      "read_calls": 1,
+      "tool_results": 1,
+      "tool_ids_match": true,
+      "cli_is_error": false,
+      "cli_subtype": "success",
+      "gateway_events": [
+        {
+          "event": "request_complete",
+          "request_id": "137649fead4b",
+          "model": "deepseek/deepseek-flash",
+          "upstream": "deepseek",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "anthropic_messages",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/sha256:c70eca6b0f88f44d/sha256:3bfc269594ef6492/sha256:f5cccfb737512bed",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "anthropic_messages",
+          "request_observability_attempt_index": 0
+        },
+        {
+          "event": "request_complete",
+          "request_id": "b67aff175504",
+          "model": "deepseek/deepseek-flash",
+          "upstream": "deepseek",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "anthropic_messages",
+          "route_provider_id": "deepseek",
+          "route_upstream_model": "deepseek-flash",
+          "route_endpoint_url": "https://api.deepseek.com/sha256:c70eca6b0f88f44d/sha256:3bfc269594ef6492/sha256:f5cccfb737512bed",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "anthropic_messages",
+          "request_observability_attempt_index": 0
+        }
+      ],
+      "executed_protocols": [
+        "anthropic_messages"
+      ]
+    },
+    {
+      "label": "native_return",
+      "selected": "claude-opus-5-5",
+      "expected_protocol": "anthropic_messages",
+      "status": "passed",
+      "model_control_success": true,
+      "same_session": true,
+      "memory_recalled": true,
+      "fresh_file_recalled": true,
+      "read_calls": 1,
+      "tool_results": 1,
+      "tool_ids_match": true,
+      "cli_is_error": false,
+      "cli_subtype": "success",
+      "gateway_events": [
+        {
+          "event": "request_complete",
+          "request_id": "88c465f31555",
+          "model": "claude-opus-5-5",
+          "upstream": "anthropic_native",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "anthropic_messages",
+          "route_provider_id": "anthropic",
+          "route_upstream_model": "claude-opus-5-5",
+          "route_endpoint_url": "https://api.anthropic.com/v1/messages",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "anthropic_messages",
+          "request_observability_attempt_index": 0
+        },
+        {
+          "event": "request_complete",
+          "request_id": "ebc3cb1aa40f",
+          "model": "claude-opus-5-5",
+          "upstream": "anthropic_native",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "anthropic_messages",
+          "route_provider_id": "anthropic",
+          "route_upstream_model": "claude-opus-5-5",
+          "route_endpoint_url": "https://api.anthropic.com/v1/messages",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "anthropic_messages",
+          "request_observability_attempt_index": 0
+        }
+      ],
+      "executed_protocols": [
+        "anthropic_messages"
+      ]
+    },
+    {
+      "label": "post_compact",
+      "selected": "claude-opus-5-5",
+      "expected_protocol": "anthropic_messages",
+      "status": "passed",
+      "same_session": true,
+      "memory_recalled": true,
+      "fresh_file_recalled": true,
+      "read_calls": 1,
+      "tool_results": 1,
+      "tool_ids_match": true,
+      "cli_is_error": false,
+      "cli_subtype": "success",
+      "gateway_events": [
+        {
+          "event": "request_complete",
+          "request_id": "27315f5ff6ac",
+          "model": "claude-opus-5-5",
+          "upstream": "anthropic_native",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "anthropic_messages",
+          "route_provider_id": "anthropic",
+          "route_upstream_model": "claude-opus-5-5",
+          "route_endpoint_url": "https://api.anthropic.com/v1/messages",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "anthropic_messages",
+          "request_observability_attempt_index": 0
+        },
+        {
+          "event": "request_complete",
+          "request_id": "5b50c2368e97",
+          "model": "claude-opus-5-5",
+          "upstream": "anthropic_native",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "anthropic_messages",
+          "route_provider_id": "anthropic",
+          "route_upstream_model": "claude-opus-5-5",
+          "route_endpoint_url": "https://api.anthropic.com/v1/messages",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "anthropic_messages",
+          "request_observability_attempt_index": 0
+        }
+      ],
+      "executed_protocols": [
+        "anthropic_messages"
+      ]
+    },
+    {
+      "label": "explicit_resume",
+      "selected": "claude-opus-5-5",
+      "expected_protocol": "anthropic_messages",
+      "status": "passed",
+      "same_session": true,
+      "memory_recalled": true,
+      "fresh_file_recalled": true,
+      "read_calls": 1,
+      "tool_results": 1,
+      "tool_ids_match": true,
+      "cli_is_error": false,
+      "cli_subtype": "success",
+      "gateway_events": [
+        {
+          "event": "request_complete",
+          "request_id": "c292440512f2",
+          "model": "claude-opus-5-5",
+          "upstream": "anthropic_native",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "anthropic_messages",
+          "route_provider_id": "anthropic",
+          "route_upstream_model": "claude-opus-5-5",
+          "route_endpoint_url": "https://api.anthropic.com/v1/messages",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "anthropic_messages",
+          "request_observability_attempt_index": 0
+        },
+        {
+          "event": "request_complete",
+          "request_id": "748fc72dfc36",
+          "model": "claude-opus-5-5",
+          "upstream": "anthropic_native",
+          "status": 200,
+          "inbound_format": "anthropic_messages",
+          "upstream_format": "anthropic_messages",
+          "route_provider_id": "anthropic",
+          "route_upstream_model": "claude-opus-5-5",
+          "route_endpoint_url": "https://api.anthropic.com/v1/messages",
+          "request_observability_scope": "executed_attempt",
+          "request_observability_upstream_protocol": "anthropic_messages",
+          "request_observability_attempt_index": 0
+        }
+      ],
+      "executed_protocols": [
+        "anthropic_messages"
+      ]
+    }
+  ],
+  "status": "passed",
+  "isolation": {
+    "temporary_home_config_work": true,
+    "access_tokens_only": true,
+    "refresh_tokens_excluded": true,
+    "cli_restricted_read_only": true,
+    "operator_gateway_untouched": true
+  },
+  "manual_compaction": {
+    "boundary_observed": true,
+    "cli_is_error": false,
+    "gateway_events": [
+      {
+        "event": "request_complete",
+        "request_id": "b40bc73276f0",
+        "model": "claude-opus-5-5",
+        "upstream": "anthropic_native",
+        "status": 200,
+        "inbound_format": "anthropic_messages",
+        "upstream_format": "anthropic_messages",
+        "route_provider_id": "anthropic",
+        "route_upstream_model": "claude-opus-5-5",
+        "route_endpoint_url": "https://api.anthropic.com/v1/messages",
+        "request_observability_scope": "executed_attempt",
+        "request_observability_upstream_protocol": "anthropic_messages",
+        "request_observability_attempt_index": 0
+      }
+    ]
+  },
+  "gateway_request_count": 18,
+  "source_files_unchanged": {
+    ".claude/.credentials.json": true,
+    ".claude/settings.json": true,
+    ".claude.json": true,
+    ".codex/auth.json": true,
+    ".codex/config.toml": true,
+    ".codex/proxy/config/providers.toml": true,
+    ".codex/proxy/settings.json": true
+  },
+  "host_state_unchanged": true,
+  "schema_version": 1,
+  "scenario": "native_sol_deepseek_chat_messages_native_compact_resume",
+  "test_date": "2026-09-26",
+  "evidence_scope": "Linux source Gateway; live upstreams; real Claude Code; not a packaged or Windows qualification",
+  "tool_identity_scope": "Client-visible tool_use/tool_result pairing plus successful live Gateway roundtrips; no raw upstream-body capture",
+  "effort": "low",
+  "thinking_disabled_by_environment": true
+}

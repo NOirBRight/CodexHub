@@ -1,0 +1,63 @@
+{
+  "component": "chatgpt-web-runtime",
+  "commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5",
+  "version": "6.1.1",
+  "license": "MIT",
+  "license_file": "docs/third-party/codex-chatgpt-web-LICENSE.txt",
+  "upstream_repository": "https://github.com/miuuyy/codex-chatgpt-web",
+  "runtime_source": {
+    "repository": "https://github.com/miuuyy/codex-chatgpt-web",
+    "commit": "a13cd09950969f43e3b7e25c71fa43efaf5446c5",
+    "patch_file": "docs/evidence/issue-567/codex-chatgpt-web-runtime.patch",
+    "patch_sha256": "7b2c91dcec4e3d4c5bd977f6eeaf3082f11feddd3a8558e8b02c36addddcd717",
+    "build_revision": "5a307bb48de3d96465305288a2fff5c4086299fb",
+    "git_tree": "b4ea65a73c4b481497a012c1a9f569e024f6f9ce",
+    "bun_version": "1.4.0",
+    "contract": "admin-status-v1"
+  },
+  "product_entry": "codexhub-supervisor",
+  "rejected_entries": [
+    "setup",
+    "dev",
+    "--replace-codex-route"
+  ],
+  "artifacts": {
+    "linux-x64": {
+      "filename": "codexhub-chatgpt-web-runtime-linux-x64.tar.gz",
+      "bundled_filename": "codexhub-chatgpt-web-runtime-linux-x64.tar.gz",
+      "bundled_only": true,
+      "build_revision": "5a307bb48de3d96465305288a2fff5c4086299fb",
+      "git_tree": "b4ea65a73c4b481497a012c1a9f569e024f6f9ce",
+      "sha256": "2422e62c875714a5627420367b2526887fe0b36ab71144e8e984400087e8be8f"
+    },
+    "windows-x64": {
+      "filename": "codexhub-chatgpt-web-runtime-windows-x64.zip",
+      "bundled_filename": "codexhub-chatgpt-web-runtime-windows-x64.zip",
+      "bundled_only": true,
+      "build_revision": "5a307bb48de3d96465305288a2fff5c4086299fb",
+      "git_tree": "b4ea65a73c4b481497a012c1a9f569e024f6f9ce",
+      "sha256": "4667ea434130dc5374802e5bde8d1e3756beda2bdff3d315d53f65b8d7c0ec0a"
+    }
+  },
+  "tunnel_client": {
+    "version": "0.0.12",
+    "repository": "https://github.com/openai/tunnel-client",
+    "artifacts": {
+      "linux-x64": {
+        "filename": "tunnel-client-v0.0.12-linux-amd64.zip",
+        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.12/tunnel-client-v0.0.12-linux-amd64.zip",
+        "sha256": "2bb693bd7b5cd28da7ce09cd9e309529dbb33b7cc9dc0058e62a064688f92c81"
+      },
+      "linux-arm64": {
+        "filename": "tunnel-client-v0.0.12-linux-arm64.zip",
+        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.12/tunnel-client-v0.0.12-linux-arm64.zip",
+        "sha256": "6813878a3edb82ebebb32fe5a859bc6327a81cce5bc7b635a2313174d26365d6"
+      },
+      "windows-x64": {
+        "filename": "tunnel-client-v0.0.12-windows-amd64.zip",
+        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.12/tunnel-client-v0.0.12-windows-amd64.zip",
+        "sha256": "2a2804933924e38a502d62b61f0266cb80d56d65744f4c29876b2bf9c1544356"
+      }
+    }
+  }
+}

@@ -2,6 +2,11 @@
 
 Status: Accepted. Native Claude Code client adapter, Connect UI, and protocol path ship in 0.2.24 experimental form; full live matrix remains gated by issue #78 evidence.
 
+Amended by [ADR-0015](0015-claude-subscription-coexistence-and-metering.md):
+subscription-preserving coexistence supersedes this document's Gateway-token
+requirement, Connect default-selection behavior and separate-launcher addendum
+for that mode. Other compatibility, identity and configuration safeguards remain.
+
 ## Context
 
 The user confirmed Claude Code as a downstream CodexHub Gateway client, not an
@@ -59,6 +64,20 @@ mapping. Catalog changes automatically update the Client Projection; removed or
 disabled mapping targets become visibly invalid and never silently fall back.
 Exact supported role names, discovery format, and refresh/restart behavior are
 facts to establish against the pinned CLI in #74/#77, not assumptions here.
+
+Family mappings use dedicated internal IDs of the form
+`claude-codexhub-role/<family>/<exported-model-id>`; explicit model-picker IDs
+keep their existing `claude-codexhub-...` projection. Claude Code 2.1.283 can
+classify a manual model as Fable when its ID equals
+`ANTHROPIC_DEFAULT_FABLE_MODEL`, applying Fable's credits gate to the mapped
+target. Different families mapped to the same target also keep distinct IDs.
+The Gateway validates internal targets against the exported catalog and resolves
+them to the same Provider/model as the corresponding explicit selection.
+These internal IDs are not additional picker entries. Native full Claude IDs,
+the explicit default, and the separate subagent default retain their existing
+identities. Apply migrates family environment values while preserving the user's
+stored target choices; Claude Code must be restarted to read changed environment
+settings. See the [bounded identity evidence](../research/2026-09-27-claude-role-selection-identity.md).
 
 ## Claude Code activation exception
 
@@ -121,3 +140,17 @@ work under the repository verification policy; this documentation change is fast
   experience or full model picker. Current-user activation is explicit and
   reversible rather than silently extending activation to every managed client.
 - ACP/session hosting is a different product and is not part of this campaign.
+
+## 2026-09-23 addendum: preserve native subscription models
+
+Historical recommendation, superseded for coexistence by ADR-0015.
+
+Global Connect is still an explicit, reversible setting, but it replaces Claude
+Code's native route for new sessions. For users who need all subscription models
+alongside Gateway models, a process-scoped launcher is the preferred path:
+ordinary `claude` keeps the original subscription configuration, while
+`codexhub-claude-gateway MODEL` validates an exported Gateway model and supplies
+Gateway environment variables only to that process. Do not silently map a
+concrete native model such as `claude-opus-5-5` to a different provider. A
+resumed native session can pin its model even after a Gateway default is set;
+report that conflict and require a new Gateway session.

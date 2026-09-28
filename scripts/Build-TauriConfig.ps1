@@ -36,6 +36,9 @@ if ($isLinuxHost) {
     foreach ($property in $linuxConfig.app.windows[0].PSObject.Properties) {
         $config.app.windows[0] | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value -Force
     }
+    foreach ($resource in $linuxConfig.bundle.resources.PSObject.Properties) {
+        $config.bundle.resources | Add-Member -NotePropertyName $resource.Name -NotePropertyValue $resource.Value -Force
+    }
 }
 $config.productName = [string]$flavorConfig.productName
 $config.identifier = [string]$flavorConfig.identifier

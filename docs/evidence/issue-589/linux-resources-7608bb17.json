@@ -1,0 +1,10 @@
+{
+  "candidate_sha": "7608bb175c03bba3df73014fd295e562696d93ef",
+  "source_file_count": 99,
+  "source_mismatches": [],
+  "private_state_files": [],
+  "runtime_hash_matches": true,
+  "archive_sha256": "d15cfae6d9bae9539451bc9e0fc02545780503746dd4281bab2d2102252ac2d3",
+  "archive_bytes": 68763102,
+  "passed": true
+}

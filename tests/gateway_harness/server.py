@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import threading
 from contextlib import ExitStack, contextmanager
@@ -37,7 +38,9 @@ class StubUpstream:
     response_status: int = 200
     response_content_type: str = "application/json"
     response_body: bytes = b"{}"
+    response_headers: dict[str, str] = field(default_factory=dict)
     stream_chunks: tuple[bytes, ...] | None = None
+    gzip_sse_when_accepted: bool = False
     hold_after_headers: threading.Event | None = None
     headers_sent: threading.Event = field(default_factory=threading.Event)
 
@@ -75,8 +78,16 @@ class _StubHandler(BaseHTTPRequestHandler):
     def _write_response(self, stub: StubUpstream) -> None:
         chunks = stub.stream_chunks
         if chunks is not None:
+            compressed = (
+                stub.gzip_sse_when_accepted
+                and "gzip" in self.headers.get("Accept-Encoding", "").lower()
+            )
+            if compressed:
+                chunks = (gzip.compress(b"".join(chunks)),)
             self.send_response(stub.response_status)
             self.send_header("Content-Type", "text/event-stream")
+            if compressed:
+                self.send_header("Content-Encoding", "gzip")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "close")
             self.end_headers()
@@ -89,6 +100,8 @@ class _StubHandler(BaseHTTPRequestHandler):
             return
         self.send_response(stub.response_status)
         self.send_header("Content-Type", stub.response_content_type)
+        for key, value in stub.response_headers.items():
+            self.send_header(key, value)
         self.send_header("Content-Length", str(len(stub.response_body)))
         self.send_header("Connection", "close")
         self.end_headers()
@@ -273,18 +286,21 @@ class GatewayHarness:
         *,
         status: int = 200,
         content_type: str = "application/json",
+        headers: dict[str, str] | None = None,
     ) -> None:
         assert self.stub is not None
         body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
         self.stub.response_status = status
         self.stub.response_content_type = content_type
         self.stub.response_body = body
+        self.stub.response_headers = dict(headers or {})
         self.stub.stream_chunks = None
 
     def set_sse_response(self, chunks: tuple[bytes, ...], *, status: int = 200) -> None:
         assert self.stub is not None
         self.stub.response_status = status
         self.stub.stream_chunks = chunks
+        self.stub.response_headers = {}
 
     def close_admission(self) -> None:
         assert self.gateway is not None

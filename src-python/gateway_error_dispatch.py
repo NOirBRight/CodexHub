@@ -100,7 +100,7 @@ def finish_proxy_post_downstream_write_failure(
         model_requested=live.model_requested,
         model_canonical=catalog.canonical_model_id(live.model) if live.model else None,
         upstream=live.upstream_name or "upstream_error",
-        provider_id=live.upstream_name,
+        provider_id=gateway_events.usage_provider_id(live.upstream_name, live.upstream),
         provider_hint=live.provider_hint,
         upstream_format=live.upstream_format,
         reports_cached_input_tokens=live.reports_cached_input_tokens,
@@ -128,7 +128,7 @@ def emit_proxy_post_success(live: PostRequestLiveState, status: int) -> None:
         model_requested=live.model_requested,
         model_canonical=live.model_canonical,
         upstream=live.upstream_name,
-        provider_id=live.upstream_name,
+        provider_id=gateway_events.usage_provider_id(live.upstream_name, live.upstream),
         provider_hint=live.provider_hint,
         upstream_format=live.upstream_format,
         reports_cached_input_tokens=live.reports_cached_input_tokens,
@@ -312,7 +312,10 @@ def dispatch_proxy_post_exception(exc: BaseException, live: PostRequestLiveState
             return
         error_code = "model_identity_error"
         identity = _retry_identity_from_context(adapter_event_context)
-        detail = safe_upstream_error_detail(exc, redact_identity=identity)
+        detail = gateway_errors.model_identity_error_detail(
+            exc, inbound_format=inbound_format
+        )
+        detail = _redact_identity_in_text(detail, identity)
         detail = _redact_identity_in_text(detail, exc.model_slug)
         write_proxy_event(
             "request_error",
@@ -562,7 +565,7 @@ def dispatch_proxy_post_exception(exc: BaseException, live: PostRequestLiveState
                 model_requested=model_requested,
                 model_canonical=canonical_model_id(model) if model else None,
                 upstream=upstream_name,
-                provider_id=upstream_name,
+                provider_id=gateway_events.usage_provider_id(upstream_name, upstream),
                 provider_hint=provider_hint,
                 upstream_format=upstream_format,
                 reports_cached_input_tokens=reports_cached_input_tokens,
@@ -593,6 +596,10 @@ def dispatch_proxy_post_exception(exc: BaseException, live: PostRequestLiveState
                 "request_id": request_id,
                 "model": canonical_model_id(model) if model else None,
                 "behavior_profile": behavior_profile,
+                "native_anthropic_subscription": (
+                    isinstance(upstream, Mapping)
+                    and upstream.get("native_anthropic_subscription") is True
+                ),
                 **proxy_request_context,
             }
             if isinstance(previous_retry_identity, str) and previous_retry_identity:
@@ -632,7 +639,7 @@ def dispatch_proxy_post_exception(exc: BaseException, live: PostRequestLiveState
             model_requested=model_requested,
             model_canonical=canonical_model_id(model) if model else None,
             upstream=upstream_name,
-            provider_id=upstream_name,
+            provider_id=gateway_events.usage_provider_id(upstream_name, upstream),
             provider_hint=provider_hint,
             upstream_format=upstream_format,
             reports_cached_input_tokens=reports_cached_input_tokens,
@@ -695,7 +702,7 @@ def dispatch_proxy_post_exception(exc: BaseException, live: PostRequestLiveState
             model_requested=model_requested,
             model_canonical=canonical_model_id(model) if model else None,
             upstream=upstream_name,
-            provider_id=upstream_name,
+            provider_id=gateway_events.usage_provider_id(upstream_name, upstream),
             provider_hint=provider_hint,
             upstream_format=upstream_format,
             reports_cached_input_tokens=reports_cached_input_tokens,

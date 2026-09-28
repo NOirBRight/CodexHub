@@ -1,0 +1,30 @@
+{
+  "candidate_sha": "fae658a2c523ec8431ba0959bf4da22756903bb3",
+  "platform": "Linux",
+  "packaged_binary_sha256": "766f872d5f013a48d28152cea05633a06df6ee7f9cf60e10559ffaf4fb33df50",
+  "claude_cli_version": "2.1.280 (Claude Code)",
+  "test": "scripts/e2e_claude_client_settings.py --browser --claude-bin <pinned CLI> --bin <packaged candidate>",
+  "status": "passed",
+  "bounds": {
+    "real_cli_timeout_seconds": 90,
+    "browser_timeout_seconds": 90,
+    "official_provider_calls": 0
+  },
+  "isolation": {
+    "temporary_home_config_runtime": true,
+    "synthetic_oauth_access_token": true,
+    "real_subscription_credential_used": false,
+    "independent_bridge_and_loopback_ports": true,
+    "egress_guard": "loopback HTTP proxy rejects nonlocal requests",
+    "installed_application_untouched": true
+  },
+  "observations": {
+    "browser_ui_preview_connect_edit_readback_disconnect": "passed",
+    "bridge_preview_connect_edit_readback": "passed",
+    "invalid_mapping_rejected_without_settings_change": "passed",
+    "conflicting_api_key_reported_and_apply_blocked": "passed",
+    "unrelated_editor_theme_and_synthetic_login_preserved": "passed",
+    "real_cli_used_saved_external_default_on_loopback": "passed"
+  },
+  "diagnostic": "The first run omitted a saved OAuth fixture and Claude Code rejected the external model before making an HTTP request. The isolated test fixture now includes a synthetic, unrefreshable login; no product code changed."
+}

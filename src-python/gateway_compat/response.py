@@ -677,7 +677,7 @@ def compatible_response_body(
     event_context = _collaboration_adapter_module.context_with_protocol(event_context, collaboration_protocol)
     changed = False
     payload, runtime_tool_plan, runtime_tool_changed = (
-        _official_passthrough.decode_tool_response(event_context, payload)
+        _official_passthrough.decode_tool_response(event_context, payload, upstream_name=upstream_name)
     )
     changed = changed or runtime_tool_changed
     changed = host._hide_reasoning_text(payload) or changed

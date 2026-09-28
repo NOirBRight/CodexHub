@@ -1,0 +1,11 @@
+{
+  "candidate_sha": "631a5478b474d46ea78690767971642de80deda2",
+  "command": "refresh-models",
+  "outcome": "blocked",
+  "exit_code": 1,
+  "classification": "codex_desktop_became_running_before_commit",
+  "source_auth_unchanged": true,
+  "official_state_written": false,
+  "operator_desktop_closed_or_restarted": false,
+  "snapshot_mode_qualifies_refresh": false
+}

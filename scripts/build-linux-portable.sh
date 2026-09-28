@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Build a release-optimized Linux portable tree for one CodexHub flavor.
-# Usage: scripts/build-linux-portable.sh [--flavor normal|debug] [--dry-run] [--output-root DIR]
+# The patched runtime is prepared from the pinned upstream source and packaged by Tauri.
 set -euo pipefail
 
 flavor="normal"
 output_root=""
 dry_run=0
+chatgpt_web_runtime=""
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 while [[ $# -gt 0 ]]; do
@@ -22,12 +23,24 @@ while [[ $# -gt 0 ]]; do
       dry_run=1
       shift
       ;;
+    --chatgpt-web-runtime)
+      chatgpt_web_runtime="${2:-}"
+      shift 2
+      ;;
     *)
       echo "unknown argument: $1" >&2
       exit 2
       ;;
   esac
 done
+
+if [[ -n "$chatgpt_web_runtime" ]]; then
+  if [[ ! -f "$chatgpt_web_runtime" ]]; then
+    echo "ChatGPT Web runtime archive was not found: $chatgpt_web_runtime" >&2
+    exit 2
+  fi
+  chatgpt_web_runtime="$(realpath "$chatgpt_web_runtime")"
+fi
 
 if [[ "$flavor" != "normal" && "$flavor" != "debug" ]]; then
   echo "unknown build flavor: $flavor" >&2
@@ -93,6 +106,12 @@ EOF
   exit 0
 fi
 
+runtime_args=(--repo-root "$repo_root")
+if [[ -n "$chatgpt_web_runtime" ]]; then
+  runtime_args+=(--archive "$chatgpt_web_runtime")
+fi
+"$repo_root/scripts/codexhub-python.sh" "$repo_root/scripts/prepare_chatgpt_web_runtime.py" "${runtime_args[@]}"
+
 export CODEXHUB_FRONTEND_PORT="$frontendPort"
 (
   cd "$repo_root/frontend"
@@ -121,12 +140,33 @@ if [[ ! -x "$binary" ]]; then
 fi
 cp -a "$binary" "$portable_dir/$executableBaseName"
 
-for resource in config src-python python scripts; do
-  src="$targetRoot/release/$resource"
-  if [[ -e "$src" ]]; then
-    cp -a "$src" "$portable_dir/"
-  fi
-done
+# Copy declared source resources, never stale files from Cargo's output tree.
+"$repo_root/scripts/codexhub-python.sh" - "$repo_root" "$portable_dir" "$generated_config" <<'PY'
+import glob
+import json
+from pathlib import Path
+import shutil
+import sys
+
+repo, portable, config = map(Path, sys.argv[1:])
+resources = json.loads(config.read_text(encoding="utf-8"))["bundle"]["resources"]
+for pattern, destination in resources.items():
+    for match in glob.glob(str(repo / "src-tauri" / pattern), include_hidden=True):
+        source = Path(match)
+        target = portable / destination
+        if glob.has_magic(pattern):
+            target /= source.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, target)
+        else:
+            shutil.copy2(source, target)
+PY
+if [[ ! -f "$portable_dir/config/chatgpt_web_runtime_pin.json" ]] || \
+   [[ ! -f "$portable_dir/config/codexhub-chatgpt-web-runtime-linux-x64.tar.gz" ]]; then
+  echo "portable build is missing the patched ChatGPT Web Runtime resource" >&2
+  exit 1
+fi
 if [[ ! -f "$portable_dir/scripts/xai_device_login.py" ]]; then
   echo "portable build is missing scripts/xai_device_login.py" >&2
   exit 1
@@ -146,7 +186,7 @@ optional and picked up automatically when present.
 NOTE
 fi
 
-tar -C "$output_root" -czf "$portable_archive" "$portable_name"
+tar --exclude='__pycache__' --exclude='*.pyc' -C "$output_root" -czf "$portable_archive" "$portable_name"
 sha256="$(sha256sum "$portable_archive" | awk '{print $1}')"
 echo "Linux portable ready:"
 echo "  Directory: $portable_dir"

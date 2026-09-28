@@ -1,0 +1,6 @@
+{
+    "candidate_sha":  "631a5478b474d46ea78690767971642de80deda2",
+    "source_auth_matches_original_login":  true,
+    "source_catalog_matches_recorded_input":  true,
+    "source_deepseek_key_matches_staged_input":  true
+}

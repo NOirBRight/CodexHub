@@ -558,12 +558,58 @@ def _client_timeout_limit(value: Any) -> int | None:
     return None
 
 
+# Codex CLI 0.157.0 AgentPath::join / resolve errors, returned verbatim.
+_AGENT_NAME_CLIENT_ERRORS = frozenset({
+    "agent_name must not be empty",
+    "agent_name must use only lowercase letters, digits, and underscores",
+    "agent_name must not contain `/`",
+    "agent_name `root` is reserved",
+    "agent_name `.` is reserved",
+    "agent_name `..` is reserved",
+})
+_AGENT_PATH_CLIENT_ERRORS = frozenset({
+    "agent path must not be empty",
+    "absolute agent paths must start with `/root` or be `/morpheus`",
+    "absolute agent path must not be empty",
+    "absolute agent path must not end with `/`",
+    "relative agent path must not end with `/`",
+})
+# join() checks the whole task_name, so a slash is an agent_name error.
+# resolve() splits on '/' first, then checks each segment.
+_AGENT_SEGMENT_CLIENT_ERRORS = _AGENT_NAME_CLIENT_ERRORS - {
+    "agent_name must not contain `/`",
+}
+_AGENT_REFERENCE_TOOLS = frozenset({
+    "send_message",
+    "followup_task",
+    "interrupt_agent",
+    "list_agents",
+})
+
+
+def _is_known_client_sentence(value: str, sentences: frozenset[str]) -> bool:
+    """Accept the CLI sentence, or that same sentence with one trailing period.
+
+    Codex 0.157 emits these without a period. A single extra period is still
+    the same handler error; any other suffix stays rejected.
+    """
+    if value in sentences:
+        return True
+    return value.endswith(".") and value[:-1] in sentences
+
+
 def _is_client_execution_error(name: str, value: str) -> bool:
     """CLI 0.153.4 RespondToModel outputs, not arbitrary non-JSON prose.
 
     The wire has no separate error tag. Keep known handler errors scoped to
     their tools; successful JSON still uses the frozen output schemas.
     """
+    if name == "spawn_agent" and _is_known_client_sentence(value, _AGENT_NAME_CLIENT_ERRORS):
+        return True
+    if name in _AGENT_REFERENCE_TOOLS and _is_known_client_sentence(
+        value, _AGENT_SEGMENT_CLIENT_ERRORS | _AGENT_PATH_CLIENT_ERRORS
+    ):
+        return True
     if name == "wait_agent":
         # CLI 0.155.1 persists cancelled waits as text, not a JSON result.
         # Preserve that history verbatim so the next turn can continue.

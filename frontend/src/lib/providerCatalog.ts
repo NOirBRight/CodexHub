@@ -37,6 +37,13 @@ export function subscriptionAuthAdapter(preset: Provider | null | undefined): st
   return capability?.slice("subscription:".length) || null;
 }
 
+export function runtimeCapability(preset: Provider | null | undefined): string | null {
+  const capability = (preset?.auth_capabilities ?? []).find((candidate) =>
+    candidate.startsWith("runtime:"),
+  );
+  return capability?.slice("runtime:".length) || null;
+}
+
 export function instantiateCatalogProvider(preset: Provider, sortOrder: number): Provider {
   return {
     ...preset,
@@ -167,9 +174,15 @@ export function applyCatalogPresetDefaults(
         (model.max_output_tokens ?? null) !== (next.max_output_tokens ?? null)
       );
     });
-  const needsFormats =
-    !(existing.available_upstream_formats && existing.available_upstream_formats.length > 0) &&
-    Boolean(preset.available_upstream_formats && preset.available_upstream_formats.length > 0);
+  const officialDeepseek = existing.id === "deepseek" &&
+    /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/.test(existing.base_url);
+  const availableFormats = officialDeepseek
+    ? [...new Set([...(existing.available_upstream_formats ?? []), ...(preset.available_upstream_formats ?? [])])]
+    : existing.available_upstream_formats?.length
+      ? existing.available_upstream_formats
+      : preset.available_upstream_formats;
+  const needsFormats = (availableFormats ?? []).join() !==
+    (existing.available_upstream_formats ?? []).join();
   const needsPrefix = !existing.display_prefix && Boolean(preset.display_prefix);
   const needsCachedFlag =
     existing.reports_cached_input_tokens == null && preset.reports_cached_input_tokens != null;
@@ -195,9 +208,7 @@ export function applyCatalogPresetDefaults(
     base_url: needsBaseUrl ? preset.base_url : existing.base_url,
     display_prefix: needsPrefix ? preset.display_prefix : existing.display_prefix,
     upstream_format: existing.upstream_format,
-    available_upstream_formats: needsFormats
-      ? preset.available_upstream_formats
-      : existing.available_upstream_formats,
+    available_upstream_formats: needsFormats ? availableFormats : existing.available_upstream_formats,
     reports_cached_input_tokens: needsCachedFlag
       ? preset.reports_cached_input_tokens
       : existing.reports_cached_input_tokens,

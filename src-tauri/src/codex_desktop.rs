@@ -582,8 +582,11 @@ if ($packages.Count -eq 0) { Write-Output 'unsupported'; exit 0 }
 if ($packages.Count -ne 1) { throw 'Expected exactly one OpenAI.Codex AppX package.' }
 $package = $packages[0]
 $manifest = Get-AppxPackageManifest -Package $package
-$applications = @($manifest.Package.Applications.Application | Where-Object { [string]$_.EntryPoint -eq 'Windows.FullTrustApplication' })
-if ($applications.Count -ne 1) { throw 'Expected exactly one Windows.FullTrustApplication in the OpenAI.Codex manifest.' }
+$applications = @($manifest.Package.Applications.Application | Where-Object {
+    [string]$_.EntryPoint -eq 'Windows.FullTrustApplication' -and
+    [string]$_.VisualElements.AppListEntry -ne 'none'
+})
+if ($applications.Count -ne 1) { throw 'Expected exactly one visible Windows.FullTrustApplication in the OpenAI.Codex manifest.' }
 $application = $applications[0]
 $relativeExecutable = [string]$application.Executable
 if ([string]::IsNullOrWhiteSpace($relativeExecutable) -or [IO.Path]::IsPathRooted($relativeExecutable)) { throw 'The OpenAI.Codex executable must be a non-empty relative path.' }
@@ -1478,6 +1481,39 @@ mod tests {
         assert!(error.contains(CLOSE_TIMEOUT_ERROR));
         assert_eq!(backend.close_wait_budget.get(), None);
         assert!(!mutated.get());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_appx_resolution_ignores_hidden_helpers_and_rejects_ambiguous_desktops() {
+        for (extra_application, expected) in [
+            ("", Ok("fixture!Desktop")),
+            (
+                r#"<Application Id="Helper" Executable="helper.exe" EntryPoint="Windows.FullTrustApplication"><uap:VisualElements AppListEntry="none" /></Application>"#,
+                Ok("fixture!Desktop"),
+            ),
+            (
+                r#"<Application Id="Other" Executable="other.exe" EntryPoint="Windows.FullTrustApplication"><uap:VisualElements /></Application>"#,
+                Err("Expected exactly one visible Windows.FullTrustApplication"),
+            ),
+        ] {
+            let script = format!(
+                r#"
+$fixtureRoot = Split-Path -Parent (Get-Command powershell.exe -ErrorAction Stop).Source
+function Get-AppxPackage {{ [pscustomobject]@{{ InstallLocation=$fixtureRoot; PackageFamilyName='fixture' }} }}
+function Get-AppxPackageManifest {{ [xml]'<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"><Applications>{extra_application}<Application Id="Desktop" Executable="powershell.exe" EntryPoint="Windows.FullTrustApplication"><uap:VisualElements /></Application></Applications></Package>' }}
+{WINDOWS_APPX_RESOLUTION}
+Write-Output $aumid
+"#
+            );
+            let result = run_windows_lifecycle_script(&script, Duration::from_secs(5));
+            match expected {
+                Ok(identity) => assert_eq!(result.expect("visible desktop resolves"), identity),
+                Err(message) => assert!(result
+                    .expect_err("ambiguous desktop must fail closed")
+                    .contains(message)),
+            }
+        }
     }
 
     #[cfg(target_os = "windows")]

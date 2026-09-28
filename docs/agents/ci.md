@@ -118,7 +118,7 @@ Pop-Location
 New-Item -ItemType Directory -Force -Path src-tauri/resources/python | Out-Null
 Set-Content -Path src-tauri/resources/python/.ci-placeholder -Value ''
 Push-Location src-tauri
-cargo test --locked
+cargo test --locked -- --test-threads=1
 cargo clippy --locked --all-targets -- -D warnings
 Pop-Location
 ```
@@ -127,7 +127,7 @@ Pop-Location
 
 On a Linux host, `./scripts/verify-linux.sh` runs Python core (excluding
 `tests/test_real_client_e2e.py`), the Python partition completeness checker,
-`cargo test --locked`, clippy, a fresh frontend/custom-protocol app build, and
+serial `cargo test --locked -- --test-threads=1`, clippy, a fresh frontend/custom-protocol app build, and
 the watchdog-bounded physical pointer-input E2E in isolated D-Bus and Xvfb
 sessions. The E2E checks the desktop `WM_CLASS`/`StartupWMClass` identity, full
 native input coverage, background click-through, and a rendered DOM state

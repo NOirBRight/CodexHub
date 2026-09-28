@@ -46,12 +46,12 @@ require_python_313(__file__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src-python"))
 
-from anthropic_messages_prototype import (  # noqa: E402
+from anthropic_messages_ir import (  # noqa: E402
     AdaptedResponse,
     NotForwardable,
-    execute_exchange,
     parse_request,
 )
+from claude_messages_evidence_exchange import execute_exchange  # noqa: E402
 from claude_messages_upstream_fixtures import UpstreamFixtureServer  # noqa: E402
 
 DEFAULT_MAX_REQUESTS = 6

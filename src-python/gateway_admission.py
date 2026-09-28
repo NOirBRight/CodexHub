@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 
 GATEWAY_USER_REQUESTED_SHUTDOWN_BUDGET_SECONDS = 2.0
@@ -22,6 +23,7 @@ class GatewayRequestAdmission:
         self._cancelled = threading.Event()
         self._lock = threading.Lock()
         self._upstream_transport: Any | None = None
+        self._cancel_listeners: list[Callable[[], None]] = []
 
     @property
     def cancelled(self) -> bool:
@@ -34,12 +36,29 @@ class GatewayRequestAdmission:
         if cancelled:
             self._close_upstream_transport(transport)
 
+    def add_cancel_listener(self, callback: Callable[[], None]) -> None:
+        with self._lock:
+            self._cancel_listeners.append(callback)
+            already_cancelled = self._cancelled.is_set()
+        if already_cancelled:
+            self._invoke_cancel_listener(callback)
+
     def cancel(self) -> None:
         self._cancelled.set()
         with self._lock:
             transport = self._upstream_transport
+            listeners = tuple(self._cancel_listeners)
+        for listener in listeners:
+            self._invoke_cancel_listener(listener)
         if transport is not None:
             self._close_upstream_transport(transport)
+
+    @staticmethod
+    def _invoke_cancel_listener(callback: Callable[[], None]) -> None:
+        try:
+            callback()
+        except Exception:
+            return
 
     def raise_if_cancelled(self) -> None:
         if self.cancelled:
@@ -99,6 +118,12 @@ class GatewayShutdownController:
             active = tuple(self._active)
         for admission in active:
             admission.cancel()
+        try:
+            import chatgpt_web_route
+
+            chatgpt_web_route.revoke_all_tool_permissions()
+        except Exception:
+            pass
         return len(active)
 
     def remaining_shutdown_budget_seconds(self) -> float:

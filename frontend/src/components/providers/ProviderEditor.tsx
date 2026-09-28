@@ -25,6 +25,7 @@ import {
   HeaderRow,
   IconButton,
 } from "./ProviderFormControls";
+import { ChatGptWebRuntimeCard } from "./ChatGptWebRuntimeCard";
 import { XaiLoginCard } from "./XaiLoginCard";
 import {
   applyAddProviderProbeResult,
@@ -45,6 +46,7 @@ import {
   applyPresetReasoningDefaults,
   bundledPresetFor,
   modelsMissingFromPreset,
+  runtimeCapability,
   subscriptionAuthAdapter,
 } from "../../lib/providerCatalog";
 import {
@@ -128,6 +130,8 @@ export function ProviderDetail({
   const subscriptionAuth =
     subscriptionAuthAdapter(provider) ?? subscriptionAuthAdapter(preset);
   const xaiSubscriptionAuth = subscriptionAuth === "xai_oauth";
+  const chatgptWebRuntime =
+    runtimeCapability(provider) === "chatgpt_web" || runtimeCapability(preset) === "chatgpt_web";
 
   useEffect(() => {
     setDraft(normalizedProvider);
@@ -435,6 +439,39 @@ export function ProviderDetail({
     }
   }
 
+  if (chatgptWebRuntime) {
+    return (
+      <div className="ws-provider-detail flex h-full min-h-0 flex-col">
+        <div className="border-b border-line px-4 py-3">
+          <HeaderRow title={provider.name} actions={
+            <IconButton title={t("providers.deleteProvider")} danger disabled={busy === "save"} onClick={onDelete}>
+              <Trash2 size={16} />
+            </IconButton>
+          } />
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <ChatGptWebRuntimeCard provider={draft} onProviderChange={setDraft} unsaved={unsaved} />
+        </div>
+        {unsaved ? (
+          <div className="flex items-center justify-between gap-3 border-t border-line px-4 py-3">
+            <p className="text-xs text-slate-600">{t("providers.chatgptWebSaveFirst")}</p>
+            <button type="button" className="ws-button" disabled={busy === "save"}
+              onClick={() => onChange(draft, t("providers.providerAdded", { name: draft.name }))}>
+              <Plus size={14} />{t("providers.chatgptWebAdd")}
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-end border-t border-line px-4 py-3">
+            <button type="button" className="ws-button" disabled={!dirty || busy === "save"}
+              onClick={() => onChange(draft, t("providers.providerSaved", { name: draft.name }))}>
+              <Save size={16} />{t("common.save")}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="ws-provider-detail grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
       <div className="grid gap-2 border-b border-line px-4 py-2.5">
@@ -530,6 +567,7 @@ export function ProviderDetail({
               />
             </Field>
             <EndpointSelectionPanel
+              allowAuto={draft.id === "deepseek" && /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/.test(draft.base_url)}
               value={draft.upstream_format ?? "auto"}
               result={probeResult}
               availableFormats={draft.available_upstream_formats}
@@ -725,6 +763,7 @@ export function AddProviderPanel({
             />
           </Field>
           <EndpointSelectionPanel
+            allowAuto={form.id === "deepseek" && /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/.test(form.base_url)}
             value={form.upstream_format}
             result={probeResult}
             availableFormats={form.available_upstream_formats}
@@ -812,6 +851,7 @@ function SubscriptionAuthChip({ signedIn }: { signedIn: boolean | null }) {
 }
 
 function EndpointSelectionPanel({
+  allowAuto = false,
   availableFormats,
   onChange,
   onProbe,
@@ -821,6 +861,7 @@ function EndpointSelectionPanel({
   toolProtocol,
   value,
 }: {
+  allowAuto?: boolean;
   availableFormats?: UpstreamFormat[] | null;
   onChange: (value: UpstreamFormat) => void;
   onProbe: () => void;
@@ -831,7 +872,7 @@ function EndpointSelectionPanel({
   value?: UpstreamFormat | null;
 }) {
   const { t } = useTranslation();
-  const selected = normalizedEndpointFormat(value);
+  const selected = allowAuto && value === "auto" ? "auto" : normalizedEndpointFormat(value);
   const mergedAvailableFormats = mergeEndpointFormats(
     availableFormats,
     probeAvailableFormats(result),
@@ -847,6 +888,7 @@ function EndpointSelectionPanel({
       </div>
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
         <EndpointFormatSelect
+          allowAuto={allowAuto}
           availableFormats={mergedAvailableFormats}
           value={selected}
           onChange={onChange}
@@ -867,25 +909,34 @@ function EndpointSelectionPanel({
           {t("common.test")}
         </button>
       </div>
+      {allowAuto && selected === "auto" && (
+        <small className="text-xs font-normal text-slate-500">
+          {t("providers.deepseekAutoHint")}
+        </small>
+      )}
     </div>
   );
 }
 
 function EndpointFormatSelect({
+  allowAuto = false,
   availableFormats,
   onChange,
   value,
 }: {
+  allowAuto?: boolean;
   availableFormats: UpstreamFormat[];
   onChange: (value: UpstreamFormat) => void;
   value: UpstreamFormat;
 }) {
   const [open, setOpen] = useState(false);
+  const options = allowAuto
+    ? [{ value: "auto" as UpstreamFormat, labelKey: "providers.upstreamFormats.auto" }, ...endpointSelectionOptions]
+    : endpointSelectionOptions;
   const selected =
-    endpointSelectionOptions.find((option) => option.value === value) ??
-    endpointSelectionOptions[0];
+    options.find((option) => option.value === value) ?? options[0];
   const available = new Set(availableFormats);
-  const selectedAvailable = available.has(selected.value);
+  const selectedAvailable = selected.value === "auto" ? available.size > 1 : available.has(selected.value);
   const { t } = useTranslation();
   const tr = t as Translate;
 
@@ -919,9 +970,9 @@ function EndpointFormatSelect({
           className="select-popover absolute left-0 top-[calc(100%+6px)] z-30 w-full min-w-[240px]"
           role="listbox"
         >
-          {endpointSelectionOptions.map((option) => {
+          {options.map((option) => {
             const selectedOption = option.value === value;
-            const optionAvailable = available.has(option.value);
+            const optionAvailable = option.value === "auto" ? available.size > 1 : available.has(option.value);
             return (
               <button
                 key={option.value}

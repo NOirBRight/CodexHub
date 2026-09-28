@@ -1,0 +1,27 @@
+{
+  "candidate_sha": "7608bb175c03bba3df73014fd295e562696d93ef",
+  "package_filename": "CodexHub_0.2.30_portable_7608bb17.zip",
+  "archive_sha256": "b15e128ef160ba20e0ede90d4b0d441375ee2882a9996339d2f1a8180145d7fb",
+  "archive_bytes": 83803333,
+  "source_file_count": 99,
+  "missing_source_count": 0,
+  "source_mismatch_count_after_crlf_normalization": 0,
+  "raw_byte_mismatch_count_due_to_crlf": 0,
+  "private_state_file_count": 0,
+  "private_state_files": [],
+  "runtime_archive_sha256": "5cbb11d6d848018d1f079c89151f4dd46cc7d5ebb83a878970626b5120b35a95",
+  "runtime_hash_matches_pin": true,
+  "settings_adapter": {
+    "status": "passed",
+    "settings_page_served": true,
+    "bootstrap_session_origin_checks": "passed",
+    "legacy_settings_readback": "passed",
+    "save_and_reopen": "passed",
+    "pending_restart": true,
+    "synthetic_secret_redacted_from_http": true,
+    "runtime_process_started": false,
+    "text_ready": false,
+    "tools_ready": false,
+    "live_account_or_upstream_runtime_acceptance": "not_performed"
+  }
+}

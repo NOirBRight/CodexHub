@@ -51,3 +51,6 @@ non-subscription adapters, not sibling `elif` chains that grow per provider.
 - Non-subscription API keys are not forced through OAuth refresh machinery.
 - Anthropic consumer OAuth remains out of product scope (ToS); this seam does
   not authorize it.
+  [ADR-0015](0015-claude-subscription-coexistence-and-metering.md) later authorizes
+  the narrow pass-through of a Claude client's own subscription request without
+  adding token acquisition, persistence or refresh to this credential seam.

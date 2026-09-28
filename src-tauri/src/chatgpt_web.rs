@@ -1,0 +1,388 @@
+//! Desktop commands for the ChatGPT Web Runtime supervisor.
+//!
+//! The pinned upstream `setup` entry rewrites Codex integration. These
+//! commands only talk to the CodexHub supervisor.
+
+use crate::{config, runtime_paths};
+use serde_json::Value;
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::process::Stdio;
+
+const SCRIPT_NAME: &str = "chatgpt_web_runtime.py";
+const CONNECTION_SCRIPT_NAME: &str = "chatgpt_web_connection.py";
+const SETTINGS_SCRIPT_NAME: &str = "chatgpt_web_settings.py";
+const PIN_NAME: &str = "chatgpt_web_runtime_pin.json";
+
+pub fn chatgpt_web_status_blocking() -> Result<Value, String> {
+    run_cli(&["status"])
+}
+
+pub fn chatgpt_web_enable_blocking() -> Result<Value, String> {
+    run_cli(&["install"])?;
+    run_cli(&["start"])
+}
+
+pub fn chatgpt_web_stop_blocking() -> Result<Value, String> {
+    run_cli(&["stop"])
+}
+
+pub fn chatgpt_web_disable_blocking() -> Result<Value, String> {
+    run_cli(&["disable"])
+}
+
+pub fn chatgpt_web_upgrade_blocking() -> Result<Value, String> {
+    run_cli(&["upgrade"])
+}
+
+pub fn chatgpt_web_delete_account_blocking() -> Result<Value, String> {
+    run_cli(&["delete-account"])
+}
+
+pub fn chatgpt_web_open_login_blocking() -> Result<Value, String> {
+    run_cli(&["open-login"])
+}
+
+pub fn chatgpt_web_close_login_blocking() -> Result<Value, String> {
+    run_cli(&["close-login"])
+}
+
+pub fn chatgpt_web_open_settings_blocking() -> Result<Value, String> {
+    let python = config::find_python()?;
+    let script = runtime_paths::resource_root()?
+        .join("src-python")
+        .join(SETTINGS_SCRIPT_NAME);
+    if !script.is_file() {
+        return Err("ChatGPT Runtime Settings page was not found".to_string());
+    }
+    let home = private_home()?;
+    let pin = pin_path()?;
+    let mut command = runtime_paths::configured_python_command(&python);
+    command
+        .arg(&script)
+        .arg("serve")
+        .arg("--home")
+        .arg(&home)
+        .env("CODEXHUB_CHATGPT_WEB_HOME", &home)
+        .env("CODEXHUB_CHATGPT_WEB_PIN", &pin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|_| "ChatGPT Runtime Settings could not be started".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "ChatGPT Runtime Settings could not be started".to_string())?;
+    let mut ready = String::new();
+    if BufReader::new(stdout).read_line(&mut ready).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("ChatGPT Runtime Settings could not be started".to_string());
+    }
+    let payload: Value = match serde_json::from_str(ready.trim()) {
+        Ok(payload) => payload,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("ChatGPT Runtime Settings could not be started".to_string());
+        }
+    };
+    let Some(url) = payload.get("url").and_then(Value::as_str) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("ChatGPT Runtime Settings could not be started".to_string());
+    };
+    if !is_settings_bootstrap_url(url) || child.try_wait().ok().flatten().is_some() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("ChatGPT Runtime Settings could not be started".to_string());
+    }
+    if crate::xai_auth::spawn_system_browser(url).is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("Could not open Runtime Settings in your default browser".to_string());
+    }
+    Ok(serde_json::json!({"opened": true}))
+}
+
+fn is_settings_bootstrap_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
+        && url.port().is_some()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_some_and(|fragment| {
+            (32..=128).contains(&fragment.len())
+                && fragment.bytes().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, b'_' | b'-')
+                })
+        })
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_status() -> Result<Value, String> {
+    spawn_cli(chatgpt_web_status_blocking).await
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_enable() -> Result<Value, String> {
+    spawn_cli(chatgpt_web_enable_blocking).await
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_stop() -> Result<Value, String> {
+    spawn_cli(chatgpt_web_stop_blocking).await
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_disable() -> Result<Value, String> {
+    spawn_cli(chatgpt_web_disable_blocking).await
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_upgrade() -> Result<Value, String> {
+    spawn_cli(chatgpt_web_upgrade_blocking).await
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_delete_account() -> Result<Value, String> {
+    spawn_cli(chatgpt_web_delete_account_blocking).await
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_open_login() -> Result<Value, String> {
+    spawn_cli(chatgpt_web_open_login_blocking).await
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_close_login() -> Result<Value, String> {
+    spawn_cli(chatgpt_web_close_login_blocking).await
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_open_settings() -> Result<Value, String> {
+    spawn_cli(chatgpt_web_open_settings_blocking).await
+}
+
+#[tauri::command]
+pub async fn chatgpt_web_connection_check(
+    base_url: String,
+    api_key: String,
+) -> Result<Value, String> {
+    spawn_cli(move || chatgpt_web_connection_check_blocking(&base_url, &api_key)).await
+}
+
+pub fn chatgpt_web_connection_check_blocking(
+    base_url: &str,
+    api_key: &str,
+) -> Result<Value, String> {
+    let python = config::find_python()?;
+    let script = runtime_paths::resource_root()?
+        .join("src-python")
+        .join(CONNECTION_SCRIPT_NAME);
+    if !script.is_file() {
+        return Err(format!(
+            "ChatGPT Web connection checker not found: {}",
+            script.display()
+        ));
+    }
+    let home = private_home()?;
+    let pin = pin_path()?;
+    let mut command = runtime_paths::configured_python_command(&python);
+    command
+        .arg(&script)
+        .arg("check")
+        .env("CODEXHUB_CHATGPT_WEB_HOME", &home)
+        .env("CODEXHUB_CHATGPT_WEB_PIN", &pin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start ChatGPT Web connection check: {error}"))?;
+    let input = serde_json::json!({ "base_url": base_url, "api_key": api_key });
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "ChatGPT Web connection check input was unavailable".to_string())?
+        .write_all(&serde_json::to_vec(&input).map_err(|error| error.to_string())?)
+        .map_err(|error| format!("failed to send ChatGPT Web connection check: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("ChatGPT Web connection check failed: {error}"))?;
+    let stdout = redact_secrets(&String::from_utf8_lossy(&output.stdout));
+    if let Ok(payload) = serde_json::from_str::<Value>(stdout.trim()) {
+        if output.status.success() && payload.get("ok").and_then(Value::as_bool) == Some(true) {
+            return Ok(payload);
+        }
+        return Err(payload
+            .get("error")
+            .and_then(Value::as_str)
+            .map(redact_secrets)
+            .unwrap_or_else(|| "ChatGPT Web connection check failed".to_string()));
+    }
+    Err("ChatGPT Web connection check returned invalid status".to_string())
+}
+
+async fn spawn_cli<F>(task: F) -> Result<Value, String>
+where
+    F: FnOnce() -> Result<Value, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|error| format!("ChatGPT Web Runtime task failed: {error}"))?
+}
+
+fn private_home() -> Result<PathBuf, String> {
+    if let Some(value) = std::env::var_os("CODEXHUB_CHATGPT_WEB_HOME") {
+        if !value.is_empty() {
+            return Ok(PathBuf::from(value));
+        }
+    }
+    let home =
+        dirs::home_dir().ok_or_else(|| "failed to resolve user home directory".to_string())?;
+    Ok(home.join(".codexhub").join("chatgpt-web"))
+}
+
+fn pin_path() -> Result<PathBuf, String> {
+    if let Some(value) = std::env::var_os("CODEXHUB_CHATGPT_WEB_PIN") {
+        if !value.is_empty() {
+            return Ok(PathBuf::from(value));
+        }
+    }
+    Ok(runtime_paths::resource_root()?
+        .join("config")
+        .join(PIN_NAME))
+}
+
+fn script_path() -> Result<PathBuf, String> {
+    let script = runtime_paths::resource_root()?
+        .join("src-python")
+        .join(SCRIPT_NAME);
+    if !script.is_file() {
+        return Err(format!(
+            "ChatGPT Web Runtime supervisor not found: {}",
+            script.display()
+        ));
+    }
+    Ok(script)
+}
+
+fn run_cli(args: &[&str]) -> Result<Value, String> {
+    let python = config::find_python()?;
+    let script = script_path()?;
+    let home = private_home()?;
+    let pin = pin_path()?;
+    let mut command = runtime_paths::configured_python_command(&python);
+    command.arg(&script);
+    command.args(args);
+    command.arg("--home");
+    command.arg(&home);
+    command.env("CODEXHUB_CHATGPT_WEB_HOME", &home);
+    command.env("CODEXHUB_CHATGPT_WEB_PIN", &pin);
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to start ChatGPT Web Runtime supervisor: {error}"))?;
+    let stdout = redact_secrets(&String::from_utf8_lossy(&output.stdout));
+    let stderr = redact_secrets(&String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        if let Ok(payload) = serde_json::from_str::<Value>(stdout.trim()) {
+            let message = payload
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("ChatGPT Web Runtime supervisor failed");
+            return Err(redact_secrets(message));
+        }
+        return Err(format!(
+            "ChatGPT Web Runtime supervisor failed\nstdout:\n{}\nstderr:\n{}",
+            stdout.trim_end(),
+            stderr.trim_end()
+        ));
+    }
+    serde_json::from_str(stdout.trim()).map_err(|error| {
+        format!(
+            "ChatGPT Web Runtime supervisor returned invalid JSON: {error}\nstdout:\n{}",
+            stdout.trim_end()
+        )
+    })
+}
+
+pub(crate) fn redact_secrets(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(found) = rest.find("sk-") {
+        output.push_str(&rest[..found]);
+        let tail = &rest[found + 3..];
+        let token_len = tail
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_alphanumeric() || *character == '_' || *character == '-'
+            })
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if token_len > 4 {
+            output.push_str("[redacted]");
+            rest = &tail[token_len..];
+        } else {
+            output.push_str("sk-");
+            rest = tail;
+        }
+    }
+    output.push_str(rest);
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_settings_bootstrap_url, redact_secrets};
+    use std::path::PathBuf;
+
+    #[test]
+    fn command_errors_redact_secret_looking_tokens() {
+        let text = redact_secrets("failed sk-chatgpt-web-test-secret-DO-NOT-LOG now");
+        assert!(!text.contains("sk-chatgpt-web-test-secret-DO-NOT-LOG"));
+        assert!(text.contains("[redacted]"));
+    }
+
+    #[test]
+    fn bundled_pin_does_not_fetch_latest() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join("config")
+            .join("chatgpt_web_runtime_pin.json");
+        let text = std::fs::read_to_string(&path).expect("read pin");
+        assert!(text.contains("a13cd09950969f43e3b7e25c71fa43efaf5446c5"));
+        assert!(text.contains("\"version\": \"6.1.1\""));
+        assert!(!text.contains("/releases/latest/"));
+        assert!(text.contains("\"setup\""));
+        assert!(text.contains("\"dev\""));
+        assert!(text.contains("--replace-codex-route"));
+    }
+
+    #[test]
+    fn settings_bootstrap_url_is_loopback_and_uses_a_fragment_capability() {
+        assert!(is_settings_bootstrap_url(
+            "http://127.0.0.1:43125/#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG"
+        ));
+        for url in [
+            "https://127.0.0.1:43125/#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG",
+            "http://localhost:43125/#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG",
+            "http://127.0.0.1/#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG",
+            "http://127.0.0.1:43125/path#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG",
+            "http://127.0.0.1:43125/?token=secret#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG",
+            "http://user@127.0.0.1:43125/#0123456789abcdefghijklmnopqrstuvwxyz_ABCDEFG",
+            "http://127.0.0.1:43125/#too-short",
+            "http://127.0.0.1:43125/#0123456789abcdefghijklmnopqrstuvwxyz%2FABCDEFG",
+        ] {
+            assert!(!is_settings_bootstrap_url(url), "{url}");
+        }
+    }
+}

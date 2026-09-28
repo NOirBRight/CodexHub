@@ -73,6 +73,7 @@ from . import request as _request
 from . import host
 from . import collaboration_delivery as _collaboration_delivery
 from . import tool_parameter_root as _tool_parameter_root
+from . import xai_reasoning_ids as _xai_reasoning_ids
 
 def _valid_tool_name(value: Any) -> bool:
     return _tool_surface_adapter_module.valid_tool_name(value)
@@ -154,6 +155,7 @@ class _RuntimeToolState:
     attempt_serial: int = 0
     attempt_plan: RuntimeToolCompatibilityPlan | None = None
     stream: Any | None = None
+    xai_ids: _xai_reasoning_ids.StreamIds | None = None
 
 
 _RUNTIME_TOOL_CAPABILITY_MANIFEST_ERROR_CODE = "tool_compatibility_capability_manifest"
@@ -407,6 +409,7 @@ def begin_tool_attempt(event_context: Mapping[str, Any] | None) -> None:
     state.attempt_serial += 1
     state.attempt_plan = None
     state.stream = None
+    state.xai_ids = None
 
 
 def request_tool_plan(
@@ -449,7 +452,7 @@ def _attempt_ledger(
 
 
 def decode_tool_response(
-    event_context: Mapping[str, Any] | None, payload: dict[str, Any]
+    event_context: Mapping[str, Any] | None, payload: dict[str, Any], *, upstream_name: str | None = None,
 ) -> tuple[dict[str, Any], RuntimeToolCompatibilityPlan | None, bool]:
     """Decode one full upstream body and record its adapter evidence."""
     plan, _state = _attempt_ledger(event_context)
@@ -457,7 +460,8 @@ def decode_tool_response(
         return payload, None, False
     wire_output = payload.get("output")
     try:
-        decoded_payload = plan.decode_payload(payload)
+        normalized = _xai_reasoning_ids.normalize_response(payload) if upstream_name == "xai" else payload
+        decoded_payload = plan.decode_payload(normalized)
     except RuntimeToolCompatibilityError as exc:
         _raise_runtime_tool_compatibility_error(exc)
     _write_runtime_tool_adapter_response_evidence(
@@ -476,6 +480,7 @@ def decode_tool_events(
     events: Mapping[str, Any] | Iterable[Mapping[str, Any]],
     *,
     evidence_context: Mapping[str, Any] | None = None,
+    upstream_name: str | None = None,
 ) -> tuple[list[Mapping[str, Any]] | None, RuntimeToolCompatibilityPlan | None]:
     """Decode upstream SSE event(s) through the shared attempt stream ledger."""
     plan, state = _attempt_ledger(event_context)
@@ -483,10 +488,14 @@ def decode_tool_events(
         return None, plan
     if state.stream is None or getattr(state.stream, "plan", None) is not plan:
         state.stream = plan.new_stream()
+        state.xai_ids = None
+    if upstream_name == "xai" and state.xai_ids is None:
+        state.xai_ids = _xai_reasoning_ids.StreamIds()
     decoded_events: list[Mapping[str, Any]] = []
     try:
         for event in ([events] if isinstance(events, Mapping) else events):
-            decoded_events.extend(state.stream.decode_events_for_event(event))
+            normalized = state.xai_ids.normalize(event) if upstream_name == "xai" else event
+            decoded_events.extend(state.stream.decode_events_for_event(normalized))
     except RuntimeToolCompatibilityError as exc:
         _raise_runtime_tool_compatibility_error(exc)
     _write_runtime_tool_adapter_response_evidence(

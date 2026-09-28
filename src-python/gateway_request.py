@@ -650,7 +650,14 @@ def local_request_authorized(
     if expected_key is None:
         return True
     token = _bearer_token(headers)
-    return bool(token and hmac.compare_digest(token, expected_key))
+    claude_gateway_key = _get_header(headers, "x-codexhub-gateway-key")
+    return bool(
+        (token and hmac.compare_digest(token, expected_key))
+        or (
+            claude_gateway_key
+            and hmac.compare_digest(claude_gateway_key.strip(), expected_key)
+        )
+    )
 _local_request_authorized = local_request_authorized
 
 
@@ -756,6 +763,12 @@ def request_context_from_headers(headers: Mapping[str, str] | Any) -> dict[str, 
                 context[key] = item[:200]
                 if key == "client_id":
                     context["client_inference_source"] = "metadata"
+    # Claude's explicit session header takes precedence over generic session hints.
+    # Preserve its source so another client using the same value cannot share tools.
+    claude_session = (_get_header(headers, "x-claude-code-session-id") or "").strip()
+    if claude_session:
+        context["session_id"] = claude_session[:200]
+        context["session_source"] = "claude-code"
     user_agent = _get_header(headers, "User-Agent")
     if user_agent:
         context["user_agent_hash"] = proxy_telemetry.telemetry_hmac(

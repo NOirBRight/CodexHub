@@ -526,6 +526,7 @@ fn sync_test_client(
         _ => crate::app_flavor::RoutingOwner::UnknownExternal,
     };
     super::GatewayClientInfo {
+        claude_settings: None,
         id: id.to_string(),
         name: name.to_string(),
         kind: "Test".to_string(),
@@ -3307,4 +3308,18 @@ fn standalone_fast_models_inherit_capabilities_and_respect_selection() {
     let models = official_models_from_metadata(&selected, Some(metadata), &contexts);
     let aliases: Vec<_> = models.iter().filter(|model| super::is_gateway_fast_variant_id(&model.id)).map(|model| model.id.as_str()).collect();
     assert_eq!(aliases, vec!["gpt-5.6-luna-fast"]);
+}
+
+#[test]
+fn claude_sync_preserves_its_saved_default_instead_of_reapplying_it() {
+    let mut client = sync_test_client("claude", "Claude Code", true, true, "hub");
+    client.claude_settings = Some(super::clients::claude::ClaudeClientSettings {
+        default_model: "chosen/model".into(), role_mappings: Default::default(),
+        default_subagent_model: String::new(), native_models: Vec::new(), conflicts: vec![],
+    });
+    let summary = super::sync_gateway_clients_from_infos(vec![client], Some("global/model".into()), |client_id, model| {
+        assert_eq!(model.as_deref(), Some(super::clients::claude::PRESERVE_DEFAULT_MODEL));
+        Ok(super::GatewayClientApplyResult { client_id, applied: true, config_path: None, backup_path: None, message: String::new() })
+    });
+    assert_eq!(summary.applied, 1);
 }

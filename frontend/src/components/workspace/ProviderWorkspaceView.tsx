@@ -103,6 +103,7 @@ export function ProviderWorkspaceView(props: Props) {
       {
         limits: OpenAIUsageLimit[];
         balance?: number | null;
+        currency?: string;
         error?: string;
         pending?: boolean;
       }
@@ -112,7 +113,7 @@ export function ProviderWorkspaceView(props: Props) {
     return cached ? [[provider.id, cached]] : [];
   })));
   const quotaProviderIds = props.providers
-    .filter((p) => ["commandcode", "opencode-go"].includes(p.id))
+    .filter((p) => ["commandcode", "opencode-go", "deepseek"].includes(p.id))
     .map((p) => p.id)
     .join(",");
   useEffect(() => {
@@ -361,15 +362,26 @@ export function ProviderWorkspaceView(props: Props) {
         pending={xaiPending}
         message={xaiError}
       />
-    ) : ["commandcode", "opencode-go"].includes(p.id) ? (
+    ) : ["commandcode", "opencode-go", "deepseek"].includes(p.id) ? (
       <div className="ws-provider-quota">
-        <ResourceLimits
-          limits={(providerQuotas[p.id]?.limits ?? []).filter(
-            (limit) => p.id !== "opencode-go" || limit.key !== "rolling",
-          )}
-          pending={providerQuotas[p.id]?.pending}
-          message={providerQuotas[p.id]?.error}
-        />
+        {providerQuotas[p.id]?.balance != null && (
+          <div className="ws-provider-balance">
+            <span>{t("workspace.availableBalance")}</span>
+            <strong>{new Intl.NumberFormat(undefined, {
+              style: "currency",
+              currency: providerQuotas[p.id].currency ?? "USD",
+            }).format(providerQuotas[p.id].balance ?? 0)}</strong>
+          </div>
+        )}
+        {Boolean(providerQuotas[p.id]?.limits.length || providerQuotas[p.id]?.balance == null) && (
+          <ResourceLimits
+            limits={(providerQuotas[p.id]?.limits ?? []).filter(
+              (limit) => p.id !== "opencode-go" || limit.key !== "rolling",
+            )}
+            pending={providerQuotas[p.id]?.pending}
+            message={providerQuotas[p.id]?.error}
+          />
+        )}
       </div>
     ) : (
       <span className="ws-muted">{t("workspace.quotaUnsupported")}</span>

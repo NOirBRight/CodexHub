@@ -11,7 +11,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from anthropic_messages_prototype import AdaptedResponse, adapt_upstream_response, execute_exchange
+from anthropic_messages_ir import AdaptedResponse, adapt_upstream_response
+from claude_messages_evidence_exchange import execute_exchange
 from claude_messages_loopback_harness import _strace_verdict  # noqa: E402
 from claude_messages_upstream_fixtures import UpstreamFixtureServer, fixture_response
 

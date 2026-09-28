@@ -1,0 +1,61 @@
+{
+  "schema": "codexhub.qualification-local-checks.v1",
+  "product_sha": "631a5478b474d46ea78690767971642de80deda2",
+  "linux": {
+    "verify_linux_exit_code": 0,
+    "python": {
+      "passed": 3421,
+      "skipped": 189,
+      "subtests_passed": 283
+    },
+    "rust": {
+      "passed": 792,
+      "ignored": 1
+    },
+    "clippy_exit_code": 0,
+    "frontend_build": "passed",
+    "physical_pointer_and_dom": "passed"
+  },
+  "windows": {
+    "rust": {
+      "passed": 780,
+      "ignored": 3
+    },
+    "clippy_exit_code": 0,
+    "debug_portable_exit_code": 0
+  },
+  "harness": {
+    "sha": "b7f7a0fbe818b6cc78973324fa458aa7b469770f",
+    "focused_catalog_and_provider_id_passed": 6,
+    "focused_restart_metadata_passed": 1,
+    "partition_full": 3773,
+    "partition_core": 3609,
+    "partition_synthetic": 164,
+    "partition_disjoint": true,
+    "partition_complete": true,
+    "report_only_quality_parse_errors": 0,
+    "synthetic_full": {
+      "exit_code": 0,
+      "passed": 164,
+      "failed": 0,
+      "skipped": 0,
+      "duration_seconds": 1360.512
+    }
+  },
+  "reviews": {
+    "720dd565": {
+      "standards": "no_findings",
+      "spec": "provenance_gap_resolved_in_linked_evidence"
+    },
+    "b7f7a0fb": {
+      "standards": "no_findings",
+      "spec": "no_findings"
+    }
+  },
+  "historical_checks_retained": {
+    "windows_python_core_sha": "e0a2289b61c2f6d454667e60871fb4bc13152aa4",
+    "windows_python_core_passed": 3546,
+    "windows_python_core_skipped": 64,
+    "windows_python_core_subtests_passed": 283
+  }
+}

@@ -16,7 +16,7 @@
   "cases": [
     {
       "provider_id": "official",
-      "model": "gpt-5.6-luna",
+      "model": "gpt-6-luna",
       "endpoint_binding": "/v1/chat/completions",
       "protocol": "chat_completions",
       "prompt_cache_key": "codexhub-chat-e2e-official",
@@ -26,15 +26,15 @@
       }
     },
     {
-      "provider_id": "opencode-go",
-      "model": "muse-spark-1.3-contributor",
-      "endpoint_binding": "/v1/providers/opencode-go/chat/completions",
+      "provider_id": "deepseek",
+      "model": "deepseek-flash",
+      "endpoint_binding": "/v1/providers/deepseek/chat/completions",
       "protocol": "chat_completions",
-      "prompt_cache_key": "codexhub-chat-e2e-opencode-go",
       "max_tokens": 1024,
+      "prompt_cache_key": "codexhub-chat-e2e-deepseek",
       "case_ids": {
-        "linux": "chat-opencode-go",
-        "windows": "chat-opencode-go"
+        "linux": "chat-deepseek",
+        "windows": "chat-deepseek"
       }
     }
   ]

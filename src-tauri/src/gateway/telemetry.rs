@@ -588,6 +588,7 @@ pub(crate) fn initialize_telemetry_db(connection: &Connection) -> Result<(), Str
                 usage_missing_reason TEXT,
                 usage_input_tokens INTEGER,
                 usage_cached_input_tokens INTEGER,
+                usage_cache_write_input_tokens INTEGER,
                 usage_output_tokens INTEGER,
                 usage_total_tokens INTEGER,
                 usage_reasoning_tokens INTEGER,
@@ -612,6 +613,41 @@ pub(crate) fn initialize_telemetry_db(connection: &Connection) -> Result<(), Str
             "#,
         )
         .map_err(|error| format!("failed to initialize telemetry sqlite indexes: {error}"))?;
+    migrate_usage_provider_ids(connection)?;
+    Ok(())
+}
+
+fn migrate_usage_provider_ids(connection: &Connection) -> Result<(), String> {
+    let migrated = connection
+        .query_row(
+            "SELECT 1 FROM telemetry_meta WHERE key = 'usage_provider_aliases_v1'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| format!("failed to read usage provider migration status: {error}"))?;
+    if migrated.is_some() {
+        return Ok(());
+    }
+    connection
+        .execute_batch(
+            r#"
+            BEGIN IMMEDIATE;
+            UPDATE gateway_requests SET provider_id = CASE provider_id
+                WHEN 'official' THEN 'openai'
+                WHEN 'volcengine' THEN 'volc'
+                WHEN 'minimax_cn' THEN 'minimax-cn'
+                WHEN 'ollama_cloud' THEN 'ollama-cloud'
+                WHEN 'opencode_go' THEN 'opencode-go'
+                WHEN 'anthropic_native' THEN 'claude_subscription'
+            END WHERE provider_id IN (
+                'official', 'volcengine', 'minimax_cn', 'ollama_cloud', 'opencode_go', 'anthropic_native'
+            );
+            INSERT OR IGNORE INTO telemetry_meta(key, value) VALUES ('usage_provider_aliases_v1', 'done');
+            COMMIT;
+            "#,
+        )
+        .map_err(|error| format!("failed to migrate usage provider IDs: {error}"))?;
     Ok(())
 }
 
@@ -685,6 +721,7 @@ fn gateway_request_column_defs() -> &'static [(&'static str, &'static str)] {
         ("usage_missing_reason", "TEXT"),
         ("usage_input_tokens", "INTEGER"),
         ("usage_cached_input_tokens", "INTEGER"),
+        ("usage_cache_write_input_tokens", "INTEGER"),
         ("usage_output_tokens", "INTEGER"),
         ("usage_total_tokens", "INTEGER"),
         ("usage_reasoning_tokens", "INTEGER"),
@@ -844,7 +881,14 @@ fn upsert_gateway_request_from_event(
     };
     let upstream = string_field(value, "upstream");
     let model = string_field(value, "model");
-    let provider_id = string_field(value, "provider_id").or_else(|| upstream.clone());
+    let provider_id = if upstream.as_deref() == Some("anthropic_native") {
+        Some("claude_subscription".to_string())
+    } else {
+        string_field(value, "route_provider_id")
+            .or_else(|| string_field(value, "provider_id"))
+            .or_else(|| upstream.clone())
+            .map(|id| canonical_usage_provider_id(&id).to_string())
+    };
     let model_canonical = string_field(value, "model_canonical").or_else(|| model.clone());
     let model_requested = string_field(value, "model_requested").or_else(|| model.clone());
     let route_mode =
@@ -871,7 +915,7 @@ fn upsert_gateway_request_from_event(
     }
     let clear_usage_missing_reason: i64 = if usage_source
         .as_deref()
-        .is_some_and(|source| source != "missing")
+        .is_some_and(|source| !matches!(source, "missing" | "partial"))
     {
         1
     } else {
@@ -923,6 +967,7 @@ fn upsert_gateway_request_from_event(
                 usage_missing_reason = CASE WHEN ? THEN NULL ELSE COALESCE(?, usage_missing_reason) END,
                 usage_input_tokens = COALESCE(?, usage_input_tokens),
                 usage_cached_input_tokens = COALESCE(?, usage_cached_input_tokens),
+                usage_cache_write_input_tokens = COALESCE(?, usage_cache_write_input_tokens),
                 usage_output_tokens = COALESCE(?, usage_output_tokens),
                 usage_total_tokens = COALESCE(?, usage_total_tokens),
                 usage_reasoning_tokens = COALESCE(?, usage_reasoning_tokens),
@@ -978,6 +1023,9 @@ fn upsert_gateway_request_from_event(
                 value.get("usage_input_tokens").and_then(Value::as_i64),
                 value
                     .get("usage_cached_input_tokens")
+                    .and_then(Value::as_i64),
+                value
+                    .get("usage_cache_write_input_tokens")
                     .and_then(Value::as_i64),
                 value.get("usage_output_tokens").and_then(Value::as_i64),
                 value.get("usage_total_tokens").and_then(Value::as_i64),
@@ -1075,6 +1123,7 @@ pub(crate) fn read_usage_events_from_sqlite_path_with_window(
                 usage_output_tokens,
                 usage_total_tokens,
                 usage_cached_input_tokens,
+                usage_cache_write_input_tokens,
                 usage_reasoning_tokens
             FROM gateway_requests
             WHERE completed_ts IS NOT NULL
@@ -1086,10 +1135,18 @@ pub(crate) fn read_usage_events_from_sqlite_path_with_window(
                   'local_responses_probe',
                   'local_responses_websocket_fast_reject'
               )
+              AND NOT (
+                  COALESCE(method, '') = 'POST'
+                  AND inbound_format = 'anthropic_messages'
+                  AND (path = '/v1/messages/count_tokens'
+                       OR path LIKE '/v1/messages/count_tokens?%')
+              )
               AND (
                   path LIKE '/v1/responses%'
                   OR path LIKE '/v1/chat/completions%'
                   OR inbound_format IN ('responses', 'chat_completions')
+                  OR (method = 'POST' AND inbound_format = 'anthropic_messages'
+                      AND (path = '/v1/messages' OR path LIKE '/v1/messages?%'))
                   OR usage_input_tokens IS NOT NULL
                   OR usage_output_tokens IS NOT NULL
                   OR usage_total_tokens IS NOT NULL
@@ -1100,6 +1157,8 @@ pub(crate) fn read_usage_events_from_sqlite_path_with_window(
                   OR usage_input_tokens IS NOT NULL
                   OR usage_output_tokens IS NOT NULL
                   OR usage_total_tokens IS NOT NULL
+                  OR (method = 'POST' AND inbound_format = 'anthropic_messages'
+                      AND (path = '/v1/messages' OR path LIKE '/v1/messages?%'))
               )
             ORDER BY completed_ts DESC
             LIMIT ?3
@@ -1114,7 +1173,9 @@ pub(crate) fn read_usage_events_from_sqlite_path_with_window(
                     ts: row.get(0)?,
                     request_id: row.get(1)?,
                     model: normalize_usage_model(row.get(3)?, row.get(2)?),
-                    upstream: row.get(3)?,
+                    upstream: row
+                        .get::<_, Option<String>>(3)?
+                        .map(|id| canonical_usage_provider_id(&id).to_string()),
                     client_id: row.get(4)?,
                     client_inference_source: row.get(5)?,
                     reports_cached_input_tokens: optional_i64_to_bool(
@@ -1130,7 +1191,8 @@ pub(crate) fn read_usage_events_from_sqlite_path_with_window(
                     output_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(12)?),
                     total_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(13)?),
                     cached_input_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(14)?),
-                    reasoning_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(15)?),
+                    cache_write_input_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(15)?),
+                    reasoning_tokens: optional_i64_to_u64(row.get::<_, Option<i64>>(16)?),
                 })
             },
         )
@@ -1201,20 +1263,33 @@ fn read_usage_summary_from_events_with_pricing(
         .iter()
         .filter(|event| event.usage_source == "missing")
         .count() as u64;
+    let partial_usage_requests = events
+        .iter()
+        .filter(|event| event.usage_source == "partial")
+        .count() as u64;
     let input_tokens = sum_optional(events.iter().map(|event| event.input_tokens));
     let output_tokens = sum_optional(events.iter().map(|event| event.output_tokens));
-    let total_tokens =
-        sum_optional(events.iter().map(|event| event.total_tokens)).or_else(|| {
-            match (input_tokens, output_tokens) {
-                (Some(input), Some(output)) => Some(input + output),
-                _ => None,
-            }
-        });
+    let total_tokens = sum_optional(events.iter().map(|event| {
+        event
+            .total_tokens
+            .or_else(|| match (event.input_tokens, event.output_tokens) {
+                (Some(input), Some(output)) => Some(input.saturating_add(output)),
+                (Some(input), None) => Some(input),
+                (None, Some(output)) => Some(output),
+                (None, None) => None,
+            })
+    }));
     let cached_input_tokens = sum_optional(
         events
             .iter()
             .filter(|event| event_reports_cache_usage(event, &cache_capable_providers))
             .map(|event| event.cached_input_tokens),
+    );
+    let cache_write_input_tokens = sum_optional(
+        events
+            .iter()
+            .filter(|event| event_reports_cache_usage(event, &cache_capable_providers))
+            .map(|event| event.cache_write_input_tokens),
     );
     let mut cache_known_input_tokens = 0_u64;
     let mut cache_known_cached_tokens = 0_u64;
@@ -1225,7 +1300,8 @@ fn read_usage_summary_from_events_with_pricing(
         if let (Some(input), Some(cached)) = (event.input_tokens, event.cached_input_tokens) {
             if input > 0 {
                 cache_known_input_tokens = cache_known_input_tokens.saturating_add(input);
-                cache_known_cached_tokens = cache_known_cached_tokens.saturating_add(cached);
+                cache_known_cached_tokens =
+                    cache_known_cached_tokens.saturating_add(cached.min(input));
             }
         }
     }
@@ -1243,10 +1319,12 @@ fn read_usage_summary_from_events_with_pricing(
         requests,
         successful_requests,
         missing_usage_requests,
+        partial_usage_requests,
         total_tokens,
         input_tokens,
         output_tokens,
         cached_input_tokens,
+        cache_write_input_tokens,
         cache_hit_rate,
         estimated_cost_usd: cost.estimated_cost_usd,
         cost_label: cost.label,
@@ -1328,10 +1406,25 @@ fn normalize_usage_model(upstream: Option<String>, model: Option<String>) -> Opt
         return None;
     }
     let upstream = upstream.as_deref().unwrap_or_default();
-    if upstream == "official" && !trimmed.contains('/') && is_official_usage_model(trimmed) {
+    if matches!(upstream, "official" | "openai")
+        && !trimmed.contains('/')
+        && is_official_usage_model(trimmed)
+    {
         return Some(format!("openai/{trimmed}"));
     }
     Some(trimmed.to_string())
+}
+
+fn canonical_usage_provider_id(id: &str) -> &str {
+    match id {
+        "official" => "openai",
+        "volcengine" => "volc",
+        "minimax_cn" => "minimax-cn",
+        "ollama_cloud" => "ollama-cloud",
+        "opencode_go" => "opencode-go",
+        "anthropic_native" => "claude_subscription",
+        _ => id,
+    }
 }
 
 fn is_official_usage_model(model: &str) -> bool {
@@ -1696,6 +1789,9 @@ pub(crate) fn read_usage_events_from_text(text: &str, limit: usize) -> Vec<Gatew
             total_tokens: value.get("usage_total_tokens").and_then(Value::as_u64),
             cached_input_tokens: value
                 .get("usage_cached_input_tokens")
+                .and_then(Value::as_u64),
+            cache_write_input_tokens: value
+                .get("usage_cache_write_input_tokens")
                 .and_then(Value::as_u64),
             reasoning_tokens: value.get("usage_reasoning_tokens").and_then(Value::as_u64),
         });

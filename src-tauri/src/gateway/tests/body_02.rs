@@ -506,6 +506,68 @@ fn usage_snapshot_bounded_window_returns_all_events() {
 }
 
 #[test]
+fn native_claude_usage_flows_through_public_statistics_query() {
+    let root = unique_temp_dir("codexhub-native-claude-usage");
+    fs::create_dir_all(&root).unwrap();
+    let event_path = root.join("codex-proxy-events.jsonl");
+    let db_path = root.join("codex-proxy-telemetry.sqlite");
+    let events = [
+        r#"{"ts":"2026-09-23T01:00:00Z","event":"request_complete","request_id":"native-complete","method":"POST","path":"/v1/messages","inbound_format":"anthropic_messages","route_reason":"model","upstream":"anthropic_native","provider_id":"claude_subscription","model":"claude-opus-5-5","reports_cached_input_tokens":true,"status":200,"duration_ms":140,"usage_source":"upstream","usage_input_tokens":12,"usage_cached_input_tokens":3,"usage_cache_write_input_tokens":2,"usage_output_tokens":5,"usage_total_tokens":17}"#,
+        r#"{"ts":"2026-09-23T01:00:01Z","event":"request_complete","request_id":"native-partial","method":"POST","path":"/v1/messages","inbound_format":"anthropic_messages","route_reason":"model","upstream":"anthropic_native","provider_id":"claude_subscription","model":"claude-opus-5-5","reports_cached_input_tokens":true,"status":502,"duration_ms":320,"usage_source":"partial","usage_missing_reason":"stream_incomplete","usage_input_tokens":12,"usage_cached_input_tokens":4,"usage_cache_write_input_tokens":2}"#,
+        r#"{"ts":"2026-09-23T01:00:02Z","event":"request_complete","request_id":"native-missing","method":"POST","path":"/v1/messages","inbound_format":"anthropic_messages","route_reason":"model","upstream":"anthropic_native","provider_id":"claude_subscription","model":"claude-opus-5-5","reports_cached_input_tokens":true,"status":502,"duration_ms":80,"usage_source":"missing","usage_missing_reason":"upstream_error"}"#,
+        r#"{"ts":"2026-09-23T01:00:03Z","event":"request_complete","request_id":"external-complete","method":"POST","path":"/v1/messages","inbound_format":"anthropic_messages","route_reason":"model","upstream":"deepseek","provider_id":"deepseek","model":"deepseek/deepseek-flash","reports_cached_input_tokens":false,"status":200,"duration_ms":210,"usage_source":"upstream","usage_input_tokens":2,"usage_output_tokens":1,"usage_total_tokens":3}"#,
+        r#"{"ts":"2026-09-23T01:00:04Z","event":"request_complete","request_id":"count-tokens","method":"POST","path":"/v1/messages/count_tokens","inbound_format":"anthropic_messages","route_reason":"model","upstream":"anthropic_native","provider_id":"claude_subscription","model":"claude-opus-5-5","reports_cached_input_tokens":true,"status":200,"duration_ms":5,"usage_source":"upstream","usage_input_tokens":500,"usage_total_tokens":500}"#,
+    ];
+    fs::write(&event_path, events.join("\n")).unwrap();
+    super::ingest_telemetry_once_for_paths(&event_path, &db_path).unwrap();
+
+    let snapshot = super::gateway_usage_snapshot_for_paths(
+        &event_path,
+        &db_path,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(snapshot.summary.requests, 4);
+    assert_eq!(snapshot.summary.successful_requests, 2);
+    assert_eq!(snapshot.summary.missing_usage_requests, 1);
+    assert_eq!(snapshot.summary.partial_usage_requests, 1);
+    assert_eq!(snapshot.summary.total_tokens, Some(32));
+    assert_eq!(snapshot.summary.input_tokens, Some(26));
+    assert_eq!(snapshot.summary.output_tokens, Some(6));
+    assert_eq!(snapshot.summary.cached_input_tokens, Some(7));
+    assert_eq!(snapshot.summary.cache_write_input_tokens, Some(4));
+    assert_eq!(snapshot.summary.cache_hit_rate, Some(29.2));
+
+    let native = snapshot
+        .events
+        .iter()
+        .find(|event| event.request_id.as_deref() == Some("native-complete"))
+        .expect("native usage row");
+    assert_eq!(native.upstream.as_deref(), Some("claude_subscription"));
+    assert_eq!(native.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(native.status, Some(200));
+    assert_eq!(native.duration_ms, Some(140));
+    assert_eq!(native.cache_write_input_tokens, Some(2));
+
+    let partial = snapshot
+        .events
+        .iter()
+        .find(|event| event.request_id.as_deref() == Some("native-partial"))
+        .expect("partial native usage row");
+    assert_eq!(partial.usage_source, "partial");
+    assert_eq!(partial.usage_missing_reason.as_deref(), Some("stream_incomplete"));
+    assert_eq!(partial.status, Some(502));
+    assert_eq!(partial.duration_ms, Some(320));
+    assert_eq!(partial.output_tokens, None);
+    assert!(!snapshot.events.iter().any(|event| {
+        event.request_id.as_deref() == Some("count-tokens")
+    }));
+}
+
+#[test]
 fn usage_events_normalize_official_bare_model_names() {
     let root = unique_temp_dir("codexhub-usage-official-models");
     fs::create_dir_all(&root).unwrap();
@@ -2717,4 +2779,72 @@ fn opencode_restore_malformed_config_fails_without_mutation() {
     restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
     assert!(result.is_err());
     assert_eq!(fs::read_to_string(&config_path).unwrap(), "not json");
+}
+
+#[test]
+fn usage_events_fold_transport_aliases_and_migrate_existing_rows() {
+    let root = unique_temp_dir("codexhub-usage-provider-aliases");
+    fs::create_dir_all(&root).unwrap();
+    let db_path = root.join("usage.sqlite");
+    let connection = rusqlite::Connection::open(&db_path).unwrap();
+    super::initialize_telemetry_db(&connection).unwrap();
+    connection.execute_batch(r#"
+        INSERT INTO gateway_requests (request_id, completed_ts, method, path, model, upstream, provider_id, status, created_at, updated_at)
+        VALUES
+            ('legacy', '2026-09-27T00:00:00Z', 'POST', '/v1/responses', 'gpt-5.5', 'official', 'official', 200, 'test', 'test'),
+            ('current', '2026-09-27T00:00:01Z', 'POST', '/v1/responses', 'gpt-5.5', 'official', 'openai', 200, 'test', 'test'),
+            ('other', '2026-09-27T00:00:02Z', 'POST', '/v1/responses', 'gpt-5.5', 'external', 'other-provider', 200, 'test', 'test');
+        INSERT INTO gateway_requests (request_id, provider_id, created_at, updated_at) VALUES
+            ('volcengine', 'volcengine', 'test', 'test'),
+            ('minimax_cn', 'minimax_cn', 'test', 'test'),
+            ('ollama_cloud', 'ollama_cloud', 'test', 'test'),
+            ('opencode_go', 'opencode_go', 'test', 'test'),
+            ('anthropic_native', 'anthropic_native', 'test', 'test');
+    "#).unwrap();
+    connection.execute("DELETE FROM telemetry_meta WHERE key = 'usage_provider_aliases_v1'", []).unwrap();
+
+    let events = read_usage_events_from_sqlite_path(&db_path, usize::MAX).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.upstream.as_deref() == Some("openai"))
+            .count(),
+        2
+    );
+    assert!(events
+        .iter()
+        .filter(|event| event.upstream.as_deref() == Some("openai"))
+        .all(|event| event.model.as_deref() == Some("openai/gpt-5.5")));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.upstream.as_deref() == Some("other-provider"))
+            .count(),
+        1
+    );
+    super::initialize_telemetry_db(&connection).unwrap();
+    let stored: String = connection
+        .query_row(
+            "SELECT provider_id FROM gateway_requests WHERE request_id = 'legacy'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "openai");
+    for (old, canonical) in [
+        ("volcengine", "volc"),
+        ("minimax_cn", "minimax-cn"),
+        ("ollama_cloud", "ollama-cloud"),
+        ("opencode_go", "opencode-go"),
+        ("anthropic_native", "claude_subscription"),
+    ] {
+        let stored: String = connection
+            .query_row(
+                "SELECT provider_id FROM gateway_requests WHERE request_id = ?",
+                [old],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, canonical);
+    }
 }

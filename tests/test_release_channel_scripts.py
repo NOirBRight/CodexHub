@@ -2,7 +2,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tomllib
 
 import pytest
@@ -32,6 +34,33 @@ def test_generated_tauri_config_applies_linux_platform_overlay():
     assert "Add-Member -NotePropertyName" in script
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="runs the Linux Tauri config generator")
+def test_linux_tauri_config_generator_includes_only_the_linux_runtime_archive(tmp_path: Path):
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell 7 is required to exercise the public config generator")
+    result = subprocess.run(
+        [
+            pwsh,
+            "-NoProfile",
+            "-File",
+            str(ROOT / "scripts" / "Build-TauriConfig.ps1"),
+            "-RepoRoot",
+            str(ROOT),
+            "-OutputRoot",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = json.loads((tmp_path / "tauri.normal.conf.json").read_text(encoding="utf-8"))
+    resources = generated["bundle"]["resources"]
+    assert resources["resources/chatgpt-web-runtime/*.tar.gz"] == "config"
+    assert "resources/chatgpt-web-runtime/*.zip" not in resources
+
+
 def test_official_transport_wheel_is_pinned_and_packaged():
     wheel = ROOT / "src-python" / "vendor" / "urllib3-2.7.0-py3-none-any.whl"
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
@@ -44,7 +73,7 @@ def test_official_transport_wheel_is_pinned_and_packaged():
 
 
 def test_release_version_is_consistent_across_manifests():
-    expected = "0.2.27"
+    expected = "0.2.30"
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     cargo = tomllib.loads((ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
     cargo_lock = tomllib.loads((ROOT / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8"))
@@ -536,7 +565,9 @@ def test_linux_portable_packages_the_xai_device_login_helper():
     script = (ROOT / "scripts" / "build-linux-portable.sh").read_text(encoding="utf-8")
     tauri = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
 
-    assert 'for resource in config src-python python scripts' in script
+    assert '["bundle"]["resources"]' in script
+    assert 'repo / "src-tauri" / pattern' in script
+    assert 'shutil.copy2(source, target)' in script
     assert '"$portable_dir/scripts/xai_device_login.py"' in script
     assert 'scripts/e2e_linux_dock_icon.py' in script
     assert '--bin "$portable_dir/$executableBaseName"' in script

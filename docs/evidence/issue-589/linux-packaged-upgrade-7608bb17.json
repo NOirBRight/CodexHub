@@ -1,0 +1,17 @@
+{
+  "candidate_sha": "7608bb175c03bba3df73014fd295e562696d93ef",
+  "upgrade_preserved_settings_and_account": true,
+  "started": true,
+  "pending_restart": false,
+  "start_preserved_settings_and_account": true,
+  "saved_settings_are_active": true,
+  "model_count": 9,
+  "passed": true,
+  "readiness": {
+    "cache_state": "current",
+    "state": "ready",
+    "text_ready": true,
+    "tools_ready": true,
+    "capabilities_match": true
+  }
+}

@@ -15,7 +15,7 @@ import http.client
 import urllib.error
 
 import anthropic_messages
-import anthropic_messages_prototype
+import anthropic_messages_ir
 import collaboration_adapter
 import gateway_relay_anthropic
 import gateway_compat
@@ -623,6 +623,34 @@ def relay_upstream_response(
         if isinstance(response_id, str) and response_id:
             response_lifecycle_state["response_id"] = response_id
 
+    if upstream_name == "anthropic_native" and 300 <= status < 400:
+        self.close_connection = True
+        write_proxy_event(
+            "request_error",
+            request_id=request_id,
+            model=model,
+            upstream=upstream_name,
+            status=502,
+            error="AnthropicRedirectBlocked",
+            detail="Claude subscription redirects are not followed or relayed.",
+        )
+        gateway_events.capture_usage(
+            usage_capture,
+            None,
+            missing_reason="native_redirect_refused",
+        )
+        self._send_json(
+            502,
+            {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": "Claude subscription redirects are blocked by Gateway.",
+                },
+            },
+        )
+        return 502
+
     if (
         streaming_policy == StreamingPolicy.TRANSPARENT
         and upstream_format == inbound_format
@@ -958,15 +986,15 @@ def relay_upstream_response(
             elif inbound_format == "anthropic_messages":
                 content_type = "application/json"
                 response_headers = getattr(response, "headers", None)
-                if response_headers is not None:
+                if response_headers is not None and not buffered_json_response:
                     content_type = response_headers.get("content-type", content_type) or content_type
-                adapted = anthropic_messages_prototype.adapt_upstream_response(
-                    upstream_format,
+                adapted = anthropic_messages_ir.adapt_upstream_response(
+                    "responses" if buffered_chat_sse_to_responses else upstream_format,
                     body,
                     status=status,
                     content_type=content_type,
                 )
-                if isinstance(adapted, anthropic_messages_prototype.NotForwardable):
+                if isinstance(adapted, anthropic_messages_ir.NotForwardable):
                     status = status if status >= 400 else 400
                     body = json.dumps(
                         {
@@ -1043,7 +1071,16 @@ def relay_upstream_response(
             gateway_events.capture_usage(usage_capture, None, missing_reason="async_usage_pending")
             gateway_events.offer_usage_observed_body(usage_context, upstream_body_for_usage)
         else:
-            gateway_events.capture_usage(usage_capture, gateway_events._usage_from_json_body(body))
+            usage_body = (
+                upstream_body_for_usage
+                if upstream_format == "anthropic_messages"
+                else body
+            )
+            gateway_events.capture_usage(
+                usage_capture,
+                gateway_events._usage_from_json_body(usage_body),
+                upstream_format=upstream_format,
+            )
             if status < 400:
                 lifecycle_issue = gateway_stream_semantics._response_body_lifecycle_final_issue(
                     body, event_context, request_kind
@@ -1254,6 +1291,13 @@ def relay_upstream_response(
 
     if is_event_stream:
         if want_anthropic_output:
+            observe_response_event = None
+            if upstream_name == "chatgpt_web":
+                import chatgpt_web_client_session as _chatgpt_web_client_session
+
+                def observe_response_event(event: Mapping[str, Any]) -> None:
+                    _chatgpt_web_client_session.observe_upstream_event(event, event_context)
+
             return gateway_relay_anthropic.relay_inbound_anthropic_sse(
                 handler=self,
                 response=response,
@@ -1267,6 +1311,8 @@ def relay_upstream_response(
                 upstream_format=upstream_format,
                 inbound_format=inbound_format,
                 status=status,
+                usage_capture=usage_capture,
+                observe_response_event=observe_response_event,
             )
         if (
             streaming_policy == StreamingPolicy.TRANSPARENT_CONVERTED
@@ -1676,6 +1722,11 @@ def relay_upstream_response(
             line_ending = b"\n"
             events: list[Mapping[str, Any]] = []
             incomplete_frame = False
+            observe_web_client = None
+            if upstream_name == "chatgpt_web":
+                import chatgpt_web_client_session as _chatgpt_web_client_session
+
+                observe_web_client = _chatgpt_web_client_session.observe_upstream_event
             try:
                 for frame in iter_upstream_sse_events(
                     response,
@@ -1691,6 +1742,8 @@ def relay_upstream_response(
                     if event is None or event == "[DONE]":
                         continue
                     events.append(event)
+                    if observe_web_client is not None and isinstance(event, Mapping):
+                        observe_web_client(event, event_context)
                     if usage_policy == UsagePolicy.ASYNC_TAP:
                         gateway_events.offer_usage_observed_sse_line(
                             usage_context,
@@ -2551,6 +2604,10 @@ def relay_upstream_response(
                     continue
                 original_payload = gateway_sse._parse_sse_json_payload(line) if upstream_name != "official" else None
                 usage_payload = gateway_sse._parse_sse_json_payload(line)
+                if upstream_name == "chatgpt_web" and isinstance(usage_payload, Mapping):
+                    import chatgpt_web_route as _chatgpt_web_route
+
+                    _chatgpt_web_route.observe_upstream_event(usage_payload, event_context)
                 buffer_current_line = False
                 if isinstance(usage_payload, Mapping):
                     remember_response_id(usage_payload)

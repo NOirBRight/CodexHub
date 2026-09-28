@@ -1,0 +1,122 @@
+{
+  "candidate_source_revision": "7608bb175c03bba3df73014fd295e562696d93ef",
+  "provenance": {
+    "packaged_modules_asserted": true,
+    "embedded_executable_revision_verified": true,
+    "rerun_reason": "Previous probe retained a hardcoded old candidate label; rerun with explicit packaged-module and binary-revision assertions."
+  },
+  "package": "CodexHub_0.2.30_portable_7608bb17.zip",
+  "runtime_archive_sha256": "5cbb11d6d848018d1f079c89151f4dd46cc7d5ebb83a878970626b5120b35a95",
+  "credentials_used": false,
+  "account_marker": "synthetic noncredential marker only",
+  "live_account_acceptance": "not performed",
+  "stages": {
+    "legacy_migration_read": {
+      "passed": true,
+      "connector": "Legacy Fixture Connector",
+      "context_window": 131072,
+      "synthetic_control_token_sha256_preserved_after_read": true
+    },
+    "pinned_runtime_install": {
+      "passed": true,
+      "installed": true,
+      "archive_hash_matches_pin": true
+    },
+    "first_start_and_legacy_migration": {
+      "passed": true,
+      "health_samples": [
+        {
+          "http_status": 200,
+          "status": "ok",
+          "pid_matches_record": true
+        },
+        {
+          "http_status": 200,
+          "status": "ok",
+          "pid_matches_record": true
+        },
+        {
+          "http_status": 200,
+          "status": "ok",
+          "pid_matches_record": true
+        }
+      ],
+      "active_context_window": 131072,
+      "pending_restart": false,
+      "legacy_connector_preserved": true,
+      "synthetic_control_token_sha256_preserved": true
+    },
+    "save_is_pending_without_restart": {
+      "passed": true,
+      "saved_context_window": 262144,
+      "active_context_window": 131072,
+      "pending_restart": true,
+      "pid_unchanged": true,
+      "admission_preserved": true,
+      "delayed_restart_seen": false
+    },
+    "explicit_stop_start_activates_saved_settings": {
+      "passed": true,
+      "new_process": true,
+      "active_context_window": 262144,
+      "saved_context_window": 262144,
+      "pending_restart": false,
+      "stop_request_removed": true
+    },
+    "same_package_upgrade_preserves_migrated_state": {
+      "passed": true,
+      "runtime_archive_hash_matches_pin": true,
+      "settings_bytes_preserved": true,
+      "active_snapshot_bytes_preserved": true,
+      "synthetic_account_marker_bytes_preserved": true,
+      "legacy_control_token_hash_preserved": true,
+      "stopped_for_upgrade": true,
+      "restart_required_after_upgrade": true
+    },
+    "post_upgrade_start_and_no_live_account_claim": {
+      "passed": true,
+      "active_context_window": 262144,
+      "pending_restart": false,
+      "runtime_running": true,
+      "ready": false,
+      "login_state": "unknown",
+      "text_ready": false,
+      "tools_ready": false,
+      "synthetic_marker_preserved": true,
+      "real_account_or_provider_call": false
+    },
+    "final_stop_cleanup": {
+      "passed": true,
+      "process_record_absent": true,
+      "stop_request_absent": true,
+      "settings_preserved": true,
+      "synthetic_account_marker_preserved": true,
+      "stopped_supervisor_pid": 24228,
+      "stopped_runtime_pid": 32772
+    }
+  },
+  "recorded_pids": [
+    {
+      "phase": "first_start",
+      "supervisor_pid": 33664,
+      "runtime_pid": 14692
+    },
+    {
+      "phase": "explicit_restart",
+      "supervisor_pid": 40976,
+      "runtime_pid": 35600
+    },
+    {
+      "phase": "post_upgrade_start",
+      "supervisor_pid": 24228,
+      "runtime_pid": 32772
+    }
+  ],
+  "account_marker_sha256": "6262cf2938e0dcb0ff3e01c54a4fb0396818bf6508ef426f17a1dc9dfb575a6e",
+  "runtime_settings_sha256": "fd8254647195759ba04986821d4bc8f114ff17a294fc6d2650e534e23e6ab399",
+  "active_settings_sha256": "0adc05abcde9b63720f9adb8a27fe4d121459bd953fffc12335a08804910b312",
+  "passed": true,
+  "cleanup_process_record_absent": true,
+  "synthetic_account_marker_present": true,
+  "all_owned_processes_gone": true
+}

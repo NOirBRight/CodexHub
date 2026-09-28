@@ -26,9 +26,11 @@ Run targeted tests freely while implementing. At the candidate commit,
 |---|---|
 | Python Gateway, routing, protocol translation, analyzers, Python configuration, or Python test infrastructure | Windows: `.\scripts\codexhub-python.cmd -m pytest -q --ignore=tests/test_real_client_e2e.py` plus the watchdog-bounded synthetic suite when the real-client E2E contract surface changed. Linux: `./scripts/codexhub-python.sh -m pytest -q --ignore=tests/test_real_client_e2e.py` (or `./scripts/verify-linux.sh` for Python core + Rust tests + clippy + physical pointer E2E). Windows cmd/PowerShell launcher and release-script tests skip on Linux. |
 | Frontend source, UI contracts, frontend configuration, or frontend dependencies | `npm run build` and `npm run test:ui-contract` in `frontend/`. A complete Linux candidate additionally runs `./scripts/verify-linux.sh`; its mandatory real-window pointer E2E proves both native input capture and a rendered DOM state transition. |
-| Tauri/Rust commands, Gateway lifecycle, configuration, packaging code, Rust dependencies, or Rust test infrastructure | Windows: `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/`. Linux: `./scripts/verify-linux.sh`, which also builds the real app and runs the mandatory physical pointer-input E2E under Xvfb. Install `xvfb`, `xauth`, and `x11-utils` before running the Linux suite. |
+| Tauri/Rust commands, Gateway lifecycle, configuration, packaging code, Rust dependencies, or Rust test infrastructure | Windows: `cargo test --locked -- --test-threads=1` and `cargo clippy --locked --all-targets -- -D warnings` in `src-tauri/`. Linux: `./scripts/verify-linux.sh`, which also builds the real app and runs the mandatory physical pointer-input E2E under Xvfb. Install `xvfb`, `xauth`, and `x11-utils` before running the Linux suite. |
 | Shared frontend/Tauri command or persisted-settings contract | Frontend and Rust suites |
 | Shared Python/Rust Gateway, process-lifecycle, catalog, packaging, updater, release, or installer boundary | Every suite touched by the contract; release instructions may add an explicit build matrix |
+
+Run Rust tests serially on both hosts because several tests mutate process-wide environment and telemetry counters. The former Hosted Rust job and the Linux fallback already use this setting; it runs the full suite without dropping any tests.
 
 Documentation-only changes need link/content inspection and diff hygiene, not a
 language full suite. A `fast` isolated UI or pure-logic change still runs the

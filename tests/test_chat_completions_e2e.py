@@ -24,22 +24,22 @@ def test_chat_contract_is_a_sibling_not_a_cli_row() -> None:
     assert CONTRACT["schema"] == "codexhub.real-client-chat-contract.v1"
     assert {case["provider_id"] for case in CONTRACT["cases"]} == {
         "official",
-        "opencode-go",
+        "deepseek",
     }
     assert {case["protocol"] for case in CONTRACT["cases"]} == {"chat_completions"}
     assert {case["case_ids"]["linux"] for case in CONTRACT["cases"]} == {
         "chat-official",
-        "chat-opencode-go",
+        "chat-deepseek",
     }
     assert {case["case_ids"]["windows"] for case in CONTRACT["cases"]} == {
         "chat-official",
-        "chat-opencode-go",
+        "chat-deepseek",
     }
-    official, muse = CONTRACT["cases"]
+    official, third_party = CONTRACT["cases"]
     assert official["endpoint_binding"] == "/v1/chat/completions"
-    assert muse["endpoint_binding"] == "/v1/providers/opencode-go/chat/completions"
+    assert third_party["endpoint_binding"] == "/v1/providers/deepseek/chat/completions"
     assert official["prompt_cache_key"]
-    assert muse["prompt_cache_key"]
+    assert third_party["prompt_cache_key"]
 
 
 def test_chat_payload_and_headers_stay_on_official_compat_path() -> None:
@@ -47,12 +47,13 @@ def test_chat_payload_and_headers_stay_on_official_compat_path() -> None:
     sentinel = E2E.SENTINEL_PREFIX + case.case_id
     payload = E2E.chat_payload(case, sentinel)
     headers = E2E.chat_headers("gateway-key")
-    assert payload["model"] == "gpt-5.6-luna"
+    assert payload["model"] == "gpt-6-luna"
     assert payload["stream"] is True
     assert payload["max_tokens"] == 256
     assert payload["prompt_cache_key"] == "codexhub-chat-e2e-official"
-    muse = next(case for case in E2E.CASES if case.provider == "opencode-go")
-    assert E2E.chat_payload(muse, "x")["max_tokens"] == 1024
+    third_party = next(case for case in E2E.CASES if case.provider == "deepseek")
+    assert third_party.model == "deepseek-flash"
+    assert E2E.chat_payload(third_party, "x")["max_tokens"] == 1024
     assert sentinel in str(payload["messages"])
     assert "X-Codex-Client-Id" not in headers
     assert headers["Authorization"] == "Bearer gateway-key"
@@ -71,26 +72,82 @@ def test_local_opener_disables_inherited_http_proxy(monkeypatch: pytest.MonkeyPa
     )
 
 
-def test_opencode_go_credentials_fail_closed(tmp_path: Path) -> None:
-    assert E2E.load_opencode_go_api_key(None) == ""
+def test_deepseek_credentials_fail_closed(tmp_path: Path) -> None:
+    assert E2E.load_deepseek_api_key(None) == ""
     missing = tmp_path / "missing.json"
-    with pytest.raises(ValueError, match="missing OpenCode Go credentials"):
-        E2E.load_opencode_go_api_key(missing)
+    with pytest.raises(ValueError, match="missing DeepSeek credentials"):
+        E2E.load_deepseek_api_key(missing)
     bad_schema = tmp_path / "bad.json"
     bad_schema.write_text('{"schema":"other","api_key":"x"}', encoding="utf-8")
-    with pytest.raises(ValueError, match="invalid OpenCode Go credential schema"):
-        E2E.load_opencode_go_api_key(bad_schema)
+    with pytest.raises(ValueError, match="invalid DeepSeek credential schema"):
+        E2E.load_deepseek_api_key(bad_schema)
     good = tmp_path / "good.json"
     good.write_text(
         json.dumps(
             {
-                "schema": "codexhub.real-client-opencode-go.v1",
+                "schema": "codexhub.real-client-deepseek.v1",
                 "api_key": "  live-key  ",
             }
         ),
         encoding="utf-8",
     )
-    assert E2E.load_opencode_go_api_key(good) == "live-key"
+    assert E2E.load_deepseek_api_key(good) == "live-key"
+
+    for payload in (
+        {"schema": "codexhub.real-client-deepseek.v1", "api_key": " "},
+        {"schema": "codexhub.real-client-deepseek.v1", "api_key": True},
+        {"schema": "codexhub.real-client-deepseek.v1", "api_key": "x", "extra": "x"},
+        {"schema": "codexhub.real-client-opencode-go.v1", "api_key": "x"},
+    ):
+        good.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError):
+            E2E.load_deepseek_api_key(good)
+
+
+def test_live_chat_requires_explicit_inputs_and_deepseek_key_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(E2E, "build_candidate", lambda: pytest.fail("must not build"))
+    monkeypatch.setattr(E2E, "_run", lambda *a, **kw: pytest.fail("must not launch"))
+    with pytest.raises(SystemExit) as missing:
+        E2E.main([])
+    assert missing.value.code == 2
+    inputs = ["--candidate-sha", "0" * 40]
+    for name in ("auth", "providers", "settings"):
+        path = tmp_path / name
+        path.write_text("{}", encoding="utf-8")
+        inputs.extend((f"--{name}", str(path)))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ambient-key-must-not-be-used")
+    with pytest.raises(SystemExit) as key_missing:
+        E2E.main(inputs)
+    assert key_missing.value.code == 2
+
+
+def test_chat_runtime_clears_host_identity_and_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("CODEXHUB_CODEX_TARGET_HOME", "CODEX_CONFIG", "ANTHROPIC_AUTH_TOKEN",
+                 "CLAUDE_CONFIG_DIR", "OPENCODE_CONFIG", "PI_CODING_AGENT_DIR",
+                 "OMP_CONFIG", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.setenv(name, "operator-value")
+    sources = tmp_path / "inputs"
+    sources.mkdir()
+    for name in ("settings", "providers", "auth"):
+        (sources / name).write_text("{}", encoding="utf-8")
+    (sources / "providers").write_text(
+        '[[providers]]\nid="deepseek"\nbase_url="https://api.deepseek.com"\n'
+        'api_key="{env:DEEPSEEK_API_KEY}"\nupstream_format="responses"\n',
+        encoding="utf-8",
+    )
+    work = tmp_path / "run"
+    env, _, _, _, _ = E2E._prepare_runtime(
+        work, sources / "settings", sources / "providers", sources / "auth", None,
+    )
+    assert env["CODEXHUB_CODEX_TARGET_HOME"] == str(work / "codex-home")
+    assert env["CODEX_HOME"] == str(work / "codex-home")
+    assert "operator-value" not in env.values()
+    assert "DEEPSEEK_API_KEY" not in env
+    assert "OPENAI_API_KEY" not in env
 
 
 def test_evaluate_chat_body_accepts_choices_and_rejects_responses_or_ciphertext() -> None:
@@ -134,17 +191,33 @@ def test_evaluate_chat_body_accepts_choices_and_rejects_responses_or_ciphertext(
     assert "Upstream stream ended" in failed["error"]
 
 
-def test_conversion_shapes_expand_v2_and_keep_muse_plain() -> None:
+@pytest.mark.parametrize("status", [200, 401])
+def test_live_chat_evidence_does_not_retain_upstream_private_text(
+    status: int, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_text = "private-upstream-payload"
+    body = json.dumps({"error": {"message": private_text}}).encode()
+    monkeypatch.setattr(E2E, "_post_chat", lambda *args: (status, body))
+    case = next(case for case in E2E.CASES if case.provider == "deepseek")
+    result = E2E._live_case("http://127.0.0.1:9", case, "gateway-key", 1)
+    assert result["ok"] is False
+    assert result["http_status"] == status
+    assert private_text not in json.dumps(result)
+    assert "body_tail" not in result
+    assert len(result["body_sha256"]) == 64
+
+
+def test_conversion_shapes_expand_v2_and_keep_deepseek_plain() -> None:
     shapes = E2E.dump_conversion_shapes()
     official = shapes["official_sentinel"]
     assert official["has_prompt_cache_key"] is True
     assert official["dropped_cache_controls"] == []
     assert official["tools"] == []
 
-    muse = shapes["muse_sentinel"]
-    assert muse["has_prompt_cache_key"] is False
-    assert muse["dropped_cache_controls"] == ["prompt_cache_key"]
-    assert set(muse["keys"]) >= {"model", "input", "stream", "max_output_tokens"}
+    third_party = shapes["deepseek_sentinel"]
+    assert third_party["has_prompt_cache_key"] is False
+    assert third_party["dropped_cache_controls"] == ["prompt_cache_key"]
+    assert set(third_party["keys"]) >= {"model", "input", "stream", "max_output_tokens"}
 
     function = shapes["official_function"]
     assert function["tools"] == [{"type": "function", "name": "get_time"}]
@@ -255,7 +328,7 @@ def test_windows_wrapper_stays_off_the_cli_summary() -> None:
     cli = CLI_RUNNER.read_text(encoding="utf-8")
     assert "codexhub-python.cmd" in source
     assert "e2e_chat_completions.py" in source
-    assert "OpenCodeGoCredentials" in source
+    assert "DeepSeekCredentials" in source
     assert "summary.json" not in source
     assert "gateway_enable_chat_completions = $false" in cli
     assert "/chat/completions" not in cli

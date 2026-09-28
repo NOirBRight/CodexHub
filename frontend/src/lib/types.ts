@@ -266,6 +266,50 @@ export interface XaiAuthStatus {
   signed_in: boolean;
 }
 
+export interface ChatGptWebStatus {
+  ok?: boolean;
+  ready: boolean;
+  restart_required: boolean;
+  settings_pending_restart: boolean;
+  disabled: boolean;
+  installed: boolean;
+  entry?: string;
+  upstream_executed?: boolean;
+  component: {
+    version: string;
+    commit: string;
+    pin: string;
+    compatible: boolean;
+    artifact_sha256?: string | null;
+    installed_sha256?: string | null;
+  };
+  login: { state: string; window: string; error?: string | null; account_id?: string | null };
+  models?: { id: string; display_name: string; efforts: string[]; image_input: boolean }[];
+  capacity?: string;
+  admitting?: boolean;
+  browser_smoke: { state: string };
+  readiness_checks?: { capabilities_match?: boolean | null };
+  tunnel: { state: string; detail?: string };
+  connector: { selectable: boolean };
+  process: {
+    pid?: number | null;
+    port?: number | null;
+    executable?: string | null;
+    private_home?: string | null;
+    running: boolean;
+    ownership: string;
+    listen_host?: string | null;
+  };
+  login_url?: string;
+}
+
+export interface ChatGptWebConnectionCheck {
+  ok: true;
+  reachable: true;
+  base_url: string;
+  credential_configured: boolean;
+}
+
 export interface XaiUsageSnapshot {
   signed_in?: boolean;
   limits: OpenAIUsageLimit[];
@@ -306,10 +350,12 @@ export interface GatewayUsageSummary {
   requests: number;
   successful_requests: number;
   missing_usage_requests: number;
+  partial_usage_requests?: number | null;
   total_tokens?: number | null;
   input_tokens?: number | null;
   output_tokens?: number | null;
   cached_input_tokens?: number | null;
+  cache_write_input_tokens?: number | null;
   cache_hit_rate?: number | null;
   estimated_cost_usd?: number | null;
   cost_label: string;
@@ -331,6 +377,7 @@ export interface GatewayUsageEvent {
   output_tokens?: number | null;
   total_tokens?: number | null;
   cached_input_tokens?: number | null;
+  cache_write_input_tokens?: number | null;
   reasoning_tokens?: number | null;
 }
 
@@ -441,6 +488,7 @@ export type GatewayClientRouteMode =
   | "unknown";
 
 export interface GatewayClientInfo {
+  claude_settings?: import("./claudeSettings").ClaudeSettings | null;
   id: string;
   name: string;
   kind: string;
@@ -540,6 +588,7 @@ export interface SubagentMatrixRow {
 }
 
 export interface Settings {
+  claude_model_mappings?: Record<string, string> | null;
   locale: "zh-CN" | "en-US";
   auto_sync_history: boolean;
   unified_codex_history: boolean;

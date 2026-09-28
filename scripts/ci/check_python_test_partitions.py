@@ -9,6 +9,7 @@ that the two partitions are disjoint and their union equals the full collection.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -55,7 +56,7 @@ def _collect(nodeids: List[str]) -> Set[str]:
             continue
         if "test session starts" in line.lower():
             continue
-        if "collected" in line.lower():
+        if re.match(r"^\d+(?:/\d+)? tests? collected(?:\s|$)", line):
             continue
         # The whole line is the nodeid; pytest -q emits one nodeid per line.
         collected.add(line)
