@@ -21,6 +21,9 @@ The CodexHub-side connection to the ChatGPT Web Runtime, consisting of its servi
 **Browser Account Connection**:
 The user's explicit handoff of an authenticated ChatGPT account from their daily browser to the ChatGPT Web Runtime. Google or Passkey authentication stays in the daily browser. This does not imply continuous session synchronization or connector/tool authorization.
 
+**ChatGPT Coding Setup**:
+The guided connection of a ChatGPT account and its authorized tool channel for use by coding clients. It is complete only when a real tool request and its result have made the roundtrip; sign-in or text access alone is not completion.
+
 **Vision Proxy**:
 The Gateway feature that lets a non-vision target model handle image requests by using a configured image-capable model to produce text visual context.
 _Avoid_: Image conversion, image workaround
