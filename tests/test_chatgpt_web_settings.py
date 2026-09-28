@@ -192,7 +192,8 @@ def test_bootstrap_token_is_consumed_atomically_under_concurrent_exchange(settin
     assert sorted(result[0] for result in results) == [200, 401]
 
 
-def test_origin_and_host_checks_reject_foreign_mutations(settings_server):
+@pytest.mark.parametrize("attempt", range(20 if os.name == "nt" else 1))
+def test_origin_and_host_checks_reject_foreign_mutations(settings_server, attempt):
     server, _home = settings_server
     status, _headers, _body = _call(
         server,

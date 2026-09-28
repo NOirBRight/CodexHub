@@ -247,6 +247,7 @@ class _SettingsHTTPServer(ThreadingHTTPServer):
 
 class _SettingsHandler(BaseHTTPRequestHandler):
     server_version = "CodexHubRuntimeSettings/1"
+    timeout = 5
 
     @property
     def service(self) -> _SettingsHTTPServer:
@@ -352,16 +353,22 @@ class _SettingsHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         self.service.mark_activity()
-        if not self._allowed(mutation=True):
-            return
         path = self._path()
         try:
+            # Consume the bounded body before rejecting its origin. Closing with
+            # unread bytes can reset the socket on Windows and lose the response.
             payload = _read_request_json(self)
+        except TimeoutError:
+            self._json(HTTPStatus.REQUEST_TIMEOUT, {"ok": False, "error": "The settings request timed out."})
+            return
         except OverflowError:
             self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"ok": False, "error": "The settings request is too large."})
             return
         except ValueError:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "The settings request is invalid."})
+            return
+
+        if not self._allowed(mutation=True):
             return
 
         if path == "/api/session":
