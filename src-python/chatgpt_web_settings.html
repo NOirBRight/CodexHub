@@ -75,6 +75,7 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
 (() => {
   const CODEX_MARK = "/codexhub.svg";
   const OPENAI_MARK = "/openai.svg";
+  const legacyBrowserOnly = "browser-only";
   const language = /^zh(?:-|$)/i.test(navigator.language || "") ? "zh" : "en";
   const copy = {
     en: {
@@ -289,7 +290,6 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     const runtime = data?.runtime || {};
     if (data?.settings?.pending_restart || runtime.settings_pending_restart || runtime.restart_required) return false;
     // Keep the browser-only branch so packaged tests and legacy installs stay explicit.
-    const legacyBrowserOnly = "browser-only";
     if (runtime.active_mode === legacyBrowserOnly) return false;
     if (runtime.active_mode !== "full") return false;
     return runtime.running === true && runtime.compatible === true && runtime.admitting === true && runtime.disabled !== true;
@@ -369,7 +369,7 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     current = data;
     if (initial) applySettings(data.settings || {});
     const runtime = data.runtime || {};
-    if (data.settings?.pending_restart || runtime.settings_pending_restart || runtime.active_mode === "browser-only") {
+    if (data.settings?.pending_restart || runtime.settings_pending_restart || runtime.active_mode === legacyBrowserOnly) {
       if (probe.state === "passed") probe = { state: "not_run" };
     }
     if (data.readiness?.tool_probe?.state) probe.state = data.readiness.tool_probe.state;
@@ -509,7 +509,7 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     if (step === 1) {
       const tunnelReady = Boolean(form.tunnel_id.trim());
       const keyReady = form.key_configured || Boolean(form.runtime_key.trim());
-      const legacy = saved.mode === "browser-only";
+      const legacy = saved.mode === legacyBrowserOnly;
       return `<div class="place">${esc(text.placeTunnel)}</div><h2>${esc(text.tunnelH2)}</h2><p>${esc(text.tunnelP)}</p>
         ${legacy ? `<div class="notice warn">${esc(text.legacyText)}</div>` : ""}
         <div class="connection-line" aria-label="ChatGPT tunnel path">
