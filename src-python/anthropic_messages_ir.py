@@ -460,7 +460,20 @@ def _to_chat_request(request: AnthropicRequest) -> Adapted | NotForwardable:
                 "mid_conversation_system_flattened_to_chat_system",
                 "Chat Completions has no mid-conversation system role.",
             )
-            messages.append({"role": "system", "content": _chat_text(message.content, declared, label=label)})
+            text_blocks = tuple(block for block in message.content if block.type != "image")
+            images = tuple(block for block in message.content if block.type == "image")
+            messages.append({"role": "system", "content": _chat_text(text_blocks, declared, label=label)})
+            if images:
+                content: list[dict[str, Any]] = []
+                for position, image in enumerate(images, start=1):
+                    content.append({"type": "text", "text": f"Image from prior system context ({position}/{len(images)})."})
+                    content.extend(_chat_user_content((image,), declared, label=label))
+                messages.append({"role": "user", "content": content})
+                declared.adapt(
+                    f"{label}.content",
+                    "mid_conversation_system_image_lifted_to_user_message",
+                    "System text stays in instructions; ordered images follow as user content.",
+                )
             continue
         declared.refuse(f"message_role:{message.role}")
     flush_tool_results_and_images()
