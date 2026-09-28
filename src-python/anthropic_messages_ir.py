@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping
 
 from gateway_errors import UpstreamStreamIncompleteError
+from multimodal_tool_result import source_caption
 from protocol_translation import (
     ResponsesToChatStreamConverter,
     UnsupportedProtocolTranslationError,
@@ -758,7 +759,7 @@ def _tool_result_message(
             for index, image in enumerate(images, start=1):
                 parts = _chat_user_content((image,), declared, label=label)
                 image_messages.append({"role": "user", "content": [
-                    {"type": "text", "text": f"Tool result image {index}/{len(images)} from call_id={tool_use_id}."},
+                    {"type": "text", "text": source_caption(index, len(images), tool_use_id)},
                     *parts,
                 ]})
             declared.adapt(
