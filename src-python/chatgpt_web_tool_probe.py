@@ -17,6 +17,7 @@ from python_runtime_contract import require_python_313
 require_python_313(__file__)
 
 import hashlib
+import html
 import json
 import secrets
 import threading
@@ -317,7 +318,11 @@ def _function_calls(events: list[Mapping[str, Any]]) -> list[dict[str, str]]:
                 name = item.get("name")
                 call_id = _call_id_from_item(item)
                 if isinstance(name, str) and call_id is not None:
-                    found.append({"name": name, "call_id": call_id})
+                    call = {"name": name, "call_id": call_id}
+                    for key in ("id", "arguments"):
+                        if isinstance(item.get(key), str):
+                            call[key] = item[key]
+                    found.append(call)
         if event_type == "response.completed":
             response = event.get("response")
             output = response.get("output") if isinstance(response, Mapping) else None
@@ -328,7 +333,11 @@ def _function_calls(events: list[Mapping[str, Any]]) -> list[dict[str, str]]:
                     name = item.get("name")
                     call_id = _call_id_from_item(item)
                     if isinstance(name, str) and call_id is not None:
-                        found.append({"name": name, "call_id": call_id})
+                        call = {"name": name, "call_id": call_id}
+                        for key in ("id", "arguments"):
+                            if isinstance(item.get(key), str):
+                                call[key] = item[key]
+                        found.append(call)
     # De-duplicate while preserving order.
     seen: set[str] = set()
     unique: list[dict[str, str]] = []
@@ -405,27 +414,66 @@ def _default_exchange(request: _ProbeRequest) -> _ProbeOutcome:
             "additionalProperties": False,
         },
     }
+    thread_id = f"thread_{request.probe_id}"
+    turn_id = f"turn_{request.probe_id}"
+    cwd = str(request.home)
+    environment = {
+        "type": "message",
+        "role": "user",
+        "id": f"env_{request.probe_id}",
+        "internal_chat_message_metadata_passthrough": {
+            "turn_id": turn_id,
+            "content_item_kinds": ["environments.environment_context"],
+        },
+        "content": [{
+            "type": "input_text",
+            "text": (
+                "<environment_context>\n"
+                f"<cwd>{html.escape(cwd, quote=False)}</cwd>\n"
+                f"<workspace_roots><root>{html.escape(cwd, quote=False)}</root></workspace_roots>\n"
+                "<sandbox_mode>read-only</sandbox_mode>\n"
+                "</environment_context>"
+            ),
+        }],
+    }
+    message = {
+        "type": "message",
+        "role": "user",
+        "id": f"msg_{request.probe_id}",
+        "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    f"Call the {_TOOL_NAME} tool exactly once with key={_TOOL_KEY}. "
+                    "After the tool result arrives, reply with only the tool token text."
+                ),
+            }
+        ],
+    }
+    turn_metadata = {
+        "prompt_cache_key": thread_id,
+        "client_metadata": {
+            "x-codex-turn-metadata": json.dumps(
+                {
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "request_kind": "turn",
+                    "sandbox_mode": "read-only",
+                    "workspaces": {cwd: {}},
+                },
+                separators=(",", ":"),
+            )
+        },
+    }
     first_payload = {
         "model": model_id,
         "stream": True,
         "store": False,
         "tools": [tool],
         "tool_choice": {"type": "function", "name": _TOOL_NAME},
-        "input": [
-            {
-                "type": "message",
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            f"Call the {_TOOL_NAME} tool exactly once with key={_TOOL_KEY}. "
-                            "After the tool result arrives, reply with only the tool token text."
-                        ),
-                    }
-                ],
-            }
-        ],
+        **turn_metadata,
+        "input": [environment, message],
     }
     status, body = _post_responses(
         base_url=request.base_url,
@@ -437,19 +485,35 @@ def _default_exchange(request: _ProbeRequest) -> _ProbeOutcome:
     if status != 200:
         return _ProbeOutcome(ok=False, reason="probe_request_rejected", live_attempted=True)
     events = _parse_sse_events(body)
+    if any(event.get("type") in {"response.failed", "response.incomplete"} for event in events):
+        return _ProbeOutcome(ok=False, reason="probe_request_rejected", live_attempted=True)
     calls = [item for item in _function_calls(events) if item["name"] == _TOOL_NAME]
     if not calls:
         return _ProbeOutcome(ok=False, reason="tool_call_missing", live_attempted=True)
     if len(calls) != 1:
         return _ProbeOutcome(ok=False, reason="tool_call_unexpected", live_attempted=True)
     call_id = calls[0]["call_id"]
+    item_id = calls[0].get("id")
+    arguments = calls[0].get("arguments")
+    if not item_id or not arguments:
+        return _ProbeOutcome(ok=False, reason="missing_call_identity", live_attempted=True)
 
     second_payload = {
         "model": model_id,
         "stream": True,
         "store": False,
         "tools": [tool],
+        **turn_metadata,
         "input": [
+            environment,
+            message,
+            {
+                "type": "function_call",
+                "id": item_id,
+                "call_id": call_id,
+                "name": _TOOL_NAME,
+                "arguments": arguments,
+            },
             {
                 "type": "function_call_output",
                 "call_id": call_id,
@@ -471,6 +535,8 @@ def _default_exchange(request: _ProbeRequest) -> _ProbeOutcome:
     if status != 200:
         return _ProbeOutcome(ok=False, reason="tool_result_rejected", live_attempted=True)
     events = _parse_sse_events(body)
+    if any(event.get("type") == "response.failed" for event in events):
+        return _ProbeOutcome(ok=False, reason="tool_result_rejected", live_attempted=True)
     if any(event.get("type") == "response.incomplete" for event in events):
         return _ProbeOutcome(ok=False, reason="tool_result_incomplete", live_attempted=True)
     # Accept only a clean terminal completion. response.incomplete never counts.

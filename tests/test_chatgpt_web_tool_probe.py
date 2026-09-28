@@ -470,7 +470,8 @@ def test_default_exchange_rejects_incomplete_and_missing_correlation(monkeypatch
             200,
             (
                 b'data: {"type":"response.output_item.done","item":'
-                b'{"type":"function_call","name":"codexhub_setup_probe","call_id":"call_1"}}\n\n'
+                b'{"type":"function_call","id":"fc_1","name":"codexhub_setup_probe",'
+                b'"call_id":"call_1","arguments":"{\\"key\\":\\"setup\\"}"}}\n\n'
                 b'data: {"type":"response.completed","response":{"output":[]}}\n\n'
             ),
         ),
@@ -505,7 +506,8 @@ def test_default_exchange_rejects_incomplete_and_missing_correlation(monkeypatch
                 200,
                 (
                     b'data: {"type":"response.output_item.done","item":'
-                    b'{"type":"function_call","name":"codexhub_setup_probe","call_id":"call_2"}}\n\n'
+                    b'{"type":"function_call","id":"fc_2","name":"codexhub_setup_probe",'
+                    b'"call_id":"call_2","arguments":"{\\"key\\":\\"setup\\"}"}}\n\n'
                     b'data: {"type":"response.completed","response":{"output":[]}}\n\n'
                 ),
             ),
@@ -528,7 +530,8 @@ def test_default_exchange_rejects_incomplete_and_missing_correlation(monkeypatch
                 200,
                 (
                     b'data: {"type":"response.output_item.done","item":'
-                    b'{"type":"function_call","name":"codexhub_setup_probe","call_id":"call_3"}}\n\n'
+                    b'{"type":"function_call","id":"fc_3","name":"codexhub_setup_probe",'
+                    b'"call_id":"call_3","arguments":"{\\"key\\":\\"setup\\"}"}}\n\n'
                     b'data: {"type":"response.completed","response":{"output":[]}}\n\n'
                 ),
             ),
@@ -544,6 +547,76 @@ def test_default_exchange_rejects_incomplete_and_missing_correlation(monkeypatch
     outcome = probe._default_exchange(request)
     assert outcome.ok is True
     assert outcome.reason is None
+
+
+def test_default_exchange_uses_native_turn_metadata_and_replays_call(monkeypatch, tmp_path):
+    home = tmp_path / "home & test"
+    _seed_settings(home)
+    _patch_common(monkeypatch, home)
+    monkeypatch.setattr(probe, "_select_model", lambda _home: "gpt-test")
+    sent = []
+
+    def fake_post(**kwargs):
+        sent.append(kwargs["payload"])
+        if len(sent) == 1:
+            return 200, (
+                b'data: {"type":"response.output_item.done","item":'
+                b'{"type":"function_call","id":"fc_probe","call_id":"call_probe",'
+                b'"name":"codexhub_setup_probe","arguments":"{\\"key\\":\\"setup\\"}"}}\n\n'
+                b'data: {"type":"response.completed","response":{"output":[]}}\n\n'
+            )
+        return 200, (
+            b'data: {"type":"response.output_text.delta","delta":"token-value"}\n\n'
+            b'data: {"type":"response.completed","response":{"output":[]}}\n\n'
+        )
+
+    monkeypatch.setattr(probe, "_post_responses", fake_post)
+    request = probe._ProbeRequest(
+        home=home, probe_id="probe1234", token="token-value",
+        base_url="http://127.0.0.1:9", service_key="key", timeout_seconds=5,
+        cancel_event=threading.Event(),
+    )
+    assert probe._default_exchange(request).ok is True
+    assert len(sent) == 2
+    for payload in sent:
+        metadata = json.loads(payload["client_metadata"]["x-codex-turn-metadata"])
+        assert metadata == {
+            "thread_id": "thread_probe1234", "turn_id": "turn_probe1234", "request_kind": "turn",
+            "sandbox_mode": "read-only", "workspaces": {str(home): {}},
+        }
+        assert payload["prompt_cache_key"] == "thread_probe1234"
+        environment, message = payload["input"][:2]
+        assert environment["id"] == "env_probe1234"
+        assert environment["internal_chat_message_metadata_passthrough"] == {
+            "turn_id": "turn_probe1234", "content_item_kinds": ["environments.environment_context"],
+        }
+        assert f"<cwd>{str(home).replace('&', '&amp;')}</cwd>" in environment["content"][0]["text"]
+        assert "<sandbox_mode>read-only</sandbox_mode>" in environment["content"][0]["text"]
+        assert message["id"] == "msg_probe1234"
+        assert message["internal_chat_message_metadata_passthrough"] == {"turn_id": "turn_probe1234"}
+    assert sent[1]["input"][2] == {
+        "type": "function_call", "id": "fc_probe", "call_id": "call_probe",
+        "name": "codexhub_setup_probe", "arguments": '{"key":"setup"}',
+    }
+    assert sent[1]["input"][3]["type"] == "function_call_output"
+    assert sent[1]["input"][3]["call_id"] == "call_probe"
+
+
+def test_default_exchange_classifies_failed_response(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    _seed_settings(home)
+    _patch_common(monkeypatch, home)
+    monkeypatch.setattr(probe, "_select_model", lambda _home: "gpt-test")
+    monkeypatch.setattr(
+        probe, "_post_responses",
+        lambda **kwargs: (200, b'data: {"type":"response.failed","response":{"status":"failed"}}\n\n'),
+    )
+    request = probe._ProbeRequest(
+        home=home, probe_id="probe1234", token="token-value",
+        base_url="http://127.0.0.1:9", service_key="key", timeout_seconds=5,
+        cancel_event=threading.Event(),
+    )
+    assert probe._default_exchange(request).reason == "probe_request_rejected"
 
 
 def test_passed_probe_stales_when_connector_becomes_unselectable(tmp_path, monkeypatch):
