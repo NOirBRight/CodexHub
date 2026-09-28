@@ -7,10 +7,11 @@
 <style nonce="__CODEXHUB_CSP_NONCE__">
 :root{color-scheme:light;font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;--bg:#f6f7f5;--panel:#fff;--line:#dde3de;--muted:#68746d;--accent:#16704c;--ink:#1c2c23;--warn:#976520;--deep:#244d34}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink)}
-button,input{font:inherit}button{cursor:pointer;padding:9px 13px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit;transition:background .15s,box-shadow .15s}
-button:hover:not(:disabled){background:#f0f4ed}button:disabled{opacity:.45;cursor:not-allowed}
-button.primary{background:var(--deep);border-color:var(--deep);color:#fff;box-shadow:0 2px 3px #15332115;font-weight:650}
-button.primary:hover:not(:disabled){background:#163c27}button.primary:disabled{background:#e6ebe3;border-color:#e6ebe3;color:#889682;opacity:1}
+button,input,a.action-button{font:inherit}button,a.action-button{cursor:pointer;padding:9px 13px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit;transition:background .15s,box-shadow .15s}
+button:hover:not(:disabled),a.action-button:hover{background:#f0f4ed}button:disabled{opacity:.45;cursor:not-allowed}
+button.primary,a.action-button.primary{background:var(--deep);border-color:var(--deep);color:#fff;box-shadow:0 2px 3px #15332115;font-weight:650}
+button.primary:hover:not(:disabled),a.action-button.primary:hover{background:#163c27}button.primary:disabled{background:#e6ebe3;border-color:#e6ebe3;color:#889682;opacity:1}
+a.action-button{display:inline-flex;align-items:center;text-decoration:none}
 button.ghost{border:none;padding:3px 0;color:#667a5c;background:none}
 a{color:var(--accent)}p{margin:8px 0;color:var(--muted)}h1,h2{margin:0;line-height:1.35}.hidden{display:none!important}
 .studio-topbar{height:74px;border-bottom:1px solid #e3e7e2;display:flex;align-items:center;justify-content:space-between;padding:0 max(28px,calc((100vw - 1180px)/2));background:#fafbf9}
@@ -585,8 +586,8 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
         <p><small>${esc(text.accountConnectorNote)}</small></p>
         ${blocked ? `<div class="notice error">${esc(blocked)}</div>` : ""}
         <div class="actions">
-          ${ready ? "" : `<button type="button" data-action="extension" class="primary"${busy?" disabled":""}>${esc(text.extensionDownload)}</button>
-          <button type="button" data-action="open-chatgpt"${busy?" disabled":""}>${esc(text.openChatgpt)}</button>`}
+          ${ready ? "" : `<button type="button" data-action="open-chatgpt" class="primary"${busy?" disabled":""}>${esc(text.openChatgpt)}</button>
+          <button type="button" data-action="extension"${busy?" disabled":""}>${esc(text.extensionDownload)}</button>`}
           ${ready ? `<button type="button" data-action="continue" class="primary"${busy?" disabled":""}>${esc(text.continueLabel)} →</button>` : ""}
         </div>`;
     }
@@ -650,9 +651,9 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
         <p><small>${esc(text.recipeNote)}</small></p>
         ${ok ? `<div class="notice success">${esc(text.connectorReady)}</div>` : `<div class="notice">${esc(text.connectorBlocked)}</div>`}
         <div class="actions">
-          <a href="https://chatgpt.com/#settings/Connectors" target="_blank" rel="noopener noreferrer"><button type="button">${esc(text.openConnector)}</button></a>
-          <button type="button" data-action="recheck-connector" class="primary"${busy?" disabled":""}>${esc(text.recheckConnector)}</button>
-          ${ok ? `<button type="button" data-action="continue"${busy?" disabled":""}>${esc(text.continueLabel)} →</button>` : ""}
+          <a class="action-button ${ok?"":"primary"}" href="https://chatgpt.com/#settings/Connectors" target="_blank" rel="noopener noreferrer">${esc(text.openConnector)}</a>
+          <button type="button" data-action="recheck-connector"${busy?" disabled":""}>${esc(text.recheckConnector)}</button>
+          ${ok ? `<button type="button" data-action="continue" class="primary"${busy?" disabled":""}>${esc(text.continueLabel)} →</button>` : ""}
         </div>`;
     }
     return `<div class="place">${esc(text.placeVerify)}</div><h2>${esc(text.verifyH2)}</h2><p>${esc(text.verifyP)}</p>
