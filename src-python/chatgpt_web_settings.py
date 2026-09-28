@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 
 import chatgpt_web_checks
 import chatgpt_web_runtime as runtime
+import chatgpt_web_tool_probe
 
 _HOST = "127.0.0.1"
 _SESSION_HEADER = "Authorization"
@@ -123,6 +124,7 @@ def _public_status(home: Path) -> dict[str, Any]:
         and connector.get("selectable") is True
         and readiness["tools_ready"]
     )
+    tool_probe = chatgpt_web_tool_probe.public_status(home)
     return {
         "ok": True,
         "settings": settings,
@@ -141,6 +143,8 @@ def _public_status(home: Path) -> dict[str, Any]:
             "login_blocked_reason": _login_blocked_reason(status),
         },
         "readiness": readiness,
+        "tool_probe": tool_probe,
+        "coding_setup_complete": chatgpt_web_tool_probe.coding_setup_complete(home),
     }
 
 
@@ -182,6 +186,16 @@ class _SettingsHTTPServer(ThreadingHTTPServer):
             self.page = page_path.read_text(encoding="utf-8")
         except OSError as exc:
             raise RuntimeError("ChatGPT Runtime Settings page is unavailable") from exc
+        self.static_assets = {
+            "/codexhub.svg": (
+                Path(__file__).with_name("chatgpt_web_settings_codexhub.svg"),
+                "image/svg+xml; charset=utf-8",
+            ),
+            "/openai.svg": (
+                Path(__file__).with_name("chatgpt_web_settings_openai.svg"),
+                "image/svg+xml; charset=utf-8",
+            ),
+        }
         self.bootstrap_token: str | None = secrets.token_urlsafe(32)
         self.bootstrap_expires_at = time.monotonic() + bootstrap_ttl
         self.sessions: dict[str, tuple[float, float]] = {}
@@ -328,7 +342,16 @@ class _SettingsHandler(BaseHTTPRequestHandler):
             page = self.service.page.replace("__CODEXHUB_CSP_NONCE__", nonce).encode("utf-8")
             self._send_bytes(HTTPStatus.OK, page, "text/html; charset=utf-8", nonce=nonce)
             return
-        if path not in {"/api/settings", "/api/status", "/api/browser-extension"}:
+        if path in self.service.static_assets:
+            asset_path, content_type = self.service.static_assets[path]
+            try:
+                payload = asset_path.read_bytes()
+            except OSError:
+                self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Page not found."})
+                return
+            self._send_bytes(HTTPStatus.OK, payload, content_type)
+            return
+        if path not in {"/api/settings", "/api/status", "/api/browser-extension", "/api/tool-probe"}:
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Page not found."})
             return
         if not self._authenticated():
@@ -345,7 +368,12 @@ class _SettingsHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "Browser connector files are unavailable. Update CodexHub."})
             return
         try:
-            payload = runtime.read_settings(self.service.home) if path == "/api/settings" else _public_status(self.service.home)
+            if path == "/api/settings":
+                payload = runtime.read_settings(self.service.home)
+            elif path == "/api/tool-probe":
+                payload = {"ok": True, **chatgpt_web_tool_probe.public_status(self.service.home)}
+            else:
+                payload = _public_status(self.service.home)
         except runtime.RuntimeError_:
             self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "Runtime Settings are temporarily unavailable."})
             return
@@ -460,6 +488,42 @@ class _SettingsHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.CONFLICT, {"ok": False, "error": "The sign-in window could not be closed. You can close it manually and refresh status."})
                 return
             self._json(HTTPStatus.OK, {"ok": True, "cancelled": True})
+            return
+        if path == "/api/tool-probe":
+            action = payload.get("action")
+            if action is None:
+                action = "start"
+            if action not in {"start", "cancel", "status"}:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Unknown tool probe action.", "error_code": "probe_action_invalid"})
+                return
+            try:
+                if action == "status":
+                    result = {"ok": True, **chatgpt_web_tool_probe.public_status(self.service.home)}
+                elif action == "cancel":
+                    result = {"ok": True, **chatgpt_web_tool_probe.cancel_probe(self.service.home)}
+                else:
+                    # Bound wait keeps the HTTP handler from hanging forever; the
+                    # probe module still enforces its own exchange timeout.
+                    result = {
+                        "ok": True,
+                        **chatgpt_web_tool_probe.start_probe(
+                            self.service.home,
+                            timeout_seconds=90.0,
+                            wait=True,
+                        ),
+                    }
+            except chatgpt_web_tool_probe.ProbeError as exc:
+                status = (
+                    HTTPStatus.CONFLICT
+                    if exc.reason in chatgpt_web_tool_probe.HTTP_CONFLICT_REASONS
+                    else HTTPStatus.BAD_REQUEST
+                )
+                self._json(status, {"ok": False, "error": "The coding setup tool check could not run.", "error_code": exc.reason})
+                return
+            except Exception:  # noqa: BLE001
+                self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "The coding setup tool check could not finish."})
+                return
+            self._json(HTTPStatus.OK, result)
             return
         self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Action not found."})
 

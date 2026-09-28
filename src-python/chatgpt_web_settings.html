@@ -1,271 +1,329 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="referrer" content="no-referrer">
-  <title>ChatGPT Runtime Settings</title>
-  <style nonce="__CODEXHUB_CSP_NONCE__">
-    :root { color-scheme: light dark; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: Canvas; color: CanvasText; }
-    main { max-width: 880px; margin: 0 auto; padding: 32px 20px 56px; }
-    header { margin-bottom: 24px; }
-    h1 { margin: 0; font-size: clamp(1.65rem, 4vw, 2.2rem); line-height: 1.2; }
-    h2 { margin: 0; font-size: 1.08rem; }
-    p { margin: 8px 0 0; color: color-mix(in srgb, CanvasText 75%, transparent); }
-    a { color: LinkText; }
-    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
-    .mark { display: grid; width: 42px; height: 42px; place-items: center; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 14px; font-weight: 700; }
-    .card { margin-top: 16px; padding: 20px; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 16px; background: color-mix(in srgb, Canvas 96%, CanvasText 4%); }
-    .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
-    .step { display: inline-grid; width: 28px; height: 28px; margin-right: 8px; place-items: center; border-radius: 50%; background: color-mix(in srgb, AccentColor 18%, Canvas); color: AccentColor; font-size: .86rem; font-weight: 700; vertical-align: middle; }
-    .field { display: grid; gap: 6px; margin-top: 16px; }
-    label, legend { font-weight: 620; }
-    input, select { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid color-mix(in srgb, CanvasText 30%, transparent); border-radius: 9px; background: Canvas; color: CanvasText; font: inherit; }
-    input[type="checkbox"] { width: 18px; min-height: 18px; margin: 2px 8px 0 0; accent-color: AccentColor; }
-    .check { display: flex; align-items: flex-start; margin-top: 13px; font-weight: 500; }
-    .help { font-size: .89rem; }
-    .muted { color: color-mix(in srgb, CanvasText 68%, transparent); }
-    .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 16px; }
-    button { min-height: 40px; padding: 9px 15px; border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); border-radius: 9px; background: Canvas; color: CanvasText; font: inherit; font-weight: 620; cursor: pointer; }
-    button.primary { border-color: AccentColor; background: AccentColor; color: AccentColorText; }
-    button.danger { border-color: color-mix(in srgb, #c22 55%, CanvasText); color: color-mix(in srgb, #d33 75%, CanvasText); }
-    button:disabled { opacity: .55; cursor: wait; }
-    .status-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
-    .status-item { padding: 11px 13px; border-radius: 10px; background: color-mix(in srgb, CanvasText 6%, Canvas); }
-    .status-item strong { display: block; font-size: .8rem; color: color-mix(in srgb, CanvasText 68%, transparent); }
-    .status-item span { display: block; margin-top: 2px; }
-    .notice { margin-top: 14px; padding: 12px 14px; border-radius: 10px; background: color-mix(in srgb, #d89b13 17%, Canvas); }
-    .notice.error { background: color-mix(in srgb, #c33 17%, Canvas); }
-    .notice.success { background: color-mix(in srgb, #29854a 17%, Canvas); }
-    .hidden { display: none !important; }
-    .options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 24px; margin-top: 8px; }
-    .options .field { margin-top: 14px; }
-    details { margin-top: 14px; }
-    summary { cursor: pointer; font-weight: 620; }
-    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
-    footer { margin-top: 22px; font-size: .86rem; }
-    @media (max-width: 620px) {
-      main { padding: 22px 14px 40px; }
-      .card { padding: 16px; }
-      .status-grid, .options { grid-template-columns: 1fr; }
-      .card-head { display: block; }
-    }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ChatGPT Coding Setup</title>
+<style nonce="__CODEXHUB_CSP_NONCE__">
+:root{color-scheme:light;font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;--bg:#f6f7f5;--panel:#fff;--line:#dde3de;--muted:#68746d;--accent:#16704c;--ink:#1c2c23;--warn:#976520;--deep:#244d34}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink)}
+button,input,a.action-button{font:inherit}button,a.action-button{cursor:pointer;padding:9px 13px;border:1px solid var(--line);border-radius:8px;background:transparent;color:inherit;transition:background .15s,box-shadow .15s}
+button:hover:not(:disabled),a.action-button:hover{background:#f0f4ed}button:disabled{opacity:.45;cursor:not-allowed}
+button.primary,a.action-button.primary{background:var(--deep);border-color:var(--deep);color:#fff;box-shadow:0 2px 3px #15332115;font-weight:650}
+button.primary:hover:not(:disabled),a.action-button.primary:hover{background:#163c27}button.primary:disabled{background:#e6ebe3;border-color:#e6ebe3;color:#889682;opacity:1}
+a.action-button{display:inline-flex;align-items:center;text-decoration:none}
+button.ghost{border:none;padding:3px 0;color:#667a5c;background:none}
+a{color:var(--accent)}p{margin:8px 0;color:var(--muted)}h1,h2{margin:0;line-height:1.35}.hidden{display:none!important}
+.studio-topbar{height:74px;border-bottom:1px solid #e3e7e2;display:flex;align-items:center;justify-content:space-between;padding:0 max(28px,calc((100vw - 1180px)/2));background:#fafbf9}
+.studio-brand{display:flex;align-items:center;gap:10px;font-weight:720;font-size:17px;letter-spacing:-.5px}
+.studio-brand img{width:30px;height:30px}.studio-brand span{font-size:12px;font-weight:450;color:#778278;border-left:1px solid #d8ded7;padding-left:14px;margin-left:7px}
+.studio-status{display:flex;align-items:center;gap:7px;color:#65746a;font-size:12px}.studio-status i{width:6px;height:6px;border-radius:50%;background:#37835c;display:inline-block}.studio-status b{font-weight:500;color:#24382a}
+.studio-shell{max-width:808px;margin:auto;padding:34px 24px 80px}
+.studio-intro{display:flex;align-items:end;justify-content:space-between;margin-bottom:28px;gap:16px}
+.studio-intro h1{font-size:30px;letter-spacing:-1.3px;font-weight:680;margin:0 0 7px}.studio-intro p{margin:0;font-size:13px;color:#788279}
+.studio-kicker{color:#7d8c7f;font-size:10px;letter-spacing:2px;font-weight:600;margin-bottom:9px}
+.studio-progress{font:11px ui-monospace,Consolas,monospace;white-space:nowrap;color:#7b887e}.studio-progress strong{font-size:19px;font-weight:450;color:#324a39}
+.studio-steps{display:flex;margin:0 0 28px}.studio-steps button{position:relative;flex:1;min-width:0;border:none;padding:0;background:none;color:#79847c;font-size:12px;display:flex;align-items:center;gap:9px;text-align:left;white-space:nowrap}
+.studio-steps button::after{content:"";height:1px;background:#dbe1db;flex:1;margin:0 12px 0 3px}.studio-steps button:last-child{flex:0 0 auto}.studio-steps button:last-child::after{display:none}
+.studio-steps .step-dot{width:25px;height:25px;display:grid;place-items:center;border:1px solid #d6ddd5;border-radius:50%;font:11px ui-monospace,monospace;flex-shrink:0;background:#f6f7f5}
+.studio-steps .is-done{color:#3c6f50}.studio-steps .is-done .step-dot{background:#e4eee3;border-color:#e4eee3}
+.studio-steps .is-current{color:#213c2a;font-weight:650}.studio-steps .is-current .step-dot{background:#203c2b;color:#fff;border-color:#203c2b;box-shadow:0 0 0 4px #e5ece2}
+.studio-steps button:disabled{color:#9aa29b;cursor:default}
+.studio-sheet{border:1px solid #dfe5dc;background:#fff;border-radius:18px;box-shadow:0 4px 8px #24352403,0 22px 55px -32px #24352430;overflow:hidden}
+.studio-sheet-head{display:flex;align-items:center;gap:16px;padding:25px 32px;background:#fbfcfa;border-bottom:1px solid #edf0e9}
+.service-symbol{width:49px;height:49px;display:grid;place-items:center;border-radius:14px;background:#e9eee5;border:1px solid #e1e8dc;flex-shrink:0}.service-symbol img{width:27px;height:27px}
+.service-name{font-weight:650;font-size:16px}.service-caption{font-size:11px;color:#7b867b;margin-top:1px}
+.sheet-step{margin-left:auto;font:10px ui-monospace,Consolas,monospace;color:#71836e;border:1px solid #dce5d6;background:#f2f5ec;border-radius:5px;padding:5px 8px;white-space:nowrap}
+.studio-content{padding:27px 32px 28px}.studio-content h2{font-size:24px;letter-spacing:-.8px;font-weight:650;margin:0 0 8px}.studio-content p{font-size:13px;line-height:1.8;max-width:570px}
+.place{font-size:11px;color:#66866b;margin-bottom:13px}
+.notice{border:none;background:#eef5ec;color:#496542;border-radius:10px;font-size:13px;padding:12px 15px;margin:16px 0}
+.notice.warn{background:#fbf4e6;color:#87682a}.notice.error{background:#fff0ed;color:#974b3f}.notice.success{background:#e7f1df;color:#496339}
+.toast{background:#e7f1df;color:#496339;border:1px solid #d3e4c8;font-size:12px;padding:12px 15px;border-radius:10px;margin-bottom:16px}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
+.connection-line{display:flex;align-items:center;gap:10px;margin:20px 0 23px;padding:11px 14px;border:1px solid #e6ebdf;border-radius:8px;background:#fafcf7;font-size:11px;color:#667663}
+.connection-line .endpoint{display:flex;gap:6px;align-items:center;color:#3b553e;font-weight:550}.connection-line img{width:15px;height:15px}
+.connection-line .wire{flex:1;height:1px;background:#d2ddc9;position:relative;min-width:18px}.connection-line .wire::after{content:"";width:5px;height:5px;background:#9eb08f;border-radius:50%;position:absolute;right:0;top:-2px}
+.credential-block{margin:19px 0 0}.credential-label{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.credential-label label{font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px}.credential-label .index{font:10px ui-monospace,monospace;color:#839178}
+.credential-input{position:relative}.credential-input input{font:13px system-ui,-apple-system,"Segoe UI",sans-serif;width:100%;padding:13px 42px 13px 14px;background:#fbfcf9;border:1px solid #dce3d6;border-radius:8px;color:#36503a;outline:none}
+.credential-input .input-symbol{position:absolute;right:14px;top:11px;color:#8ba17c;font-size:16px}
+.credential-block p{font-size:12px;color:#707d67;margin-top:6px}.credential-block.is-ready input{border-color:#adc69c;background:#f9fcf5}.credential-block.is-ready .input-symbol{color:#518147}
+.studio-bottom{border-top:1px solid #e9ede4;margin-top:25px;padding-top:20px;display:flex;align-items:center;justify-content:space-between;gap:20px}
+.studio-bottom p{font-size:11px;line-height:1.65;margin:0;color:#8a9382}.studio-bottom p strong{color:#596b50;font-weight:500}.studio-bottom button{white-space:nowrap;min-height:41px}
+.studio-footer{display:flex;justify-content:space-between;align-items:center;padding:18px 4px;color:#8a9485;font-size:11px;gap:15px}
+.completed{padding:35px 0;text-align:center}.completed .checkmark{font-size:38px;color:#43733a}.completed .badge{display:inline-block;padding:3px 9px;border-radius:20px;background:#edf4e7;color:#527a44;font-size:12px;margin:10px 0}.completed h1{font-size:28px;margin:10px 0}
+ol.recipe{padding-left:22px;color:var(--muted);font-size:13px}ol.recipe li+li{margin-top:8px}
+details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}details.advanced summary{cursor:pointer;color:#667a5c;font-size:12px;font-weight:600}
+.adv-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.field{display:grid;gap:6px}.field label{font-size:12px;font-weight:600}.field input[type=number]{padding:10px 12px;border:1px solid #dce3d6;border-radius:8px;background:#fafbf8}
+.check-row{display:flex;align-items:center;gap:8px;font-size:12px;color:#546456;margin:8px 0}
+.session-gate{max-width:640px;margin:60px auto;padding:28px;border:1px solid var(--line);border-radius:16px;background:#fff}
+.linkish{border:none;padding:2px 0;color:#4d7350;font-size:11px;background:none;text-decoration:none}
+:is(button,input,a,summary):focus-visible{outline:2px solid #538745;outline-offset:4px}
+@media(prefers-reduced-motion:no-preference){.studio-sheet{animation:sheet-in .24s ease-out}@keyframes sheet-in{from{opacity:.6;transform:translateY(5px)}to{opacity:1;transform:none}}}
+@media(max-width:600px){.studio-topbar{height:60px;padding:0 20px}.studio-brand span{display:none}.studio-shell{padding:25px 16px 70px}.studio-intro h1{font-size:26px}.studio-progress{display:none}
+.studio-steps button{flex-direction:column;gap:7px;font-size:10px;flex:1!important}.studio-steps button::after{position:absolute;top:12px;left:calc(50% + 18px);width:calc(100% - 36px);margin:0}
+.studio-steps button>span:last-child{min-width:0;white-space:normal;overflow-wrap:anywhere;text-align:center;line-height:1.25}
+.studio-sheet-head,.studio-content{padding-left:20px;padding-right:20px}.studio-content h2{font-size:21px}.studio-bottom{flex-direction:column;align-items:stretch}.studio-bottom button{width:100%}.adv-grid{grid-template-columns:1fr}}
+</style>
 </head>
 <body>
-<main>
-  <header>
-    <div class="brand"><div class="mark" aria-hidden="true">CH</div><div>
-      <h1 data-i18n="title">ChatGPT Runtime Settings</h1>
-      <p data-i18n="intro">Set up the ChatGPT account and tools used by the component managed by CodexHub.</p>
-    </div></div>
-    <p class="muted" data-i18n="separation">These settings apply to the ChatGPT component. Its model service address and Gateway access credential are managed in CodexHub.</p>
-  </header>
-
-  <div id="session-needed" class="notice hidden" role="alert" data-i18n="openFromApp">Open this page from the ChatGPT provider in CodexHub to start a private settings session.</div>
-  <div id="page-error" class="notice error hidden" role="alert"></div>
-  <div id="page-message" class="notice hidden" role="status" aria-live="polite"></div>
-
-  <section class="card" aria-labelledby="readiness-title">
-    <div class="card-head"><div>
-      <h2 id="readiness-title"><span class="step">✓</span><span data-i18n="readinessTitle">Connection status</span></h2>
-      <p data-i18n="readinessHelp">Status uses the latest saved check. Run a check when you are ready to verify the account and connector.</p>
-    </div><button id="check-button" type="button" data-i18n="check">Check connection</button></div>
-    <div class="status-grid" aria-live="polite">
-      <div class="status-item"><strong data-i18n="accountStatus">ChatGPT account</strong><span id="account-state">—</span></div>
-      <div class="status-item"><strong data-i18n="browserStatus">Browser check</strong><span id="browser-state">—</span></div>
-      <div class="status-item"><strong data-i18n="textStatus">Text requests</strong><span id="text-state">—</span></div>
-      <div class="status-item"><strong data-i18n="toolsStatus">Tool requests</strong><span id="tools-state">—</span></div>
-      <div class="status-item"><strong data-i18n="tunnelStatus">Tool connection</strong><span id="tunnel-state">—</span></div>
-      <div class="status-item"><strong data-i18n="connectorStatus">Connector</strong><span id="connector-state">—</span></div>
-    </div>
-    <p id="readiness-summary" class="help muted" data-i18n="notChecked">No connection check has been run yet.</p>
-    <p class="help muted" data-i18n="installInApp">Component installation and start are managed in CodexHub.</p>
-  </section>
-
-  <section class="card" aria-labelledby="account-title">
-    <h2 id="account-title"><span class="step">1</span><span data-i18n="accountTitle">Sign in to ChatGPT</span></h2>
-    <p data-i18n="accountHelp">Sign in with the ChatGPT account used by this component. This account is separate from your CodexHub service credential.</p>
-    <p id="login-blocked" class="notice hidden" role="status"></p>
-    <p data-i18n="dailyBrowserHelp">Open ChatGPT in your daily browser, then return here and use the CodexHub browser extension to connect that account.</p>
-    <button id="extension-download" type="button" data-i18n="extensionDownload">Download browser connector</button>
-    <div class="row">
-      <button id="login-button" type="button" data-i18n="login">Open ChatGPT sign-in</button>
-      <button id="cancel-login-button" class="danger hidden" type="button" data-i18n="cancelLogin">Cancel sign-in</button>
-    </div>
-    <p data-i18n="loginHelp">When sign-in completes, this page will show whether the component needs a restart. Use Cancel sign-in only to stop an unfinished login.</p>
-  </section>
-
-  <form id="settings-form" autocomplete="off">
-    <section class="card" aria-labelledby="tools-title">
-      <h2 id="tools-title"><span class="step">2</span><span data-i18n="toolsTitle">Choose how ChatGPT is used</span></h2>
-      <p data-i18n="toolsHelp">Browser-only mode supports text requests. Full mode also connects the tools you authorize for this ChatGPT account.</p>
-      <div class="field">
-        <label for="mode" data-i18n="modeLabel">ChatGPT mode</label>
-        <select id="mode" name="mode">
-          <option value="browser-only" data-i18n="browserOnly">Text and browser access</option>
-          <option value="full" data-i18n="fullMode">Text and authorized tools</option>
-        </select>
-      </div>
-      <div id="tunnel-fields">
-        <div class="field">
-          <label for="tunnel-id" data-i18n="tunnelId">Tunnel ID</label>
-          <input id="tunnel-id" name="tunnel_id" type="text" spellcheck="false" placeholder="tunnel_…">
-          <span class="help muted" data-i18n="tunnelIdHelp">Find the ID in your OpenAI Tunnels. It is not your API key.</span>
-        </div>
-        <div class="field">
-          <label for="runtime-key" data-i18n="runtimeKey">Tunnel Runtime Key</label>
-          <input id="runtime-key" name="runtime_key" type="password" autocomplete="new-password" spellcheck="false">
-          <span id="key-help" class="help muted"></span>
-          <label id="clear-key-label" class="check hidden"><input id="clear-key" type="checkbox"><span data-i18n="clearKey">Remove the saved Runtime Key</span></label>
-          <span class="help muted" data-i18n="keyHelp">This key is for the OpenAI Tunnel. It is separate from ChatGPT sign-in and the CodexHub service credential.</span>
-        </div>
-        <p class="help"><a href="https://platform.openai.com/tunnels" target="_blank" rel="noopener noreferrer" data-i18n="tunnelLink">Open OpenAI Tunnels</a></p>
-      </div>
-    </section>
-
-    <section class="card" aria-labelledby="connector-title">
-      <h2 id="connector-title"><span class="step">3</span><span data-i18n="connectorTitle">Connect your ChatGPT connector</span></h2>
-      <p data-i18n="connectorHelp">Authorize the connector in ChatGPT, then check the connection above. Opening the account settings does not count as authorization.</p>
-      <div class="field">
-        <label for="connector-name" data-i18n="connectorName">Connector name</label>
-        <input id="connector-name" name="connector_name" type="text" maxlength="80" required>
-        <span class="help muted" data-i18n="connectorNameHelp">Use the name shown when you add the CodexHub connector in ChatGPT.</span>
-      </div>
-      <p class="help"><a href="https://chatgpt.com/#settings/Plugins" target="_blank" rel="noopener noreferrer" data-i18n="connectorLink">Open ChatGPT connector settings</a></p>
-      <div id="unsupported-warning" class="notice hidden" role="status">
-        <span data-i18n="unsupportedWarning">A saved Zero Risk setting is not supported by this managed setup.</span>
-        <div class="row"><button id="disable-unsupported" class="danger" type="button" data-i18n="disableUnsupported">Disable that unsupported setting and save</button></div>
-      </div>
-    </section>
-
-    <section class="card" aria-labelledby="options-title">
-      <h2 id="options-title"><span class="step">4</span><span data-i18n="optionsTitle">Runtime preferences</span></h2>
-      <p data-i18n="optionsHelp">These options affect the next start of the ChatGPT component.</p>
-      <div class="options">
-        <div class="field"><label for="context-window" data-i18n="contextWindow">Context window</label><input id="context-window" type="number" min="1" step="1"></div>
-        <div class="field"><label for="stall-timeout" data-i18n="stallTimeout">Stop waiting after (seconds)</label><input id="stall-timeout" type="number" min="1" step="1"></div>
-        <label class="check"><input id="headed" type="checkbox"><span data-i18n="headed">Show the browser while ChatGPT is working</span></label>
-        <label class="check"><input id="auto-approve" type="checkbox"><span data-i18n="autoApprove">Allow tool calls without confirmation</span></label>
-        <label class="check"><input id="saved-chats" type="checkbox"><span data-i18n="savedChats">Use saved chats</span></label>
-        <label class="check"><input id="bigger-context" type="checkbox"><span data-i18n="biggerContext">Use the experimental larger context</span></label>
-        <label class="check"><input id="skill-attachments" type="checkbox"><span data-i18n="skillAttachments">Enable experimental skill attachments</span></label>
-        <label class="check"><input id="fresh-conversation" type="checkbox"><span data-i18n="freshConversation">Start a fresh conversation for each request</span></label>
-      </div>
-    </section>
-
-    <section class="card" aria-label="Save settings">
-      <div id="pending-notice" class="notice hidden" role="status" aria-live="polite"></div>
-      <div class="actions">
-        <button id="save-button" class="primary" type="submit" data-i18n="save">Save settings</button>
-      </div>
-      <p class="help muted" data-i18n="saveHelp">Saving only stores your settings. It never interrupts active requests or restarts the component.</p>
-    </section>
-  </form>
-
-  <footer class="muted" data-i18n="footer">This page controls the ChatGPT component managed by CodexHub. Closing this browser tab does not stop it.</footer>
-</main>
+<div id="session-needed" class="session-gate hidden" role="alert">
+  <h2 data-i18n="openFromApp">Open this page from the ChatGPT provider in CodexHub to start a private settings session.</h2>
+  <p data-i18n="separation">These settings apply to the ChatGPT component. Its model service address and Gateway access credential are managed in CodexHub.</p>
+</div>
+<div id="app" class="hidden"></div>
 <script nonce="__CODEXHUB_CSP_NONCE__">
+
 (() => {
+  const CODEX_MARK = "/codexhub.svg";
+  const OPENAI_MARK = "/openai.svg";
+  const legacyBrowserOnly = "browser-only";
   const language = /^zh(?:-|$)/i.test(navigator.language || "") ? "zh" : "en";
-  const text = {
+  const copy = {
     en: {
-      title:"ChatGPT Runtime Settings", intro:"Set up the ChatGPT account and tools used by the component managed by CodexHub.",
-      separation:"These settings apply to the ChatGPT component. Its model service address and Gateway access credential are managed in CodexHub.",
+      brandSub:"Connection setup", localStatus:"Local settings", kicker:"CHATGPT · CODING SETUP",
+      title:"From connection to coding.", subtitle:"Connect your account and tools, one step at a time.",
       openFromApp:"Open this page from the ChatGPT provider in CodexHub to start a private settings session.",
-      readinessTitle:"Connection status", readinessHelp:"Status uses the latest saved check. Run a check when you are ready to verify the account and connector.", check:"Check connection", checking:"Checking the ChatGPT account and connector…",
-      accountStatus:"ChatGPT account", browserStatus:"Browser check", textStatus:"Text requests", toolsStatus:"Tool requests", tunnelStatus:"Tool connection", connectorStatus:"Connector", notChecked:"No connection check has been run yet.", notCheckedValue:"Not checked", installInApp:"Component installation and start are managed in CodexHub.",
-      dailyBrowserHelp:"Sign in to ChatGPT in this browser using your existing Google session or passkey. Return here and click the CodexHub browser extension to connect that account. If the extension is not installed, download and extract it, then load it as an unpacked extension in Chrome / Edge.", extensionDownload:"Download browser connector", browserVerifying:"Verifying the account from this browser…", browserSaved:"Account verified and saved. Restart the ChatGPT component from CodexHub to use it. It has not been restarted automatically.", browserFailed:"Could not connect this browser account. Your previous account is unchanged.",
-      accountTitle:"Sign in to ChatGPT", accountHelp:"Sign in with the ChatGPT account used by this component. This account is separate from your CodexHub service credential.", login:"Open ChatGPT sign-in", cancelLogin:"Cancel sign-in", loginHelp:"When sign-in completes, this page will show whether the component needs a restart. Use Cancel sign-in only to stop an unfinished login.",
-      toolsTitle:"Choose how ChatGPT is used", toolsHelp:"Browser-only mode supports text requests. Full mode also connects the tools you authorize for this ChatGPT account.", modeLabel:"ChatGPT mode", browserOnly:"Text and browser access", fullMode:"Text and authorized tools",
-      tunnelId:"Tunnel ID", tunnelIdHelp:"Find the ID in your OpenAI Tunnels. It is not your API key.", runtimeKey:"Tunnel Runtime Key", keyHelp:"This key is for the OpenAI Tunnel. It is separate from ChatGPT sign-in and the CodexHub service credential.",
-      clearKey:"Remove the saved Runtime Key", keySaved:"A Runtime Key is saved. Leave this blank to keep it, or enter a replacement.", keyMissing:"No Runtime Key is saved. Enter one to enable tools.", tunnelLink:"Open OpenAI Tunnels",
-      connectorTitle:"Connect your ChatGPT connector", connectorHelp:"Authorize the connector in ChatGPT, then check the connection above. Opening the account settings does not count as authorization.", connectorName:"Connector name", connectorNameHelp:"Use the name shown when you add the CodexHub connector in ChatGPT.", connectorLink:"Open ChatGPT connector settings",
-      unsupportedWarning:"A saved Zero Risk setting is not supported by this managed setup.", disableUnsupported:"Disable that unsupported setting and save",
-      optionsTitle:"Runtime preferences", optionsHelp:"These options affect the next start of the ChatGPT component.", contextWindow:"Context window", stallTimeout:"Stop waiting after (seconds)",
-      headed:"Show the browser while ChatGPT is working", autoApprove:"Allow tool calls without confirmation", savedChats:"Use saved chats", biggerContext:"Use the experimental larger context", skillAttachments:"Enable experimental skill attachments", freshConversation:"Start a fresh conversation for each request",
-      save:"Save settings", saveHelp:"Saving only stores your settings. It never interrupts active requests or restarts the component.", footer:"This page controls the ChatGPT component managed by CodexHub. Closing this browser tab does not stop it.",
-      signedIn:"Signed in", signedOut:"Not signed in", checked:"Checked", passed:"Available", ready:"Ready", notReady:"Not ready", selectable:"Connected", failed:"Check failed", stale:"Needs a new check", unavailable:"Unavailable", running:"Running", stopped:"Stopped", installed:"Installed", notInstalled:"Not installed", disabled:"Disabled", pending:"Restart needed", noRestart:"No pending restart", notApplicable:"Not needed in text mode",
-      summaryReady:"Text and tools are ready.", summaryText:"Text requests are ready. Tools still need a working Tunnel and connector.", summaryTextOnly:"Text requests are ready in browser-only mode.", summaryPending:"Saved settings will take effect after you restart the ChatGPT component.", summaryNoCheck:"Run a connection check to verify ChatGPT access and tool authorization.",
-      openLoginDone:"The sign-in window is ready. Complete sign-in there; this page will update its status.", cancelLoginDone:"The unfinished sign-in was cancelled.", loginFailed:"Sign-in did not complete. Check the ChatGPT window and try again.", checkDone:"Connection check finished.", loginRestart:"Sign-in was verified. Restart the ChatGPT component from CodexHub to use the account.", runtimeRestart:"The ChatGPT component needs a restart. Restart it from CodexHub to use its latest state.", activeMode:"Active mode",
-      savedPending:"Settings saved. Restart the ChatGPT component for these changes to take effect.", savedNextStart:"Settings saved. They will load the next time the ChatGPT component starts.", saveError:"Settings could not be saved. Your previous settings are unchanged.", sessionExpired:"This settings session expired. Return to CodexHub and open Runtime Settings again.",
-      incompleteFull:"Full mode is selected, but tools are not ready until a Tunnel ID, Runtime Key, signed-in account, and authorized connector are available.",
-      readinessCache:"Last check: {when}", noAccountCheck:"Sign-in has not been checked", noConnectorCheck:"Connector has not been checked", noTunnelCheck:"Tunnel has not been checked", browserOnlyTunnel:"Not needed in text mode",
-      errors:{"component_upgrade_required":"The installed ChatGPT component does not match this CodexHub build. In the ChatGPT provider’s advanced actions, upgrade the component and start it, then return here to sign in.","component_restart_required":"In the ChatGPT provider’s advanced actions, stop and start the component, then return here to sign in.","settings_busy":"Settings are being updated. Try again.","tunnel_id_invalid":"Check the Tunnel ID and try again.","runtime_key_invalid":"Check the Runtime Key and try again.","connector_name_invalid":"Enter a connector name.","mode_invalid":"Choose a supported ChatGPT mode.","runtime_options_invalid":"Check the runtime options and try again."}
+      separation:"These settings apply to the ChatGPT component. Its model service address and Gateway access credential are managed in CodexHub.",
+      steps:["Connect account","Prepare tunnel","Activate tunnel","Authorize tools","Verify coding"],
+      sheetCodes:["ACCOUNT","TUNNEL","ACTIVATE","AUTHORIZE","VERIFY"],
+      serviceName:"ChatGPT", serviceCaption:"Your account, your coding workflow",
+      placeAccount:"Where: your daily browser", placeTunnel:"Where: OpenAI Platform → return here",
+      placeActivate:"Where: CodexHub main window → return here", placeAuthorize:"Where: ChatGPT → return here",
+      placeVerify:"Where: this page → return to CodexHub",
+      accountH2:"Connect your existing ChatGPT account",
+      accountP:"Keep using Google or Passkey in your daily browser. A valid login can be reused; you do not need a separate account.",
+      accountReady:"A connected ChatGPT account was detected. You can continue to the tool tunnel.",
+      accountNeed:"Sign in to ChatGPT in this browser, then use the CodexHub browser extension on a chatgpt.com tab to connect that session here.",
+      extensionHelp:"First time only: download the connector, extract it, and load it as an unpacked extension in Chrome or Edge. This browser connector is not the ChatGPT tool connector.",
+      extensionDownload:"Download browser connector", openChatgpt:"Open ChatGPT", continueLabel:"Continue",
+      accountConnectorNote:"Account connection (browser extension) is separate from tool authorization (Codex Native2 connector).",
+      browserVerifying:"Verifying the account from this browser…",
+      browserSaved:"Account verified and saved. Restart the ChatGPT component from CodexHub before tools can use it. It was not restarted automatically.",
+      browserFailed:"Could not connect this browser account. Your previous account is unchanged.",
+      tunnelH2:"Build the path for coding tools",
+      tunnelP:"Create a Tunnel so ChatGPT tool requests can reach your coding clients. Use the same OpenAI account as ChatGPT.",
+      tunnelId:"Tunnel ID", tunnelCreate:"Create / open Tunnels ↗", tunnelHelp:"Tool requests return to your coding client through this channel.",
+      apiKey:"Ordinary API key", apiKeyCreate:"Create API key ↗",
+      apiKeyHelp:"Use an ordinary API key with Tunnels Read + Use. Not an Admin key. Not your CodexHub service credential.",
+      keySaved:"A key is already saved. Leave blank to keep it, or enter a replacement.",
+      keyMissing:"No key is saved yet. Enter one to enable tools.", clearKey:"Remove the saved API key",
+      saveNext:"Next: manually restart the ChatGPT component", saveNextDetail:"Saving finishes immediately and never restarts the component.",
+      saveContinue:"Save and continue",
+      savedPending:"Settings saved. In CodexHub, stop then start the ChatGPT component. This page did not restart it.",
+      savedNextStart:"Settings saved. They load the next time the ChatGPT component starts.",
+      saveError:"Settings could not be saved. Your previous settings are unchanged.",
+      activateH2:"Make the saved configuration active",
+      activateWarn:"Configuration is saved. In CodexHub, manually stop and start the ChatGPT component.",
+      activateP:"Refreshing this page does not restart the component. Keep it running, then recheck status here.",
+      restartHelp:"In CodexHub → ChatGPT provider → advanced actions: Stop, then Start.",
+      recheckRuntime:"Recheck component status",
+      runtimePending:"Still waiting for a manual restart, or full mode is not active yet.",
+      runtimeReady:"Tool tunnel runtime is active. You can authorize the ChatGPT connector next.",
+      authorizeH2:"Allow ChatGPT to use coding tools",
+      authorizeP:"The tunnel is running. Create the matching tool connector in ChatGPT.",
+      recipe1:"Turn on Developer Mode in ChatGPT settings.",
+      recipe2:"Create a connector of type Tunnel and select the Tunnel you prepared.",
+      recipe3:"Set Authentication to None. Name it Codex Native2.",
+      recipe4:"In Permissions, allow the actions required for coding tools (upstream full harness uses Allow all actions).",
+      recipeNote:"Understand the permission scope. Client sandboxes and approvals still apply. Workspace policy may block tools. The browser account extension does not replace this authorization.",
+      openConnector:"Open ChatGPT connector settings", recheckConnector:"Check connector authorization",
+      connectorReady:"Connector is selectable. Continue to the coding capability check.",
+      connectorBlocked:"Connector is not authorized yet. Opening the settings link alone does not count.",
+      verifyH2:"Confirm one real tool roundtrip",
+      verifyP:"Sign-in or text success is not enough. Coding setup needs a tool request to reach the client and return a result in the same model turn.",
+      verifyNote:"This step uses a harmless real tool probe. Doctor flags and text-only checks do not complete setup.",
+      verifyRun:"Verify coding capability", verifyRunning:"Running tool roundtrip…",
+      verifyPassed:"Tool roundtrip succeeded. Coding setup is complete for the current configuration.",
+      verifyFailed:"Tool result did not return. Coding setup is still incomplete. Check the tunnel, connector, and client tool permissions.",
+      verifyUnavailable:"The real tool probe is not available in this build yet. Coding setup stays incomplete until a real roundtrip can pass.",
+      verifyReason:"Reason: {{reason}}",
+      probeReasons:{
+        "tool_result_incomplete":"The model turn ended before the tool result completed.",
+        "tool_correlation_missing":"The tool result was not confirmed in the completed turn.",
+        "tool_call_missing":"The model did not request the setup probe tool.",
+        "tool_call_unexpected":"The model requested an unexpected tool.",
+        "tool_result_rejected":"The runtime rejected the tool result.",
+        "probe_request_rejected":"The runtime rejected the probe request.",
+        "probe_timeout":"The tool roundtrip timed out.",
+        "probe_cancelled":"The probe was cancelled.",
+        "runtime_unreachable":"The ChatGPT component could not be reached.",
+        "runtime_not_running":"The ChatGPT component is not running.",
+        "tunnel_not_ready":"The tool tunnel is not ready.",
+        "connector_not_selectable":"The ChatGPT connector is not authorized.",
+        "tool_runtime_not_ready":"The tool tunnel and connector are not ready.",
+        "login_required":"ChatGPT account login is required.",
+        "full_mode_required":"Full coding mode is required.",
+        "component_restart_required":"Restart the ChatGPT component, then try again.",
+        "component_unavailable":"The ChatGPT component is unavailable or incompatible.",
+        "model_unavailable":"No model is available for the probe.",
+        "missing_call_identity":"The tool call had no Call identity.",
+        "runtime_disabled":"The ChatGPT component is disabled.",
+        "active_config_or_account_changed":"Account or configuration changed since the last successful probe.",
+        "runtime_instance_changed":"The ChatGPT component instance changed since the last successful probe.",
+        "probe_response_too_large":"The probe response was too large to accept.",
+        "probe_already_running":"A probe is already running.",
+        "probe_interrupted":"The previous check was interrupted. Run the check again.",
+        "probe_timeout_invalid":"The probe timeout is invalid.",
+        "active_account_state_unavailable":"The active account state is unavailable.",
+        "probe_evidence_invalid":"Saved probe evidence is invalid.",
+        "probe_not_run":"The coding probe has not been run yet.",
+        "probe_failed":"The tool probe failed."
+      },
+      doneBadge:"Coding tools ready", doneH1:"You can start coding.",
+      doneP:"Account, active tunnel, connector, and a real tool roundtrip are complete for this configuration.",
+      doneNext:"Next: return to CodexHub, choose a model, and connect your coding client.",
+      review:"Review steps", back:"← Previous", returnAuth:"Back to authorization",
+      footerNote:"Local Runtime Settings · secrets stay on this machine", footerBrand:"CodexHub · ChatGPT setup",
+      advanced:"Advanced runtime preferences (optional)",
+      contextWindow:"Context window", stallTimeout:"Stop waiting after (seconds)",
+      headed:"Show the browser while ChatGPT is working", autoApprove:"Allow tool calls without confirmation",
+      savedChats:"Use saved chats", biggerContext:"Use the experimental larger context",
+      skillAttachments:"Enable experimental skill attachments", freshConversation:"Start a fresh conversation for each request",
+      unsupportedWarning:"A saved Zero Risk setting is not supported by this managed setup.",
+      disableUnsupported:"Disable that unsupported setting and save",
+      checking:"Checking…", sessionExpired:"This settings session expired. Return to CodexHub and open Runtime Settings again.",
+      legacyText:"This installation still has browser-only text settings. Coding setup is unfinished; saved credentials are kept.",
+      errors:{"component_upgrade_required":"The installed ChatGPT component does not match this CodexHub build. In the ChatGPT provider’s advanced actions, upgrade the component and start it, then return here.","component_restart_required":"In the ChatGPT provider’s advanced actions, stop and start the component, then return here.","settings_busy":"Settings are being updated. Try again.","tunnel_id_invalid":"Check the Tunnel ID and try again.","runtime_key_invalid":"Check the API key and try again.","connector_name_invalid":"Enter a connector name.","mode_invalid":"Choose a supported ChatGPT mode.","runtime_options_invalid":"Check the runtime options and try again."}
     },
     zh: {
-      title:"ChatGPT Runtime Settings", intro:"设置由 CodexHub 管理的 ChatGPT 组件所用的账号与工具。",
-      separation:"这些设置属于 ChatGPT 组件。模型服务地址和 Gateway 访问凭证在 CodexHub 中管理。",
+      brandSub:"连接设置", localStatus:"本机设置", kicker:"CHATGPT · 编程设置",
+      title:"从连接到开始编程。", subtitle:"连接账号与工具，按步骤完成准备。",
       openFromApp:"请从 CodexHub 的 ChatGPT 供应商页面打开此页，以建立本机设置会话。",
-      readinessTitle:"连接状态", readinessHelp:"这里显示最近一次检查结果。准备好验证账号和连接器后，再运行检查。", check:"检查连接", checking:"正在检查 ChatGPT 账号和连接器…",
-      accountStatus:"ChatGPT 账号", browserStatus:"浏览器检查", textStatus:"文本请求", toolsStatus:"工具请求", tunnelStatus:"工具连接", connectorStatus:"连接器", notChecked:"尚未运行连接检查。", notCheckedValue:"尚未检查", installInApp:"组件的安装与启动在 CodexHub 中管理。",
-      dailyBrowserHelp:"在当前日常浏览器中使用已有 Google 登录或 Passkey 登录 ChatGPT，然后返回本页，点击 CodexHub 浏览器扩展连接此账号。首次使用请下载并解压扩展，在 Chrome / Edge 的扩展管理中加载已解压的扩展。", extensionDownload:"下载浏览器连接扩展", browserVerifying:"正在验证此浏览器的账号…", browserSaved:"账号已验证并保存。请在 CodexHub 中重启 ChatGPT 组件以使用它；没有自动重启。", browserFailed:"未能连接此浏览器账号，原有账号保持不变。",
-      accountTitle:"登录 ChatGPT", accountHelp:"使用此组件要连接的 ChatGPT 账号。它与 CodexHub 服务凭证相互独立。", login:"打开 ChatGPT 登录", cancelLogin:"取消登录", loginHelp:"登录完成后，此页会显示组件是否需要重启。只有要终止未完成的登录时才点击取消。",
-      toolsTitle:"选择 ChatGPT 使用方式", toolsHelp:"仅浏览器模式支持文本请求。完整模式还会连接你在此 ChatGPT 账号中授权的工具。", modeLabel:"ChatGPT 模式", browserOnly:"文本和浏览器访问", fullMode:"文本和已授权工具",
-      tunnelId:"Tunnel ID", tunnelIdHelp:"可在 OpenAI Tunnels 中找到。它不是 API Key。", runtimeKey:"Tunnel Runtime Key", keyHelp:"此密钥用于 OpenAI Tunnel，与 ChatGPT 登录及 CodexHub 服务凭证不同。",
-      clearKey:"清除已保存的 Runtime Key", keySaved:"已保存 Runtime Key。留空可保留，输入新值则替换。", keyMissing:"尚未保存 Runtime Key。输入后才能启用工具。", tunnelLink:"打开 OpenAI Tunnels",
-      connectorTitle:"连接 ChatGPT 连接器", connectorHelp:"在 ChatGPT 中授权连接器，然后检查上方状态。打开账号设置链接不代表已授权。", connectorName:"连接器名称", connectorNameHelp:"填写在 ChatGPT 中添加 CodexHub 连接器时显示的名称。", connectorLink:"打开 ChatGPT 连接器设置",
-      unsupportedWarning:"当前托管设置不支持已保存的 Zero Risk 选项。", disableUnsupported:"关闭此不受支持的选项并保存",
-      optionsTitle:"运行偏好", optionsHelp:"这些选项会在 ChatGPT 组件下次启动时生效。", contextWindow:"上下文窗口", stallTimeout:"停止等待时间（秒）",
-      headed:"ChatGPT 工作时显示浏览器", autoApprove:"不经确认直接允许工具调用", savedChats:"使用已保存的聊天", biggerContext:"使用实验性更大上下文", skillAttachments:"启用实验性技能附件", freshConversation:"每个请求都开启新对话",
-      save:"保存设置", saveHelp:"保存只会写入设置，不会中断正在运行的请求，也不会重启组件。", footer:"此页面管理 CodexHub 托管的 ChatGPT 组件。关闭浏览器标签不会停止组件。",
-      signedIn:"已登录", signedOut:"未登录", checked:"已检查", passed:"可用", ready:"就绪", notReady:"未就绪", selectable:"已连接", failed:"检查失败", stale:"需要重新检查", unavailable:"不可用", running:"运行中", stopped:"已停止", installed:"已安装", notInstalled:"未安装", disabled:"已禁用", pending:"需要重启", noRestart:"无需重启", notApplicable:"文本模式无需此项",
-      summaryReady:"文本和工具均已就绪。", summaryText:"文本请求已就绪。工具仍需要可用的 Tunnel 和已授权连接器。", summaryTextOnly:"浏览器模式下的文本请求已就绪。", summaryPending:"保存的设置将在重启 ChatGPT 组件后生效。", summaryNoCheck:"运行连接检查以验证 ChatGPT 访问和工具授权。",
-      openLoginDone:"登录窗口已打开。请在其中完成登录，此页会自动更新状态。", cancelLoginDone:"已取消未完成的登录。", loginFailed:"登录未能完成。请检查 ChatGPT 窗口后重试。", checkDone:"连接检查已完成。", loginRestart:"登录已验证。请在 CodexHub 中重启 ChatGPT 组件以使用此账号。", runtimeRestart:"ChatGPT 组件需要重启。请在 CodexHub 中重启，以使用最新状态。", activeMode:"当前运行模式",
-      savedPending:"设置已保存。重启 ChatGPT 组件后生效。", savedNextStart:"设置已保存。ChatGPT 组件下次启动时会加载。", saveError:"设置保存失败，之前的设置保持不变。", sessionExpired:"设置会话已过期。请回到 CodexHub，重新打开 Runtime Settings。",
-      incompleteFull:"已选择完整模式，但工具就绪前仍需 Tunnel ID、Runtime Key、已登录账号和已授权连接器。",
-      readinessCache:"最近检查：{when}", noAccountCheck:"尚未检查登录状态", noConnectorCheck:"尚未检查连接器", noTunnelCheck:"尚未检查 Tunnel", browserOnlyTunnel:"文本模式无需 Tunnel",
-      errors:{"component_upgrade_required":"已安装的 ChatGPT 组件与当前 CodexHub 版本不一致。请回到 ChatGPT Provider 的高级操作，升级组件并启动，然后返回此页登录。","component_restart_required":"请回到 ChatGPT Provider 的高级操作，停止再启动组件，然后返回此页登录。","settings_busy":"设置正在更新，请稍后重试。","tunnel_id_invalid":"请检查 Tunnel ID 后重试。","runtime_key_invalid":"请检查 Runtime Key 后重试。","connector_name_invalid":"请填写连接器名称。","mode_invalid":"请选择支持的 ChatGPT 模式。","runtime_options_invalid":"请检查运行选项后重试。"}
+      separation:"这些设置属于 ChatGPT 组件。模型服务地址和 Gateway 访问凭证在 CodexHub 中管理。",
+      steps:["连接账号","准备通道","启用通道","授权工具","完成验证"],
+      sheetCodes:["ACCOUNT","TUNNEL","ACTIVATE","AUTHORIZE","VERIFY"],
+      serviceName:"ChatGPT", serviceCaption:"你的账号，你的编程工作流",
+      placeAccount:"操作位置：你的日常浏览器", placeTunnel:"操作位置：OpenAI 平台 → 返回本页",
+      placeActivate:"操作位置：CodexHub 主界面 → 返回本页", placeAuthorize:"操作位置：ChatGPT → 返回本页",
+      placeVerify:"操作位置：本页检查 → 返回 CodexHub",
+      accountH2:"连接已有的 ChatGPT 账号",
+      accountP:"继续使用日常浏览器里的 Google / Passkey。有效登录可以复用，不需要另开一套账号。",
+      accountReady:"已检测到连接的账号，可以继续配置工具通道。",
+      accountNeed:"在当前浏览器登录 ChatGPT，然后在 chatgpt.com 标签页点击 CodexHub 浏览器扩展，把该会话连接到这里。",
+      extensionHelp:"仅首次需要：下载扩展并解压，在 Chrome / Edge 中加载已解压的扩展。此浏览器扩展不是 ChatGPT 工具连接器。",
+      extensionDownload:"下载浏览器连接扩展", openChatgpt:"打开 ChatGPT", continueLabel:"继续",
+      accountConnectorNote:"账号连接（浏览器扩展）与工具授权（Codex Native2 连接器）是不同步骤。",
+      browserVerifying:"正在验证此浏览器的账号…",
+      browserSaved:"账号已验证并保存。请在 CodexHub 中重启 ChatGPT 组件后才能用于工具；没有自动重启。",
+      browserFailed:"未能连接此浏览器账号，原有账号保持不变。",
+      tunnelH2:"为编程工具建立连接",
+      tunnelP:"创建工具通道，让 ChatGPT 的工具请求回到你的编程客户端。请使用与 ChatGPT 相同的 OpenAI 账号。",
+      tunnelId:"Tunnel ID", tunnelCreate:"创建 / 打开 Tunnels ↗", tunnelHelp:"工具请求通过这个通道返回编程客户端。",
+      apiKey:"普通 API key", apiKeyCreate:"创建 API key ↗",
+      apiKeyHelp:"使用具备 Tunnels Read + Use 权限的普通 API key，不是 Admin key，也不是 CodexHub 服务凭证。",
+      keySaved:"已保存密钥。留空可保留，输入新值则替换。",
+      keyMissing:"尚未保存密钥。输入后才能启用工具。", clearKey:"清除已保存的 API key",
+      saveNext:"下一步：手动重启 ChatGPT 组件", saveNextDetail:"保存立即完成，不会自动重启。",
+      saveContinue:"保存并继续",
+      savedPending:"设置已保存。请在 CodexHub 中停止再启动 ChatGPT 组件。本页没有自动重启。",
+      savedNextStart:"设置已保存。ChatGPT 组件下次启动时会加载。",
+      saveError:"设置保存失败，之前的设置保持不变。",
+      activateH2:"让已保存的配置真正生效",
+      activateWarn:"配置已保存。请在 CodexHub 手动停止再启动 ChatGPT 组件。",
+      activateP:"仅刷新这个网页不会重启组件。保持组件运行后，再回到这里检查状态。",
+      restartHelp:"在 CodexHub → ChatGPT 供应商 → 高级操作：先停止，再启动。",
+      recheckRuntime:"重新检查组件状态",
+      runtimePending:"仍在等待手动重启，或完整模式尚未生效。",
+      runtimeReady:"工具通道已运行，可以去 ChatGPT 添加连接器。",
+      authorizeH2:"允许 ChatGPT 使用编程工具",
+      authorizeP:"通道已运行。现在在 ChatGPT 里创建与它对应的工具连接器。",
+      recipe1:"在 ChatGPT 设置中开启 Developer Mode。",
+      recipe2:"新建连接器，类型选 Tunnel，并选择刚才的 Tunnel。",
+      recipe3:"Authentication 选 None，名称填写 Codex Native2。",
+      recipe4:"在 Permissions 中确认编程工具所需权限（上游完整流程为 Allow all actions）。",
+      recipeNote:"请了解授权范围。客户端沙箱与审批仍然生效；工作区策略也可能禁止工具。账号连接扩展不能代替此授权。",
+      openConnector:"打开 ChatGPT 连接器设置", recheckConnector:"检查连接器授权",
+      connectorReady:"连接器可选。继续验证编程能力。",
+      connectorBlocked:"连接器尚未授权。仅打开设置链接不算完成。",
+      verifyH2:"最后，确认工具能完成一次往返",
+      verifyP:"不仅是登录成功：编程能力需要工具请求到达客户端，并把结果送回同一次模型交互。",
+      verifyNote:"此步骤使用无副作用的真实工具探测。Doctor 状态或纯文本检查不能结束设置。",
+      verifyRun:"验证编程能力", verifyRunning:"正在进行工具往返…",
+      verifyPassed:"工具往返成功。当前配置的编程设置已完成。",
+      verifyFailed:"工具结果没有返回。编程设置尚未完成。请检查通道、连接器与客户端工具权限。",
+      verifyUnavailable:"当前版本尚无真实工具探测接口。在真实往返通过前，编程设置保持未完成。",
+      verifyReason:"原因：{{reason}}",
+      probeReasons:{
+        "tool_result_incomplete":"模型回合在工具结果完成前就结束了。",
+        "tool_correlation_missing":"已完成的回合中未能确认工具结果。",
+        "tool_call_missing":"模型没有请求设置探测工具。",
+        "tool_call_unexpected":"模型请求了非预期工具。",
+        "tool_result_rejected":"运行时拒绝了工具结果。",
+        "probe_request_rejected":"运行时拒绝了探测请求。",
+        "probe_timeout":"工具往返超时。",
+        "probe_cancelled":"探测已取消。",
+        "runtime_unreachable":"无法连接 ChatGPT 组件。",
+        "runtime_not_running":"ChatGPT 组件未在运行。",
+        "tunnel_not_ready":"工具通道尚未就绪。",
+        "connector_not_selectable":"ChatGPT 连接器尚未授权。",
+        "tool_runtime_not_ready":"工具通道与连接器尚未就绪。",
+        "login_required":"需要先登录 ChatGPT 账号。",
+        "full_mode_required":"需要完整编程模式。",
+        "component_restart_required":"请重启 ChatGPT 组件后再试。",
+        "component_unavailable":"ChatGPT 组件不可用或不兼容。",
+        "model_unavailable":"没有可用于探测的模型。",
+        "missing_call_identity":"工具调用缺少 Call identity。",
+        "runtime_disabled":"ChatGPT 组件已禁用。",
+        "active_config_or_account_changed":"自上次探测成功后，账号或配置已变化。",
+        "runtime_instance_changed":"自上次探测成功后，ChatGPT 组件实例已变化。",
+        "probe_response_too_large":"探测响应过大，无法接受。",
+        "probe_already_running":"已有探测正在进行。",
+        "probe_interrupted":"上次检查被中断，请重新运行。",
+        "probe_timeout_invalid":"探测超时设置无效。",
+        "active_account_state_unavailable":"当前账号状态不可用。",
+        "probe_evidence_invalid":"已保存的探测证据无效。",
+        "probe_not_run":"尚未运行编程探测。",
+        "probe_failed":"工具探测失败。"
+      },
+      doneBadge:"编程工具已就绪", doneH1:"可以开始编程了。",
+      doneP:"账号、运行中的通道、连接器和真实工具往返均已完成。",
+      doneNext:"下一步：回到 CodexHub，选择模型并接入你的编程客户端。",
+      review:"查看步骤", back:"← 上一步", returnAuth:"返回核对授权",
+      footerNote:"本机 Runtime Settings · 密钥不离开本机", footerBrand:"CodexHub · ChatGPT 设置",
+      advanced:"高级运行偏好（可选）",
+      contextWindow:"上下文窗口", stallTimeout:"停止等待时间（秒）",
+      headed:"ChatGPT 工作时显示浏览器", autoApprove:"不经确认直接允许工具调用",
+      savedChats:"使用已保存的聊天", biggerContext:"使用实验性更大上下文",
+      skillAttachments:"启用实验性技能附件", freshConversation:"每个请求都开启新对话",
+      unsupportedWarning:"当前托管设置不支持已保存的 Zero Risk 选项。",
+      disableUnsupported:"关闭此不受支持的选项并保存",
+      checking:"正在检查…", sessionExpired:"设置会话已过期。请回到 CodexHub，重新打开 Runtime Settings。",
+      legacyText:"当前仍是仅浏览器文本配置。编程设置未完成；已保存的凭证会保留。",
+      errors:{"component_upgrade_required":"已安装的 ChatGPT 组件与当前 CodexHub 版本不一致。请回到 ChatGPT Provider 的高级操作，升级组件并启动，然后返回此页。","component_restart_required":"请回到 ChatGPT Provider 的高级操作，停止再启动组件，然后返回此页。","settings_busy":"设置正在更新，请稍后重试。","tunnel_id_invalid":"请检查 Tunnel ID 后重试。","runtime_key_invalid":"请检查 API key 后重试。","connector_name_invalid":"请填写连接器名称。","mode_invalid":"请选择支持的 ChatGPT 模式。","runtime_options_invalid":"请检查运行选项后重试。"}
     }
-  }[language];
+  };
+  const text = copy[language];
+  const probeReasonMessage = (reason) => {
+    if (!reason) return "";
+    const mapped = (text.probeReasons && text.probeReasons[reason]) || reason;
+    return (text.verifyReason || "Reason: {{reason}}").replace("{{reason}}", mapped);
+  };
+  const verifyFailureMessage = (reason) => {
+    const detail = probeReasonMessage(reason);
+    return detail ? `${text.verifyFailed} ${detail}` : text.verifyFailed;
+  };
+  document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
+  document.querySelectorAll("[data-i18n]").forEach((node) => {
+    if (text[node.dataset.i18n]) node.textContent = text[node.dataset.i18n];
+  });
 
   const byId = (id) => document.getElementById(id);
   let bootstrap = window.location.hash.length > 1 ? window.location.hash.slice(1) : "";
   history.replaceState(null, "", window.location.pathname);
-  let current = null;
-  let busy = false;
-  let timer = null;
-  let loginWasStarted = false;
+  let current = null, busy = false, timer = null, step = 0, toast = "", toastKind = "success";
+  let probe = { state: "not_run" };
+  let form = {
+    tunnel_id: "", runtime_key: "", clear_key: false, key_configured: false,
+    context_window: 256000, stall_timeout_sec: "", headed: false, auto_approve_tool_calls: false,
+    use_saved_chats: false, experimental_bigger_context: false, experimental_skill_attachments: false,
+    experimental_fresh_conversation_per_turn: false, unsupported_zero_risk: false
+  };
 
-  document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
-  document.querySelectorAll("[data-i18n]").forEach((node) => {
-    const key = node.dataset.i18n;
-    if (text[key]) node.textContent = text[key];
-  });
-  const label = (state) => ({
-    signed_in:text.signedIn, signed_out:text.signedOut, not_checked:text.notCheckedValue,
-    passed:text.passed, ready:text.ready, selectable:text.selectable, not_ready:text.notReady, failed:text.failed,
-    stale:text.stale, unavailable:text.unavailable, not_started:text.stopped, running:text.running,
-    blocked:text.notReady, error:text.failed, browser_only:text.browserOnly, stopped:text.stopped, installed:text.installed, not_installed:text.notInstalled,
-    disabled:text.disabled
-  }[state] || state || "—");
-  const setBusy = (value) => {
-    busy = value;
-    document.querySelectorAll("button").forEach((button) => { button.disabled = value; });
-    updateLoginButtons();
-  };
-  const updateLoginButtons = () => {
-    const open = current?.runtime?.login_window_open === true;
-    const blocked = current?.runtime?.login_blocked_reason;
-    byId("login-button").disabled = busy || open || Boolean(blocked);
-    byId("login-blocked").textContent = text.errors[blocked] || "";
-    byId("login-blocked").classList.toggle("hidden", !blocked);
-    byId("cancel-login-button").disabled = busy || !open;
-    byId("cancel-login-button").classList.toggle("hidden", !open);
-  };
-  const showMessage = (message, kind = "success") => {
-    const node = byId("page-message");
-    node.textContent = message;
-    node.className = `notice ${kind === "error" ? "error" : kind === "success" ? "success" : ""}`;
-    if (!message) node.classList.add("hidden");
-  };
-  const showError = (message) => {
-    const node = byId("page-error");
-    node.textContent = message;
-    node.classList.toggle("hidden", !message);
-  };
+  const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+  }[ch]));
+
   const request = async (path, method = "GET", body = undefined) => {
     const init = { method, mode:"same-origin", credentials:"same-origin", cache:"no-store" };
     const session = sessionStorage.getItem("codexhub.runtime-settings.session");
@@ -279,192 +337,423 @@
     if (response.status === 401) {
       sessionStorage.removeItem("codexhub.runtime-settings.session");
       byId("session-needed").classList.remove("hidden");
-      document.querySelectorAll("button, input, select").forEach((node) => { node.disabled = true; });
-      showError(text.sessionExpired);
+      byId("app").classList.add("hidden");
       throw new Error(text.sessionExpired);
     }
+    if (response.status === 404) {
+      const err = new Error("not_found"); err.code = 404; throw err;
+    }
     if (!response.ok || !data || data.ok === false) {
-      const message = data && data.error ? data.error : text.saveError;
-      throw new Error(text.errors[data?.error_code] || message);
+      throw new Error(text.errors[data?.error_code] || (data && data.error) || text.saveError);
     }
     return data;
   };
+
+  const accountConnected = (data) => {
+    const runtime = data?.runtime || {};
+    const readiness = data?.readiness || {};
+    return runtime.login_state === "signed_in" ||
+      (readiness.cache_state === "current" && readiness.login?.state === "signed_in");
+  };
+  const credentialsSaved = (data) => {
+    const saved = data?.settings?.saved || {};
+    const tunnel = saved.tunnel || {};
+    return saved.mode === "full" && (
+      saved.configuration_complete === true ||
+      (Boolean(tunnel.tunnel_id) && tunnel.runtime_key_configured === true)
+    );
+  };
+  const runtimeActive = (data) => {
+    const runtime = data?.runtime || {};
+    if (data?.settings?.pending_restart || runtime.settings_pending_restart || runtime.restart_required) return false;
+    // Keep the browser-only branch so packaged tests and legacy installs stay explicit.
+    if (runtime.active_mode === legacyBrowserOnly) return false;
+    if (runtime.active_mode !== "full") return false;
+    return runtime.running === true && runtime.compatible === true && runtime.admitting === true && runtime.disabled !== true;
+  };
+  const connectorOk = (data) => {
+    const readiness = data?.readiness || {};
+    if (readiness.cache_state !== "current") return false;
+    if (readiness.connector?.state === "selectable" || readiness.connector?.state === "ready") return true;
+    return readiness.tools_ready === true;
+  };
+  const toolPassed = (data) => {
+    // Only server-side probe evidence completes coding setup. Local busy state is display-only.
+    if (!data) return false;
+    if (data.coding_setup_complete === true) return true;
+    return data.tool_probe?.state === "passed";
+  };
+  const completed = (index, data) => {
+    if (index === 0) return accountConnected(data);
+    if (index === 1) return credentialsSaved(data);
+    if (index === 2) return credentialsSaved(data) && runtimeActive(data);
+    if (index === 3) return completed(2, data) && connectorOk(data);
+    if (index === 4) return completed(3, data) && toolPassed(data);
+    return false;
+  };
+  const firstPending = (data) => {
+    for (let i = 0; i < 5; i += 1) if (!completed(i, data)) return i;
+    return 5;
+  };
+  const showToast = (message, kind = "success") => { toast = message || ""; toastKind = kind; };
+
+  const captureForm = () => {
+    const tunnel = byId("focus-tunnel");
+    const key = byId("focus-key");
+    const clear = byId("clear-key");
+    if (tunnel) form.tunnel_id = tunnel.value.trim();
+    if (key) form.runtime_key = key.value;
+    if (clear) form.clear_key = clear.checked;
+    const cw = byId("context-window");
+    const st = byId("stall-timeout");
+    if (cw) form.context_window = Number(cw.value);
+    if (st) form.stall_timeout_sec = st.value;
+    const map = {
+      headed: "headed",
+      "auto-approve": "auto_approve_tool_calls",
+      "saved-chats": "use_saved_chats",
+      "bigger-context": "experimental_bigger_context",
+      "skill-attachments": "experimental_skill_attachments",
+      "fresh-conversation": "experimental_fresh_conversation_per_turn",
+    };
+    Object.entries(map).forEach(([id, key]) => {
+      const node = byId(id);
+      if (node) form[key] = node.checked;
+    });
+  };
+
   const applySettings = (result) => {
     const saved = result.saved || {};
     const tunnel = saved.tunnel || {};
     const options = saved.options || {};
-    byId("mode").value = saved.mode || "browser-only";
-    byId("connector-name").value = saved.connector_name || "";
-    byId("tunnel-id").value = tunnel.tunnel_id || "";
-    byId("runtime-key").value = "";
-    byId("runtime-key").disabled = false;
-    byId("clear-key").checked = false;
-    byId("clear-key-label").classList.toggle("hidden", tunnel.runtime_key_configured !== true);
-    byId("key-help").textContent = tunnel.runtime_key_configured ? text.keySaved : text.keyMissing;
-    byId("context-window").value = options.context_window ?? 256000;
-    byId("stall-timeout").value = options.stall_timeout_sec ?? "";
-    byId("headed").checked = options.headed === true;
-    byId("auto-approve").checked = options.auto_approve_tool_calls === true;
-    byId("saved-chats").checked = options.use_saved_chats === true;
-    byId("bigger-context").checked = options.experimental_bigger_context === true;
-    byId("skill-attachments").checked = options.experimental_skill_attachments === true;
-    byId("fresh-conversation").checked = options.experimental_fresh_conversation_per_turn === true;
-    byId("unsupported-warning").classList.toggle("hidden", !saved.unsupported_options?.zero_risk_pro_enabled);
-    updatePendingNotice({ settings:result, runtime:current?.runtime });
-    byId("tunnel-fields").classList.toggle("muted", byId("mode").value !== "full");
+    form.tunnel_id = tunnel.tunnel_id || form.tunnel_id || "";
+    form.runtime_key = "";
+    form.clear_key = false;
+    form.key_configured = tunnel.runtime_key_configured === true;
+    form.context_window = options.context_window ?? 256000;
+    form.stall_timeout_sec = options.stall_timeout_sec ?? "";
+    form.headed = options.headed === true;
+    form.auto_approve_tool_calls = options.auto_approve_tool_calls === true;
+    form.use_saved_chats = options.use_saved_chats === true;
+    form.experimental_bigger_context = options.experimental_bigger_context === true;
+    form.experimental_skill_attachments = options.experimental_skill_attachments === true;
+    form.experimental_fresh_conversation_per_turn = options.experimental_fresh_conversation_per_turn === true;
+    form.unsupported_zero_risk = saved.unsupported_options?.zero_risk_pro_enabled === true;
   };
-  const updatePendingNotice = (data) => {
-    const runtime = data.runtime || {};
-    const settingsPending = data.settings?.pending_restart === true || runtime.settings_pending_restart === true;
-    const runtimePending = runtime.restart_required === true;
-    const blocked = text.errors[runtime.login_blocked_reason];
-    const pending = settingsPending || runtimePending || Boolean(blocked);
-    byId("pending-notice").classList.toggle("hidden", !pending);
-    byId("pending-notice").textContent = blocked || (settingsPending ? text.summaryPending : runtimePending ? text.runtimeRestart : "");
-  };
+
   const applyStatus = (data, initial = false) => {
     current = data;
-    if (initial) applySettings(data.settings);
-    const readiness = data.readiness || {};
+    if (initial) applySettings(data.settings || {});
     const runtime = data.runtime || {};
-    const checked = readiness.cache_state === "current";
-    const loginState = checked ? readiness.login?.state : runtime.running ? runtime.login_state : "not_checked";
-    byId("account-state").textContent = label(loginState);
-    byId("browser-state").textContent = checked ? label(readiness.browser?.state) : text.noAccountCheck;
-    byId("text-state").textContent = checked ? label(readiness.text_ready ? "ready" : "not_ready") : text.notCheckedValue;
-    byId("tools-state").textContent = runtime.active_mode === "browser-only" ? text.notApplicable
-      : checked ? label(readiness.tools_ready ? "ready" : "not_ready") : text.notCheckedValue;
-    byId("tunnel-state").textContent = runtime.active_mode === "browser-only" ? text.browserOnlyTunnel
-      : checked ? label(readiness.tunnel?.state) : text.noTunnelCheck;
-    byId("connector-state").textContent = checked ? label(readiness.connector?.state) : text.noConnectorCheck;
-    let summary = !checked ? text.summaryNoCheck : readiness.tools_ready ? text.summaryReady
-      : readiness.text_ready ? (runtime.active_mode === "full" ? text.summaryText : text.summaryTextOnly) : text.summaryNoCheck;
-    if (runtime.login_blocked_reason) summary = text.errors[runtime.login_blocked_reason];
-    else if (data.settings?.pending_restart || runtime.settings_pending_restart) summary = text.summaryPending;
-    else if (runtime.restart_required) summary = text.runtimeRestart;
-    else if (runtime.active_mode === "full" && data.settings?.active?.configuration_complete === false) summary = text.incompleteFull;
-    byId("readiness-summary").textContent = summary;
-    if (runtime.disabled) byId("readiness-summary").textContent += ` · ${text.disabled}`;
-    if (!runtime.installed) byId("readiness-summary").textContent += ` · ${text.notInstalled}`;
-    if (checked && readiness.checked_at) {
-      byId("readiness-summary").textContent += ` · ${text.readinessCache.replace("{when}", new Date(readiness.checked_at).toLocaleString())}`;
+    if (data.settings?.pending_restart || runtime.settings_pending_restart || runtime.active_mode === legacyBrowserOnly) {
+      if (probe.state === "passed") probe = { state: "not_run" };
     }
-    updatePendingNotice(data);
-    updateLoginButtons();
-    if (loginWasStarted && !runtime.login_window_open) {
-      loginWasStarted = false;
-      if (runtime.login_error) showMessage(text.loginFailed, "error");
-      else if (runtime.restart_required && runtime.login_state === "signed_in") showMessage(text.loginRestart);
+    if (data.tool_probe?.state) {
+      probe = {
+        state: data.tool_probe.state,
+        reason: data.tool_probe.reason || null,
+      };
+    } else if (data.coding_setup_complete === true) {
+      probe = { state: "passed", reason: null };
     }
+    const pending = firstPending(data);
+    if (initial) step = Math.min(pending, 4);
+    else if (step > pending) step = pending;
   };
+
   const refresh = async (initial = false) => {
     const data = await request("/api/status");
     applyStatus(data, initial);
+    render();
   };
-  const check = async () => {
-    if (busy) return;
-    setBusy(true); showError(""); showMessage(text.checking, "info");
-    try {
-      await request("/api/check", "POST", {});
-      await refresh(false); showMessage(text.checkDone);
-    } catch (error) { showMessage(error.message || text.saveError, "error"); }
-    finally { setBusy(false); }
-  };
-  const formPayload = () => {
-    const key = byId("runtime-key").value;
-    const clear = byId("clear-key").checked;
-    const timeout = byId("stall-timeout").value;
-    return {
-      mode:byId("mode").value,
-      connector_name:byId("connector-name").value.trim(),
-      tunnel:{
-        tunnel_id:byId("tunnel-id").value.trim(),
-        runtime_key:clear ? { action:"clear" } : key ? { action:"replace", value:key } : { action:"keep" }
-      },
-      options:{
-        context_window:Number(byId("context-window").value),
-        stall_timeout_sec:timeout ? Number(timeout) : null,
-        headed:byId("headed").checked,
-        auto_approve_tool_calls:byId("auto-approve").checked,
-        use_saved_chats:byId("saved-chats").checked,
-        experimental_bigger_context:byId("bigger-context").checked,
-        experimental_skill_attachments:byId("skill-attachments").checked,
-        experimental_fresh_conversation_per_turn:byId("fresh-conversation").checked
-      }
-    };
-  };
+
+  const setBusy = (value) => { busy = value; render(); };
+
   const save = async (disableUnsupported = false) => {
     if (busy) return;
-    if (!byId("settings-form").reportValidity()) return;
-    const payload = formPayload();
+    captureForm();
+    if (!form.tunnel_id.trim()) { showToast(text.errors.tunnel_id_invalid, "error"); render(); return; }
+    if (!form.key_configured && !form.runtime_key.trim() && !form.clear_key) {
+      showToast(text.keyMissing, "error"); render(); return;
+    }
+    const payload = {
+      mode: "full",
+      connector_name: "Codex Native2",
+      tunnel: {
+        tunnel_id: form.tunnel_id.trim(),
+        runtime_key: form.clear_key ? { action: "clear" }
+          : form.runtime_key ? { action: "replace", value: form.runtime_key }
+          : { action: "keep" },
+      },
+      options: {
+        context_window: Number(form.context_window) || 256000,
+        stall_timeout_sec: form.stall_timeout_sec === "" || form.stall_timeout_sec === null ? null : Number(form.stall_timeout_sec),
+        headed: !!form.headed,
+        auto_approve_tool_calls: !!form.auto_approve_tool_calls,
+        use_saved_chats: !!form.use_saved_chats,
+        experimental_bigger_context: !!form.experimental_bigger_context,
+        experimental_skill_attachments: !!form.experimental_skill_attachments,
+        experimental_fresh_conversation_per_turn: !!form.experimental_fresh_conversation_per_turn,
+      },
+    };
     if (disableUnsupported) payload.options.zero_risk_pro_enabled = false;
-    setBusy(true); showError(""); showMessage("", "info");
+    setBusy(true);
     try {
       const result = await request("/api/settings", "POST", payload);
       applySettings(result);
-      showMessage(result.pending_restart ? text.savedPending : text.savedNextStart);
-      if (current) {
-        current.settings = result;
-        applyStatus(current, false);
-      }
-    } catch (error) { showMessage(error.message || text.saveError, "error"); }
+      if (current) current.settings = result;
+      probe = { state: "not_run" };
+      showToast(result.pending_restart ? text.savedPending : text.savedNextStart);
+      await refresh(false);
+      step = firstPending(current);
+    } catch (error) {
+      showToast(error.message || text.saveError, "error");
+    } finally { setBusy(false); }
+  };
+
+  const recheckRuntime = async () => {
+    if (busy) return;
+    setBusy(true); showToast(text.checking, "info");
+    try {
+      await refresh(false);
+      if (!runtimeActive(current)) showToast(text.runtimePending, "warn");
+      else { showToast(text.runtimeReady); step = firstPending(current); }
+    } catch (error) { showToast(error.message || text.saveError, "error"); }
     finally { setBusy(false); }
   };
-  const login = () => {
+
+  const recheckConnector = async () => {
     if (busy) return;
-    window.open("https://chatgpt.com/", "_blank", "noopener,noreferrer");
-    showMessage(text.dailyBrowserHelp, "info");
+    setBusy(true); showToast(text.checking, "info");
+    try {
+      await request("/api/check", "POST", {});
+      await refresh(false);
+      if (connectorOk(current)) { showToast(text.connectorReady); step = firstPending(current); }
+      else showToast(text.connectorBlocked, "warn");
+    } catch (error) { showToast(error.message || text.saveError, "error"); }
+    finally { setBusy(false); }
   };
+
+  const verifyCoding = async () => {
+    if (busy) return;
+    setBusy(true); probe = { state: "running" }; showToast(text.verifyRunning, "info"); render();
+    try {
+      const result = await request("/api/tool-probe", "POST", {});
+      if (result.state === "passed") {
+        probe = { state: "passed", reason: null }; showToast(text.verifyPassed);
+      } else {
+        const reason = result.reason || null;
+        probe = { state: result.state === "blocked" ? "blocked" : result.state === "stale" ? "stale" : "failed", reason };
+        showToast(verifyFailureMessage(reason), "error");
+      }
+      await refresh(false).catch(() => {});
+      step = firstPending(current || {});
+    } catch (error) {
+      if (error.code === 404 || error.message === "not_found") {
+        probe = { state: "unavailable" }; showToast(text.verifyUnavailable, "warn");
+      } else {
+        probe = { state: "failed" }; showToast(error.message || text.verifyFailed, "error");
+      }
+    } finally { setBusy(false); }
+  };
+
+  const downloadExtension = async () => {
+    try {
+      const session = sessionStorage.getItem("codexhub.runtime-settings.session");
+      const response = await fetch("/api/browser-extension", {
+        headers: { Authorization: `Bearer ${session}` }, cache: "no-store",
+      });
+      if (!response.ok) throw new Error(text.sessionExpired);
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url; link.download = "CodexHub-browser-connector.zip"; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) { showToast(error.message, "error"); render(); }
+  };
+
+  const stepContent = (data) => {
+    const runtime = data?.runtime || {};
+    const saved = data?.settings?.saved || {};
+    if (step === 5) {
+      return `<section class="completed"><div class="checkmark">✓</div><span class="badge">${esc(text.doneBadge)}</span><h1>${esc(text.doneH1)}</h1><p>${esc(text.doneP)}</p><p>${esc(text.doneNext)}</p><div class="actions" style="justify-content:center"><button type="button" data-action="review" class="primary">${esc(text.review)}</button></div></section>`;
+    }
+    if (step === 0) {
+      const ready = accountConnected(data);
+      const blocked = runtime.login_blocked_reason ? (text.errors[runtime.login_blocked_reason] || runtime.login_blocked_reason) : "";
+      return `<div class="place">${esc(text.placeAccount)}</div><h2>${esc(text.accountH2)}</h2><p>${esc(text.accountP)}</p>
+        ${ready ? `<div class="notice success">${esc(text.accountReady)}</div>` : `<div class="notice">${esc(text.accountNeed)}</div>`}
+        ${ready ? "" : `<p><small>${esc(text.extensionHelp)}</small></p>`}
+        <p><small>${esc(text.accountConnectorNote)}</small></p>
+        ${blocked ? `<div class="notice error">${esc(blocked)}</div>` : ""}
+        <div class="actions">
+          ${ready ? "" : `<button type="button" data-action="open-chatgpt" class="primary"${busy?" disabled":""}>${esc(text.openChatgpt)}</button>
+          <button type="button" data-action="extension"${busy?" disabled":""}>${esc(text.extensionDownload)}</button>`}
+          ${ready ? `<button type="button" data-action="continue" class="primary"${busy?" disabled":""}>${esc(text.continueLabel)} →</button>` : ""}
+        </div>`;
+    }
+    if (step === 1) {
+      const tunnelReady = Boolean(form.tunnel_id.trim());
+      const keyReady = form.key_configured || Boolean(form.runtime_key.trim());
+      const legacy = saved.mode === legacyBrowserOnly;
+      return `<div class="place">${esc(text.placeTunnel)}</div><h2>${esc(text.tunnelH2)}</h2><p>${esc(text.tunnelP)}</p>
+        ${legacy ? `<div class="notice warn">${esc(text.legacyText)}</div>` : ""}
+        <div class="connection-line" aria-label="ChatGPT tunnel path">
+          <span class="endpoint"><img src="${OPENAI_MARK}" alt="">ChatGPT</span>
+          <span class="wire"></span><span>Tunnel</span><span class="wire"></span>
+          <span class="endpoint"><code aria-hidden="true">&gt;_</code> Client</span>
+        </div>
+        <div class="credential-block ${tunnelReady?"is-ready":""}">
+          <div class="credential-label"><label for="focus-tunnel"><span class="index">01</span>${esc(text.tunnelId)}</label>
+            <a class="linkish" href="https://platform.openai.com/tunnels" target="_blank" rel="noopener noreferrer">${esc(text.tunnelCreate)}</a></div>
+          <div class="credential-input"><input id="focus-tunnel" spellcheck="false" placeholder="tunnel_…" value="${esc(form.tunnel_id)}" ${busy?"disabled":""}>
+            <span class="input-symbol" aria-hidden="true">${tunnelReady?"✓":"↳"}</span></div>
+          <p>${esc(text.tunnelHelp)}</p>
+        </div>
+        <div class="credential-block ${keyReady?"is-ready":""}">
+          <div class="credential-label"><label for="focus-key"><span class="index">02</span>${esc(text.apiKey)}</label>
+            <a class="linkish" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">${esc(text.apiKeyCreate)}</a></div>
+          <div class="credential-input"><input id="focus-key" type="password" autocomplete="off" placeholder="${form.key_configured?"••••••••••••":"sk-…"}" value="" ${busy||form.clear_key?"disabled":""}>
+            <span class="input-symbol" aria-hidden="true">${keyReady?"✓":"⌑"}</span></div>
+          <p>${esc(form.key_configured ? text.keySaved : text.keyMissing)}</p>
+          <p><small>${esc(text.apiKeyHelp)}</small></p>
+          <label class="check-row ${form.key_configured?"":"hidden"}"><input id="clear-key" type="checkbox" ${form.clear_key?"checked":""} ${busy?"disabled":""}> ${esc(text.clearKey)}</label>
+        </div>
+        ${form.unsupported_zero_risk ? `<div class="notice warn">${esc(text.unsupportedWarning)} <button type="button" data-action="disable-unsupported" class="linkish">${esc(text.disableUnsupported)}</button></div>` : ""}
+        ${form.key_configured || (saved.mode === "full" && Boolean((saved.tunnel || {}).tunnel_id)) ? `<details class="advanced"><summary>${esc(text.advanced)}</summary>
+          <div class="adv-grid">
+            <div class="field"><label for="context-window">${esc(text.contextWindow)}</label><input id="context-window" type="number" min="1" step="1" value="${esc(form.context_window)}" ${busy?"disabled":""}></div>
+            <div class="field"><label for="stall-timeout">${esc(text.stallTimeout)}</label><input id="stall-timeout" type="number" min="1" step="1" value="${esc(form.stall_timeout_sec)}" ${busy?"disabled":""}></div>
+          </div>
+          <label class="check-row"><input id="headed" type="checkbox" ${form.headed?"checked":""} ${busy?"disabled":""}> ${esc(text.headed)}</label>
+          <label class="check-row"><input id="auto-approve" type="checkbox" ${form.auto_approve_tool_calls?"checked":""} ${busy?"disabled":""}> ${esc(text.autoApprove)}</label>
+          <label class="check-row"><input id="saved-chats" type="checkbox" ${form.use_saved_chats?"checked":""} ${busy?"disabled":""}> ${esc(text.savedChats)}</label>
+          <label class="check-row"><input id="bigger-context" type="checkbox" ${form.experimental_bigger_context?"checked":""} ${busy?"disabled":""}> ${esc(text.biggerContext)}</label>
+          <label class="check-row"><input id="skill-attachments" type="checkbox" ${form.experimental_skill_attachments?"checked":""} ${busy?"disabled":""}> ${esc(text.skillAttachments)}</label>
+          <label class="check-row"><input id="fresh-conversation" type="checkbox" ${form.experimental_fresh_conversation_per_turn?"checked":""} ${busy?"disabled":""}> ${esc(text.freshConversation)}</label>
+        </details>` : ""}
+        <div class="studio-bottom">
+          <p><strong>${esc(text.saveNext)}</strong><br>${esc(text.saveNextDetail)}</p>
+          <button type="button" data-action="save" class="primary" ${busy||!tunnelReady||(!keyReady&&!form.clear_key)?"disabled":""}>${esc(text.saveContinue)} <span aria-hidden="true">→</span></button>
+        </div>`;
+    }
+    if (step === 2) {
+      const active = runtimeActive(data);
+      return `<div class="place">${esc(text.placeActivate)}</div><h2>${esc(text.activateH2)}</h2>
+        ${active ? `<div class="notice success">${esc(text.runtimeReady)}</div>` : `<div class="notice warn">${esc(text.activateWarn)}</div><p>${esc(text.activateP)}</p><p><small>${esc(text.restartHelp)}</small></p><div class="notice">${esc(text.runtimePending)}</div>`}
+        <div class="actions">
+          ${active ? `<button type="button" data-action="continue" class="primary"${busy?" disabled":""}>${esc(text.continueLabel)} →</button>` : `<button type="button" data-action="recheck-runtime" class="primary"${busy?" disabled":""}>${esc(text.recheckRuntime)}</button>`}
+        </div>`;
+    }
+    if (step === 3) {
+      const ok = connectorOk(data);
+      return `<div class="place">${esc(text.placeAuthorize)}</div><h2>${esc(text.authorizeH2)}</h2><p>${esc(text.authorizeP)}</p>
+        <ol class="recipe"><li>${esc(text.recipe1)}</li><li>${esc(text.recipe2)}</li><li>${esc(text.recipe3)}</li><li>${esc(text.recipe4)}</li></ol>
+        <p><small>${esc(text.recipeNote)}</small></p>
+        ${ok ? `<div class="notice success">${esc(text.connectorReady)}</div>` : `<div class="notice">${esc(text.connectorBlocked)}</div>`}
+        <div class="actions">
+          <a class="action-button ${ok?"":"primary"}" href="https://chatgpt.com/#settings/Connectors" target="_blank" rel="noopener noreferrer">${esc(text.openConnector)}</a>
+          <button type="button" data-action="recheck-connector"${busy?" disabled":""}>${esc(text.recheckConnector)}</button>
+          ${ok ? `<button type="button" data-action="continue" class="primary"${busy?" disabled":""}>${esc(text.continueLabel)} →</button>` : ""}
+        </div>`;
+    }
+    return `<div class="place">${esc(text.placeVerify)}</div><h2>${esc(text.verifyH2)}</h2><p>${esc(text.verifyP)}</p>
+      <div class="notice">${esc(text.verifyNote)}</div>
+      ${probe.state === "failed" || probe.state === "blocked" || probe.state === "stale" ? `<div class="notice error">${esc(verifyFailureMessage(probe.reason))}</div>` : ""}
+      ${probe.state === "unavailable" ? `<div class="notice warn">${esc(text.verifyUnavailable)}</div>` : ""}
+      <div class="actions">
+        <button type="button" data-action="verify" class="primary"${busy||probe.state==="running"?" disabled":""}>${esc(probe.state==="running"?text.verifyRunning:text.verifyRun)}</button>
+        <button type="button" data-action="goto-auth"${busy?" disabled":""}>${esc(text.returnAuth)}</button>
+      </div>`;
+  };
+
+  function render() {
+    const data = current || { runtime: {}, readiness: {}, settings: {} };
+    const pending = firstPending(data);
+    const view = Math.min(step, 5);
+    const toastHtml = toast ? `<div class="toast notice ${toastKind==="error"?"error":toastKind==="warn"?"warn":"success"}" role="status">${esc(toast)}</div>` : "";
+    const nav = text.steps.map((title, i) => {
+      const done = completed(i, data);
+      const currentStep = view === i;
+      return `<button type="button" data-step="${i}" class="${done?"is-done":""} ${currentStep?"is-current":""}" ${currentStep?'aria-current="step"':""}${i>pending?" disabled":""}><span class="step-dot">${done?"✓":i+1}</span><span>${esc(title)}</span></button>`;
+    }).join("");
+    const sheetCode = view === 5 ? "READY" : `${String(view+1).padStart(2,"0")} / ${text.sheetCodes[view]}`;
+    byId("app").innerHTML = `
+      <header class="studio-topbar">
+        <div class="studio-brand"><img src="${CODEX_MARK}" alt="">CodexHub<span>${esc(text.brandSub)}</span></div>
+        <div class="studio-status"><i></i><b>${esc(text.localStatus)}</b></div>
+      </header>
+      <div class="studio-shell">
+        <div class="studio-intro"><div><div class="studio-kicker">${esc(text.kicker)}</div><h1>${esc(text.title)}</h1><p>${esc(text.subtitle)}</p></div>
+          <div class="studio-progress"><strong>${String(Math.min(view+1,5)).padStart(2,"0")}</strong> / 05</div></div>
+        <nav class="studio-steps" aria-label="Setup progress">${nav}</nav>
+        ${toastHtml}
+        <section class="studio-sheet">
+          <div class="studio-sheet-head">
+            <div class="service-symbol"><img src="${OPENAI_MARK}" alt="ChatGPT"></div>
+            <div><div class="service-name">${esc(text.serviceName)}</div><div class="service-caption">${esc(text.serviceCaption)}</div></div>
+            <span class="sheet-step">${esc(sheetCode)}</span>
+          </div>
+          <div class="studio-content">${stepContent(data)}</div>
+        </section>
+        <footer class="studio-footer">
+          <span>${esc(text.footerNote)}</span>
+          ${view>0 && view<5 ? `<button type="button" class="ghost" data-action="back"${busy?" disabled":""}>${esc(text.back)}</button>` : `<span>${esc(text.footerBrand)}</span>`}
+        </footer>
+      </div>`;
+  }
+
+  document.addEventListener("click", (event) => {
+    const target = event.target.closest("button");
+    if (!target || target.disabled) return;
+    if (target.dataset.step !== undefined) {
+      const next = Number(target.dataset.step);
+      if (Number.isFinite(next) && next <= firstPending(current || {})) {
+        captureForm(); step = next; toast = ""; render();
+      }
+      return;
+    }
+    const action = target.dataset.action;
+    if (!action) return;
+    if (action === "back") { captureForm(); step = Math.max(0, step - 1); toast = ""; render(); return; }
+    if (action === "continue") { captureForm(); step = Math.min(4, Math.max(step, firstPending(current || {}))); if (completed(step, current||{})) step = firstPending(current||{}); toast=""; render(); return; }
+    if (action === "review") { step = 0; toast = ""; render(); return; }
+    if (action === "goto-auth") { step = 3; toast = ""; render(); return; }
+    if (action === "extension") { void downloadExtension(); return; }
+    if (action === "open-chatgpt") { window.open("https://chatgpt.com/", "_blank", "noopener,noreferrer"); return; }
+    if (action === "save") { void save(false); return; }
+    if (action === "disable-unsupported") { void save(true); return; }
+    if (action === "recheck-runtime") { void recheckRuntime(); return; }
+    if (action === "recheck-connector") { void recheckConnector(); return; }
+    if (action === "verify") { void verifyCoding(); return; }
+  });
+  document.addEventListener("change", (event) => {
+    if (event.target && event.target.id === "clear-key") {
+      form.clear_key = event.target.checked;
+      const key = byId("focus-key");
+      if (key) key.disabled = form.clear_key || busy;
+    }
+  });
   window.addEventListener("codexhub-browser-account", (event) => {
     const phase = event.detail?.phase;
     if (!["verifying", "saved", "failed"].includes(phase)) return;
-    setBusy(phase === "verifying");
-    showMessage(phase === "verifying" ? text.browserVerifying : phase === "saved" ? text.browserSaved : text.browserFailed,
-      phase === "failed" ? "error" : phase === "saved" ? "success" : "info");
-    if (phase !== "verifying") void refresh(false).catch(() => {});
+    if (phase === "verifying") { busy = true; showToast(text.browserVerifying, "info"); render(); return; }
+    busy = false;
+    showToast(phase === "saved" ? text.browserSaved : text.browserFailed, phase === "failed" ? "error" : "success");
+    void refresh(false).then(() => {
+      if (phase === "saved") step = firstPending(current || {});
+      render();
+    }).catch(() => render());
   });
-  byId("extension-download").addEventListener("click", async () => {
-    try {
-      const session = sessionStorage.getItem("codexhub.runtime-settings.session");
-      const response = await fetch("/api/browser-extension", { headers:{ Authorization:`Bearer ${session}` }, cache:"no-store" });
-      if (!response.ok) throw new Error(text.sessionExpired);
-      const url = URL.createObjectURL(await response.blob());
-      const link = document.createElement("a"); link.href = url; link.download = "CodexHub-browser-connector.zip";
-      link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error) { showMessage(error.message, "error"); }
-  });
-  const cancelLogin = async () => {
-    if (busy) return;
-    setBusy(true); showError(""); loginWasStarted = false;
-    try {
-      await request("/api/login/cancel", "POST", {});
-      await refresh(false);
-      showMessage(text.cancelLoginDone);
-    } catch (error) { showMessage(error.message || text.saveError, "error"); }
-    finally { setBusy(false); }
-  };
-
-  byId("settings-form").addEventListener("submit", (event) => { event.preventDefault(); void save(false); });
-  byId("check-button").addEventListener("click", () => void check());
-  byId("login-button").addEventListener("click", () => void login());
-  byId("cancel-login-button").addEventListener("click", () => void cancelLogin());
-  byId("disable-unsupported").addEventListener("click", () => void save(true));
-  byId("mode").addEventListener("change", () => {
-    byId("tunnel-fields").classList.toggle("muted", byId("mode").value !== "full");
-    if (current) applyStatus(current, false);
-  });
-  byId("clear-key").addEventListener("change", () => { byId("runtime-key").disabled = byId("clear-key").checked; });
 
   const start = async () => {
     const key = "codexhub.runtime-settings.session";
-    const savedSession = sessionStorage.getItem(key);
     const exchangeBootstrap = async () => {
       const result = await request("/api/session", "POST", { bootstrap });
       sessionStorage.setItem(key, result.session);
       bootstrap = "";
     };
     try {
-      if (savedSession) {
+      if (sessionStorage.getItem(key)) {
         try { await refresh(true); }
         catch (error) {
           if (!bootstrap || sessionStorage.getItem(key)) throw error;
@@ -477,19 +766,20 @@
       } else {
         throw new Error(text.sessionExpired);
       }
-      showError("");
+      byId("session-needed").classList.add("hidden");
+      byId("app").classList.remove("hidden");
+      render();
       timer = window.setInterval(() => { if (!busy) void refresh(false).catch(() => {}); }, 30000);
     } catch (error) {
-      if (!sessionStorage.getItem(key)) {
-        byId("session-needed").classList.remove("hidden");
-        document.querySelectorAll("button, input, select").forEach((node) => { node.disabled = true; });
-      }
-      showError(error.message || text.sessionExpired);
+      byId("session-needed").classList.remove("hidden");
+      byId("app").classList.add("hidden");
+      byId("session-needed").insertAdjacentHTML("beforeend", `<p class="notice error">${esc(error.message || text.sessionExpired)}</p>`);
     }
   };
   window.addEventListener("pagehide", () => { if (timer) clearInterval(timer); });
   void start();
 })();
+
 </script>
 </body>
 </html>
