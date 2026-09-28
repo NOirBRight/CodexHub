@@ -685,6 +685,43 @@ def test_login_routes_open_and_cancel_separately(settings_server, monkeypatch):
     assert calls == [("open", home), ("cancel", home)]
 
 
+def test_browser_import_requires_settings_origin_and_session(settings_server, monkeypatch):
+    import chatgpt_web_browser_account as accounts
+    server, home = settings_server
+    calls = []
+    def imported(request_home, cookies):
+        calls.append((request_home, cookies))
+        return {"ok": True, "authenticated": True, "restart_required": True}
+    monkeypatch.setattr(accounts, "import_session", imported)
+    session = _session(server)
+    for origin, credential, expected in [("https://attacker.test", session, 403),
+                                         (server.origin, None, 401)]:
+        status, _, _ = _call(server, "/api/browser-session", method="POST",
+                            body={"cookies": []}, headers={"Origin": origin}, session=credential)
+        assert status == expected
+    assert calls == []
+    status, _, body = _call(server, "/api/browser-session", method="POST",
+                            body={"cookies": []}, headers={"Origin": server.origin}, session=session)
+    assert status == 200
+    assert json.loads(body)["restart_required"] is True
+    assert calls == [(home, [])]
+
+
+def test_browser_connector_download_is_authenticated_and_scoped(settings_server):
+    import io
+    import zipfile
+    server, _ = settings_server
+    status, _, _ = _call(server, "/api/browser-extension")
+    assert status == 401
+    status, _, body = _call(server, "/api/browser-extension", session=_session(server))
+    assert status == 200
+    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["host_permissions"] == ["https://chatgpt.com/*"]
+        assert set(manifest["permissions"]) == {"activeTab", "scripting", "cookies"}
+        assert "background" not in manifest
+
+
 @pytest.mark.parametrize("settings_server", [{"session_ttl": 0.01}], indirect=True)
 def test_expired_session_cannot_read_settings(settings_server):
     server, _home = settings_server
