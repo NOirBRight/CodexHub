@@ -1,0 +1,13 @@
+{
+  "candidate_sha": "11119246457a710daa8b06e22a6754b73dd491c6",
+  "kind": "public runtime API with synthetic verified archives",
+  "real_account": false,
+  "old_runtime_started": true,
+  "upgrade_completed": true,
+  "new_start_failed": true,
+  "previous_good_retained": true,
+  "current_restored_to_previous_good": false,
+  "running_after_failed_new_start": false,
+  "startup_failure_rollback_requirement_met": false,
+  "cleanup_stopped": true
+}

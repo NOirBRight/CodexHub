@@ -1,0 +1,48 @@
+{
+  "application_candidate_sha": "7608bb175c03bba3df73014fd295e562696d93ef",
+  "client_version": "codex-cli 0.157.1",
+  "platform": "linux-x64",
+  "provider": "chatgpt-web",
+  "model": "gpt-5.6-sol",
+  "isolated_client": true,
+  "account_reuse_authorized": true,
+  "steps": [
+    {
+      "name": "text1",
+      "exit_code": 0,
+      "final_matches_expected": true,
+      "command_count": 0,
+      "tool_result_matches_file": false,
+      "sse_responses": 1,
+      "elapsed_seconds": 18.94,
+      "readiness": {
+        "cache_state": "current",
+        "text_ready": true,
+        "tools_ready": true
+      },
+      "passed": true
+    },
+    {
+      "name": "context2",
+      "exit_code": 1,
+      "final_matches_expected": false,
+      "command_count": 0,
+      "tool_result_matches_file": false,
+      "sse_responses": 6,
+      "elapsed_seconds": 6.68,
+      "readiness": {
+        "cache_state": "current",
+        "text_ready": true,
+        "tools_ready": true
+      },
+      "passed": false
+    }
+  ],
+  "same_codex_thread": true,
+  "passed": false,
+  "planned_steps": 3,
+  "completed_steps": 2,
+  "tool_step": "not_run_after_context_failure",
+  "failure_reason": "ChatGPT web turn is missing cwd in trusted Codex environment context",
+  "per_client_call_timeout_seconds": 180
+}
