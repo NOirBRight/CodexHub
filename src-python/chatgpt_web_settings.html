@@ -301,11 +301,10 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     return readiness.tools_ready === true;
   };
   const toolPassed = (data) => {
-    const readiness = data?.readiness || {};
-    if (data.tool_probe?.state === "stale" || data.tool_probe?.state === "failed") return false;
-    if (data.tool_probe?.state === "passed" || data.coding_setup_complete === true) return true;
-    if (probe.state === "passed") return runtimeActive(data) && connectorOk(data);
-    return false;
+    // Only server-side probe evidence completes coding setup. Local busy state is display-only.
+    if (!data) return false;
+    if (data.coding_setup_complete === true) return true;
+    return data.tool_probe?.state === "passed";
   };
   const completed = (index, data) => {
     if (index === 0) return accountConnected(data);
