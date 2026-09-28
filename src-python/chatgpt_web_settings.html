@@ -302,8 +302,8 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
   };
   const toolPassed = (data) => {
     const readiness = data?.readiness || {};
-    if (readiness.tool_probe?.state === "stale" || readiness.tool_probe?.state === "failed") return false;
-    if (readiness.tool_probe?.state === "passed" || readiness.coding_setup_complete === true) return true;
+    if (data.tool_probe?.state === "stale" || data.tool_probe?.state === "failed") return false;
+    if (data.tool_probe?.state === "passed" || data.coding_setup_complete === true) return true;
     if (probe.state === "passed") return runtimeActive(data) && connectorOk(data);
     return false;
   };
@@ -372,8 +372,8 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     if (data.settings?.pending_restart || runtime.settings_pending_restart || runtime.active_mode === legacyBrowserOnly) {
       if (probe.state === "passed") probe = { state: "not_run" };
     }
-    if (data.readiness?.tool_probe?.state) probe.state = data.readiness.tool_probe.state;
-    else if (data.readiness?.coding_setup_complete === true) probe.state = "passed";
+    if (data.tool_probe?.state) probe.state = data.tool_probe.state;
+    else if (data.coding_setup_complete === true) probe.state = "passed";
     const pending = firstPending(data);
     if (initial) step = Math.min(pending, 4);
     else if (step > pending) step = pending;

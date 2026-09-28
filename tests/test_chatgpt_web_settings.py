@@ -170,6 +170,8 @@ def test_page_is_local_and_bootstrap_fragment_is_one_use(settings_server):
     assert b'mode: "full"' in body
     assert b"/codexhub.svg" in body
     assert b"/openai.svg" in body
+    assert b"/api/tool-probe" in body
+    assert b"data.tool_probe" in body or b"tool_probe" in body
 
     for asset_path, needle in (("/codexhub.svg", b"<svg"), ("/openai.svg", b"<svg")):
         status, asset_headers, asset_body = _call(server, asset_path)
@@ -225,6 +227,11 @@ def test_coding_setup_save_forces_full_mode_and_reuses_secret(settings_server):
     assert secret.encode() not in body
     status_payload = json.loads(body)
     assert status_payload["settings"]["saved"]["mode"] == "full"
+    assert "tool_probe" in status_payload
+    assert status_payload["tool_probe"]["state"] in {
+        "not_run", "running", "passed", "failed", "stale", "blocked", "cancelled"
+    }
+    assert status_payload["coding_setup_complete"] is False
 
     keep = {
         "mode": "full",
