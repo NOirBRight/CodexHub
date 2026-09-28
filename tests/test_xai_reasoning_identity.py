@@ -22,7 +22,7 @@ XAI = {
 
 
 def recorded_events() -> list[dict]:
-    return [json.loads(line) for line in FIXTURE.read_text().splitlines()]
+    return [json.loads(line) for line in FIXTURE.read_text(encoding="utf-8").splitlines()]
 
 
 def request(context: dict, *, input_items: list[dict] | None = None) -> dict:
