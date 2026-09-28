@@ -182,6 +182,16 @@ class _SettingsHTTPServer(ThreadingHTTPServer):
             self.page = page_path.read_text(encoding="utf-8")
         except OSError as exc:
             raise RuntimeError("ChatGPT Runtime Settings page is unavailable") from exc
+        self.static_assets = {
+            "/codexhub.svg": (
+                Path(__file__).with_name("chatgpt_web_settings_codexhub.svg"),
+                "image/svg+xml; charset=utf-8",
+            ),
+            "/openai.svg": (
+                Path(__file__).with_name("chatgpt_web_settings_openai.svg"),
+                "image/svg+xml; charset=utf-8",
+            ),
+        }
         self.bootstrap_token: str | None = secrets.token_urlsafe(32)
         self.bootstrap_expires_at = time.monotonic() + bootstrap_ttl
         self.sessions: dict[str, tuple[float, float]] = {}
@@ -327,6 +337,15 @@ class _SettingsHandler(BaseHTTPRequestHandler):
             nonce = secrets.token_urlsafe(18)
             page = self.service.page.replace("__CODEXHUB_CSP_NONCE__", nonce).encode("utf-8")
             self._send_bytes(HTTPStatus.OK, page, "text/html; charset=utf-8", nonce=nonce)
+            return
+        if path in self.service.static_assets:
+            asset_path, content_type = self.service.static_assets[path]
+            try:
+                payload = asset_path.read_bytes()
+            except OSError:
+                self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Page not found."})
+                return
+            self._send_bytes(HTTPStatus.OK, payload, content_type)
             return
         if path not in {"/api/settings", "/api/status", "/api/browser-extension"}:
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Page not found."})
