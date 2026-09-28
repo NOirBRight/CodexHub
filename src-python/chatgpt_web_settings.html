@@ -638,11 +638,9 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     if (step === 2) {
       const active = runtimeActive(data);
       return `<div class="place">${esc(text.placeActivate)}</div><h2>${esc(text.activateH2)}</h2>
-        <div class="notice warn">${esc(text.activateWarn)}</div><p>${esc(text.activateP)}</p><p><small>${esc(text.restartHelp)}</small></p>
-        ${active ? `<div class="notice success">${esc(text.runtimeReady)}</div>` : `<div class="notice">${esc(text.runtimePending)}</div>`}
+        ${active ? `<div class="notice success">${esc(text.runtimeReady)}</div>` : `<div class="notice warn">${esc(text.activateWarn)}</div><p>${esc(text.activateP)}</p><p><small>${esc(text.restartHelp)}</small></p><div class="notice">${esc(text.runtimePending)}</div>`}
         <div class="actions">
-          <button type="button" data-action="recheck-runtime" class="primary"${busy?" disabled":""}>${esc(text.recheckRuntime)}</button>
-          ${active ? `<button type="button" data-action="continue"${busy?" disabled":""}>${esc(text.continueLabel)} →</button>` : ""}
+          ${active ? `<button type="button" data-action="continue" class="primary"${busy?" disabled":""}>${esc(text.continueLabel)} →</button>` : `<button type="button" data-action="recheck-runtime" class="primary"${busy?" disabled":""}>${esc(text.recheckRuntime)}</button>`}
         </div>`;
     }
     if (step === 3) {
