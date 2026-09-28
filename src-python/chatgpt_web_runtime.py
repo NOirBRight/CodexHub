@@ -479,6 +479,10 @@ def _account_dir(home: Path) -> Path:
 
 
 def _storage_state(home: Path) -> Path:
+    selected = _read_json(_account_dir(home) / "selected.json") or {}
+    generation = selected.get("generation")
+    if isinstance(generation, str) and re.fullmatch(r"[0-9a-f]{32}", generation):
+        return _account_dir(home) / generation / "storage-state.json"
     return _web_home(home) / "browser" / "storage-state.json"
 
 
@@ -1293,14 +1297,15 @@ def delete_account(home: Path) -> dict[str, Any]:
     _mkdir(home)
     close_login(home)
     stop_runtime(home, disable=not _lifecycle(home)["enabled"])
-    account = _account_dir(home)
-    if account.is_symlink() or account.is_file():
-        account.unlink()
-    elif account.exists():
-        shutil.rmtree(account)
-    browser = _storage_state(home).parent
-    if browser.exists():
-        shutil.rmtree(browser)
+    with _settings_lock(home):
+        account = _account_dir(home)
+        if account.is_symlink() or account.is_file():
+            account.unlink()
+        elif account.exists():
+            shutil.rmtree(account)
+        browser = _storage_state(home).parent
+        if browser.exists():
+            shutil.rmtree(browser)
     _append_log(home, "deleted ChatGPT Web account files")
     return build_status(home)
 
@@ -1965,6 +1970,9 @@ def build_status(home: Path, pin: dict[str, Any] | None = None) -> dict[str, Any
     restart_required = lifecycle["restart_required"] or bool(
         running and record.get("login_control") != LOGIN_CONTROL
     )
+    active_config = _read_json(_web_home(home) / "config.json") or {}
+    if (_account_dir(home) / "selected.json").is_file():
+        restart_required = restart_required or active_config.get("storageStatePath") != str(_storage_state(home))
     ready = bool(
         compatible
         and running

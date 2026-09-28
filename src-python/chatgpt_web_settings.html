@@ -89,6 +89,8 @@
     <h2 id="account-title"><span class="step">1</span><span data-i18n="accountTitle">Sign in to ChatGPT</span></h2>
     <p data-i18n="accountHelp">Sign in with the ChatGPT account used by this component. This account is separate from your CodexHub service credential.</p>
     <p id="login-blocked" class="notice hidden" role="status"></p>
+    <p data-i18n="dailyBrowserHelp">Open ChatGPT in your daily browser, then return here and use the CodexHub browser extension to connect that account.</p>
+    <button id="extension-download" type="button" data-i18n="extensionDownload">Download browser connector</button>
     <div class="row">
       <button id="login-button" type="button" data-i18n="login">Open ChatGPT sign-in</button>
       <button id="cancel-login-button" class="danger hidden" type="button" data-i18n="cancelLogin">Cancel sign-in</button>
@@ -175,6 +177,7 @@
       openFromApp:"Open this page from the ChatGPT provider in CodexHub to start a private settings session.",
       readinessTitle:"Connection status", readinessHelp:"Status uses the latest saved check. Run a check when you are ready to verify the account and connector.", check:"Check connection", checking:"Checking the ChatGPT account and connector…",
       accountStatus:"ChatGPT account", browserStatus:"Browser check", textStatus:"Text requests", toolsStatus:"Tool requests", tunnelStatus:"Tool connection", connectorStatus:"Connector", notChecked:"No connection check has been run yet.", notCheckedValue:"Not checked", installInApp:"Component installation and start are managed in CodexHub.",
+      dailyBrowserHelp:"Sign in to ChatGPT in this browser using your existing Google session or passkey. Return here and click the CodexHub browser extension to connect that account. If the extension is not installed, download and extract it, then load it as an unpacked extension in Chrome / Edge.", extensionDownload:"Download browser connector", browserVerifying:"Verifying the account from this browser…", browserSaved:"Account verified and saved. Restart the ChatGPT component from CodexHub to use it. It has not been restarted automatically.", browserFailed:"Could not connect this browser account. Your previous account is unchanged.",
       accountTitle:"Sign in to ChatGPT", accountHelp:"Sign in with the ChatGPT account used by this component. This account is separate from your CodexHub service credential.", login:"Open ChatGPT sign-in", cancelLogin:"Cancel sign-in", loginHelp:"When sign-in completes, this page will show whether the component needs a restart. Use Cancel sign-in only to stop an unfinished login.",
       toolsTitle:"Choose how ChatGPT is used", toolsHelp:"Browser-only mode supports text requests. Full mode also connects the tools you authorize for this ChatGPT account.", modeLabel:"ChatGPT mode", browserOnly:"Text and browser access", fullMode:"Text and authorized tools",
       tunnelId:"Tunnel ID", tunnelIdHelp:"Find the ID in your OpenAI Tunnels. It is not your API key.", runtimeKey:"Tunnel Runtime Key", keyHelp:"This key is for the OpenAI Tunnel. It is separate from ChatGPT sign-in and the CodexHub service credential.",
@@ -198,6 +201,7 @@
       openFromApp:"请从 CodexHub 的 ChatGPT 供应商页面打开此页，以建立本机设置会话。",
       readinessTitle:"连接状态", readinessHelp:"这里显示最近一次检查结果。准备好验证账号和连接器后，再运行检查。", check:"检查连接", checking:"正在检查 ChatGPT 账号和连接器…",
       accountStatus:"ChatGPT 账号", browserStatus:"浏览器检查", textStatus:"文本请求", toolsStatus:"工具请求", tunnelStatus:"工具连接", connectorStatus:"连接器", notChecked:"尚未运行连接检查。", notCheckedValue:"尚未检查", installInApp:"组件的安装与启动在 CodexHub 中管理。",
+      dailyBrowserHelp:"在当前日常浏览器中使用已有 Google 登录或 Passkey 登录 ChatGPT，然后返回本页，点击 CodexHub 浏览器扩展连接此账号。首次使用请下载并解压扩展，在 Chrome / Edge 的扩展管理中加载已解压的扩展。", extensionDownload:"下载浏览器连接扩展", browserVerifying:"正在验证此浏览器的账号…", browserSaved:"账号已验证并保存。请在 CodexHub 中重启 ChatGPT 组件以使用它；没有自动重启。", browserFailed:"未能连接此浏览器账号，原有账号保持不变。",
       accountTitle:"登录 ChatGPT", accountHelp:"使用此组件要连接的 ChatGPT 账号。它与 CodexHub 服务凭证相互独立。", login:"打开 ChatGPT 登录", cancelLogin:"取消登录", loginHelp:"登录完成后，此页会显示组件是否需要重启。只有要终止未完成的登录时才点击取消。",
       toolsTitle:"选择 ChatGPT 使用方式", toolsHelp:"仅浏览器模式支持文本请求。完整模式还会连接你在此 ChatGPT 账号中授权的工具。", modeLabel:"ChatGPT 模式", browserOnly:"文本和浏览器访问", fullMode:"文本和已授权工具",
       tunnelId:"Tunnel ID", tunnelIdHelp:"可在 OpenAI Tunnels 中找到。它不是 API Key。", runtimeKey:"Tunnel Runtime Key", keyHelp:"此密钥用于 OpenAI Tunnel，与 ChatGPT 登录及 CodexHub 服务凭证不同。",
@@ -406,17 +410,29 @@
     } catch (error) { showMessage(error.message || text.saveError, "error"); }
     finally { setBusy(false); }
   };
-  const login = async () => {
+  const login = () => {
     if (busy) return;
-    setBusy(true); showError("");
-    try {
-      await request("/api/login", "POST", {});
-      loginWasStarted = true;
-      showMessage(text.openLoginDone, "info");
-      await refresh(false);
-    } catch (error) { showMessage(error.message || text.saveError, "error"); }
-    finally { setBusy(false); }
+    window.open("https://chatgpt.com/", "_blank", "noopener,noreferrer");
+    showMessage(text.dailyBrowserHelp, "info");
   };
+  window.addEventListener("codexhub-browser-account", (event) => {
+    const phase = event.detail?.phase;
+    if (!["verifying", "saved", "failed"].includes(phase)) return;
+    setBusy(phase === "verifying");
+    showMessage(phase === "verifying" ? text.browserVerifying : phase === "saved" ? text.browserSaved : text.browserFailed,
+      phase === "failed" ? "error" : phase === "saved" ? "success" : "info");
+    if (phase !== "verifying") void refresh(false).catch(() => {});
+  });
+  byId("extension-download").addEventListener("click", async () => {
+    try {
+      const session = sessionStorage.getItem("codexhub.runtime-settings.session");
+      const response = await fetch("/api/browser-extension", { headers:{ Authorization:`Bearer ${session}` }, cache:"no-store" });
+      if (!response.ok) throw new Error(text.sessionExpired);
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a"); link.href = url; link.download = "CodexHub-browser-connector.zip";
+      link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) { showMessage(error.message, "error"); }
+  });
   const cancelLogin = async () => {
     if (busy) return;
     setBusy(true); showError(""); loginWasStarted = false;

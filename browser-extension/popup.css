@@ -1,0 +1,5 @@
+:root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
+body { width: 320px; margin: 16px; }
+h1 { font-size: 18px; }
+button { width: 100%; padding: 10px; cursor: pointer; }
+#status { overflow-wrap: anywhere; }
