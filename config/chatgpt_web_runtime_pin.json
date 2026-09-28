@@ -36,7 +36,7 @@
       "bundled_only": true,
       "build_revision": "5a307bb48de3d96465305288a2fff5c4086299fb",
       "git_tree": "b4ea65a73c4b481497a012c1a9f569e024f6f9ce",
-      "sha256": "5cbb11d6d848018d1f079c89151f4dd46cc7d5ebb83a878970626b5120b35a95"
+      "sha256": "4667ea434130dc5374802e5bde8d1e3756beda2bdff3d315d53f65b8d7c0ec0a"
     }
   },
   "tunnel_client": {

@@ -542,7 +542,7 @@ def test_repo_pin_is_the_accepted_upstream_release() -> None:
     assert set(document["artifacts"]) == {"linux-x64", "windows-x64"}
     expected_artifacts = {
         "linux-x64": "2422e62c875714a5627420367b2526887fe0b36ab71144e8e984400087e8be8f",
-        "windows-x64": "5cbb11d6d848018d1f079c89151f4dd46cc7d5ebb83a878970626b5120b35a95",
+        "windows-x64": "4667ea434130dc5374802e5bde8d1e3756beda2bdff3d315d53f65b8d7c0ec0a",
     }
     for key, artifact in document["artifacts"].items():
         assert artifact["bundled_only"] is True
