@@ -61,6 +61,7 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
 @media(prefers-reduced-motion:no-preference){.studio-sheet{animation:sheet-in .24s ease-out}@keyframes sheet-in{from{opacity:.6;transform:translateY(5px)}to{opacity:1;transform:none}}}
 @media(max-width:600px){.studio-topbar{height:60px;padding:0 20px}.studio-brand span{display:none}.studio-shell{padding:25px 16px 70px}.studio-intro h1{font-size:26px}.studio-progress{display:none}
 .studio-steps button{flex-direction:column;gap:7px;font-size:10px;flex:1!important}.studio-steps button::after{position:absolute;top:12px;left:calc(50% + 18px);width:calc(100% - 36px);margin:0}
+.studio-steps button>span:last-child{min-width:0;white-space:normal;overflow-wrap:anywhere;text-align:center;line-height:1.25}
 .studio-sheet-head,.studio-content{padding-left:20px;padding-right:20px}.studio-content h2{font-size:21px}.studio-bottom{flex-direction:column;align-items:stretch}.studio-bottom button{width:100%}.adv-grid{grid-template-columns:1fr}}
 </style>
 </head>
@@ -161,6 +162,7 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
         "runtime_instance_changed":"The ChatGPT component instance changed since the last successful probe.",
         "probe_response_too_large":"The probe response was too large to accept.",
         "probe_already_running":"A probe is already running.",
+        "probe_interrupted":"The previous check was interrupted. Run the check again.",
         "probe_timeout_invalid":"The probe timeout is invalid.",
         "active_account_state_unavailable":"The active account state is unavailable.",
         "probe_evidence_invalid":"Saved probe evidence is invalid.",
@@ -266,6 +268,7 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
         "runtime_instance_changed":"自上次探测成功后，ChatGPT 组件实例已变化。",
         "probe_response_too_large":"探测响应过大，无法接受。",
         "probe_already_running":"已有探测正在进行。",
+        "probe_interrupted":"上次检查被中断，请重新运行。",
         "probe_timeout_invalid":"探测超时设置无效。",
         "active_account_state_unavailable":"当前账号状态不可用。",
         "probe_evidence_invalid":"已保存的探测证据无效。",
@@ -535,7 +538,7 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
     setBusy(true); probe = { state: "running" }; showToast(text.verifyRunning, "info"); render();
     try {
       const result = await request("/api/tool-probe", "POST", {});
-      if (result.passed === true || result.state === "passed") {
+      if (result.state === "passed") {
         probe = { state: "passed", reason: null }; showToast(text.verifyPassed);
       } else {
         const reason = result.reason || null;

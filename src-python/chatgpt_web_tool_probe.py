@@ -174,6 +174,10 @@ def public_status(home: Path) -> dict[str, Any]:
     home = Path(home).expanduser().resolve()
     binding = chatgpt_web_checks._binding(home)
     status = _public_from_document(_load_document(home), binding)
+    # A running record without an in-process worker was interrupted by a
+    # service restart; it must not prevent the next attempt forever.
+    if status.get("state") == "running" and str(home) not in _active:
+        status = {**status, "state": "stale", "reason": "probe_interrupted"}
     # A prior pass is not current if tunnel/connector/runtime preconditions fail.
     if status.get("state") == "passed":
         blocked = _precondition_reason(home)
@@ -519,6 +523,9 @@ def start_probe(
         raise ProbeError("probe_timeout_invalid")
 
     with _lock:
+        home_key = str(home)
+        if home_key in _active:
+            raise ProbeError("probe_already_running")
         existing = public_status(home)
         if existing.get("state") == "running":
             raise ProbeError("probe_already_running")
@@ -550,7 +557,6 @@ def start_probe(
         probe_id = secrets.token_hex(8)
         token = secrets.token_urlsafe(18)
         cancel_event = threading.Event()
-        home_key = str(home)
         _active[home_key] = cancel_event
         document = {
             "version": _PROBE_VERSION,
@@ -582,7 +588,7 @@ def start_probe(
                 outcome = _ProbeOutcome(ok=False, reason="probe_cancelled", live_attempted=exchange is None)
             else:
                 outcome = runner(request)
-                if cancel_event.is_set() and not outcome.ok:
+                if cancel_event.is_set():
                     outcome = _ProbeOutcome(
                         ok=False,
                         reason="probe_cancelled",
@@ -600,7 +606,7 @@ def start_probe(
             if current_binding is None or current_binding != binding:
                 final_state = "stale"
                 reason = "active_config_or_account_changed"
-            if cancel_event.is_set() and final_state == "failed":
+            if cancel_event.is_set() and final_state != "stale":
                 final_state = "cancelled"
                 reason = "probe_cancelled"
             document = {

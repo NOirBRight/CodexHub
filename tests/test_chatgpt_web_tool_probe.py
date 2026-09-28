@@ -269,6 +269,50 @@ def test_cancel_marks_incomplete(tmp_path, monkeypatch):
     assert probe.coding_setup_complete(home) is False
 
 
+def test_cancel_cannot_be_overwritten_by_late_success(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _seed_settings(home)
+    _patch_common(monkeypatch, home)
+    started = threading.Event()
+    release = threading.Event()
+
+    def exchange(_request: probe._ProbeRequest) -> probe._ProbeOutcome:
+        started.set()
+        assert release.wait(timeout=2)
+        return probe._ProbeOutcome(ok=True, live_attempted=False)
+
+    worker = threading.Thread(target=lambda: probe.start_probe(home, exchange=exchange), daemon=True)
+    worker.start()
+    assert started.wait(timeout=2)
+    assert probe.cancel_probe(home)["state"] == "cancelled"
+    with pytest.raises(probe.ProbeError) as info:
+        probe.start_probe(home, exchange=exchange)
+    assert info.value.reason == "probe_already_running"
+    release.set()
+    worker.join(timeout=2)
+    assert probe.public_status(home)["state"] == "cancelled"
+    assert probe.coding_setup_complete(home) is False
+    assert probe.start_probe(home, exchange=lambda _request: probe._ProbeOutcome(ok=True))["state"] == "passed"
+
+
+def test_interrupted_running_probe_can_be_retried(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _seed_settings(home)
+    _patch_common(monkeypatch, home)
+    probe._write_document(home, {
+        "version": 1,
+        "state": "running",
+        "reason": None,
+        "checked_at": "2026-09-28T00:00:00Z",
+        "probe_id": "interrupted",
+        "binding": _binding(),
+        "live_attempted": True,
+    })
+    assert probe.public_status(home)["reason"] == "probe_interrupted"
+    result = probe.start_probe(home, exchange=lambda _request: probe._ProbeOutcome(ok=True), wait=True)
+    assert result["state"] == "passed"
+
+
 def test_stale_after_generation_change(tmp_path, monkeypatch):
     home = tmp_path / "home"
     _seed_settings(home)
