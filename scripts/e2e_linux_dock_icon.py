@@ -238,7 +238,7 @@ export default class Probe {
         processes = []
         with (home / 'private.log').open('w') as log:
             try:
-                shell = subprocess.Popen(['gnome-shell', '--headless', '--wayland',
+                shell = subprocess.Popen(['gnome-shell', '--headless', '--wayland', '--no-x11',
                     '--wayland-display=codexhub-dock-test', '--virtual-monitor=1024x768',
                     '--debug-control'], env=env, stdout=log, stderr=log, start_new_session=True)
                 processes.append(shell)

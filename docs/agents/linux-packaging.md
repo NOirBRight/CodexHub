@@ -204,6 +204,10 @@ resulting desktop entry through GIO and assert both the current executable and
 fingerprinted icon file. Run `cargo test --locked --manifest-path
 src-tauri/Cargo.toml linux_window`. A portable candidate must also pass
 `./scripts/codexhub-python.sh scripts/e2e_linux_dock_icon.py --bin <portable>/CodexHub`.
+The Wayland-only test starts GNOME with `--no-x11`. Keep this flag: isolated
+HOME, D-Bus, and XDG runtime directories do not isolate `/tmp/.X11-unix`;
+otherwise GNOME can replace and later delete the live desktop's X0 socket,
+breaking new X11 windows in applications such as Feishu.
 This starts an isolated headless GNOME session with a populated stale icon cache,
 resolves the running window through Shell.WindowTracker, and verifies that its
 actual GIcon can load. The release builder runs this check before archiving, so
