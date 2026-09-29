@@ -725,7 +725,22 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
           ${view>0 && view<5 ? `<button type="button" class="ghost" data-action="back"${busy?" disabled":""}>${esc(text.back)}</button>` : `<span>${esc(text.footerBrand)}</span>`}
         </footer>
       </div>`;
+    const key = byId("focus-key");
+    if (key) key.value = form.runtime_key;
   }
+
+  document.addEventListener("input", (event) => {
+    if (event.target.id !== "focus-tunnel" && event.target.id !== "focus-key") return;
+    captureForm();
+    const tunnelReady = Boolean(form.tunnel_id.trim());
+    const keyReady = form.key_configured || Boolean(form.runtime_key.trim());
+    const saveButton = document.querySelector('[data-action="save"]');
+    if (saveButton) saveButton.disabled = busy || !tunnelReady || (!keyReady && !form.clear_key);
+    const ready = event.target.id === "focus-tunnel" ? tunnelReady : keyReady;
+    event.target.closest(".credential-block")?.classList.toggle("is-ready", ready);
+    const symbol = event.target.parentElement.querySelector(".input-symbol");
+    if (symbol) symbol.textContent = ready ? "✓" : event.target.id === "focus-tunnel" ? "↳" : "⌑";
+  });
 
   document.addEventListener("click", (event) => {
     const target = event.target.closest("button");
@@ -796,7 +811,7 @@ details.advanced{margin-top:22px;border-top:1px solid #edf0e9;padding-top:14px}d
       byId("session-needed").classList.add("hidden");
       byId("app").classList.remove("hidden");
       render();
-      timer = window.setInterval(() => { if (!busy) void refresh(false).catch(() => {}); }, 30000);
+      timer = window.setInterval(() => { if (!busy && step !== 1) void refresh(false).catch(() => {}); }, 30000);
     } catch (error) {
       byId("session-needed").classList.remove("hidden");
       byId("app").classList.add("hidden");
