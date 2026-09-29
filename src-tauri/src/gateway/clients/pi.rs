@@ -398,23 +398,16 @@ pub(in crate::gateway) fn restore_pi_from_baseline(
                     .map_err(|_| "failed to restore Pi config from baseline".to_string())?;
                 restored_any = true;
             }
-            Some(BaselineFile::Absent) if path.exists() => {
-                let text = fs::read_to_string(path).unwrap_or_default();
-                let managed = match name {
-                    "settings.json" => is_pi_settings_codexhub_config(&text),
-                    "models.json" => is_pi_models_codexhub_config(&text),
-                    _ => false,
-                };
-                if !managed {
-                    return Err(
-                        "Pi target exists but is not managed by CodexHub; refusing removal."
-                            .to_string(),
-                    );
+            Some(BaselineFile::Absent) if path.exists() => match name {
+                // ADR-0004: settings.json is user-owned; detach never removes it.
+                "settings.json" => {}
+                "models.json" => {
+                    if detach_pi_managed_models(path)? {
+                        removed_any = true;
+                    }
                 }
-                fs::remove_file(path)
-                    .map_err(|_| "failed to remove restored-absent Pi target".to_string())?;
-                removed_any = true;
-            }
+                _ => {}
+            },
             Some(BaselineFile::Absent) | None => {}
         }
     }
@@ -428,30 +421,20 @@ pub(in crate::gateway) fn restore_pi_from_baseline(
                 "Pi official config restored from canonical baseline; absent targets removed."
                     .to_string()
             }
+            (true, false) => "Pi official config restored from canonical baseline.".to_string(),
             (false, true) => {
-                "Pi config removed; original baseline recorded targets as absent.".to_string()
+                "Pi CodexHub entries removed while preserving unrelated config.".to_string()
             }
-            _ => "Pi official config restored from canonical baseline.".to_string(),
+            (false, false) => "Pi CodexHub config was already absent.".to_string(),
         },
     })
 }
 
-pub(in crate::gateway) fn pi_ownership_bounded_cleanup(
-    settings_path: &Path,
-    models_path: &Path,
-) -> Result<GatewayClientApplyResult, String> {
-    // settings.json is user-owned under Provider Injection; detach never
-    // reads or mutates it. The Injected Block lives only in models.json.
-    let _ = settings_path;
-    let models_exists = models_path.exists();
-    if !models_exists {
-        return Ok(GatewayClientApplyResult {
-            client_id: "pi".to_string(),
-            applied: true,
-            config_path: None,
-            backup_path: None,
-            message: "Pi config was already absent.".to_string(),
-        });
+/// Remove only CodexHub Injected Block entries from Pi models.json.
+/// Returns whether the file was mutated. settings.json is never touched.
+fn detach_pi_managed_models(models_path: &Path) -> Result<bool, String> {
+    if !models_path.exists() {
+        return Ok(false);
     }
 
     let models_text = fs::read_to_string(models_path)
@@ -477,21 +460,16 @@ pub(in crate::gateway) fn pi_ownership_bounded_cleanup(
         return Err("Pi providers map contains malformed entries; refusing cleanup.".to_string());
     }
 
-    let providers_object = models_object.get("providers").and_then(Value::as_object);
-    let providers_has_managed = providers_object.is_some_and(|providers| {
-        providers
-            .iter()
-            .any(|(key, value)| is_managed_codexhub_provider_entry(key, value))
-    });
-
-    if !providers_has_managed {
-        return Ok(GatewayClientApplyResult {
-            client_id: "pi".to_string(),
-            applied: true,
-            config_path: None,
-            backup_path: None,
-            message: "Pi CodexHub config was already absent.".to_string(),
+    let providers_has_managed = models_object
+        .get("providers")
+        .and_then(Value::as_object)
+        .is_some_and(|providers| {
+            providers
+                .iter()
+                .any(|(key, value)| is_managed_codexhub_provider_entry(key, value))
         });
+    if !providers_has_managed {
+        return Ok(false);
     }
 
     let models_object = models_value.as_object_mut().unwrap();
@@ -505,22 +483,36 @@ pub(in crate::gateway) fn pi_ownership_bounded_cleanup(
         }
     }
 
-    let mut mutated = false;
     if models_object.is_empty() {
-        if models_exists {
-            fs::remove_file(models_path)
-                .map_err(|_| "failed to remove cleaned Pi models.".to_string())?;
-            mutated = true;
-        }
+        fs::remove_file(models_path)
+            .map_err(|_| "failed to remove cleaned Pi models.".to_string())?;
     } else {
         let next = serde_json::to_string_pretty(&models_value)
             .map(|text| format!("{text}\n"))
             .map_err(|error| format!("failed to serialize cleaned Pi models: {error}"))?;
         write_text_replace(models_path, &next)
             .map_err(|_| "failed to write cleaned Pi models".to_string())?;
-        mutated = true;
     }
+    Ok(true)
+}
 
+pub(in crate::gateway) fn pi_ownership_bounded_cleanup(
+    settings_path: &Path,
+    models_path: &Path,
+) -> Result<GatewayClientApplyResult, String> {
+    // settings.json is user-owned under Provider Injection; detach never
+    // reads or mutates it. The Injected Block lives only in models.json.
+    let _ = settings_path;
+    if !models_path.exists() {
+        return Ok(GatewayClientApplyResult {
+            client_id: "pi".to_string(),
+            applied: true,
+            config_path: None,
+            backup_path: None,
+            message: "Pi config was already absent.".to_string(),
+        });
+    }
+    let mutated = detach_pi_managed_models(models_path)?;
     Ok(GatewayClientApplyResult {
         client_id: "pi".to_string(),
         applied: true,

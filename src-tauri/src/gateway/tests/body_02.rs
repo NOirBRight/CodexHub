@@ -2707,7 +2707,7 @@ fn pi_equal_mtime_adoption_ignores_parent_path_channel_names() {
 }
 
 #[test]
-fn pi_restore_absent_tombstone_removes_only_owned_targets() {
+fn pi_restore_absent_tombstone_detaches_managed_models_only() {
     let _guard = TEST_ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -2717,16 +2717,13 @@ fn pi_restore_absent_tombstone_removes_only_owned_targets() {
     let settings_path = root.join("settings.json");
     let models_path = root.join("models.json");
     fs::create_dir_all(&root).unwrap();
+    let settings = r#"{"defaultProvider":"codexhub-openai","defaultModel":"gpt-5.5"}"#;
+    fs::write(&settings_path, settings).unwrap();
     fs::write(
-        &settings_path,
-        r#"{"defaultProvider":"codexhub-openai","defaultModel":"gpt-5.5"}"#,
+        &models_path,
+        r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
     )
     .unwrap();
-    fs::write(
-            &models_path,
-            r#"{"providers":{"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
-        )
-        .unwrap();
     let provenance_dir = root.join("provenance");
     std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", &provenance_dir);
     let baseline = super::RollbackBaseline {
@@ -2750,11 +2747,67 @@ fn pi_restore_absent_tombstone_removes_only_owned_targets() {
 
     restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
     assert!(result.applied);
-    assert!(!settings_path.exists());
+    assert!(settings_path.exists(), "settings.json stays user-owned");
+    assert_eq!(fs::read_to_string(&settings_path).unwrap(), settings);
     assert!(!models_path.exists());
     assert_eq!(
         result.message,
-        "Pi config removed; original baseline recorded targets as absent."
+        "Pi CodexHub entries removed while preserving unrelated config."
+    );
+}
+
+#[test]
+fn pi_restore_absent_tombstone_preserves_foreign_models() {
+    // ADR-0004: Absent restore keeps user settings and foreign providers.
+    let _guard = TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let previous_provenance = std::env::var_os("CODEXHUB_ROLLBACK_PROVENANCE_DIR");
+    let root = unique_temp_dir("codexhub-pi-absent-foreign-models");
+    let settings_path = root.join("settings.json");
+    let models_path = root.join("models.json");
+    fs::create_dir_all(&root).unwrap();
+    let user_settings =
+        r#"{"theme":"omarchy-system","defaultProvider":"xai","defaultModel":"grok-4.5"}"#;
+    fs::write(&settings_path, user_settings).unwrap();
+    fs::write(
+        &models_path,
+        r#"{"providers":{"ollama":{"baseUrl":"http://127.0.0.1:11434/v1","api":"openai-completions","models":[{"id":"qwen2.5"}]},"codexhub-openai":{"baseUrl":"http://127.0.0.1:9099/v1/providers/openai","api":"openai-responses","apiKey":"codexhub-proxy","models":[{"id":"gpt-5.5"}]}}}"#,
+    )
+    .unwrap();
+    std::env::set_var("CODEXHUB_ROLLBACK_PROVENANCE_DIR", root.join("provenance"));
+    let baseline = super::RollbackBaseline {
+        version: super::ROLLBACK_BASELINE_VERSION,
+        recorded_at: 1,
+        files: [
+            ("settings.json".to_string(), super::BaselineFile::Absent),
+            ("models.json".to_string(), super::BaselineFile::Absent),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    super::write_rollback_baseline_atomic("pi", &baseline).unwrap();
+
+    let result = super::restore_pi_config_with_paths(
+        &settings_path,
+        &models_path,
+        &[stable_root(root.join("backups"))],
+    )
+    .unwrap();
+
+    restore_env("CODEXHUB_ROLLBACK_PROVENANCE_DIR", previous_provenance);
+    assert!(result.applied);
+    assert_eq!(fs::read_to_string(&settings_path).unwrap(), user_settings);
+    let models = fs::read_to_string(&models_path).unwrap();
+    assert!(models.contains("ollama"), "foreign provider preserved: {models}");
+    assert!(
+        !models.contains("codexhub-openai"),
+        "managed provider removed: {models}"
+    );
+    assert_eq!(
+        result.message,
+        "Pi CodexHub entries removed while preserving unrelated config."
     );
 }
 
