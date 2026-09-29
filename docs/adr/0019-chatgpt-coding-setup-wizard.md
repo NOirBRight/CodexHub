@@ -3,7 +3,7 @@
 Date: 2026-09-28
 Status: Accepted — product goal, responsibility boundary, setup sequence, and refined single-step layout A finalized by the user on 2026-09-28.
 
-Tracking: [ChatGPT integration #567](https://github.com/NOirBRight/CodexHub/issues/567), [daily-browser connection #592](https://github.com/NOirBRight/CodexHub/issues/592). Refines [ADR-0017](0017-chatgpt-runtime-settings-boundary.md) and preserves [ADR-0018](0018-daily-browser-chatgpt-authentication.md).
+Tracking: [ChatGPT integration #567](https://github.com/NOirBRight/CodexHub/issues/567), [daily-browser connection #592](https://github.com/NOirBRight/CodexHub/issues/592). Refines [ADR-0017](0017-chatgpt-runtime-settings-boundary.md) and [ADR-0018](0018-daily-browser-chatgpt-authentication.md). The 2026-09-29 user decision makes the existing managed browser the default sign-in path; daily-browser transfer is optional.
 
 The user explicitly requires programming with tools; a text-only route has no product value for this setup. The Runtime Settings webpage will become a task-oriented wizard with one completion target: an authenticated ChatGPT account, an active tool tunnel, an authorized ChatGPT connector, and a verified tool roundtrip. There is no text/full mode selector in the new onboarding flow, and login or text success alone never marks setup complete. Existing settings and saved credentials are retained; a legacy text-only installation is unfinished coding setup, not an instruction to erase or silently replace its configuration.
 
@@ -11,10 +11,10 @@ CodexHub continues to own component installation/lifecycle, Provider Connection,
 
 The wizard follows the upstream dependency order:
 
-1. Connect the ChatGPT account through the daily browser; skip redundant authentication when a valid account is already connected. Explain the one-time browser extension requirement only when needed.
+1. Reuse a valid connected account. Otherwise open the managed sign-in window and let the user authenticate there, then recheck login status. Offer the daily-browser extension as an optional alternative, with its one-time installation requirement explained there.
 2. Prepare a Tunnel and a regular API key with Tunnels Read + Use permission. Use upstream product names, not the ambiguous internal field name Runtime Key. Reuse saved credentials without revealing them.
 3. Save and explain the exact manual restart of the ChatGPT component. Saving returns immediately and never queues, waits for, or performs a restart. Rechecking whether the tool tunnel is running is a separate explicit action; the user may leave and return. A saved configuration is not an active connection.
-4. Authorize the matching connector in ChatGPT after the tunnel is running. Give the connector name and exact external steps rather than asking the user to invent the configuration. Account-connection extension and tool connector remain distinct concepts.
+4. Authorize the matching connector in ChatGPT after the tunnel is running. Give the connector name and exact external steps rather than asking the user to invent the configuration. Account sign-in or the optional browser extension and the tool connector remain distinct concepts.
 5. Verify a harmless, real tool request/result roundtrip through the intended integration before declaring coding setup complete. Status flags, text smoke checks, synthetic receipts, or merely opening external settings do not satisfy this criterion. Production exposes an authenticated Runtime Settings tool-probe seam (`chatgpt_web_tool_probe`) that drives a fixed no-side-effect tool through the managed ChatGPT Web path and binds success to the current account/config/runtime generation.
 
 Show current progress, one clear next action, and actionable reasons for blocked steps. Completed steps are summarized and remain editable. Return visits derive progress from saved configuration and fresh evidence, not a blindly trusted step counter. Changes to account, tunnel, connector, or active configuration invalidate affected downstream readiness. Verification failure stays incomplete and never falls back to text-only success. Advanced runtime parameters are outside the first-run path. Successful setup hands the user back to CodexHub for model/client selection; it does not waive the real-client acceptance matrix in #567.

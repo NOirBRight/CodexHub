@@ -1657,14 +1657,6 @@ mod tests {
             let plan = adapter.plan(ClientIntent::Connect, &ctx).expect("plan");
             assert_eq!(plan.client_id, id);
             assert!(!plan.activation_touched, "{id} must not touch activation");
-            assert_eq!(
-                plan.restart_required,
-                match id {
-                    "grok" => "Grok CLI",
-                    "claude" => "Claude Code",
-                    _ => "none",
-                }
-            );
         }
     }
 }

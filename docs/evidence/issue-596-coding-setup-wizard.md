@@ -40,17 +40,29 @@ On `bc6d48db`, the same production page and HTTP server were driven in a tempora
 
 | State | Primary visible action |
 | --- | --- |
-| First run | Open ChatGPT |
+| First run | Open sign-in window |
 | Saved, awaiting manual restart | Recheck component status (after the stop/start instruction) |
-| Account expired | Open ChatGPT |
+| Account expired | Open sign-in window / Check sign-in |
 | Connector restricted | Open ChatGPT connector settings (one focusable link) |
 | Tool result rejected | Verify coding capability (with failure reason and authorization fallback) |
 
 The already-active connector view also showed **Continue** as its single primary action. The isolated live runtime was not altered for these failure scenarios. The temporary server, Yoga SSH forward, and scenario files were removed afterward.
 
+## Managed-browser default amendment (2026-09-29)
+
+Commit `45b15722` makes the private managed sign-in window the default account step. The daily-browser extension remains under an optional details section. ADR-0018 and ADR-0019 record the product decision.
+
+Live relay after operator-confirmed managed login on isolated home `codexhub-584-HPkFy2`:
+
+- readiness refresh at `2026-09-28T17:00:47Z`: `login=signed_in`, `tunnel=ready`, `connector=selectable`, `tools_ready=true`
+- `start_probe` at `2026-09-28T17:02:07Z`: `state=passed`, `live_attempted=true`, `probe_id=0ec3820d3e55ad26`, same generation binding as prior pass
+- Focused settings/probe/browser-account tests on this branch: **64 passed**
+
+Evidence detail: [issue-592/managed-browser-live-check-2026-09-29.md](issue-592/managed-browser-live-check-2026-09-29.md). Keep #592 open for the optional daily-browser extension path.
+
 ## Outstanding acceptance
 
-The default daily runtime remains in `browser-only` mode; the real roundtrips above used the previously configured isolated `full` instance. The abnormal UI states were inspected with controlled status responses, without expiring the real account or revoking its connector. #599's browser matrix and live tool check are covered for PR review; keep the issue open until merge. The broader #567 real-client matrix and #592 daily-browser acceptance remain open.
+The default daily runtime remains in `browser-only` mode; the real roundtrips above used the previously configured isolated `full` instance, including the 2026-09-29 managed-login relay. The abnormal UI states were inspected with controlled status responses, without expiring the real account or revoking its connector. #599's browser matrix and live tool check are covered for PR review; keep the issue open until merge. The broader #567 real-client matrix and #592 daily-browser acceptance remain open.
 
 ## Review
 
