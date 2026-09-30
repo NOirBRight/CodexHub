@@ -1,0 +1,199 @@
+{
+  "scope": "live Codex and isolated production Gateway; reference subscription bridges where configured",
+  "scenario": "code-mode",
+  "parent_model": "cursor-probe/cursor/gpt-5.6-luna",
+  "child_model": null,
+  "codex_version": "codex-cli 0.158.0",
+  "probe_value_sha256": "5810280f1cda65b98e824faebe6c803a03f6e8fcd33f1f6f81c008baebf06710",
+  "turns": [
+    {
+      "exit": 0,
+      "timed_out": false,
+      "nonce_in_final": true,
+      "reversed_nonce_in_final": false,
+      "final_text": [
+        "I\u2019ll read the fixture with the requested command and return its exact contents.",
+        "8b359cb47b53ee5b45c821b8"
+      ],
+      "tool_events": [
+        {
+          "id": "item_0",
+          "type": "error",
+          "message": "Under-development features enabled: code_mode. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /tmp/codexhub-subscription-prototype-W4H0kq/codex-runtime/cursor-code-mode-r3/client/config.toml."
+        },
+        {
+          "id": "item_2",
+          "type": "command_execution",
+          "command": "/usr/bin/bash -c 'cat probe-value.txt'",
+          "aggregated_output": "8b359cb47b53ee5b45c821b8\n",
+          "exit_code": 0,
+          "status": "completed"
+        }
+      ],
+      "errors": [],
+      "usage": [
+        {
+          "input_tokens": 35298,
+          "cached_input_tokens": 0,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 69,
+          "reasoning_output_tokens": 0
+        }
+      ]
+    },
+    {
+      "exit": 0,
+      "timed_out": false,
+      "nonce_in_final": false,
+      "reversed_nonce_in_final": true,
+      "final_text": [
+        "8b128c54b5ee35b74bc953b8"
+      ],
+      "tool_events": [
+        {
+          "id": "item_0",
+          "type": "error",
+          "message": "Under-development features enabled: code_mode. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /tmp/codexhub-subscription-prototype-W4H0kq/codex-runtime/cursor-code-mode-r3/client/config.toml."
+        }
+      ],
+      "errors": [],
+      "usage": [
+        {
+          "input_tokens": 58289,
+          "cached_input_tokens": 0,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 536,
+          "reasoning_output_tokens": 0
+        }
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "cursor-probe/cursor/gpt-5.6-luna",
+      "input_types": [
+        "message",
+        "message",
+        "message",
+        "message",
+        "message"
+      ],
+      "tool_outputs": [],
+      "agent_messages": [],
+      "portable_tools": 5,
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.completed"
+      ],
+      "response_calls": [
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_dnofT9CX0SLmcXudghcEvsWH__fc_0e21ed5d547e0021016abbeb714a8887d192f0c2bc8e0d1bd4"
+        },
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_dnofT9CX0SLmcXudghcEvsWH__fc_0e21ed5d547e0021016abbeb714a8887d192f0c2bc8e0d1bd4"
+        }
+      ]
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "cursor-probe/cursor/gpt-5.6-luna",
+      "input_types": [
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "custom_tool_call",
+        "custom_tool_call_output"
+      ],
+      "tool_outputs": [
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_dnofT9CX0SLmcXudghcEvsWH__fc_0e21ed5d547e0021016abbeb714a8887d192f0c2bc8e0d1bd4",
+          "fixture_value_present": true
+        }
+      ],
+      "agent_messages": [],
+      "portable_tools": 5,
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.completed"
+      ]
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "cursor-probe/cursor/gpt-5.6-luna",
+      "input_types": [
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "message",
+        "message"
+      ],
+      "tool_outputs": [
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_dnofT9CX0SLmcXudghcEvsWH__fc_0e21ed5d547e0021016abbeb714a8887d192f0c2bc8e0d1bd4",
+          "fixture_value_present": true
+        }
+      ],
+      "agent_messages": [],
+      "portable_tools": 5,
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.completed"
+      ]
+    }
+  ],
+  "portable_tools": true,
+  "recover_plaintext": false,
+  "task_recoveries": [],
+  "effort": "high",
+  "passed": true,
+  "gateway_stopped": true
+}

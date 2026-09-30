@@ -14,8 +14,8 @@ import sys
 import tempfile
 
 
-def concrete_executable(binary: Path) -> Path:
-    """Return a Claude binary that can start without a version-manager lookup.
+def concrete_executable(binary: Path, executable_name: str = 'claude') -> Path:
+    """Return an installed CLI binary without a version-manager lookup.
 
     A mise shim's resolved file is ``mise``. Running that shim after ``HOME`` is
     replaced makes mise try to download Claude, which the offline discovery
@@ -27,7 +27,7 @@ def concrete_executable(binary: Path) -> Path:
     if resolved.name != 'mise':
         return binary
     which = subprocess.run(
-        [str(resolved), 'which', 'claude'],
+        [str(resolved), 'which', executable_name],
         capture_output=True, text=True, timeout=5,
     )
     lines = [line.strip() for line in which.stdout.splitlines() if line.strip()]

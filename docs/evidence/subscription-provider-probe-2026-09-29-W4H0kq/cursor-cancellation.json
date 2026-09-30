@@ -1,0 +1,9 @@
+{
+  "model_route": "cursor/gpt-5.6-luna",
+  "reference_source_mapped_cursor_model_id": "gpt-5.6-luna-high",
+  "wire_model_id_captured": false,
+  "caller_closed_stream_after_first_text_delta": true,
+  "completion_seen_before_close": false,
+  "gateway_healthy_after_abort": true,
+  "upstream_context_cancellation": "Magpie source path inspected; request context is passed to cursorRun and cancels its AgentService/Run stream"
+}

@@ -1,0 +1,35 @@
+{
+  "schema": "codexhub.cli-subscription-discovery.v1",
+  "date": "2026-10-01",
+  "baseline_sha": "022362f3b4a2085b1605c1dc996296afa1c68821",
+  "scope": "isolated inference-free discovery; no Provider enablement or production generation",
+  "cursor": {
+    "state": "available",
+    "cli_version": "2026.09.28-64d2043",
+    "generation_qualified": false,
+    "model_count": 246,
+    "model_ids_sha256": "a3973a434828c09be1a82ddc3d00cc823997b04075fc3c8834bdf91e59c7ad12"
+  },
+  "claude": {
+    "state": "not-eligible",
+    "cli_version": "2.1.285",
+    "first_party_claude_ai_login_detected": true,
+    "generation_qualified": false,
+    "model_count": 0,
+    "inference_attempted": false,
+    "historical_organization_policy_revalidated_by_generation": false
+  },
+  "isolation": {
+    "disposable_home_config_and_cwd": true,
+    "user_project_settings_and_ambient_provider_keys_excluded": true,
+    "only_necessary_current_login_copied": true,
+    "copies_removed_after_each_discovery": true,
+    "normal_cli_and_gateway_configuration_changed": false,
+    "login_refresh_or_account_switch_command_run": false
+  },
+  "qualification_limits": [
+    "model listing is not generation entitlement",
+    "no text/tools/Code Mode/V2/restart generation qualification in this discovery run",
+    "no Windows live discovery evidence"
+  ]
+}

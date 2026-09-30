@@ -1,0 +1,118 @@
+{
+  "scope": "isolated current-client rollout evidence, not a new model run",
+  "sessions": [
+    {
+      "actor": "/root/reader",
+      "models": [
+        "cursor-probe/cursor/gpt-5.6-luna"
+      ],
+      "task_message_parts": [
+        [
+          "input_text"
+        ],
+        [
+          "input_text"
+        ]
+      ],
+      "calls": [
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_J4eqVrs9MbCUUYghgodbSvIw__fc_08ab634d9e631e86016abbecdfaf5c87d181fad7aad68d45b6",
+          "plaintext_args_marker": null,
+          "reads_fixture": true
+        },
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075",
+          "plaintext_args_marker": null,
+          "reads_fixture": false
+        },
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_WRABjMNv3g9oKywwtVIYvMjQ__fc_0ac8bf6002e87330016abbeced881c87d1983f1e7d49e06efc",
+          "plaintext_args_marker": null,
+          "reads_fixture": true
+        },
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_DyZ2eQEHqxsVngJR3XExNWfn__fc_0c2350b5c0751b3f016abbecf1393887d1a39f44f5e53a53f9",
+          "plaintext_args_marker": null,
+          "reads_fixture": false
+        }
+      ],
+      "tool_results_with_fixture_value": 2,
+      "tool_results_with_reversed_fixture_value": 1,
+      "assistant_returned_value": true,
+      "assistant_returned_reversed_value": true,
+      "raw_rollout_sha256": "08ed3df4b9339e602e225b6b6a21ef71c3f430ec66f5ce8c34d13c9fdbd00be9"
+    },
+    {
+      "actor": "/root",
+      "models": [
+        "gpt-6-astra"
+      ],
+      "task_message_parts": [
+        [
+          "input_text",
+          "encrypted_content"
+        ],
+        [
+          "input_text"
+        ],
+        [
+          "input_text",
+          "encrypted_content"
+        ]
+      ],
+      "calls": [
+        {
+          "type": "function_call",
+          "name": "spawn_agent",
+          "namespace": "collaboration",
+          "call_id": "call_L09JrOdSQa9Xc8Zfz2eR6NiX",
+          "plaintext_args_marker": [],
+          "reads_fixture": false
+        },
+        {
+          "type": "function_call",
+          "name": "wait_agent",
+          "namespace": "collaboration",
+          "call_id": "call_Zb4iOQMCDHrwz6xNdNidhOQm",
+          "plaintext_args_marker": [],
+          "reads_fixture": false
+        },
+        {
+          "type": "function_call",
+          "name": "followup_task",
+          "namespace": "collaboration",
+          "call_id": "call_jGtRXRaDe0RNwRxytciTb522",
+          "plaintext_args_marker": [],
+          "reads_fixture": false
+        },
+        {
+          "type": "function_call",
+          "name": "wait_agent",
+          "namespace": "collaboration",
+          "call_id": "call_uOGWVkUoXfEienTCvWKUg3lM",
+          "plaintext_args_marker": [],
+          "reads_fixture": false
+        }
+      ],
+      "tool_results_with_fixture_value": 0,
+      "tool_results_with_reversed_fixture_value": 0,
+      "assistant_returned_value": true,
+      "assistant_returned_reversed_value": true,
+      "raw_rollout_sha256": "4aba8fca0941b7d08e21f5a7b5075e098b166d20844b592c1cb93c975cc7790f"
+    }
+  ],
+  "parent_did_not_read_fixture": true,
+  "child_executed_and_returned_both_results": true
+}

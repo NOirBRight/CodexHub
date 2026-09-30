@@ -1,0 +1,32 @@
+{
+  "baseline": "7185c1a1499e455300fe79bf226671491f0114b8",
+  "runtime_overlay": [
+    {
+      "path": "config/providers.toml",
+      "sha256": "3cd9c1ca0b07e609c8fea1c8ffff77ff7ab4ad817a8170c0ccb15020f05f137c"
+    },
+    {
+      "path": "src-python/collaboration_runtime_contract.py",
+      "sha256": "37ad9e6f099300682f4c61897c43211445a425a0cef3ca9e02a25335590cc67d"
+    },
+    {
+      "path": "src-python/gateway_catalog_runtime.py",
+      "sha256": "0a01b5b42329434a4e3936a9b7b740160d847ec52e730d884962051c4b3ffe1b"
+    },
+    {
+      "path": "src-python/protocol_translation.py",
+      "sha256": "94ed22b01cbd6906155f8b4bd6f26fad878d358c1c2e116621ad0eef1392c1a3"
+    },
+    {
+      "path": "src-python/providers_config.py",
+      "sha256": "dd9ad049c7b8afed8c99c571dd196b50ab7d66d31676130d419bdeab4e94d19d"
+    },
+    {
+      "path": "src-python/route_plan.py",
+      "sha256": "463b3ff5d885be3cad8d7b2575d9b4f94d8cf9a14832fa77596662661a938919"
+    }
+  ],
+  "overlay_is_preexisting_user_work": true,
+  "prototype_branch": "prototype/subscription-provider-probes-W4H0kq",
+  "live_model_authorized": true
+}

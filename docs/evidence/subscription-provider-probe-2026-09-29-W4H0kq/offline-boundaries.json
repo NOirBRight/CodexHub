@@ -1,0 +1,9 @@
+{
+  "scope": "offline exact-source and conversion boundaries; no model call",
+  "exact_source_recovery": true,
+  "opaque_without_source_unchanged": true,
+  "wrong_author_unchanged": true,
+  "declared_child_subset_only": true,
+  "typed_history_ids": true,
+  "call_id_preserved": true
+}

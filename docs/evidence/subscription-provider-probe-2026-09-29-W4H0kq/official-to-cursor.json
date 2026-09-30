@@ -1,0 +1,811 @@
+{
+  "scope": "live Codex and isolated production Gateway; reference subscription bridges where configured",
+  "scenario": "collaboration",
+  "parent_model": "gpt-6-astra",
+  "child_model": "cursor-probe/cursor/gpt-5.6-luna",
+  "codex_version": "codex-cli 0.158.0",
+  "probe_value_sha256": "b91b20522dc5ca99017f65c81e84dff43a3764734fc2e624b53d3a392dfcc9ef",
+  "turns": [
+    {
+      "exit": 0,
+      "timed_out": false,
+      "nonce_in_final": true,
+      "reversed_nonce_in_final": true,
+      "final_text": [
+        "I\u2019ll spawn the requested child to read the file, then ask that same child to read it again and reverse the contents.",
+        "Child results, with newline characters shown as `\\n`:\n\n- First read: `03896df17d76de42bfd716af\\n`\n- Second read, reversed: `\\nfa617dfb24ed67d71fd69830`"
+      ],
+      "tool_events": [
+        {
+          "id": "item_0",
+          "type": "error",
+          "message": "Under-development features enabled: code_mode. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /tmp/codexhub-subscription-prototype-W4H0kq/codex-runtime/official-to-cursor-r2/client/config.toml."
+        },
+        {
+          "id": "item_2",
+          "type": "collab_tool_call",
+          "tool": "wait",
+          "sender_thread_id": "01a0ee15-1a72-7e82-9f97-be82f856ada7",
+          "receiver_thread_ids": [],
+          "prompt": null,
+          "agents_states": {},
+          "status": "completed"
+        },
+        {
+          "id": "item_3",
+          "type": "collab_tool_call",
+          "tool": "wait",
+          "sender_thread_id": "01a0ee15-1a72-7e82-9f97-be82f856ada7",
+          "receiver_thread_ids": [],
+          "prompt": null,
+          "agents_states": {},
+          "status": "completed"
+        }
+      ],
+      "errors": [],
+      "usage": [
+        {
+          "input_tokens": 60937,
+          "cached_input_tokens": 47744,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 358,
+          "reasoning_output_tokens": 13
+        }
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "gpt-6-astra",
+      "input_types": [
+        "additional_tools",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message"
+      ],
+      "tool_outputs": [],
+      "agent_messages": [],
+      "recovered_parts": 0,
+      "direct_collaboration_exposed": true,
+      "portable_tools": 11,
+      "status": 200,
+      "content_type": "",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.completed"
+      ],
+      "response_calls": [
+        {
+          "type": "function_call",
+          "name": "spawn_agent",
+          "namespace": "collaboration",
+          "call_id": "call_L09JrOdSQa9Xc8Zfz2eR6NiX"
+        }
+      ]
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "cursor-probe/cursor/gpt-5.6-luna",
+      "input_types": [
+        "message",
+        "message",
+        "message",
+        "message",
+        "agent_message"
+      ],
+      "tool_outputs": [],
+      "agent_messages": [
+        {
+          "author": "/root",
+          "recipient": "/root/reader",
+          "plaintext": true,
+          "encrypted": false
+        }
+      ],
+      "recovered_parts": 0,
+      "direct_collaboration_exposed": false,
+      "portable_tools": 4,
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.completed"
+      ],
+      "response_calls": [
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_J4eqVrs9MbCUUYghgodbSvIw__fc_08ab634d9e631e86016abbecdfaf5c87d181fad7aad68d45b6"
+        },
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_J4eqVrs9MbCUUYghgodbSvIw__fc_08ab634d9e631e86016abbecdfaf5c87d181fad7aad68d45b6"
+        }
+      ]
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "gpt-6-astra",
+      "input_types": [
+        "additional_tools",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "function_call",
+        "function_call_output"
+      ],
+      "tool_outputs": [
+        {
+          "type": "function_call_output",
+          "call_id": "call_L09JrOdSQa9Xc8Zfz2eR6NiX",
+          "fixture_value_present": false
+        }
+      ],
+      "agent_messages": [],
+      "recovered_parts": 0,
+      "direct_collaboration_exposed": true,
+      "portable_tools": 11,
+      "status": 200,
+      "content_type": "",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+        "response.completed"
+      ],
+      "response_calls": [
+        {
+          "type": "function_call",
+          "name": "wait_agent",
+          "namespace": "collaboration",
+          "call_id": "call_Zb4iOQMCDHrwz6xNdNidhOQm"
+        }
+      ]
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "cursor-probe/cursor/gpt-5.6-luna",
+      "input_types": [
+        "message",
+        "message",
+        "message",
+        "message",
+        "agent_message",
+        "message",
+        "custom_tool_call",
+        "custom_tool_call_output"
+      ],
+      "tool_outputs": [
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_J4eqVrs9MbCUUYghgodbSvIw__fc_08ab634d9e631e86016abbecdfaf5c87d181fad7aad68d45b6",
+          "fixture_value_present": true
+        }
+      ],
+      "agent_messages": [
+        {
+          "author": "/root",
+          "recipient": "/root/reader",
+          "plaintext": true,
+          "encrypted": false
+        }
+      ],
+      "recovered_parts": 0,
+      "direct_collaboration_exposed": false,
+      "portable_tools": 4,
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.reasoning_summary_part.done",
+        "response.output_item.done",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.completed"
+      ],
+      "response_calls": [
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075"
+        },
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075"
+        }
+      ]
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "gpt-6-astra",
+      "input_types": [
+        "additional_tools",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "function_call",
+        "function_call_output",
+        "function_call",
+        "function_call_output",
+        "agent_message"
+      ],
+      "tool_outputs": [
+        {
+          "type": "function_call_output",
+          "call_id": "call_L09JrOdSQa9Xc8Zfz2eR6NiX",
+          "fixture_value_present": false
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call_Zb4iOQMCDHrwz6xNdNidhOQm",
+          "fixture_value_present": false
+        }
+      ],
+      "agent_messages": [
+        {
+          "author": "/root/reader",
+          "recipient": "/root",
+          "plaintext": true,
+          "encrypted": true
+        }
+      ],
+      "recovered_parts": 1,
+      "direct_collaboration_exposed": true,
+      "portable_tools": 11,
+      "status": 200,
+      "content_type": "",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+        "response.completed"
+      ],
+      "response_calls": [
+        {
+          "type": "function_call",
+          "name": "followup_task",
+          "namespace": "collaboration",
+          "call_id": "call_jGtRXRaDe0RNwRxytciTb522"
+        }
+      ]
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "cursor-probe/cursor/gpt-5.6-luna",
+      "input_types": [
+        "message",
+        "message",
+        "message",
+        "message",
+        "agent_message",
+        "message",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "reasoning",
+        "custom_tool_call",
+        "custom_tool_call_output"
+      ],
+      "tool_outputs": [
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_J4eqVrs9MbCUUYghgodbSvIw__fc_08ab634d9e631e86016abbecdfaf5c87d181fad7aad68d45b6",
+          "fixture_value_present": true
+        },
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075",
+          "fixture_value_present": false
+        }
+      ],
+      "agent_messages": [
+        {
+          "author": "/root",
+          "recipient": "/root/reader",
+          "plaintext": true,
+          "encrypted": false
+        }
+      ],
+      "recovered_parts": 0,
+      "direct_collaboration_exposed": false,
+      "portable_tools": 4,
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.completed"
+      ]
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "gpt-6-astra",
+      "input_types": [
+        "additional_tools",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "function_call",
+        "function_call_output",
+        "function_call",
+        "function_call_output",
+        "agent_message",
+        "function_call",
+        "function_call_output",
+        "agent_message"
+      ],
+      "tool_outputs": [
+        {
+          "type": "function_call_output",
+          "call_id": "call_L09JrOdSQa9Xc8Zfz2eR6NiX",
+          "fixture_value_present": false
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call_Zb4iOQMCDHrwz6xNdNidhOQm",
+          "fixture_value_present": false
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call_jGtRXRaDe0RNwRxytciTb522",
+          "fixture_value_present": false
+        }
+      ],
+      "agent_messages": [
+        {
+          "author": "/root/reader",
+          "recipient": "/root",
+          "plaintext": true,
+          "encrypted": true
+        },
+        {
+          "author": "/root/reader",
+          "recipient": "/root",
+          "plaintext": true,
+          "encrypted": false
+        }
+      ],
+      "recovered_parts": 1,
+      "direct_collaboration_exposed": true,
+      "portable_tools": 11,
+      "status": 200,
+      "content_type": "",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+        "response.completed"
+      ],
+      "response_calls": [
+        {
+          "type": "function_call",
+          "name": "wait_agent",
+          "namespace": "collaboration",
+          "call_id": "call_uOGWVkUoXfEienTCvWKUg3lM"
+        }
+      ]
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "cursor-probe/cursor/gpt-5.6-luna",
+      "input_types": [
+        "message",
+        "message",
+        "message",
+        "message",
+        "agent_message",
+        "message",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "reasoning",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "message",
+        "agent_message"
+      ],
+      "tool_outputs": [
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_J4eqVrs9MbCUUYghgodbSvIw__fc_08ab634d9e631e86016abbecdfaf5c87d181fad7aad68d45b6",
+          "fixture_value_present": true
+        },
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075",
+          "fixture_value_present": false
+        }
+      ],
+      "agent_messages": [
+        {
+          "author": "/root",
+          "recipient": "/root/reader",
+          "plaintext": true,
+          "encrypted": false
+        },
+        {
+          "author": "/root",
+          "recipient": "/root/reader",
+          "plaintext": true,
+          "encrypted": false
+        }
+      ],
+      "recovered_parts": 0,
+      "direct_collaboration_exposed": false,
+      "portable_tools": 4,
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.completed"
+      ],
+      "response_calls": [
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_WRABjMNv3g9oKywwtVIYvMjQ__fc_0ac8bf6002e87330016abbeced881c87d1983f1e7d49e06efc"
+        },
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_WRABjMNv3g9oKywwtVIYvMjQ__fc_0ac8bf6002e87330016abbeced881c87d1983f1e7d49e06efc"
+        }
+      ]
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "cursor-probe/cursor/gpt-5.6-luna",
+      "input_types": [
+        "message",
+        "message",
+        "message",
+        "message",
+        "agent_message",
+        "message",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "reasoning",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "message",
+        "agent_message",
+        "message",
+        "custom_tool_call",
+        "custom_tool_call_output"
+      ],
+      "tool_outputs": [
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_J4eqVrs9MbCUUYghgodbSvIw__fc_08ab634d9e631e86016abbecdfaf5c87d181fad7aad68d45b6",
+          "fixture_value_present": true
+        },
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075",
+          "fixture_value_present": false
+        },
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_WRABjMNv3g9oKywwtVIYvMjQ__fc_0ac8bf6002e87330016abbeced881c87d1983f1e7d49e06efc",
+          "fixture_value_present": true
+        }
+      ],
+      "agent_messages": [
+        {
+          "author": "/root",
+          "recipient": "/root/reader",
+          "plaintext": true,
+          "encrypted": false
+        },
+        {
+          "author": "/root",
+          "recipient": "/root/reader",
+          "plaintext": true,
+          "encrypted": false
+        }
+      ],
+      "recovered_parts": 0,
+      "direct_collaboration_exposed": false,
+      "portable_tools": 4,
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+        "response.completed"
+      ],
+      "response_calls": [
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_DyZ2eQEHqxsVngJR3XExNWfn__fc_0c2350b5c0751b3f016abbecf1393887d1a39f44f5e53a53f9"
+        },
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": null,
+          "call_id": "call_DyZ2eQEHqxsVngJR3XExNWfn__fc_0c2350b5c0751b3f016abbecf1393887d1a39f44f5e53a53f9"
+        }
+      ]
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "cursor-probe/cursor/gpt-5.6-luna",
+      "input_types": [
+        "message",
+        "message",
+        "message",
+        "message",
+        "agent_message",
+        "message",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "reasoning",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "message",
+        "agent_message",
+        "message",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "custom_tool_call",
+        "custom_tool_call_output"
+      ],
+      "tool_outputs": [
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_J4eqVrs9MbCUUYghgodbSvIw__fc_08ab634d9e631e86016abbecdfaf5c87d181fad7aad68d45b6",
+          "fixture_value_present": true
+        },
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075",
+          "fixture_value_present": false
+        },
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_WRABjMNv3g9oKywwtVIYvMjQ__fc_0ac8bf6002e87330016abbeced881c87d1983f1e7d49e06efc",
+          "fixture_value_present": true
+        },
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_DyZ2eQEHqxsVngJR3XExNWfn__fc_0c2350b5c0751b3f016abbecf1393887d1a39f44f5e53a53f9",
+          "fixture_value_present": false
+        }
+      ],
+      "agent_messages": [
+        {
+          "author": "/root",
+          "recipient": "/root/reader",
+          "plaintext": true,
+          "encrypted": false
+        },
+        {
+          "author": "/root",
+          "recipient": "/root/reader",
+          "plaintext": true,
+          "encrypted": false
+        }
+      ],
+      "recovered_parts": 0,
+      "direct_collaboration_exposed": false,
+      "portable_tools": 4,
+      "status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.completed"
+      ]
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "gpt-6-astra",
+      "input_types": [
+        "additional_tools",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "function_call",
+        "function_call_output",
+        "function_call",
+        "function_call_output",
+        "agent_message",
+        "function_call",
+        "function_call_output",
+        "agent_message",
+        "function_call",
+        "function_call_output",
+        "agent_message"
+      ],
+      "tool_outputs": [
+        {
+          "type": "function_call_output",
+          "call_id": "call_L09JrOdSQa9Xc8Zfz2eR6NiX",
+          "fixture_value_present": false
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call_Zb4iOQMCDHrwz6xNdNidhOQm",
+          "fixture_value_present": false
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call_jGtRXRaDe0RNwRxytciTb522",
+          "fixture_value_present": false
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call_uOGWVkUoXfEienTCvWKUg3lM",
+          "fixture_value_present": false
+        }
+      ],
+      "agent_messages": [
+        {
+          "author": "/root/reader",
+          "recipient": "/root",
+          "plaintext": true,
+          "encrypted": true
+        },
+        {
+          "author": "/root/reader",
+          "recipient": "/root",
+          "plaintext": true,
+          "encrypted": false
+        },
+        {
+          "author": "/root/reader",
+          "recipient": "/root",
+          "plaintext": true,
+          "encrypted": true
+        }
+      ],
+      "recovered_parts": 2,
+      "direct_collaboration_exposed": true,
+      "portable_tools": 11,
+      "status": 200,
+      "content_type": "",
+      "event_types": [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.completed"
+      ]
+    }
+  ],
+  "portable_tools": true,
+  "recover_plaintext": true,
+  "task_recoveries": [
+    {
+      "source_call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075",
+      "author": "/root/reader",
+      "recipient": "/root",
+      "message_sha256": "677035f7306c563d4c0eed7ba096b0351bd95dd1ba9ad00bf70b615c069c144b",
+      "basis": "exact literal from observed parent call, same author and recipient"
+    },
+    {
+      "source_call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075",
+      "author": "/root/reader",
+      "recipient": "/root",
+      "message_sha256": "677035f7306c563d4c0eed7ba096b0351bd95dd1ba9ad00bf70b615c069c144b",
+      "basis": "exact literal from observed parent call, same author and recipient"
+    },
+    {
+      "source_call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075",
+      "author": "/root/reader",
+      "recipient": "/root",
+      "message_sha256": "677035f7306c563d4c0eed7ba096b0351bd95dd1ba9ad00bf70b615c069c144b",
+      "basis": "exact literal from observed parent call, same author and recipient"
+    },
+    {
+      "source_call_id": "call_DyZ2eQEHqxsVngJR3XExNWfn__fc_0c2350b5c0751b3f016abbecf1393887d1a39f44f5e53a53f9",
+      "author": "/root/reader",
+      "recipient": "/root",
+      "message_sha256": "10b1e3d13cbdf50f1322c60665ab73840128af9495335727291a3e2b23cfb375",
+      "basis": "exact literal from observed parent call, same author and recipient"
+    }
+  ],
+  "effort": "high",
+  "passed": true,
+  "gateway_stopped": true
+}

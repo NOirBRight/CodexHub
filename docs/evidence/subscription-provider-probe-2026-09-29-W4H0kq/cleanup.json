@@ -1,0 +1,30 @@
+{
+  "private_runtime_directories_removed": [
+    "codex-runtime",
+    "cursor-runtime",
+    "claude-runtime"
+  ],
+  "copied_credentials_and_raw_probe_logs_removed": true,
+  "checked_loopback_ports": [
+    3487,
+    34037,
+    34791,
+    35189,
+    35399,
+    36743,
+    37147,
+    37649,
+    38147,
+    38627,
+    40203,
+    40781,
+    41483,
+    42753,
+    45611,
+    45903
+  ],
+  "remaining_listeners_on_checked_ports": 0,
+  "source_worktree_retained": "/home/noirbright/Workstation/CodexHub-subscription-prototype-W4H0kq",
+  "production_configuration_changed_by_probe": false,
+  "account_switch_or_api_key_fallback_performed": false
+}

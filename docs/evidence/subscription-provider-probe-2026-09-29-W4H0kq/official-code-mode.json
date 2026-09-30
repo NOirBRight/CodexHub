@@ -1,0 +1,146 @@
+{
+  "scope": "live Codex and isolated production Gateway; reference subscription bridges where configured",
+  "scenario": "code-mode",
+  "parent_model": "gpt-6-astra",
+  "child_model": null,
+  "codex_version": "codex-cli 0.158.0",
+  "probe_value_sha256": "b6f486a3b820e93038c989e3b3777db9b55aba4894f7adf7b52f87e67341e7c8",
+  "turns": [
+    {
+      "exit": 0,
+      "timed_out": false,
+      "nonce_in_final": true,
+      "reversed_nonce_in_final": false,
+      "final_text": [
+        "I\u2019ll read `probe-value.txt` and return its exact value.\n",
+        "3ce814545c1fe68ba6b8b99f"
+      ],
+      "tool_events": [
+        {
+          "id": "item_0",
+          "type": "error",
+          "message": "Under-development features enabled: code_mode. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /tmp/codexhub-subscription-prototype-W4H0kq/codex-runtime/official-control/client/config.toml."
+        },
+        {
+          "id": "item_2",
+          "type": "command_execution",
+          "command": "/usr/bin/bash -c 'cat probe-value.txt'",
+          "aggregated_output": "3ce814545c1fe68ba6b8b99f\n",
+          "exit_code": 0,
+          "status": "completed"
+        }
+      ],
+      "errors": [],
+      "usage": [
+        {
+          "input_tokens": 20727,
+          "cached_input_tokens": 10112,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 71,
+          "reasoning_output_tokens": 0
+        }
+      ]
+    },
+    {
+      "exit": 0,
+      "timed_out": false,
+      "nonce_in_final": false,
+      "reversed_nonce_in_final": true,
+      "final_text": [
+        "f99b8b6ab86ef1c545418ec3"
+      ],
+      "tool_events": [
+        {
+          "id": "item_0",
+          "type": "error",
+          "message": "Under-development features enabled: code_mode. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /tmp/codexhub-subscription-prototype-W4H0kq/codex-runtime/official-control/client/config.toml."
+        }
+      ],
+      "errors": [],
+      "usage": [
+        {
+          "input_tokens": 31201,
+          "cached_input_tokens": 10112,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 169,
+          "reasoning_output_tokens": 77
+        }
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "gpt-6-astra",
+      "input_types": [
+        "additional_tools",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message"
+      ],
+      "tool_outputs": [],
+      "agent_messages": [],
+      "status": 200
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "gpt-6-astra",
+      "input_types": [
+        "additional_tools",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "custom_tool_call",
+        "custom_tool_call_output"
+      ],
+      "tool_outputs": [
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_M0BooeFTPwZsKHw94PhGDoJS",
+          "fixture_value_present": true
+        }
+      ],
+      "agent_messages": [],
+      "status": 200
+    },
+    {
+      "path": "/v1/responses",
+      "method": "POST",
+      "model": "gpt-6-astra",
+      "input_types": [
+        "additional_tools",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "message",
+        "message"
+      ],
+      "tool_outputs": [
+        {
+          "type": "custom_tool_call_output",
+          "call_id": "call_M0BooeFTPwZsKHw94PhGDoJS",
+          "fixture_value_present": true
+        }
+      ],
+      "agent_messages": [],
+      "status": 200
+    }
+  ],
+  "passed": true,
+  "gateway_stopped": true
+}
