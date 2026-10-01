@@ -35,6 +35,15 @@ _VERSION = re.compile(r"\d{4}\.\d{2}\.\d{2}-[0-9a-f]+\Z")
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+\[\]-]{0,255}\Z")
 _CALL_PREFIX = "call_cursor_"
 _CONFIG_URL = "https://api2.cursor.sh/aiserver.v1.ServerConfigService/GetServerConfig"
+_TRANSPORT_FAILURES = {
+    "connection": ("upstream-connection-error", "Cursor transport failed."),
+    "dns": ("upstream-dns-error", "Cursor endpoint lookup failed."),
+    "connect": ("upstream-connect-error", "Cursor endpoint connection failed."),
+    "tls": ("upstream-tls-error", "Cursor TLS negotiation failed."),
+    "read": ("upstream-read-error", "Cursor transport read failed."),
+    "write": ("upstream-write-error", "Cursor transport write failed."),
+    "http2": ("upstream-http2-error", "Cursor HTTP/2 processing failed."),
+}
 
 
 @dataclass(frozen=True)
@@ -195,6 +204,7 @@ class HTTP2Duplex:
 
     def _pump(self) -> None:
         raw: socket.socket | None = None
+        stage = "connection"
         try:
             try:
                 load_http2_dependencies()
@@ -205,7 +215,9 @@ class HTTP2Duplex:
                 raise BackendError("backend-unavailable", "Cursor HTTP/2 transport is not installed.", 503) from None
             target = urlsplit(self.url)
             self._check()
+            stage = "connect"
             raw = socket.create_connection((target.hostname, target.port or 443), timeout=min(1, max(.1, self.deadline - time.monotonic())))
+            stage = "tls"
             context = self.tls_context_factory()
             context.set_alpn_protocols(["h2"])
             self._socket = context.wrap_socket(raw, server_hostname=target.hostname, do_handshake_on_connect=False)
@@ -220,6 +232,7 @@ class HTTP2Duplex:
             if self._socket.selected_alpn_protocol() != "h2":
                 raise BackendError("upstream-protocol-error", "Cursor endpoint did not negotiate HTTP/2.")
             self._socket.settimeout(.1)
+            stage = "http2"
             connection = H2Connection(config=H2Configuration(client_side=True, header_encoding="utf-8"))
             connection.initiate_connection()
             path = target.path + ("?" + target.query if target.query else "")
@@ -229,6 +242,7 @@ class HTTP2Duplex:
             connect_stream = any(key.lower() == "content-type" and value == "application/connect+proto" for key, value in self.headers.items())
             while True:
                 self._check()
+                stage = "http2"
                 while len(pending) < 32:
                     try:
                         pending.append(self._out.get_nowait())
@@ -253,13 +267,16 @@ class HTTP2Duplex:
                         pending[0] = item[size:]
                 outgoing = connection.data_to_send()
                 if outgoing:
+                    stage = "write"
                     self._socket.sendall(outgoing)
+                stage = "read"
                 try:
                     data = self._socket.recv(65536)
                 except socket.timeout:
                     continue
                 if not data:
                     raise BackendError("upstream-interrupted", "Cursor reply ended before the transport completed.")
+                stage = "http2"
                 for event in connection.receive_data(data):
                     if isinstance(event, ResponseReceived):
                         self.response_headers = dict(event.headers)
@@ -275,9 +292,18 @@ class HTTP2Duplex:
                         raise BackendError("upstream-interrupted", "Cursor closed the active stream.")
         except BackendError as error:
             self._deliver(error)
-        except Exception:
-            # TLS/socket/h2 diagnostics can contain identities or request data.
-            self._deliver(BackendError("upstream-connection-error", "Could not connect to Cursor AgentService."))
+        except Exception as error:
+            # Report only the operation boundary, never exception text, errno,
+            # peer, headers, or request data. A stage does not assert a root cause.
+            try:
+                self._check()
+            except BackendError as interrupted:
+                self._deliver(interrupted)
+            else:
+                if isinstance(error, socket.gaierror):
+                    stage = "dns"
+                code, message = _TRANSPORT_FAILURES[stage]
+                self._deliver(BackendError(code, message))
         finally:
             if self._socket is not None:
                 self._socket.close()
