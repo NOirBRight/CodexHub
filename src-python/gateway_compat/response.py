@@ -130,8 +130,11 @@ def _rewrite_v2_unsupported_tool_history(
         if call_record is not None and call_record.family == "custom_freeform":
             return True
         return any(
-            entry.family == "custom_freeform"
-            and entry.original_name == name
+            (entry.family == "custom_freeform" and entry.original_name == name and entry.namespace == item.get("namespace"))
+            or (entry.family == "namespace" and entry.namespace == item.get("namespace") and any(
+                child.get("type") == "custom" and child.get("name") == name
+                for child in entry.declaration.get("tools", ()) if isinstance(child, Mapping)
+            ))
             for entry in compatibility_plan.entries
         )
 

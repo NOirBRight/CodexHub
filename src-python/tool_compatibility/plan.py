@@ -82,6 +82,7 @@ from .dispositions import (
     build_tool_compatibility_plan,
     classify_declaration,
 )
+from .custom_codec import custom_child_entry as _custom_child_entry, custom_function_declaration as _custom_function_declaration
 from .registry import (
     AliasRecord,
     CompatibilityDiagnostics,
@@ -188,9 +189,9 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                         )]
             elif family == NAMESPACE:
                 namespace, children, version, _valid = _namespace_details(declaration)
-                if self.capabilities.namespace_lifecycle:
+                if self.capabilities.namespace_lifecycle and (self.capabilities.custom_lifecycle or all(child.get("type") != "custom" for child in children)):
                     disposition, reason = NATIVE, "native_namespace_lifecycle"
-                elif self.capabilities.function_lifecycle and self.capabilities.accepts_namespace_adapter:
+                elif self.capabilities.function_lifecycle and self.capabilities.accepts_namespace_adapter and (self.capabilities.accepts_custom_adapter or all(child.get("type") != "custom" for child in children)):
                     disposition, reason = ADAPT, "namespace_function_adapter"
                     aliases = [
                         self.registry.allocate_namespace(
@@ -199,6 +200,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                             child_index=child_index,
                             child_name=str(child.get("name")),
                             version=version,
+                            family=CUSTOM_FREEFORM if child.get("type") == "custom" else NAMESPACE,
                         )
                         for child_index, child in enumerate(children)
                     ]
@@ -346,6 +348,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                     if entry.family == NAMESPACE
                     and any(name == f"{entry.namespace}__{child}" for child in entry.child_names)
                 ]
+        matches = [_custom_child_entry(entry, name) for entry in matches]
         if expected_family is not None:
             filtered = [entry for entry in matches if entry.family == expected_family]
             if (
@@ -386,6 +389,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             elif entry.original_name == name:
                 if namespace is None:
                     matches.append(entry)
+        matches = [_custom_child_entry(entry, name) for entry in matches]
         if expected_family is not None:
             filtered = [entry for entry in matches if entry.family == expected_family]
             if (
@@ -506,29 +510,14 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                     if entry.version in {"v1", "v2"}:
                         encode_timeout_contract(child)
                     encoded.append(
+                        _custom_function_declaration(child, entry.aliases[child_index])
+                        if child.get("type") == "custom" else
                         _provider_function_declaration(child, entry.aliases[child_index])
                     )
                 changed = True
                 continue
             if entry.family == CUSTOM_FREEFORM:
-                alias = entry.aliases[0]
-                encoded.append(
-                    {
-                        "type": "function",
-                        "name": alias,
-                        "parameters": {
-                            "type": "object",
-                            # The Responses custom/freeform contract is a
-                            # text format.  Keep the adapter envelope
-                            # explicit so Chat models do not infer an object
-                            # value for the freeform input and trip the
-                            # stream decoder's string boundary.
-                            "properties": {CUSTOM_INPUT_KEY: {"type": "string"}},
-                            "required": [CUSTOM_INPUT_KEY],
-                            "additionalProperties": False,
-                        },
-                    }
-                )
+                encoded.append(_custom_function_declaration(raw_tool, entry.aliases[0]))
                 changed = True
                 continue
             if entry.family == TOOL_SEARCH:
@@ -672,6 +661,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                     raise ToolCompatibilityError("tool_compatibility_boundary", "malformed_envelope")
                 item["type"] = "function_call"
                 item["arguments"] = _dump_envelope(CUSTOM_INPUT_KEY, item.pop("input"))
+            item.pop("namespace", None)
             return item, True
         if item_type == "custom_tool_call" and entry is not None and entry.disposition == ADAPT:
             alias = self._alias_for(entry)
@@ -683,6 +673,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             item["type"] = "function_call"
             item["name"] = alias
             item["arguments"] = _dump_envelope(CUSTOM_INPUT_KEY, item.pop("input"))
+            item.pop("namespace", None)
             return item, True
         if item_type == "tool_search_call" and entry is not None and entry.disposition == ADAPT:
             alias = self._alias_for(entry)
@@ -848,8 +839,9 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
         if (
             item.get("type") == "custom_tool_call"
             and item.get("namespace") is not None
+            and self._entry_for_name(item.get("name"), item.get("namespace"), item_type="custom_tool_call") is None
             and any(
-                entry.family == CUSTOM_FREEFORM and entry.disposition == ADAPT
+                entry.family in {CUSTOM_FREEFORM, NAMESPACE} and entry.disposition == ADAPT
                 for entry in self.entries
             )
         ):
@@ -1450,6 +1442,8 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                 surface="response", preserve_failed=preserve_failed_arguments,
             )
         elif record.family == CUSTOM_FREEFORM:
+            if record.namespace is not None:
+                result["namespace"] = record.namespace
             if "arguments" in result:
                 envelope = _json_object_exact(result["arguments"])
                 result["type"] = "custom_tool_call"
@@ -1689,7 +1683,7 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
             ):
                 raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface=surface)
         elif entry.family == CUSTOM_FREEFORM:
-            if item_type != "custom_tool_call" or item.get("name") != entry.original_name:
+            if item_type != "custom_tool_call" or item.get("name") != entry.original_name or item.get("namespace") != entry.namespace:
                 raise ToolCompatibilityError("tool_compatibility_boundary", "unknown_native_identity", surface=surface)
         elif entry.family == TOOL_SEARCH:
             if item_type not in {"tool_search_call", "tool_search_output"}:
@@ -1766,12 +1760,18 @@ class ToolCompatibilityPlan(CollaborationV1PlanMixin, CollaborationV2PlanMixin):
                         )
                     response_output_call_ids.add(call_id)
                 owner = response_call_owners.get(call_id) if isinstance(call_id, str) else None
+                call_index = response_call_positions.get(call_id) if isinstance(call_id, str) else None
+                wire_call = items[call_index] if call_index is not None else None
+                # Encoded completed history has the adapter function lifecycle,
+                # proven by the actual call alias, even for a custom owner.
+                wire_history = (
+                    surface == "history" and isinstance(wire_call, Mapping)
+                    and raw_item.get("namespace") is None
+                    and self.registry.record_for_alias(wire_call.get("name")) is not None
+                )
                 self._validate_response_owner_item(
-                    raw_item,
-                    owner=owner,
-                    call_index=response_call_positions.get(call_id) if isinstance(call_id, str) else None,
-                    item_index=item_index,
-                    surface=surface,
+                    raw_item, owner=owner, call_index=call_index, item_index=item_index,
+                    surface="response" if wire_history else surface,
                 )
         for raw_item in items:
             if not isinstance(raw_item, Mapping):

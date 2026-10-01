@@ -7,6 +7,11 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from gateway_errors import UpstreamProtocolTranslationError
+from protocol_translation import UnsupportedProtocolTranslationError
+
+from code_mode_collaboration import expose_declared_collaboration, has_code_mode_exec, is_supported_subset
+
 from collaboration_runtime_contract import (
     COLLABORATION_V2,
     CollaborationContractError,
@@ -22,15 +27,17 @@ NAMES = {
 MESSAGE_TOOLS = {"spawn_agent", "send_message", "followup_task"}
 
 
-def _portable_tools(tools: Any) -> Any:
+def _portable_tools(tools: Any, *, code_mode: bool = False) -> Any:
     if not isinstance(tools, list):
         return tools
     try:
         if classify_collaboration_tools(tools) != COLLABORATION_V2:
             return tools
     except CollaborationContractError:
-        # Unknown/native contracts stay native; never partially rewrite them.
-        return tools
+        # Current Code Mode child subsets retain exactly the declared handlers.
+        namespaces = [tool for tool in tools if isinstance(tool, dict) and tool.get("name") == "collaboration"]
+        if not code_mode or len(namespaces) != 1 or not is_supported_subset(namespaces[0]):
+            return tools
     result = copy.deepcopy(tools)
     for namespace in result:
         if not isinstance(namespace, dict) or namespace.get("name") != "collaboration":
@@ -50,6 +57,16 @@ def make_messages_portable(payload: dict[str, Any]) -> bool:
     chosen after the parent request; all V2 message tools must be portable.
     Both top-level tools and input additional_tools retain their placement.
     """
+    # An existing alias is unowned; do not expand or partially modify a collision.
+    original_groups = [payload.get("tools")]
+    original_items = payload.get("input")
+    if isinstance(original_items, list):
+        original_groups.extend(item.get("tools") for item in original_items if isinstance(item, dict) and item.get("type") == "additional_tools")
+    if any(isinstance(tool, Mapping) and tool.get("name") == ALIAS for group in original_groups if isinstance(group, list) for tool in group):
+        return False
+    # Expand actual typed exec handler declarations before aliasing.
+    code_mode = any(has_code_mode_exec(group) for group in original_groups)
+    code_mode = expose_declared_collaboration(payload) or code_mode
     items = payload.get("input")
     groups = [payload.get("tools")]
     if isinstance(items, list):
@@ -64,7 +81,7 @@ def make_messages_portable(payload: dict[str, Any]) -> bool:
         return False
     changed = False
     tools = payload.get("tools")
-    portable = _portable_tools(tools)
+    portable = _portable_tools(tools, code_mode=code_mode)
     if portable != tools:
         payload["tools"] = portable
         changed = True
@@ -74,7 +91,7 @@ def make_messages_portable(payload: dict[str, Any]) -> bool:
             if not isinstance(item, dict) or item.get("type") != "additional_tools":
                 continue
             tools = item.get("tools")
-            portable = _portable_tools(tools)
+            portable = _portable_tools(tools, code_mode=code_mode)
             if portable != tools:
                 result[index] = {**item, "tools": portable}
                 changed = True
@@ -92,6 +109,20 @@ def make_messages_portable(payload: dict[str, Any]) -> bool:
     return changed
 
 
+def portable_handler_names(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return exactly the methods exposed by this request's portable declaration."""
+    groups = [payload.get("tools")]
+    items = payload.get("input")
+    if isinstance(items, list):
+        groups.extend(item.get("tools") for item in items if isinstance(item, Mapping) and item.get("type") == "additional_tools")
+    return tuple(
+        child["name"]
+        for group in groups if isinstance(group, list)
+        for tool in group if isinstance(tool, Mapping) and tool.get("name") == ALIAS
+        for child in tool.get("tools", []) if isinstance(child, Mapping) and child.get("name") in NAMES
+    )
+
+
 def decode_body(body: bytes, context: Any) -> bytes:
     if not isinstance(context, Mapping) or not context.get(CONTEXT_KEY):
         return body
@@ -99,17 +130,22 @@ def decode_body(body: bytes, context: Any) -> bytes:
         payload = json.loads(body)
     except (ValueError, UnicodeError):
         return body
+    enabled = context[CONTEXT_KEY]
+    allowed = NAMES if enabled is True else set(enabled) if isinstance(enabled, (tuple, list, set, frozenset)) else set()
     changed = False
 
     def visit(value: Any) -> None:
         nonlocal changed
         if isinstance(value, dict):
-            if (
-                value.get("type") == "function_call"
-                and value.get("namespace") == ALIAS
-                and value.get("name") in NAMES
-                and not value.get("encrypted_function_args")
-            ):
+            if value.get("type") == "function_call" and value.get("namespace") == ALIAS:
+                if value.get("name") not in allowed:
+                    raise UpstreamProtocolTranslationError(UnsupportedProtocolTranslationError(
+                        "collaboration_tool_not_declared", "Upstream returned a collaboration method this caller did not declare.",
+                    ))
+                if value.get("encrypted_function_args"):
+                    raise UpstreamProtocolTranslationError(UnsupportedProtocolTranslationError(
+                        "encrypted_collaboration_arguments_unavailable", "Upstream returned opaque collaboration arguments for a plaintext tool.",
+                    ))
                 value["namespace"] = "collaboration"
                 value["encrypted_function_args"] = []
                 changed = True

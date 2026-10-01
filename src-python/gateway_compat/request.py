@@ -72,6 +72,8 @@ from route_primitives import (
     BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH,
 )
 
+from code_mode_collaboration import expose_declared_collaboration, has_code_mode_exec
+
 from . import official_passthrough as _official_passthrough
 from . import response as _response
 from . import host
@@ -292,13 +294,35 @@ def compatible_request_body(
     if official_passthrough:
         return _official_passthrough.official_passthrough_request_body(body, payload, upstream, model_id=model_id, event_context=event_context)
 
+    # Code Mode declarations can live in additional_tools. Promote only the
+    # actual exec catalogue before boundary classification and immutable planning.
+    # External tool codecs already strip Official encryption and inverse-map the
+    # native collaboration namespace; Official uses its ordinary-namespace alias.
+    raw_probe = _official_passthrough._is_raw_provider_probe_context(event_context)
+    if not raw_probe:
+        items = payload.get("input")
+        groups = [payload.get("tools")]
+        if isinstance(items, list):
+            groups.extend(item.get("tools") for item in items if isinstance(item, dict) and item.get("type") == "additional_tools")
+        if any(has_code_mode_exec(group) for group in groups):
+            changed |= expose_declared_collaboration(payload)
+            changed |= _official_passthrough._hoist_additional_tools_input_items(payload)
     collaboration_protocol = _collaboration_adapter_module.resolve_boundary(
         payload,
         event_context,
         surface="request",
     )
+    if upstream_name != "official" and not raw_probe and collaboration_protocol == _COLLABORATION_V2:
+        # An opaque assignment is essential task content. It cannot be silently
+        # sanitized into an empty child request or reconstructed from ciphertext.
+        for item in payload.get("input", []) if isinstance(payload.get("input"), list) else ():
+            if isinstance(item, Mapping) and item.get("type") == "agent_message" and isinstance(item.get("content"), list) and any(isinstance(part, Mapping) and part.get("type") == "encrypted_content" for part in item["content"]):
+                raise UpstreamProtocolTranslationError(UnsupportedProtocolTranslationError(
+                    "encrypted_agent_message_unavailable",
+                    "Opaque agent assignment cannot be delivered to this Provider. The caller must restate or reissue the original plaintext requirements using the existing child state and results; do not replay completed tool effects.",
+                ))
 
-    changed = host._normalize_responses_message_input_items(payload)
+    changed = host._normalize_responses_message_input_items(payload) or changed
     if upstream_name != "official" and _drop_third_party_web_search_external_web_access(payload):
         changed = True
     if upstream_name == "official":
@@ -461,7 +485,7 @@ def compatible_request_body(
                 if _official_passthrough._is_raw_namespace_schema(tool)
                 and not (
                     isinstance(tool, Mapping)
-                    and tool.get("name") in {"multi_agent_v1", _COLLABORATION_V2_NAMESPACE} | discovered_namespaces
+                    and (tool.get("name") in {"multi_agent_v1", _COLLABORATION_V2_NAMESPACE} | discovered_namespaces or has_code_mode_exec([tool]))
                 )
             ]
             retained_tools = [
@@ -471,7 +495,7 @@ def compatible_request_body(
                     _official_passthrough._is_raw_namespace_schema(tool)
                     and not (
                         isinstance(tool, Mapping)
-                        and tool.get("name") in {"multi_agent_v1", _COLLABORATION_V2_NAMESPACE} | discovered_namespaces
+                        and (tool.get("name") in {"multi_agent_v1", _COLLABORATION_V2_NAMESPACE} | discovered_namespaces or has_code_mode_exec([tool]))
                     )
                 )
             ]
