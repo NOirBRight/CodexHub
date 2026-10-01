@@ -198,3 +198,50 @@ performed. Prior protocol failures and the earlier real-result success remain
 separate historical observations. Advanced Code Mode/V2 and same-SHA Windows
 qualification remain open; the existing Windows gate is blocked by `yoga`
 SSH reporting `No route to host`.
+
+## Responses complete-history success delta — e9449930
+
+A new [tool-continuation-only run](cursor-responses-e9449930.json) froze
+reviewed candidate `e9449930e3cc6e5c8812a2862471b1ca88c36a5d`, including the
+sanitized transport-stage diagnostic codes. The bounded hypothesis was that
+any new transport failure could be distinguished at the DNS, connect, TLS,
+read, write or HTTP/2 boundary. This run succeeded, so it did not identify the
+cause of the prior generic HTTP 502. That historical failure remains unchanged
+and is not reclassified as transient or assigned a new diagnostic code.
+
+The candidate's tracked runtime sources were clean. The frozen runtime snapshot
+SHA-256 was
+`4c715365c9f190e72d884f6e2aa3402cf7d0010e8a3b4a5c41f6296970cd13b8`;
+Cursor's installed official package version was `2026.09.28-64d2043` before
+and after the run. Evidence was retained by `2026-10-01T01:57:41Z`. The exact
+upstream model was `gpt-5.6-luna-high`; no Provider prefix or alternative model
+was substituted.
+
+All three scoped operations passed:
+
+- A genuine caller-tool request returned one original Call in 8.40 seconds.
+  Its Call-ID SHA-256 was
+  `fc639bc01d6eb3908ff1ab45bbdd0026967c8828a239ff73000e49a609eed617`.
+- The caller returned the actual random fixture result with full native output
+  history. The result exchange passed in 4.48 seconds, emitted no further tool
+  call, and reported native usage.
+- After an actual Gateway process restart, a fresh HTTP caller submitted the
+  complete native history without current tool declarations. Continuation
+  passed in 4.35 seconds, emitted no further tool call, and reported native usage.
+
+Both result exchanges returned the same exact 32-byte fixture value, SHA-256
+`0540991c0c703f8fabe6ac577bed8ba7d2d7dc6e5f0b3bb51f33288b7856b95c`.
+No history Item, Call identity or completion field was removed to obtain this
+result. The caller alone performed the fixture read. Limits were 60 seconds
+per exchange and 240 seconds for the run; actual elapsed time was 18.16 seconds.
+All private runtime copies, configuration, credentials and logs were removed.
+No vendor retry, fallback, login or refresh was performed, and normal account
+or client configuration was not written.
+
+The report's `ordinary_qualified=true` applies to these three Responses
+tool-continuation cases. Text, streaming, Chat, cancellation, Messages and Claude
+were not repeated. It does not change the historical Messages parameter
+failures, Claude inference denial or unresolved advanced Code Mode/V2 gates.
+Same-SHA Windows qualification still has no live evidence because `yoga` SSH
+reported `No route to host`; no product or dual-platform release acceptance is
+claimed by this scoped probe.

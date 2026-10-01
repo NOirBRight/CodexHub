@@ -1,0 +1,82 @@
+{
+  "provider": "cursor-subscription",
+  "model": "gpt-5.6-luna-high",
+  "risk": "strict",
+  "kind": "ordinary-real-gateway",
+  "bound_seconds_per_exchange": 60.0,
+  "bound_seconds_total": 240.0,
+  "success_cues": [
+    "exact randomized text with complete protocol terminal event",
+    "actual caller tool with original Call identity",
+    "real tool result recovered from completed history after Gateway restart",
+    "upstream sockets close after caller disconnect"
+  ],
+  "failure_cues": [
+    "bounded HTTP/SSE error",
+    "wrong exact output",
+    "orphan or malformed caller tool",
+    "incomplete stream",
+    "unobserved cleanup"
+  ],
+  "protocols": [
+    "responses"
+  ],
+  "cases": [
+    {
+      "case": "responses.caller-tool",
+      "state": "passed",
+      "elapsed_seconds": 8.4,
+      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "text_bytes": 0,
+      "tool_calls": 1,
+      "call_id_sha256": [
+        "fc639bc01d6eb3908ff1ab45bbdd0026967c8828a239ff73000e49a609eed617"
+      ],
+      "usage_present": false,
+      "stream_events": 0,
+      "finish": "completed"
+    },
+    {
+      "case": "responses.tool-result",
+      "state": "passed",
+      "elapsed_seconds": 4.48,
+      "text_sha256": "0540991c0c703f8fabe6ac577bed8ba7d2d7dc6e5f0b3bb51f33288b7856b95c",
+      "text_bytes": 32,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": true,
+      "stream_events": 0,
+      "finish": "completed"
+    },
+    {
+      "case": "responses.restart-history-fresh-caller",
+      "state": "passed",
+      "elapsed_seconds": 4.35,
+      "text_sha256": "0540991c0c703f8fabe6ac577bed8ba7d2d7dc6e5f0b3bb51f33288b7856b95c",
+      "text_bytes": 32,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": true,
+      "stream_events": 0,
+      "finish": "completed"
+    }
+  ],
+  "advanced_codemode_v2_qualified": false,
+  "dual_platform_qualified": false,
+  "windows_gate": {
+    "state": "blocked",
+    "reason": "yoga SSH No route to host; actual Windows verification pending"
+  },
+  "ordinary_scope": "tool-continuation-only",
+  "cli_version_observed_before_run": "2026.09.28-64d2043",
+  "candidate_sha": "e9449930e3cc6e5c8812a2862471b1ca88c36a5d",
+  "candidate_runtime_tracked_dirty": false,
+  "runtime_source_sha256": "4c715365c9f190e72d884f6e2aa3402cf7d0010e8a3b4a5c41f6296970cd13b8",
+  "gateway_restart_observed": true,
+  "private_artifacts_removed": true,
+  "cli_version_observed_after_run": "2026.09.28-64d2043",
+  "ordinary_qualified": true,
+  "caller_cancel_qualified": false,
+  "generation_qualified": false,
+  "elapsed_seconds": 18.16
+}
