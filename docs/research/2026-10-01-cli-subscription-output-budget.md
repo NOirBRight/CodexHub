@@ -23,13 +23,11 @@ mapping that CodexHub can safely implement from these findings.
 ## Bound and method
 
 The research began at `2026-10-01T02:07:30Z`, with approximately three minutes
-allocated to read-only discovery. Model generation requests: **zero**. No CLI
-process, login, refresh, account/configuration mutation or replay was run.
+allocated to read-only discovery. Model generation requests: **zero**. No official
+Provider CLI process, login, refresh, account/configuration mutation or replay was run.
 Official documentation was read over the web; installed first-party binaries
 were inspected offline with literal searches and bounded embedded-code excerpts.
-No credential files, account logs or service configuration were read. The
-research skill requested a background researcher; the attempted spawn was
-rejected by the agent thread limit, so the assigned worker performed the reads.
+No credential files, account logs or service configuration were read.
 
 ## Claude Code 2.1.286
 
