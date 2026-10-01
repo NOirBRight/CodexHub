@@ -13,6 +13,7 @@ import argparse
 import gzip
 import hashlib
 import http.client
+import itertools
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -34,6 +35,92 @@ CASES = ("code-mode", "official-to-cursor", "cursor-to-official", "completed-his
 CURSOR_MODEL = "cursor-subscription/gpt-5.6-luna-high"
 OFFICIAL_MODEL = "gpt-6-astra"
 MAX_CAPTURE = 64 * 1024 * 1024
+MAX_ROLLOUT_FILES = 64
+
+
+class CaptureLimitExceeded(ValueError):
+    """A private capture exceeded its fixed resource budget."""
+
+
+def bounded_rollout_paths(paths):
+    files = list(itertools.islice(paths, MAX_ROLLOUT_FILES + 1))
+    if len(files) > MAX_ROLLOUT_FILES or sum(path.stat().st_size for path in files) > MAX_CAPTURE:
+        raise CaptureLimitExceeded("rollout-capture-size-exceeded")
+    return sorted(files)
+
+
+def capture_caller(command, *, env, cwd, capture, rollout_home, timeout):
+    """Bound stdout while the caller runs; watch private rollout disk growth."""
+    overflow = threading.Event()
+    failure = threading.Event()
+    child = subprocess.Popen(command, env=env, cwd=cwd, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, start_new_session=os.name != "nt")
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    def copy_stdout():
+        remaining = MAX_CAPTURE
+        try:
+            with capture.open("wb") as output:
+                while True:
+                    data = child.stdout.read1(min(65536, remaining + 1))
+                    if not data:
+                        return
+                    if len(data) > remaining:
+                        overflow.set()
+                        return
+                    output.write(data)
+                    remaining -= len(data)
+        except OSError:
+            failure.set()
+
+    reader = threading.Thread(target=copy_stdout, daemon=True, name="bounded-codex-capture")
+    try:
+        reader.start()
+        if sys.platform == "linux":
+            import resource
+            try:
+                # The CLI owns rollout files: cap its process-tree writes as
+                # well as the aggregate watchdog/read budget below.
+                _, hard = resource.prlimit(child.pid, resource.RLIMIT_FSIZE)
+                limit = MAX_CAPTURE if hard == resource.RLIM_INFINITY else min(MAX_CAPTURE, hard)
+                resource.prlimit(child.pid, resource.RLIMIT_FSIZE, (limit, limit))
+            except ProcessLookupError:
+                pass
+        while child.poll() is None:
+            bounded_rollout_paths(rollout_home.rglob("*.jsonl"))
+            if overflow.is_set():
+                raise CaptureLimitExceeded("caller-capture-size-exceeded")
+            if failure.is_set():
+                raise ValueError("caller-capture-write-failed")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                stop_process(child)
+                break
+            try:
+                child.wait(timeout=min(.05, remaining))
+            except subprocess.TimeoutExpired:
+                pass
+        # Reap descendants too: an inherited stdout writer cannot keep a
+        # bounded reader waiting after its parent has exited.
+        stop_process(child)
+        reader.join(timeout=2)
+        if reader.is_alive() or failure.is_set():
+            raise ValueError("caller-capture-write-failed")
+        if overflow.is_set():
+            raise CaptureLimitExceeded("caller-capture-size-exceeded")
+        bounded_rollout_paths(rollout_home.rglob("*.jsonl"))
+        with capture.open("rb") as output:
+            data = output.read(MAX_CAPTURE + 1)
+        if len(data) > MAX_CAPTURE:
+            raise CaptureLimitExceeded("caller-capture-size-exceeded")
+        return data, child, timed_out
+    finally:
+        stop_process(child)
+        if reader.ident is not None:
+            reader.join(timeout=2)
+        if not reader.is_alive():
+            child.stdout.close()
 
 
 def digest(value):
@@ -123,8 +210,14 @@ def is_fixture_execution(call):
 def summarize_rollouts(paths, nonce):
     """Prove actual caller effects/child identity from private Codex rollouts."""
     sessions = []
-    for path in sorted(paths):
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    remaining = MAX_CAPTURE
+    for path in bounded_rollout_paths(iter(paths)):
+        with path.open("rb") as capture:
+            data = capture.read(remaining + 1)
+        if len(data) > remaining:
+            raise CaptureLimitExceeded("rollout-capture-size-exceeded")
+        remaining -= len(data)
+        rows = [json.loads(line) for line in data.decode("utf-8").splitlines() if line.strip()]
         items = [row.get("payload", {}) for row in rows if row.get("type") == "response_item"]
         meta = next((row.get("payload", {}) for row in rows if row.get("type") == "session_meta"), {})
         models = sorted({row.get("payload", {}).get("model") for row in rows if isinstance(row.get("payload", {}).get("model"), str)})
@@ -162,7 +255,7 @@ def summarize_rollouts(paths, nonce):
                               for part in item.get("content", []) if isinstance(part, dict))
         sessions.append({"session_sha256": digest(meta.get("id", path.name)), "is_child": is_child, "models": models,
                          "calls": calls, "effects": effects, "assistant_returned_fixture": nonce in assistant,
-                         "assistant_returned_reversed_fixture": nonce[::-1] in assistant, "rollout_sha256": digest(path.read_bytes())})
+                         "assistant_returned_reversed_fixture": nonce[::-1] in assistant, "rollout_sha256": digest(data)})
     return sessions
 
 
@@ -188,7 +281,9 @@ def assess_case(case, turns, requests, sessions, nonce, gateway_pids):
                       spawn=any(call["spawn"] for call in parent_calls), same_child_followup=bool(followups) and len(spawned) == 1 and followups == spawned and len(children) == 1,
                       wait=any(call["wait"] for call in parent_calls), child_read_twice=child_reads >= 2,
                       child_both_results=len(children) == 1 and children[0]["assistant_returned_fixture"] and children[0]["assistant_returned_reversed_fixture"],
-                      direction_models={OFFICIAL_MODEL, CURSOR_MODEL}.issubset({row.get("model") for row in requests}))
+                      direction_models={OFFICIAL_MODEL, CURSOR_MODEL}.issubset(actual_models),
+                      parent_role_model=bool(parent) and all(set(session.get("models", [])) == {OFFICIAL_MODEL if case == "official-to-cursor" else CURSOR_MODEL} for session in parent),
+                      child_role_model=len(children) == 1 and set(children[0].get("models", [])) == {CURSOR_MODEL if case == "official-to-cursor" else OFFICIAL_MODEL})
         first_exact = bool(turns) and turns[0]["finals"] == [nonce + "\n" + nonce[::-1]]
         result["first_exact"] = first_exact
     if case == "completed-history-restart" or case in ("official-to-cursor", "cursor-to-official"):
@@ -465,19 +560,8 @@ unbounded_connection_retries=false
                 if remaining <= 0:
                     raise ValueError("case-budget-exhausted")
                 capture = runtime / f"caller-{turn}.jsonl"
-                with capture.open("wb") as output:
-                    caller = subprocess.Popen(command, env=client_env, cwd=fixture, stdout=output, stderr=subprocess.DEVNULL,
-                                              start_new_session=os.name != "nt")
-                    timed_out = False
-                    try:
-                        caller.wait(timeout=max(.1, remaining))
-                    except subprocess.TimeoutExpired:
-                        timed_out = True
-                        stop_process(caller)
-                with capture.open("rb") as captured:
-                    data = captured.read(MAX_CAPTURE + 1)
-                if len(data) > MAX_CAPTURE:
-                    raise ValueError("caller-capture-size-exceeded")
+                data, caller, timed_out = capture_caller(command, env=client_env, cwd=fixture,
+                                                        capture=capture, rollout_home=client / "sessions", timeout=max(.1, remaining))
                 turns.append(parse_turn(data.decode("utf-8"), caller, timed_out, nonce))
                 if caller.returncode:
                     break

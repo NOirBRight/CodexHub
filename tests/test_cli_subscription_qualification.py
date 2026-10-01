@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import re
+import subprocess
 
 import pytest
 
@@ -138,7 +139,30 @@ def minimal_repo(tmp_path):
     for name in ("src-python", "config", "model-catalogs"):
         (root / name).mkdir(parents=True)
         (root / name / "candidate.txt").write_text("read-only source")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=Qualification Fixture", "-c", "user.email=fixture@example.invalid",
+                    "commit", "-qm", "frozen candidate"], check=True)
     return root
+
+
+@pytest.mark.parametrize("change", ["staged", "unstaged", "untracked"])
+def test_dirty_runtime_fails_before_gateway_start_or_qualification(tmp_path, monkeypatch, change):
+    root = minimal_repo(tmp_path)
+    path = root / "src-python" / ("untracked.py" if change == "untracked" else "candidate.txt")
+    path.write_text("uncommitted runtime change")
+    if change == "staged":
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    class UnreachableGateway(FakeGateway):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("dirty candidate must not launch a Gateway")
+    monkeypatch.setattr(qualify, "PrivateGateway", UnreachableGateway)
+    result = qualify.run_qualification(root, "cursor-subscription", "exact-model")
+    assert result["candidate_runtime_tracked_dirty"]
+    assert not result["candidate_sha_is_exact_runtime"]
+    assert not result["ordinary_qualified"] and not result["caller_cancel_qualified"]
+    assert result["private_artifacts_removed"]
+    assert result["cases"] == [{"case": "gateway.setup", "state": "failed", "code": "candidate-runtime-not-clean"}]
 
 
 def test_entire_public_harness_keeps_real_results_and_restart_without_qualification_overclaim(tmp_path, monkeypatch):

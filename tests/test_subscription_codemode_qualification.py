@@ -1,6 +1,9 @@
 """Public evidence oracle tests: synthetic data cannot count as live success."""
 import importlib.util
 import json
+import os
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,8 +28,8 @@ def test_observer_does_not_mutate_history_or_expose_description():
     assert observed["declarations"][0]["namespace"] == "functions"
 
 
-def session(child=False, reads=1, spawn=False, followup=False, wait=False):
-    return {"is_child": child, "calls": [{"type": "custom_tool_call", "name": "exec", "reads_fixture": bool(reads), "call_sha256": "call", "spawn": spawn, "followup": followup, "wait": wait}] * reads,
+def session(child=False, reads=1, spawn=False, followup=False, wait=False, model=None):
+    return {"is_child": child, "models": [model or qualification.CURSOR_MODEL], "calls": [{"type": "custom_tool_call", "name": "exec", "reads_fixture": bool(reads), "call_sha256": "call", "spawn": spawn, "followup": followup, "wait": wait}] * reads,
             "effects": [{"call_sha256": "call", "fixture_present": True}], "assistant_returned_fixture": True, "assistant_returned_reversed_fixture": True}
 
 
@@ -53,7 +56,7 @@ def test_restart_requires_new_gateway_and_caller_and_same_history_calls():
 def test_v2_requires_same_single_child_and_real_followup_wait_and_direction():
     turns = [{"exit": 0, "timed_out": False, "errors": [], "finals": [value], "pid": pid} for value, pid in [("nonce\necnon", 10), ("ecnon", 11)]]
     traces = [{"epoch": epoch, "tool_outputs": [{"call_sha256": "call"}], "model": model} for epoch, model in [(0, qualification.OFFICIAL_MODEL), (0, qualification.CURSOR_MODEL), (1, qualification.OFFICIAL_MODEL)]]
-    sessions = [session(reads=0), session(child=True, reads=2)]
+    sessions = [session(reads=0, model=qualification.OFFICIAL_MODEL), session(child=True, reads=2)]
     sessions[0]["calls"] = [{"type": "function_call", "name": "spawn_agent", "reads_fixture": False, "call_sha256": "spawn", "spawn": True, "followup": True, "wait": True, "spawn_target_sha256": "reader", "target_sha256": "reader"}]
     assert qualification.assess_case("official-to-cursor", turns, traces, sessions, "nonce", [1, 2])["passed"]
     assert not qualification.assess_case("official-to-cursor", turns, traces, sessions + [session(child=True)], "nonce", [1, 2])["passed"]
@@ -168,7 +171,7 @@ def test_parent_restart_replays_its_results_without_merging_child_internals():
     traces = [{"epoch": epoch, "tool_outputs": [{"call_sha256": call}], "model": model} for epoch, model, call in [(0, qualification.CURSOR_MODEL, "parent-call"), (0, qualification.OFFICIAL_MODEL, "child-call"), (1, qualification.CURSOR_MODEL, "parent-call")]]
     parent = session(reads=0)
     parent["calls"] = [{"type": "function_call", "name": "spawn_agent", "reads_fixture": True, "call_sha256": "spawn", "spawn": True, "followup": True, "wait": True, "spawn_target_sha256": "reader", "target_sha256": "reader"}]
-    result = qualification.assess_case("cursor-to-official", turns, traces, [parent, session(child=True, reads=2)], "nonce", [1, 2])
+    result = qualification.assess_case("cursor-to-official", turns, traces, [parent, session(child=True, reads=2, model=qualification.OFFICIAL_MODEL)], "nonce", [1, 2])
     assert result["parent_did_not_read"]
     assert result["completed_calls_replayed"]
     assert result["passed"]
@@ -182,3 +185,66 @@ def test_encryption_observation_records_shape_without_retaining_ciphertext():
     evidence = qualification.observe_request(request, 0, "nonce")
     assert evidence["history_calls"][0]["encrypted_function_args_shape"] == "nonempty-list"
     assert "PRIVATE" not in json.dumps(evidence)
+
+
+@pytest.mark.parametrize("parent_model,child_model", [
+    (qualification.CURSOR_MODEL, qualification.OFFICIAL_MODEL),
+    ("unknown-parent", qualification.CURSOR_MODEL),
+    (qualification.OFFICIAL_MODEL, "unknown-child"),
+    (None, qualification.CURSOR_MODEL),
+    (qualification.OFFICIAL_MODEL, None),
+])
+def test_v2_oracle_rejects_wrong_or_missing_observed_role_models(parent_model, child_model):
+    turns = [{"exit": 0, "timed_out": False, "errors": [], "finals": [value], "pid": pid}
+             for value, pid in [("nonce\necnon", 10), ("ecnon", 11)]]
+    traces = [{"epoch": epoch, "tool_outputs": [{"call_sha256": "call"}], "model": model}
+              for epoch, model in [(0, qualification.OFFICIAL_MODEL), (0, qualification.CURSOR_MODEL), (1, qualification.OFFICIAL_MODEL)]]
+    parent, child = session(reads=0), session(child=True, reads=2)
+    parent["models"] = [parent_model] if parent_model else []
+    child["models"] = [child_model] if child_model else []
+    parent["calls"] = [{"type": "function_call", "name": "spawn_agent", "reads_fixture": False,
+                        "call_sha256": "spawn", "spawn": True, "followup": True, "wait": True,
+                        "spawn_target_sha256": "reader", "target_sha256": "reader"}]
+    result = qualification.assess_case("official-to-cursor", turns, traces, [parent, child], "nonce", [1, 2])
+    assert result["direction_models"]
+    assert not result["passed"]
+    assert not (result["parent_role_model"] and result["child_role_model"])
+
+
+@pytest.mark.parametrize("kind", ["bytes", "files"])
+def test_rollout_capture_has_an_aggregate_read_budget(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(qualification, "MAX_CAPTURE", 16)
+    monkeypatch.setattr(qualification, "MAX_ROLLOUT_FILES", 2)
+    files = []
+    for index in range(3 if kind == "files" else 2):
+        path = tmp_path / f"rollout-{index}.jsonl"
+        path.write_bytes(b"{}\n" if kind == "files" else b" " * 9)
+        files.append(path)
+    with pytest.raises(qualification.CaptureLimitExceeded):
+        qualification.summarize_rollouts(files, "nonce")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group resource fixture")
+def test_stdout_budget_stops_a_running_caller_before_capture_can_grow(tmp_path, monkeypatch):
+    monkeypatch.setattr(qualification, "MAX_CAPTURE", 128)
+    capture = tmp_path / "caller.jsonl"
+    before = time.monotonic()
+    with pytest.raises(qualification.CaptureLimitExceeded):
+        qualification.capture_caller([sys.executable, "-c", "import os,time; os.write(1,b'x'*4096); time.sleep(30)"],
+                                     env=os.environ.copy(), cwd=tmp_path, capture=capture,
+                                     rollout_home=tmp_path / "sessions", timeout=5)
+    assert capture.stat().st_size <= 128
+    assert time.monotonic() - before < 5
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux native per-file resource limit")
+def test_native_rollout_writer_is_capped_while_caller_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(qualification, "MAX_CAPTURE", 2048)
+    rollouts = tmp_path / "sessions"
+    rollouts.mkdir()
+    capture = tmp_path / "caller.jsonl"
+    data, child, timed_out = qualification.capture_caller(
+        [sys.executable, "-c", "import os; f=os.open('sessions/rollout-large.jsonl',os.O_CREAT|os.O_WRONLY,0o600); os.write(f,b'x'*8192); os.write(f,b'x'*8192)"],
+        env=os.environ.copy(), cwd=tmp_path, capture=capture, rollout_home=rollouts, timeout=5)
+    assert child.returncode != 0 and not timed_out and data == b""
+    assert (rollouts / "rollout-large.jsonl").stat().st_size <= 2048

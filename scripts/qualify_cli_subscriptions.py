@@ -553,9 +553,12 @@ def run_qualification(repo: Path, provider: str, model: str, *, timeout: float =
                                              capture_output=True, text=True, timeout=5)
             revision = source_revision.stdout.strip()
             report["candidate_sha"] = revision if source_revision.returncode == 0 and re.fullmatch(r"[a-f0-9]{40}", revision) else None
-            changes = subprocess.run(["git", "diff", "--quiet", "--", "src-python", "config", "model-catalogs"],
-                                     cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-            report["candidate_runtime_tracked_dirty"] = changes.returncode != 0
+            changes = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all", "--", "src-python", "config", "model-catalogs"],
+                                     cwd=repo, capture_output=True, text=True, timeout=5)
+            report["candidate_runtime_tracked_dirty"] = changes.returncode != 0 or bool(changes.stdout.strip())
+            report["candidate_sha_is_exact_runtime"] = bool(report["candidate_sha"]) and not report["candidate_runtime_tracked_dirty"]
+            if not report["candidate_sha_is_exact_runtime"]:
+                raise QualificationFailure("candidate-runtime-not-clean")
             report["runtime_source_sha256"] = freeze_candidate(repo.resolve(), frozen)
             server = PrivateGateway(frozen, root, provider, model, timeout)
             server.start()
