@@ -22,18 +22,39 @@ Item identity, completed history with a fresh plan, same-child followup targets,
 and SSE reconstruction. Official portability uses the existing ordinary
 namespace inverse. External preparation uses the existing V2/custom codecs.
 
-Opaque agent_message content now fails before an external generation request,
-with bounded instructions for caller-owned restatement/reissue from original
-requirements and existing child state/results. It is never silently discarded
-or sent as a success-shaped replacement. Completed tool effects must not be
-replayed. Reasoning ciphertext remains subject to the separate existing policy.
+Current opaque agent_message content fails before an external generation
+request, with bounded instructions for caller-owned restatement/reissue from
+original requirements and existing child state/results. A later, nonempty,
+entirely plaintext agent_message from the same author to the same recipient
+establishes a newer addressed assignment. Only earlier opaque items for that
+address become explicitly disclosed historical opaque envelopes. Each envelope
+retains the original item, ID, routing and ciphertext strings as unavailable
+history, never as a recovered task. Existing child calls/results and the current
+plaintext assignment retain their identities and content. This permits the
+addressed caller-owned restatement path without replaying completed effects.
+Different addresses, assistant/tool output, mixed encrypted/plaintext messages,
+and ordinary user turns do not establish that boundary. The ordinary-user/new
+task boundary remains **partial**: the current contract supplies no structural
+replacement marker, and text such as "Continue" does not prove that the missing
+requirements are available. Reasoning ciphertext uses its separate policy.
 
 `recover_observed_assignments` requires explicit executed-assignment provenance
 (author, recipient, exact text, source Call ID and typed Item ID). Different
 addresses/text or ambiguous calls remain opaque. It has no process-global cache,
 JavaScript execution, ciphertext inference or automatic source observation.
-Production does not invent provenance from arbitrary source text; a boundary
-without trusted observations continues to reject opaque tasks. Real mixed-model
+This recovery helper is currently **test-only**, with no production observer
+or invocation. Native paired collaboration calls/results provide target/message
+and real Call/typed Item IDs, but the frozen contract does not provide a trusted
+acting-author identity. Spawn results name the child, and send/followup results
+may be null; they do not bind the initiating author to an agent_message. The
+agent_message itself has author/recipient but no source Call ID. Matching those
+items by text, route suffix or assumed `/root` would invent the missing
+association. Actual exec source is not parsed or executed to fill that gap.
+Therefore production observed-assignment recovery remains **unimplemented**
+and is an open requirement under [#605](https://github.com/NOirBRight/CodexHub/issues/605),
+rather than an integration claim. Production does not invent provenance from
+arbitrary source text; a boundary without trusted observations continues to
+reject current opaque tasks. Real mixed-model
 V2 lifecycle and restart qualification remains required on the integrated
 Provider candidate; the historical 0.158 prototype is not substituted for it.
 
@@ -44,3 +65,11 @@ the sanitized 0.159.2 Gateway fixture, namespace/flat custom owner collisions,
 complete SSE terminal output, and repository entry/seam/module boundaries.
 The report-only quality command reported zero parse errors and no new-module
 unused imports. No full-suite or hosted Actions gate is claimed here.
+
+The completed-history and addressed historical-opaque followup selection passed
+**753 tests and 113 subtests**. It includes actual converter-generated complete
+output replay (empty/nonempty completed messages and function calls), flat and
+namespaced custom continuation, fresh request contexts, and both tool-surface
+strategies across subscription/generic external Providers. These are local
+public-seam checks; they do not qualify a live historical sealed task or supply
+the missing production assignment observer.
