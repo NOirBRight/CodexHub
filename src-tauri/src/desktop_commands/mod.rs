@@ -98,6 +98,7 @@ macro_rules! desktop_command_registry {
             RefreshOfficialModels => "refresh_official_models" => $crate::desktop_commands::refresh_official_models, true, true, true, false, ALIASES_REQUEST_ID;
             OpenaiUsageCompletions => "openai_usage_completions" => $crate::desktop_commands::openai_usage_completions, true, true, true, false, ALIASES_USAGE;
             DiscoverProviderModels => "discover_provider_models" => $crate::desktop_commands::discover_provider_models, true, true, true, false, ALIASES_DISCOVER;
+            CliSubscriptionStatus => "cli_subscription_status" => $crate::desktop_commands::cli_subscription_status, true, true, true, false, ALIASES_PROVIDER_ID;
             ProbeUpstreamFormat => "probe_upstream_format" => $crate::desktop_commands::probe_upstream_format, true, true, true, false, ALIASES_BASE_URL_API_KEY;
             ProviderProbeUpstreamFormat => "provider_probe_upstream_format" => $crate::desktop_commands::provider_probe_upstream_format, true, true, true, false, ALIASES_PROVIDER_ID;
             TestModelEndpoint => "test_model_endpoint" => $crate::desktop_commands::test_model_endpoint, true, true, true, false, ALIASES_TEST_MODEL_ENDPOINT;

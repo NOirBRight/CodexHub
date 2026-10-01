@@ -2620,6 +2620,8 @@ def build_external_provider_model(
     model["input_modalities"] = list(external_model.get("input_modalities") or ("text",))
 
     provider_alias = str(external_model.get("provider_alias") or "")
+    from subscription_exchange import is_subscription_provider
+    cli_subscription = is_subscription_provider(provider_alias)
     upstream_model = str(external_model.get("upstream_model") or "")
     maintained = maintained_catalog.resolve_model(provider_alias, upstream_model)
     capabilities_edited = external_model.get("capabilities_edited") is True
@@ -2630,7 +2632,7 @@ def build_external_provider_model(
     has_explicit_reasoning_levels = (
         isinstance(explicit_reasoning_levels, (list, tuple)) and bool(explicit_reasoning_levels)
     )
-    if has_explicit_reasoning_levels or capabilities_edited:
+    if has_explicit_reasoning_levels or capabilities_edited or cli_subscription:
         reasoning_levels_source = explicit_reasoning_levels
         fill_missing = False
     elif maintained is not None:
@@ -2729,6 +2731,13 @@ def build_external_provider_model(
         model,
         external_model.get("upstream_format"),
     )
+    if cli_subscription:
+        # A fallback template is presentation scaffolding, not vendor limits.
+        for field in ("context_window", "max_context_window", "max_output_tokens", "auto_compact_token_limit"):
+            configured = external_model.get("context_window" if field == "max_context_window" else field)
+            if not isinstance(configured, int) or configured <= 0:
+                model.pop(field, None)
+        model["description"] = "Current official CLI account. Model listing does not prove generation permission."
     stamp_catalog_owner_metadata(model)
     return model
 

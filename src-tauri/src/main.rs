@@ -8,6 +8,7 @@ mod build_info;
 mod catalog;
 mod chatgpt_web;
 mod cli;
+mod cli_subscription;
 mod codex_cli;
 mod codex_desktop;
 mod config;
@@ -224,6 +225,8 @@ pub struct Provider {
     pub onboarding_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery_policy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_context_consent: Option<String>,
     pub sort_order: Option<i32>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,

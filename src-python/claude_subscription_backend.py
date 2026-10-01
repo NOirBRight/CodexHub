@@ -7,7 +7,7 @@ No process/session is retained after a request, and no tool result is invented.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
@@ -66,9 +66,9 @@ def _source_bytes(path: Path) -> bytes:
 
 @dataclass(frozen=True)
 class _Account:
-    path: Path
-    original: bytes
-    oauth: dict[str, Any]
+    path: Path = field(repr=False)
+    original: bytes = field(repr=False)
+    oauth: dict[str, Any] = field(repr=False)
     expiry: float
 
     def check(self) -> None:

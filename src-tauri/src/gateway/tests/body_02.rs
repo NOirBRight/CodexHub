@@ -67,6 +67,7 @@ fn omp_models_omit_unknown_context_window_instead_of_inventing_a_default() {
         auth_capabilities: None,
         onboarding_hint: None,
         discovery_policy: None,
+        system_context_consent: None,
         sort_order: None,
         enabled: true,
         locked: false,

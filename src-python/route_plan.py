@@ -1866,8 +1866,9 @@ def route_plan_for_request(
             )
             retry_http_errors = not native_anthropic_subscription
             open_attempt_budget = None
-        web_direct = _is_chatgpt_web_upstream(upstream)
-        if web_direct:
+        from subscription_exchange import is_subscription_provider
+        single_submission = _is_chatgpt_web_upstream(upstream) or is_subscription_provider(str(upstream.get("name") or ""))
+        if single_submission:
             # A turn already handed to the runtime is not replayed.
             base_open_attempts = 1
             base_relay_attempts = 1
@@ -1883,10 +1884,10 @@ def route_plan_for_request(
             base_open_attempts=base_open_attempts,
             base_relay_attempts=base_relay_attempts,
             failure_expansion_attempts=(
-                0 if web_direct else selected_runtime_facts.failure_expansion_attempts
+                0 if single_submission else selected_runtime_facts.failure_expansion_attempts
             ),
             request_kind_attempts_configured=(
-                True if web_direct else selected_runtime_facts.request_kind_attempts_configured
+                True if single_submission else selected_runtime_facts.request_kind_attempts_configured
             ),
             retry_http_errors=retry_http_errors,
             open_attempt_budget=open_attempt_budget,
@@ -1898,7 +1899,7 @@ def route_plan_for_request(
             ),
             emit_downstream_retry_notice=(
                 False
-                if web_direct
+                if single_submission
                 else (
                     not official_http_passthrough
                     and not transparent_metered
@@ -1915,7 +1916,7 @@ def route_plan_for_request(
             ),
             lifecycle_final_retry_eligible=(
                 False
-                if web_direct
+                if single_submission
                 else (
                     not official_http_passthrough
                     and repair_policy != REPAIR_NONE
@@ -1923,7 +1924,7 @@ def route_plan_for_request(
                     == RETRY_REQUEST_MAIN_GENERATION
                 )
             ),
-            empty_completed_max_attempts=1 if web_direct else 2,
+            empty_completed_max_attempts=1 if single_submission else 2,
         )
         attempt_upstream = {
             **upstream,

@@ -49,7 +49,7 @@ export function instantiateCatalogProvider(preset: Provider, sortOrder: number):
     ...preset,
     api_key: usesSubscriptionAuth(preset) ? null : preset.api_key ?? null,
     sort_order: sortOrder,
-    enabled: true,
+    enabled: ["cursor-subscription", "claude-subscription"].includes(preset.id) ? false : true,
     models: sortModelsEnabledFirst(preset.models),
   };
 }

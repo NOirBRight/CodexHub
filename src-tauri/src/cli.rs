@@ -401,6 +401,7 @@ fn candidate_official_provider(models: Vec<Model>) -> Provider {
         auth_capabilities: None,
         onboarding_hint: None,
         discovery_policy: None,
+        system_context_consent: None,
         sort_order: Some(0),
         enabled: true,
         locked: true,

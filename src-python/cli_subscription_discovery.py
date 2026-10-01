@@ -26,8 +26,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from claude_native_models import cli_command, concrete_executable
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+\[\]-]{0,255}\Z")
-_CURSOR_ROW = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._:+\[\]-]*) - (.+)$")
+_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+\[\]-]{0,255}\Z")
+_CURSOR_ROW = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._:/+\[\]-]*) - (.+)$")
 _MAX_BYTES = 4 * 1024 * 1024
 _PROVIDERS = {"claude-subscription", "cursor-subscription"}
 _FAILURE_STATES = {"cli-timeout", "auth-required", "auth-expired", "not-eligible",
@@ -339,7 +339,7 @@ def _cursor_models(output: str) -> list[SubscriptionModel]:
         if match:
             name = re.sub(r"\s*\((?:default|current)\)\s*$", "", match[2])
             _append_model(rows, match[1], name)
-        elif re.fullmatch(r"\S+ - .+", line.strip()):
+        elif re.fullmatch(r".+ - .+", line.strip()):
             # A vendor row with an unsupported identity cannot be quietly
             # skipped while claiming discovery retained every account model.
             raise DiscoveryFailure()
