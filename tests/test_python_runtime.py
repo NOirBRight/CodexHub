@@ -22,6 +22,7 @@ PREPARE_RUNTIME = ROOT / "scripts" / "Prepare-PythonRuntime.ps1"
 
 DIRECT_PYTHON_ENTRYPOINTS = (
     "src-python/claude_native_models.py",
+    "src-python/claude_subscription_mcp.py",
     "scripts/capture_desktop_tool_catalog.py",
     "scripts/e2e_desktop_tool_matrix.py",
     "src-python/bucket_sync.py",
