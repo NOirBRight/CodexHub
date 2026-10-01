@@ -364,3 +364,19 @@ def test_exact_vendor_slash_identity_is_preserved(exchange):
     values[0]["event"]["message"]["model"] = "vendor/claude-exact"
     rows = list(invoke({"model": "vendor/claude-exact", "messages": [{"role": "user", "content": "text"}]}, events=values))
     assert all(row["model"] == "vendor/claude-exact" for row in rows)
+
+
+@pytest.mark.parametrize("parameter,value", [
+    ("max_tokens", 1024), ("max_completion_tokens", 1024), ("temperature", 0), ("top_p", .5),
+    ("response_format", {"type": "json_object"}), ("stop", ["END"]), ("audio", {"voice": "alloy"}),
+    ("modalities", ["text"]), ("logit_bias", {"1": 1}), ("seed", 1), ("frequency_penalty", 0),
+    ("presence_penalty", 0), ("prediction", {"type": "content", "content": "expected"}),
+    ("parallel_tool_calls", False), ("functions", []), ("function_call", "none"), ("n", 2),
+])
+def test_unrepresentable_generation_semantics_fail_before_any_process_or_private_artifact(exchange, parameter, value):
+    invoke, _, _, roots, children, commands, _ = exchange
+    payload = {"model": "claude-exact", "messages": [{"role": "user", "content": "original prompt"}], parameter: value}
+    with pytest.raises(BackendError) as error:
+        list(invoke(payload))
+    assert error.value.code == "unsupported-parameter" and error.value.status == 400
+    assert roots == [] and children == [] and commands == []

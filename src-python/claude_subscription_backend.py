@@ -47,6 +47,7 @@ def _failure(code: str, status: int = 502) -> BackendError:
         "cancelled": "The caller cancelled the Claude request.",
         "timeout": "The official Claude request exceeded its time limit.",
         "invalid-request": "The Claude request contains unsupported or incomplete content or tool history.",
+        "unsupported-parameter": "The official Claude CLI cannot preserve this requested generation parameter.",
         "backend-contract": "The official Claude CLI returned an unsupported or inconsistent tool stream.",
         "backend-failed": "The official Claude CLI could not complete this request.",
     }
@@ -143,6 +144,15 @@ def _validate_content(value: Any) -> None:
 
 
 def _request(payload: Mapping[str, Any]) -> tuple[str, list[dict[str, Any]], bytes]:
+    # No observed native flag represents these caller requirements. Reject
+    # before credentials/private artifacts/processes rather than drop them.
+    for parameter in ("max_tokens", "max_completion_tokens", "temperature", "top_p", "response_format", "stop",
+                      "audio", "modalities", "logit_bias", "seed", "frequency_penalty", "presence_penalty",
+                      "prediction", "parallel_tool_calls", "functions", "function_call"):
+        if payload.get(parameter) is not None:
+            raise _failure("unsupported-parameter", 400)
+    if payload.get("n") not in (None, 1):
+        raise _failure("unsupported-parameter", 400)
     model = payload.get("model")
     if not isinstance(model, str) or not _MODEL.fullmatch(model):
         raise _failure("invalid-request", 400)
