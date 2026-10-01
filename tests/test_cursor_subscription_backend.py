@@ -461,3 +461,16 @@ def test_mixed_provider_call_identity_collision_fails_before_transport(tmp_path)
         list(run(account(tmp_path), transport, payload))
     assert error.value.code == "invalid-request"
     assert not transport.streams
+
+
+@pytest.mark.parametrize("key,value", [("parallel_tool_calls", False), ("seed", 1), ("frequency_penalty", 0.5),
+                                     ("presence_penalty", 0.5), ("functions", []), ("function_call", "auto"),
+                                     ("reasoning_effort", "high")])
+def test_unsupported_selection_controls_fail_before_account_or_transport(key, value):
+    payload = tool_payload()
+    payload[key] = value
+    def forbidden_account(**kwargs):
+        pytest.fail("unsupported controls must fail before reading credentials")
+    with pytest.raises(BackendError) as error:
+        list(stream_chat(payload, cancel=threading.Event(), timeout=1, account_reader=forbidden_account))
+    assert error.value.code == "unsupported-parameter"

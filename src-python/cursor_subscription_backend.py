@@ -453,9 +453,12 @@ def _conversation(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], lis
         raise BackendError("unsupported-tool-choice", "Cursor currently supports automatic caller tool selection.", 400)
     # Refuse declared semantics that AgentService does not represent, rather
     # than quietly dropping caller output or sampling requirements.
-    for key in ("response_format", "audio", "modalities", "prediction", "stop", "logit_bias", "temperature", "top_p", "max_tokens", "max_completion_tokens"):
+    for key in ("response_format", "audio", "modalities", "prediction", "stop", "logit_bias", "temperature", "top_p", "max_tokens", "max_completion_tokens",
+                "seed", "frequency_penalty", "presence_penalty", "functions", "function_call", "reasoning_effort"):
         if payload.get(key) is not None:
             raise BackendError("unsupported-parameter", "Cursor cannot represent the requested generation parameter: " + key + ".", 400)
+    if payload.get("parallel_tool_calls") not in (None, True):
+        raise BackendError("unsupported-parameter", "Cursor cannot enforce serial caller tool selection.", 400)
     history = payload.get("messages")
     if not isinstance(history, list) or not history or len(history) > 100000:
         raise _invalid()
