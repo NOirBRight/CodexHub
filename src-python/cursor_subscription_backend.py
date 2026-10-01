@@ -582,7 +582,11 @@ def stream_chat(payload: Mapping[str, Any], *, cancel: threading.Event, timeout:
     listed: int | None = None
     said = False
     started_reply = False
-    emitted_ids: set[str] = set()
+    emitted_ids: set[str] = {
+        part["toolCallId"]
+        for message in messages if message.get("role") == "assistant" and isinstance(message.get("content"), list)
+        for part in message["content"] if part.get("type") == "tool-call"
+    }
     usage = None
     finish = False
     frames = wire.Frames()

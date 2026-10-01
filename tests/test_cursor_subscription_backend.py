@@ -474,3 +474,17 @@ def test_unsupported_selection_controls_fail_before_account_or_transport(key, va
     with pytest.raises(BackendError) as error:
         list(stream_chat(payload, cancel=threading.Event(), timeout=1, account_reader=forbidden_account))
     assert error.value.code == "unsupported-parameter"
+
+
+def test_new_upstream_call_cannot_reuse_a_completed_history_identity(tmp_path):
+    lease = account(tmp_path)
+    initial = list(run(lease, Transport([update(27, pb(1, 1)), call()]), tool_payload()))
+    original = initial[1]["choices"][0]["delta"]["tool_calls"][0]
+    history = [{"role": "assistant", "tool_calls": [original]},
+               {"role": "tool", "tool_call_id": original["id"], "content": "completed actual result"},
+               {"role": "user", "content": "Continue without replaying completed effects."}]
+    transport = Transport([update(27, pb(1, 1)), call()])
+    with pytest.raises(BackendError) as error:
+        list(run(lease, transport, tool_payload(history)))
+    assert error.value.code == "upstream-protocol-error"
+    assert all(stream.closed for stream in transport.streams)
