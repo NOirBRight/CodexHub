@@ -1066,6 +1066,7 @@ def rewrite_structured_tool_input_items(
         payload["input"] = input_items
     rewritten_items: list[Any] = []
     preserved_structured_call_ids: set[str] = set(adapted_apply_patch_call_ids)
+    preserved_owned_custom_call_ids: set[str] = set()
     available_function_names = function_tool_names(payload.get("tools"))
     apply_patch_name = _facts().apply_patch_function_name
     compact_history = (
@@ -1097,6 +1098,13 @@ def rewrite_structured_tool_input_items(
             call_id = item.get("call_id")
             if isinstance(call_id, str):
                 preserved_structured_call_ids.add(call_id)
+                if item.get("type") == "custom_tool_call":
+                    preserved_owned_custom_call_ids.add(call_id)
+            rewritten_items.append(item)
+            continue
+        if item.get("type") == "custom_tool_call_output" and item.get("call_id") in preserved_owned_custom_call_ids:
+            # The actual preceding call is owned by this request codec. Keep
+            # its typed result for the codec ledger to validate and inverse-map.
             rewritten_items.append(item)
             continue
         if item.get("type") == "function_call":

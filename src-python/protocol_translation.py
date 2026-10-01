@@ -776,9 +776,14 @@ def responses_input_to_chat_messages(
         if item_type == "function_call":
             _require_supported_fields(
                 item,
-                {"id", "type", "call_id", "name", "arguments"},
+                {"id", "type", "call_id", "name", "arguments", "status"},
                 "Responses function-call input item",
             )
+            if "status" in item and item["status"] != "completed":
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate an unfinished or unknown Responses function-call status as completed tool history.",
+                )
             call_id = item.get("call_id")
             name = item.get("name")
             if not isinstance(call_id, str) or not call_id:
