@@ -128,3 +128,40 @@ actual caller tool request, its real result and completed-history continuation
 after actual Gateway restart. It skips text, stream and cancellation; public
 fixture tests assert those cases are not invoked. Qualification remains scoped
 to the selected cases and does not imply advanced or dual-platform acceptance.
+
+## Responses complete-history delta — 2a999072
+
+After completed message-Item handling was fixed, a new
+[tool-continuation-only run](cursor-responses-2a999072.json) froze candidate
+`2a99907233b9fceda4ff2f057b4ed749c9c29072`. Runtime SHA-256 was
+`fce99448b6cc7c0c31152da0a71a736a0be01206b2a0a1ba4f5be8e83452e5b0`;
+installed Cursor version was `2026.09.28-64d2043` before and after the run.
+Only three fresh-caller operations ran: one actual tool request, the real
+result, and full completed-history continuation after actual Gateway restart.
+No text, stream, cancellation, Claude or Messages probe was repeated. Each
+request was bounded to 60 seconds, the run to 240 seconds; actual total was
+9.96 seconds. The record was retained by `2026-10-01T01:17:37Z`.
+
+The real caller tool passed in 5.22 seconds with an original Call-ID SHA-256 of
+`6017aabfe75bafba5ef5408f420570f6f7fca2d701ff5927408a2eec5b76a452`.
+Returning the full native output and actual caller result then passed in
+3.73 seconds: the exact fixture response's SHA-256 was
+`a67104ac187f64d01c535ec7bc8033c71726bec38fc1a01dbf177cd43b974ba7`.
+The Gateway was actually restarted; the fresh HTTP caller's complete-history
+continuation nevertheless failed with HTTP 400 after 0.12 seconds. The
+current bounded wrapper classified that error as `upstream-error`, so the
+specific restart rejection is not yet confirmed. No restart success, ordinary
+qualification or product acceptance was claimed. Private artifacts were removed.
+
+One concrete output defect remains: the nonstream Chat-to-Responses converter
+uses the same message Item ID `msg_0` across separate responses, so the empty
+tool-turn message and later completed answer can have duplicate Item IDs in
+full history. This is a **diagnostic hypothesis** for the real restart failure,
+not its confirmed classification: an isolated public
+`build_tool_compatibility_plan([], selected_protocol="chat_tools").encode_history`
+call accepted the reproduced two-output history. The Gateway's full request
+boundary and history without current tool declarations still require diagnosis.
+The harness retained both native completed outputs and original Call identity;
+it did not remove empty messages, rename Items, supply fake results, or silently
+repeat tool execution to get a pass. The repeated-ID producer and the actual
+restart rejection require a later fix and a bounded new three-operation delta.

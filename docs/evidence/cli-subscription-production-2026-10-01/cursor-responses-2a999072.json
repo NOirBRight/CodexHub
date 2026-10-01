@@ -1,0 +1,77 @@
+{
+  "provider": "cursor-subscription",
+  "model": "gpt-5.6-luna-high",
+  "risk": "strict",
+  "kind": "ordinary-real-gateway",
+  "bound_seconds_per_exchange": 60.0,
+  "bound_seconds_total": 240.0,
+  "success_cues": [
+    "exact randomized text with complete protocol terminal event",
+    "actual caller tool with original Call identity",
+    "real tool result recovered from completed history after Gateway restart",
+    "upstream sockets close after caller disconnect"
+  ],
+  "failure_cues": [
+    "bounded HTTP/SSE error",
+    "wrong exact output",
+    "orphan or malformed caller tool",
+    "incomplete stream",
+    "unobserved cleanup"
+  ],
+  "protocols": [
+    "responses"
+  ],
+  "cases": [
+    {
+      "case": "responses.caller-tool",
+      "state": "passed",
+      "elapsed_seconds": 5.22,
+      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "text_bytes": 0,
+      "tool_calls": 1,
+      "call_id_sha256": [
+        "6017aabfe75bafba5ef5408f420570f6f7fca2d701ff5927408a2eec5b76a452"
+      ],
+      "usage_present": false,
+      "stream_events": 0,
+      "finish": "completed"
+    },
+    {
+      "case": "responses.tool-result",
+      "state": "passed",
+      "elapsed_seconds": 3.73,
+      "text_sha256": "a67104ac187f64d01c535ec7bc8033c71726bec38fc1a01dbf177cd43b974ba7",
+      "text_bytes": 32,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": true,
+      "stream_events": 0,
+      "finish": "completed"
+    },
+    {
+      "case": "responses.restart-history-fresh-caller",
+      "state": "failed",
+      "code": "upstream-error",
+      "http_status": 400,
+      "elapsed_seconds": 0.12
+    }
+  ],
+  "advanced_codemode_v2_qualified": false,
+  "dual_platform_qualified": false,
+  "windows_gate": {
+    "state": "blocked",
+    "reason": "yoga SSH No route to host; actual Windows verification pending"
+  },
+  "ordinary_scope": "tool-continuation-only",
+  "cli_version_observed_before_run": "2026.09.28-64d2043",
+  "candidate_sha": "2a99907233b9fceda4ff2f057b4ed749c9c29072",
+  "candidate_runtime_tracked_dirty": false,
+  "runtime_source_sha256": "fce99448b6cc7c0c31152da0a71a736a0be01206b2a0a1ba4f5be8e83452e5b0",
+  "gateway_restart_observed": true,
+  "private_artifacts_removed": true,
+  "cli_version_observed_after_run": "2026.09.28-64d2043",
+  "ordinary_qualified": false,
+  "caller_cancel_qualified": false,
+  "generation_qualified": false,
+  "elapsed_seconds": 9.96
+}
