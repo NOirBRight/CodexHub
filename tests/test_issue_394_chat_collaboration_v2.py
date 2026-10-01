@@ -226,7 +226,7 @@ def test_v2_chat_calls_reverse_to_exact_namespace_and_identity(name: str) -> Non
     assert item["namespace"] == "collaboration"
     assert item["name"] == name
     assert item["call_id"] == f"call_{name}"
-    assert item["id"] == f"fc_call_{name}"
+    assert item["id"] == json.loads(responses)["output"][0]["id"]
     assert item["encrypted_function_args"] == []
     assert json.loads(item["arguments"]) == ARGUMENTS[name]
 

@@ -8,7 +8,7 @@ import pytest
 
 import gateway_compat
 import protocol_translation
-from tool_compatibility.contracts import CUSTOM_INPUT_KEY
+from tool_compatibility.contracts import CUSTOM_INPUT_KEY, CUSTOM_OUTPUT_KEY
 
 
 def response_for_call(name: str, arguments: str):
@@ -84,6 +84,83 @@ def test_completed_message_history_still_rejects_unknown_fields():
         protocol_translation.responses_request_to_chat_completion_body(json.dumps({"model": "exact-selected-model", "input": [item]}).encode())
     assert error.value.code == "unsupported_protocol_semantics"
     assert "private-value" not in str(error.value)
+
+
+def test_two_actual_complete_outputs_continue_with_all_typed_history_after_restart():
+    tools = [{"type": "custom", "name": "exec", "description": "Caller Code Mode", "format": {"type": "text"}}]
+    upstream = {"name": "claude-subscription", "upstream_format": "chat_completions", "tool_protocol": "chat_tools", "tool_surface_strategy": "eager"}
+    context = {}
+    initial = json.loads(gateway_compat.compatible_request_body(json.dumps({"model": "exact-selected-model", "tools": tools, "input": [], "tool_choice": "auto"}).encode(), upstream, event_context=context, inject_codex_tools=False))
+    first_chat = {"id": "chatcmpl_actual_first", "model": "exact-selected-model", "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+        "role": "assistant", "content": "", "tool_calls": [{"id": "caller-actual-call", "type": "function", "function": {"name": initial["tools"][0]["name"], "arguments": json.dumps({CUSTOM_INPUT_KEY: "text(42)"})}}],
+    }}]}
+    second_chat = {"id": "chatcmpl_actual_second", "model": "exact-selected-model", "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "The fixture result is saved."}}]}
+    first = json.loads(gateway_compat.compatible_response_body(protocol_translation.chat_completion_to_response_body(json.dumps(first_chat).encode(), repair=False), upstream["name"], context))
+    second = json.loads(gateway_compat.compatible_response_body(protocol_translation.chat_completion_to_response_body(json.dumps(second_chat).encode(), repair=False), upstream["name"], context))
+    call = next(item for item in first["output"] if item["type"] == "custom_tool_call")
+    result = {"type": "custom_tool_call_output", "id": "caller-original-result-item", "call_id": call["call_id"], "output": "42"}
+    history = [*first["output"], result, *second["output"]]
+    original = copy.deepcopy(history)
+    # A new context models Gateway restart; no old plan or process cache helps.
+    continuation = json.loads(gateway_compat.compatible_request_body(json.dumps({"model": "exact-selected-model", "tools": tools, "input": history, "tool_choice": "auto"}).encode(), upstream, event_context={}, inject_codex_tools=False))
+    ids = [item["id"] for item in history]
+    assert len(ids) == len(set(ids))
+    assert first["output"][0]["content"][0]["text"] == ""
+    assert [item["id"] for item in continuation["input"]] == ids
+    exchange = protocol_translation.prepare_exchange(json.dumps(continuation).encode(), inbound_format="responses", outbound_format="chat_completions")
+    assert not isinstance(exchange, protocol_translation.NonForwardable)
+    messages = json.loads(exchange.upstream_body)["messages"]
+    assert messages[0] == {"role": "assistant", "content": ""}
+    assert messages[1]["tool_calls"][0]["id"] == call["call_id"] == "caller-actual-call"
+    assert messages[2]["role"] == "tool"
+    assert messages[2]["tool_call_id"] == call["call_id"]
+    assert json.loads(messages[2]["content"])[CUSTOM_OUTPUT_KEY] == "42"
+    assert messages[3] == {"role": "assistant", "content": "The fixture result is saved."}
+    assert history == original
+
+
+def test_response_owned_body_ids_are_stable_and_missing_source_ids_are_unique():
+    message = {"role": "assistant", "content": "", "reasoning_content": "Portable reasoning", "tool_calls": [{"id": "unchanged-call-id", "type": "function", "function": {"name": "caller_tool", "arguments": "{}"}}]}
+    payload = {"id": "actual-response-owner", "choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}]}
+    def convert(value):
+        return json.loads(protocol_translation.chat_completion_to_response_body(json.dumps(value).encode(), repair=False))
+    first = convert(payload)
+    repeated = convert(payload)
+    other = convert({**payload, "id": "other-response-owner"})
+    assert first["output"] == repeated["output"]
+    assert {item["type"] for item in first["output"]} == {"reasoning", "message", "function_call"}
+    ids = {item["id"] for item in first["output"]}
+    assert len(ids) == 3
+    assert not ids.intersection(item["id"] for item in other["output"])
+    assert first["id"] == payload["id"]
+    assert next(item for item in first["output"] if item["type"] == "function_call")["call_id"] == "unchanged-call-id"
+    without_id = {key: value for key, value in payload.items() if key != "id"}
+    no_source_a, no_source_b = convert(without_id), convert(without_id)
+    assert not {item["id"] for item in no_source_a["output"]}.intersection(item["id"] for item in no_source_b["output"])
+
+
+@pytest.mark.parametrize("stateful", [False, True])
+def test_stream_generated_ids_are_response_owned_and_stable_in_every_fragment(stateful):
+    chunks = [
+        {"id": "actual-chat-stream", "model": "selected-model", "choices": [{"index": 0, "delta": {"role": "assistant", "reasoning_content": "Portable thinking", "content": "Saved ", "tool_calls": [{"index": 0, "id": "unchanged-call-id", "type": "function", "function": {"name": "caller_tool", "arguments": "{"}}]}, "finish_reason": None}]},
+        {"id": "actual-chat-stream", "model": "selected-model", "choices": [{"index": 0, "delta": {"content": "result", "tool_calls": [{"index": 0, "function": {"arguments": "}"}}]}, "finish_reason": "tool_calls"}]},
+    ]
+    def convert():
+        if not stateful:
+            return protocol_translation.chat_stream_chunks_to_response_events(chunks)
+        converter = protocol_translation.ChatToResponsesStreamConverter()
+        return [event for chunk in chunks for event in converter.events_for_chunk(chunk)] + converter.events_for_done()
+    events, other = convert(), convert()
+    output = next(event["response"]["output"] for event in events if event["type"] == "response.completed")
+    other_output = next(event["response"]["output"] for event in other if event["type"] == "response.completed")
+    by_id = {item["id"]: item for item in output}
+    assert {item["type"] for item in output} == {"reasoning", "message", "function_call"}
+    assert not set(by_id).intersection(item["id"] for item in other_output)
+    added = {event["item"]["id"] for event in events if event["type"] == "response.output_item.added"}
+    done = {event["item"]["id"] for event in events if event["type"] == "response.output_item.done"}
+    assert added == done == set(by_id)
+    assert all(event["item_id"] in by_id for event in events if "item_id" in event)
+    assert next(item for item in output if item["type"] == "function_call")["call_id"] == "unchanged-call-id"
 
 
 @pytest.mark.parametrize("restart", [False, True])

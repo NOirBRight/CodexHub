@@ -1699,10 +1699,17 @@ def _chat_reasoning_effort(payload: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _response_item_id(response_id: str, family: str, identity: Any) -> str:
+    """Give synthesized items a stable identity within one response owner."""
+    source = json.dumps([response_id, family, identity], ensure_ascii=True, separators=(",", ":"))
+    return f"{family}_{uuid.uuid5(uuid.NAMESPACE_URL, source).hex}"
+
+
 def _chat_completion_message_output(
     message: Mapping[str, Any],
     index: int,
     *,
+    response_id: str,
     chat_content_text: ChatContentText,
 ) -> dict[str, Any] | None:
     _raise_for_unsupported_chat_message_semantics(message)
@@ -1718,7 +1725,7 @@ def _chat_completion_message_output(
     if not text and content != "":
         return None
     return {
-        "id": f"msg_{index}",
+        "id": _response_item_id(response_id, "msg", index),
         "type": "message",
         "status": "completed",
         "role": "assistant",
@@ -1729,6 +1736,7 @@ def _chat_completion_message_output(
 def _chat_completion_tool_outputs(
     message: Mapping[str, Any],
     *,
+    response_id: str,
     chat_content_text: ChatContentText,
     xmlish_tool_outputs: XmlishToolOutputs | None,
 ) -> list[dict[str, Any]]:
@@ -1788,7 +1796,7 @@ def _chat_completion_tool_outputs(
         arguments = _function_arguments(function, "Chat Completions function-call")
         output.append(
             {
-                "id": f"fc_{call_id}",
+                "id": _response_item_id(response_id, "fc", call_id),
                 "type": "function_call",
                 "status": "completed",
                 "call_id": call_id,
@@ -1811,12 +1819,15 @@ def chat_completion_to_response_body(
     if not isinstance(payload, dict):
         return body
 
+    response_id = payload.get("id")
+    if not isinstance(response_id, str) or not response_id:
+        response_id = f"resp_{uuid.uuid4().hex}"
     upstream_error = payload.get("error")
     if upstream_error is not None:
         error = dict(upstream_error) if isinstance(upstream_error, Mapping) else {"message": str(upstream_error)}
         error.setdefault("type", "upstream_error")
         failed_payload = {
-            "id": payload.get("id") if isinstance(payload.get("id"), str) else f"resp_{uuid.uuid4().hex[:12]}",
+            "id": response_id,
             "object": "response",
             "status": "failed",
             "model": payload.get("model"),
@@ -1870,9 +1881,11 @@ def chat_completion_to_response_body(
             _require_supported_chat_message_fields(message, "Chat Completions response message")
             reasoning_output = _chat_reasoning_output(message)
             if reasoning_output is not None:
+                reasoning_output["id"] = _response_item_id(response_id, "rs", index)
                 output.append(reasoning_output)
             tool_outputs = _chat_completion_tool_outputs(
                 message,
+                response_id=response_id,
                 chat_content_text=chat_content_text,
                 xmlish_tool_outputs=xmlish_tool_outputs,
             )
@@ -1884,6 +1897,7 @@ def chat_completion_to_response_body(
             message_output = _chat_completion_message_output(
                 message,
                 index,
+                response_id=response_id,
                 chat_content_text=chat_content_text,
             )
             if message_output is not None:
@@ -1891,7 +1905,7 @@ def chat_completion_to_response_body(
             output.extend(tool_outputs)
 
     response_payload: dict[str, Any] = {
-        "id": payload.get("id") if isinstance(payload.get("id"), str) else f"resp_{uuid.uuid4().hex[:12]}",
+        "id": response_id,
         "object": "response",
         "status": "incomplete" if incomplete_details is not None else "completed",
         "model": payload.get("model"),
@@ -2435,7 +2449,7 @@ def chat_stream_chunks_to_response_events(
     def maybe_emit_added(state: dict[str, Any]) -> None:
         if state["added"] or not state["call_id"] or not state["name"]:
             return
-        state["item_id"] = f"fc_{state['call_id']}"
+        state["item_id"] = _response_item_id(response_id, "fc", state["call_id"])
         events.append(
             {
                 "type": "response.output_item.added",
@@ -2630,7 +2644,7 @@ def chat_stream_chunks_to_response_events(
     if reasoning_parts:
         output_index = reasoning_output_index if reasoning_output_index is not None else allocate_output_index()
         reasoning_item = {
-            "id": f"rs_{uuid.uuid4().hex[:12]}",
+            "id": _response_item_id(response_id, "rs", 0),
             "type": "reasoning",
             "status": "completed",
             "summary": [
@@ -2680,7 +2694,7 @@ def chat_stream_chunks_to_response_events(
             output_by_index[output_index] = item
     elif text:
         output_index = message_output_index if message_output_index is not None else allocate_output_index()
-        item_id = f"msg_{uuid.uuid4().hex[:12]}"
+        item_id = _response_item_id(response_id, "msg", 0)
         item = {
             "id": item_id,
             "type": "message",
@@ -3732,9 +3746,9 @@ class ChatToResponsesStreamConverter:
     def __init__(self) -> None:
         self.response_id = f"resp_{uuid.uuid4().hex[:12]}"
         self.model: str | None = None
-        self.item_id = f"msg_{uuid.uuid4().hex[:12]}"
+        self.item_id = _response_item_id(self.response_id, "msg", 0)
         self.text_parts: list[str] = []
-        self.reasoning_item_id = f"rs_{uuid.uuid4().hex[:12]}"
+        self.reasoning_item_id = _response_item_id(self.response_id, "rs", 0)
         self.reasoning_parts: list[str] = []
         self.reasoning_output_index: int | None = None
         self.reasoning_started = False
@@ -3826,7 +3840,7 @@ class ChatToResponsesStreamConverter:
         if state["added"] or not state["call_id"] or not state["name"]:
             return []
         events = self._created_events()
-        state["item_id"] = f"fc_{state['call_id']}"
+        state["item_id"] = _response_item_id(self.response_id, "fc", state["call_id"])
         events.append(
             {
                 "type": "response.output_item.added",
