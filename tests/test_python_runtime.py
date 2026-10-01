@@ -53,6 +53,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/claude_code_version_gate.py",
     "scripts/claude_messages_loopback_harness.py",
     "scripts/discover_cli_subscription.py",
+    "scripts/qualify_cli_subscriptions.py",
     "scripts/ci/check_python_test_partitions.py",
     "scripts/ci/ci_change_plan.py",
     "scripts/ci/python_test_plan.py",
