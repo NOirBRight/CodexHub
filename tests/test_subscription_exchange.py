@@ -25,7 +25,7 @@ def chunk(delta, finish=None):
 @pytest.mark.parametrize("inbound,payload", [
     ("responses", {"model": "exact-high-fast", "input": "hello", "stream": True}),
     ("chat_completions", {"model": "exact-high-fast", "messages": [{"role": "user", "content": "hello"}], "stream": True}),
-    ("anthropic_messages", {"model": "exact-high-fast", "messages": [{"role": "user", "content": "hello"}], "stream": True}),
+    ("anthropic_messages", {"model": "exact-high-fast", "messages": [{"role": "user", "content": "hello"}], "stream": True, "max_tokens": 128}),
 ])
 def test_existing_protocol_adapters_feed_same_subscription_exchange(inbound, payload):
     prepared = prepare_exchange(json.dumps(payload).encode(), inbound_format=inbound, outbound_format="chat_completions")
@@ -37,6 +37,8 @@ def test_existing_protocol_adapters_feed_same_subscription_exchange(inbound, pay
     with open_subscription(Request("https://cli-subscription.invalid/v1/chat/completions", data=prepared.upstream_body), provider_id="cursor-subscription", timeout=2, backend=backend) as response:
         body = response.read()
     assert observed[0]["model"] == "exact-high-fast"
+    if inbound == "anthropic_messages":
+        assert observed[0]["max_tokens"] == 128
     assert "actual reply" in body.decode()
     assert body.endswith(b"data: [DONE]\n\n")
 
