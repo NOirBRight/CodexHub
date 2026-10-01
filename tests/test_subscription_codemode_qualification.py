@@ -32,13 +32,13 @@ def session(child=False, reads=1, spawn=False, followup=False, wait=False):
 
 def test_code_mode_requires_actual_custom_effect_and_exact_final():
     turns = [{"exit": 0, "timed_out": False, "errors": [], "finals": ["nonce"], "pid": 10}]
-    result = qualification.assess_case("code-mode", turns, [], [session()], "nonce", [1])
+    result = qualification.assess_case("code-mode", turns, [{"model": qualification.CURSOR_MODEL}], [session()], "nonce", [1])
     assert result["passed"]
     fake = session()
     fake["effects"][0]["call_sha256"] = "different-call"
-    assert not qualification.assess_case("code-mode", turns, [], [fake], "nonce", [1])["passed"]
+    assert not qualification.assess_case("code-mode", turns, [{"model": qualification.CURSOR_MODEL}], [fake], "nonce", [1])["passed"]
     turns[0]["finals"] = ["nonce\u200b"]
-    assert not qualification.assess_case("code-mode", turns, [], [session()], "nonce", [1])["passed"]
+    assert not qualification.assess_case("code-mode", turns, [{"model": qualification.CURSOR_MODEL}], [session()], "nonce", [1])["passed"]
 
 
 def test_restart_requires_new_gateway_and_caller_and_same_history_calls():
@@ -134,3 +134,23 @@ def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup
     assert result["failure_class"] is None
     assert not result["checks"]["passed"]
     assert result["private_tree_removed"]
+
+
+
+def test_public_oracle_rejects_a_model_fallback_even_when_fixture_matches():
+    turns = [{"exit": 0, "timed_out": False, "errors": [], "finals": ["nonce"], "pid": 1}]
+    wrong = qualification.assess_case("code-mode", turns, [{"model": "nearest-family-low"}], [session()], "nonce", [2])
+    assert not wrong["exact_selected_model_identity"] and not wrong["passed"]
+
+
+def test_observer_preserves_payload_and_records_safe_selection_controls():
+    request = {"model": qualification.CURSOR_MODEL, "reasoning": {"effort": "high"}, "parallel_tool_calls": True}
+    before = json.dumps(request)
+    result = qualification.observe_request(request, 0, "nonce")
+    assert result["requested_reasoning_effort"] == "high"
+    assert result["parallel_tool_calls"] is True
+    assert json.dumps(request) == before
+    result = qualification.observe_request({"reasoning_effort": "PRIVATE-DYNAMIC-STRING", "parallel_tool_calls": 1}, 0, "nonce")
+    assert result["requested_reasoning_effort"] == "unsupported"
+    assert result["parallel_tool_calls"] == "invalid"
+    assert "PRIVATE" not in json.dumps(result)

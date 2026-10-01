@@ -90,7 +90,12 @@ def observe_request(body, epoch, nonce):
                 "fixture_present": nonce in json.dumps(item, ensure_ascii=False),
                 "reversed_fixture_present": nonce[::-1] in json.dumps(item, ensure_ascii=False)}
                for item in items if isinstance(item, dict) and item.get("type") in ("custom_tool_call_output", "function_call_output")]
-    return {"epoch": epoch, "model": body.get("model"), "input_types": [item.get("type") for item in items if isinstance(item, dict)],
+    reasoning = body.get("reasoning")
+    effort = reasoning.get("effort") if isinstance(reasoning, dict) else body.get("reasoning_effort")
+    effort = effort if effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra") else "absent" if effort is None else "unsupported"
+    parallel = body.get("parallel_tool_calls")
+    parallel = parallel if isinstance(parallel, bool) else "absent" if parallel is None else "invalid"
+    return {"epoch": epoch, "model": body.get("model"), "requested_reasoning_effort": effort, "parallel_tool_calls": parallel, "input_types": [item.get("type") for item in items if isinstance(item, dict)],
             "input_sha256": digest(json.dumps(items, sort_keys=True, ensure_ascii=False)),
             "declarations": declaration_summary(tools), "tool_outputs": outputs,
             "agent_messages": [{"author_sha256": digest(item.get("author", "")), "recipient_sha256": digest(item.get("recipient", "")),
@@ -153,7 +158,9 @@ def assess_case(case, turns, requests, sessions, nonce, gateway_pids):
     read_calls = {call["call_sha256"] for session in sessions for call in session["calls"] if call["reads_fixture"] and call["type"] == "custom_tool_call"}
     actual_effect = any(effect["fixture_present"] and effect["call_sha256"] in read_calls for session in sessions for effect in session["effects"])
     first_exact = bool(turns) and turns[0]["finals"] == [nonce]
-    result = {"actual_custom_exec": custom, "actual_fixture_tool_result": actual_effect, "first_exact": first_exact}
+    expected_models = {OFFICIAL_MODEL, CURSOR_MODEL} if case in ("official-to-cursor", "cursor-to-official") else {CURSOR_MODEL}
+    actual_models = {row.get("model") for row in requests if isinstance(row.get("model"), str)}
+    result = {"exact_selected_model_identity": bool(actual_models) and actual_models.issubset(expected_models), "actual_custom_exec": custom, "actual_fixture_tool_result": actual_effect, "first_exact": first_exact}
     if case in ("official-to-cursor", "cursor-to-official"):
         parent_calls = [call for session in parent for call in session["calls"]]
         child_reads = sum(call["reads_fixture"] for session in children for call in session["calls"])
@@ -272,7 +279,7 @@ def run_case(case, checkout, source_codex, source_user, codex, timeout):
         from catalog_sync import build_codex_catalog
         from catalog import load_policy
         provider = ProviderConfig(id="cursor-subscription", name="Cursor", base_url="", api_key="", upstream_format="chat_completions", tool_protocol="chat_tools",
-                                  models=[ModelConfig(id="gpt-5.6-luna-high", upstream_model="gpt-5.6-luna-high", multi_agent_version="v2")])
+                                  models=[ModelConfig(id="gpt-5.6-luna-high", upstream_model="gpt-5.6-luna-high", multi_agent_version="v2", capabilities_edited=True, supported_reasoning_levels=(), default_reasoning_level=None)])
         provider_path = server / "proxy/config/providers.toml"
         provider_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         save_providers([provider], provider_path)
@@ -354,10 +361,10 @@ def run_case(case, checkout, source_codex, source_user, codex, timeout):
         observer_thread.start()
         parent_model = OFFICIAL_MODEL if case == "official-to-cursor" else CURSOR_MODEL
         child_model = CURSOR_MODEL if case == "official-to-cursor" else OFFICIAL_MODEL
+        reasoning_config = 'model_reasoning_effort="high"\n' if parent_model == OFFICIAL_MODEL else ""
         (client / "config.toml").write_text(f'''model_provider="qualification"
 model={json.dumps(parent_model)}
-model_reasoning_effort="high"
-approval_policy="never"
+{reasoning_config}approval_policy="never"
 sandbox_mode="read-only"
 web_search="disabled"
 model_catalog_json={json.dumps(str(client / 'catalog.json'))}
@@ -409,8 +416,9 @@ unbounded_connection_retries=false
                   'Use text to emit its result. Read only this fixture. Do not modify anything or spawn agents. '
                   'Final response must be exactly the file value, with no markdown and no extra characters.')
         if case in ("official-to-cursor", "cursor-to-official"):
+            child_effort = ", reasoning_effort high" if child_model == OFFICIAL_MODEL else ", omit reasoning_effort because its exact selected ID already fixes the vendor variant"
             prompt = ('This is a controlled cross-provider V2 qualification. Spawn exactly one child named reader, '
-                      f'with model {child_model}, fork_turns none, reasoning_effort high. Parent must never read the fixture. '
+                      f'with model {child_model}, fork_turns none{child_effort}. Parent must never read the fixture. '
                       'Assign the child this plaintext task: use actual Code Mode exec with tools.exec_command to read probe-value.txt and return its exact contents. '
                       'Keep every assignment plaintext; do not set encrypted_function_args and do not encrypt or label text as encrypted_content. '
                       'Wait for the child, then followup_task to the SAME child: read the same fixture again and return its contents reversed. '
