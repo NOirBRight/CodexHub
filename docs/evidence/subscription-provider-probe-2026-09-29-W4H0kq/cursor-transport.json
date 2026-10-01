@@ -1,0 +1,28 @@
+{
+  "transport": "Magpie reference binary using CLI-authenticated Cursor AgentService/Run",
+  "offline": false,
+  "model_route": "cursor/gpt-5.6-luna",
+  "reference_source_mapped_cursor_model_id": "gpt-5.6-luna-high",
+  "reasoning_effort": "high",
+  "wire_model_id_captured": false,
+  "available_model_count": 24,
+  "ordinary_text": {
+    "passed": true,
+    "expected_marker_seen": true
+  },
+  "dynamic_tool": {
+    "passed": true,
+    "name": "fixture_digest",
+    "call_id_correlated": true,
+    "caller_executed_private_fixture_calculation": true
+  },
+  "second_request_history": {
+    "passed": true,
+    "caller_tool_result_reconstructed": true,
+    "digest_verified": true
+  },
+  "tool_result_digest": "4447751369ac7b5326778079ec74b19bcc785d2e1d1caf3754439ae98c86ff4e",
+  "plain_text": "cursor-probe-text-ok",
+  "followup_text": "4447751369ac7b5326778079ec74b19bcc785d2e1d1caf3754439ae98c86ff4e",
+  "selected_model_visible_in_catalog": true
+}

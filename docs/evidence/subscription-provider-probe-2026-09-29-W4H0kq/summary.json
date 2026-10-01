@@ -1,0 +1,166 @@
+{
+  "scope": "isolated live feasibility prototype, not production Provider implementation or complete release qualification",
+  "source_worktree": "/home/noirbright/Workstation/CodexHub-subscription-prototype-W4H0kq",
+  "prototype_branch": "prototype/subscription-provider-probes-W4H0kq",
+  "codex_version": "0.158.0",
+  "cursor_agent_version": "2026.09.28-64d2043",
+  "magpie_version": "0.1.393",
+  "cursor_selected_route": "cursor/gpt-5.6-luna",
+  "reasoning_effort": "high",
+  "cursor_wire_model_id_captured": false,
+  "cursor_wire_model_mapping": "[INFERENCE] Magpie source maps this route/effort to catalog-listed gpt-5.6-luna-high",
+  "passed": [
+    "Cursor text streaming",
+    "Cursor caller-owned dynamic tool and exact result replay",
+    "actual Codex Code Mode over Cursor",
+    "official parent to Cursor child V2 spawn/wait/followup",
+    "Cursor parent to official child V2 spawn/wait/followup",
+    "completed Code Mode history after both backend and Gateway process restart with a fresh caller"
+  ],
+  "recovery": {
+    "live_exact_source_repairs": 4,
+    "distinct_observed_source_calls": 2,
+    "arbitrary_ciphertext_decrypted": false,
+    "source_index_durable": false
+  },
+  "retained_failures": [
+    {
+      "scenario": "V2 restart exact-output case",
+      "observed": "child original/reversed values correct; Cursor parent final and resumed final contain two U+200B characters",
+      "passed": false
+    },
+    {
+      "scenario": "earlier Cursor custom-call envelope",
+      "observed": "did not satisfy input:string wrapper; exact body was not captured, cause unresolved; later successful runs are not a fix claim",
+      "passed": false
+    }
+  ],
+  "claude": {
+    "status": "blocked_by_organization_policy",
+    "message": "Your organization has disabled Claude subscription access for Claude Code \u00b7 Use an Anthropic API key instead, or ask your admin to enable access",
+    "local_gateway_status": 502,
+    "separate_upstream_http_status_captured": false,
+    "oauth_present_unexpired_with_inference_scope": true,
+    "models_checked": [
+      "claude/claude-sonnet-5-5",
+      "claude/claude-sonnet-4-5"
+    ],
+    "direct_official_cli_control_failed": true,
+    "tools_history_cancellation_qualified": false
+  },
+  "catalog": {
+    "cursor_raw_ids": 246,
+    "reference_grouped_families": 68,
+    "reference_default_exports": 24,
+    "product_must_not_copy_export_cap": true
+  },
+  "cancellation": "Caller disconnected before completion; bridge stayed healthy. No upstream cancellation acknowledgement or billing-stop proof.",
+  "not_qualified": [
+    "all discovered models",
+    "all Gateway clients/protocols/platforms",
+    "expired authentication/account changes",
+    "opaque-only old task reconstruction or safe replay of prior side effects",
+    "durable in-flight agents",
+    "vendor authorization"
+  ],
+  "cleanup": {
+    "private_runtime_directories_removed": [
+      "codex-runtime",
+      "cursor-runtime",
+      "claude-runtime"
+    ],
+    "copied_credentials_and_raw_probe_logs_removed": true,
+    "checked_loopback_ports": [
+      3487,
+      34037,
+      34791,
+      35189,
+      35399,
+      36743,
+      37147,
+      37649,
+      38147,
+      38627,
+      40203,
+      40781,
+      41483,
+      42753,
+      45611,
+      45903
+    ],
+    "remaining_listeners_on_checked_ports": 0,
+    "source_worktree_retained": "/home/noirbright/Workstation/CodexHub-subscription-prototype-W4H0kq",
+    "production_configuration_changed_by_probe": false,
+    "account_switch_or_api_key_fallback_performed": false
+  },
+  "evidence": [
+    {
+      "file": "official-code-mode.json",
+      "sha256": "3204f4a5f3411a7b8cca299aad8625b07ac14d0516434da10c705641c3ca9c8a"
+    },
+    {
+      "file": "cursor-code-mode.json",
+      "sha256": "a192d099c30909a1aca280fe4fca1a86a9fbb01c6fa075573e522f12ee7e1c76"
+    },
+    {
+      "file": "official-to-cursor.json",
+      "sha256": "3829d74b6b9e121842584a9abce7783d05f8b52fdc2ff2f4dd0bb06010f20a3b"
+    },
+    {
+      "file": "official-to-cursor-lifecycle.json",
+      "sha256": "3b04507b154835605455e6666edf3aa43a17f1495a7b62f2f096ebcb875afb54"
+    },
+    {
+      "file": "cursor-to-official.json",
+      "sha256": "099c600ee4f1a08013082bac1f0534b33a18abd696f5d05bfec347b3684d827c"
+    },
+    {
+      "file": "cursor-to-official-lifecycle.json",
+      "sha256": "94d93a4f76d0ae0c2c04d6e7b3284b9ead701414e18124a78845211c74b4f474"
+    },
+    {
+      "file": "cursor-backend-restart.json",
+      "sha256": "176ed26cfa258ed90a73177deeb2f9f35145416b6741017bfa1f28bad7b0d25d"
+    },
+    {
+      "file": "cursor-v2-restart-exact-output-failure.json",
+      "sha256": "6c0e180cb74011aab58643f93ee95add0e5101aceb93c94fadd8d85a6c0584d8"
+    },
+    {
+      "file": "cursor-v2-restart-lifecycle.json",
+      "sha256": "0a37bc8c502719d79899962e8460408e6d26ac63d2d85161e2c3c76b894c2220"
+    },
+    {
+      "file": "live-recovery.json",
+      "sha256": "b2e86ef312f19fd7a8c8cc61ea62ac7c1bd60a7d317513a2264774026b42e88e"
+    },
+    {
+      "file": "offline-boundaries.json",
+      "sha256": "8b7f7d2492731d99dec86d70f6f4c1954a579eb11454cf117da521387d68fbc7"
+    },
+    {
+      "file": "baseline.json",
+      "sha256": "009b5b0570f2f69df526bf680021d4338f87c0b18ebfb930e9e9d78e0caa8509"
+    },
+    {
+      "file": "cursor-transport.json",
+      "sha256": "1c7f970a46c06d2212328d4391465c4804bf5d7a3dc26fe22608432aa1f653a8"
+    },
+    {
+      "file": "cursor-cancellation.json",
+      "sha256": "4180e2b29e672bbd481f4fe1a36907b0deed08c194b338bf7bc49788681539c1"
+    },
+    {
+      "file": "cursor-model-catalog.json",
+      "sha256": "de0489ca71d75b6dca41cc5cc3067cd7f21b42e39b0154a5553ff50d61e8041d"
+    },
+    {
+      "file": "claude-blocker.jsonl",
+      "sha256": "e0bc2ac7eeee5f45b65fa06baf34f805702acee48afe0355a5a05bfd1e771553"
+    },
+    {
+      "file": "cleanup.json",
+      "sha256": "3f00b000ae94585f683b8c3e66e2e925150720b402feea2b3a367319ede5df77"
+    }
+  ]
+}

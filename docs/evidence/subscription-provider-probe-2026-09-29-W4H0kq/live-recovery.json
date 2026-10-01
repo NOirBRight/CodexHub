@@ -1,0 +1,50 @@
+{
+  "scope": "live recovery source excerpts from isolated fixture-only sessions",
+  "recovery_operations": 4,
+  "distinct_source_calls": 2,
+  "source_calls": [
+    {
+      "type": "custom_tool_call",
+      "name": "exec",
+      "call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075",
+      "input": "const r = await tools.collaboration__send_message({target: \"/root\", message: \"probe-value.txt exact contents: 03896df17d76de42bfd716af (cat output included trailing newline).\"}); text(r);"
+    },
+    {
+      "type": "custom_tool_call",
+      "name": "exec",
+      "call_id": "call_DyZ2eQEHqxsVngJR3XExNWfn__fc_0c2350b5c0751b3f016abbecf1393887d1a39f44f5e53a53f9",
+      "input": "const r = await tools.collaboration__send_message({target: \"/root\", message: \"Bytes are b'03896df17d76de42bfd716af\\\\n'. Character-by-character reverse is repr '\\\\nfa617dfb24ed67d71fd69830' \u2014 i.e. leading newline followed by fa617dfb24ed67d71fd69830.\"}); text(r);"
+    }
+  ],
+  "recoveries": [
+    {
+      "source_call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075",
+      "author": "/root/reader",
+      "recipient": "/root",
+      "message_sha256": "677035f7306c563d4c0eed7ba096b0351bd95dd1ba9ad00bf70b615c069c144b",
+      "basis": "exact literal from observed parent call, same author and recipient"
+    },
+    {
+      "source_call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075",
+      "author": "/root/reader",
+      "recipient": "/root",
+      "message_sha256": "677035f7306c563d4c0eed7ba096b0351bd95dd1ba9ad00bf70b615c069c144b",
+      "basis": "exact literal from observed parent call, same author and recipient"
+    },
+    {
+      "source_call_id": "call_8n36fP6xy4rzIszdVDCleEBF__fc_0dc7d96b57090adb016abbece4820487d1a3d3ea02f380f075",
+      "author": "/root/reader",
+      "recipient": "/root",
+      "message_sha256": "677035f7306c563d4c0eed7ba096b0351bd95dd1ba9ad00bf70b615c069c144b",
+      "basis": "exact literal from observed parent call, same author and recipient"
+    },
+    {
+      "source_call_id": "call_DyZ2eQEHqxsVngJR3XExNWfn__fc_0c2350b5c0751b3f016abbecf1393887d1a39f44f5e53a53f9",
+      "author": "/root/reader",
+      "recipient": "/root",
+      "message_sha256": "10b1e3d13cbdf50f1322c60665ab73840128af9495335727291a3e2b23cfb375",
+      "basis": "exact literal from observed parent call, same author and recipient"
+    }
+  ],
+  "unknown_ciphertext_decrypted": false
+}

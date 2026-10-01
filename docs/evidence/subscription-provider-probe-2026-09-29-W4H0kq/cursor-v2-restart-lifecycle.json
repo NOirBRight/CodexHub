@@ -1,0 +1,97 @@
+{
+  "scope": "isolated current-client rollout evidence, not a new model run",
+  "sessions": [
+    {
+      "actor": "/root/reader",
+      "models": [
+        "gpt-6-astra"
+      ],
+      "task_message_parts": [
+        [
+          "input_text"
+        ],
+        [
+          "input_text"
+        ]
+      ],
+      "calls": [
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": "functions",
+          "call_id": "call_glPKmiVZXqr9evQZNJlyjwPG",
+          "plaintext_args_marker": null,
+          "reads_fixture": true
+        },
+        {
+          "type": "custom_tool_call",
+          "name": "exec",
+          "namespace": "functions",
+          "call_id": "call_flp5glyhSfUl54fILQ4LKIwZ",
+          "plaintext_args_marker": null,
+          "reads_fixture": true
+        }
+      ],
+      "tool_results_with_fixture_value": 1,
+      "tool_results_with_reversed_fixture_value": 1,
+      "assistant_returned_value": true,
+      "assistant_returned_reversed_value": true,
+      "raw_rollout_sha256": "a5935812d1b9e5a00d929f21728341dc5ea291bac18d648290cab7056d7e0d20"
+    },
+    {
+      "actor": "/root",
+      "models": [
+        "cursor-probe/cursor/gpt-5.6-luna"
+      ],
+      "task_message_parts": [
+        [
+          "input_text"
+        ],
+        [
+          "input_text"
+        ]
+      ],
+      "calls": [
+        {
+          "type": "function_call",
+          "name": "spawn_agent",
+          "namespace": "collaboration",
+          "call_id": "call_1YBsXnkgm5Km02xt5SUdiKjF__fc_0b750781d764ad7b016abbedcd9f1887d1a5b7cead03e5ea18",
+          "plaintext_args_marker": [],
+          "reads_fixture": false
+        },
+        {
+          "type": "function_call",
+          "name": "wait_agent",
+          "namespace": "collaboration",
+          "call_id": "call_jgKYwKXoN8ns8lZUKMojgYmI__fc_05a2a36bf8ba8aec016abbedd2979887d1973f4622d07f949b",
+          "plaintext_args_marker": [],
+          "reads_fixture": false
+        },
+        {
+          "type": "function_call",
+          "name": "followup_task",
+          "namespace": "collaboration",
+          "call_id": "call_jj0y500uOVeAoIX1FhgfQsCK__fc_0539cc5967c99a0c016abbeddbd5d487d1929d4186683cce40",
+          "plaintext_args_marker": [],
+          "reads_fixture": false
+        },
+        {
+          "type": "function_call",
+          "name": "wait_agent",
+          "namespace": "collaboration",
+          "call_id": "call_UBHT5oyic37e9OaMZOh9l2q9__fc_0882b6c6563d949e016abbeddf0f1887d18a4cd16bca495192",
+          "plaintext_args_marker": [],
+          "reads_fixture": false
+        }
+      ],
+      "tool_results_with_fixture_value": 0,
+      "tool_results_with_reversed_fixture_value": 0,
+      "assistant_returned_value": true,
+      "assistant_returned_reversed_value": false,
+      "raw_rollout_sha256": "a0191e4b484dd0a81c72c4a992932aa12f854602c225beca2b6fc881b6a23cd3"
+    }
+  ],
+  "parent_did_not_read_fixture": true,
+  "child_executed_and_returned_both_results": true
+}
