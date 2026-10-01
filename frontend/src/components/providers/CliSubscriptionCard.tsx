@@ -34,6 +34,7 @@ export function CliSubscriptionCard({ provider, onChange }: { provider: Provider
       <SwitchControl checked={provider.enabled} disabled={!canEnableCliSubscription(provider)} label={t("providers.cliEnabled")} onChange={(enabled) => onChange({ ...provider, enabled })} />
     </div>
     <p>{t("providers.cliNotQualified")}</p>
+    <p>{t("providers.cliParameterLimits")}</p>
     {provider.id === "claude-subscription" ? <>
       <p>{t("providers.claudeCliAdaptation")}</p>
       <label className="flex items-start gap-2">

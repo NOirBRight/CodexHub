@@ -530,6 +530,7 @@ const zhCN = {
     cliCurrentAccount: "使用当前官方 CLI 登录账号。登录、刷新和切换账号由官方 CLI 管理。点击模型发现可将完整模型列表加入此工作区。",
     cliEnabled: "启用 Provider",
     cliNotQualified: "模型发现不代表生成权限或实测通过。文本与工具请求通过 Gateway；工具由调用方执行。",
+    cliParameterLimits: "当前不支持输出 token 上限和采样参数。需要 max_tokens 的 Anthropic Messages 请求暂时无法使用此通道。",
     claudeCliAdaptation: "Claude CLI 适配：调用方的 system 指令会放入 CLI 的 user 上下文，原生 system 消息优先级不会保留。高级 Code Mode 与协作行为属于尽力兼容。",
     claudeCliConsent: "我理解并接受以上上下文适配，允许启用 Claude Subscription。",
     cliState: {

@@ -531,6 +531,7 @@ const enUS = {
     cliCurrentAccount: "Uses the current official CLI account. The official CLI owns login, refresh, and account changes. Use model discovery to add the full list to this workspace.",
     cliEnabled: "Enable Provider",
     cliNotQualified: "Model listing does not prove generation permission or live qualification. Requests use Gateway; the caller executes tools.",
+    cliParameterLimits: "Output-token limits and sampling controls are currently unsupported. Anthropic Messages requests requiring max_tokens cannot use this transport yet.",
     claudeCliAdaptation: "Claude CLI adaptation: caller system instructions travel in CLI user context without native system-message priority. Advanced Code Mode and collaboration are best effort.",
     claudeCliConsent: "I understand and accept this context adaptation and allow Claude Subscription to be enabled.",
     cliState: {
