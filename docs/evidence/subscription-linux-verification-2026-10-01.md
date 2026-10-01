@@ -42,6 +42,43 @@ invocation; no runtime-resolution code or assertion was changed.
 
 Clippy `--locked --all-targets -- -D warnings`: **passed**, 8.12 seconds.
 
+## Integrated source and final core gate
+
+Production source `e9449930e3cc6e5c8812a2862471b1ca88c36a5d` adds the scoped
+Official compatibility alias/SSE inverse and fixed safe Cursor transport stage
+errors. Standards and Spec delta reviews found no actionable production
+regression. Integrated focused public-seam checks: **136 passed**, 2.78 seconds.
+
+The complete core run at this source found one remaining old issue-509 test
+requiring an unchanged upstream namespace name: 3,883 passed, one failed, 201
+skipped, 283 subtests passed, 234.95 seconds. Its corrected test retains the
+namespace structure, complete declaration schema and all six inverse-context
+handlers; it now expects the reviewed plaintext namespace alias. No production
+source was changed. Its associated tests passed: **47**, 0.38 seconds. Both
+review axes approved this test/evidence-only delta.
+
+Final candidate `2f2e6e840cb1ee1143f275b3efae5e666e34a02c` complete Python core:
+**3,884 passed, zero failed, 201 skipped and 283 subtests passed**, 242.59 seconds.
+Partition completeness at the unchanged production source: 4,249 total tests,
+4,085 core, 164 synthetic, disjoint and complete. The excluded synthetic
+real-client surface did not change in this campaign; its Windows watchdog
+suite was not substituted with Linux skips.
+
+On exact clean production source `e9449930`, the bounded real Responses
+tool/result/Gateway-restart probe passed all three cases in 18.16 seconds.
+The bounded Official-parent → Cursor-child V2/followup/restart probe passed in
+72.996 seconds, with 15 HTTP200 and only plaintext child task parts. Both
+snapshots and private account trees were removed. Earlier failures remain
+historical records with their original source identity; the old 502 cause is
+unknown. Earlier Code Mode/opposite-direction successes retain their own
+source snapshots, rather than being relabelled as same-SHA qualification.
+
+Remaining acceptance is explicit: Messages native output-budget mapping,
+authoritative opaque-assignment recovery/unrelated old opaque history, Claude
+inference permission, after-first-text cancellation evidence, and same-SHA
+Windows qualification. This successful local matrix is not full Provider or
+dual-platform release acceptance.
+
 ## Manual Provider workspace
 
 The real Rust web bridge and frontend ran against isolated application/config

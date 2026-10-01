@@ -72,3 +72,14 @@ a bounded classification. Ordinary declared function metadata is also retained.
 The final targeted followup selection passed **781 tests and 113 subtests**,
 including repository entry/seam/module gates. This is local public-seam evidence,
 not qualification of the live Provider restart or sealed-task recovery paths.
+
+The subsequent actual Codex 0.159.3 compatibility-route correction and
+[bounded Official → Cursor V2 probe](subscription-official-cursor-e9449930-2026-10-01/README.md)
+passed on exact source `e9449930`, including same-child followup, actual Code
+Mode reads, Gateway restart and fresh-caller completed history. The earlier
+[Cursor → Official/Code Mode passes](subscription-codemode-v2-e13e2fd0-2026-10-01.md)
+remain tied to `e13e2fd0`; no same-SHA four-case claim is made. Source prevention
+is now exercised through both real directions. This does not implement the
+authoritative old-assignment recovery or unrelated historical ciphertext
+handling described above. The final Linux engineering results are recorded
+in [the local verification record](subscription-linux-verification-2026-10-01.md).
