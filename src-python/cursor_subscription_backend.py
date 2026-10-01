@@ -18,6 +18,7 @@ import re
 import shutil
 import socket
 import ssl
+import subprocess
 import threading
 import tempfile
 import time
@@ -76,7 +77,7 @@ def load_cursor_account(*, source_home: Path | None = None, environ: Mapping[str
         raise BackendError("cli-missing", "Install the official Cursor CLI before using this Provider.", 503)
     try:
         binary = concrete_executable(Path(candidate).absolute(), "cursor-agent").resolve()
-    except (OSError, ValueError):
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         raise BackendError("cli-missing", "The official Cursor CLI could not be resolved.", 503) from None
     # Official installers use versions/<date-hash>/{cursor-agent,node}. Never
     # claim an invented fallback version when an unsupported install is found.
@@ -354,6 +355,8 @@ def _agent_url(account: CursorAccount, factory: Callable[..., Any], cancel: thre
         config = json.loads(body)
         # Privacy mode must use the privacy endpoint, never agentn fallback.
         raw = config["agentUrlConfig"]["agentUrl"]
+        if not isinstance(raw, str):
+            raise ValueError()
         target = urlsplit(raw)
         host = target.hostname or ""
         if (target.scheme != "https" or target.username or target.password or target.port not in (None, 443)
@@ -422,6 +425,8 @@ def _decode_call_id(caller: str) -> str:
 
 
 def _conversation(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    if payload.get("n") not in (None, 1):
+        raise BackendError("unsupported-parameter", "Cursor supports one generated choice per request.", 400)
     tools = []
     names = set()
     supplied_tools = payload.get("tools") or []
@@ -470,6 +475,8 @@ def _conversation(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], lis
         if not isinstance(item, dict):
             raise _invalid()
         role = item.get("role")
+        if item.get("refusal"):
+            raise BackendError("unsupported-content", "Cursor cannot safely preserve typed refusal history.", 400)
         if role == "tool":
             call_id = item.get("tool_call_id")
             if not isinstance(call_id, str) or call_id not in pending:
@@ -635,7 +642,7 @@ def stream_chat(payload: Mapping[str, Any], *, cancel: threading.Event, timeout:
                                     raise wire.malformed()
                                 finish = bool(listed and calls == listed)
                     elif key == 4:
-                        request_id = wire.get(body, 1, 0)
+                        request_id = wire.integer(body, 1)
                         for operation, detail in wire.fields(body):
                             if operation == 2:
                                 blob_id = wire.get(detail, 1)
@@ -644,7 +651,7 @@ def stream_chat(payload: Mapping[str, Any], *, cancel: threading.Event, timeout:
                             elif operation == 3:
                                 stream.send(wire.frame(wire.binary(3, wire.number(1, request_id) + wire.binary(3, b""))))
                     elif key == 2:
-                        request_id = wire.get(body, 1, 0)
+                        request_id = wire.integer(body, 1)
                         exec_id = wire.text(body, 15)
                         recognized = False
                         for operation, detail in wire.fields(body):

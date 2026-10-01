@@ -66,6 +66,8 @@ def string(field: int, value: str) -> bytes:
 
 
 def fields(data: bytes) -> list[tuple[int, int | bytes]]:
+    if not isinstance(data, bytes) or len(data) > MAX_BYTES:
+        raise malformed()
     out = []
     at = 0
     def read_varint() -> int:
@@ -106,6 +108,13 @@ def fields(data: bytes) -> list[tuple[int, int | bytes]]:
 
 def get(data: bytes, field: int, default: Any = b"") -> Any:
     return next((value for key, value in fields(data) if key == field), default)
+
+
+def integer(data: bytes, field: int) -> int:
+    value = get(data, field, 0)
+    if not isinstance(value, int):
+        raise malformed()
+    return value
 
 
 def text(data: bytes, field: int) -> str:

@@ -417,3 +417,20 @@ def test_cli_version_fallback_runs_with_empty_private_configuration(tmp_path):
                                                              "ANTHROPIC_API_KEY": "private-key", "HTTP_PROXY": "http://gateway.invalid"})
     assert lease.version == "2026.09.28-64d2043"
     assert lease.token == "official-token"
+
+
+@pytest.mark.parametrize("config", [{"agentUrlConfig": {"agentUrl": 42}}, {"agentUrlConfig": []}, []])
+def test_malformed_configuration_is_bounded(tmp_path, config):
+    transport = Transport([], config=config)
+    # Empty config is distinct from the Transport fixture default.
+    transport.config = config
+    with pytest.raises(BackendError) as error:
+        list(run(account(tmp_path), transport))
+    assert error.value.code == "upstream-configuration-error"
+
+
+def test_wrong_wire_type_is_bounded(tmp_path):
+    transport = Transport([framed(pb(4, pb(1, "wrong-request-id") + pb(2, pb(1, "hash"))))])
+    with pytest.raises(BackendError) as error:
+        list(run(account(tmp_path), transport))
+    assert error.value.code == "upstream-protocol-error"
