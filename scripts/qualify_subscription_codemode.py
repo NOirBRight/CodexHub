@@ -235,6 +235,7 @@ def parse_turn(stdout, child, timed_out, nonce):
 
 def run_case(case, checkout, source_codex, source_user, codex, timeout):
     """Run one disposable production candidate; cleanup includes raw accounts/logs."""
+    case_started = time.monotonic()
     from claude_native_models import concrete_executable
     cursor = shutil.which("cursor-agent")
     if not cursor:
@@ -417,7 +418,6 @@ unbounded_connection_retries=false
                       'Final response must be exactly two lines: first original file contents, then reversed contents, with no extra characters.')
         caller = None
         failure = None
-        case_started = time.monotonic()
         try:
             gateway = start_gateway()
             for turn in range(2 if case != "code-mode" else 1):
@@ -432,16 +432,24 @@ unbounded_connection_retries=false
                                "Without reading any file, using any tool, or spawning/reissuing an agent, return the exact original fixture value from our completed previous turn reversed. No extra characters."]
                 else:
                     command = [str(codex), "exec", "--json", "--skip-git-repo-check", "--ignore-rules", "-C", str(fixture), prompt]
-                caller = subprocess.Popen(command, env=client_env, cwd=fixture, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                          text=True, encoding="utf-8", start_new_session=os.name != "nt")
-                timed_out = False
-                try:
-                    stdout, _stderr = caller.communicate(timeout=max(.1, remaining))
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-                    stop_process(caller)
-                    stdout, _stderr = caller.communicate(timeout=5)
-                turns.append(parse_turn(stdout, caller, timed_out, nonce))
+                remaining = timeout - (time.monotonic() - case_started)
+                if remaining <= 0:
+                    raise ValueError("case-budget-exhausted")
+                capture = runtime / f"caller-{turn}.jsonl"
+                with capture.open("wb") as output:
+                    caller = subprocess.Popen(command, env=client_env, cwd=fixture, stdout=output, stderr=subprocess.DEVNULL,
+                                              start_new_session=os.name != "nt")
+                    timed_out = False
+                    try:
+                        caller.wait(timeout=max(.1, remaining))
+                    except subprocess.TimeoutExpired:
+                        timed_out = True
+                        stop_process(caller)
+                with capture.open("rb") as captured:
+                    data = captured.read(MAX_CAPTURE + 1)
+                if len(data) > MAX_CAPTURE:
+                    raise ValueError("caller-capture-size-exceeded")
+                turns.append(parse_turn(data.decode("utf-8"), caller, timed_out, nonce))
                 if caller.returncode:
                     break
             sessions = summarize_rollouts((client / "sessions").rglob("*.jsonl"), nonce)
