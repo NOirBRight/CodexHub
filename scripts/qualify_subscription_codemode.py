@@ -609,26 +609,32 @@ def main(argv=None):
     report = {"scope": "isolated actual Codex and production Gateway; passive byte-preserving observer; no injected codec", "candidate_sha": sha,
               "codex_version": version, "case_timeout_seconds": args.case_timeout, "total_timeout_seconds": args.total_timeout,
               "platform": sys.platform, "cases": []}
+    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all", "--", "src-python", "config", "model-catalogs"],
+                            cwd=args.checkout, capture_output=True, text=True, timeout=5)
+    report["source_runtime_dirty"] = status.returncode != 0 or bool(status.stdout.strip())
+    report["candidate_sha_is_exact_runtime"] = not report["source_runtime_dirty"]
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="codexhub-codemode-candidate-") as frozen:
-        snapshot = Path(frozen)
-        report["runtime_snapshot_sha256"] = freeze_candidate(args.checkout.resolve(), snapshot)
-        dirty = subprocess.run(["git", "status", "--porcelain", "--", "src-python", "config", "model-catalogs"], cwd=args.checkout, capture_output=True, text=True, timeout=5, check=True).stdout
-        report["source_runtime_dirty"] = bool(dirty.strip())
-        report["candidate_sha_is_exact_runtime"] = not report["source_runtime_dirty"]
-        sys.path.insert(0, str(snapshot / "src-python"))
-        for case in selected_cases:
-            remaining = args.total_timeout - (time.monotonic() - started)
-            if remaining <= 0:
-                report["budget_exhausted"] = True
-                break
-            try:
-                report["cases"].append(run_case(case, snapshot, args.source_codex_home, args.source_user_home,
-                                                 args.codex.resolve(), min(args.case_timeout, remaining)))
-            except Exception as error:
-                report["cases"].append({"case": case, "checks": {"passed": False}, "failure_class": type(error).__name__})
-    report["snapshot_tree_removed"] = not snapshot.exists()
-    report["passed"] = report["snapshot_tree_removed"] and bool(report["cases"]) and all(case["checks"]["passed"] for case in report["cases"]) and not report.get("budget_exhausted")
+    if not report["candidate_sha_is_exact_runtime"]:
+        report["cases"].append({"case": "candidate.admission", "checks": {"passed": False},
+                                "failure_class": "candidate-runtime-not-clean"})
+        report["snapshot_tree_removed"] = True  # no snapshot or account/process admission
+    else:
+        with tempfile.TemporaryDirectory(prefix="codexhub-codemode-candidate-") as frozen:
+            snapshot = Path(frozen)
+            report["runtime_snapshot_sha256"] = freeze_candidate(args.checkout.resolve(), snapshot)
+            sys.path.insert(0, str(snapshot / "src-python"))
+            for case in selected_cases:
+                remaining = args.total_timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    report["budget_exhausted"] = True
+                    break
+                try:
+                    report["cases"].append(run_case(case, snapshot, args.source_codex_home, args.source_user_home,
+                                                     args.codex.resolve(), min(args.case_timeout, remaining)))
+                except Exception as error:
+                    report["cases"].append({"case": case, "checks": {"passed": False}, "failure_class": type(error).__name__})
+        report["snapshot_tree_removed"] = not snapshot.exists()
+    report["passed"] = report["candidate_sha_is_exact_runtime"] and report["snapshot_tree_removed"] and bool(report["cases"]) and all(case["checks"]["passed"] for case in report["cases"]) and not report.get("budget_exhausted")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps({"passed": report["passed"], "cases": [{"case": case["case"], "checks": case["checks"], "failure_class": case.get("failure_class")} for case in report["cases"]]}))

@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -88,6 +89,35 @@ def test_private_rollout_summary_proves_child_execution_with_call_identity(tmp_p
 def test_harness_rejects_unbounded_timeout_before_any_run(tmp_path):
     with pytest.raises(SystemExit):
         qualification.main(["--case-timeout", "181", "--output", str(tmp_path / "result.json")])
+
+
+@pytest.mark.parametrize("change", ["staged", "unstaged", "untracked"])
+def test_advanced_main_rejects_dirty_runtime_before_snapshot_or_cases(tmp_path, monkeypatch, change):
+    source = tmp_path / "source"
+    runtime = source / "src-python"
+    runtime.mkdir(parents=True)
+    (runtime / "candidate.txt").write_text("committed")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "-c", "user.name=Qualification Fixture",
+                    "-c", "user.email=fixture@example.invalid", "commit", "-qm", "candidate"], check=True)
+    (runtime / ("new.py" if change == "untracked" else "candidate.txt")).write_text("uncommitted")
+    if change == "staged":
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+
+    def unreachable(*args, **kwargs):
+        pytest.fail("dirty runtime must fail before snapshot, accounts, or case execution")
+
+    monkeypatch.setattr(qualification, "freeze_candidate", unreachable)
+    monkeypatch.setattr(qualification, "run_case", unreachable)
+    output = tmp_path / "result.json"
+    assert qualification.main(["--checkout", str(source), "--codex", sys.executable,
+                               "--case", "code-mode", "--output", str(output)]) == 1
+    report = json.loads(output.read_text())
+    assert report["source_runtime_dirty"] and not report["candidate_sha_is_exact_runtime"]
+    assert not report["passed"] and report["snapshot_tree_removed"]
+    assert report["cases"] == [{"case": "candidate.admission", "checks": {"passed": False},
+                                "failure_class": "candidate-runtime-not-clean"}]
 
 
 
