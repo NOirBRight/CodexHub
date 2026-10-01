@@ -8,6 +8,7 @@ import gateway_compat
 import gateway_errors
 import gateway_events
 import gateway_stream_semantics
+from gateway_compat.collaboration_delivery import ALIAS, CONTEXT_KEY
 from collaboration_runtime_contract import (
     COLLABORATION_V1, COLLABORATION_V2, EXPECTED_PARAMETER_SCHEMAS,
 )
@@ -67,7 +68,14 @@ def test_native_collaboration_continuation_preserves_call_and_result(version, na
          "output": RESULTS.get(name, "")},
     ]
     prepared, context = prepare([declaration], history)
-    assert prepared["tools"] == [declaration]
+    expected_declaration = copy.deepcopy(declaration)
+    if version == COLLABORATION_V2:
+        expected_declaration["name"] = ALIAS
+        for child in expected_declaration["tools"]:
+            if child["name"] in {"spawn_agent", "send_message", "followup_task"}:
+                child["parameters"]["properties"]["message"].pop("encrypted")
+        assert set(context[CONTEXT_KEY]) == set(EXPECTED_PARAMETER_SCHEMAS[version])
+    assert prepared["tools"] == [expected_declaration]
     assert prepared["input"] == history
     assert context["collaboration_protocol"] == version
     assert "_chat_official_v2_name_map" not in context

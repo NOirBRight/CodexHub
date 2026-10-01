@@ -1,0 +1,817 @@
+{
+  "declaration_capture": {
+    "scope": "no-account empty-home actual CLI first-request loopback capture; synthetic HTTP400, zero vendor requests",
+    "client_version": "codex-cli 0.159.3",
+    "elapsed_seconds": 0.86,
+    "private_tree_removed": true,
+    "actual_native_namespace": {
+      "type": "namespace",
+      "name": "collaboration",
+      "description": "sanitized",
+      "tools": [
+        {
+          "type": "function",
+          "name": "followup_task",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "description": "sanitized",
+                "encrypted": true
+              },
+              "target": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "target",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "interrupt_agent",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "target": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "target"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "list_agents",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path_prefix": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "send_message",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "description": "sanitized",
+                "encrypted": true
+              },
+              "target": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "target",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "spawn_agent",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "fork_turns": {
+                "type": "string",
+                "description": "sanitized"
+              },
+              "message": {
+                "type": "string",
+                "description": "sanitized",
+                "encrypted": true
+              },
+              "model": {
+                "type": "string",
+                "description": "sanitized"
+              },
+              "reasoning_effort": {
+                "type": "string",
+                "description": "sanitized"
+              },
+              "task_name": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "task_name",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "wait_agent",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "timeout_ms": {
+                "type": "number",
+                "description": "sanitized"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    "production_make_messages_portable_changed": true,
+    "portable_handler_names": [
+      "followup_task",
+      "interrupt_agent",
+      "list_agents",
+      "send_message",
+      "spawn_agent",
+      "wait_agent"
+    ],
+    "classification": "collaboration_v2",
+    "classification_failure": null,
+    "methods": [
+      {
+        "name": "followup_task",
+        "observed_properties": [
+          "message",
+          "target"
+        ],
+        "expected_properties": [
+          "message",
+          "target"
+        ],
+        "observed_required": [
+          "target",
+          "message"
+        ],
+        "expected_required": [
+          "target",
+          "message"
+        ],
+        "exact_structural_equal_without_descriptions": true,
+        "observed_schema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string",
+              "description": "sanitized",
+              "encrypted": true
+            },
+            "target": {
+              "type": "string",
+              "description": "sanitized"
+            }
+          },
+          "required": [
+            "target",
+            "message"
+          ],
+          "additionalProperties": false
+        },
+        "expected_schema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string",
+              "encrypted": true
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "interrupt_agent",
+        "observed_properties": [
+          "target"
+        ],
+        "expected_properties": [
+          "target"
+        ],
+        "observed_required": [
+          "target"
+        ],
+        "expected_required": [
+          "target"
+        ],
+        "exact_structural_equal_without_descriptions": true,
+        "observed_schema": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string",
+              "description": "sanitized"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "additionalProperties": false
+        },
+        "expected_schema": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_agents",
+        "observed_properties": [
+          "path_prefix"
+        ],
+        "expected_properties": [
+          "path_prefix"
+        ],
+        "observed_required": null,
+        "expected_required": [],
+        "exact_structural_equal_without_descriptions": false,
+        "observed_schema": {
+          "type": "object",
+          "properties": {
+            "path_prefix": {
+              "type": "string",
+              "description": "sanitized"
+            }
+          },
+          "additionalProperties": false
+        },
+        "expected_schema": {
+          "type": "object",
+          "properties": {
+            "path_prefix": {
+              "type": "string"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "send_message",
+        "observed_properties": [
+          "message",
+          "target"
+        ],
+        "expected_properties": [
+          "message",
+          "target"
+        ],
+        "observed_required": [
+          "target",
+          "message"
+        ],
+        "expected_required": [
+          "target",
+          "message"
+        ],
+        "exact_structural_equal_without_descriptions": true,
+        "observed_schema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string",
+              "description": "sanitized",
+              "encrypted": true
+            },
+            "target": {
+              "type": "string",
+              "description": "sanitized"
+            }
+          },
+          "required": [
+            "target",
+            "message"
+          ],
+          "additionalProperties": false
+        },
+        "expected_schema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string",
+              "encrypted": true
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "spawn_agent",
+        "observed_properties": [
+          "fork_turns",
+          "message",
+          "model",
+          "reasoning_effort",
+          "task_name"
+        ],
+        "expected_properties": [
+          "agent_type",
+          "fork_turns",
+          "message",
+          "model",
+          "reasoning_effort",
+          "task_name"
+        ],
+        "observed_required": [
+          "task_name",
+          "message"
+        ],
+        "expected_required": [
+          "task_name",
+          "message"
+        ],
+        "exact_structural_equal_without_descriptions": false,
+        "observed_schema": {
+          "type": "object",
+          "properties": {
+            "fork_turns": {
+              "type": "string",
+              "description": "sanitized"
+            },
+            "message": {
+              "type": "string",
+              "description": "sanitized",
+              "encrypted": true
+            },
+            "model": {
+              "type": "string",
+              "description": "sanitized"
+            },
+            "reasoning_effort": {
+              "type": "string",
+              "description": "sanitized"
+            },
+            "task_name": {
+              "type": "string",
+              "description": "sanitized"
+            }
+          },
+          "required": [
+            "task_name",
+            "message"
+          ],
+          "additionalProperties": false
+        },
+        "expected_schema": {
+          "type": "object",
+          "properties": {
+            "agent_type": {
+              "type": "string"
+            },
+            "fork_turns": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string",
+              "encrypted": true
+            },
+            "model": {
+              "type": "string"
+            },
+            "reasoning_effort": {
+              "type": "string"
+            },
+            "task_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "task_name",
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "wait_agent",
+        "observed_properties": [
+          "timeout_ms"
+        ],
+        "expected_properties": [
+          "timeout_ms"
+        ],
+        "observed_required": null,
+        "expected_required": [],
+        "exact_structural_equal_without_descriptions": false,
+        "observed_schema": {
+          "type": "object",
+          "properties": {
+            "timeout_ms": {
+              "type": "number",
+              "description": "sanitized"
+            }
+          },
+          "additionalProperties": false
+        },
+        "expected_schema": {
+          "type": "object",
+          "properties": {
+            "timeout_ms": {
+              "type": "number"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "synthetic_inverse_namespace": "collaboration",
+    "synthetic_inverse_encryption_marker": []
+  },
+  "synthetic_metadata_diagnostic": {
+    "scope": "actual CLI empty-home loopback-only synthetic alias/native inverse; no account, no vendor, no inference/tool-execution qualification",
+    "client_version": "codex-cli 0.159.3",
+    "elapsed_seconds": 0.922,
+    "inverse_namespace": "collaboration",
+    "inverse_encrypted_function_args": [],
+    "child_request_observed": true,
+    "observations": [
+      {
+        "model": "gpt-6-astra",
+        "agent_messages": []
+      },
+      {
+        "model": "gpt-6-astra",
+        "agent_messages": []
+      },
+      {
+        "model": "cursor-subscription/gpt-5.6-luna-high",
+        "agent_messages": [
+          {
+            "author_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+            "recipient_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+            "part_types": [
+              "input_text"
+            ],
+            "literal_in_plaintext": false,
+            "literal_mislabelled_encrypted": false,
+            "actual_ciphertext_present": false
+          }
+        ]
+      }
+    ],
+    "private_tree_removed": true,
+    "scope_limit": "The task may be wrapped by the CLI: exact-part-equality was false and raw parts were cleaned. Only recorded task-part types and no-encrypted-content are asserted; literal preservation is not claimed."
+  },
+  "scope_limit": "Synthetic no-vendor diagnostics; not generation or mixed-provider qualification. Actual e13e2fd0 Official-to-Cursor failure remains failed.",
+  "public_modules_sha256": {
+    "gateway_compat/collaboration_delivery.py": "fe45e43b9929cc5cefa8f09515f1d301feb161c9b194217e55da5b51c453784b",
+    "code_mode_collaboration.py": "cce1102f292769291731d338790e137d3b274de850e87532027f3178dc0c26ad",
+    "collaboration_runtime_contract.py": "4329b0965fdb01d7cf8e297b0529bbaa96f45b533bb120ef52f29d97118f8c22"
+  },
+  "public_official_request_body_seam": {
+    "public_official_request_namespace": "codexhub_plaintext_collaboration",
+    "public_official_request_context_methods": [
+      "followup_task",
+      "interrupt_agent",
+      "list_agents",
+      "send_message",
+      "spawn_agent",
+      "wait_agent"
+    ],
+    "public_official_request_handlers": [
+      "followup_task",
+      "interrupt_agent",
+      "list_agents",
+      "send_message",
+      "spawn_agent",
+      "wait_agent"
+    ]
+  },
+  "production_gateway_loopback": {
+    "bounds": {
+      "case_timeout_seconds": 70,
+      "total_probe_runtime_seconds_max": 120,
+      "vendor_requests": 0
+    },
+    "before": {
+      "base_candidate_sha": "b89f7c87eb2696534b8db48461edb2c58f3d4ce5",
+      "source_snapshot_sha256": "daf4d7b65dc3a3225073e2e901246f9347d0053d8707b80173e700a6c9cd462e",
+      "source_runtime_dirty": false,
+      "elapsed_seconds": 1.74,
+      "private_tree_removed": true,
+      "upstream_native_handlers": 6,
+      "upstream_alias_handlers": 0,
+      "downstream_alias_call_markers": [
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.completed"
+      ],
+      "downstream_encrypted_function_args": "absent",
+      "cli_exit": 1,
+      "provenance": "Sanitized observations recorded before cleanup; original raw request, SSE and logs removed."
+    },
+    "after": {
+      "scope": "actual production Gateway to fake loopback Official, synthetic Call, empty caller HOME, dummy Gateway auth, no vendor requests",
+      "client_version": "codex-cli 0.159.3",
+      "source_snapshot_sha256": "d5736e99064cbcd635ca4ab60b5a694a53d4a8531fcead76c3ed49959b51a7ed",
+      "private_config_override": "Frozen source snapshot includes the two-module uncommitted fix; only private snapshot config official_upstream_base_url redirected to loopback.",
+      "cli_exit": 0,
+      "upstream_requests": [
+        {
+          "path": "/backend-api/codex/responses",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input_async",
+              "schema_sha256": "f1fbb40b4d11546ee3e2cb870b705d7dfc86e2d646668abe8ef5749442256812",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "sleep",
+              "schema_sha256": "8b5ae0633744b7eb44c4a7212032f63982726a8a0ababf054931997d04966547",
+              "namespace": "clock"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "bf3728ae89b7437ca87df2032644b4f21aa6b10dd90ff503d2e95309c2047ca1",
+              "namespace": "codexhub_plaintext_collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "codexhub_plaintext_collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "codexhub_plaintext_collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "6f0f5670d88062f1bffe13be8c179d943e120d54cc96e0dea3e38adf22788620",
+              "namespace": "codexhub_plaintext_collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "946cf927d38987f23cbf921a96b06eaea37c5349f56dbe2a3309e56bdcea4643",
+              "namespace": "codexhub_plaintext_collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "codexhub_plaintext_collaboration"
+            }
+          ],
+          "input_types": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message"
+          ]
+        },
+        {
+          "path": "/backend-api/codex/responses",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input_async",
+              "schema_sha256": "f1fbb40b4d11546ee3e2cb870b705d7dfc86e2d646668abe8ef5749442256812",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "sleep",
+              "schema_sha256": "8b5ae0633744b7eb44c4a7212032f63982726a8a0ababf054931997d04966547",
+              "namespace": "clock"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "bf3728ae89b7437ca87df2032644b4f21aa6b10dd90ff503d2e95309c2047ca1",
+              "namespace": "codexhub_plaintext_collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "codexhub_plaintext_collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "codexhub_plaintext_collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "6f0f5670d88062f1bffe13be8c179d943e120d54cc96e0dea3e38adf22788620",
+              "namespace": "codexhub_plaintext_collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "946cf927d38987f23cbf921a96b06eaea37c5349f56dbe2a3309e56bdcea4643",
+              "namespace": "codexhub_plaintext_collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "codexhub_plaintext_collaboration"
+            }
+          ],
+          "input_types": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output"
+          ]
+        }
+      ],
+      "inbound_requests": [
+        {
+          "model": "gpt-6-astra",
+          "agent_parts": [],
+          "classification": "collaboration_marker_missing",
+          "public_preparation_changed": true,
+          "public_preparation_handlers": [
+            "followup_task",
+            "interrupt_agent",
+            "list_agents",
+            "send_message",
+            "spawn_agent",
+            "wait_agent"
+          ],
+          "safe_client_identity": {
+            "originator": "codex_exec",
+            "user-agent": "codex_exec/0.159.3 (Linux Unknown; x86_64) unknown (codex_exec; 0.159.3)"
+          },
+          "status": 200
+        },
+        {
+          "model": "gpt-6-astra",
+          "agent_parts": [],
+          "classification": "collaboration_marker_missing",
+          "public_preparation_changed": true,
+          "public_preparation_handlers": [
+            "followup_task",
+            "interrupt_agent",
+            "list_agents",
+            "send_message",
+            "spawn_agent",
+            "wait_agent"
+          ],
+          "safe_client_identity": {
+            "originator": "codex_exec",
+            "user-agent": "codex_exec/0.159.3 (Linux Unknown; x86_64) unknown (codex_exec; 0.159.3)"
+          },
+          "status": 200
+        },
+        {
+          "model": "cursor-subscription/gpt-5.6-luna-high",
+          "agent_parts": [
+            {
+              "type": "input_text",
+              "controlled_literal_present": true
+            }
+          ],
+          "classification": "collaboration_v2",
+          "public_preparation_changed": true,
+          "public_preparation_handlers": [
+            "followup_task",
+            "interrupt_agent",
+            "list_agents",
+            "send_message",
+            "spawn_agent",
+            "wait_agent"
+          ],
+          "safe_client_identity": {
+            "originator": "codex_exec",
+            "user-agent": "codex_exec/0.159.3 (Linux Unknown; x86_64) unknown (codex_exec; 0.159.3)"
+          },
+          "status": 401,
+          "transport_error": true
+        }
+      ],
+      "downstream_call_markers": [
+        {
+          "event": "response.output_item.added",
+          "namespace": "collaboration",
+          "name": "spawn_agent",
+          "encrypted_function_args": "empty"
+        },
+        {
+          "event": "response.output_item.done",
+          "namespace": "collaboration",
+          "name": "spawn_agent",
+          "encrypted_function_args": "empty"
+        },
+        {
+          "event": "response.completed",
+          "namespace": "collaboration",
+          "name": "spawn_agent",
+          "encrypted_function_args": "empty"
+        }
+      ],
+      "private_tree_removed": true,
+      "elapsed_seconds": 3.754,
+      "base_candidate_sha": "b89f7c87eb2696534b8db48461edb2c58f3d4ce5",
+      "source_runtime_dirty": true,
+      "candidate_sha_is_exact_runtime": false
+    },
+    "interpretation": "Actual codex_exec identity selects Official compatibility policy, which missed source prevention and SSE inverse. Corrected request preparation and SSE inverse now deliver controlled plaintext to the accountless Cursor child; HTTP401 is expected. Synthetic observation is not real-provider qualification."
+  },
+  "public_regression_tests": 6
+}

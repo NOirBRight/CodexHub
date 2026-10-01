@@ -326,6 +326,16 @@ def compatible_request_body(
     if upstream_name != "official" and _drop_third_party_web_search_external_web_access(payload):
         changed = True
     if upstream_name == "official":
+        # CLI callers also use the compatibility route. Prevent encrypted
+        # assignments before generation regardless of the desktop-only
+        # passthrough profile; keep the inverse bound to this request.
+        if not raw_probe:
+            from . import collaboration_delivery
+
+            if collaboration_delivery.make_messages_portable(payload):
+                changed = True
+                if isinstance(event_context, dict):
+                    event_context[collaboration_delivery.CONTEXT_KEY] = collaboration_delivery.portable_handler_names(payload)
         if host._sanitize_official_reasoning_items(payload):
             changed = True
         if _response._sanitize_unsupported_compaction_input_items(payload):

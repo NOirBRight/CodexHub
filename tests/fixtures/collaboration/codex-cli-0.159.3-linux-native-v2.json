@@ -1,0 +1,152 @@
+{
+  "client_version": "codex-cli 0.159.3",
+  "capture_date": "2026-10-01",
+  "scope": "Loopback-only empty-home/no-account actual native Collaboration declaration. Stopped with synthetic HTTP400 before inference. Dynamic descriptions sanitized; exact parameter structures preserved.",
+  "tools": [
+    {
+      "type": "namespace",
+      "name": "collaboration",
+      "description": "sanitized",
+      "tools": [
+        {
+          "type": "function",
+          "name": "followup_task",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "description": "sanitized",
+                "encrypted": true
+              },
+              "target": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "target",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "interrupt_agent",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "target": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "target"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "list_agents",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path_prefix": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "send_message",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "description": "sanitized",
+                "encrypted": true
+              },
+              "target": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "target",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "spawn_agent",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "fork_turns": {
+                "type": "string",
+                "description": "sanitized"
+              },
+              "message": {
+                "type": "string",
+                "description": "sanitized",
+                "encrypted": true
+              },
+              "model": {
+                "type": "string",
+                "description": "sanitized"
+              },
+              "reasoning_effort": {
+                "type": "string",
+                "description": "sanitized"
+              },
+              "task_name": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "task_name",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "wait_agent",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "timeout_ms": {
+                "type": "number",
+                "description": "sanitized"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      ]
+    }
+  ]
+}
