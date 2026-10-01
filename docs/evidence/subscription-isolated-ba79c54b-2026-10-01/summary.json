@@ -1,0 +1,80 @@
+{
+  "schema": "codexhub.subscription.isolated-e2e.v1",
+  "candidate_sha": "ba79c54b3ea35a7516ff4abad0e6f871e906cfe2",
+  "runtime_source_sha256": "d0f6b9eecea3920755fb628b9060a710b378e380efb2220adac5faecda9d4083",
+  "isolation": {
+    "source_read_only_verified": true,
+    "inputs_read_only_verified": true,
+    "private_runtime_writable_verified": true,
+    "private_pid_namespace_verified": true,
+    "host_root_read_only_verified": true,
+    "private_home_verified": true
+  },
+  "network_scope": "host network retained for actual vendor APIs and random loopback ports",
+  "device_access": "/dev forwarded for native X11 E2E",
+  "source_inputs_unchanged": true,
+  "private_account_copies": 5,
+  "actual_cli_versions": {
+    "codex": "codex-cli 0.159.3",
+    "cursor": "2026.09.28-64d2043",
+    "claude": "2.1.286"
+  },
+  "native_pointer": {
+    "passed": true,
+    "binary_sha256": "d1a8e082dd5ede58774ee0f311dfb5995639df9649f19d93c460e3116d774f4d",
+    "binary_build_source_sha": "29ee769689816511fbd7b010ee6339dddf61bc8f",
+    "binary_reused_with_source_equality_check": true,
+    "source_equality_paths": [
+      "frontend",
+      "src-tauri",
+      "src-python",
+      "config"
+    ],
+    "physical_clicks": 13,
+    "window": [
+      820,
+      620
+    ],
+    "drawer_transitions": [
+      0.573,
+      0.573,
+      0.573,
+      0.573
+    ],
+    "watchdog_seconds": 90
+  },
+  "advanced_cases": [
+    {
+      "case": "code-mode",
+      "passed": true,
+      "elapsed_seconds": 28.237
+    },
+    {
+      "case": "official-to-cursor",
+      "passed": true,
+      "elapsed_seconds": 83.676
+    },
+    {
+      "case": "cursor-to-official",
+      "passed": false,
+      "elapsed_seconds": 94.991
+    },
+    {
+      "case": "completed-history-restart",
+      "passed": true,
+      "elapsed_seconds": 36.028
+    }
+  ],
+  "advanced_qualified": false,
+  "ordinary_passed": 11,
+  "ordinary_failed": 3,
+  "ordinary_qualified": false,
+  "claude_inference_qualified": false,
+  "after_first_text_cancellation": "inconclusive; TLS already closed at disconnect",
+  "windows": "not run; this run is an isolated Linux E2E",
+  "private_probe_trees_removed": true,
+  "final_private_inputs_removed": true,
+  "detached_checkout_removed": true,
+  "overall_qualified": false,
+  "all_execution_sessions_exited": true
+}

@@ -1,0 +1,8 @@
+{
+  "source_read_only_verified": true,
+  "inputs_read_only_verified": true,
+  "private_runtime_writable_verified": true,
+  "private_pid_namespace_verified": true,
+  "host_root_read_only_verified": true,
+  "private_home_verified": true
+}
