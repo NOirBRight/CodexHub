@@ -39,6 +39,53 @@ def test_actual_completed_function_output_is_accepted_unchanged_as_next_turn_his
     assert payload == original
 
 
+@pytest.mark.parametrize("text", ["", "The fixture check is complete."])
+@pytest.mark.parametrize("with_call", [False, True])
+def test_all_actual_completed_response_output_items_are_accepted_unchanged(text, with_call):
+    message = {"role": "assistant", "content": text}
+    if with_call:
+        message["tool_calls"] = [{"id": "actual-call", "type": "function", "function": {"name": "caller_tool", "arguments": "{}"}}]
+    response = json.loads(protocol_translation.chat_completion_to_response_body(json.dumps({
+        "id": "resp_actual_complete", "model": "exact-selected-model",
+        "choices": [{"index": 0, "finish_reason": "tool_calls" if with_call else "stop", "message": message}],
+    }).encode(), repair=False))
+    assert response["output"]
+    assistant = next(item for item in response["output"] if item["type"] == "message")
+    assert assistant["status"] == "completed"
+    assert assistant["content"] == [{"type": "output_text", "text": text, "annotations": []}]
+    history = copy.deepcopy(response["output"])
+    if with_call:
+        call = next(item for item in history if item["type"] == "function_call")
+        history.append({"type": "function_call_output", "id": "fco_actual_result", "call_id": call["call_id"], "output": "actual caller result"})
+    payload = {"model": "exact-selected-model", "input": history}
+    original = copy.deepcopy(payload)
+    exchange = protocol_translation.prepare_exchange(json.dumps(payload).encode(), inbound_format="responses", outbound_format="chat_completions")
+    assert not isinstance(exchange, protocol_translation.NonForwardable)
+    messages = json.loads(exchange.upstream_body)["messages"]
+    assert messages[0] == {"role": "assistant", "content": text}
+    if with_call:
+        assert messages[1]["tool_calls"][0]["id"] == call["call_id"]
+        assert messages[2] == {"role": "tool", "tool_call_id": call["call_id"], "content": "actual caller result"}
+    assert payload == original
+
+
+@pytest.mark.parametrize("status", [None, "in_progress", "incomplete", "unexpected-private-status", {}, 1])
+def test_completed_message_history_does_not_admit_unknown_or_unfinished_status(status):
+    item = {"type": "message", "id": "actual-message-item", "status": status, "role": "assistant", "content": [{"type": "output_text", "text": "actual response", "annotations": []}]}
+    with pytest.raises(protocol_translation.UnsupportedProtocolTranslationError) as error:
+        protocol_translation.responses_request_to_chat_completion_body(json.dumps({"model": "exact-selected-model", "input": [item]}).encode())
+    assert error.value.code == "unsupported_protocol_semantics"
+    assert "unexpected-private-status" not in str(error.value)
+
+
+def test_completed_message_history_still_rejects_unknown_fields():
+    item = {"type": "message", "id": "actual-message-item", "status": "completed", "role": "assistant", "content": "actual response", "unknown-private-field": "private-value"}
+    with pytest.raises(protocol_translation.UnsupportedProtocolTranslationError) as error:
+        protocol_translation.responses_request_to_chat_completion_body(json.dumps({"model": "exact-selected-model", "input": [item]}).encode())
+    assert error.value.code == "unsupported_protocol_semantics"
+    assert "private-value" not in str(error.value)
+
+
 @pytest.mark.parametrize("restart", [False, True])
 @pytest.mark.parametrize("namespace", [None, "functions"])
 def test_completed_custom_output_roundtrips_through_production_compatibility_and_exchange(namespace, restart):

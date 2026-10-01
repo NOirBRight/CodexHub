@@ -713,7 +713,12 @@ def responses_input_to_chat_messages(
             )
         item_type = item.get("type")
         if item_type == "message" or (item_type is None and ("role" in item or "content" in item)):
-            _require_supported_fields(item, {"id", "type", "role", "content"}, "Responses message input item")
+            _require_supported_fields(item, {"id", "type", "role", "content", "status"}, "Responses message input item")
+            if "status" in item and item["status"] != "completed":
+                raise UnsupportedProtocolTranslationError(
+                    "unsupported_protocol_semantics",
+                    "Cannot translate an unfinished or unknown Responses message status as completed history.",
+                )
             role = item.get("role")
             if role == "developer":
                 role = "system"
