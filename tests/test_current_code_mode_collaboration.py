@@ -6,7 +6,6 @@ import json
 import pytest
 
 from code_mode_collaboration import (
-    HISTORICAL_OPAQUE_ASSIGNMENT_PREFIX,
     ObservedAssignment, declared_code_mode_handlers, expose_declared_collaboration,
     recover_observed_assignments,
 )
@@ -162,77 +161,19 @@ def test_external_gateway_opaque_task_requires_caller_restatement(provider):
     assert payload == original
 
 
-@pytest.mark.parametrize("provider", ["cursor-subscription", "claude-subscription", "custom-endpoint"])
-@pytest.mark.parametrize("strategy", ["eager", "deferred_core"])
-def test_same_address_plaintext_assignment_preserves_old_opaque_history_and_child_results(provider, strategy):
-    import gateway_compat
-    import protocol_translation
-    old = agent_message("opaque-original-task")
-    current = {**agent_message(), "id": "am_current", "content": [{"type": "input_text", "text": "Use saved child result; complete the remaining fixture check."}]}
-    call = {"type": "function_call", "namespace": "collaboration", "name": "wait_agent", "id": "fc_existing", "call_id": "existing-real-call", "arguments": '{"timeout_ms":10000}', "encrypted_function_args": []}
-    result = {"type": "function_call_output", "id": "fco_existing", "call_id": call["call_id"], "output": '{"message":"saved child result","timed_out":false}'}
-    payload = {"model": "selected-model", "tools": [exec_tool(("followup_task", "wait_agent"))], "input": [old, call, result, current], "tool_choice": "auto"}
-    original = copy.deepcopy(payload)
-    upstream = {"name": provider, "upstream_format": "responses", "tool_protocol": "chat_tools", "tool_surface_strategy": strategy}
-    prepared = json.loads(gateway_compat.compatible_request_body(json.dumps(payload).encode(), upstream, event_context={}, inject_codex_tools=False))
-    historical = prepared["input"][0]["content"][0]["text"]
-    assert historical.startswith(HISTORICAL_OPAQUE_ASSIGNMENT_PREFIX)
-    archive = json.loads(historical[len(HISTORICAL_OPAQUE_ASSIGNMENT_PREFIX):])
-    assert archive["availability"] == "historical_opaque_not_recovered"
-    assert archive["item"] == old
-    assert archive["item"]["content"][0]["type"] == "encrypted_content"
-    assert prepared["input"][1]["id"] == call["id"]
-    assert prepared["input"][1]["call_id"] == call["call_id"]
-    assert prepared["input"][2] == result
-    assert json.loads(prepared["input"][3]["content"][0]["text"].split(":", 1)[1]) == current
-    exchange = protocol_translation.prepare_exchange(json.dumps(prepared).encode(), inbound_format="responses", outbound_format="chat_completions")
-    assert not isinstance(exchange, protocol_translation.NonForwardable)
-    messages = json.loads(exchange.upstream_body)["messages"]
-    assert messages[2]["tool_call_id"] == call["call_id"]
-    assert messages[2]["content"] == result["output"]
-    assert historical == messages[0]["content"]
-    assert payload == original
-
-
-@pytest.mark.parametrize("mutation", ["other_author", "other_recipient", "empty", "mixed", "reverse", "user_continue", "assistant", "result", "latest_opaque"])
-def test_unproven_new_task_boundary_cannot_hide_current_opaque_assignment(mutation):
+@pytest.mark.parametrize("later_text", ["Continue", "Use prior results to finish the remaining task."])
+def test_same_address_plaintext_is_not_proof_of_complete_task_restatement(later_text):
     import gateway_compat
     from gateway_errors import UpstreamProtocolTranslationError
-    old = agent_message("opaque-private-task")
-    current = {**agent_message(), "id": "am_current", "content": [{"type": "input_text", "text": "Use the saved result to finish the original task."}]}
-    items = [old, current]
-    if mutation in {"other_author", "other_recipient"}:
-        current[mutation.removeprefix("other_")] += "_other"
-    elif mutation == "empty":
-        current["content"][0]["text"] = " \n "
-    elif mutation == "mixed":
-        current["content"].append({"type": "encrypted_content", "encrypted_content": "another-private-task"})
-    elif mutation == "reverse":
-        items.reverse()
-    elif mutation in {"user_continue", "assistant"}:
-        items[1] = {"type": "message", "role": "user" if mutation == "user_continue" else "assistant", "content": "Continue."}
-    elif mutation == "result":
-        items[1] = {"type": "function_call_output", "call_id": "unrelated", "output": "child completed"}
-    elif mutation == "latest_opaque":
-        items.append(agent_message("latest-private-task"))
-    payload = {"model": "selected-model", "tools": [exec_tool(("followup_task",))], "input": items, "tool_choice": "auto"}
+    opaque = agent_message("opaque-private-task")
+    later = {**agent_message(), "id": "am_later", "content": [{"type": "input_text", "text": later_text}]}
+    payload = {"model": "selected-model", "tools": [exec_tool(("followup_task",))], "input": [opaque, later], "tool_choice": "auto"}
     original = copy.deepcopy(payload)
     upstream = {"name": "cursor-subscription", "upstream_format": "responses", "tool_protocol": "chat_tools", "tool_surface_strategy": "eager"}
     with pytest.raises(UpstreamProtocolTranslationError, match="caller must restate") as error:
         gateway_compat.compatible_request_body(json.dumps(payload).encode(), upstream, event_context={}, inject_codex_tools=False)
-    assert "private-task" not in str(error.value)
+    assert "opaque-private-task" not in str(error.value)
     assert payload == original
-
-
-def test_historical_opaque_envelope_cannot_hide_duplicate_item_identity():
-    import gateway_compat
-    from gateway_errors import UpstreamProtocolTranslationError
-    old = agent_message("opaque-task")
-    current = {**agent_message(), "content": [{"type": "input_text", "text": "Complete the remaining fixture checks from the existing results."}]}
-    payload = {"model": "selected-model", "tools": [exec_tool(("followup_task",))], "input": [old, current], "tool_choice": "auto"}
-    upstream = {"name": "cursor-subscription", "upstream_format": "responses", "tool_protocol": "chat_tools", "tool_surface_strategy": "eager"}
-    with pytest.raises(UpstreamProtocolTranslationError, match="Malformed directed assignment"):
-        gateway_compat.compatible_request_body(json.dumps(payload).encode(), upstream, event_context={}, inject_codex_tools=False)
 
 
 def test_official_inverse_cannot_expand_a_child_subset_or_accept_opaque_arguments():

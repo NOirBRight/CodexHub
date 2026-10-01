@@ -8,7 +8,6 @@ inferred from ciphertext or request metadata. All state is request-owned.
 from __future__ import annotations
 
 import copy
-import json
 from dataclasses import dataclass
 import re
 from collections.abc import Iterator, Mapping, Sequence
@@ -21,7 +20,6 @@ from collaboration_runtime_contract import (
 
 _NAMES = frozenset(EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2])
 _MESSAGE_NAMES = frozenset({"spawn_agent", "send_message", "followup_task"})
-HISTORICAL_OPAQUE_ASSIGNMENT_PREFIX = "__codexhub_historical_opaque_assignment_v2__:"
 _SECTION = re.compile(r"^### `collaboration__(\w+)`\s*$", re.MULTILINE)
 _SIGNATURE = re.compile(r"declare const tools:\s*\{\s*collaboration__(\w+)\(args:\s*\{(.*?)\}\):\s*Promise<", re.DOTALL)
 _FIELD = re.compile(r"([a-z_]+)(\?)?:\s*(string|number|boolean)(?:\s*\|\s*(null))?\s*;")
@@ -173,51 +171,6 @@ def is_supported_subset(namespace: Mapping[str, Any]) -> bool:
         return classify_collaboration_tools([probe]) == COLLABORATION_V2
     except (CollaborationContractError, AttributeError, TypeError):
         return False
-
-
-def prepare_external_assignment_history(payload: dict[str, Any]) -> bool:
-    """Archive opaque history only behind a later same-address plaintext assignment.
-
-    Ordinary user turns, results and messages to another child cannot establish
-    replacement requirements. The original opaque item remains verbatim data in
-    a disclosed historical envelope; this does not recover or decrypt its task.
-    Work is atomic: an unavailable current assignment leaves the payload intact.
-    """
-    items = payload.get("input")
-    if not isinstance(items, list):
-        return False
-    plaintext_addresses: set[tuple[str, str]] = set()
-    historical: set[int] = set()
-    for index in range(len(items) - 1, -1, -1):
-        item = items[index]
-        if not isinstance(item, Mapping) or item.get("type") != "agent_message":
-            continue
-        validate_agent_message(item)
-        address = (item["author"], item["recipient"])
-        if any(part["type"] == "encrypted_content" for part in item["content"]):
-            if address not in plaintext_addresses:
-                raise CollaborationContractError("encrypted_agent_message_unavailable")
-            historical.add(index)
-        elif any(part["text"].strip() for part in item["content"]):
-            plaintext_addresses.add(address)
-    if not historical:
-        return False
-    # Archiving must not hide an identity collision from the native codec.
-    item_ids = [item.get("id") for item in items if isinstance(item, Mapping) and isinstance(item.get("id"), str)]
-    if len(item_ids) != len(set(item_ids)):
-        raise CollaborationContractError("duplicate_item_identity")
-    payload["input"] = [
-        {
-            "type": "message", "role": "user",
-            "content": [{"type": "input_text", "text": HISTORICAL_OPAQUE_ASSIGNMENT_PREFIX + json.dumps({
-                "availability": "historical_opaque_not_recovered",
-                "reason": "A later plaintext assignment from the same author to the same recipient supplies the current requirements. This earlier encrypted item is unavailable historical data, not executable task instructions.",
-                "item": item,
-            }, ensure_ascii=True, separators=(",", ":"))}],
-        } if index in historical else item
-        for index, item in enumerate(items)
-    ]
-    return True
 
 
 @dataclass(frozen=True, slots=True)
