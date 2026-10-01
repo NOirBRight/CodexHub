@@ -98,9 +98,26 @@ def observe_request(body, epoch, nonce):
     return {"epoch": epoch, "model": body.get("model"), "requested_reasoning_effort": effort, "parallel_tool_calls": parallel, "input_types": [item.get("type") for item in items if isinstance(item, dict)],
             "input_sha256": digest(json.dumps(items, sort_keys=True, ensure_ascii=False)),
             "declarations": declaration_summary(tools), "tool_outputs": outputs,
+            "history_calls": [{"type": item["type"], "name": item.get("name"), "namespace": item.get("namespace"), "call_sha256": digest(item.get("call_id", "")), "item_sha256": digest(item.get("id", "")) if item.get("id") else None, "encrypted_function_args_shape": encryption_marker(item)} for item in items if isinstance(item, dict) and item.get("type") in ("function_call", "custom_tool_call")],
             "agent_messages": [{"author_sha256": digest(item.get("author", "")), "recipient_sha256": digest(item.get("recipient", "")),
                                 "part_types": [part.get("type") for part in item.get("content", []) if isinstance(part, dict)]}
                                for item in items if isinstance(item, dict) and item.get("type") == "agent_message"]}
+
+
+def encryption_marker(item):
+    """Record only declaration shape; encrypted bytes never leave the private run."""
+    if "encrypted_function_args" not in item:
+        return "absent"
+    marker = item["encrypted_function_args"]
+    return "empty-list" if marker == [] else "nonempty-list" if isinstance(marker, list) else "malformed"
+
+
+def is_fixture_execution(call):
+    """A delegation instruction mentioning a command is not its execution."""
+    return bool(call.get("reads_fixture") and (
+        call.get("type") == "custom_tool_call" and call.get("name") in ("exec", "functions.exec")
+        or call.get("type") == "function_call" and call.get("name") in ("exec_command", "functions.exec_command")
+    ))
 
 
 def summarize_rollouts(paths, nonce):
@@ -131,9 +148,9 @@ def summarize_rollouts(paths, nonce):
                 canonical_target = (target if target.startswith("/") else "/root/" + target) if isinstance(target, str) else None
                 calls.append({"target_sha256": digest(canonical_target) if canonical_target else None,
                               "spawn_target_sha256": digest("/root/" + task_name) if isinstance(task_name, str) else None,
-                              "type": kind, "name": item.get("name"), "namespace": item.get("namespace"),
+                              "type": kind, "name": item.get("name"), "namespace": item.get("namespace"), "encrypted_function_args_shape": encryption_marker(item),
                               "call_sha256": digest(item.get("call_id", "")), "item_sha256": digest(item.get("id", "")) if item.get("id") else None,
-                              "reads_fixture": "exec_command" in raw and "probe-value.txt" in raw,
+                              "reads_fixture": "exec_command" in raw and "probe-value.txt" in raw and (kind == "custom_tool_call" and item.get("name") in ("exec", "functions.exec") or kind == "function_call" and item.get("name") in ("exec_command", "functions.exec_command")),
                               "spawn": "spawn_agent" in str(item.get("name", "")) or "spawn_agent" in raw,
                               "followup": "followup_task" in str(item.get("name", "")) or "followup_task" in raw,
                               "wait": "wait_agent" in str(item.get("name", "")) or "wait_agent" in raw})
@@ -154,8 +171,8 @@ def assess_case(case, turns, requests, sessions, nonce, gateway_pids):
     good = bool(turns) and all(row["exit"] == 0 and not row["timed_out"] and not row["errors"] for row in turns)
     parent = [session for session in sessions if not session["is_child"]]
     children = [session for session in sessions if session["is_child"]]
-    custom = any(call["type"] == "custom_tool_call" and call["name"] in ("exec", "functions.exec") and call["reads_fixture"] for session in sessions for call in session["calls"])
-    read_calls = {call["call_sha256"] for session in sessions for call in session["calls"] if call["reads_fixture"] and call["type"] == "custom_tool_call"}
+    custom = any(call["type"] == "custom_tool_call" and call["name"] in ("exec", "functions.exec") and is_fixture_execution(call) for session in sessions for call in session["calls"])
+    read_calls = {call["call_sha256"] for session in sessions for call in session["calls"] if is_fixture_execution(call) and call["type"] == "custom_tool_call"}
     actual_effect = any(effect["fixture_present"] and effect["call_sha256"] in read_calls for session in sessions for effect in session["effects"])
     first_exact = bool(turns) and turns[0]["finals"] == [nonce]
     expected_models = {OFFICIAL_MODEL, CURSOR_MODEL} if case in ("official-to-cursor", "cursor-to-official") else {CURSOR_MODEL}
@@ -163,11 +180,11 @@ def assess_case(case, turns, requests, sessions, nonce, gateway_pids):
     result = {"exact_selected_model_identity": bool(actual_models) and actual_models.issubset(expected_models), "actual_custom_exec": custom, "actual_fixture_tool_result": actual_effect, "first_exact": first_exact}
     if case in ("official-to-cursor", "cursor-to-official"):
         parent_calls = [call for session in parent for call in session["calls"]]
-        child_reads = sum(call["reads_fixture"] for session in children for call in session["calls"])
+        child_reads = sum(is_fixture_execution(call) for session in children for call in session["calls"])
         spawned = {call.get("spawn_target_sha256") for call in parent_calls if call["spawn"] and call.get("spawn_target_sha256")}
         followups = {call.get("target_sha256") for call in parent_calls if call["followup"] and call.get("target_sha256")}
 
-        result.update(one_child=len(children) == 1, parent_did_not_read=not any(call["reads_fixture"] for call in parent_calls),
+        result.update(one_child=len(children) == 1, parent_did_not_read=not any(is_fixture_execution(call) for call in parent_calls),
                       spawn=any(call["spawn"] for call in parent_calls), same_child_followup=bool(followups) and len(spawned) == 1 and followups == spawned and len(children) == 1,
                       wait=any(call["wait"] for call in parent_calls), child_read_twice=child_reads >= 2,
                       child_both_results=len(children) == 1 and children[0]["assistant_returned_fixture"] and children[0]["assistant_returned_reversed_fixture"],
@@ -175,8 +192,12 @@ def assess_case(case, turns, requests, sessions, nonce, gateway_pids):
         first_exact = bool(turns) and turns[0]["finals"] == [nonce + "\n" + nonce[::-1]]
         result["first_exact"] = first_exact
     if case == "completed-history-restart" or case in ("official-to-cursor", "cursor-to-official"):
-        previous_calls = {out["call_sha256"] for row in requests if row["epoch"] == 0 for out in row["tool_outputs"]}
-        replayed = {out["call_sha256"] for row in requests if row["epoch"] == 1 for out in row["tool_outputs"]}
+        parent_model = OFFICIAL_MODEL if case == "official-to-cursor" else CURSOR_MODEL
+        # Child transcripts belong to their own caller sessions. A fresh parent
+        # must replay its completed collaboration results, not merge the child's
+        # private internal tool conversation into the parent input.
+        previous_calls = {out["call_sha256"] for row in requests if row["epoch"] == 0 and row.get("model") == parent_model for out in row["tool_outputs"]}
+        replayed = {out["call_sha256"] for row in requests if row["epoch"] == 1 and row.get("model") == parent_model for out in row["tool_outputs"]}
         result.update(actual_gateway_restart=len(gateway_pids) == 2 and gateway_pids[0] != gateway_pids[1],
                       fresh_caller=len(turns) == 2 and turns[0]["pid"] != turns[1]["pid"],
                       completed_calls_replayed=bool(previous_calls) and previous_calls.issubset(replayed),
@@ -345,7 +366,7 @@ def run_case(case, checkout, source_codex, source_user, codex, timeout):
                         row["error_body_sha256"] = digest(bytes(failure_body))
                         try:
                             error_payload = json.loads(failure_body)
-                            code = error_payload.get("error", {}).get("code")
+                            code = error_payload.get("error", {}).get("code") or error_payload.get("error", {}).get("type")
                             if isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", code):
                                 row["error_code"] = code
                         except (ValueError, AttributeError):

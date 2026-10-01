@@ -57,7 +57,7 @@ def test_v2_requires_same_single_child_and_real_followup_wait_and_direction():
     sessions[0]["calls"] = [{"type": "function_call", "name": "spawn_agent", "reads_fixture": False, "call_sha256": "spawn", "spawn": True, "followup": True, "wait": True, "spawn_target_sha256": "reader", "target_sha256": "reader"}]
     assert qualification.assess_case("official-to-cursor", turns, traces, sessions, "nonce", [1, 2])["passed"]
     assert not qualification.assess_case("official-to-cursor", turns, traces, sessions + [session(child=True)], "nonce", [1, 2])["passed"]
-    sessions[0]["calls"][0]["reads_fixture"] = True
+    sessions[0]["calls"][0].update(type="custom_tool_call", name="exec", reads_fixture=True)
     assert not qualification.assess_case("official-to-cursor", turns, traces, sessions, "nonce", [1, 2])["passed"]
 
 
@@ -154,3 +154,31 @@ def test_observer_preserves_payload_and_records_safe_selection_controls():
     assert result["requested_reasoning_effort"] == "unsupported"
     assert result["parallel_tool_calls"] == "invalid"
     assert "PRIVATE" not in json.dumps(result)
+
+
+
+def test_delegation_message_mentioning_fixture_command_is_not_parent_execution():
+    assert not qualification.is_fixture_execution({"type": "function_call", "name": "spawn_agent", "reads_fixture": True})
+    assert not qualification.is_fixture_execution({"type": "function_call", "name": "followup_task", "reads_fixture": True})
+    assert qualification.is_fixture_execution({"type": "custom_tool_call", "name": "exec", "reads_fixture": True})
+
+
+def test_parent_restart_replays_its_results_without_merging_child_internals():
+    turns = [{"exit": 0, "timed_out": False, "errors": [], "finals": [value], "pid": pid} for value, pid in [("nonce\necnon", 10), ("ecnon", 11)]]
+    traces = [{"epoch": epoch, "tool_outputs": [{"call_sha256": call}], "model": model} for epoch, model, call in [(0, qualification.CURSOR_MODEL, "parent-call"), (0, qualification.OFFICIAL_MODEL, "child-call"), (1, qualification.CURSOR_MODEL, "parent-call")]]
+    parent = session(reads=0)
+    parent["calls"] = [{"type": "function_call", "name": "spawn_agent", "reads_fixture": True, "call_sha256": "spawn", "spawn": True, "followup": True, "wait": True, "spawn_target_sha256": "reader", "target_sha256": "reader"}]
+    result = qualification.assess_case("cursor-to-official", turns, traces, [parent, session(child=True, reads=2)], "nonce", [1, 2])
+    assert result["parent_did_not_read"]
+    assert result["completed_calls_replayed"]
+    assert result["passed"]
+
+
+
+def test_encryption_observation_records_shape_without_retaining_ciphertext():
+    assert qualification.encryption_marker({}) == "absent"
+    assert qualification.encryption_marker({"encrypted_function_args": []}) == "empty-list"
+    request = {"input": [{"type": "function_call", "name": "spawn_agent", "call_id": "call", "encrypted_function_args": ["PRIVATE-CIPHERTEXT"]}]}
+    evidence = qualification.observe_request(request, 0, "nonce")
+    assert evidence["history_calls"][0]["encrypted_function_args_shape"] == "nonempty-list"
+    assert "PRIVATE" not in json.dumps(evidence)
