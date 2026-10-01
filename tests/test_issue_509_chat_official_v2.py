@@ -17,6 +17,7 @@ from protocol_translation import (
 )
 from tool_compatibility.collab_v2 import AGENT_MESSAGE_ENVELOPE_PREFIX
 import gateway_compat
+from gateway_compat.collaboration_delivery import ALIAS, CONTEXT_KEY
 import gateway_errors
 
 
@@ -122,7 +123,7 @@ def test_chat_v2_functions_expand_to_official_namespace() -> None:
     assert first["tool_choice"] == "auto"
 
 
-def test_responses_inbound_official_keeps_native_namespace() -> None:
+def test_responses_inbound_official_keeps_namespace_with_plaintext_source_alias() -> None:
     children = []
     for name, schema in EXPECTED_PARAMETER_SCHEMAS[COLLABORATION_V2].items():
         parameters = copy.deepcopy(schema)
@@ -158,7 +159,13 @@ def test_responses_inbound_official_keeps_native_namespace() -> None:
         )
     )
     assert prepared["tools"][0]["type"] == "namespace"
-    assert prepared["tools"][0]["name"] == "collaboration"
+    expected = copy.deepcopy(namespace)
+    expected["name"] = ALIAS
+    for child in expected["tools"]:
+        if child["name"] in {"spawn_agent", "send_message", "followup_task"}:
+            child["parameters"]["properties"]["message"].pop("encrypted")
+    assert prepared["tools"] == [expected]
+    assert set(context[CONTEXT_KEY]) == set(V2_TOOLS)
     assert not any(
         isinstance(tool, dict) and str(tool.get("name", "")).startswith("__codexhub_ns_")
         for tool in prepared["tools"]
