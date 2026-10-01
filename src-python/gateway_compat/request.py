@@ -611,13 +611,15 @@ def compatible_request_body(
         if tool_surface_strategy == "deferred_core" and _official_passthrough._hoist_additional_tools_input_items(payload):
             changed = True
         if tool_protocol in host.STRUCTURED_TOOL_PROTOCOLS:
-            if _official_passthrough._rewrite_structured_tool_input_items(
-                payload,
-                event_context=event_context,
-                upstream_name=upstream_name,
-                compatibility_plan=runtime_tool_plan,
-            ):
-                changed = True
+            try:
+                changed |= _official_passthrough._rewrite_structured_tool_input_items(
+                    payload,
+                    event_context=event_context,
+                    upstream_name=upstream_name,
+                    compatibility_plan=runtime_tool_plan,
+                )
+            except UnsupportedProtocolTranslationError as exc:
+                raise UpstreamProtocolTranslationError(exc) from exc
         elif tool_protocol == "none":
             tools = payload.get("tools")
             if isinstance(tools, list):

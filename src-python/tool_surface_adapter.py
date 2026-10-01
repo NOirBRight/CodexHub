@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import tool_history
+from completed_function_history import completed_flat_function_history
 
 from codex_semantic_adapter import (
     COLLABORATION_V1,
@@ -961,15 +962,12 @@ def structured_tool_function_call_item(
     if item.get("type") != "function_call":
         return None
     request_shape = dict(item)
-    for response_only_field in (
-        "id",
-        "status",
-        _facts().worker_requested_binding_field,
-    ):
-        request_shape.pop(response_only_field, None)
+    request_shape.pop(_facts().worker_requested_binding_field, None)
     tool_name = multi_agent_function_call_name(item)
     if tool_name is not None:
         rewritten = request_shape
+        rewritten.pop("id", None)
+        rewritten.pop("status", None)
         rewritten.pop("namespace", None)
         rewritten["name"] = f"multi_agent_v1__{tool_name}"
         normalized, _, args_changed = normalize_multi_agent_arguments(
@@ -981,6 +979,8 @@ def structured_tool_function_call_item(
     node_name = node_repl_function_call_name(item)
     if node_name is not None:
         rewritten = request_shape
+        rewritten.pop("id", None)
+        rewritten.pop("status", None)
         rewritten.pop("namespace", None)
         rewritten["name"] = f"{_facts().node_repl_namespace}__{node_name}"
         return rewritten
@@ -1073,7 +1073,15 @@ def rewrite_structured_tool_input_items(
         isinstance(event_context, Mapping)
         and event_context.get("request_kind") == "compact"
     )
-    for item in input_items:
+    ordinary_history = [
+        None if isinstance(item, Mapping) and (
+            multi_agent_function_call_name(item) is not None
+            or node_repl_function_call_name(item) is not None
+        ) else item
+        for item in input_items
+    ]
+    closed_native_positions = frozenset() if compact_history else completed_flat_function_history(ordinary_history)
+    for item_index, item in enumerate(input_items):
         if not isinstance(item, dict):
             rewritten_items.append(item)
             continue
@@ -1105,6 +1113,11 @@ def rewrite_structured_tool_input_items(
         if item.get("type") == "custom_tool_call_output" and item.get("call_id") in preserved_owned_custom_call_ids:
             # The actual preceding call is owned by this request codec. Keep
             # its typed result for the codec ledger to validate and inverse-map.
+            rewritten_items.append(item)
+            continue
+        if item_index in closed_native_positions and multi_agent_function_call_name(item) is None and node_repl_function_call_name(item) is None:
+            # Closed native history supplies its own call/result identity. It
+            # does not add a declaration or authorize any new upstream call.
             rewritten_items.append(item)
             continue
         if item.get("type") == "function_call":

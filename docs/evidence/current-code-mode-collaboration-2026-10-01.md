@@ -59,3 +59,16 @@ the sanitized 0.159.2 Gateway fixture, namespace/flat custom owner collisions,
 complete SSE terminal output, and repository entry/seam/module boundaries.
 The report-only quality command reported zero parse errors and no new-module
 unused imports. No full-suite or hosted Actions gate is claimed here.
+
+Completed-history followups use response-owned generated Item IDs for body and
+SSE message/reasoning/function items; original Call IDs and incoming native
+Item IDs are retained. Two converter-generated complete outputs, the actual
+caller result, and a fresh request context now roundtrip without a synthetic
+`msg_0` collision. Closed native flat function history can retain its exact
+call/result pairing without repeating current tool declarations. This does not
+declare a tool or grant a new execution owner. Namespaced/custom unowned history
+keeps its previous policy; malformed or ambiguous closed flat pairs fail with
+a bounded classification. Ordinary declared function metadata is also retained.
+The final targeted followup selection passed **781 tests and 113 subtests**,
+including repository entry/seam/module gates. This is local public-seam evidence,
+not qualification of the live Provider restart or sealed-task recovery paths.
