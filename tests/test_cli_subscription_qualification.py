@@ -170,3 +170,41 @@ def test_runtime_snapshot_is_frozen_before_restart(tmp_path):
     (repo / "src-python/candidate.txt").write_text("later worker edit")
     assert (destination / "src-python/candidate.txt").read_text() == "read-only source"
     assert len(digest) == 64
+
+
+def test_protocol_delta_skips_previously_qualified_cancellation(tmp_path, monkeypatch):
+    class ProtocolOnly(FakeGateway):
+        def cancel_stream(self, model):
+            raise AssertionError("a protocol delta must not repeat cancellation")
+    monkeypatch.setattr(qualify, "PrivateGateway", ProtocolOnly)
+    result = qualify.run_qualification(minimal_repo(tmp_path), "cursor-subscription", "exact-model",
+                                       protocols=("responses",), include_cancel=False)
+    assert result["ordinary_qualified"] and result["private_artifacts_removed"]
+    assert [case["case"] for case in result["cases"]] == ["responses.text", "responses.stream",
+        "responses.caller-tool", "responses.tool-result", "responses.restart-history-fresh-caller"]
+    assert result["protocols"] == ["responses"] and not result["caller_cancel_qualified"]
+
+
+def test_installed_cli_version_reads_package_path_without_cli_execution(tmp_path, monkeypatch):
+    binary = tmp_path / "2026.09.28-64d2043" / "bin" / "cursor-agent"
+    binary.parent.mkdir(parents=True)
+    binary.touch()
+    monkeypatch.setattr(qualify.shutil, "which", lambda name: str(binary))
+    assert qualify.installed_cli_version("cursor-subscription") == "2026.09.28-64d2043"
+
+
+def test_tool_continuation_delta_does_not_repeat_text_stream_or_cancellation(tmp_path, monkeypatch):
+    class ToolContinuation(FakeGateway):
+        def exchange(self, protocol, payload):
+            history = payload["input" if protocol == "responses" else "messages"]
+            assert not payload["stream"]
+            assert not any(isinstance(item.get("content"), str) and item["content"].startswith("Reply exactly:") for item in history)
+            return super().exchange(protocol, payload)
+        def cancel_stream(self, model):
+            raise AssertionError("this tool continuation delta must not repeat cancellation")
+    monkeypatch.setattr(qualify, "PrivateGateway", ToolContinuation)
+    result = qualify.run_qualification(minimal_repo(tmp_path), "cursor-subscription", "exact-model",
+                                       protocols=("responses",), include_cancel=False, include_text=False)
+    assert result["ordinary_qualified"] and result["ordinary_scope"] == "tool-continuation-only"
+    assert [case["case"] for case in result["cases"]] == ["responses.caller-tool", "responses.tool-result",
+                                                         "responses.restart-history-fresh-caller"]

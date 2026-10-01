@@ -51,6 +51,17 @@ def fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def installed_cli_version(provider: str) -> str | None:
+    """Observe the installed official package identity without a CLI request."""
+    name = "cursor-agent" if provider == "cursor-subscription" else "claude"
+    found = shutil.which(name)
+    if not found:
+        return None
+    pattern = (r"\d{4}\.\d{2}\.\d{2}-[0-9a-f]+" if provider == "cursor-subscription"
+               else r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?")
+    return next((part for part in Path(found).resolve().parts if re.fullmatch(pattern, part)), None)
+
+
 def request_for(protocol: str, model: str, history: list[dict[str, Any]], *,
                 tools: list[dict[str, Any]] | None = None, stream: bool = False) -> dict[str, Any]:
     """Build native downstream requests; required Messages max_tokens survives."""
@@ -487,7 +498,7 @@ path.chmod(0o600)
 
 def run_qualification(repo: Path, provider: str, model: str, *, timeout: float = 60,
                       total_timeout: float = 900, protocols: tuple[str, ...] = PROTOCOLS,
-                      progress: Any = None) -> dict[str, Any]:
+                      progress: Any = None, include_cancel: bool = True, include_text: bool = True) -> dict[str, Any]:
     """Execute bounded ordinary acceptance; advanced/Windows gates stay separate."""
     start = time.monotonic()
     deadline = start + total_timeout
@@ -501,6 +512,8 @@ def run_qualification(repo: Path, provider: str, model: str, *, timeout: float =
     histories = {}
     records = report["cases"]
     qualified = True
+    report["ordinary_scope"] = "text-stream-tool-continuation" if include_text else "tool-continuation-only"
+    report["cli_version_observed_before_run"] = installed_cli_version(provider)
 
     def case(name: str, operation: Any) -> Any:
         nonlocal qualified
@@ -548,19 +561,20 @@ def run_qualification(repo: Path, provider: str, model: str, *, timeout: float =
             server.start()
             selected = provider + "/" + model
             for protocol in protocols:
-                nonce = "probe-" + secrets.token_hex(8)
-                history = [{"role": "user", "content": "Reply exactly: " + nonce}]
-                def text_check(stream=False):
-                    reply = server.exchange(protocol, request_for(protocol, selected, history, stream=stream))
-                    if reply.text != nonce or reply.calls:
-                        raise QualificationFailure("wrong-exact-output", evidence=reply.evidence())
-                    return reply
-                result = case(protocol + ".text", text_check)
-                # A denied Claude generation is a failure observation, not a
-                # reason to repeatedly hit that account or fabricate a pass.
-                if provider == "claude-subscription" and result is None:
-                    break
-                case(protocol + ".stream", lambda: text_check(True))
+                if include_text:
+                    nonce = "probe-" + secrets.token_hex(8)
+                    history = [{"role": "user", "content": "Reply exactly: " + nonce}]
+                    def text_check(stream=False):
+                        reply = server.exchange(protocol, request_for(protocol, selected, history, stream=stream))
+                        if reply.text != nonce or reply.calls:
+                            raise QualificationFailure("wrong-exact-output", evidence=reply.evidence())
+                        return reply
+                    result = case(protocol + ".text", text_check)
+                    # A denied Claude generation is a failure observation, not
+                    # a reason to repeatedly hit that account.
+                    if provider == "claude-subscription" and result is None:
+                        break
+                    case(protocol + ".stream", lambda: text_check(True))
                 fixture_key = secrets.token_hex(8)
                 fixture_value = "fixture-" + secrets.token_hex(12)
                 fixture = root / ("fixture-" + protocol + ".txt")
@@ -578,6 +592,8 @@ def run_qualification(repo: Path, provider: str, model: str, *, timeout: float =
                     return reply
                 requested = case(protocol + ".caller-tool", request_tool)
                 if requested is None:
+                    if provider == "claude-subscription":
+                        break
                     continue
                 # Execution happens here in the HTTP caller, exactly once;
                 # no Gateway tool executor or artificial result is involved.
@@ -604,7 +620,7 @@ def run_qualification(repo: Path, provider: str, model: str, *, timeout: float =
                             raise QualificationFailure("wrong-history-after-restart", evidence=reply.evidence())
                         return reply
                     case(protocol + ".restart-history-fresh-caller", continuation)
-            if provider == "cursor-subscription":
+            if provider == "cursor-subscription" and include_cancel:
                 def cancellation():
                     evidence = server.cancel_stream(selected)
                     if not evidence["caller_wait_ended"] or not evidence["upstream_socket_cleanup_observed"]:
@@ -618,6 +634,7 @@ def run_qualification(repo: Path, provider: str, model: str, *, timeout: float =
             if server is not None:
                 server.stop()
     report["private_artifacts_removed"] = not root.exists()
+    report["cli_version_observed_after_run"] = installed_cli_version(provider)
     report["ordinary_qualified"] = qualified and bool(records) and bool(protocols)
     report["caller_cancel_qualified"] = any(row["case"] == "chat.caller-cancel" and row["state"] == "passed" for row in records)
     report["generation_qualified"] = False  # full product acceptance includes separate advanced/platform gates
@@ -635,12 +652,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--total-timeout", type=float, default=900)
     parser.add_argument("--protocol", choices=PROTOCOLS, action="append")
     parser.add_argument("--cancel-only", action="store_true", help="Run only the actual upstream-wait caller cancellation probe")
+    parser.add_argument("--skip-cancel", action="store_true", help="Retain earlier cancellation evidence while verifying only protocol deltas")
+    parser.add_argument("--tool-continuation-only", action="store_true", help="Verify new real tool call/result and restart without repeating text/stream/cancel")
     args = parser.parse_args(argv)
     if args.timeout <= 0 or args.total_timeout <= 0 or not (args.repo_root / "src-python/codex_proxy.py").is_file():
         parser.error("positive bounds and a real Gateway checkout are required")
+    if args.cancel_only and args.tool_continuation_only:
+        parser.error("select cancellation or tool continuation, not both")
     result = run_qualification(args.repo_root, args.provider, args.model, timeout=args.timeout,
                                total_timeout=args.total_timeout, protocols=() if args.cancel_only else tuple(args.protocol or PROTOCOLS),
-                               progress=lambda case: print(json.dumps(case), flush=True))
+                               progress=lambda case: print(json.dumps(case), flush=True),
+                               include_cancel=not (args.skip_cancel or args.tool_continuation_only),
+                               include_text=not args.tool_continuation_only)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"provider": args.provider, "ordinary_qualified": result["ordinary_qualified"],

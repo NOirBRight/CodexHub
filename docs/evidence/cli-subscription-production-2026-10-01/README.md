@@ -94,3 +94,37 @@ an incompatible interpreter was unavailable on this Linux environment.
 Worker backend rejection delta: 44 Claude public exchange tests passed.
 No full suite was run by this worker; the Orchestrator owns candidate review
 and the affected full local matrix.
+
+## Responses continuation delta — c0bc2ba
+
+A bounded [new Responses-only run](cursor-responses-c0bc2ba.json) froze candidate
+`c0bc2ba5323da831a96699980b129dc61c7f6719` after the completed function-Call
+status fix. Runtime SHA-256 was
+`1f5b8efda8b6e230e5a1694cf22b365974c22e540761d9e6fd0d903a5247f227`;
+Cursor's resolved official package version was `2026.09.28-64d2043` before and
+after the run. Text, stream and the real caller-tool request passed in
+4.45, 7.05 and 5.41 seconds. Returning the complete native output and real
+result still failed after 0.10 seconds with HTTP 400,
+`unsupported_protocol_semantics`. No tool-result success or restart was
+claimed. No Chat, Messages, Claude or cancellation case was repeated.
+Bounds were 60 seconds/request and 360 seconds/run; total elapsed time was
+17.68 seconds and all private artifacts were removed.
+
+The public converter reproduces this second layer without inference:
+`chat_completion_to_response_body` outputs both a completed message Item
+(`content,id,role,status,type`) and a completed function Call Item
+(`arguments,call_id,id,name,status,type`). Empty assistant `content=""` also
+produces that message. The candidate accepts the completed function-Call
+status, but its Responses message-input allowlist still excludes `status`.
+`prepare_exchange` therefore rejects its own message output with
+`NonForwardable.code=unsupported_protocol_semantics`, explaining the remaining
+real roundtrip failure. The harness preserved the full Items and did not
+remove completion fields or replace Call identity. Both historical failures
+remain retained. A later completed-message fix needs a new tool-result and
+restart delta, rather than rerunning already accepted text/stream/cancellation.
+
+The harness now supports `--tool-continuation-only`, which runs exactly a new
+actual caller tool request, its real result and completed-history continuation
+after actual Gateway restart. It skips text, stream and cancellation; public
+fixture tests assert those cases are not invoked. Qualification remains scoped
+to the selected cases and does not imply advanced or dual-platform acceptance.
