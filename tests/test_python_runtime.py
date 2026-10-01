@@ -82,6 +82,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/prepare_chatgpt_web_runtime.py",
     "scripts/probe_claude_role_identity.py",
     "scripts/qualify_authenticated_provider_cli.py",
+    "scripts/qualify_subscription_codemode.py",
     "scripts/qualify_beta3_protocol_cli.py",
     "scripts/replay_official_transport.py",
     "scripts/report_quality_gates.py",
