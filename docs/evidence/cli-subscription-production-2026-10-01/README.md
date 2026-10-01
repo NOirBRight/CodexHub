@@ -165,3 +165,36 @@ The harness retained both native completed outputs and original Call identity;
 it did not remove empty messages, rename Items, supply fake results, or silently
 repeat tool execution to get a pass. The repeated-ID producer and the actual
 restart rejection require a later fix and a bounded new three-operation delta.
+
+## Responses transport interruption delta — 19c4ad01
+
+After response-scoped Item IDs and strict completed native function history
+without current tool declarations were fixed, a new
+[tool-continuation-only run](cursor-responses-19c4ad01.json) froze candidate
+`19c4ad01bb7e5ecc5070f5ad645c0a45d6b8d63c`. Tracked runtime sources were clean;
+the runtime snapshot SHA-256 was
+`daf4d7b65dc3a3225073e2e901246f9347d0053d8707b80173e700a6c9cd462e`.
+Cursor's installed official package version was `2026.09.28-64d2043` before
+and after the run. The evidence was retained by `2026-10-01T01:40:21Z`.
+
+The real caller-tool request passed in 5.24 seconds with one original Call,
+whose ID SHA-256 was
+`deeee0dfa5e8fbc48b2e287a56f0d0ae7dd0ed99ce9238d65a96d6edb7180dbc`.
+Returning the full native output and the actual caller result failed after
+6.29 seconds with HTTP 502, `upstream-connection-error`. The backend emits
+this bounded classification at its TLS/socket/HTTP2 exception boundary.
+This observation does not identify the underlying transport exception or
+establish that it was transient; it also does not reproduce a protocol/history
+HTTP 400 rejection. Private logs were destroyed under the probe's privacy
+policy rather than retained for post hoc diagnosis.
+
+The dependent actual Gateway restart and fresh-caller full-history case did
+not run because the result exchange failed. No result-continuation success,
+restart success or current-candidate qualification is claimed. The three-case
+scope had a 60-second request and 240-second total bound; actual total elapsed
+time was 12.2 seconds. All private artifacts were removed. No text, stream,
+cancellation, Chat, Messages or Claude probe was repeated, and no retry was
+performed. Prior protocol failures and the earlier real-result success remain
+separate historical observations. Advanced Code Mode/V2 and same-SHA Windows
+qualification remain open; the existing Windows gate is blocked by `yoga`
+SSH reporting `No route to host`.

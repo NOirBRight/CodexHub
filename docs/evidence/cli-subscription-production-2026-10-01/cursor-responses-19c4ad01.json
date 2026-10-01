@@ -1,0 +1,64 @@
+{
+  "provider": "cursor-subscription",
+  "model": "gpt-5.6-luna-high",
+  "risk": "strict",
+  "kind": "ordinary-real-gateway",
+  "bound_seconds_per_exchange": 60.0,
+  "bound_seconds_total": 240.0,
+  "success_cues": [
+    "exact randomized text with complete protocol terminal event",
+    "actual caller tool with original Call identity",
+    "real tool result recovered from completed history after Gateway restart",
+    "upstream sockets close after caller disconnect"
+  ],
+  "failure_cues": [
+    "bounded HTTP/SSE error",
+    "wrong exact output",
+    "orphan or malformed caller tool",
+    "incomplete stream",
+    "unobserved cleanup"
+  ],
+  "protocols": [
+    "responses"
+  ],
+  "cases": [
+    {
+      "case": "responses.caller-tool",
+      "state": "passed",
+      "elapsed_seconds": 5.24,
+      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "text_bytes": 0,
+      "tool_calls": 1,
+      "call_id_sha256": [
+        "deeee0dfa5e8fbc48b2e287a56f0d0ae7dd0ed99ce9238d65a96d6edb7180dbc"
+      ],
+      "usage_present": false,
+      "stream_events": 0,
+      "finish": "completed"
+    },
+    {
+      "case": "responses.tool-result",
+      "state": "failed",
+      "code": "upstream-connection-error",
+      "http_status": 502,
+      "elapsed_seconds": 6.29
+    }
+  ],
+  "advanced_codemode_v2_qualified": false,
+  "dual_platform_qualified": false,
+  "windows_gate": {
+    "state": "blocked",
+    "reason": "yoga SSH No route to host; actual Windows verification pending"
+  },
+  "ordinary_scope": "tool-continuation-only",
+  "cli_version_observed_before_run": "2026.09.28-64d2043",
+  "candidate_sha": "19c4ad01bb7e5ecc5070f5ad645c0a45d6b8d63c",
+  "candidate_runtime_tracked_dirty": false,
+  "runtime_source_sha256": "daf4d7b65dc3a3225073e2e901246f9347d0053d8707b80173e700a6c9cd462e",
+  "private_artifacts_removed": true,
+  "cli_version_observed_after_run": "2026.09.28-64d2043",
+  "ordinary_qualified": false,
+  "caller_cancel_qualified": false,
+  "generation_qualified": false,
+  "elapsed_seconds": 12.2
+}
