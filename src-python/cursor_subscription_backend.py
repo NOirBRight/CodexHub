@@ -457,7 +457,7 @@ def _conversation(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], lis
                 "seed", "frequency_penalty", "presence_penalty", "functions", "function_call", "reasoning_effort"):
         if payload.get(key) is not None:
             raise BackendError("unsupported-parameter", "Cursor cannot represent the requested generation parameter: " + key + ".", 400)
-    if payload.get("parallel_tool_calls") not in (None, True):
+    if payload.get("parallel_tool_calls") is not None and payload["parallel_tool_calls"] is not True:
         raise BackendError("unsupported-parameter", "Cursor cannot enforce serial caller tool selection.", 400)
     history = payload.get("messages")
     if not isinstance(history, list) or not history or len(history) > 100000:
