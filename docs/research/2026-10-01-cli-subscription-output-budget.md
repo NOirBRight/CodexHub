@@ -138,3 +138,20 @@ rejection remains the truthful behavior.
 No parameter support or provider qualification is claimed here. Ordinary
 Responses success, advanced Code Mode/V2, Messages compatibility and Windows
 same-SHA evidence remain distinct acceptance surfaces.
+
+## Reviewed production lifecycle audit
+
+A follow-up read-only audit of candidate `29ee769689816511fbd7b010ee6339dddf61bc8f`
+made zero additional model-generation requests and changed no source/config.
+Its Claude `read_output` thread queues native events; it does not immediately
+terminate the CLI at the first `message_stop`. The consumer validates that
+event, yields pending tool/text chunks, then calls `dispose()`. Earlier text
+delivery and pending yields can be delayed by a slow caller. Consequently,
+delivering only the first native message does not prove that automatic recovery
+has not already started a second upstream request before termination.
+
+An eventual native budget mapping needs termination/control independent of
+caller backpressure and proof that recovery requests cannot exceed the whole
+Gateway-turn budget. Moving cleanup before buffered delivery alone does not
+establish that proof. The existing explicit rejection remains appropriate;
+the current account's separate HTTP 403 also prevents live cap qualification.
