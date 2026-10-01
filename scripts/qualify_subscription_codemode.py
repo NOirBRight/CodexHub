@@ -465,9 +465,13 @@ unbounded_connection_retries=false
         checks = assess_case(case, turns, requests, sessions, nonce, gateway_pids)
         if failure:
             checks["passed"] = False
-        return {"case": case, "checks": checks, "turns": turns, "requests": requests, "sessions": sessions,
+        result = {"case": case, "checks": checks, "turns": turns, "requests": requests, "sessions": sessions,
                 "fixture_sha256": digest(nonce), "gateway_pids": gateway_pids, "failure_class": failure,
-                "elapsed_seconds": round(time.monotonic() - case_started, 3), "private_tree_removed": True}
+                "elapsed_seconds": round(time.monotonic() - case_started, 3)}
+    result["private_tree_removed"] = not runtime.exists()
+    if not result["private_tree_removed"]:
+        result["checks"]["passed"] = False
+    return result
 
 
 def main(argv=None):
@@ -483,6 +487,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not 1 <= args.case_timeout <= 180 or not 1 <= args.total_timeout <= 1200:
         parser.error("case timeout must be <=180s and total timeout <=1200s")
+    selected_cases = tuple(args.case or CASES)
+    if len(selected_cases) > 4 or len(set(selected_cases)) != len(selected_cases):
+        parser.error("select at most four distinct cases; duplicate cases are not allowed")
     sys.path.insert(0, str(args.checkout.resolve() / "src-python"))
     version = subprocess.run([str(args.codex), "--version"], capture_output=True, text=True, timeout=5, check=True).stdout.strip()
     sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=args.checkout, capture_output=True, text=True, timeout=5, check=True).stdout.strip()
@@ -493,8 +500,11 @@ def main(argv=None):
     with tempfile.TemporaryDirectory(prefix="codexhub-codemode-candidate-") as frozen:
         snapshot = Path(frozen)
         report["runtime_snapshot_sha256"] = freeze_candidate(args.checkout.resolve(), snapshot)
+        dirty = subprocess.run(["git", "status", "--porcelain", "--", "src-python", "config", "model-catalogs"], cwd=args.checkout, capture_output=True, text=True, timeout=5, check=True).stdout
+        report["source_runtime_dirty"] = bool(dirty.strip())
+        report["candidate_sha_is_exact_runtime"] = not report["source_runtime_dirty"]
         sys.path.insert(0, str(snapshot / "src-python"))
-        for case in args.case or CASES:
+        for case in selected_cases:
             remaining = args.total_timeout - (time.monotonic() - started)
             if remaining <= 0:
                 report["budget_exhausted"] = True
@@ -504,7 +514,8 @@ def main(argv=None):
                                                  args.codex.resolve(), min(args.case_timeout, remaining)))
             except Exception as error:
                 report["cases"].append({"case": case, "checks": {"passed": False}, "failure_class": type(error).__name__})
-    report["passed"] = bool(report["cases"]) and all(case["checks"]["passed"] for case in report["cases"]) and not report.get("budget_exhausted")
+    report["snapshot_tree_removed"] = not snapshot.exists()
+    report["passed"] = report["snapshot_tree_removed"] and bool(report["cases"]) and all(case["checks"]["passed"] for case in report["cases"]) and not report.get("budget_exhausted")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps({"passed": report["passed"], "cases": [{"case": case["case"], "checks": case["checks"], "failure_class": case.get("failure_class")} for case in report["cases"]]}))

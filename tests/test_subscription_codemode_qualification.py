@@ -97,3 +97,40 @@ def test_frozen_candidate_restart_bytes_do_not_follow_worker_edits(tmp_path):
     (source / "src-python/sample.txt").write_text("worker edit")
     assert (frozen / "src-python/sample.txt").read_text() == "candidate"
     assert len(digest) == 64
+
+
+
+def test_harness_rejects_duplicate_cases_before_any_candidate_or_inference(tmp_path):
+    with pytest.raises(SystemExit):
+        qualification.main(["--case", "code-mode", "--case", "code-mode", "--output", str(tmp_path / "result.json")])
+
+
+def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup(tmp_path, monkeypatch):
+    import os
+    if os.name == "nt":
+        pytest.skip("POSIX fake executable fixture")
+    source, user, frozen = tmp_path / "codex-source", tmp_path / "user", tmp_path / "candidate"
+    (source / "model-catalogs").mkdir(parents=True)
+    (user / ".config/cursor").mkdir(parents=True)
+    (source / "model-catalogs/codexhub-model-catalog.json").write_text(json.dumps({"models": [{"slug": qualification.OFFICIAL_MODEL, "display_name": "official fixture", "visibility": "list", "supported_in_api": True, "tool_mode": "code_mode", "multi_agent_version": "v2"}]}))
+    (source / "auth.json").write_text('{"auth_mode":"chatgpt","tokens":{"access_token":"dummy-never-used","refresh_token":"dummy-never-used","id_token":"dummy-never-used"}}')
+    (user / ".config/cursor/auth.json").write_text('{"accessToken":"dummy-never-used"}')
+    installed = tmp_path / "installed" / "2026.09.28-64d2043"
+    installed.mkdir(parents=True)
+    cursor = installed / "cursor-agent"
+    cursor.write_text("#!/bin/sh\nexit 1\n")
+    cursor.chmod(0o700)
+    fake = tmp_path / "fake-codex"
+    fake.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then printf "codex-cli 0.159.3\\n"; else printf \'{"type":"turn.failed","error":{"message":"fake caller no request"}}\\n\'; exit 1; fi\n')
+    fake.chmod(0o700)
+    qualification.freeze_candidate(ROOT, frozen)
+    monkeypatch.syspath_prepend(str(frozen / "src-python"))
+    monkeypatch.setenv("PATH", str(installed) + os.pathsep + os.environ.get("PATH", os.defpath))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    result = qualification.run_case("code-mode", frozen, source, user, fake, 30)
+    assert len(result["gateway_pids"]) == 1
+    assert result["requests"] == []  # no model request, even to a fake server
+    assert result["failure_class"] is None
+    assert not result["checks"]["passed"]
+    assert result["private_tree_removed"]
