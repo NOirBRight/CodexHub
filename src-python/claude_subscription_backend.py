@@ -143,12 +143,12 @@ def _validate_content(value: Any) -> None:
             raise _failure("invalid-request", 400)
 
 
-def _request(payload: Mapping[str, Any]) -> tuple[str, list[dict[str, Any]], bytes]:
+def _request(payload: Mapping[str, Any]) -> tuple[str, list[dict[str, Any]], bytes, set[str]]:
     # No observed native flag represents these caller requirements. Reject
     # before credentials/private artifacts/processes rather than drop them.
     for parameter in ("max_tokens", "max_completion_tokens", "temperature", "top_p", "response_format", "stop",
                       "audio", "modalities", "logit_bias", "seed", "frequency_penalty", "presence_penalty",
-                      "prediction", "parallel_tool_calls", "functions", "function_call"):
+                      "prediction", "parallel_tool_calls", "functions", "function_call", "logprobs", "top_logprobs"):
         if payload.get(parameter) is not None:
             raise _failure("unsupported-parameter", 400)
     if payload.get("n") not in (None, 1):
@@ -243,7 +243,7 @@ def _request(payload: Mapping[str, Any]) -> tuple[str, list[dict[str, Any]], byt
         raise _failure("invalid-request", 400) from None
     if len(line) > _MAX_BODY or len(manifest_bytes) > _MAX_BODY:
         raise _failure("invalid-request", 400)
-    return model, manifest, line
+    return model, manifest, line, completed
 
 
 class _Callback:
@@ -448,7 +448,7 @@ def stream_chat(payload: Mapping[str, Any], *, cancel: threading.Event, timeout:
     and MCP boundary. Only the official source login is admitted. Caller closes
     the iterator or sets cancel to reap all children and remove private files.
     """
-    model, tools, input_line = _request(payload)
+    model, tools, input_line, completed_call_ids = _request(payload)
     if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
         raise _failure("invalid-request", 400)
     environment = dict(os.environ if environ is None else environ)
@@ -595,10 +595,24 @@ def stream_chat(payload: Mapping[str, Any], *, cancel: threading.Event, timeout:
 
             calls: dict[str, dict[str, Any]] = {}
             blocks: dict[int, dict[str, Any]] = {}
+            pending_deltas: list[dict[str, Any]] = []
+            buffering = False
+            buffered_bytes = 0
             stopped_reason = None
             started = False
             role_pending = True
             usage: dict[str, Any] = {}
+
+            def deliver(delta: dict[str, Any]) -> Iterator[dict[str, Any]]:
+                nonlocal buffered_bytes
+                if buffering:
+                    buffered_bytes += len(json.dumps(delta, ensure_ascii=False).encode())
+                    if buffered_bytes > _MAX_BODY:
+                        raise _failure("backend-contract")
+                    pending_deltas.append(delta)
+                else:
+                    yield chunk(delta)
+
             while True:
                 check()
                 try:
@@ -643,15 +657,17 @@ def stream_chat(payload: Mapping[str, Any], *, cancel: threading.Event, timeout:
                     if block.get("type") == "tool_use":
                         name, call_id = block.get("name"), block.get("id")
                         if (not isinstance(name, str) or not name.startswith(_MCP_PREFIX) or name[len(_MCP_PREFIX):] not in {row["name"] for row in tools}
-                                or not isinstance(call_id, str) or not call_id or call_id in calls
+                                or not isinstance(call_id, str) or not call_id or call_id in calls or call_id in completed_call_ids
                                 or any(old.get("id") == call_id for old in blocks.values())):
                             raise _failure("backend-contract")
+                        buffering = True
+                        pending_deltas.append({"tool_call_id": call_id})
                         blocks[index] = {"type": "tool_use", "id": call_id, "name": name[len(_MCP_PREFIX):],
                                          "raw": "", "initial": block.get("input", {})}
                     elif block.get("type") in {"text", "thinking", "redacted_thinking"}:
                         blocks[index] = {"type": block["type"]}
                         if block.get("type") == "text" and block.get("text"):
-                            yield chunk({"content": block["text"]})
+                            yield from deliver({"content": block["text"]})
                     else:
                         raise _failure("backend-contract")
                 elif kind == "content_block_delta":
@@ -659,13 +675,13 @@ def stream_chat(payload: Mapping[str, Any], *, cancel: threading.Event, timeout:
                     if block is None or not isinstance(delta, dict):
                         raise _failure("backend-contract")
                     if delta.get("type") == "text_delta" and block["type"] == "text" and isinstance(delta.get("text"), str):
-                        yield chunk({"content": delta["text"]})
+                        yield from deliver({"content": delta["text"]})
                     elif delta.get("type") == "input_json_delta" and block["type"] == "tool_use" and isinstance(delta.get("partial_json"), str):
                         block["raw"] += delta["partial_json"]
                         if len(block["raw"]) > _MAX_BODY:
                             raise _failure("backend-contract")
                     elif delta.get("type") == "thinking_delta" and block["type"] == "thinking" and isinstance(delta.get("thinking"), str):
-                        yield chunk({"reasoning_content": delta["thinking"]})
+                        yield from deliver({"reasoning_content": delta["thinking"]})
                     elif delta.get("type") != "signature_delta" or block["type"] != "thinking":
                         raise _failure("backend-contract")
                 elif kind == "content_block_stop":
@@ -700,9 +716,17 @@ def stream_chat(payload: Mapping[str, Any], *, cancel: threading.Event, timeout:
                         raise _failure("backend-contract")
                     callback.check(calls)
                     check()
-                    for index, call in enumerate(calls.values()):
-                        yield chunk({"tool_calls": [{"index": index, "id": call["id"], "type": "function",
-                                    "function": {"name": call["name"], "arguments": json.dumps(call["arguments"], ensure_ascii=False, separators=(",", ":"))}}]})
+                    # Calls must agree with the private MCP callback before any
+                    # caller can execute them. Preserve the native order of those
+                    # calls and later text, while earlier text streams directly.
+                    call_index = 0
+                    for delta in pending_deltas:
+                        if "tool_call_id" in delta:
+                            call = calls[delta["tool_call_id"]]
+                            delta = {"tool_calls": [{"index": call_index, "id": call["id"], "type": "function",
+                                     "function": {"name": call["name"], "arguments": json.dumps(call["arguments"], ensure_ascii=False, separators=(",", ":"))}}]}
+                            call_index += 1
+                        yield chunk(delta)
                     final = chunk({}, "tool_calls" if calls else "length" if stopped_reason == "max_tokens" else "stop")
                     reported_usage = _reported_usage(usage)
                     if reported_usage is not None:

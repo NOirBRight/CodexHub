@@ -49,6 +49,14 @@ def _portable_tools(tools: Any, *, code_mode: bool = False) -> Any:
     return result
 
 
+def _tool_groups(payload: Mapping[str, Any]) -> list[Any]:
+    groups = [payload.get("tools")]
+    items = payload.get("input")
+    if isinstance(items, list):
+        groups.extend(item.get("tools") for item in items if isinstance(item, Mapping) and item.get("type") == "additional_tools")
+    return groups
+
+
 def make_messages_portable(payload: dict[str, Any]) -> bool:
     """Copy declarations and plaintext call identities, preserving ciphertext.
 
@@ -57,28 +65,24 @@ def make_messages_portable(payload: dict[str, Any]) -> bool:
     chosen after the parent request; all V2 message tools must be portable.
     Both top-level tools and input additional_tools retain their placement.
     """
-    # An existing alias is unowned; do not expand or partially modify a collision.
-    original_groups = [payload.get("tools")]
-    original_items = payload.get("input")
-    if isinstance(original_items, list):
-        original_groups.extend(item.get("tools") for item in original_items if isinstance(item, dict) and item.get("type") == "additional_tools")
+    # An existing alias is unowned. Fail before mutation when the caller's
+    # recognized collaboration would otherwise bypass plaintext prevention.
+    # Alias-only or unknown tool surfaces remain caller-owned and untouched.
+    original_groups = _tool_groups(payload)
     if any(isinstance(tool, Mapping) and tool.get("name") == ALIAS for group in original_groups if isinstance(group, list) for tool in group):
+        probe = dict(payload)
+        code_mode = any(has_code_mode_exec(group) for group in original_groups)
+        code_mode = expose_declared_collaboration(probe) or code_mode
+        if any(_portable_tools(group, code_mode=code_mode) != group for group in _tool_groups(probe)):
+            raise UpstreamProtocolTranslationError(UnsupportedProtocolTranslationError(
+                "collaboration_portable_alias_collision",
+                "Caller tools reserve the namespace needed for plaintext collaboration delivery. Rename that tool before retrying.",
+            ))
         return False
     # Expand actual typed exec handler declarations before aliasing.
     code_mode = any(has_code_mode_exec(group) for group in original_groups)
     code_mode = expose_declared_collaboration(payload) or code_mode
     items = payload.get("input")
-    groups = [payload.get("tools")]
-    if isinstance(items, list):
-        groups.extend(
-            item.get("tools") for item in items
-            if isinstance(item, dict) and item.get("type") == "additional_tools"
-        )
-    if any(
-        isinstance(tool, dict) and tool.get("name") == ALIAS
-        for group in groups if isinstance(group, list) for tool in group
-    ):
-        return False
     changed = False
     tools = payload.get("tools")
     portable = _portable_tools(tools, code_mode=code_mode)
@@ -111,13 +115,9 @@ def make_messages_portable(payload: dict[str, Any]) -> bool:
 
 def portable_handler_names(payload: Mapping[str, Any]) -> tuple[str, ...]:
     """Return exactly the methods exposed by this request's portable declaration."""
-    groups = [payload.get("tools")]
-    items = payload.get("input")
-    if isinstance(items, list):
-        groups.extend(item.get("tools") for item in items if isinstance(item, Mapping) and item.get("type") == "additional_tools")
     return tuple(
         child["name"]
-        for group in groups if isinstance(group, list)
+        for group in _tool_groups(payload) if isinstance(group, list)
         for tool in group if isinstance(tool, Mapping) and tool.get("name") == ALIAS
         for child in tool.get("tools", []) if isinstance(child, Mapping) and child.get("name") in NAMES
     )
@@ -142,7 +142,8 @@ def decode_body(body: bytes, context: Any) -> bytes:
                     raise UpstreamProtocolTranslationError(UnsupportedProtocolTranslationError(
                         "collaboration_tool_not_declared", "Upstream returned a collaboration method this caller did not declare.",
                     ))
-                if value.get("encrypted_function_args"):
+                marker = value.get("encrypted_function_args", [])
+                if not isinstance(marker, list) or marker:
                     raise UpstreamProtocolTranslationError(UnsupportedProtocolTranslationError(
                         "encrypted_collaboration_arguments_unavailable", "Upstream returned opaque collaboration arguments for a plaintext tool.",
                     ))

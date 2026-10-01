@@ -194,7 +194,41 @@ def test_official_inverse_cannot_expand_a_child_subset_or_accept_opaque_argument
 
 
 def test_alias_collision_does_not_partially_expand_current_exec():
+    from gateway_errors import UpstreamProtocolTranslationError
     payload = {"tools": [exec_tool(("send_message",)), {"type": "namespace", "name": ALIAS, "tools": []}]}
     original = copy.deepcopy(payload)
-    assert not make_messages_portable(payload)
+    with pytest.raises(UpstreamProtocolTranslationError, match="namespace needed for plaintext collaboration") as error:
+        make_messages_portable(payload)
+    assert error.value.classification == "collaboration_portable_alias_collision"
     assert payload == original
+
+
+@pytest.mark.parametrize("marker", [None, False, 0, "", {}, ["message"]])
+@pytest.mark.parametrize("wire_format", ["body", "sse"])
+def test_official_inverse_rejects_malformed_or_opaque_encryption_markers(marker, wire_format):
+    from gateway_errors import UpstreamProtocolTranslationError
+    call = {"type": "function_call", "namespace": ALIAS, "name": "spawn_agent",
+            "id": "item-original", "call_id": "call-original",
+            "arguments": '{"task_name":"reader","message":"private task"}',
+            "encrypted_function_args": marker}
+    body = json.dumps({"output": [call]}).encode()
+    context = {CONTEXT_KEY: ("spawn_agent",)}
+    with pytest.raises(UpstreamProtocolTranslationError) as error:
+        if wire_format == "body":
+            decode_body(body, context)
+        else:
+            decode_sse_line(b"data: " + body + b"\n", context)
+    assert "private task" not in str(error.value)
+
+
+@pytest.mark.parametrize("marker", ["absent", []])
+@pytest.mark.parametrize("wire_format", ["body", "sse"])
+def test_official_inverse_accepts_only_absent_or_empty_list_encryption_marker(marker, wire_format):
+    call = {"type": "function_call", "namespace": ALIAS, "name": "spawn_agent",
+            "id": "item-original", "call_id": "call-original", "arguments": "{}"}
+    if marker != "absent":
+        call["encrypted_function_args"] = marker
+    body = json.dumps({"output": [call]}).encode()
+    context = {CONTEXT_KEY: ("spawn_agent",)}
+    decoded = decode_body(body, context) if wire_format == "body" else decode_sse_line(b"data: " + body + b"\n", context)[5:].strip()
+    assert json.loads(decoded)["output"] == [{**call, "namespace": "collaboration", "encrypted_function_args": []}]

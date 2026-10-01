@@ -8,6 +8,7 @@ import gateway_compat
 import gateway_errors
 import gateway_events
 import gateway_stream_semantics
+import route_primitives
 from gateway_compat.collaboration_delivery import ALIAS, CONTEXT_KEY
 from collaboration_runtime_contract import (
     COLLABORATION_V1, COLLABORATION_V2, EXPECTED_PARAMETER_SCHEMAS,
@@ -195,3 +196,31 @@ def test_rejected_collaboration_diagnostics_do_not_expose_payload(monkeypatch):
     ))
     assert sentinel not in json.dumps(downstream)
     assert sentinel not in json.dumps(events)
+
+
+@pytest.mark.parametrize("behavior_profile", [None, route_primitives.BEHAVIOR_OFFICIAL_CODEX_APP_HTTP_PASSTHROUGH])
+@pytest.mark.parametrize("placement", ["tools", "additional_tools", "split_groups"])
+@pytest.mark.parametrize("alias_type", ["namespace", "custom", "function"])
+def test_owned_collaboration_alias_collision_fails_before_official_generation(behavior_profile, placement, alias_type):
+    alias = {"type": alias_type, "name": ALIAS, "description": "unrelated private tool"}
+    if alias_type == "namespace":
+        alias["tools"] = []
+    if alias_type == "function":
+        alias["parameters"] = {"type": "object"}
+    declarations = [namespace(), alias]
+    payload = {"model": "gpt-6-astra", "tools": declarations, "input": [], "stream": True, "tool_choice": "auto"}
+    if placement == "additional_tools":
+        payload.update(tools=[], input=[{"type": "additional_tools", "tools": declarations}])
+    elif placement == "split_groups":
+        payload.update(tools=[namespace()], input=[{"type": "additional_tools", "tools": [alias]}])
+    original = copy.deepcopy(payload)
+    context = {}
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError, match="namespace needed for plaintext collaboration") as error:
+        gateway_compat.compatible_request_body(
+            json.dumps(payload).encode(), {"name": "official", "upstream_model": "gpt-6-astra"},
+            event_context=context, behavior_profile=behavior_profile,
+        )
+    assert CONTEXT_KEY not in context
+    assert error.value.classification == "collaboration_portable_alias_collision"
+    assert payload == original
+    assert "unrelated private tool" not in str(error.value)

@@ -72,6 +72,9 @@ if data.get("calls"):
 if data.get("change"):
     Path(data["change"]).write_text("{}")
 for value in data["events"]:
+    delta = value.get("event", {}).get("delta", {})
+    if "_fixture_repeat" in delta:
+        delta["text"] *= delta.pop("_fixture_repeat")
     print(json.dumps(value, ensure_ascii=False), flush=True)
     time.sleep(.01)
 time.sleep(3600)
@@ -182,6 +185,117 @@ def test_callback_disagrees_with_native_call_fails_without_tool_delivery(exchang
     with pytest.raises(BackendError) as error:
         list(invoke(tool_payload(), events=tool_events(native), calls=callback))
     assert error.value.code == "backend-contract"
+
+
+@pytest.mark.parametrize("reuse_completed_id", [False, True])
+def test_new_native_call_keeps_completed_history_call_identity_unique(exchange, reuse_completed_id):
+    invoke, _, capture, roots, children, *_ = exchange
+    payload = tool_payload()
+    old = {"id": "toolu-completed", "type": "function",
+           "function": {"name": "first", "arguments": '{"task":"already executed"}'}}
+    payload["messages"] += [
+        {"role": "assistant", "content": None, "tool_calls": [old]},
+        {"role": "tool", "tool_call_id": old["id"], "content": "actual completed result"},
+        {"role": "user", "content": "Continue with new work"},
+    ]
+    call = {"id": old["id"] if reuse_completed_id else "toolu-new",
+            "name": "first", "arguments": {"task": "new side effect"}}
+    iterator = invoke(payload, events=tool_events([call]), calls=[call])
+    if reuse_completed_id:
+        with pytest.raises(BackendError) as error:
+            next(iterator)
+        assert error.value.code == "backend-contract"
+    else:
+        rows = list(iterator)
+        assert rows[0]["choices"][0]["delta"]["tool_calls"][0]["id"] == call["id"]
+        assert rows[-1]["choices"][0]["finish_reason"] == "tool_calls"
+    history = json.loads(json.loads(capture.read_text())["message"]["content"])
+    assert history["messages"] == payload["messages"]
+    assert all(child.poll() is not None for child in children)
+    assert all(not root.exists() for root in roots)
+
+
+@pytest.mark.parametrize("layout", ["tool_text", "text_tool_text", "tools_interleaved"])
+def test_validated_calls_and_text_keep_native_block_order(exchange, layout):
+    invoke, *_ = exchange
+    first = {"id": "toolu-first", "name": "first", "arguments": {"task": "first"}}
+    second = {"id": "toolu-second", "name": "second", "arguments": {"task": "second"}}
+    values = [event("message_start", message={"model": "claude-exact"})]
+    expected = []
+    calls = []
+    blocks = [first, "after-tool"] if layout == "tool_text" else ["before-tool", first, "after-tool"]
+    if layout == "tools_interleaved":
+        blocks = [first, "between-tools", second, "after-tools"]
+    for index, block in enumerate(blocks):
+        if isinstance(block, dict):
+            calls.append(block)
+            native = tool_events([block])[1:-2]
+            for value in native:
+                value["event"]["index"] = index
+            values.extend(native)
+            expected.append(("tool", block["id"]))
+        else:
+            values += [event("content_block_start", index=index, content_block={"type": "text", "text": ""}),
+                       event("content_block_delta", index=index, delta={"type": "text_delta", "text": block}),
+                       event("content_block_stop", index=index)]
+            expected.append(("text", block))
+    values += [event("message_delta", delta={"stop_reason": "tool_use"}), event("message_stop")]
+    rows = list(invoke(tool_payload(), events=values, calls=calls))
+    delivered = []
+    for row in rows[:-1]:
+        delta = row["choices"][0]["delta"]
+        delivered.append(("tool", delta["tool_calls"][0]["id"]) if "tool_calls" in delta else ("text", delta["content"]))
+    assert delivered == expected
+    assert [row["choices"][0]["delta"]["tool_calls"][0]["index"] for row in rows[:-1]
+            if "tool_calls" in row["choices"][0]["delta"]] == list(range(len(calls)))
+    assert rows[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_unvalidated_call_does_not_release_buffered_later_text(exchange):
+    invoke, _, _, roots, children, *_ = exchange
+    native = {"id": "toolu-first", "name": "first", "arguments": {"task": "native"}}
+    callback = {**native, "arguments": {"task": "mismatch"}}
+    values = tool_events([native])[:-2] + [
+        event("content_block_start", index=1, content_block={"type": "text", "text": "post-tool"}),
+        event("content_block_stop", index=1),
+        event("message_delta", delta={"stop_reason": "tool_use"}), event("message_stop"),
+    ]
+    with pytest.raises(BackendError) as error:
+        next(invoke(tool_payload(), events=values, calls=[callback]))
+    assert error.value.code == "backend-contract"
+    assert all(child.poll() is not None for child in children)
+    assert all(not root.exists() for root in roots)
+
+
+def test_text_before_pending_tool_streams_without_native_completion(exchange):
+    invoke, _, _, roots, children, *_ = exchange
+    call = {"id": "toolu-first", "name": "first", "arguments": {}}
+    values = text_events("before-tool")[:-2] + tool_events([call])[1:-2]
+    for value in values[4:]:
+        value["event"]["index"] = 1
+    iterator = invoke(tool_payload(), events=values, calls=[call], timeout=.5)
+    assert next(iterator)["choices"][0]["delta"]["content"] == "before-tool"
+    with pytest.raises(BackendError) as error:
+        next(iterator)
+    assert error.value.code == "timeout"
+    assert all(child.poll() is not None for child in children)
+    assert all(not root.exists() for root in roots)
+
+
+def test_post_tool_text_buffer_is_bounded_before_delivery(exchange):
+    invoke, _, _, roots, children, *_ = exchange
+    call = {"id": "toolu-first", "name": "first", "arguments": {}}
+    values = tool_events([call])[:-2] + [
+        event("content_block_start", index=1, content_block={"type": "text", "text": ""}),
+        *[event("content_block_delta", index=1, delta={"type": "text_delta", "text": "x", "_fixture_repeat": 1024 * 1024}) for _ in range(5)],
+        event("content_block_stop", index=1),
+        event("message_delta", delta={"stop_reason": "tool_use"}), event("message_stop"),
+    ]
+    with pytest.raises(BackendError) as error:
+        next(invoke(tool_payload(), events=values, calls=[call]))
+    assert error.value.code == "backend-contract"
+    assert all(child.poll() is not None for child in children)
+    assert all(not root.exists() for root in roots)
 
 
 @pytest.mark.parametrize("events,code", [
@@ -372,6 +486,7 @@ def test_exact_vendor_slash_identity_is_preserved(exchange):
     ("modalities", ["text"]), ("logit_bias", {"1": 1}), ("seed", 1), ("frequency_penalty", 0),
     ("presence_penalty", 0), ("prediction", {"type": "content", "content": "expected"}),
     ("parallel_tool_calls", False), ("functions", []), ("function_call", "none"), ("n", 2),
+    ("logprobs", True), ("logprobs", False), ("top_logprobs", 0), ("top_logprobs", 3),
 ])
 def test_unrepresentable_generation_semantics_fail_before_any_process_or_private_artifact(exchange, parameter, value):
     invoke, _, _, roots, children, commands, _ = exchange

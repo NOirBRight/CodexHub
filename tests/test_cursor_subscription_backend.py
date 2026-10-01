@@ -465,7 +465,8 @@ def test_mixed_provider_call_identity_collision_fails_before_transport(tmp_path)
 
 @pytest.mark.parametrize("key,value", [("parallel_tool_calls", False), ("seed", 1), ("frequency_penalty", 0.5),
                                      ("presence_penalty", 0.5), ("functions", []), ("function_call", "auto"),
-                                     ("reasoning_effort", "high")])
+                                     ("reasoning_effort", "high"), ("logprobs", True), ("logprobs", False),
+                                     ("top_logprobs", 0), ("top_logprobs", 3)])
 def test_unsupported_selection_controls_fail_before_account_or_transport(key, value):
     payload = tool_payload()
     payload[key] = value
