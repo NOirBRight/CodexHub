@@ -139,9 +139,13 @@ def google_value(value: Any, depth: int = 0) -> bytes:
     if isinstance(value, bool):
         return number(4, int(value))
     if isinstance(value, (float, int)):
-        if not math.isfinite(value):
+        try:
+            encoded = float(value)
+        except OverflowError:
+            raise malformed() from None
+        if not math.isfinite(encoded) or (isinstance(value, int) and int(encoded) != value):
             raise malformed()
-        return varint(17) + struct.pack("<d", value)
+        return varint(17) + struct.pack("<d", encoded)
     if isinstance(value, str):
         return string(3, value)
     if isinstance(value, dict):

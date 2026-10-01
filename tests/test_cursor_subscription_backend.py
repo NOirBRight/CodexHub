@@ -434,3 +434,30 @@ def test_wrong_wire_type_is_bounded(tmp_path):
     with pytest.raises(BackendError) as error:
         list(run(account(tmp_path), transport))
     assert error.value.code == "upstream-protocol-error"
+
+
+@pytest.mark.parametrize("value", [2**53 + 1, -(2**53 + 1), 10**400])
+def test_tool_schema_integer_precision_loss_fails_before_transport(tmp_path, value):
+    payload = tool_payload()
+    payload["tools"][0]["function"]["parameters"] = {"type": "integer", "enum": [value]}
+    transport = Transport([])
+    with pytest.raises(BackendError) as error:
+        list(run(account(tmp_path), transport, payload))
+    assert error.value.status == 400
+    assert not transport.streams
+    assert error.value.code == "invalid-request"
+
+
+def test_mixed_provider_call_identity_collision_fails_before_transport(tmp_path):
+    identities = ["abc", "call_cursor_YWJj"]
+    calls = [{"id": identity, "type": "function", "function": {"name": "random_tool", "arguments": "{}"}} for identity in identities]
+    payload = tool_payload([
+        {"role": "assistant", "tool_calls": calls},
+        *[{"role": "tool", "tool_call_id": identity, "content": "actual result"} for identity in identities],
+        {"role": "user", "content": "Continue from both completed results."},
+    ])
+    transport = Transport([])
+    with pytest.raises(BackendError) as error:
+        list(run(account(tmp_path), transport, payload))
+    assert error.value.code == "invalid-request"
+    assert not transport.streams

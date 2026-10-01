@@ -462,6 +462,7 @@ def _conversation(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], lis
     messages = []
     pending: dict[str, str] = {}
     seen: set[str] = set()
+    upstream_calls: set[str] = set()
     results = []
     last_user = "."
     def flush() -> None:
@@ -508,6 +509,10 @@ def _conversation(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], lis
                 function = call["function"]
                 if not isinstance(call_id, str) or not call_id or call_id in seen or not isinstance(function.get("name"), str) or not function["name"]:
                     raise _invalid("Cursor history contains an invalid or undeclared caller tool Call.")
+                upstream_call_id = _decode_call_id(call_id)
+                if upstream_call_id in upstream_calls:
+                    raise _invalid("Cursor history contains ambiguous upstream Call identities.")
+                upstream_calls.add(upstream_call_id)
                 try:
                     args = json.loads(function["arguments"])
                     if not isinstance(args, dict):
@@ -517,7 +522,7 @@ def _conversation(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], lis
                     raise _invalid("Cursor tool arguments must be a JSON object.") from None
                 pending[call_id] = function["name"]
                 seen.add(call_id)
-                content.append({"type": "tool-call", "toolCallId": _decode_call_id(call_id), "toolName": wire.DYNAMIC_TOOL,
+                content.append({"type": "tool-call", "toolCallId": upstream_call_id, "toolName": wire.DYNAMIC_TOOL,
                                 "args": {"namespace": wire.NAMESPACE, "toolName": function["name"], "arguments": args}})
         if role == "user":
             last_user = next((part["text"] for part in content if part["type"] == "text" and part["text"]), last_user)
