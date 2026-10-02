@@ -50,6 +50,7 @@ import type {
   GatewayUsageEvent,
   GatewayUsageSummary,
   Model,
+  NativeSubagentSettings,
   Provider,
   RoutingOwner,
   Settings,
@@ -143,6 +144,21 @@ function GatewayPageImpl({
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
+  const [dshSubagent, setDshSubagent] = useState<NativeSubagentSettings | null>(null);
+  const [grokSubagent, setGrokSubagent] = useState<NativeSubagentSettings | null>(null);
+  const [openCodeSubagent, setOpenCodeSubagent] = useState<NativeSubagentSettings | null>(null);
+  const [zCodeSubagent, setZCodeSubagent] = useState<NativeSubagentSettings | null>(null);
+  const [ompSubagent, setOmpSubagent] = useState<NativeSubagentSettings | null>(null);
+  const nativeSubagents: Record<string, {
+    settings: NativeSubagentSettings | null;
+    save: (model: string, effort: string, native?: boolean) => Promise<NativeSubagentSettings>;
+    set: (settings: NativeSubagentSettings) => void;
+  }> = {
+    opencode: { settings: openCodeSubagent, save: api.saveOpenCodeDefaultSubagent, set: setOpenCodeSubagent },
+    zcode: { settings: zCodeSubagent, save: api.saveZCodeDefaultSubagent, set: setZCodeSubagent },
+    omp: { settings: ompSubagent, save: api.saveOmpDefaultSubagent, set: setOmpSubagent },
+    grok: { settings: grokSubagent, save: api.saveGrokDefaultSubagent, set: setGrokSubagent },
+  };
   const subagentSaveGen = useRef<Record<string, number>>({});
   const running = status?.proxy_running ?? false;
   const diagnosticsEnabled = Boolean(
@@ -670,8 +686,66 @@ function GatewayPageImpl({
     }
   }
 
+  useEffect(() => {
+    let cancelled = false;
+    const gen = subagentSaveGen.current.opencode;
+    void api.readOpenCodeDefaultSubagent().then((value) => {
+      if (!cancelled && gen === subagentSaveGen.current.opencode) setOpenCodeSubagent(value);
+    }).catch((err) => {
+      if (!cancelled) showToast({ text: messageFromError(err), tone: "error", dedupeKey: "opencode-native-subagent-read" });
+    });
+    return () => { cancelled = true; };
+  }, [clientInfos]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const gen = subagentSaveGen.current.zcode;
+    void api.readZCodeDefaultSubagent().then((value) => {
+      if (!cancelled && gen === subagentSaveGen.current.zcode) setZCodeSubagent(value);
+    }).catch((err) => {
+      if (!cancelled) showToast({ text: messageFromError(err), tone: "error", dedupeKey: "zcode-native-subagent-read" });
+    });
+    return () => { cancelled = true; };
+  }, [clientInfos]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const gen = subagentSaveGen.current.omp;
+    void api.readOmpDefaultSubagent().then((value) => {
+      if (!cancelled && gen === subagentSaveGen.current.omp) setOmpSubagent(value);
+    }).catch((err) => {
+      if (!cancelled) showToast({ text: messageFromError(err), tone: "error", dedupeKey: "omp-native-subagent-read" });
+    });
+    return () => { cancelled = true; };
+  }, [clientInfos]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const gen = subagentSaveGen.current.dsh;
+    if (clientInfoById.get("dsh")?.installed) void api.readDshHeadlessDefaultSubagent().then((value) => {
+      if (!cancelled && gen === subagentSaveGen.current.dsh) setDshSubagent(value);
+    }).catch((err) => {
+      if (!cancelled) showToast({ text: messageFromError(err), tone: "error", dedupeKey: "dsh-native-subagent-read" });
+    });
+    return () => { cancelled = true; };
+  }, [clientInfos]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const gen = subagentSaveGen.current.grok;
+    void api.readGrokDefaultSubagent().then((value) => {
+      if (!cancelled && gen === subagentSaveGen.current.grok) setGrokSubagent(value);
+    }).catch((err) => {
+      if (!cancelled) showToast({ text: messageFromError(err), tone: "error", dedupeKey: "grok-native-subagent-read" });
+    });
+    return () => { cancelled = true; };
+  }, [clientInfos]);
+
   function subagentOptionsFor(clientId: string) {
-    return listDefaultSubagentOptions({
+    if (clientId === "dsh") return (dshSubagent?.options ?? []).map((option) => ({
+      ...option, id: `native:${option.id}`, label: `${t("workspace.nativeSubagentModel")} · ${option.label}`, native: true,
+    }));
+    const gatewayOptions = listDefaultSubagentOptions({
       officialId: OFFICIAL_ID,
       officialIncluded: Boolean(settings?.include_official_models),
       officialModels: officialModelsForSubagent,
@@ -679,6 +753,14 @@ function GatewayPageImpl({
       providers,
       excludeProviderIds: clientId === "grok" ? ["xai"] : undefined,
     });
+    const nativeClient = nativeSubagents[clientId];
+    if (!nativeClient) return gatewayOptions;
+    const nativeSettings = nativeClient.settings;
+    const nativeOptions = (nativeSettings?.options ?? []).map((option) => ({
+      ...option, id: `native:${option.id}`, label: `${t("workspace.nativeSubagentModel")} · ${option.label}`, native: true,
+    }));
+    const state = connectionStateFromInfo(clientInfoById.get(clientId));
+    return state === "connected" || state === "drift" ? [...nativeOptions, ...gatewayOptions] : nativeOptions;
   }
 
   async function persistClientDefaultSubagent(
@@ -687,9 +769,24 @@ function GatewayPageImpl({
     effort: string,
     options?: { stale?: boolean },
   ) {
+    if (clientId === "dsh") {
+      const gen = (subagentSaveGen.current.dsh = (subagentSaveGen.current.dsh ?? 0) + 1);
+      const toastId = showToast({ dedupeKey: "default-subagent-dsh", text: t("workspace.savingDefaultSubagent"), tone: "loading" });
+      try {
+        const written = await api.saveDshHeadlessDefaultSubagent(model.replace(/^native:/, ""));
+        if (gen !== subagentSaveGen.current.dsh) return;
+        setDshSubagent(written);
+        updateToast(toastId, { action: null, text: t("workspace.dshHeadlessSubagentSaved"), tone: "success" });
+      } catch (err) {
+        if (gen === subagentSaveGen.current.dsh) updateToastWithError(toastId, err);
+      }
+      return;
+    }
     if (!settings) return;
+    const nativeClient = nativeSubagents[clientId];
+    const nativeSave = Boolean(nativeClient) && (model.startsWith("native:") || !model && !options?.stale);
     const current = clientDefaultSubagentFields(settings, clientId);
-    if (current.model === model && current.effort === effort) return;
+    if (!nativeSave && !nativeClient?.settings?.native && current.model === model && current.effort === effort) return;
     const next = normalizeSettings(
       withClientDefaultSubagent(settings, clientId, model, effort),
     );
@@ -708,8 +805,16 @@ function GatewayPageImpl({
       tone: "loading",
     });
     try {
+      if (nativeSave) {
+        const written = await nativeClient.save(model.replace(/^native:/, ""), effort);
+        if (gen !== subagentSaveGen.current[clientId]) return;
+        nativeClient.set(written);
+        updateToast(toastId, { action: null, text: t(clientId === "zcode" ? "workspace.defaultSubagentSavedZCode" : "workspace.defaultSubagentSavedClient", { name }), tone: "success" });
+        return;
+      }
       await onApplySettings(next);
       if (gen !== subagentSaveGen.current[clientId]) return;
+      if (nativeClient) await nativeClient.save("", "", false);
       if (connected) {
         await api.applyGatewayClientConfig(clientId, defaultModel);
         if (gen !== subagentSaveGen.current[clientId]) return;
@@ -737,7 +842,8 @@ function GatewayPageImpl({
     void (async () => {
       for (const clientId of ["opencode", "zcode", "omp", "grok"]) {
         const { model } = clientDefaultSubagentFields(settings, clientId);
-        if (!model) continue;
+        const nativeClient = nativeSubagents[clientId];
+        if (!model || nativeClient && (!nativeClient.settings || nativeClient.settings.native || connectionStateFromInfo(clientInfoById.get(clientId)) === "disconnected")) continue;
         const options = subagentOptionsFor(clientId);
         if (
           options.length === 0 &&
@@ -751,7 +857,7 @@ function GatewayPageImpl({
         }
       }
     })();
-  }, [settings, status, providers, officialModelsForSubagent]);
+  }, [settings, status, providers, officialModelsForSubagent, openCodeSubagent, zCodeSubagent, ompSubagent, grokSubagent]);
 
   return (
     <main
@@ -1029,9 +1135,18 @@ function GatewayPageImpl({
                   enabledModelCount={enabledModelCount}
                   exportedModels={exportedModels}
                   defaultSubagent={
-                    settings && supportsClientDefaultSubagent(client.id)
+                    client.id === "dsh" && dshSubagent ? {
+                      model: dshSubagent.model ? `native:${dshSubagent.model}` : "",
+                      effort: "",
+                      options: subagentOptionsFor(client.id),
+                      onChange: (model, effort) => { void persistClientDefaultSubagent("dsh", model, effort); },
+                    } : settings && supportsClientDefaultSubagent(client.id)
                       ? {
                           ...clientDefaultSubagentFields(settings, client.id),
+                          ...(nativeSubagents[client.id]?.settings?.native ? {
+                            model: nativeSubagents[client.id].settings?.model ? `native:${nativeSubagents[client.id].settings?.model}` : "",
+                            effort: nativeSubagents[client.id].settings?.effort ?? "",
+                          } : {}),
                           options: subagentOptionsFor(client.id),
                           onChange: (model, effort) => {
                             void persistClientDefaultSubagent(

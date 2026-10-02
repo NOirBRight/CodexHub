@@ -80,6 +80,7 @@ export function claudeDraftValid(
   ids: Set<string>,
   saved: ClaudeDraft,
   nativeIds: Set<string> = new Set(),
+  subagentNativeIds: Set<string> = nativeIds,
 ): boolean {
   return (
     (draft.model === claudePreserveDefault ||
@@ -94,6 +95,7 @@ export function claudeDraftValid(
     ) &&
     (!draft.subagent ||
       ids.has(draft.subagent) ||
+      subagentNativeIds.has(draft.subagent) ||
       draft.subagent === saved.subagent)
   );
 }

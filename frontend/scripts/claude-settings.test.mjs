@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
 import {
   aliasDefaultChanges,
   claudeDefaultTarget,
@@ -11,6 +12,10 @@ import {
   filterClaudeModels,
   rebaseClaudeDraft,
 } from "../src/lib/claudeSettings.ts";
+test("native subagent selection remains valid without any exported Gateway model", () => {
+  const saved = claudeDraft({ default_model: "claude-sonnet-4-6", role_mappings: {}, default_subagent_model: "" }, "");
+  assert.equal(claudeDraftValid({ ...saved, subagent: "claude-opus-5-5[1m]" }, new Set(), saved, new Set(["claude-opus-5-5[1m]"])), true);
+});
 const models = [
   { id: "one", label: "One" },
   { id: "two", label: "Two" },

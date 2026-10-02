@@ -21,6 +21,12 @@ pub(in crate::gateway) fn opencode_config_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
+    opencode_config_text_with_path(current, settings, providers, model, detect_opencode_config_path().as_deref())
+}
+
+pub(in crate::gateway) fn opencode_config_text_with_path(
+    current: Option<&str>, settings: &Settings, providers: &[Provider], model: &str, path: Option<&Path>,
+) -> Result<String, String> {
     // Provider Injection (ADR-0004 / #435): surgical merge. Preserve every
     // user-owned provider and setting in the existing opencode.json; only
     // the CodexHub provider entry is inserted/updated. model/small_model
@@ -76,7 +82,7 @@ pub(in crate::gateway) fn opencode_config_text(
 
     let mut base: Value = match current {
         Some(text) if !text.trim().is_empty() => {
-            serde_json::from_str(text).unwrap_or(Value::Object(Map::new()))
+            super::opencode_native::parse_config(text)?
         }
         _ => Value::Object(Map::new()),
     };
@@ -95,7 +101,7 @@ pub(in crate::gateway) fn opencode_config_text(
     } else {
         object.insert("provider".to_string(), Value::Object(provider_map));
     }
-    apply_opencode_default_subagent(object, settings, providers, model, current)?;
+    apply_opencode_default_subagent(object, settings, providers, model, current, path)?;
     serde_json::to_string_pretty(&base)
         .map(|text| {
             format!(
@@ -124,7 +130,15 @@ fn apply_opencode_default_subagent(
     providers: &[Provider],
     model: &str,
     current: Option<&str>,
+    path: Option<&Path>,
 ) -> Result<(), String> {
+    if let Some(path) = path {
+        let mut value = Value::Object(object.clone());
+        if super::opencode_native::apply_saved_native(path, &mut value, false)? {
+            *object = value.as_object().expect("OpenCode object").clone();
+            return Ok(());
+        }
+    }
     let pin = resolve_client_default_subagent_pin(settings, providers, "opencode", model)?;
     let baseline_text = rollback_file_text("opencode", "opencode.json", current);
     let baseline: Option<Value> = baseline_text
@@ -133,8 +147,22 @@ fn apply_opencode_default_subagent(
         .and_then(|text| serde_json::from_str(text).ok());
     if let Some(pin) = pin {
         pin_json_agent_models(object, OPENCODE_SPAWN_AGENTS, &pin.opencode_model_id());
+        if let Some(agents) = object.get_mut("agent").and_then(Value::as_object_mut) {
+            for name in OPENCODE_SPAWN_AGENTS {
+                if let Some(agent) = agents.get_mut(*name).and_then(Value::as_object_mut) { agent.remove("variant"); }
+            }
+        }
     } else if json_spawn_models_are_owned(object, OPENCODE_SPAWN_AGENTS) {
-        restore_json_agent_models(object, baseline.as_ref(), OPENCODE_SPAWN_AGENTS);
+        let mut restored = Value::Object(object.clone());
+        let native_restored = match path {
+            Some(path) => super::opencode_native::apply_saved_native(path, &mut restored, true)?,
+            None => false,
+        };
+        if native_restored {
+            *object = restored.as_object().expect("OpenCode object").clone();
+        } else {
+            restore_json_agent_models(object, baseline.as_ref(), OPENCODE_SPAWN_AGENTS);
+        }
     }
     debug_assert!(OPENCODE_SPAWN_AGENTS
         .iter()
@@ -316,7 +344,7 @@ pub(in crate::gateway) fn restore_opencode_from_baseline(
 ) -> Result<GatewayClientApplyResult, String> {
     match file {
         BaselineFile::Snapshot { content } => {
-            write_text_replace(config_path, content)
+            write_text_replace(config_path, &super::opencode_native::restored_native_text(config_path, content)?)
                 .map_err(|_| "failed to restore OpenCode config from baseline".to_string())?;
             Ok(GatewayClientApplyResult {
                 client_id: "opencode".to_string(),
@@ -327,6 +355,14 @@ pub(in crate::gateway) fn restore_opencode_from_baseline(
             })
         }
         BaselineFile::Absent => {
+            let restored = super::opencode_native::restored_native_text(config_path, "{}")?;
+            if restored.trim() != "{}" {
+                write_text_replace(config_path, &restored)?;
+                return Ok(GatewayClientApplyResult {
+                    client_id: "opencode".to_string(), applied: true, config_path: Some(config_path.to_path_buf()), backup_path: None,
+                    message: "OpenCode native Default subagent retained; Gateway configuration removed.".into(),
+                });
+            }
             if config_path.exists() {
                 let text = fs::read_to_string(config_path).unwrap_or_default();
                 if !is_opencode_codexhub_config(&text) {
@@ -532,7 +568,7 @@ pub(in crate::gateway) fn plan_opencode_apply(
     } else {
         None
     };
-    let next = opencode_config_text(current.as_deref(), settings, providers, &model)?;
+    let next = opencode_config_text_with_path(current.as_deref(), settings, providers, &model, Some(config_path))?;
     Ok(OpenCodeApplyPlan {
         config_path: config_path.to_path_buf(),
         skip_snapshot: current
@@ -578,6 +614,7 @@ pub(in crate::gateway) fn publish_opencode_apply(
         Some(path)
     };
     record_opencode_rollback_baseline(&plan.config_path, backup_roots)?;
+    super::opencode_native::capture_native_before_publish(&plan.config_path)?;
     write_text_replace(&plan.config_path, &plan.next)
         .map_err(|_| "failed to write managed OpenCode config".to_string())?;
     Ok(GatewayClientApplyResult {
@@ -630,6 +667,7 @@ pub(in crate::gateway) fn restore_opencode_config_with_backup_roots(
     config_path: &Path,
     backup_roots: &[(PathBuf, BackupChannel)],
 ) -> Result<GatewayClientApplyResult, String> {
+    super::opencode_native::capture_native_before_publish(config_path)?;
     if let Some(baseline) = read_rollback_baseline("opencode")? {
         return match baseline.files.get("opencode.json") {
             Some(file) => restore_opencode_from_baseline(config_path, file),

@@ -20,6 +20,7 @@ from model_limits import (
 )
 import re
 import sys
+import tomllib
 from urllib.parse import urlsplit
 
 
@@ -925,6 +926,72 @@ def apply_default_subagent_override(
     )
 
 
+def read_native_default_subagent(config_path: Path, backup_paths: list[Path]) -> dict:
+    text = read_text_preserving_newlines(config_path) if config_path.exists() else ""
+    document = tomllib.loads(text)
+    agents = document.get("agents", {})
+    result = {
+        "model": agents.get("default_subagent_model", ""),
+        "effort": agents.get("default_subagent_reasoning_effort", ""),
+        "models": [],
+    }
+    # A user-owned catalog belongs to the native client. The Hub projection is
+    # not a native source; while connected, inspect the route baseline instead.
+    catalog = document.get("model_catalog_json")
+    if catalog and is_managed_catalog_path(catalog):
+        catalog = None
+        for backup in backup_paths:
+            if backup.exists():
+                candidate = tomllib.loads(read_text_preserving_newlines(backup)).get("model_catalog_json")
+                if candidate and not is_managed_catalog_path(candidate):
+                    catalog = candidate
+                    break
+    if catalog:
+        path = Path(catalog).expanduser()
+        if not path.is_absolute():
+            path = config_path.parent / path
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for item in payload.get("models", []):
+            slug = item.get("slug") or item.get("id")
+            if not slug or item.get("visibility") in {"hidden", "internal"}:
+                continue
+            levels = item.get("supported_reasoning_levels", [])
+            efforts = [level.get("effort", "") if isinstance(level, dict) else level for level in levels]
+            result["models"].append({
+                "id": slug,
+                "label": item.get("display_name") or slug,
+                "efforts": [effort for effort in efforts if effort],
+                "defaultEffort": item.get("default_reasoning_level") or "",
+            })
+    result["native_catalog"] = bool(catalog)
+    return result
+
+
+def save_native_default_subagent(
+    config_path: Path, backup_paths: list[Path], model: str, effort: str
+) -> dict:
+    if any(ord(char) < 32 or ord(char) == 127 for char in model):
+        raise ValueError("default subagent model cannot contain control characters")
+    values = {
+        "default_subagent_model": toml_literal(model.strip()) if model.strip() else None,
+        "default_subagent_reasoning_effort": toml_literal(effort.strip()) if model.strip() and effort.strip() else None,
+    }
+    # Prepare every target before writing. Rust owns serialization and rollback
+    # of this multi-file operation, including clearing the old Gateway pin.
+    updates = []
+    for path in dict.fromkeys([config_path, *backup_paths]):
+        if path != config_path and not path.exists():
+            continue
+        text = read_text_preserving_newlines(path) if path.exists() else ""
+        tomllib.loads(text)
+        updated = set_table_values(text, "agents", values)
+        tomllib.loads(updated)
+        updates.append((path, updated))
+    for path, text in updates:
+        atomic_write_text(path, text, encoding="utf-8")
+    return read_native_default_subagent(config_path, backup_paths)
+
+
 def _table_assignment_lines(values: dict[str, str | None], newline: str) -> list[str]:
     return [f"{key} = {value}{newline}" for key, value in values.items() if value is not None]
 
@@ -1158,6 +1225,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Apply or restore the Codex proxy session config overlay.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    for command in ("inspect-native-subagent", "save-native-subagent"):
+        native_parser = subparsers.add_parser(command)
+        native_parser.add_argument("--config", required=True, type=Path)
+        native_parser.add_argument("--backup", type=Path, action="append", default=[])
+        if command == "save-native-subagent":
+            native_parser.add_argument("--model", required=True)
+            native_parser.add_argument("--effort", required=True)
+
     apply_parser = subparsers.add_parser("apply")
     apply_parser.add_argument("--config", required=True, type=Path)
     apply_parser.add_argument("--backup", required=True, type=Path)
@@ -1187,7 +1262,11 @@ def main(argv: list[str] | None = None) -> int:
     migrate_context_parser.add_argument("--context-guard-state", required=True, type=Path)
 
     args = parser.parse_args(argv)
-    if args.command == "apply":
+    if args.command == "inspect-native-subagent":
+        print(json.dumps(read_native_default_subagent(args.config, args.backup)))
+    elif args.command == "save-native-subagent":
+        print(json.dumps(save_native_default_subagent(args.config, args.backup, args.model, args.effort)))
+    elif args.command == "apply":
         apply_overlay(
             args.config,
             args.backup,

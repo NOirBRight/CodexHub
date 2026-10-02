@@ -587,8 +587,15 @@ export interface SubagentMatrixRow {
   detail: string;
 }
 
+export type CodexNativeSubagent = {
+  model: string;
+  effort: string;
+  models: { id: string; label: string; efforts: string[]; defaultEffort: string }[];
+};
+
 export interface Settings {
   claude_model_mappings?: Record<string, string> | null;
+  claude_native_subagent_model?: string | null;
   locale: "zh-CN" | "en-US";
   auto_sync_history: boolean;
   unified_codex_history: boolean;
@@ -680,4 +687,11 @@ export interface CatalogOverrideDiagnostics {
   rejected: number;
   migrated: number;
   reasons: Record<string, number>;
+}
+
+export interface NativeSubagentSettings {
+  model: string;
+  effort: string;
+  native: boolean;
+  options: { id: string; label: string; efforts: string[]; defaultEffort: string }[];
 }

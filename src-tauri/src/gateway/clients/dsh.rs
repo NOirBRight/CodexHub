@@ -23,7 +23,7 @@ pub struct DshClientInfo {
     pub restart_required: String,
 }
 
-fn dsh_executable_path() -> Option<PathBuf> {
+pub(super) fn dsh_executable_path() -> Option<PathBuf> {
     std::env::var_os("CODEXHUB_DSH_EXECUTABLE")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)

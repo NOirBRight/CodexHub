@@ -1,7 +1,7 @@
 use super::clients::claude::claude_settings_text;
-use super::clients::grok::{grok_config_text, grok_injected_blocks_match, grok_owned_shadows_match};
+use super::clients::grok::{grok_config_text_with_path, grok_injected_blocks_match, grok_owned_shadows_match};
 use super::clients::omp::{apply_omp_default_subagent_slice, omp_config_text, omp_models_yml_text};
-use super::clients::opencode::opencode_config_text;
+use super::clients::opencode::opencode_config_text_with_path;
 use super::clients::pi::pi_models_text;
 use super::clients::zcode::{
     persisted_zcode_collection_timestamp, zcode_owned_agents_match,
@@ -81,7 +81,7 @@ pub fn verify_apply_readback(
                 .map_err(|error| format!("readback failed: {error}"))?;
             // Provider Injection merge is idempotent: re-merging the written
             // config must reproduce it exactly (foreign providers preserved).
-            let expected = opencode_config_text(Some(&written), settings, providers, model)?;
+            let expected = opencode_config_text_with_path(Some(&written), settings, providers, model, Some(&target_paths[0]))?;
             if written != expected {
                 return Err(
                     "readback failed: opencode output does not round-trip production preview"
@@ -123,6 +123,7 @@ pub fn verify_apply_readback(
                 settings,
                 providers,
                 model,
+                Some(&target_paths[0]),
             )?;
             // `models.yml` is a provider-injection document: the published
             // CodexHub blocks are regenerated, while every foreign provider
@@ -180,6 +181,7 @@ pub fn verify_apply_readback(
                 ZcodeProviderFileKind::V2Cache,
                 cache_now,
             )?;
+            let expected_cache = super::clients::zcode_native::preserve_native_cache(&target_paths[2], &expected_cache)?;
             let expected_config =
                 zcode_v2_config_text(&target_paths[1], settings, providers, model)?;
             if written_catalog != expected_catalog
@@ -206,7 +208,7 @@ pub fn verify_apply_readback(
         "grok" => {
             let written = fs::read_to_string(&target_paths[0])
                 .map_err(|error| format!("readback failed: {error}"))?;
-            let expected = grok_config_text(Some(&written), settings, providers, model)?;
+            let expected = grok_config_text_with_path(&target_paths[0], Some(&written), settings, providers, model)?;
             if !grok_injected_blocks_match(&written, &expected)? {
                 return Err(
                     "readback failed: grok injected block does not match production preview"

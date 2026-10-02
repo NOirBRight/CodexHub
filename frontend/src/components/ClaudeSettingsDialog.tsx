@@ -15,6 +15,7 @@ import {
   claudeRoles,
   filterClaudeModels,
   rebaseClaudeDraft,
+  type ClaudeSettings,
 } from "../lib/claudeSettings";
 import type { GatewayClientInfo } from "../lib/types";
 import type { ExportedGatewayModel } from "./GatewayClientCard";
@@ -43,10 +44,30 @@ export function ClaudeSettingsDialog({
 }) {
   const { t } = useTranslation();
   const toast = useToasts();
+  const [subagentSettings, setSubagentSettings] = useState<ClaudeSettings | null>(null);
+  const [subagentLoading, setSubagentLoading] = useState(true);
+  const [subagentSaving, setSubagentSaving] = useState(false);
+  const [subagentError, setSubagentError] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    setSubagentLoading(true);
+    void api.readClaudeSubagentSettings().then((readback) => {
+      if (active) {
+        setSubagentSettings(readback);
+        setSubagentError(null);
+      }
+    }).catch((error) => {
+      if (active) setSubagentError(messageFromError(error));
+    }).finally(() => {
+      if (active) setSubagentLoading(false);
+    });
+    return () => { active = false; };
+  }, [info?.claude_settings]);
   const fallback = connected ? "" : (models[0]?.id ?? "");
   const saved = useMemo(
-    () => claudeDraft(info?.claude_settings, fallback),
-    [info?.claude_settings, fallback],
+    () => ({ ...claudeDraft(info?.claude_settings, fallback),
+      subagent: subagentSettings?.default_subagent_model ?? info?.claude_settings?.default_subagent_model ?? "" }),
+    [info?.claude_settings, fallback, subagentSettings],
   );
   const [draft, setDraft] = useState(saved);
   const baseline = useRef(saved);
@@ -72,7 +93,9 @@ export function ClaudeSettingsDialog({
   const unavailable = !info?.installed || !info?.claude_settings;
   const nativeModels = info?.claude_settings?.native_models ?? [];
   const nativeIds = new Set(nativeModels.map((model) => model.id));
-  const invalid = !claudeDraftValid(draft, ids, saved, nativeIds);
+  const subagentNativeModels = subagentSettings?.native_models ?? nativeModels;
+  const subagentNativeIds = new Set(subagentNativeModels.map((model) => model.id));
+  const invalid = !claudeDraftValid(draft, ids, saved, nativeIds, subagentNativeIds);
   const aliasChanges = aliasDefaultChanges(
     info?.claude_settings?.default_model ?? "",
     saved.roles,
@@ -96,7 +119,7 @@ export function ClaudeSettingsDialog({
         ? t("gateway.claudeSubscriptionDefault")
         : part,
   );
-  const locked = Boolean(busy || previewBusy);
+  const locked = Boolean(busy || previewBusy || subagentSaving);
   const resumeCommand = claudeResumeCommand(resumeModelId);
   const needsActivation = !connected || !info?.managed_by_current_app;
   const canApply =
@@ -111,6 +134,28 @@ export function ClaudeSettingsDialog({
     setDraft(next);
     setPreview(null);
     setError(null);
+  }
+  async function saveSubagent() {
+    setSubagentSaving(true);
+    const toastId = toast.showToast({
+      text: t("workspace.savingDefaultSubagent"), tone: "loading", timeoutMs: null,
+      dedupeKey: "default-subagent-claude",
+    });
+    try {
+      const readback = await api.saveClaudeSubagent(draft.subagent);
+      setSubagentSettings(readback);
+      setSubagentError(null);
+      toast.updateToast(toastId, {
+        text: t("workspace.defaultSubagentSavedClient", { name: "Claude Code" }),
+        tone: "success", timeoutMs: 8000,
+      });
+    } catch (error) {
+      const message = messageFromError(error);
+      setSubagentError(message);
+      toast.updateToast(toastId, { text: message, tone: "error", timeoutMs: null });
+    } finally {
+      setSubagentSaving(false);
+    }
   }
   async function loadPreview() {
     setPreviewBusy(true);
@@ -137,8 +182,10 @@ export function ClaudeSettingsDialog({
     onChange: (value: string) => void,
     label: string,
     optional = false,
+    choices: { id: string; label: string }[] = models,
+    emptyLabel = t("gateway.claudeRoleUnmapped"),
   ) {
-    const invalid = Boolean(value) && !ids.has(value);
+    const invalid = Boolean(value) && !choices.some((model) => model.id === value);
     return (
       <label className="ws-claude-field">
         <span>{label}</span>
@@ -149,7 +196,7 @@ export function ClaudeSettingsDialog({
           onChange={(event) => onChange(event.target.value)}
         >
           {optional ? (
-            <option value="">{t("gateway.claudeRoleUnmapped")}</option>
+            <option value="">{emptyLabel}</option>
           ) : !value ? (
             <option value="">{t("gateway.claudeNoModels")}</option>
           ) : null}
@@ -158,7 +205,7 @@ export function ClaudeSettingsDialog({
               {value} — {t("gateway.claudeUnavailableModel")}
             </option>
           )}
-          {filterClaudeModels(models, query, value).map((model) => (
+          {filterClaudeModels(choices, query, value).map((model) => (
             <option key={model.id} value={model.id}>
               {model.label}
             </option>
@@ -344,7 +391,19 @@ export function ClaudeSettingsDialog({
           (subagent) => update({ ...draft, subagent }),
           t("gateway.claudeRoleSubagent"),
           true,
+          [...subagentNativeModels, ...(connected ? models.filter((model) => !subagentNativeIds.has(model.id)) : [])],
+          t("gateway.claudeUseCliDefault"),
         )}
+        <button
+          className="ws-button"
+          disabled={locked || subagentLoading || !subagentSettings ||
+            draft.subagent === saved.subagent ||
+            Boolean(draft.subagent && !subagentNativeIds.has(draft.subagent) && !(connected && ids.has(draft.subagent)))}
+          onClick={() => void saveSubagent()}
+        >
+          {t("gateway.claudeSaveSubagent")}
+        </button>
+        {subagentError && <p role="alert" className="text-danger">{subagentError}</p>}
       </section>
       {connected && (
         <section className="ws-claude-section">

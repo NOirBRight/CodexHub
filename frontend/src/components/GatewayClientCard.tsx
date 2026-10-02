@@ -157,7 +157,9 @@ export function GatewayClientCard({
               model={defaultSubagent.model}
               effort={
                 defaultSubagent.model
-                  ? resolveSubagentEffort(
+                  ? defaultSubagent.model.startsWith("native:")
+                    ? defaultSubagent.effort
+                    : resolveSubagentEffort(
                       defaultSubagent.options.find(
                         (option) => option.id === defaultSubagent.model,
                       ),
@@ -173,6 +175,7 @@ export function GatewayClientCard({
               onChange={defaultSubagent.onChange}
             />
           ) : null}
+          {defaultSubagent && client.id === "dsh" ? <small>{t("workspace.dshHeadlessSubagentHint")}</small> : null}
           <div className="ws-client-bottom">
             <div className={cx("ws-client-status", labelTone)}>
               <ConnectionNarrative

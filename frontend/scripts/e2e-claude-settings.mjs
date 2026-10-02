@@ -26,6 +26,18 @@ try {
   await expect(dialog).toBeVisible();
   await picker("Default model").selectOption("e2e/alpha");
   await picker("Haiku / fast").selectOption("e2e/beta");
+  const beforeSubagent = settings();
+  const subagentPicker = picker("Subagent");
+  await expect.poll(() => subagentPicker.locator('option[value^="claude-"]').count()).toBeGreaterThan(0);
+  const nativeSubagent = await subagentPicker.locator('option[value^="claude-"]').first().getAttribute("value");
+  await subagentPicker.selectOption(nativeSubagent);
+  await dialog.getByRole("button", { name: "Save Default subagent", exact: true }).click();
+  await expect.poll(() => settings().env?.CLAUDE_CODE_SUBAGENT_MODEL).toBe(nativeSubagent);
+  const afterSubagent = settings();
+  delete afterSubagent.env.CLAUDE_CODE_SUBAGENT_MODEL;
+  if (!Object.keys(afterSubagent.env).length && !beforeSubagent.env) delete afterSubagent.env;
+  assert.deepEqual(afterSubagent, beforeSubagent, "saving subagent must leave unsaved main/family edits and connection untouched");
+  await expect(dialog.getByRole("button", { name: "Save Default subagent", exact: true })).toBeDisabled();
   await dialog.getByText("Advanced and diagnostics").click();
   await dialog.getByRole("button", { name: "Preview connection configuration" }).click();
   await expect(dialog.locator("pre")).toContainText("claude-codexhub-e2e-alpha");
@@ -36,6 +48,7 @@ try {
   await dialog.getByRole("button", { name: "Connect", exact: true }).click();
   await expect.poll(() => settings().env?.ANTHROPIC_MODEL).toBe("claude-codexhub-e2e-alpha");
   await expect.poll(() => settings().env?.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-codexhub-role/haiku/e2e/beta");
+  assert.equal(settings().env.CLAUDE_CODE_SUBAGENT_MODEL, nativeSubagent);
   await expect(dialog.getByRole("button", { name: "Disconnect" })).toBeEnabled();
   await dialog.getByRole("button", { name: "Close" }).click();
   await expect(dialog).toBeHidden();
@@ -63,6 +76,7 @@ try {
   await expect.poll(() => settings().env?.ANTHROPIC_MODEL).toBeUndefined();
   assert.equal(settings().theme, "dark");
   assert.equal(settings().env.EDITOR, "vim");
+  assert.equal(settings().env.CLAUDE_CODE_SUBAGENT_MODEL, nativeSubagent);
   console.log("PASS: Claude browser UI preview, connect, edit, readback, disconnect");
 } finally {
   await browser.close();

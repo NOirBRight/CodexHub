@@ -29,6 +29,27 @@ fn claude_mapping_preferences_survive_settings_restart_and_stale_targets() {
 }
 
 #[test]
+fn independent_claude_native_subagent_and_explicit_default_survive_restart() {
+    let root = temp_root("claude-native-subagent-preferences");
+    let paths = test_paths(&root);
+    for model in ["claude-opus-5-5[1m]", ""] {
+        let settings = Settings {
+            claude_native_subagent_model: Some(model.into()),
+            claude_model_mappings: Some(std::collections::BTreeMap::from([
+                ("opus".into(), "gpt-5.5".into()), ("subagent".into(), model.into()),
+            ])),
+            ..Settings::default()
+        };
+        save_settings_with_paths(settings, &paths).unwrap();
+        let restarted = get_settings_with_paths(&paths).unwrap();
+        assert_eq!(restarted.claude_native_subagent_model.as_deref(), Some(model));
+        assert_eq!(restarted.claude_model_mappings.as_ref().unwrap()["subagent"], model);
+        assert_eq!(restarted.claude_model_mappings.as_ref().unwrap()["opus"], "gpt-5.5");
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn projection_transaction_restores_both_channel_backups_and_takeover_metadata() {
     let root = temp_root("projection-cross-channel-rollback");
     let paths = test_paths(&root);
@@ -550,6 +571,7 @@ fn settings_missing_file_returns_defaults_and_roundtrips_saved_values() {
         claude_native_picker: None,
         claude_native_picker_source: None,
         claude_model_mappings: None,
+        claude_native_subagent_model: None,
         locale: "zh-CN".to_string(),
         auto_sync_history: false,
         unified_codex_history: false,
