@@ -270,9 +270,15 @@ def _placeholder_line(kind: str, index: int, total: int, call_id: str | None) ->
     return f"{_OMITTED_NOTE_PREFIX} {kind} {index}/{total}{source}]"
 
 
-def _source_caption(index: int, total: int, call_id: str | None) -> str:
+def source_caption(
+    index: int,
+    total: int,
+    call_id: str | None = None,
+    *,
+    prefix: str = _SOURCE_NOTE_PREFIX,
+) -> str:
     source = f" from call_id={call_id}" if call_id else ""
-    return f"{_SOURCE_NOTE_PREFIX} {index}/{total}{source}."
+    return f"{prefix} {index}/{total}{source}."
 
 
 def _responses_image_part(part: Mapping[str, Any]) -> dict[str, Any]:
@@ -413,7 +419,7 @@ def adapt_tool_result_item(
     for index, part in enumerate(image_parts, start=1):
         can_lift_part = lift and (not chat_tool or bool(_image_url_from_part(part)))
         if can_lift_part:
-            caption = _source_caption(index, total, call_id)
+            caption = source_caption(index, total, call_id)
             _assert_text_has_no_media_payloads(caption, payloads)
             follow_items.append(
                 _user_image_item(

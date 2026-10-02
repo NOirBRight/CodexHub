@@ -1339,6 +1339,11 @@ mod tests {
 
     #[test]
     fn independent_subagent_save_preserves_native_configuration_and_reads_actual_value() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
         let dir = std::env::temp_dir().join(format!("claude-native-subagent-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
@@ -1370,6 +1375,11 @@ mod tests {
 
     #[test]
     fn independent_native_subagent_survives_connect_republish_gateway_pin_and_disconnect() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
         let dir = std::env::temp_dir().join(format!("claude-native-subagent-lifecycle-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
@@ -1424,6 +1434,11 @@ mod tests {
 
     #[test]
     fn disconnected_readback_and_reconnect_keep_saved_mapping_intent() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
         let dir = std::env::temp_dir().join(format!("claude-saved-intent-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
@@ -1448,6 +1463,11 @@ mod tests {
 
     #[test]
     fn explicit_native_model_is_not_replaced_by_the_opus_family_mapping() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
         let current = r#"{"model":"claude-opus-5-5[1m]","env":{"ANTHROPIC_MODEL":"claude-codexhub-gpt-5.5","ANTHROPIC_DEFAULT_OPUS_MODEL":"claude-codexhub-gpt-5.5"}}"#;
         let next = claude_settings_text(
             Some(current),
@@ -1470,6 +1490,11 @@ mod tests {
 
     #[test]
     fn preview_apply_and_readback_use_the_same_draft() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
         let dir = std::env::temp_dir().join(format!(
             "codexhub-claude-regression-1-{}",
             std::process::id()
@@ -1498,6 +1523,11 @@ mod tests {
 
     #[test]
     fn credential_conflicts_block_preview_and_apply_without_writing() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
         let dir = std::env::temp_dir().join(format!(
             "codexhub-claude-regression-2-{}",
             std::process::id()
@@ -1532,6 +1562,11 @@ mod tests {
 
     #[test]
     fn removed_models_reject_new_choices_but_keep_saved_mappings() {
+        let _guard = crate::gateway::tests::TEST_ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _official_home = crate::gateway::tests::isolated_official_models_home();
         let dir = std::env::temp_dir().join(format!(
             "codexhub-claude-regression-3-{}",
             std::process::id()

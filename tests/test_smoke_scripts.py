@@ -1019,10 +1019,14 @@ def test_xai_offline_preflight_preserves_caller_home(tmp_path):
     caller.mkdir()
     sentinel = caller / "keep.txt"
     sentinel.write_text("untouched")
-    env = dict(os.environ, CODEX_HOME=str(caller), CODEXHUB_RUNTIME_HOME=str(caller))
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    env = dict(os.environ, CODEX_HOME=str(caller), CODEXHUB_RUNTIME_HOME=str(caller),
+               TMPDIR=str(temporary), TMP=str(temporary), TEMP=str(temporary))
     env.pop("CODEXHUB_E2E_XAI", None)
     result = subprocess.run([sys.executable, "scripts/e2e_xai_grok_tools.py"], env=env,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+    assert list(temporary.iterdir()) == [], result.stderr
     assert list(caller.iterdir()) == [sentinel]
     assert sentinel.read_text() == "untouched"
