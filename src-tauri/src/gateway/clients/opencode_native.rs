@@ -477,9 +477,6 @@ pub(in crate::gateway) fn capture_native_before_publish(path: &Path) -> Result<(
     let Some(mut pin) = read_pin(path)? else {
         return Ok(());
     };
-    if !pin.active {
-        return Ok(());
-    }
     let value = read_config(path)?;
     if value.as_object().is_some_and(|root| {
         crate::gateway::json_spawn_models_are_owned(root, OPENCODE_SPAWN_AGENTS)
@@ -748,6 +745,32 @@ mod native_opencode_tests {
         }
         assert_eq!(actual["agent"]["general"]["prompt"], "keep prompt");
         assert_eq!(actual["agent"]["custom"]["model"], "native/custom");
+    }
+
+    #[test]
+    fn native_opencode_inactive_gateway_pin_restores_latest_disconnected_native_edit() {
+        let root = root();
+        let isolated = validate_isolated_root(&root).unwrap();
+        let path = root.join("opencode/opencode.json");
+        fixture(&path);
+        let input = gateway_input();
+        let targets = isolated_client_apply_targets(&isolated, "opencode").unwrap();
+        let restore = || restore_opencode_config_with_backup_roots(&path, &[(targets.backup_path().to_path_buf(), BackupChannel::Stable)]).unwrap();
+        with_rollback_provenance_dir_override(Some(root.join("rollback-provenance")), || {
+            save_opencode_default_subagent_with_path(&path, "native/child".into(), "high".into(), true, &[]).unwrap();
+            save_opencode_default_subagent_with_path(&path, "".into(), "".into(), false, &[]).unwrap();
+        });
+        apply_gateway_client_config_isolated(&isolated, &input).unwrap();
+        with_rollback_provenance_dir_override(Some(root.join("rollback-provenance")), restore);
+        let mut manual = read_config(&path).unwrap();
+        manual["agent"]["general"]["model"] = serde_json::json!("native/manually-changed");
+        manual["agent"]["general"]["variant"] = serde_json::json!("low");
+        fs::write(&path, manual.to_string()).unwrap();
+        apply_gateway_client_config_isolated(&isolated, &input).unwrap();
+        assert!(read_config(&path).unwrap()["agent"]["general"]["model"].as_str().unwrap().starts_with("codexhub"));
+        with_rollback_provenance_dir_override(Some(root.join("rollback-provenance")), restore);
+        assert_eq!(read_config(&path).unwrap()["agent"]["general"]["model"], "native/manually-changed");
+        assert_eq!(read_config(&path).unwrap()["agent"]["general"]["variant"], "low");
     }
 
     #[test]
