@@ -94,6 +94,8 @@ macro_rules! desktop_command_registry {
             GetSettings => "get_settings" => $crate::desktop_commands::get_settings, true, true, true, false, NO_ALIASES;
             GetAppFlavor => "get_app_flavor" => $crate::desktop_commands::get_app_flavor, true, true, true, false, NO_ALIASES;
             SaveSettings => "save_settings" => $crate::desktop_commands::save_settings, true, true, true, false, NO_ALIASES;
+            GetCodexNativeSubagent => "get_codex_native_subagent" => $crate::desktop_commands::get_codex_native_subagent, true, true, true, false, NO_ALIASES;
+            SaveCodexNativeSubagent => "save_codex_native_subagent" => $crate::desktop_commands::save_codex_native_subagent, true, true, true, false, NO_ALIASES;
             CancelOfficialModelRefresh => "cancel_official_model_refresh" => $crate::desktop_commands::cancel_official_model_refresh, true, true, true, false, ALIASES_REQUEST_ID;
             RefreshOfficialModels => "refresh_official_models" => $crate::desktop_commands::refresh_official_models, true, true, true, false, ALIASES_REQUEST_ID;
             OpenaiUsageCompletions => "openai_usage_completions" => $crate::desktop_commands::openai_usage_completions, true, true, true, false, ALIASES_USAGE;

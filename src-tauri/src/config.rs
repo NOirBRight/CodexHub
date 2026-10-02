@@ -5,6 +5,11 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod codex_native_subagent;
+pub use codex_native_subagent::{
+    get_codex_native_subagent, save_codex_native_subagent, CodexNativeSubagent,
+};
+
 pub fn get_providers() -> Result<Vec<Provider>, String> {
     let paths = ConfigPaths::runtime()?;
     let mut providers = get_providers_with_paths(&paths)?;

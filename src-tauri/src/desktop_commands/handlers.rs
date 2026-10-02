@@ -63,6 +63,19 @@ pub fn save_settings(settings: Settings) -> Result<Settings, String> {
 }
 
 #[tauri::command]
+pub fn get_codex_native_subagent() -> Result<config::CodexNativeSubagent, String> {
+    config::get_codex_native_subagent()
+}
+
+#[tauri::command]
+pub fn save_codex_native_subagent(
+    model: String,
+    effort: String,
+) -> Result<config::CodexNativeSubagent, String> {
+    config::save_codex_native_subagent(model, effort)
+}
+
+#[tauri::command]
 pub fn get_catalog_override_diagnostics() -> Result<catalog::CatalogOverrideDiagnostics, String> {
     catalog::catalog_override_diagnostics()
 }

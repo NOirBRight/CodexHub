@@ -107,6 +107,7 @@ export function subagentCatalogSlug(
 }
 
 export function listDefaultSubagentOptions(input: {
+  nativeOptions?: DefaultSubagentOption[];
   includeFastVariants?: boolean;
   officialId: string;
   officialIncluded: boolean;
@@ -122,6 +123,8 @@ export function listDefaultSubagentOptions(input: {
     seen.add(option.id);
     options.push(option);
   };
+
+  for (const option of input.nativeOptions ?? []) push(option);
 
   if (input.officialIncluded) {
     for (const model of input.officialModels) {

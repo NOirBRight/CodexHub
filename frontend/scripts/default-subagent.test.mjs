@@ -9,7 +9,7 @@ function loadDefaultSubagent() {
   const strip = (text) =>
     text
       .replace(/^\s*import[\s\S]*?;\s*$/gm, "")
-      .replace(/export type [\s\S]*?\};\n/g, "")
+      .replace(/export type [\s\S]*?\};\r?\n/g, "")
       .replace(/^export /gm, "");
   const wire = strip(
     fs.readFileSync(new URL("../src/lib/wireDisplayName.ts", import.meta.url), "utf8"),
@@ -41,6 +41,31 @@ const {
   resolveSubagentEffort,
   subagentCatalogSlug,
 } = loadDefaultSubagent();
+
+test("native Codex choices remain selectable when every Gateway model is excluded", () => {
+  const native = { id: "native:gpt-6-sol", label: "Native · Sol", efforts: ["high", "max"], defaultEffort: "high" };
+  const options = listDefaultSubagentOptions({
+    nativeOptions: [native],
+    includeFastVariants: true,
+    officialId: "__official__",
+    officialIncluded: false,
+    officialModels: [official("gpt-6-sol")],
+    officialDisabledModels: ["gpt-6-sol"],
+    providers: [],
+  });
+  assert.deepEqual(options, [native]);
+  assert.equal(resolveSubagentEffort(options[0], ""), "high");
+  assert.equal(options[0].speedVariant, undefined);
+});
+
+test("native and Gateway Codex choices retain distinct identities for the same model", () => {
+  const options = listDefaultSubagentOptions({
+    nativeOptions: [{ id: "native:gpt-6-sol", label: "Native · Sol", efforts: ["high"], defaultEffort: "high" }],
+    officialId: "__official__", officialIncluded: true,
+    officialModels: [official("gpt-6-sol")], officialDisabledModels: [], providers: [],
+  });
+  assert.deepEqual(options.map((option) => option.id), ["native:gpt-6-sol", "gpt-6-sol"]);
+});
 
 const official = (id, overrides = {}) => ({
   id,

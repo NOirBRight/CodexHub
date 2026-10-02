@@ -22,6 +22,8 @@ export const COMMANDS = {
   saveProviders: "save_providers",
   getSettings: "get_settings",
   saveSettings: "save_settings",
+  getCodexNativeSubagent: "get_codex_native_subagent",
+  saveCodexNativeSubagent: "save_codex_native_subagent",
   cancelOfficialModelRefresh: "cancel_official_model_refresh",
   refreshOfficialModels: "refresh_official_models",
   openaiUsageCompletions: "openai_usage_completions",
