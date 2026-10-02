@@ -1462,7 +1462,7 @@ def official_passthrough_request_body(
     if _collaboration_delivery.make_messages_portable(next_payload):
         changed = True
         if event_context is not None:
-            event_context[_collaboration_delivery.CONTEXT_KEY] = True
+            event_context[_collaboration_delivery.CONTEXT_KEY] = _collaboration_delivery.portable_handler_names(next_payload)
     if isinstance(upstream_model, str) and upstream_model and next_payload.get("model") != upstream_model:
         next_payload["model"] = upstream_model
         changed = True

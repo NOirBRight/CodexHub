@@ -1,0 +1,51 @@
+{
+  "provider": "claude-subscription",
+  "model": "claude-sonnet-4-5",
+  "risk": "strict",
+  "kind": "ordinary-real-gateway",
+  "bound_seconds_per_exchange": 30.0,
+  "bound_seconds_total": 60.0,
+  "success_cues": [
+    "exact randomized text with complete protocol terminal event",
+    "actual caller tool with original Call identity",
+    "real tool result recovered from completed history after Gateway restart",
+    "upstream sockets close after caller disconnect"
+  ],
+  "failure_cues": [
+    "bounded HTTP/SSE error",
+    "wrong exact output",
+    "orphan or malformed caller tool",
+    "incomplete stream",
+    "unobserved cleanup"
+  ],
+  "protocols": [
+    "chat"
+  ],
+  "cases": [
+    {
+      "case": "chat.text",
+      "state": "failed",
+      "code": "not-eligible",
+      "http_status": 403,
+      "elapsed_seconds": 2.62
+    }
+  ],
+  "advanced_codemode_v2_qualified": false,
+  "dual_platform_qualified": false,
+  "windows_gate": {
+    "state": "blocked",
+    "reason": "yoga SSH No route to host; actual Windows verification pending"
+  },
+  "ordinary_scope": "text-stream-tool-continuation",
+  "cli_version_observed_before_run": "2.1.286",
+  "candidate_sha": "29ee769689816511fbd7b010ee6339dddf61bc8f",
+  "candidate_runtime_tracked_dirty": false,
+  "candidate_sha_is_exact_runtime": true,
+  "runtime_source_sha256": "d0f6b9eecea3920755fb628b9060a710b378e380efb2220adac5faecda9d4083",
+  "private_artifacts_removed": true,
+  "cli_version_observed_after_run": "2.1.286",
+  "ordinary_qualified": false,
+  "caller_cancel_qualified": false,
+  "generation_qualified": false,
+  "elapsed_seconds": 3.23
+}

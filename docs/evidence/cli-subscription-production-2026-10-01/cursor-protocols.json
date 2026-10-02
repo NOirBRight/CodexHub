@@ -1,0 +1,109 @@
+{
+  "provider": "cursor-subscription",
+  "model": "gpt-5.6-luna-high",
+  "risk": "strict",
+  "kind": "ordinary-real-gateway",
+  "bound_seconds_per_exchange": 60.0,
+  "bound_seconds_total": 600.0,
+  "success_cues": [
+    "exact randomized text with complete protocol terminal event",
+    "actual caller tool with original Call identity",
+    "real tool result recovered from completed history after Gateway restart",
+    "upstream sockets close after caller disconnect"
+  ],
+  "failure_cues": [
+    "bounded HTTP/SSE error",
+    "wrong exact output",
+    "orphan or malformed caller tool",
+    "incomplete stream",
+    "unobserved cleanup"
+  ],
+  "cases": [
+    {
+      "case": "responses.text",
+      "state": "passed",
+      "elapsed_seconds": 4.23,
+      "text_sha256": "0d17722591ea50032a8e5fea8256117723e3a1650ad88406c302ce9b1db941fc",
+      "text_bytes": 22,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": true,
+      "stream_events": 0,
+      "finish": "completed"
+    },
+    {
+      "case": "responses.stream",
+      "state": "passed",
+      "elapsed_seconds": 5.09,
+      "text_sha256": "0d17722591ea50032a8e5fea8256117723e3a1650ad88406c302ce9b1db941fc",
+      "text_bytes": 22,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": true,
+      "stream_events": 14,
+      "finish": "completed"
+    },
+    {
+      "case": "responses.caller-tool",
+      "state": "passed",
+      "elapsed_seconds": 9.09,
+      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "text_bytes": 0,
+      "tool_calls": 1,
+      "call_id_sha256": [
+        "3d4c913b730d2e20c9c0cbf4ffe8104a0609760c2208ea6c72f5f6e1e7d3cd97"
+      ],
+      "usage_present": false,
+      "stream_events": 0,
+      "finish": "completed"
+    },
+    {
+      "case": "responses.tool-result",
+      "state": "failed",
+      "code": "upstream-error",
+      "http_status": 400,
+      "elapsed_seconds": 0.11
+    },
+    {
+      "case": "messages.text",
+      "state": "failed",
+      "code": "upstream-error",
+      "http_status": 400,
+      "elapsed_seconds": 0.11
+    },
+    {
+      "case": "messages.stream",
+      "state": "failed",
+      "code": "upstream-error",
+      "http_status": 400,
+      "elapsed_seconds": 0.11
+    },
+    {
+      "case": "messages.caller-tool",
+      "state": "failed",
+      "code": "upstream-error",
+      "http_status": 400,
+      "elapsed_seconds": 0.11
+    },
+    {
+      "case": "chat.caller-cancel",
+      "state": "failed",
+      "code": "cancel-cleanup-unobserved",
+      "http_status": null,
+      "elapsed_seconds": 7.57
+    }
+  ],
+  "advanced_codemode_v2_qualified": false,
+  "dual_platform_qualified": false,
+  "windows_gate": {
+    "state": "blocked",
+    "reason": "yoga SSH No route to host; actual Windows verification pending"
+  },
+  "candidate_sha": "47e45f0b0aedd37e4e1c0abed1ed66f577a1457a",
+  "candidate_runtime_tracked_dirty": false,
+  "runtime_source_sha256": "29960b250ffb78cf5ae3febeac7531ebb21f5e8fe2c015c4b74e8ff4177b23c0",
+  "private_artifacts_removed": true,
+  "ordinary_qualified": false,
+  "generation_qualified": false,
+  "elapsed_seconds": 27.18
+}

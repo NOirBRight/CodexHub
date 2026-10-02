@@ -1090,6 +1090,7 @@ fn save_providers_with_paths(
     providers: Vec<Provider>,
     paths: &ConfigPaths,
 ) -> Result<Vec<Provider>, String> {
+    crate::cli_subscription::validate_settings(&providers)?;
     let path = paths.runtime_providers_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {

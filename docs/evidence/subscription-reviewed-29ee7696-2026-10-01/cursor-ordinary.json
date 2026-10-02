@@ -1,0 +1,208 @@
+{
+  "provider": "cursor-subscription",
+  "model": "gpt-5.6-luna-high",
+  "risk": "strict",
+  "kind": "ordinary-real-gateway",
+  "bound_seconds_per_exchange": 60.0,
+  "bound_seconds_total": 600.0,
+  "success_cues": [
+    "exact randomized text with complete protocol terminal event",
+    "actual caller tool with original Call identity",
+    "real tool result recovered from completed history after Gateway restart",
+    "upstream sockets close after caller disconnect"
+  ],
+  "failure_cues": [
+    "bounded HTTP/SSE error",
+    "wrong exact output",
+    "orphan or malformed caller tool",
+    "incomplete stream",
+    "unobserved cleanup"
+  ],
+  "protocols": [
+    "chat",
+    "responses",
+    "messages"
+  ],
+  "cases": [
+    {
+      "case": "chat.text",
+      "state": "passed",
+      "elapsed_seconds": 7.8,
+      "text_sha256": "cf324cb10a4e55f5a0cd0c671d190cda7189f6950e1cfe55aec59fcfae403cbd",
+      "text_bytes": 22,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": true,
+      "stream_events": 0,
+      "finish": "stop"
+    },
+    {
+      "case": "chat.stream",
+      "state": "passed",
+      "elapsed_seconds": 4.53,
+      "text_sha256": "cf324cb10a4e55f5a0cd0c671d190cda7189f6950e1cfe55aec59fcfae403cbd",
+      "text_bytes": 22,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": false,
+      "stream_events": 4,
+      "finish": "stop"
+    },
+    {
+      "case": "chat.caller-tool",
+      "state": "passed",
+      "elapsed_seconds": 6.61,
+      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "text_bytes": 0,
+      "tool_calls": 1,
+      "call_id_sha256": [
+        "994304cf56f88e2f78e4e1d8a6b1ed133bcaeb4b31a6620daaa4e75526a62286"
+      ],
+      "usage_present": false,
+      "stream_events": 0,
+      "finish": "tool_calls"
+    },
+    {
+      "case": "chat.tool-result",
+      "state": "passed",
+      "elapsed_seconds": 4.46,
+      "text_sha256": "75222fa696a875621309479b6daa7ceb135d5d35a6259daabf9b59802515af74",
+      "text_bytes": 32,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": true,
+      "stream_events": 0,
+      "finish": "stop"
+    },
+    {
+      "case": "responses.text",
+      "state": "passed",
+      "elapsed_seconds": 3.92,
+      "text_sha256": "bcb5aba12d7135d76c756cfc0e013ced10e4252a7449985b48e62bf92c8f8e1b",
+      "text_bytes": 22,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": true,
+      "stream_events": 0,
+      "finish": "completed"
+    },
+    {
+      "case": "responses.stream",
+      "state": "passed",
+      "elapsed_seconds": 4.07,
+      "text_sha256": "bcb5aba12d7135d76c756cfc0e013ced10e4252a7449985b48e62bf92c8f8e1b",
+      "text_bytes": 22,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": true,
+      "stream_events": 15,
+      "finish": "completed"
+    },
+    {
+      "case": "responses.caller-tool",
+      "state": "passed",
+      "elapsed_seconds": 5.82,
+      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "text_bytes": 0,
+      "tool_calls": 1,
+      "call_id_sha256": [
+        "82816cd32bf423943ae4187d4dc72f374877e396c11a700eea3319bfadbe9659"
+      ],
+      "usage_present": false,
+      "stream_events": 0,
+      "finish": "completed"
+    },
+    {
+      "case": "responses.tool-result",
+      "state": "passed",
+      "elapsed_seconds": 11.4,
+      "text_sha256": "ffc5683bceda39d047f361b104c45de652ab663cdac58fc54af95bf313c5a55e",
+      "text_bytes": 32,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": true,
+      "stream_events": 0,
+      "finish": "completed"
+    },
+    {
+      "case": "messages.text",
+      "state": "failed",
+      "code": "upstream-error",
+      "http_status": 400,
+      "elapsed_seconds": 0.12
+    },
+    {
+      "case": "messages.stream",
+      "state": "failed",
+      "code": "upstream-error",
+      "http_status": 400,
+      "elapsed_seconds": 0.13
+    },
+    {
+      "case": "messages.caller-tool",
+      "state": "failed",
+      "code": "upstream-error",
+      "http_status": 400,
+      "elapsed_seconds": 0.14
+    },
+    {
+      "case": "chat.restart-history-fresh-caller",
+      "state": "passed",
+      "elapsed_seconds": 7.79,
+      "text_sha256": "75222fa696a875621309479b6daa7ceb135d5d35a6259daabf9b59802515af74",
+      "text_bytes": 32,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": true,
+      "stream_events": 0,
+      "finish": "stop"
+    },
+    {
+      "case": "responses.restart-history-fresh-caller",
+      "state": "passed",
+      "elapsed_seconds": 4.43,
+      "text_sha256": "ffc5683bceda39d047f361b104c45de652ab663cdac58fc54af95bf313c5a55e",
+      "text_bytes": 32,
+      "tool_calls": 0,
+      "call_id_sha256": [],
+      "usage_present": true,
+      "stream_events": 0,
+      "finish": "completed"
+    },
+    {
+      "case": "chat.caller-cancel",
+      "state": "passed",
+      "elapsed_seconds": 0.25,
+      "cancel_phase": "upstream-wait",
+      "headers_received_before_cancel": false,
+      "caller_wait_ended": true,
+      "caller_failure_observed": true,
+      "socket_baseline": 2,
+      "socket_after_cancel": 1,
+      "upstream_tls_baseline": 0,
+      "upstream_tls_at_disconnect": 1,
+      "upstream_tls_after_cancel": 0,
+      "upstream_socket_cleanup_observed": true,
+      "billing_cessation_claimed": false
+    }
+  ],
+  "advanced_codemode_v2_qualified": false,
+  "dual_platform_qualified": false,
+  "windows_gate": {
+    "state": "blocked",
+    "reason": "yoga SSH No route to host; actual Windows verification pending"
+  },
+  "ordinary_scope": "text-stream-tool-continuation",
+  "cli_version_observed_before_run": "2026.09.28-64d2043",
+  "candidate_sha": "29ee769689816511fbd7b010ee6339dddf61bc8f",
+  "candidate_runtime_tracked_dirty": false,
+  "candidate_sha_is_exact_runtime": true,
+  "runtime_source_sha256": "d0f6b9eecea3920755fb628b9060a710b378e380efb2220adac5faecda9d4083",
+  "gateway_restart_observed": true,
+  "private_artifacts_removed": true,
+  "cli_version_observed_after_run": "2026.09.28-64d2043",
+  "ordinary_qualified": false,
+  "caller_cancel_qualified": true,
+  "generation_qualified": false,
+  "elapsed_seconds": 62.36
+}

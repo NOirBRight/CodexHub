@@ -1,0 +1,54 @@
+{
+  "provider": "cursor-subscription",
+  "model": "gpt-5.6-luna-high",
+  "risk": "strict",
+  "kind": "ordinary-real-gateway",
+  "bound_seconds_per_exchange": 30.0,
+  "bound_seconds_total": 45.0,
+  "success_cues": [
+    "exact randomized text with complete protocol terminal event",
+    "actual caller tool with original Call identity",
+    "real tool result recovered from completed history after Gateway restart",
+    "upstream sockets close after caller disconnect"
+  ],
+  "failure_cues": [
+    "bounded HTTP/SSE error",
+    "wrong exact output",
+    "orphan or malformed caller tool",
+    "incomplete stream",
+    "unobserved cleanup"
+  ],
+  "protocols": [],
+  "cases": [
+    {
+      "case": "chat.caller-cancel",
+      "state": "passed",
+      "elapsed_seconds": 0.44,
+      "cancel_phase": "upstream-wait",
+      "headers_received_before_cancel": false,
+      "caller_wait_ended": true,
+      "caller_failure_observed": true,
+      "socket_baseline": 1,
+      "socket_after_cancel": 1,
+      "upstream_tls_baseline": 0,
+      "upstream_tls_at_disconnect": 1,
+      "upstream_tls_after_cancel": 0,
+      "upstream_socket_cleanup_observed": true,
+      "billing_cessation_claimed": false
+    }
+  ],
+  "advanced_codemode_v2_qualified": false,
+  "dual_platform_qualified": false,
+  "windows_gate": {
+    "state": "blocked",
+    "reason": "yoga SSH No route to host; actual Windows verification pending"
+  },
+  "candidate_sha": "47e45f0b0aedd37e4e1c0abed1ed66f577a1457a",
+  "candidate_runtime_tracked_dirty": false,
+  "runtime_source_sha256": "29960b250ffb78cf5ae3febeac7531ebb21f5e8fe2c015c4b74e8ff4177b23c0",
+  "private_artifacts_removed": true,
+  "ordinary_qualified": false,
+  "caller_cancel_qualified": true,
+  "generation_qualified": false,
+  "elapsed_seconds": 1.12
+}

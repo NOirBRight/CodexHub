@@ -164,11 +164,12 @@ class RequestScopedToolAliasRegistry:
         child_index: int,
         child_name: str,
         version: str | None,
+        family: str = NAMESPACE,
     ) -> str:
         return self._allocate(
             AliasRecord(
                 alias="",
-                family=NAMESPACE,
+                family=family,
                 declaration_index=declaration_index,
                 child_index=child_index,
                 namespace=namespace,

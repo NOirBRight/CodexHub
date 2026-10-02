@@ -365,7 +365,19 @@ def classify_collaboration_request(request: Mapping[str, Any]) -> str | None:
         "collaboration_version_signal_unexpected",
     )
     _require(request.get("tool_choice") == "auto", "tool_choice_invalid")
-    return classify_collaboration_tools(tools)  # type: ignore[arg-type]
+    try:
+        return classify_collaboration_tools(tools)  # type: ignore[arg-type]
+    except CollaborationContractError as exc:
+        # Current Code Mode children advertise a strict subset of the same V2
+        # handlers. Keep the frozen full-pack classifier unchanged; authorize a
+        # subset only alongside the actual caller exec transport declaration.
+        from code_mode_collaboration import has_code_mode_exec, is_supported_subset
+
+        if exc.classification == "namespace_child_set_invalid" and has_code_mode_exec(tools):
+            candidates = _namespace_candidates(tools)
+            if len(candidates) == 1 and is_supported_subset(candidates[0]):
+                return COLLABORATION_V2
+        raise
 
 
 # CLI 0.153.4 deserializes Option<i64>. Effective duration limits belong to

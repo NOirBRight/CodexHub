@@ -26,6 +26,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { providerLogoSrc } from "../../lib/providerLogos";
 import { subscriptionAuthAdapter } from "../../lib/providerCatalog";
+import { canEnableCliSubscription, isCliSubscription } from "../../lib/cliSubscription";
 import { api, messageFromError } from "../../lib/tauri";
 import type {
   Model,
@@ -344,6 +345,7 @@ export function ProviderWorkspaceView(props: Props) {
           {t(
             p.id === props.officialId
               ? "workspace.codexSubscription"
+              : isCliSubscription(p) ? "workspace.cliSubscription"
               : subscriptionAuthAdapter(p) === "xai_oauth"
                 ? "workspace.subscription"
                 : "workspace.apiProvider",
@@ -361,7 +363,7 @@ export function ProviderWorkspaceView(props: Props) {
           !props.authorized ? t("workspace.signInForQuota") : props.quotaError
         }
       />
-    ) : subscriptionAuthAdapter(p) === "xai_oauth" ? (
+    ) : isCliSubscription(p) ? <p className="ws-provider-quota">{t("workspace.quotaUnknown")}</p> : subscriptionAuthAdapter(p) === "xai_oauth" ? (
       <ResourceLimits
         limits={xaiLimits}
         pending={xaiPending}
@@ -521,7 +523,7 @@ export function ProviderWorkspaceView(props: Props) {
                     </button>
                     <SwitchControl
                       checked={p.enabled}
-                      disabled={props.busy}
+                      disabled={props.busy || !canEnableCliSubscription(p)}
                       ariaLabel={t("workspace.enableProvider", {
                         name: p.name,
                       })}
@@ -565,6 +567,7 @@ export function ProviderWorkspaceView(props: Props) {
                         {t(
                           official
                             ? "workspace.codexAuth"
+                            : isCliSubscription(p) ? "workspace.cliCurrentAccount"
                             : subscriptionAuthAdapter(p) === "xai_oauth"
                               ? "workspace.subscriptionAccount"
                               : p.api_key
@@ -572,8 +575,8 @@ export function ProviderWorkspaceView(props: Props) {
                                 : "workspace.credentialsNeeded",
                         )}
                       </span>
-                      <code title={p.base_url}>
-                        {official ? t("workspace.officialService") : p.base_url}
+                      <code title={isCliSubscription(p) ? undefined : p.base_url}>
+                        {official ? t("workspace.officialService") : isCliSubscription(p) ? t("workspace.cliTransport") : p.base_url}
                       </code>
                     </div>
                     <div className="ws-actions">
@@ -598,7 +601,7 @@ export function ProviderWorkspaceView(props: Props) {
                           name: p.name,
                         })}
                         checked={p.enabled}
-                        disabled={props.busy}
+                        disabled={props.busy || !canEnableCliSubscription(p)}
                         onChange={(enabled) => props.onToggle(p.id, enabled)}
                       />
                     </div>

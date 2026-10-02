@@ -1692,6 +1692,8 @@ class CompatibilityStreamState(CollaborationV2StreamMixin):
         result = _copy_mapping(item)
         result["type"] = "custom_tool_call"
         result["name"] = record.original_name
+        if record.namespace is not None:
+            result["namespace"] = record.namespace
         result["input"] = native_input
         result.pop("arguments", None)
         return result

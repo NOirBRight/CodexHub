@@ -197,7 +197,7 @@ def test_failures_clean_private_directory_and_never_return_raw_errors(tmp_path, 
 
 
 @pytest.mark.parametrize("output", ["", "warning: could not list models", "same - One\nsame - Two",
-                                    "good - Good\nunsupported/id - Unsupported"])
+                                    "good - Good\nunsupported id - Unsupported"])
 def test_missing_or_ambiguous_cursor_catalog_is_not_available(tmp_path, output):
     home, _, binary = account(tmp_path)
     runner = cursor_runner([])
@@ -209,11 +209,19 @@ def test_missing_or_ambiguous_cursor_catalog_is_not_available(tmp_path, output):
     assert not result.models
 
 
+def test_raw_vendor_slash_identity_survives_discovery(tmp_path):
+    home, _, binary = account(tmp_path)
+    result = discover_subscription("cursor-subscription", binary=binary, source_home=home,
+                                   environ=environment(home), runner=cursor_runner([], "vendor/exact-high-fast - Vendor Model"))
+    assert result.state == "available"
+    assert result.models[0].id == "vendor/exact-high-fast"
+
+
 @pytest.mark.parametrize("page", [
     {"data": [], "has_more": False},
     {"data": [{"id": "good", "display_name": "Good"}], "has_more": True},
     {"data": [{"id": "good"}], "has_more": "false"},
-    {"data": [{"id": "bad/id", "display_name": "Bad"}], "has_more": False},
+    {"data": [{"id": "bad id", "display_name": "Bad"}], "has_more": False},
 ])
 def test_malformed_or_incomplete_vendor_catalog_discards_partial_models(tmp_path, page):
     home, _, binary = account(tmp_path, "claude-subscription")

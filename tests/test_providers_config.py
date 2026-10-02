@@ -1484,7 +1484,7 @@ enabled = true
 
         self.assertEqual(
             [provider.id for provider in providers],
-            ["ollama-cloud", "volc", "minimax-cn", "kimi-cn", "kimi", "commandcode", "opencode-go", "xai", "deepseek", "chatgpt-web"],
+            ["ollama-cloud", "volc", "minimax-cn", "kimi-cn", "kimi", "commandcode", "opencode-go", "xai", "deepseek", "chatgpt-web", "cursor-subscription", "claude-subscription"],
         )
         deepseek = next(provider for provider in providers if provider.id == "deepseek")
         self.assertEqual(deepseek.upstream_format, "auto")

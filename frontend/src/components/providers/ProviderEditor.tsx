@@ -26,6 +26,8 @@ import {
   IconButton,
 } from "./ProviderFormControls";
 import { ChatGptWebRuntimeCard } from "./ChatGptWebRuntimeCard";
+import { CliSubscriptionCard } from "./CliSubscriptionCard";
+import { isCliSubscription } from "../../lib/cliSubscription";
 import { XaiLoginCard } from "./XaiLoginCard";
 import {
   applyAddProviderProbeResult,
@@ -130,6 +132,7 @@ export function ProviderDetail({
   const subscriptionAuth =
     subscriptionAuthAdapter(provider) ?? subscriptionAuthAdapter(preset);
   const xaiSubscriptionAuth = subscriptionAuth === "xai_oauth";
+  const cliSubscription = isCliSubscription(provider);
   const chatgptWebRuntime =
     runtimeCapability(provider) === "chatgpt_web" || runtimeCapability(preset) === "chatgpt_web";
 
@@ -536,7 +539,7 @@ export function ProviderDetail({
           }
         />
 
-        {xaiSubscriptionAuth && !desktopTab ? null : (
+        {cliSubscription ? <CliSubscriptionCard key={provider.id} provider={draft} onChange={setDraft} /> : xaiSubscriptionAuth && !desktopTab ? null : (
           <div className="grid grid-cols-2 gap-2">
             <Field label={t("common.name")} className={xaiSubscriptionAuth ? "col-span-2" : undefined}>
               <input
@@ -584,7 +587,7 @@ export function ProviderDetail({
       </div>
 
       <ModelSection
-        discoverDisabled={!draft.base_url.trim()}
+        discoverDisabled={!cliSubscription && !draft.base_url.trim()}
         discoverBusy={busy === draft.id}
         discoverError={discoverError}
         models={listedModels}
@@ -609,7 +612,7 @@ export function ProviderDetail({
             ),
           }))
         }
-        modelTestDisabled={!draft.base_url.trim()}
+        modelTestDisabled={cliSubscription || !draft.base_url.trim()}
       />
       <div className="flex items-center justify-end border-t border-line px-5 py-3">
         <button

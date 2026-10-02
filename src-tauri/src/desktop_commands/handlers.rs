@@ -43,6 +43,12 @@ pub fn get_bundled_providers() -> Result<Vec<Provider>, String> {
 }
 
 #[tauri::command]
+pub async fn cli_subscription_status(provider_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::cli_subscription::status(&provider_id))
+        .await.map_err(|_| "CLI account detection failed".to_string())?
+}
+
+#[tauri::command]
 pub fn save_providers(providers: Vec<Provider>) -> Result<Vec<Provider>, String> {
     config::save_providers(providers)
 }

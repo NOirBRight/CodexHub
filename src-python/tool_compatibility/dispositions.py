@@ -114,7 +114,9 @@ def namespace_details(declaration: Mapping[str, Any]) -> tuple[str | None, tuple
         return namespace, (), None, False
     children: list[Mapping[str, Any]] = []
     for child in raw_tools:
-        if not isinstance(child, Mapping) or child.get("type") != "function" or not _name_of(child):
+        if not isinstance(child, Mapping) or child.get("type") not in {"function", "custom"} or not _name_of(child):
+            return namespace, (), None, False
+        if child.get("type") == "custom" and not isinstance(child.get("format"), Mapping):
             return namespace, (), None, False
         children.append(child)
     child_names = [str(child.get("name")) for child in children]
@@ -597,9 +599,9 @@ def build_tool_compatibility_plan(
             else:
                 reason = "function_lifecycle_unavailable"
         elif family == NAMESPACE:
-            if valid and capabilities.namespace_lifecycle:
+            if valid and capabilities.namespace_lifecycle and (capabilities.custom_lifecycle or all(child.get("type") != "custom" for child in children)):
                 disposition, reason = NATIVE, "native_namespace_lifecycle"
-            elif valid and capabilities.function_lifecycle and capabilities.accepts_namespace_adapter:
+            elif valid and capabilities.function_lifecycle and capabilities.accepts_namespace_adapter and (capabilities.accepts_custom_adapter or all(child.get("type") != "custom" for child in children)):
                 disposition, reason = ADAPT, "namespace_function_adapter"
                 for child_index, child in enumerate(children):
                     child_name = str(child.get("name"))
@@ -610,6 +612,7 @@ def build_tool_compatibility_plan(
                             child_index=child_index,
                             child_name=child_name,
                             version=version,
+                            family=CUSTOM_FREEFORM if child.get("type") == "custom" else NAMESPACE,
                         )
                     )
             else:
@@ -668,7 +671,7 @@ def build_tool_compatibility_plan(
                 declaration=_freeze(_copy_mapping(declaration)),
                 reason=reason,
                 aliases=tuple(aliases),
-                namespace=namespace,
+                namespace=namespace if family == NAMESPACE else None,
                 version=version,
                 child_names=tuple(str(child.get("name")) for child in children if isinstance(child.get("name"), str)),
             )

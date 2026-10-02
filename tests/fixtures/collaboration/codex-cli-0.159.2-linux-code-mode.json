@@ -1,0 +1,329 @@
+{
+  "client_version": "codex-cli 0.159.2",
+  "capture_date": "2026-10-01",
+  "scope": "Loopback-only declaration capture; rejected before inference. tools and input.additional_tools hoisted; dynamic descriptions sanitized. Native V2 and namespaced custom exec are actual observed declarations.",
+  "tools": [
+    {
+      "type": "namespace",
+      "name": "functions",
+      "description": "sanitized",
+      "tools": [
+        {
+          "type": "custom",
+          "name": "exec",
+          "description": "Run JavaScript code to orchestrate/compose tool calls\n- All nested tools are available on the global `tools` object, for example `await tools.exec_command(...)`. Tool names are exposed as normalized JavaScript identifiers, for example `await tools.mcp__ologs__get_profile(...)`.",
+          "format": {
+            "type": "grammar",
+            "syntax": "lark",
+            "definition": "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n"
+          }
+        },
+        {
+          "type": "function",
+          "name": "wait",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "cell_id": {
+                "type": "string",
+                "description": "sanitized"
+              },
+              "max_tokens": {
+                "type": "number",
+                "description": "sanitized"
+              },
+              "terminate": {
+                "type": "boolean",
+                "description": "sanitized"
+              },
+              "yield_time_ms": {
+                "type": "number",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "cell_id"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "request_user_input",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "questions": {
+                "type": "array",
+                "description": "sanitized",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "header": {
+                      "type": "string",
+                      "description": "sanitized"
+                    },
+                    "id": {
+                      "type": "string",
+                      "description": "sanitized"
+                    },
+                    "options": {
+                      "type": "array",
+                      "description": "sanitized",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "description": "sanitized",
+                          "label": {
+                            "type": "string",
+                            "description": "sanitized"
+                          }
+                        },
+                        "required": [
+                          "label",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "question": {
+                      "type": "string",
+                      "description": "sanitized"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "header",
+                    "question",
+                    "options"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "questions"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "request_user_input_async",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "questions": {
+                "type": "array",
+                "description": "sanitized",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "options": {
+                      "type": "array",
+                      "description": "sanitized",
+                      "items": {
+                        "type": "string"
+                      },
+                      "minItems": 1
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "sanitized"
+                    }
+                  },
+                  "required": [
+                    "title"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "questions"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "type": "namespace",
+      "name": "clock",
+      "description": "sanitized",
+      "tools": [
+        {
+          "type": "function",
+          "name": "sleep",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "duration_ms": {
+                "type": "number",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "duration_ms"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    {
+      "type": "namespace",
+      "name": "collaboration",
+      "description": "sanitized",
+      "tools": [
+        {
+          "type": "function",
+          "name": "followup_task",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "description": "sanitized",
+                "encrypted": true
+              },
+              "target": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "target",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "interrupt_agent",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "target": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "target"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "list_agents",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path_prefix": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "send_message",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string",
+                "description": "sanitized",
+                "encrypted": true
+              },
+              "target": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "target",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "spawn_agent",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "fork_turns": {
+                "type": "string",
+                "description": "sanitized"
+              },
+              "message": {
+                "type": "string",
+                "description": "sanitized",
+                "encrypted": true
+              },
+              "model": {
+                "type": "string",
+                "description": "sanitized"
+              },
+              "reasoning_effort": {
+                "type": "string",
+                "description": "sanitized"
+              },
+              "task_name": {
+                "type": "string",
+                "description": "sanitized"
+              }
+            },
+            "required": [
+              "task_name",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "type": "function",
+          "name": "wait_agent",
+          "description": "sanitized",
+          "strict": false,
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "timeout_ms": {
+                "type": "number",
+                "description": "sanitized"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      ]
+    }
+  ]
+}

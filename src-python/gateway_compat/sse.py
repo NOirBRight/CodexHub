@@ -208,7 +208,11 @@ def compatible_sse_line(
     *,
     runtime_tool_inverse_only: bool = False,
 ) -> bytes:
-    if upstream_name == "official" or _official_passthrough._is_raw_provider_probe_context(event_context) or not line.startswith(b"data:"):
+    if upstream_name == "official":
+        from . import collaboration_delivery
+
+        return collaboration_delivery.decode_sse_line(line, event_context)
+    if _official_passthrough._is_raw_provider_probe_context(event_context) or not line.startswith(b"data:"):
         return line
 
     line_ending = _sse_line_ending(line)

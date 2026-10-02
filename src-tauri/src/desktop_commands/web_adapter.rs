@@ -112,6 +112,10 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
                 provider_id.as_deref(),
             ))
         }
+        Command::CliSubscriptionStatus => {
+            let provider_id = registry_string_arg(args, command, "provider_id")?;
+            to_value(crate::cli_subscription::status(&provider_id))
+        }
         Command::ProbeUpstreamFormat => {
             let base_url = registry_string_arg(args, command, "base_url")?;
             let api_key =

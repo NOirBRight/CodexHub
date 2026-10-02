@@ -195,6 +195,9 @@ pub fn discover_provider_models(
     api_key: &str,
     provider_id: Option<&str>,
 ) -> Result<Vec<Model>, String> {
+    if let Some(id) = provider_id.filter(|id| crate::cli_subscription::is_provider(id)) {
+        return crate::cli_subscription::discover_models(id);
+    }
     let credential = resolve_provider_discovery_api_key(base_url, api_key, provider_id)?;
     let mut models =
         discover_provider_models_with_timeout(base_url, &credential, DISCOVERY_TIMEOUT)?;

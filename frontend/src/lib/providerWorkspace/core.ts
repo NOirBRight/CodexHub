@@ -1,4 +1,5 @@
 import { emptyProvider, type AddProviderForm } from "../providerForm";
+import { isCliSubscription } from "../cliSubscription";
 import { applyPresetReasoningDefaults, instantiateCatalogProvider } from "../providerCatalog";
 import { normalizeModel } from "../providerModel";
 import {
@@ -314,7 +315,7 @@ export function applyDiscoveredModelsForProvider(
   );
   const provider = {
     ...baseProvider,
-    models: fillMissingModelLimits(
+    models: isCliSubscription(baseProvider) ? mergeDiscoveredModels(retained, liveDiscovered) : fillMissingModelLimits(
       applyPresetReasoningDefaults(mergeDiscoveredModels(retained, liveDiscovered), preset),
       retained,
     ),

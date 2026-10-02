@@ -96,6 +96,7 @@ class CallerRequestBodyMode(str, Enum):
 class AuthenticationStrategy(str, Enum):
     CODEX_AUTH = "codex_auth"
     ANTHROPIC_OAUTH = "anthropic_oauth"
+    OFFICIAL_CLI_SESSION = "official_cli_session"
     API_KEY = "api_key"
     OLLAMA_API_KEY = "ollama_api_key"
     INCOMING = "incoming"
