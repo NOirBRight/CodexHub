@@ -66,6 +66,10 @@ coverage of every integrated client.
 
 ## Implementation tickets
 
+Native capability evidence: [Pi 0.80.6](../research/2026-10-02-pi-native-default-subagent.md)
+has no built-in native Default subagent setting. Its core delegates this workflow
+to extensions, so #621 records that limitation without adding a simulated setting.
+
 The user approved eight independent client slices. All tickets are published
 with `ready-for-agent` and have no blocking dependencies:
 
