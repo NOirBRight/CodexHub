@@ -19,6 +19,7 @@ mod isolated;
 mod managed_clients;
 mod native_subagent;
 pub use native_subagent::{NativeSubagentOption, NativeSubagentSettings};
+pub use clients::omp_native::{read_omp_default_subagent, save_omp_default_subagent};
 pub use clients::opencode_native::{read_opencode_default_subagent, save_opencode_default_subagent};
 pub use clients::zcode_native::{read_zcode_default_subagent, save_zcode_default_subagent};
 mod providers;

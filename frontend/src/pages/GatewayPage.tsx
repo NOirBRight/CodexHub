@@ -146,6 +146,16 @@ function GatewayPageImpl({
   const lastUsageErrorToast = useRef<string | null>(null);
   const [openCodeSubagent, setOpenCodeSubagent] = useState<NativeSubagentSettings | null>(null);
   const [zCodeSubagent, setZCodeSubagent] = useState<NativeSubagentSettings | null>(null);
+  const [ompSubagent, setOmpSubagent] = useState<NativeSubagentSettings | null>(null);
+  const nativeSubagents: Record<string, {
+    settings: NativeSubagentSettings | null;
+    save: (model: string, effort: string, native?: boolean) => Promise<NativeSubagentSettings>;
+    set: (settings: NativeSubagentSettings) => void;
+  }> = {
+    opencode: { settings: openCodeSubagent, save: api.saveOpenCodeDefaultSubagent, set: setOpenCodeSubagent },
+    zcode: { settings: zCodeSubagent, save: api.saveZCodeDefaultSubagent, set: setZCodeSubagent },
+    omp: { settings: ompSubagent, save: api.saveOmpDefaultSubagent, set: setOmpSubagent },
+  };
   const subagentSaveGen = useRef<Record<string, number>>({});
   const running = status?.proxy_running ?? false;
   const diagnosticsEnabled = Boolean(
@@ -695,6 +705,17 @@ function GatewayPageImpl({
     return () => { cancelled = true; };
   }, [clientInfos]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const gen = subagentSaveGen.current.omp;
+    void api.readOmpDefaultSubagent().then((value) => {
+      if (!cancelled && gen === subagentSaveGen.current.omp) setOmpSubagent(value);
+    }).catch((err) => {
+      if (!cancelled) showToast({ text: messageFromError(err), tone: "error", dedupeKey: "omp-native-subagent-read" });
+    });
+    return () => { cancelled = true; };
+  }, [clientInfos]);
+
   function subagentOptionsFor(clientId: string) {
     const gatewayOptions = listDefaultSubagentOptions({
       officialId: OFFICIAL_ID,
@@ -704,8 +725,9 @@ function GatewayPageImpl({
       providers,
       excludeProviderIds: clientId === "grok" ? ["xai"] : undefined,
     });
-    if (clientId !== "opencode" && clientId !== "zcode") return gatewayOptions;
-    const nativeSettings = clientId === "opencode" ? openCodeSubagent : zCodeSubagent;
+    const nativeClient = nativeSubagents[clientId];
+    if (!nativeClient) return gatewayOptions;
+    const nativeSettings = nativeClient.settings;
     const nativeOptions = (nativeSettings?.options ?? []).map((option) => ({
       ...option, id: `native:${option.id}`, label: `${t("workspace.nativeSubagentModel")} · ${option.label}`, native: true,
     }));
@@ -720,11 +742,10 @@ function GatewayPageImpl({
     options?: { stale?: boolean },
   ) {
     if (!settings) return;
-    const nativeSettings = clientId === "opencode" ? openCodeSubagent : clientId === "zcode" ? zCodeSubagent : null;
-    const nativeClient = clientId === "opencode" || clientId === "zcode";
-    const nativeSave = nativeClient && (model.startsWith("native:") || !model && !options?.stale);
+    const nativeClient = nativeSubagents[clientId];
+    const nativeSave = Boolean(nativeClient) && (model.startsWith("native:") || !model && !options?.stale);
     const current = clientDefaultSubagentFields(settings, clientId);
-    if (!nativeSave && !nativeSettings?.native && current.model === model && current.effort === effort) return;
+    if (!nativeSave && !nativeClient?.settings?.native && current.model === model && current.effort === effort) return;
     const next = normalizeSettings(
       withClientDefaultSubagent(settings, clientId, model, effort),
     );
@@ -744,16 +765,15 @@ function GatewayPageImpl({
     });
     try {
       if (nativeSave) {
-        const written = await (clientId === "zcode" ? api.saveZCodeDefaultSubagent : api.saveOpenCodeDefaultSubagent)(model.replace(/^native:/, ""), effort);
+        const written = await nativeClient.save(model.replace(/^native:/, ""), effort);
         if (gen !== subagentSaveGen.current[clientId]) return;
-        if (clientId === "zcode") setZCodeSubagent(written); else setOpenCodeSubagent(written);
+        nativeClient.set(written);
         updateToast(toastId, { action: null, text: t(clientId === "zcode" ? "workspace.defaultSubagentSavedZCode" : "workspace.defaultSubagentSavedClient", { name }), tone: "success" });
         return;
       }
       await onApplySettings(next);
       if (gen !== subagentSaveGen.current[clientId]) return;
-      if (clientId === "opencode") await api.saveOpenCodeDefaultSubagent("", "", false);
-      if (clientId === "zcode") await api.saveZCodeDefaultSubagent("", "", false);
+      if (nativeClient) await nativeClient.save("", "", false);
       if (connected) {
         await api.applyGatewayClientConfig(clientId, defaultModel);
         if (gen !== subagentSaveGen.current[clientId]) return;
@@ -781,8 +801,8 @@ function GatewayPageImpl({
     void (async () => {
       for (const clientId of ["opencode", "zcode", "omp", "grok"]) {
         const { model } = clientDefaultSubagentFields(settings, clientId);
-        if (!model || clientId === "opencode" && (!openCodeSubagent || openCodeSubagent.native || connectionStateFromInfo(clientInfoById.get(clientId)) === "disconnected")) continue;
-        if (clientId === "zcode" && (!zCodeSubagent || zCodeSubagent.native || connectionStateFromInfo(clientInfoById.get(clientId)) === "disconnected")) continue;
+        const nativeClient = nativeSubagents[clientId];
+        if (!model || nativeClient && (!nativeClient.settings || nativeClient.settings.native || connectionStateFromInfo(clientInfoById.get(clientId)) === "disconnected")) continue;
         const options = subagentOptionsFor(clientId);
         if (
           options.length === 0 &&
@@ -796,7 +816,7 @@ function GatewayPageImpl({
         }
       }
     })();
-  }, [settings, status, providers, officialModelsForSubagent, openCodeSubagent, zCodeSubagent]);
+  }, [settings, status, providers, officialModelsForSubagent, openCodeSubagent, zCodeSubagent, ompSubagent]);
 
   return (
     <main
@@ -1077,13 +1097,9 @@ function GatewayPageImpl({
                     settings && supportsClientDefaultSubagent(client.id)
                       ? {
                           ...clientDefaultSubagentFields(settings, client.id),
-                          ...(client.id === "opencode" && openCodeSubagent?.native ? {
-                            model: openCodeSubagent.model ? `native:${openCodeSubagent.model}` : "",
-                            effort: openCodeSubagent.effort,
-                          } : {}),
-                          ...(client.id === "zcode" && zCodeSubagent?.native ? {
-                            model: zCodeSubagent.model ? `native:${zCodeSubagent.model}` : "",
-                            effort: zCodeSubagent.effort,
+                          ...(nativeSubagents[client.id]?.settings?.native ? {
+                            model: nativeSubagents[client.id].settings?.model ? `native:${nativeSubagents[client.id].settings?.model}` : "",
+                            effort: nativeSubagents[client.id].settings?.effort ?? "",
                           } : {}),
                           options: subagentOptionsFor(client.id),
                           onChange: (model, effort) => {

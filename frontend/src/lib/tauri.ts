@@ -339,6 +339,8 @@ export const api = {
     }),
   syncGatewayClients: (model?: string | null) =>
     call<GatewayClientSyncSummary>(COMMANDS.syncGatewayClients, { model: model ?? null }),
+  readOmpDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readOmpDefaultSubagent),
+  saveOmpDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveOmpDefaultSubagent, { model, effort, native }),
   readOpenCodeDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readOpenCodeDefaultSubagent),
   readZCodeDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readZCodeDefaultSubagent),
   saveZCodeDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveZCodeDefaultSubagent, { model, effort, native }),

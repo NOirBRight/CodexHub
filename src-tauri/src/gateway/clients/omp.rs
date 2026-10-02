@@ -66,8 +66,21 @@ pub(in crate::gateway) fn apply_omp_default_subagent_slice(
     settings: &Settings,
     providers: &[Provider],
     model: &str,
+    config_path: Option<&Path>,
 ) -> Result<String, String> {
+    if let Some(path) = config_path {
+        if let Some(native) = super::omp_native::apply_saved_native(path, text, false)? {
+            return Ok(native);
+        }
+    }
     let pin = resolve_client_default_subagent_pin(settings, providers, "omp", model)?;
+    if pin.is_none() && omp_bundled_overrides_are_owned(text) {
+        if let Some(path) = config_path {
+            if let Some(native) = super::omp_native::apply_saved_native(path, text, true)? {
+                return Ok(native);
+            }
+        }
+    }
     let baseline = rollback_file_text("omp", "config.yml", current);
     Ok(rewrite_omp_agent_model_overrides(
         text,
@@ -110,15 +123,18 @@ fn omp_bundled_overrides_are_owned(text: &str) -> bool {
     })
 }
 
-fn omp_agent_overrides_block(selector: &str) -> Vec<String> {
-    let mut block = vec!["task:".to_string(), "  agentModelOverrides:".to_string()];
-    for name in OMP_BUNDLED_AGENTS {
-        block.push(format!("    {name}: {selector}"));
-    }
-    block
+fn write_omp_agent_model_overrides(text: &str, selector: &str) -> String {
+    let overrides = OMP_BUNDLED_AGENTS
+        .iter()
+        .map(|name| ((*name).into(), Value::String(selector.into())))
+        .collect();
+    rewrite_omp_bundled_agent_overrides(text, &overrides)
 }
 
-fn write_omp_agent_model_overrides(text: &str, selector: &str) -> String {
+pub(in crate::gateway) fn rewrite_omp_bundled_agent_overrides(
+    text: &str,
+    overrides: &serde_json::Map<String, Value>,
+) -> String {
     let mut lines: Vec<String> = text.lines().map(ToOwned::to_owned).collect();
     if let Some(task_start) = lines
         .iter()
@@ -143,39 +159,80 @@ fn write_omp_agent_model_overrides(text: &str, selector: &str) -> String {
             let mut replacement = vec!["  agentModelOverrides:".to_string()];
             let mut seen = std::collections::HashSet::new();
             for name in OMP_BUNDLED_AGENTS {
-                replacement.push(format!("    {name}: {selector}"));
+                if let Some(value) = overrides.get(*name) {
+                    replacement.push(format!("    {name}: {}", omp_override_scalar(value)));
+                }
                 seen.insert(*name);
             }
-            for line in &lines[override_start + 1..override_end] {
+            let mut index = override_start + 1;
+            while index < override_end {
+                let line = &lines[index];
                 let trimmed = line.trim_start();
-                if let Some((key, _)) = trimmed.split_once(':') {
-                    if seen.contains(key.trim()) {
-                        continue;
+                if trimmed
+                    .split_once(':')
+                    .is_some_and(|(key, _)| seen.contains(key.trim()))
+                {
+                    index += 1;
+                    while index < override_end
+                        && (lines[index].trim().is_empty()
+                            || lines[index].trim_start().starts_with('#')
+                            || lines[index].trim_start().starts_with("- ")
+                            || lines[index].chars().take_while(|ch| *ch == ' ').count() > 4)
+                    {
+                        index += 1;
                     }
+                    continue;
                 }
-                if !trimmed.is_empty() {
-                    replacement.push(line.clone());
-                }
+                replacement.push(line.clone());
+                index += 1;
+            }
+            if replacement
+                .iter()
+                .skip(1)
+                .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
+            {
+                replacement.clear();
             }
             lines.splice(override_start..override_end, replacement);
-        } else {
-            let insert_at = task_start + 1;
+        } else if !overrides.is_empty() {
             let replacement: Vec<String> = std::iter::once("  agentModelOverrides:".to_string())
-                .chain(
-                    OMP_BUNDLED_AGENTS
-                        .iter()
-                        .map(|name| format!("    {name}: {selector}")),
-                )
+                .chain(OMP_BUNDLED_AGENTS.iter().filter_map(|name| {
+                    overrides
+                        .get(*name)
+                        .map(|value| format!("    {name}: {}", omp_override_scalar(value)))
+                }))
                 .collect();
-            lines.splice(insert_at..insert_at, replacement);
+            lines.splice(task_start + 1..task_start + 1, replacement);
         }
-    } else {
+        let remaining = (task_start + 1..lines.len())
+            .find(|index| is_any_top_level_yaml_key(&lines[*index]))
+            .unwrap_or(lines.len());
+        if lines[task_start + 1..remaining]
+            .iter()
+            .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
+        {
+            lines.remove(task_start);
+        }
+    } else if !overrides.is_empty() {
         if !lines.is_empty() && lines.last().is_some_and(|line| !line.trim().is_empty()) {
             lines.push(String::new());
         }
-        lines.extend(omp_agent_overrides_block(selector));
+        lines.push("task:".into());
+        lines.push("  agentModelOverrides:".into());
+        for name in OMP_BUNDLED_AGENTS {
+            if let Some(value) = overrides.get(*name) {
+                lines.push(format!("    {name}: {}", omp_override_scalar(value)));
+            }
+        }
     }
     join_yaml_lines(text, &lines)
+}
+
+fn omp_override_scalar(value: &Value) -> String {
+    match value {
+        Value::String(text) => yaml_scalar(text),
+        _ => serde_json::to_string(value).expect("JSON value"),
+    }
 }
 
 fn restore_omp_agent_model_overrides(text: &str, baseline: Option<&str>) -> String {
@@ -714,6 +771,7 @@ pub(in crate::gateway) fn preview_omp_config_with_paths(
         settings,
         providers,
         &model,
+        Some(config_path),
     )?;
     let next_models = omp_models_yml_text(current_models.as_deref(), settings, providers, &model)?;
     let mut message =
@@ -779,6 +837,7 @@ pub(in crate::gateway) fn plan_omp_apply(
         settings,
         providers,
         &model,
+        Some(config_path),
     )?;
     let next_models = omp_models_yml_text(Some(&current_models), settings, providers, &model)?;
     Ok(OmpApplyPlan {
@@ -810,6 +869,7 @@ pub(in crate::gateway) fn publish_omp_apply(
     plan: &OmpApplyPlan,
     backup_root: &Path,
 ) -> Result<GatewayClientApplyResult, String> {
+    super::omp_native::capture_native_before_publish(&plan.config_path)?;
     let backup_path = create_snapshot_backup(
         "omp",
         backup_root,
@@ -841,6 +901,8 @@ pub(in crate::gateway) fn restore_omp_config_with_paths(
     models_path: &Path,
     backup_root: &Path,
 ) -> Result<GatewayClientApplyResult, String> {
+    super::omp_native::capture_native_before_publish(config_path)?;
+    let live = fs::read_to_string(config_path).ok();
     let latest = restore_latest_snapshot_backup(
         "omp",
         backup_root,
@@ -851,7 +913,7 @@ pub(in crate::gateway) fn restore_omp_config_with_paths(
             is_omp_codexhub_config(&config, &models)
         },
     );
-    match latest {
+    let result = match latest {
         Ok(latest) => Ok(GatewayClientApplyResult {
             client_id: "omp".to_string(),
             applied: true,
@@ -860,7 +922,9 @@ pub(in crate::gateway) fn restore_omp_config_with_paths(
             message: "OMP official config restored.".to_string(),
         }),
         Err(_clean_error) => omp_ownership_bounded_cleanup(config_path, models_path),
-    }
+    }?;
+    super::omp_native::restore_saved_native(config_path, live.as_deref())?;
+    Ok(result)
 }
 
 /// Remove only provider blocks that CodexHub can positively identify as its
