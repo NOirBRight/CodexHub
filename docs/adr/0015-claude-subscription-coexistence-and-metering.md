@@ -6,6 +6,12 @@ picker and explicit-model resume behavior remain part of combined candidate
 evidence in #564.
 Published specification: [#559](https://github.com/NOirBRight/CodexHub/issues/559).
 
+Amendment 2026-10-02: [ADR-0019](0019-native-default-subagent-independent-of-connection.md)
+accepts independently applied native Default subagent settings, including while
+disconnected. Its preservation rule amends the Default subagent restore lifecycle
+below; implementation is pending. Family mappings, authentication, and metering
+retain this ADR's existing contract.
+
 Claude Code's saved subscription authentication remains active while its model
 requests traverse CodexHub Gateway. Native IDs pass through unchanged to the
 official Anthropic endpoint; external projected IDs use their own provider

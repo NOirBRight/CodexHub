@@ -3,6 +3,12 @@
 Date: 2026-09-17
 Status: Accepted
 
+Amendment 2026-10-02: [ADR-0019](0019-native-default-subagent-independent-of-connection.md)
+accepts independent native Default subagent saves, including while disconnected.
+Implementation is pending per-client tickets. This ADR's connected ownership and
+restore rules continue to apply to Gateway-backed pins; they must preserve any
+independently saved native choice as specified by ADR-0019.
+
 Amends ADR-0004. Does not reopen Provider Injection, Activation, or the
 Codex History Bucket exception.
 
