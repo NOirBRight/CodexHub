@@ -738,3 +738,13 @@ pub async fn read_opencode_default_subagent() -> Result<gateway::NativeSubagentS
 pub async fn save_opencode_default_subagent(model: String, effort: String, native: bool) -> Result<gateway::NativeSubagentSettings, String> {
     run_blocking("save_opencode_default_subagent", move || gateway::save_opencode_default_subagent(model, effort, native)).await
 }
+
+#[tauri::command]
+pub async fn read_omp_default_subagent() -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("read_omp_default_subagent", gateway::read_omp_default_subagent).await
+}
+
+#[tauri::command]
+pub async fn save_omp_default_subagent(model: String, effort: String, native: bool) -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("save_omp_default_subagent", move || gateway::save_omp_default_subagent(model, effort, native)).await
+}

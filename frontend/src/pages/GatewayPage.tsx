@@ -145,6 +145,7 @@ function GatewayPageImpl({
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
   const [openCodeSubagent, setOpenCodeSubagent] = useState<NativeSubagentSettings | null>(null);
+  const [ompSubagent, setOmpSubagent] = useState<NativeSubagentSettings | null>(null);
   const subagentSaveGen = useRef<Record<string, number>>({});
   const running = status?.proxy_running ?? false;
   const diagnosticsEnabled = Boolean(
@@ -683,6 +684,17 @@ function GatewayPageImpl({
     return () => { cancelled = true; };
   }, [clientInfos]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const gen = subagentSaveGen.current.omp;
+    void api.readOmpDefaultSubagent().then((value) => {
+      if (!cancelled && gen === subagentSaveGen.current.omp) setOmpSubagent(value);
+    }).catch((err) => {
+      if (!cancelled) showToast({ text: messageFromError(err), tone: "error", dedupeKey: "omp-native-subagent-read" });
+    });
+    return () => { cancelled = true; };
+  }, [clientInfos]);
+
   function subagentOptionsFor(clientId: string) {
     const gatewayOptions = listDefaultSubagentOptions({
       officialId: OFFICIAL_ID,
@@ -692,8 +704,9 @@ function GatewayPageImpl({
       providers,
       excludeProviderIds: clientId === "grok" ? ["xai"] : undefined,
     });
-    if (clientId !== "opencode") return gatewayOptions;
-    const nativeOptions = (openCodeSubagent?.options ?? []).map((option) => ({
+    if (clientId !== "opencode" && clientId !== "omp") return gatewayOptions;
+    const nativeSettings = clientId === "omp" ? ompSubagent : openCodeSubagent;
+    const nativeOptions = (nativeSettings?.options ?? []).map((option) => ({
       ...option, id: `native:${option.id}`, label: `${t("workspace.nativeSubagentModel")} · ${option.label}`, native: true,
     }));
     const state = connectionStateFromInfo(clientInfoById.get(clientId));
@@ -707,9 +720,11 @@ function GatewayPageImpl({
     options?: { stale?: boolean },
   ) {
     if (!settings) return;
-    const nativeSave = clientId === "opencode" && (model.startsWith("native:") || !model && !options?.stale);
+    const hasNativeSettings = clientId === "opencode" || clientId === "omp";
+    const nativeSettings = clientId === "omp" ? ompSubagent : openCodeSubagent;
+    const nativeSave = hasNativeSettings && (model.startsWith("native:") || !model && !options?.stale);
     const current = clientDefaultSubagentFields(settings, clientId);
-    if (!nativeSave && !(clientId === "opencode" && openCodeSubagent?.native) && current.model === model && current.effort === effort) return;
+    if (!nativeSave && !(hasNativeSettings && nativeSettings?.native) && current.model === model && current.effort === effort) return;
     const next = normalizeSettings(
       withClientDefaultSubagent(settings, clientId, model, effort),
     );
@@ -729,15 +744,19 @@ function GatewayPageImpl({
     });
     try {
       if (nativeSave) {
-        const written = await api.saveOpenCodeDefaultSubagent(model.replace(/^native:/, ""), effort);
+        const written = clientId === "omp"
+          ? await api.saveOmpDefaultSubagent(model.replace(/^native:/, ""), effort)
+          : await api.saveOpenCodeDefaultSubagent(model.replace(/^native:/, ""), effort);
         if (gen !== subagentSaveGen.current[clientId]) return;
-        setOpenCodeSubagent(written);
+        if (clientId === "omp") setOmpSubagent(written);
+        else setOpenCodeSubagent(written);
         updateToast(toastId, { action: null, text: t("workspace.defaultSubagentSavedClient", { name }), tone: "success" });
         return;
       }
       await onApplySettings(next);
       if (gen !== subagentSaveGen.current[clientId]) return;
       if (clientId === "opencode") await api.saveOpenCodeDefaultSubagent("", "", false);
+      if (clientId === "omp") await api.saveOmpDefaultSubagent("", "", false);
       if (connected) {
         await api.applyGatewayClientConfig(clientId, defaultModel);
         if (gen !== subagentSaveGen.current[clientId]) return;
@@ -765,7 +784,8 @@ function GatewayPageImpl({
     void (async () => {
       for (const clientId of ["opencode", "zcode", "omp", "grok"]) {
         const { model } = clientDefaultSubagentFields(settings, clientId);
-        if (!model || clientId === "opencode" && (!openCodeSubagent || openCodeSubagent.native || connectionStateFromInfo(clientInfoById.get(clientId)) === "disconnected")) continue;
+        const nativeSettings = clientId === "omp" ? ompSubagent : openCodeSubagent;
+        if (!model || (clientId === "opencode" || clientId === "omp") && (!nativeSettings || nativeSettings.native || connectionStateFromInfo(clientInfoById.get(clientId)) === "disconnected")) continue;
         const options = subagentOptionsFor(clientId);
         if (
           options.length === 0 &&
@@ -779,7 +799,7 @@ function GatewayPageImpl({
         }
       }
     })();
-  }, [settings, status, providers, officialModelsForSubagent, openCodeSubagent]);
+  }, [settings, status, providers, officialModelsForSubagent, openCodeSubagent, ompSubagent]);
 
   return (
     <main
@@ -1063,6 +1083,10 @@ function GatewayPageImpl({
                           ...(client.id === "opencode" && openCodeSubagent?.native ? {
                             model: openCodeSubagent.model ? `native:${openCodeSubagent.model}` : "",
                             effort: openCodeSubagent.effort,
+                          } : {}),
+                          ...(client.id === "omp" && ompSubagent?.native ? {
+                            model: ompSubagent.model ? `native:${ompSubagent.model}` : "",
+                            effort: ompSubagent.effort,
                           } : {}),
                           options: subagentOptionsFor(client.id),
                           onChange: (model, effort) => {

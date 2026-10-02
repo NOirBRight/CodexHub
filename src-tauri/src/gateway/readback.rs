@@ -123,6 +123,7 @@ pub fn verify_apply_readback(
                 settings,
                 providers,
                 model,
+                Some(&target_paths[0]),
             )?;
             // `models.yml` is a provider-injection document: the published
             // CodexHub blocks are regenerated, while every foreign provider
