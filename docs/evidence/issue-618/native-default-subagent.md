@@ -40,3 +40,10 @@ Connect/republish/Disconnect, native → Gateway → detach, and custom-state
 preservation. No real ZCode session, model inference, or user configuration write
 was performed. Full strict checks and integrated review belong to the final
 candidate.
+
+Follow-up verification covers existing unescaped builtin identities such as
+`custom:builtin:zai:glm-4.7`, model suffixes containing slashes or colons, and
+percent-encoded identities. The public native readback regression first failed
+with an out-of-bounds panic, then passed after correcting the legacy parser.
+Readback retains the full provider/model identity without modifying the state.
+All 22 focused ZCode tests pass.
