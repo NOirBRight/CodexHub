@@ -95,12 +95,13 @@ fn decode_component(value: &str) -> String {
 }
 
 fn legacy_selection(model: &str, effort: &str) -> Value {
+    let custom = model.starts_with("custom:");
     let model = model.strip_prefix("custom:").unwrap_or(model);
-    let parts = if model.contains('/') {
+    let parts = if model.contains('/') && !custom {
         model.split_once('/')
     } else if let Some(rest) = model.strip_prefix("builtin:") {
         rest.split_once(':')
-            .map(|(provider, model)| (&model[..provider.len() + 8], model))
+            .map(|(provider, suffix)| (&model[..provider.len() + 8], suffix))
     } else {
         model.split_once(':')
     };
@@ -600,6 +601,36 @@ mod native_zcode_tests {
         let paths = isolated_client_apply_targets(&isolated, "zcode").unwrap();
         super::super::zcode::restore_zcode_config_with_targets(targets, paths.backup_path())
             .unwrap();
+    }
+
+    #[test]
+    fn native_zcode_reads_existing_legacy_model_identities_without_mutation() {
+        let root = std::env::temp_dir().join(format!(
+            "codexhub-zcode-legacy-readback-{}-{}",
+            std::process::id(),
+            crate::gateway::timestamp_millis()
+        ));
+        let targets = fixture(&root, true);
+        for (legacy, expected) in [
+            ("custom:builtin:zai:glm-4.7", "builtin:zai/glm-4.7"),
+            ("custom:builtin:zai:vendor/model:tag", "builtin:zai/vendor/model:tag"),
+            ("custom:user:vendor/model", "user/vendor/model"),
+            ("custom:builtin%3Azai:vendor%2Fmodel%3Atag", "builtin:zai/vendor/model:tag"),
+            ("user/vendor/model", "user/vendor/model"),
+        ] {
+            let state = json!({
+                "builtInModelOverrides": {"general-purpose": legacy},
+                "builtInThoughtLevelOverrides": {"general-purpose": "high"},
+                "disabledAgentIds": ["user:custom"],
+            });
+            let text = state.to_string();
+            fs::write(state_path(&targets), &text).unwrap();
+            let readback = read_with_targets(&targets).unwrap();
+            assert!(readback.native);
+            assert_eq!(readback.model, expected);
+            assert_eq!(readback.effort, "high");
+            assert_eq!(fs::read_to_string(state_path(&targets)).unwrap(), text);
+        }
     }
 
     #[test]
