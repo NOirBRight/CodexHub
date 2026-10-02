@@ -326,9 +326,6 @@ pub(in crate::gateway) fn capture_native_before_publish(path: &Path) -> Result<(
     let Some(mut pin) = read_pin(path)? else {
         return Ok(());
     };
-    if !pin.active {
-        return Ok(());
-    }
     let current = bundled_overrides(&parse(&read_text(path)?)?);
     if has_gateway_overrides(&current) {
         return Ok(());
@@ -717,6 +714,21 @@ mod tests {
                 read_with_paths(&paths, &[]).unwrap().model,
                 "native/child:cloud"
             );
+            // Keep the explicit Gateway preference, but refresh its native
+            // detach baseline after a disconnected edit outside the Hub.
+            let live = read_text(&paths.config_path)
+                .unwrap()
+                .replace("native/child:cloud:high", "native/plain");
+            fs::write(&paths.config_path, live).unwrap();
+            apply_gateway_client_config_isolated(&isolated, &input).unwrap();
+            assert!(!read_with_paths(&paths, &[]).unwrap().native);
+            native!(restore_omp_config_with_paths(
+                &paths.config_path,
+                &paths.models_path,
+                &root.join("backups")
+            ))
+            .unwrap();
+            assert_eq!(read_with_paths(&paths, &[]).unwrap().model, "native/plain");
             // Native edits made outside the Hub remain authoritative on detach.
             native!(save_with_paths(
                 &paths,
