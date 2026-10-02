@@ -819,7 +819,7 @@ mod tests {
             let settings_path = proxy_dir.join("settings.json");
             fs::write(
                 &settings_path,
-                r#"{"proxy_port": 9099, "gateway_client_key": "isolated-key"}"#,
+                r#"{"proxy_port": 9099, "gateway_client_key": "isolated-key", "claude_native_picker": [{"model": "claude-opus-5-5", "label": "Claude Opus 5.5"}]}"#,
             )
             .unwrap();
             let providers_path = config_dir.join("providers.toml");

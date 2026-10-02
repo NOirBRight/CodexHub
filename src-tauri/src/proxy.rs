@@ -5861,8 +5861,8 @@ time.sleep(10)
     }
 
     fn spawn_single_health_response(port: u16) -> std::thread::JoinHandle<()> {
+        let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind health port");
         std::thread::spawn(move || {
-            let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind health port");
             let (mut stream, _) = listener.accept().expect("accept health request");
             let mut buffer = [0u8; 1024];
             let _ = std::io::Read::read(&mut stream, &mut buffer);
