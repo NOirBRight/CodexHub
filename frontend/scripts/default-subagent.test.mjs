@@ -278,7 +278,7 @@ test("subagent picker keeps the menu open after model or effort changes", async 
   assert.doesNotMatch(fn, /open \? draftModel : model/);
 });
 
-test("Clients-page cards reuse the picker for OpenCode, ZCode, OMP, and Grok only", async () => {
+test("Clients-page cards retain the Gateway-backed subagent picker", async () => {
   const [card, page, localesEn, localesZh, types, settings] = await Promise.all([
     readFile(new URL("../src/components/GatewayClientCard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/pages/GatewayPage.tsx", import.meta.url), "utf8"),
@@ -357,4 +357,28 @@ test("native options only expose client-declared efforts and keep the native def
   assert.equal(resolveSubagentEffort({ id: "native:anthropic/child", native: true, efforts: [], defaultEffort: "" }, "high"), "");
   assert.equal(resolveSubagentEffort({ id: "native:custom/child", native: true, efforts: ["", "high"], defaultEffort: "" }, "high"), "high");
   assert.equal(resolveSubagentEffort({ id: "native:custom/child", native: true, efforts: ["", "high"], defaultEffort: "" }, "max"), "");
+});
+
+
+test("DSH native choices save independently and disclose Headless scope and restart", async () => {
+  const [page, card, en, zh, commands] = await Promise.all([
+    readFile(new URL("../src/pages/GatewayPage.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/GatewayClientCard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/i18n/locales/en-US.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/i18n/locales/zh-CN.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/commands.ts", import.meta.url), "utf8"),
+  ]);
+  const nativeSave = page.slice(page.indexOf('if (clientId === "dsh") {'), page.indexOf('const nativeSave ='));
+  assert.match(nativeSave, /saveDshHeadlessDefaultSubagent/);
+  assert.match(nativeSave, /setDshSubagent\(written\)/);
+  assert.match(nativeSave, /updateToastWithError/);
+  assert.match(nativeSave, /dshHeadlessSubagentSaved/);
+  assert.doesNotMatch(nativeSave, /await onApplySettings|applyGatewayClientConfig/);
+  assert.match(page, /client.id === "dsh" && dshSubagent/);
+  assert.match(card, /dshHeadlessSubagentHint/);
+  assert.match(en, /DSH Headless only/);
+  assert.match(en, /Start a new DSH Headless invocation to apply/);
+  assert.match(en, /Web presets are unaffected/);
+  assert.match(zh, /仅适用于 DSH Headless/);
+  assert.match(commands, /save_dsh_headless_default_subagent/);
 });

@@ -1,6 +1,7 @@
 pub(super) mod claude;
 pub(super) mod codex;
 pub(super) mod dsh;
+pub(super) mod dsh_native;
 pub(super) mod grok;
 pub(super) mod omp;
 pub(super) mod opencode;

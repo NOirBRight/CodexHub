@@ -127,6 +127,8 @@ macro_rules! desktop_command_registry {
             RestoreGatewayClientConfig => "restore_gateway_client_config" => $crate::desktop_commands::restore_gateway_client_config, true, true, true, false, ALIASES_CLIENT_ID;
             SwitchGatewayClientRoute => "switch_gateway_client_route" => $crate::desktop_commands::switch_gateway_client_route, true, true, true, false, ALIASES_SWITCH_ROUTE;
             SyncGatewayClients => "sync_gateway_clients" => $crate::desktop_commands::sync_gateway_clients, true, true, true, false, NO_ALIASES;
+            ReadDshHeadlessDefaultSubagent => "read_dsh_headless_default_subagent" => $crate::desktop_commands::read_dsh_headless_default_subagent, true, true, true, false, NO_ALIASES;
+            SaveDshHeadlessDefaultSubagent => "save_dsh_headless_default_subagent" => $crate::desktop_commands::save_dsh_headless_default_subagent, true, true, true, false, NO_ALIASES;
             ReadOpenCodeDefaultSubagent => "read_opencode_default_subagent" => $crate::desktop_commands::read_opencode_default_subagent, true, true, true, false, NO_ALIASES;
             SaveOpenCodeDefaultSubagent => "save_opencode_default_subagent" => $crate::desktop_commands::save_opencode_default_subagent, true, true, true, false, NO_ALIASES;
             SubagentMatrixStatus => "subagent_matrix_status" => $crate::desktop_commands::subagent_matrix_status, true, true, true, false, NO_ALIASES;

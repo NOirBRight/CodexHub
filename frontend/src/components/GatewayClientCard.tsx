@@ -175,6 +175,7 @@ export function GatewayClientCard({
               onChange={defaultSubagent.onChange}
             />
           ) : null}
+          {defaultSubagent && client.id === "dsh" ? <small>{t("workspace.dshHeadlessSubagentHint")}</small> : null}
           <div className="ws-client-bottom">
             <div className={cx("ws-client-status", labelTone)}>
               <ConnectionNarrative

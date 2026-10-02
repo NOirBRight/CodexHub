@@ -70,6 +70,14 @@ Native capability evidence: [Pi 0.80.6](../research/2026-10-02-pi-native-default
 has no built-in native Default subagent setting. Its core delegates this workflow
 to extensions, so #621 records that limitation without adding a simulated setting.
 
+Native capability evidence: [DSH 0.1.0-rc.6](../research/2026-10-02-dsh-native-default-subagent.md)
+supports composition-local Headless child provider/model overrides. #622 applies
+only the Headless host spawn/fork tool options and discloses that a new Headless
+invocation is required. Web delegates inside shipped presets and has no equivalent
+independent setting in this version; shipped presets, profile selection, and main
+model behavior remain intact. Native model choices include the installed adapter's
+own catalog for configured providers, with no invented effort/Fast settings.
+
 The user approved eight independent client slices. All tickets are published
 with `ready-for-agent` and have no blocking dependencies:
 

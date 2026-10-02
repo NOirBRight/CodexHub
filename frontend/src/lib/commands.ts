@@ -54,6 +54,8 @@ export const COMMANDS = {
   restoreGatewayClientConfig: "restore_gateway_client_config",
   switchGatewayClientRoute: "switch_gateway_client_route",
   syncGatewayClients: "sync_gateway_clients",
+  readDshHeadlessDefaultSubagent: "read_dsh_headless_default_subagent",
+  saveDshHeadlessDefaultSubagent: "save_dsh_headless_default_subagent",
   readOpenCodeDefaultSubagent: "read_opencode_default_subagent",
   saveOpenCodeDefaultSubagent: "save_opencode_default_subagent",
   subagentMatrixStatus: "subagent_matrix_status",

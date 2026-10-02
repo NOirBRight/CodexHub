@@ -339,6 +339,8 @@ export const api = {
     }),
   syncGatewayClients: (model?: string | null) =>
     call<GatewayClientSyncSummary>(COMMANDS.syncGatewayClients, { model: model ?? null }),
+  readDshHeadlessDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readDshHeadlessDefaultSubagent),
+  saveDshHeadlessDefaultSubagent: (model: string) => call<NativeSubagentSettings>(COMMANDS.saveDshHeadlessDefaultSubagent, { model }),
   readOpenCodeDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readOpenCodeDefaultSubagent),
   saveOpenCodeDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveOpenCodeDefaultSubagent, { model, effort, native }),
   subagentMatrixStatus: () => call<SubagentMatrixStatus>(COMMANDS.subagentMatrixStatus),
