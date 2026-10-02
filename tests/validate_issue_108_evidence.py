@@ -12,9 +12,10 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src-python"))
 from python_runtime_contract import require_python_313  # noqa: E402
-import gateway_compat
 
 require_python_313(__file__)
+
+import gateway_compat  # noqa: E402
 
 
 TOOL_SURFACE_SCHEMA = "codexhub.issue108.tool-surface-replay.v1"
