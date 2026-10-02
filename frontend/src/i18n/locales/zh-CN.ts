@@ -61,6 +61,7 @@ const zhCN = {
   "externalModels": "外部模型已接入",
   "officialConfig": "使用 Codex 官方配置",
   "modelCount": "{{count}} 个可用模型",
+  "nativeSubagentModel": "原生",
   "defaultSubagent": "默认子代理",
   "defaultSubagentLabel": "子代理",
   "defaultSubagentHint": "连接后写入 Codex；断开后恢复原配置。",

@@ -86,6 +86,7 @@ export type DefaultSubagentOption = {
   defaultEffort: string;
   fast?: boolean;
   speedVariant?: string;
+  native?: boolean;
 };
 
 const FAST_SUBAGENT_MODELS = new Set(Object.values(officialFastVariants));
@@ -175,6 +176,7 @@ export function resolveSubagentEffort(
   option: DefaultSubagentOption | undefined,
   currentEffort: string,
 ) {
+  if (option?.native) return option.efforts.includes(currentEffort) ? currentEffort : option.defaultEffort;
   const efforts = option?.efforts?.length ? option.efforts : [...CODEX_SUBAGENT_EFFORTS];
   if (currentEffort && efforts.includes(currentEffort)) return currentEffort;
   if (option?.defaultEffort && efforts.includes(option.defaultEffort)) {

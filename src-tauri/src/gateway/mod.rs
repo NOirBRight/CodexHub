@@ -17,6 +17,9 @@ mod default_subagent;
 mod inject;
 mod isolated;
 mod managed_clients;
+mod native_subagent;
+pub use native_subagent::{NativeSubagentOption, NativeSubagentSettings};
+pub use clients::opencode_native::{read_opencode_default_subagent, save_opencode_default_subagent};
 mod providers;
 mod readback;
 

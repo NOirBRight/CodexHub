@@ -50,6 +50,7 @@ import type {
   GatewayUsageEvent,
   GatewayUsageSummary,
   Model,
+  NativeSubagentSettings,
   Provider,
   RoutingOwner,
   Settings,
@@ -143,6 +144,7 @@ function GatewayPageImpl({
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
+  const [openCodeSubagent, setOpenCodeSubagent] = useState<NativeSubagentSettings | null>(null);
   const subagentSaveGen = useRef<Record<string, number>>({});
   const running = status?.proxy_running ?? false;
   const diagnosticsEnabled = Boolean(
@@ -670,8 +672,19 @@ function GatewayPageImpl({
     }
   }
 
+  useEffect(() => {
+    let cancelled = false;
+    const gen = subagentSaveGen.current.opencode;
+    void api.readOpenCodeDefaultSubagent().then((value) => {
+      if (!cancelled && gen === subagentSaveGen.current.opencode) setOpenCodeSubagent(value);
+    }).catch((err) => {
+      if (!cancelled) showToast({ text: messageFromError(err), tone: "error", dedupeKey: "opencode-native-subagent-read" });
+    });
+    return () => { cancelled = true; };
+  }, [clientInfos]);
+
   function subagentOptionsFor(clientId: string) {
-    return listDefaultSubagentOptions({
+    const gatewayOptions = listDefaultSubagentOptions({
       officialId: OFFICIAL_ID,
       officialIncluded: Boolean(settings?.include_official_models),
       officialModels: officialModelsForSubagent,
@@ -679,6 +692,12 @@ function GatewayPageImpl({
       providers,
       excludeProviderIds: clientId === "grok" ? ["xai"] : undefined,
     });
+    if (clientId !== "opencode") return gatewayOptions;
+    const nativeOptions = (openCodeSubagent?.options ?? []).map((option) => ({
+      ...option, id: `native:${option.id}`, label: `${t("workspace.nativeSubagentModel")} · ${option.label}`, native: true,
+    }));
+    const state = connectionStateFromInfo(clientInfoById.get(clientId));
+    return state === "connected" || state === "drift" ? [...nativeOptions, ...gatewayOptions] : nativeOptions;
   }
 
   async function persistClientDefaultSubagent(
@@ -688,8 +707,9 @@ function GatewayPageImpl({
     options?: { stale?: boolean },
   ) {
     if (!settings) return;
+    const nativeSave = clientId === "opencode" && (model.startsWith("native:") || !model && !options?.stale);
     const current = clientDefaultSubagentFields(settings, clientId);
-    if (current.model === model && current.effort === effort) return;
+    if (!nativeSave && !(clientId === "opencode" && openCodeSubagent?.native) && current.model === model && current.effort === effort) return;
     const next = normalizeSettings(
       withClientDefaultSubagent(settings, clientId, model, effort),
     );
@@ -708,8 +728,16 @@ function GatewayPageImpl({
       tone: "loading",
     });
     try {
+      if (nativeSave) {
+        const written = await api.saveOpenCodeDefaultSubagent(model.replace(/^native:/, ""), effort);
+        if (gen !== subagentSaveGen.current[clientId]) return;
+        setOpenCodeSubagent(written);
+        updateToast(toastId, { action: null, text: t("workspace.defaultSubagentSavedClient", { name }), tone: "success" });
+        return;
+      }
       await onApplySettings(next);
       if (gen !== subagentSaveGen.current[clientId]) return;
+      if (clientId === "opencode") await api.saveOpenCodeDefaultSubagent("", "", false);
       if (connected) {
         await api.applyGatewayClientConfig(clientId, defaultModel);
         if (gen !== subagentSaveGen.current[clientId]) return;
@@ -737,7 +765,7 @@ function GatewayPageImpl({
     void (async () => {
       for (const clientId of ["opencode", "zcode", "omp", "grok"]) {
         const { model } = clientDefaultSubagentFields(settings, clientId);
-        if (!model) continue;
+        if (!model || clientId === "opencode" && (!openCodeSubagent || openCodeSubagent.native || connectionStateFromInfo(clientInfoById.get(clientId)) === "disconnected")) continue;
         const options = subagentOptionsFor(clientId);
         if (
           options.length === 0 &&
@@ -751,7 +779,7 @@ function GatewayPageImpl({
         }
       }
     })();
-  }, [settings, status, providers, officialModelsForSubagent]);
+  }, [settings, status, providers, officialModelsForSubagent, openCodeSubagent]);
 
   return (
     <main
@@ -1032,6 +1060,10 @@ function GatewayPageImpl({
                     settings && supportsClientDefaultSubagent(client.id)
                       ? {
                           ...clientDefaultSubagentFields(settings, client.id),
+                          ...(client.id === "opencode" && openCodeSubagent?.native ? {
+                            model: openCodeSubagent.model ? `native:${openCodeSubagent.model}` : "",
+                            effort: openCodeSubagent.effort,
+                          } : {}),
                           options: subagentOptionsFor(client.id),
                           onChange: (model, effort) => {
                             void persistClientDefaultSubagent(

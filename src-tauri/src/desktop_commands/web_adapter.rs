@@ -277,6 +277,13 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
                 .map(ToOwned::to_owned);
             to_value(gateway::sync_gateway_clients(model))
         }
+        Command::ReadOpenCodeDefaultSubagent => to_value(gateway::read_opencode_default_subagent()),
+        Command::SaveOpenCodeDefaultSubagent => {
+            let model = registry_optional_string_arg(args, command, "model").ok_or("model is required")?;
+            let effort = registry_optional_string_arg(args, command, "effort").ok_or("effort is required")?;
+            let native = registry_bool_arg(args, command, "native")?;
+            to_value(gateway::save_opencode_default_subagent(model, effort, native))
+        }
         Command::SubagentMatrixStatus => to_value(gateway::subagent_matrix_status()),
         Command::GenerateCatalog => to_value(crate::generate_catalog_coordinated()),
         Command::GetCatalogOverrideDiagnostics => to_value(catalog::catalog_override_diagnostics()),

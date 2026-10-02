@@ -706,7 +706,7 @@ export function DefaultSubagentPicker({
   );
   const effortChoices = activeSelected?.efforts.length
     ? activeSelected.efforts
-    : activeSelected
+    : activeSelected && !activeSelected.native
       ? [...CODEX_SUBAGENT_EFFORTS]
       : [];
   const modelChoices =
@@ -890,7 +890,7 @@ export function DefaultSubagentPicker({
               <button
                 type="button"
                 className="ws-bridge-subagent-row"
-                disabled={!draftModel}
+                disabled={!draftModel || effortChoices.length === 0}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => setPanel("effort")}
               >
@@ -978,7 +978,7 @@ export function DefaultSubagentPicker({
                       onMouseDown={(event) => event.preventDefault()}
                       onClick={() => chooseEffort(item)}
                     >
-                      {formatSubagentEffort(item)}
+                      {formatSubagentEffort(item) || t("workspace.defaultSubagentCliDefault")}
                     </button>
                   ))
                 )}

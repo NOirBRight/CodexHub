@@ -50,6 +50,8 @@ export const COMMANDS = {
   restoreGatewayClientConfig: "restore_gateway_client_config",
   switchGatewayClientRoute: "switch_gateway_client_route",
   syncGatewayClients: "sync_gateway_clients",
+  readOpenCodeDefaultSubagent: "read_opencode_default_subagent",
+  saveOpenCodeDefaultSubagent: "save_opencode_default_subagent",
   subagentMatrixStatus: "subagent_matrix_status",
   generateCatalog: "generate_catalog",
   getCatalogOverrideDiagnostics: "get_catalog_override_diagnostics",

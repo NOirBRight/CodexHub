@@ -61,6 +61,7 @@ const enUS = {
   "externalModels": "External models connected",
   "officialConfig": "Using official Codex configuration",
   "modelCount": "{{count}} available models",
+  "nativeSubagentModel": "Native",
   "defaultSubagent": "Default subagent",
   "defaultSubagentLabel": "Subagent",
   "defaultSubagentHint": "Written to Codex on connect; restored on disconnect.",
