@@ -145,6 +145,7 @@ function GatewayPageImpl({
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
   const [dshSubagent, setDshSubagent] = useState<NativeSubagentSettings | null>(null);
+  const [grokSubagent, setGrokSubagent] = useState<NativeSubagentSettings | null>(null);
   const [openCodeSubagent, setOpenCodeSubagent] = useState<NativeSubagentSettings | null>(null);
   const [zCodeSubagent, setZCodeSubagent] = useState<NativeSubagentSettings | null>(null);
   const [ompSubagent, setOmpSubagent] = useState<NativeSubagentSettings | null>(null);
@@ -156,6 +157,7 @@ function GatewayPageImpl({
     opencode: { settings: openCodeSubagent, save: api.saveOpenCodeDefaultSubagent, set: setOpenCodeSubagent },
     zcode: { settings: zCodeSubagent, save: api.saveZCodeDefaultSubagent, set: setZCodeSubagent },
     omp: { settings: ompSubagent, save: api.saveOmpDefaultSubagent, set: setOmpSubagent },
+    grok: { settings: grokSubagent, save: api.saveGrokDefaultSubagent, set: setGrokSubagent },
   };
   const subagentSaveGen = useRef<Record<string, number>>({});
   const running = status?.proxy_running ?? false;
@@ -728,6 +730,17 @@ function GatewayPageImpl({
     return () => { cancelled = true; };
   }, [clientInfos]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const gen = subagentSaveGen.current.grok;
+    void api.readGrokDefaultSubagent().then((value) => {
+      if (!cancelled && gen === subagentSaveGen.current.grok) setGrokSubagent(value);
+    }).catch((err) => {
+      if (!cancelled) showToast({ text: messageFromError(err), tone: "error", dedupeKey: "grok-native-subagent-read" });
+    });
+    return () => { cancelled = true; };
+  }, [clientInfos]);
+
   function subagentOptionsFor(clientId: string) {
     if (clientId === "dsh") return (dshSubagent?.options ?? []).map((option) => ({
       ...option, id: `native:${option.id}`, label: `${t("workspace.nativeSubagentModel")} · ${option.label}`, native: true,
@@ -844,7 +857,7 @@ function GatewayPageImpl({
         }
       }
     })();
-  }, [settings, status, providers, officialModelsForSubagent, openCodeSubagent, zCodeSubagent, ompSubagent]);
+  }, [settings, status, providers, officialModelsForSubagent, openCodeSubagent, zCodeSubagent, ompSubagent, grokSubagent]);
 
   return (
     <main

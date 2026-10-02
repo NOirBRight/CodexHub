@@ -346,7 +346,9 @@ export const api = {
   readOpenCodeDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readOpenCodeDefaultSubagent),
   readZCodeDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readZCodeDefaultSubagent),
   saveZCodeDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveZCodeDefaultSubagent, { model, effort, native }),
+  readGrokDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readGrokDefaultSubagent),
   saveOpenCodeDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveOpenCodeDefaultSubagent, { model, effort, native }),
+  saveGrokDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveGrokDefaultSubagent, { model, effort, native }),
   subagentMatrixStatus: () => call<SubagentMatrixStatus>(COMMANDS.subagentMatrixStatus),
   generateCatalog: () => call<Model[]>(COMMANDS.generateCatalog),
   catalogOverrideDiagnostics: () =>

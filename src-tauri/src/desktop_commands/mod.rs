@@ -132,9 +132,11 @@ macro_rules! desktop_command_registry {
             ReadDshHeadlessDefaultSubagent => "read_dsh_headless_default_subagent" => $crate::desktop_commands::read_dsh_headless_default_subagent, true, true, true, false, NO_ALIASES;
             SaveDshHeadlessDefaultSubagent => "save_dsh_headless_default_subagent" => $crate::desktop_commands::save_dsh_headless_default_subagent, true, true, true, false, NO_ALIASES;
             ReadOpenCodeDefaultSubagent => "read_opencode_default_subagent" => $crate::desktop_commands::read_opencode_default_subagent, true, true, true, false, NO_ALIASES;
+            ReadGrokDefaultSubagent => "read_grok_default_subagent" => $crate::desktop_commands::read_grok_default_subagent, true, true, true, false, NO_ALIASES;
             SaveOpenCodeDefaultSubagent => "save_opencode_default_subagent" => $crate::desktop_commands::save_opencode_default_subagent, true, true, true, false, NO_ALIASES;
             ReadZCodeDefaultSubagent => "read_zcode_default_subagent" => $crate::desktop_commands::read_zcode_default_subagent, true, true, true, false, NO_ALIASES;
             SaveZCodeDefaultSubagent => "save_zcode_default_subagent" => $crate::desktop_commands::save_zcode_default_subagent, true, true, true, false, NO_ALIASES;
+            SaveGrokDefaultSubagent => "save_grok_default_subagent" => $crate::desktop_commands::save_grok_default_subagent, true, true, true, false, NO_ALIASES;
             SubagentMatrixStatus => "subagent_matrix_status" => $crate::desktop_commands::subagent_matrix_status, true, true, true, false, NO_ALIASES;
             GenerateCatalog => "generate_catalog" => $crate::desktop_commands::generate_catalog, true, true, true, false, NO_ALIASES;
             GetCatalogOverrideDiagnostics => "get_catalog_override_diagnostics" => $crate::desktop_commands::get_catalog_override_diagnostics, true, true, true, false, NO_ALIASES;

@@ -3,6 +3,7 @@ pub(super) mod codex;
 pub(super) mod dsh;
 pub(super) mod dsh_native;
 pub(super) mod grok;
+pub(super) mod grok_native;
 pub(super) mod omp;
 pub(super) mod omp_native;
 pub(super) mod opencode;

@@ -130,14 +130,14 @@ fn grok_model_display_name(display_name: &str) -> String {
     }
 }
 
-fn parse_grok_table(text: &str) -> Result<Table, String> {
+pub(super) fn parse_grok_table(text: &str) -> Result<Table, String> {
     if text.trim().is_empty() {
         return Ok(Table::new());
     }
     toml::from_str(text).map_err(|error| format!("Grok config is not valid TOML: {error}"))
 }
 
-fn grok_toml_to_string(root: &Table) -> Result<String, String> {
+pub(super) fn grok_toml_to_string(root: &Table) -> Result<String, String> {
     toml::to_string_pretty(&Value::Table(root.clone()))
         .map(|text| {
             if text.is_empty() || text.ends_with('\n') {
@@ -397,6 +397,22 @@ pub(in crate::gateway) fn grok_config_text(
     providers: &[Provider],
     model: &str,
 ) -> Result<String, String> {
+    grok_config_text_with_path(
+        &detect_grok_config_path(),
+        current,
+        settings,
+        providers,
+        model,
+    )
+}
+
+pub(in crate::gateway) fn grok_config_text_with_path(
+    config_path: &Path,
+    current: Option<&str>,
+    settings: &Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<String, String> {
     // Provider Injection (ADR-0004 / #523): surgical TOML merge. Preserve
     // every user-owned table. Never write [models] default (Activation),
     // [endpoints], extra_headers, or Grok auth.json. Skip CodexHub's xAI
@@ -448,17 +464,22 @@ pub(in crate::gateway) fn grok_config_text(
             }
         }
     }
-    grok_owned_default_subagent(&mut root, current, settings, providers, model)?;
+    grok_owned_default_subagent(config_path, &mut root, current, settings, providers, model)?;
     grok_toml_to_string(&root)
 }
 
 fn grok_owned_default_subagent(
+    config_path: &Path,
     root: &mut Table,
     current: Option<&str>,
     settings: &Settings,
     providers: &[Provider],
     model: &str,
 ) -> Result<(), String> {
+    if super::grok_native::apply_saved_native(config_path, root, false)? {
+        return Ok(());
+    }
+    let owned = grok_spawn_models_are_owned(root);
     let pin =
         super::super::resolve_client_default_subagent_pin(settings, providers, "grok", model)?;
     let baseline_text = super::super::rollback_file_text(CLIENT_ID, "config.toml", current);
@@ -466,6 +487,21 @@ fn grok_owned_default_subagent(
         .as_deref()
         .and_then(|text| parse_grok_table(text).ok());
     apply_grok_subagent_tables(root, baseline.as_ref(), pin.as_ref());
+    // Native Save may have introduced a role model, which takes precedence
+    // over [subagents.models] in Grok. A later explicit Gateway pin must win.
+    if let Some(pin) = &pin {
+        if super::grok_native::has_native_state(config_path)? {
+            for name in super::super::GROK_SPAWN_TYPES {
+                if grok_role_can_carry_effort(root, name) {
+                    nested_table_mut(root, &["subagents", "roles", name])
+                        .insert("model".into(), Value::String(pin.grok_picker_key()));
+                }
+            }
+        }
+    }
+    if owned && pin.is_none() {
+        super::grok_native::apply_saved_native(config_path, root, true)?;
+    }
     Ok(())
 }
 
@@ -496,7 +532,7 @@ fn apply_grok_subagent_tables(
     }
 }
 
-fn grok_spawn_models_are_owned(root: &Table) -> bool {
+pub(super) fn grok_spawn_models_are_owned(root: &Table) -> bool {
     let Some(models) = root
         .get("subagents")
         .and_then(Value::as_table)
@@ -513,7 +549,7 @@ fn grok_spawn_models_are_owned(root: &Table) -> bool {
     })
 }
 
-fn grok_role_can_carry_effort(root: &Table, spawn_type: &str) -> bool {
+pub(super) fn grok_role_can_carry_effort(root: &Table, spawn_type: &str) -> bool {
     let Some(roles) = root
         .get("subagents")
         .and_then(Value::as_table)
@@ -531,7 +567,7 @@ fn grok_role_can_carry_effort(root: &Table, spawn_type: &str) -> bool {
 
 const GROK_SHADOW_MARKER: &str = "x-codexhub-default-subagent: true";
 
-fn grok_agents_dir(config_path: &Path) -> PathBuf {
+pub(super) fn grok_agents_dir(config_path: &Path) -> PathBuf {
     config_path
         .parent()
         .map(|parent| parent.join("agents"))
@@ -545,8 +581,27 @@ pub(in crate::gateway) fn grok_shadow_agent_plan(
     providers: &[Provider],
     model: &str,
 ) -> Result<Vec<(PathBuf, Option<String>)>, String> {
+    if super::grok_native::native_active(config_path)? {
+        return Ok(Vec::new());
+    }
     let pin =
         super::super::resolve_client_default_subagent_pin(settings, providers, "grok", model)?;
+    if let (Some(pin), Some(current)) = (&pin, current) {
+        if let Some(files) = super::grok_native::gateway_definition_plan(
+            config_path,
+            current,
+            &pin.grok_picker_key(),
+            &pin.effort,
+        )? {
+            return Ok(files);
+        }
+    }
+    if pin.is_none() {
+        let native_files = super::grok_native::native_files(config_path)?;
+        if !native_files.is_empty() {
+            return Ok(native_files);
+        }
+    }
     let agents_dir = grok_agents_dir(config_path);
     let mut files = Vec::new();
     for spawn_type in super::super::GROK_SPAWN_TYPES {
@@ -577,13 +632,15 @@ pub(in crate::gateway) fn grok_shadow_agent_plan(
     Ok(files)
 }
 
-fn grok_shadow_is_ours(path: &Path) -> bool {
+pub(super) fn grok_shadow_is_ours(path: &Path) -> bool {
     fs::read_to_string(path)
         .ok()
         .is_some_and(|text| text.contains(GROK_SHADOW_MARKER))
 }
 
-fn publish_grok_shadow_agents(files: &[(PathBuf, Option<String>)]) -> Result<(), String> {
+pub(super) fn publish_grok_shadow_agents(
+    files: &[(PathBuf, Option<String>)],
+) -> Result<(), String> {
     for (path, content) in files {
         match content {
             Some(text) => {
@@ -640,7 +697,7 @@ pub(in crate::gateway) fn grok_owned_shadows_match(
     Ok(true)
 }
 
-fn nested_table_mut<'a>(root: &'a mut Table, path: &[&str]) -> &'a mut Table {
+pub(super) fn nested_table_mut<'a>(root: &'a mut Table, path: &[&str]) -> &'a mut Table {
     let mut current = root;
     for key in path {
         if !matches!(current.get(*key), Some(Value::Table(_))) {
@@ -876,7 +933,13 @@ pub(in crate::gateway) fn preview_grok_config_with_path(
 ) -> Result<GatewayClientConfigPreview, String> {
     let current_text = fs::read_to_string(config_path).ok();
     let current = current_text.as_deref().map(sanitize_text);
-    let next = grok_config_text(current_text.as_deref(), settings, providers, model)?;
+    let next = grok_config_text_with_path(
+        config_path,
+        current_text.as_deref(),
+        settings,
+        providers,
+        model,
+    )?;
     let current_table = current_text
         .as_deref()
         .and_then(|text| parse_grok_table(text).ok());
@@ -924,7 +987,8 @@ pub(in crate::gateway) fn plan_grok_apply(
     let skip_snapshot = current
         .as_deref()
         .is_none_or(|text| text.trim().is_empty() || is_grok_codexhub_config(text));
-    let next = grok_config_text(current.as_deref(), settings, providers, &model)?;
+    let next =
+        grok_config_text_with_path(config_path, current.as_deref(), settings, providers, &model)?;
     let current_table = current
         .as_deref()
         .and_then(|text| parse_grok_table(text).ok());
@@ -964,6 +1028,7 @@ pub(in crate::gateway) fn publish_grok_apply(
         Some(path)
     };
     record_grok_rollback_baseline(&plan.config_path, backup_roots)?;
+    super::grok_native::capture_native_before_publish(&plan.config_path)?;
     write_text_replace(&plan.config_path, &plan.next)
         .map_err(|_| "failed to write managed Grok config".to_string())?;
     publish_grok_shadow_agents(&plan.shadow_agents)?;
@@ -1043,8 +1108,11 @@ pub(in crate::gateway) fn restore_grok_from_baseline(
 ) -> Result<GatewayClientApplyResult, String> {
     let result = match baseline.files.get("config.toml") {
         Some(BaselineFile::Snapshot { content }) => {
-            write_text_replace(config_path, content)
-                .map_err(|_| "failed to restore Grok config from baseline".to_string())?;
+            write_text_replace(
+                config_path,
+                &super::grok_native::restored_native_text(config_path, content)?,
+            )
+            .map_err(|_| "failed to restore Grok config from baseline".to_string())?;
             GatewayClientApplyResult {
                 client_id: CLIENT_ID.to_string(),
                 applied: true,
@@ -1076,7 +1144,21 @@ pub(in crate::gateway) fn restore_grok_from_baseline(
         }
         None => return Err("rollback baseline is incomplete".to_string()),
     };
-    restore_grok_agent_files(config_path, baseline)?;
+    if super::grok_native::native_files(config_path)?.is_empty() {
+        restore_grok_agent_files(config_path, baseline)?;
+    } else {
+        publish_grok_shadow_agents(&super::grok_native::native_files(config_path)?)?;
+        if matches!(
+            baseline.files.get("config.toml"),
+            Some(BaselineFile::Absent)
+        ) {
+            let current = fs::read_to_string(config_path).unwrap_or_default();
+            write_text_replace(
+                config_path,
+                &super::grok_native::restored_native_text(config_path, &current)?,
+            )?;
+        }
+    }
     Ok(result)
 }
 
@@ -1134,6 +1216,7 @@ pub(in crate::gateway) fn restore_grok_config_with_backup_roots(
     config_path: &Path,
     backup_roots: &[(PathBuf, BackupChannel)],
 ) -> Result<GatewayClientApplyResult, String> {
+    super::grok_native::capture_native_before_publish(config_path)?;
     if let Some(baseline) = read_rollback_baseline("grok")? {
         return restore_grok_from_baseline(config_path, &baseline);
     }

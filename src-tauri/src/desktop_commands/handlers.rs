@@ -768,3 +768,13 @@ pub async fn read_dsh_headless_default_subagent() -> Result<gateway::NativeSubag
 pub async fn save_dsh_headless_default_subagent(model: String) -> Result<gateway::NativeSubagentSettings, String> {
     run_blocking("save_dsh_headless_default_subagent", move || gateway::save_dsh_headless_default_subagent(model)).await
 }
+
+#[tauri::command]
+pub async fn read_grok_default_subagent() -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("read_grok_default_subagent", gateway::read_grok_default_subagent).await
+}
+
+#[tauri::command]
+pub async fn save_grok_default_subagent(model: String, effort: String, native: bool) -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("save_grok_default_subagent", move || gateway::save_grok_default_subagent(model, effort, native)).await
+}
