@@ -1,6 +1,7 @@
 import { writeQuotaCache, clearQuotaCache } from "./quotaCache";
 import { invoke } from "@tauri-apps/api/core";
 import { COMMANDS, type CommandName } from "./commands";
+import type { ClaudeSettings } from "./claudeSettings";
 import type {
   AppFlavorInfo,
   AppStatus,
@@ -303,6 +304,8 @@ export const api = {
   dshClientConnect: () => call<DshLifecycleReport>(COMMANDS.dshClientConnect),
   dshClientDisconnect: () => call<DshLifecycleReport>(COMMANDS.dshClientDisconnect),
   dshClientReadback: () => call<DshLifecycleReport>(COMMANDS.dshClientReadback),
+  readClaudeSubagentSettings: () => call<ClaudeSettings>(COMMANDS.readClaudeSubagentSettings),
+  saveClaudeSubagent: (model: string) => call<ClaudeSettings>(COMMANDS.saveClaudeSubagent, { model }),
   previewGatewayClientConfig: (clientId: string, model?: string | null, roleMappings?: Record<string, string> | null) =>
     call<GatewayClientConfigPreview>(COMMANDS.previewGatewayClientConfig, {
       clientId,

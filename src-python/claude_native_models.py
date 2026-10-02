@@ -49,7 +49,7 @@ def cli_command(binary: Path, arguments: list[str]) -> list[str] | str:
     return command
 
 
-def discover(binary: Path, config: Path) -> dict:
+def discover(binary: Path, config: Path, *, gateway_mode: bool = True) -> dict:
     source = config / 'settings.json'
     current = json.loads(source.read_text(encoding='utf-8')) if source.exists() else {}
     if not isinstance(current, dict):
@@ -66,7 +66,8 @@ def discover(binary: Path, config: Path) -> dict:
     }
     # Ask for the gateway-mode lineup: some genuine native 1M variants are only
     # listed separately when a base URL is configured. No request is submitted.
-    snapshot['env']['ANTHROPIC_BASE_URL'] = 'http://127.0.0.1:1'
+    if gateway_mode:
+        snapshot['env']['ANTHROPIC_BASE_URL'] = 'http://127.0.0.1:1'
     with tempfile.TemporaryDirectory(prefix='codexhub-native-picker-') as directory:
         root = Path(directory)
         isolated = root / '.claude'
@@ -125,8 +126,9 @@ def discover(binary: Path, config: Path) -> dict:
                 if resolved.startswith('claude-codexhub-'):
                     continue
                 label = model.get('displayName') if model.get('value') != 'default' else None
+                description = 'Claude subscription via Gateway' if gateway_mode else 'Claude native model'
                 rows[resolved] = {'model': resolved, 'label': label or resolved,
-                                  'description': f'Claude subscription via Gateway · {resolved}'}
+                                  'description': f'{description} · {resolved}'}
         if not rows:
             raise ValueError('Claude returned no native models; existing configuration was preserved')
         version = subprocess.run(cli_command(binary, ['--version']), capture_output=True, text=True,
@@ -146,10 +148,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--claude-bin', type=Path, required=True)
     parser.add_argument('--config-dir', type=Path, required=True)
+    parser.add_argument('--native-route', action='store_true')
     args = parser.parse_args()
     try:
         binary = concrete_executable(args.claude_bin.expanduser())
-        print(json.dumps(discover(binary, args.config_dir.expanduser().resolve())))
+        print(json.dumps(discover(binary, args.config_dir.expanduser().resolve(), gateway_mode=not args.native_route)))
         return 0
     except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
         print('Cannot obtain the native Claude model list. Update Claude Code and retry; existing configuration was preserved.', file=sys.stderr)

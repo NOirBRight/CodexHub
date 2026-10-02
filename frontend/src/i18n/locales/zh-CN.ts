@@ -359,6 +359,7 @@ const zhCN = {
     claudeUseCliDefault: "使用 Claude Code 内置默认值",
     claudeAliasDefaultPreview: "默认别名 {{alias}} 的实际目标将从 {{from}} 改为 {{to}}。显式模型 ID 保持不变。",
     claudeSubagentTitle: "默认子代理",
+    claudeSaveSubagent: "保存默认子代理",
     claudeSubagentHelp: "此设置独立于模型家族映射和主模型。",
     claudeNoModels: "没有已导出模型",
     claudeConfirmConnect:

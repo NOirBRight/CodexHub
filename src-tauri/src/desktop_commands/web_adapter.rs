@@ -214,6 +214,11 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         Command::DshClientConnect => to_value(gateway::dsh_client_connect()),
         Command::DshClientDisconnect => to_value(gateway::dsh_client_disconnect()),
         Command::DshClientReadback => to_value(gateway::dsh_client_readback()),
+        Command::ReadClaudeSubagentSettings => to_value(gateway::read_claude_subagent_settings()),
+        Command::SaveClaudeSubagent => {
+            let model = registry_string_arg(args, command, "model")?;
+            to_value(gateway::save_claude_subagent(model))
+        }
         Command::PreviewGatewayClientConfig => {
             let client_id = registry_string_arg(args, command, "client_id")?;
             let model = args

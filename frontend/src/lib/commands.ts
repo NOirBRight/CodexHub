@@ -47,6 +47,8 @@ export const COMMANDS = {
   dshClientConnect: "dsh_client_connect",
   dshClientDisconnect: "dsh_client_disconnect",
   dshClientReadback: "dsh_client_readback",
+  readClaudeSubagentSettings: "read_claude_subagent_settings",
+  saveClaudeSubagent: "save_claude_subagent",
   previewGatewayClientConfig: "preview_gateway_client_config",
   applyGatewayClientConfig: "apply_gateway_client_config",
   restoreGatewayClientConfig: "restore_gateway_client_config",

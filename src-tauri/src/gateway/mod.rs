@@ -38,6 +38,7 @@ pub use clients::dsh::{
     detect_dsh_client, dsh_client_connect, dsh_client_disconnect, dsh_client_readback,
     DshClientInfo,
 };
+pub use clients::claude::ClaudeClientSettings;
 pub use providers::provider_probe_upstream_format;
 pub use readback::verify_apply_readback;
 
@@ -907,6 +908,31 @@ pub fn list_gateway_clients(include_versions: bool) -> Result<Vec<GatewayClientI
     Ok(clients)
 }
 
+pub fn read_claude_subagent_settings() -> Result<ClaudeClientSettings, String> {
+    clients::claude::read_claude_subagent_with_path(
+        &detect_claude_config_path(), &config::get_settings()?, &config::get_providers()?,
+    )
+}
+
+pub fn save_claude_subagent(model: String) -> Result<ClaudeClientSettings, String> {
+    let _guard = gateway_client_config_write_lock().lock()
+        .map_err(|_| "gateway client config write lock is poisoned".to_string())?;
+    crate::codex_desktop::serialize_config_writer(|| {
+        let paths = config::ConfigPaths::runtime()?;
+        let mut settings = config::get_settings_with_paths(&paths)?;
+        let path = detect_claude_config_path();
+        let providers = config::get_providers()?;
+        // Discovery can detect a concurrent foreign edit. Do it before taking
+        // rollback snapshots so an aborted discovery cannot restore that edit.
+        settings = clients::claude::native_picker_settings(&path, &settings, false)?;
+        crate::file_transaction::with_text_file_rollback(&[paths.settings_path(), path.clone()], || {
+            let readback = clients::claude::save_claude_subagent_with_path(&path, &mut settings, &providers, &model)?;
+            config::save_settings_with_paths(settings.clone(), &paths)?;
+            Ok(readback)
+        }).map_err(|error| error.to_string())
+    })
+}
+
 pub fn preview_gateway_client_config(
     client_id: String,
     model: Option<String>,
@@ -1038,9 +1064,13 @@ fn restore_gateway_client_config_locked(
                 let mut mappings = previous.role_mappings;
                 mappings.insert("subagent".into(), previous.default_subagent_model);
                 settings.claude_model_mappings = Some(mappings);
-                config::save_settings_with_paths(settings, &paths)?;
+                config::save_settings_with_paths(settings.clone(), &paths)?;
             }
-            managed_clients::restore_native(client_id, &backup_roots)
+            crate::file_transaction::with_text_file_rollback(&[path.clone()], || {
+                let result = managed_clients::restore_native(client_id, &backup_roots)?;
+                clients::claude::restore_independent_claude_subagent(&path, &settings)?;
+                Ok(result)
+            }).map_err(|error| error.to_string())
         });
     }
     managed_clients::restore_native(client_id, &backup_roots)
