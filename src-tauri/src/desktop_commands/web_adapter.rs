@@ -294,6 +294,11 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
             let native = registry_bool_arg(args, command, "native")?;
             to_value(gateway::save_omp_default_subagent(model, effort, native))
         }
+        Command::ReadDshHeadlessDefaultSubagent => to_value(gateway::read_dsh_headless_default_subagent()),
+        Command::SaveDshHeadlessDefaultSubagent => {
+            let model = registry_optional_string_arg(args, command, "model").ok_or("model is required")?;
+            to_value(gateway::save_dsh_headless_default_subagent(model))
+        }
         Command::ReadOpenCodeDefaultSubagent => to_value(gateway::read_opencode_default_subagent()),
         Command::ReadZCodeDefaultSubagent => to_value(gateway::read_zcode_default_subagent()),
         Command::SaveZCodeDefaultSubagent => {

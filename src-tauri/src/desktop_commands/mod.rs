@@ -129,6 +129,8 @@ macro_rules! desktop_command_registry {
             SyncGatewayClients => "sync_gateway_clients" => $crate::desktop_commands::sync_gateway_clients, true, true, true, false, NO_ALIASES;
             ReadOmpDefaultSubagent => "read_omp_default_subagent" => $crate::desktop_commands::read_omp_default_subagent, true, true, true, false, NO_ALIASES;
             SaveOmpDefaultSubagent => "save_omp_default_subagent" => $crate::desktop_commands::save_omp_default_subagent, true, true, true, false, NO_ALIASES;
+            ReadDshHeadlessDefaultSubagent => "read_dsh_headless_default_subagent" => $crate::desktop_commands::read_dsh_headless_default_subagent, true, true, true, false, NO_ALIASES;
+            SaveDshHeadlessDefaultSubagent => "save_dsh_headless_default_subagent" => $crate::desktop_commands::save_dsh_headless_default_subagent, true, true, true, false, NO_ALIASES;
             ReadOpenCodeDefaultSubagent => "read_opencode_default_subagent" => $crate::desktop_commands::read_opencode_default_subagent, true, true, true, false, NO_ALIASES;
             SaveOpenCodeDefaultSubagent => "save_opencode_default_subagent" => $crate::desktop_commands::save_opencode_default_subagent, true, true, true, false, NO_ALIASES;
             ReadZCodeDefaultSubagent => "read_zcode_default_subagent" => $crate::desktop_commands::read_zcode_default_subagent, true, true, true, false, NO_ALIASES;

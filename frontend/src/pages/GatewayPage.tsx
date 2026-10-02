@@ -144,6 +144,7 @@ function GatewayPageImpl({
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const copyResetTimer = useRef<number | null>(null);
   const lastUsageErrorToast = useRef<string | null>(null);
+  const [dshSubagent, setDshSubagent] = useState<NativeSubagentSettings | null>(null);
   const [openCodeSubagent, setOpenCodeSubagent] = useState<NativeSubagentSettings | null>(null);
   const [zCodeSubagent, setZCodeSubagent] = useState<NativeSubagentSettings | null>(null);
   const [ompSubagent, setOmpSubagent] = useState<NativeSubagentSettings | null>(null);
@@ -716,7 +717,21 @@ function GatewayPageImpl({
     return () => { cancelled = true; };
   }, [clientInfos]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const gen = subagentSaveGen.current.dsh;
+    if (clientInfoById.get("dsh")?.installed) void api.readDshHeadlessDefaultSubagent().then((value) => {
+      if (!cancelled && gen === subagentSaveGen.current.dsh) setDshSubagent(value);
+    }).catch((err) => {
+      if (!cancelled) showToast({ text: messageFromError(err), tone: "error", dedupeKey: "dsh-native-subagent-read" });
+    });
+    return () => { cancelled = true; };
+  }, [clientInfos]);
+
   function subagentOptionsFor(clientId: string) {
+    if (clientId === "dsh") return (dshSubagent?.options ?? []).map((option) => ({
+      ...option, id: `native:${option.id}`, label: `${t("workspace.nativeSubagentModel")} · ${option.label}`, native: true,
+    }));
     const gatewayOptions = listDefaultSubagentOptions({
       officialId: OFFICIAL_ID,
       officialIncluded: Boolean(settings?.include_official_models),
@@ -741,6 +756,19 @@ function GatewayPageImpl({
     effort: string,
     options?: { stale?: boolean },
   ) {
+    if (clientId === "dsh") {
+      const gen = (subagentSaveGen.current.dsh = (subagentSaveGen.current.dsh ?? 0) + 1);
+      const toastId = showToast({ dedupeKey: "default-subagent-dsh", text: t("workspace.savingDefaultSubagent"), tone: "loading" });
+      try {
+        const written = await api.saveDshHeadlessDefaultSubagent(model.replace(/^native:/, ""));
+        if (gen !== subagentSaveGen.current.dsh) return;
+        setDshSubagent(written);
+        updateToast(toastId, { action: null, text: t("workspace.dshHeadlessSubagentSaved"), tone: "success" });
+      } catch (err) {
+        if (gen === subagentSaveGen.current.dsh) updateToastWithError(toastId, err);
+      }
+      return;
+    }
     if (!settings) return;
     const nativeClient = nativeSubagents[clientId];
     const nativeSave = Boolean(nativeClient) && (model.startsWith("native:") || !model && !options?.stale);
@@ -1094,7 +1122,12 @@ function GatewayPageImpl({
                   enabledModelCount={enabledModelCount}
                   exportedModels={exportedModels}
                   defaultSubagent={
-                    settings && supportsClientDefaultSubagent(client.id)
+                    client.id === "dsh" && dshSubagent ? {
+                      model: dshSubagent.model ? `native:${dshSubagent.model}` : "",
+                      effort: "",
+                      options: subagentOptionsFor(client.id),
+                      onChange: (model, effort) => { void persistClientDefaultSubagent("dsh", model, effort); },
+                    } : settings && supportsClientDefaultSubagent(client.id)
                       ? {
                           ...clientDefaultSubagentFields(settings, client.id),
                           ...(nativeSubagents[client.id]?.settings?.native ? {

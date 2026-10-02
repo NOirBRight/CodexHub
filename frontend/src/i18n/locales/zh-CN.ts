@@ -61,6 +61,8 @@ const zhCN = {
   "externalModels": "外部模型已接入",
   "officialConfig": "使用 Codex 官方配置",
   "modelCount": "{{count}} 个可用模型",
+  "dshHeadlessSubagentHint": "原生 Sub Agent 仅适用于 DSH Headless。保存后需启动新的 Headless 调用，Web 预设不受影响。",
+  "dshHeadlessSubagentSaved": "已保存 DSH Headless Sub Agent 模型。请启动新的 DSH Headless 调用以应用。",
   "nativeSubagentModel": "原生",
   "defaultSubagent": "默认子代理",
   "defaultSubagentLabel": "子代理",

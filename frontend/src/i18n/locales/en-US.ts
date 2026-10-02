@@ -61,6 +61,8 @@ const enUS = {
   "externalModels": "External models connected",
   "officialConfig": "Using official Codex configuration",
   "modelCount": "{{count}} available models",
+  "dshHeadlessSubagentHint": "Native subagents: DSH Headless only. Start a new Headless invocation after saving. Web presets are unaffected.",
+  "dshHeadlessSubagentSaved": "Saved DSH Headless subagent model. Start a new DSH Headless invocation to apply.",
   "nativeSubagentModel": "Native",
   "defaultSubagent": "Default subagent",
   "defaultSubagentLabel": "Subagent",

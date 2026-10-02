@@ -56,6 +56,8 @@ export const COMMANDS = {
   syncGatewayClients: "sync_gateway_clients",
   readOmpDefaultSubagent: "read_omp_default_subagent",
   saveOmpDefaultSubagent: "save_omp_default_subagent",
+  readDshHeadlessDefaultSubagent: "read_dsh_headless_default_subagent",
+  saveDshHeadlessDefaultSubagent: "save_dsh_headless_default_subagent",
   readOpenCodeDefaultSubagent: "read_opencode_default_subagent",
   saveOpenCodeDefaultSubagent: "save_opencode_default_subagent",
   readZCodeDefaultSubagent: "read_zcode_default_subagent",
