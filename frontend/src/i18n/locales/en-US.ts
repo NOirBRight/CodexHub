@@ -359,6 +359,7 @@ const enUS = {
     claudeUseCliDefault: "Use Claude Code's built-in default",
     claudeAliasDefaultPreview: "Default alias {{alias}} changes its effective target from {{from}} to {{to}}. Explicit model IDs remain unchanged.",
     claudeSubagentTitle: "Default subagent",
+    claudeSaveSubagent: "Save Default subagent",
     claudeSubagentHelp: "This setting is independent of family mappings and the main model.",
     claudeNoModels: "No exported models",
     claudeConfirmConnect:

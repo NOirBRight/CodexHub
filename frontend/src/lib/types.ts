@@ -589,6 +589,7 @@ export interface SubagentMatrixRow {
 
 export interface Settings {
   claude_model_mappings?: Record<string, string> | null;
+  claude_native_subagent_model?: string | null;
   locale: "zh-CN" | "en-US";
   auto_sync_history: boolean;
   unified_codex_history: boolean;

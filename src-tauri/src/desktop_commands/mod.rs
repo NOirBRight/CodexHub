@@ -118,6 +118,8 @@ macro_rules! desktop_command_registry {
             DshClientConnect => "dsh_client_connect" => $crate::desktop_commands::dsh_client_connect, true, true, true, false, NO_ALIASES;
             DshClientDisconnect => "dsh_client_disconnect" => $crate::desktop_commands::dsh_client_disconnect, true, true, true, false, NO_ALIASES;
             DshClientReadback => "dsh_client_readback" => $crate::desktop_commands::dsh_client_readback, true, true, true, false, NO_ALIASES;
+            ReadClaudeSubagentSettings => "read_claude_subagent_settings" => $crate::desktop_commands::read_claude_subagent_settings, true, true, true, false, NO_ALIASES;
+            SaveClaudeSubagent => "save_claude_subagent" => $crate::desktop_commands::save_claude_subagent, true, true, true, false, NO_ALIASES;
             PreviewGatewayClientConfig => "preview_gateway_client_config" => $crate::desktop_commands::preview_gateway_client_config, true, true, true, false, ALIASES_CLIENT_ID;
             ApplyGatewayClientConfig => "apply_gateway_client_config" => $crate::desktop_commands::apply_gateway_client_config, true, true, true, false, ALIASES_CLIENT_ID;
             RestoreGatewayClientConfig => "restore_gateway_client_config" => $crate::desktop_commands::restore_gateway_client_config, true, true, true, false, ALIASES_CLIENT_ID;

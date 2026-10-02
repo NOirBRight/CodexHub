@@ -301,6 +301,8 @@ pub struct Settings {
     #[serde(default)]
     pub claude_model_mappings: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default)]
+    pub claude_native_subagent_model: Option<String>,
+    #[serde(default)]
     pub locale: String,
     pub auto_sync_history: bool,
     #[serde(default = "default_enabled")]
@@ -374,6 +376,7 @@ impl Default for Settings {
             claude_native_picker: None,
             claude_native_picker_source: None,
             claude_model_mappings: None,
+            claude_native_subagent_model: None,
             locale: String::new(),
             auto_sync_history: false,
             unified_codex_history: true,

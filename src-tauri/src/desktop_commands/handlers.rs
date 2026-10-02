@@ -263,6 +263,16 @@ pub async fn list_gateway_clients(
 }
 
 #[tauri::command]
+pub async fn read_claude_subagent_settings() -> Result<gateway::ClaudeClientSettings, String> {
+    run_blocking("read_claude_subagent_settings", gateway::read_claude_subagent_settings).await
+}
+
+#[tauri::command]
+pub async fn save_claude_subagent(model: String) -> Result<gateway::ClaudeClientSettings, String> {
+    run_blocking("save_claude_subagent", move || gateway::save_claude_subagent(model)).await
+}
+
+#[tauri::command]
 pub fn preview_gateway_client_config(
     client_id: String,
     model: Option<String>,

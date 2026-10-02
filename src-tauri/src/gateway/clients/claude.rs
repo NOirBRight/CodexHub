@@ -122,7 +122,7 @@ pub(in crate::gateway) fn read_claude_settings(
             .filter(|(role, _)| *role != "subagent")
             .map(|(role, key)| (role.to_string(), preference(role, key)))
             .collect(),
-        default_subagent_model: preference("subagent", "CLAUDE_CODE_SUBAGENT_MODEL"),
+        default_subagent_model: canonical("CLAUDE_CODE_SUBAGENT_MODEL"),
         native_models: native_model_choices(&value),
         conflicts: claude_override_conflicts(Some(&value), settings),
     }
@@ -149,6 +149,116 @@ fn native_model_choices(value: &Value) -> Vec<ClaudeNativeModelChoice> {
         let label = row.get("label").and_then(Value::as_str).filter(|label| !label.trim().is_empty()).unwrap_or(id);
         Some(ClaudeNativeModelChoice { id: id.to_string(), label: label.to_string() })
     }).collect()
+}
+
+pub(in crate::gateway) fn read_claude_subagent_with_path(
+    path: &Path,
+    settings: &Settings,
+    providers: &[Provider],
+) -> Result<ClaudeClientSettings, String> {
+    let prepared = native_picker_settings(path, settings, false)?;
+    let mut readback = read_claude_settings(path, settings, providers);
+    let discovered = json!({"modelPicker":{"options":prepared.claude_native_picker}});
+    let mut ids: HashSet<String> = readback.native_models.iter().map(|row| row.id.clone()).collect();
+    for row in native_model_choices(&discovered) {
+        if ids.insert(row.id.clone()) {
+            readback.native_models.push(row);
+        }
+    }
+    // Include client-configured native picker entries and the current native
+    // default, including aliases or deployment IDs on third-party routes.
+    let current: Option<Value> = fs::read_to_string(path).ok()
+        .and_then(|text| serde_json::from_str(&text).ok());
+    for row in current.as_ref().and_then(|value| value.pointer("/modelPicker/options"))
+        .and_then(Value::as_array).into_iter().flatten()
+    {
+        if let Some(id) = row.get("model").and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && !id.starts_with("claude-codexhub-"))
+        {
+            if ids.insert(id.to_string()) {
+                readback.native_models.push(ClaudeNativeModelChoice {
+                    id: id.to_string(),
+                    label: row.get("label").and_then(Value::as_str).unwrap_or(id).to_string(),
+                });
+            }
+        }
+    }
+    if current.as_ref().and_then(|value| env_string(value, "CLAUDE_CODE_SUBAGENT_MODEL"))
+        .is_some_and(|id| !id.is_empty() && !id.starts_with("claude-codexhub-"))
+        && ids.insert(readback.default_subagent_model.clone()) {
+        readback.native_models.push(ClaudeNativeModelChoice {
+            id: readback.default_subagent_model.clone(),
+            label: readback.default_subagent_model.clone(),
+        });
+    }
+    Ok(readback)
+}
+
+fn write_claude_subagent(path: &Path, model: &str) -> Result<(), String> {
+    let mut root = match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str::<Value>(&text)
+            .map_err(|error| format!("failed to parse Claude settings.json: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(format!("failed to read Claude settings.json: {error}")),
+    };
+    let object = root.as_object_mut().ok_or("Claude settings.json must be a JSON object")?;
+    let env = object.entry("env").or_insert_with(|| json!({}));
+    let env = env.as_object_mut().ok_or("Claude settings.json env must be an object")?;
+    if model.is_empty() {
+        env.remove("CLAUDE_CODE_SUBAGENT_MODEL");
+        if env.is_empty() {
+            object.remove("env");
+        }
+    } else {
+        env.insert("CLAUDE_CODE_SUBAGENT_MODEL".into(), json!(model));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("failed to create Claude directory: {error}"))?;
+    }
+    let next = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
+    write_text_replace(path, &next).map_err(|_| "failed to save Claude Default subagent".to_string())
+}
+
+pub(in crate::gateway) fn save_claude_subagent_with_path(
+    path: &Path,
+    settings: &mut Settings,
+    providers: &[Provider],
+    model: &str,
+) -> Result<ClaudeClientSettings, String> {
+    let model = model.trim();
+    let readback = read_claude_subagent_with_path(path, settings, providers)?;
+    let native = model.is_empty() || readback.native_models.iter().any(|row| row.id == model);
+    let written = if native {
+        model.to_string()
+    } else {
+        let current = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        if !is_claude_codexhub_config(&current) {
+            return Err("Connect Claude Code before selecting a Gateway Default subagent".into());
+        }
+        projected_claude_model_id(&resolved_external_model(settings, providers, model)?)
+    };
+    write_claude_subagent(path, &written)?;
+    if native {
+        settings.claude_native_subagent_model = Some(model.to_string());
+    }
+    settings.claude_model_mappings.get_or_insert_with(BTreeMap::new)
+        .insert("subagent".into(), model.to_string());
+    let mut actual = read_claude_settings(path, settings, providers);
+    actual.native_models = readback.native_models;
+    if actual.default_subagent_model != model {
+        return Err("Claude Default subagent readback did not match the saved selection".into());
+    }
+    Ok(actual)
+}
+
+pub(in crate::gateway) fn restore_independent_claude_subagent(
+    path: &Path,
+    settings: &Settings,
+) -> Result<(), String> {
+    if let Some(model) = settings.claude_native_subagent_model.as_deref() {
+        write_claude_subagent(path, model)?;
+    }
+    Ok(())
 }
 
 fn resolved_external_model(
@@ -543,7 +653,7 @@ fn claude_picker_options(
         .collect()
 }
 
-fn native_picker_settings(config_path: &Path, settings: &Settings) -> Result<Settings, String> {
+pub(in crate::gateway) fn native_picker_settings(config_path: &Path, settings: &Settings, gateway_mode: bool) -> Result<Settings, String> {
     if settings.claude_native_picker.is_some() {
         return Ok(settings.clone());
     }
@@ -555,6 +665,9 @@ fn native_picker_settings(config_path: &Path, settings: &Settings) -> Result<Set
     let mut command = std::process::Command::new(python);
     command.arg(script).args(["--claude-bin", &executable.to_string_lossy(),
         "--config-dir", &config_path.parent().unwrap_or(Path::new(".")).to_string_lossy()]);
+    if !gateway_mode {
+        command.arg("--native-route");
+    }
     let output = super::super::command_output_no_window_with_timeout(&mut command, std::time::Duration::from_secs(20))
         .ok_or_else(|| "Could not start Claude native model discovery".to_string())?;
     if !output.status.success() {
@@ -878,6 +991,11 @@ pub(in crate::gateway) fn claude_settings_text(
                 continue;
             }
             let existing = env_map.get(*env_key).and_then(Value::as_str).unwrap_or("");
+            if role == "subagent" && (is_native_claude_model_id(canonical)
+                || settings.claude_native_subagent_model.as_deref() == Some(canonical)) {
+                env_map.insert((*env_key).to_string(), json!(canonical));
+                continue;
+            }
             let resolved = match resolved_external_model(settings, providers, canonical) {
                 Ok(resolved) => resolved,
                 Err(_) if canonical == existing => continue,
@@ -979,7 +1097,7 @@ pub(in crate::gateway) fn preview_claude_config_with_path(
     model: &str,
     role_mappings: &BTreeMap<String, String>,
 ) -> Result<GatewayClientConfigPreview, String> {
-    let prepared = native_picker_settings(config_path, settings)?;
+    let prepared = native_picker_settings(config_path, settings, true)?;
     let settings = &prepared;
     let current = fs::read_to_string(config_path).ok();
     let next = claude_settings_text(
@@ -1043,7 +1161,7 @@ pub(in crate::gateway) fn plan_claude_apply(
     model: &str,
     role_mappings: BTreeMap<String, String>,
 ) -> Result<ClaudeApplyPlan, String> {
-    let prepared = native_picker_settings(config_path, settings)?;
+    let prepared = native_picker_settings(config_path, settings, true)?;
     let settings = &prepared;
     let current = if config_path.exists() {
         Some(
@@ -1217,6 +1335,91 @@ mod tests {
             gateway_client_key: "gateway-secret-key".to_string(),
             ..Settings::default()
         }
+    }
+
+    #[test]
+    fn independent_subagent_save_preserves_native_configuration_and_reads_actual_value() {
+        let dir = std::env::temp_dir().join(format!("claude-native-subagent-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let original = json!({"model":"claude-sonnet-4-6", "env":{
+            "ANTHROPIC_API_KEY":"existing-key", "ANTHROPIC_BASE_URL":"https://existing.example",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL":"custom-opus", "USER_ENV":"keep"
+        }, "permissions":{"allow":["Read"]}, "agents":{"custom":{"model":"haiku"}}});
+        fs::write(&path, original.to_string()).unwrap();
+        let mut settings = settings();
+        settings.claude_model_mappings = Some(BTreeMap::from([("opus".into(), "gpt-5.5".into()), ("subagent".into(), "gpt-5.5".into())]));
+        let readback = save_claude_subagent_with_path(&path, &mut settings, &[], "claude-opus-5-5").unwrap();
+        assert_eq!(readback.default_subagent_model, "claude-opus-5-5");
+        let mut written: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["env"].as_object_mut().unwrap().remove("CLAUDE_CODE_SUBAGENT_MODEL"), Some(json!("claude-opus-5-5")));
+        assert_eq!(written, original);
+        assert_eq!(settings.claude_model_mappings.as_ref().unwrap()["opus"], "gpt-5.5");
+        assert_eq!(settings.claude_native_subagent_model.as_deref(), Some("claude-opus-5-5"));
+        let reset = save_claude_subagent_with_path(&path, &mut settings, &[], "").unwrap();
+        assert!(reset.default_subagent_model.is_empty());
+        assert_eq!(serde_json::from_str::<Value>(&fs::read_to_string(&path).unwrap()).unwrap(), original);
+        let connected = claude_settings_text(Some(&original.to_string()), &settings, &[], PRESERVE_DEFAULT_MODEL, &BTreeMap::new()).unwrap();
+        fs::write(&path, &connected).unwrap();
+        save_claude_subagent_with_path(&path, &mut settings, &[], "claude-opus-5-5").unwrap();
+        let mut changed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        changed["env"].as_object_mut().unwrap().remove("CLAUDE_CODE_SUBAGENT_MODEL");
+        assert_eq!(changed, serde_json::from_str::<Value>(&connected).unwrap());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn independent_native_subagent_survives_connect_republish_gateway_pin_and_disconnect() {
+        let dir = std::env::temp_dir().join(format!("claude-native-subagent-lifecycle-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let original = r#"{"model":"claude-sonnet-4-6","env":{"CLAUDE_CODE_SUBAGENT_MODEL":"haiku"}}"#;
+        fs::write(&path, original).unwrap();
+        let mut settings = settings();
+        save_claude_subagent_with_path(&path, &mut settings, &[], "claude-opus-5-5").unwrap();
+        for _ in 0..2 {
+            let current = fs::read_to_string(&path).unwrap();
+            let next = claude_settings_text(Some(&current), &settings, &[], PRESERVE_DEFAULT_MODEL, &BTreeMap::new()).unwrap();
+            fs::write(&path, next).unwrap();
+            assert_eq!(read_claude_settings(&path, &settings, &[]).default_subagent_model, "claude-opus-5-5");
+        }
+        save_claude_subagent_with_path(&path, &mut settings, &[], "gpt-5.5").unwrap();
+        assert_eq!(read_claude_settings(&path, &settings, &[]).default_subagent_model, "gpt-5.5");
+        restore_claude_from_baseline(&path, &BaselineFile::Snapshot { content: original.into() }).unwrap();
+        restore_independent_claude_subagent(&path, &settings).unwrap();
+        assert_eq!(read_claude_settings(&path, &settings, &[]).default_subagent_model, "claude-opus-5-5");
+        // A native save while connected clears the old Gateway preference.
+        let current = fs::read_to_string(&path).unwrap();
+        fs::write(&path, claude_settings_text(Some(&current), &settings, &[], PRESERVE_DEFAULT_MODEL, &BTreeMap::new()).unwrap()).unwrap();
+        save_claude_subagent_with_path(&path, &mut settings, &[], "").unwrap();
+        let current = fs::read_to_string(&path).unwrap();
+        fs::write(&path, claude_settings_text(Some(&current), &settings, &[], PRESERVE_DEFAULT_MODEL, &BTreeMap::new()).unwrap()).unwrap();
+        restore_claude_from_baseline(&path, &BaselineFile::Snapshot { content: original.into() }).unwrap();
+        restore_independent_claude_subagent(&path, &settings).unwrap();
+        assert!(read_claude_settings(&path, &settings, &[]).default_subagent_model.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn independent_subagent_keeps_client_deployment_ids_and_rejects_disconnected_gateway_pin() {
+        let dir = std::env::temp_dir().join(format!("claude-subagent-deployment-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let original = json!({"env":{"CLAUDE_CODE_SUBAGENT_MODEL":"haiku", "CLAUDE_CODE_USE_FOUNDRY":"1"},
+            "modelPicker":{"options":[{"model":"my-native-deployment", "label":"My deployment"}]}}).to_string();
+        fs::write(&path, &original).unwrap();
+        let mut settings = settings();
+        assert!(save_claude_subagent_with_path(&path, &mut settings, &[], "gpt-5.5").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        let readback = read_claude_subagent_with_path(&path, &settings, &[]).unwrap();
+        assert!(readback.native_models.iter().any(|row| row.id == "haiku"));
+        save_claude_subagent_with_path(&path, &mut settings, &[], "my-native-deployment").unwrap();
+        let current = fs::read_to_string(&path).unwrap();
+        let next = claude_settings_text(Some(&current), &settings, &[], PRESERVE_DEFAULT_MODEL, &BTreeMap::new()).unwrap();
+        let next: Value = serde_json::from_str(&next).unwrap();
+        assert_eq!(next["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "my-native-deployment");
+        assert_eq!(next["env"]["CLAUDE_CODE_USE_FOUNDRY"], "1");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
