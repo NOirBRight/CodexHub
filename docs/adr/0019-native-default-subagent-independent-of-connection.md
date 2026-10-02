@@ -1,7 +1,7 @@
 # ADR-0019: Native Default subagent settings are independent of connection
 
 Date: 2026-10-02
-Status: Accepted product direction; implementation pending per-client tickets.
+Status: Accepted; implemented for the verified native capabilities below.
 
 Amends ADR-0013 and the Default subagent lifecycle in ADR-0015. Provider
 Injection, Activation, the Codex History Bucket exception, and existing
@@ -78,8 +78,17 @@ independent setting in this version; shipped presets, profile selection, and mai
 model behavior remain intact. Native model choices include the installed adapter's
 own catalog for configured providers, with no invented effort/Fast settings.
 
-The user approved eight independent client slices. All tickets are published
-with `ready-for-agent` and have no blocking dependencies:
+The eight client slices implement the native configuration contract or record
+a version-specific capability limitation. Per-client evidence:
+
+- [Codex](../evidence/issue-615/native-default-subagent.md)
+- [Claude Code](../evidence/issue-616/native-default-subagent.md)
+- [OpenCode](../evidence/issue-617/native-subagent.md)
+- [ZCode](../evidence/issue-618/native-default-subagent.md)
+- [OMP](../evidence/issue-619/native-subagent.md)
+- [Grok CLI](../evidence/issue-620/native-subagent.md)
+
+Implementation tickets:
 
 - [Codex: #615](https://github.com/NOirBRight/CodexHub/issues/615)
 - [Claude Code: #616](https://github.com/NOirBRight/CodexHub/issues/616)
