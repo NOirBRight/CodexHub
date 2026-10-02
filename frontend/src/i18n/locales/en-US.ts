@@ -76,6 +76,7 @@ const enUS = {
   "defaultSubagentSaved": "Default subagent saved. Restart Codex to apply.",
   "defaultSubagentSavedDisconnected": "Default subagent saved. It will be written to Codex when you connect CodexHub.",
   "defaultSubagentSavedClient": "Default subagent saved. Restart {{name}} to apply.",
+  "defaultSubagentSavedZCode": "Default subagent saved. Start a new ZCode session to apply.",
   "defaultSubagentSavedDisconnectedClient": "Default subagent saved. It will be written to {{name}} when you connect CodexHub.",
   "defaultSubagentStale": "Default subagent for {{name}} reverted to CLI default because the model is no longer injected.",
   "defaultSubagentStaleRestart": "Default subagent for {{name}} reverted to CLI default because the model is no longer injected. Restart {{name}} to apply.",

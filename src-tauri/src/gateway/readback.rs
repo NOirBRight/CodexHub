@@ -180,6 +180,7 @@ pub fn verify_apply_readback(
                 ZcodeProviderFileKind::V2Cache,
                 cache_now,
             )?;
+            let expected_cache = super::clients::zcode_native::preserve_native_cache(&target_paths[2], &expected_cache)?;
             let expected_config =
                 zcode_v2_config_text(&target_paths[1], settings, providers, model)?;
             if written_catalog != expected_catalog

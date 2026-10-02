@@ -288,6 +288,13 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
             to_value(gateway::sync_gateway_clients(model))
         }
         Command::ReadOpenCodeDefaultSubagent => to_value(gateway::read_opencode_default_subagent()),
+        Command::ReadZCodeDefaultSubagent => to_value(gateway::read_zcode_default_subagent()),
+        Command::SaveZCodeDefaultSubagent => {
+            let model = registry_optional_string_arg(args, command, "model").ok_or("model is required")?;
+            let effort = registry_optional_string_arg(args, command, "effort").ok_or("effort is required")?;
+            let native = registry_bool_arg(args, command, "native")?;
+            to_value(gateway::save_zcode_default_subagent(model, effort, native))
+        }
         Command::SaveOpenCodeDefaultSubagent => {
             let model = registry_optional_string_arg(args, command, "model").ok_or("model is required")?;
             let effort = registry_optional_string_arg(args, command, "effort").ok_or("effort is required")?;

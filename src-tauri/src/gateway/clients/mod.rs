@@ -7,3 +7,4 @@ pub(super) mod opencode;
 pub(super) mod pi;
 pub(super) mod zcode;
 pub(super) mod opencode_native;
+pub(super) mod zcode_native;

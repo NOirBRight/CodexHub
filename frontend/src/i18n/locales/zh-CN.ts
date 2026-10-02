@@ -76,6 +76,7 @@ const zhCN = {
   "defaultSubagentSaved": "默认子代理已保存。请重启 Codex 使其生效。",
   "defaultSubagentSavedDisconnected": "默认子代理已保存。连接 CodexHub 后会写入 Codex。",
   "defaultSubagentSavedClient": "默认子代理已保存。请重启 {{name}} 使其生效。",
+  "defaultSubagentSavedZCode": "默认子代理已保存。请新建 ZCode 会话使其生效。",
   "defaultSubagentSavedDisconnectedClient": "默认子代理已保存。连接 CodexHub 后会写入 {{name}}。",
   "defaultSubagentStale": "{{name}} 的默认子代理已恢复为维持 CLI 默认，因为该模型已不再注入。",
   "defaultSubagentStaleRestart": "{{name}} 的默认子代理已恢复为维持 CLI 默认，因为该模型已不再注入。请重启 {{name}} 使其生效。",
