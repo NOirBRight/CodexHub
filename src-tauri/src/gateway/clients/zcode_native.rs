@@ -78,8 +78,8 @@ fn decode_component(value: &str) -> String {
     let mut index = 0;
     while index < value.len() {
         if value.as_bytes()[index] == b'%' && index + 2 < value.len() {
-            if let Some(byte) = std::str::from_utf8(&value.as_bytes()[index + 1..index + 3])
-                .ok()
+            if let Some(byte) = value
+                .get(index + 1..index + 3)
                 .and_then(|hex| u8::from_str_radix(hex, 16).ok())
             {
                 bytes.push(byte);

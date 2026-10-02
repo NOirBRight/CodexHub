@@ -391,6 +391,7 @@ fn sentinel_base_url(settings: &Settings) -> String {
         .to_string()
 }
 
+#[cfg(test)]
 pub(in crate::gateway) fn grok_config_text(
     current: Option<&str>,
     settings: &Settings,

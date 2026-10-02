@@ -1073,7 +1073,7 @@ fn restore_gateway_client_config_locked(
                 settings.claude_model_mappings = Some(mappings);
                 config::save_settings_with_paths(settings.clone(), &paths)?;
             }
-            crate::file_transaction::with_text_file_rollback(&[path.clone()], || {
+            crate::file_transaction::with_text_file_rollback(std::slice::from_ref(&path), || {
                 let result = managed_clients::restore_native(client_id, &backup_roots)?;
                 clients::claude::restore_independent_claude_subagent(&path, &settings)?;
                 Ok(result)

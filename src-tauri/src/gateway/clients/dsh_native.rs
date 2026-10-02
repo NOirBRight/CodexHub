@@ -324,7 +324,7 @@ pub(in crate::gateway) fn save_with_home(
         }
         text.push_str(&format!("{BEGIN}\n{patch}{END}\n"));
     }
-    file_transaction::with_text_file_rollback(&[path.clone()], || {
+    file_transaction::with_text_file_rollback(std::slice::from_ref(&path), || {
         safe_file::write_text_atomic(&path, &text)?;
         let dump = readback()?;
         let readback = settings(home, &dump)?;

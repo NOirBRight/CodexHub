@@ -360,12 +360,14 @@ fn edit_agent(text: &str, model: &str, effort: &str) -> Result<String, String> {
     ))
 }
 
+type AgentFileUpdates = Vec<(PathBuf, Option<String>)>;
+
 pub(in crate::gateway) fn gateway_definition_plan(
     path: &Path,
     root: &Table,
     model: &str,
     effort: &str,
-) -> Result<Option<Vec<(PathBuf, Option<String>)>>, String> {
+) -> Result<Option<AgentFileUpdates>, String> {
     let Some(pin) = read_pin(path)? else {
         return Ok(None);
     };
