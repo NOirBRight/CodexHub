@@ -3422,33 +3422,30 @@ fn inspect_process(pid: u32) -> Result<InspectedProcess, String> {
         .map(|part| String::from_utf8_lossy(part).to_string())
         .collect::<Vec<_>>();
     let mut info = ProcessInfo::from_args(args);
-    // A zombie has exited and released its descriptors even before its parent
-    // reaps it. Do not confuse its empty cmdline with a live PID replacement.
-    // Empty cmdline alone is insufficient: a live process may be mid-exec.
+    // Linux can clear an exiting process's command line before its state
+    // becomes Z/X. Until exit is confirmed, ownership inspection is unavailable.
     if bytes.is_empty() {
         match fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(stat)
-                if matches!(
-                    stat.rsplit_once(')')
-                        .and_then(|(_, rest)| rest.split_whitespace().next()),
-                    Some("Z" | "X")
-                ) =>
-            {
-                return Ok(InspectedProcess::Missing)
-            }
+            Ok(stat) => return classify_empty_linux_command_line(&stat),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(InspectedProcess::Missing);
             }
-            _ => {}
+            Err(error) => return Err(format!("failed to read process state for PID {pid}: {error}")),
         }
     }
-    // Creation identity remains available even when a live cmdline is empty.
-    info.process_start_id = match linux_process_start_id(pid) {
-        Ok(process_start_id) => Some(process_start_id),
-        Err(_) if bytes.is_empty() => None,
-        Err(error) => return Err(error),
-    };
+    info.process_start_id = Some(linux_process_start_id(pid)?);
     Ok(InspectedProcess::Running(info))
+}
+
+#[cfg(not(windows))]
+fn classify_empty_linux_command_line(stat: &str) -> Result<InspectedProcess, String> {
+    match stat
+        .rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+    {
+        Some("Z" | "X") => Ok(InspectedProcess::Missing),
+        _ => Err("process command line is empty and exit is not confirmed".to_string()),
+    }
 }
 
 #[cfg(not(windows))]
@@ -3810,6 +3807,18 @@ mod tests {
             inspected.expect("zombie /proc entry should still be inspectable"),
             InspectedProcess::Missing
         ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn empty_linux_command_line_requires_confirmed_exit() {
+        assert!(super::classify_empty_linux_command_line("1234 (python3.13) R 1").is_err());
+        for state in ["Z", "X"] {
+            assert_eq!(
+                super::classify_empty_linux_command_line(&format!("1234 (python3.13) {state} 1")),
+                Ok(InspectedProcess::Missing)
+            );
+        }
     }
 
     #[cfg(not(windows))]
