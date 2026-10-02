@@ -65,7 +65,6 @@ const enUS = {
   "defaultSubagent": "Default subagent",
   "defaultSubagentLabel": "Subagent",
   "defaultSubagentHint": "Native models are applied independently of the CodexHub connection.",
-  "nativeSubagentModel": "Native",
   "defaultSubagentCodexDefault": "Codex default",
   "defaultSubagentCliDefault": "CLI default",
   "defaultSubagentModel": "Model",

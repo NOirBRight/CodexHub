@@ -65,7 +65,6 @@ const zhCN = {
   "defaultSubagent": "默认子代理",
   "defaultSubagentLabel": "子代理",
   "defaultSubagentHint": "原生模型设置独立于 CodexHub 连接，保存后直接写入。",
-  "nativeSubagentModel": "原生",
   "defaultSubagentCodexDefault": "Codex 默认",
   "defaultSubagentCliDefault": "维持 CLI 默认",
   "defaultSubagentModel": "模型",
