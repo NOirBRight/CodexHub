@@ -83,6 +83,7 @@ type Props = {
   officialId: string;
   defaultSubagentModel: string;
   defaultSubagentEffort: string;
+  nativeSubagentOptions?: DefaultSubagentOption[];
   onDefaultSubagentChange?: (model: string, effort: string) => void;
 };
 let dailyCache: { day: string; snapshot: GatewayUsageSnapshot } | null = null;
@@ -214,25 +215,28 @@ export function ProviderWorkspaceView(props: Props) {
       props.officialIncluded ? props.officialEnabled : 0,
     );
   const subagentOptions = listDefaultSubagentOptions({
+    nativeOptions: props.nativeSubagentOptions,
     includeFastVariants: true,
     officialId: props.officialId,
-    officialIncluded: props.officialIncluded,
+    officialIncluded: props.connected && props.officialIncluded,
     officialModels: props.officialModels,
     officialDisabledModels: props.officialDisabledModels,
-    providers: props.providers,
+    providers: props.connected ? props.providers : [],
   });
   const selectedSubagent =
     subagentOptions.find((option) => option.id === props.defaultSubagentModel) ??
     (props.defaultSubagentModel
       ? {
           id: props.defaultSubagentModel,
-          label: props.defaultSubagentModel,
+          label: props.defaultSubagentModel.replace(/^native:/, ""),
           efforts: [],
           defaultEffort: "medium",
         }
       : undefined);
   const subagentEfforts = selectedSubagent
-    ? resolveSubagentEffort(selectedSubagent, props.defaultSubagentEffort)
+    ? props.defaultSubagentModel.startsWith("native:")
+      ? props.defaultSubagentEffort
+      : resolveSubagentEffort(selectedSubagent, props.defaultSubagentEffort)
     : "";
   const subagentDisabled =
     props.connectionBusy || !props.onDefaultSubagentChange;
@@ -900,7 +904,7 @@ export function DefaultSubagentPicker({
                   <ChevronRight size={11} />
                 </span>
               </button>
-              {options.some((option) => option.speedVariant) && <button
+              {!draftModel.startsWith("native:") && options.some((option) => option.speedVariant) && <button
                 type="button"
                 className="ws-bridge-subagent-row"
                 role="switch"

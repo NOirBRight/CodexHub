@@ -5,6 +5,7 @@ import type {
   AppFlavorInfo,
   AppStatus,
   CodexDesktopStatus,
+  CodexNativeSubagent,
   AppUpdateCompletionStatus,
   AppUpdateInstallResult,
   AppUpdateInstallStatus,
@@ -215,6 +216,9 @@ export const api = {
   getBundledProviders: () => call<Provider[]>(COMMANDS.getBundledProviders),
   saveProviders: (providers: Provider[]) => call<Provider[]>(COMMANDS.saveProviders, { providers }),
   getSettings: async () => normalizeSettings(await call<Partial<Settings>>(COMMANDS.getSettings)),
+  getCodexNativeSubagent: () => call<CodexNativeSubagent>(COMMANDS.getCodexNativeSubagent),
+  saveCodexNativeSubagent: (model: string, effort: string) =>
+    call<CodexNativeSubagent>(COMMANDS.saveCodexNativeSubagent, { model, effort }),
   saveSettings: async (settings: Settings) =>
     normalizeSettings(
       await call<Partial<Settings>>(COMMANDS.saveSettings, {

@@ -64,6 +64,11 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         Command::GetSettings => {
             to_value(config::get_settings().and_then(autostart::reconcile_settings))
         }
+        Command::GetCodexNativeSubagent => to_value(config::get_codex_native_subagent()),
+        Command::SaveCodexNativeSubagent => to_value(config::save_codex_native_subagent(
+            registry_string_arg(args, command, "model")?,
+            registry_string_arg(args, command, "effort")?,
+        )),
         Command::GetAppFlavor => to_value(Ok(crate::app_flavor::current_info())),
         Command::SaveSettings => {
             let settings = serde_json::from_value(

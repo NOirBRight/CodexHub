@@ -62,6 +62,7 @@ import {
 import type {
   AppFlavorInfo,
   AppStatus,
+  CodexNativeSubagent,
   GatewayStatus,
   Model,
   OpenAIUsageSnapshot,
@@ -187,6 +188,16 @@ function ProvidersPageImpl({
   } = workspace;
   const handledCodexSwitchRequestRef = useRef<number | null>(null);
   const defaultSubagentSaveGen = useRef(0);
+  const [nativeSubagent, setNativeSubagent] = useState<CodexNativeSubagent | null>(null);
+  useEffect(() => {
+    let active = true;
+    void api.getCodexNativeSubagent().then((state) => {
+      if (active) setNativeSubagent(state);
+    }).catch((error) => {
+      if (active) showToast(messageFromError(error), "error");
+    });
+    return () => { active = false; };
+  }, [appStatusSnapshot?.mode, catalogModels, showToast]);
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(
     appStatusSnapshot,
   );
@@ -778,6 +789,28 @@ function ProvidersPageImpl({
   async function persistDefaultSubagent(model: string, effort: string) {
     const current = settingsDraft ?? settings;
     if (!current) return;
+    if (!model || model.startsWith("native:")) {
+      const gen = ++defaultSubagentSaveGen.current;
+      const toastId = showToast({
+        dedupeKey: "default-subagent",
+        text: t("workspace.savingDefaultSubagent"),
+        tone: "loading",
+      });
+      try {
+        const state = await api.saveCodexNativeSubagent(model.replace(/^native:/, ""), effort);
+        const saved = await api.getSettings();
+        if (gen !== defaultSubagentSaveGen.current) return;
+        setNativeSubagent(state);
+        stageSettings(saved);
+        onSettingsChanged?.(saved);
+        markRestartReminder();
+        setRestartReminder(true);
+        updateToast(toastId, { action: null, text: t("workspace.defaultSubagentSaved"), tone: "success" });
+      } catch (error) {
+        if (gen === defaultSubagentSaveGen.current) updateToastWithError(toastId, error);
+      }
+      return;
+    }
     if (
       current.codex_default_subagent_model === model &&
       current.codex_default_subagent_reasoning_effort === effort
@@ -1075,15 +1108,16 @@ function ProvidersPageImpl({
           }
           onRefresh={() => loadOfficialOpenAIUsage(true, true)}
           defaultSubagentModel={
-            settingsDraft?.codex_default_subagent_model ??
-            settings?.codex_default_subagent_model ??
-            ""
+            realCodexConnected && (settingsDraft?.codex_default_subagent_model ?? settings?.codex_default_subagent_model)
+              ? (settingsDraft?.codex_default_subagent_model ?? settings?.codex_default_subagent_model ?? "")
+              : nativeSubagent?.model ? `native:${nativeSubagent.model}` : ""
           }
           defaultSubagentEffort={
-            settingsDraft?.codex_default_subagent_reasoning_effort ??
-            settings?.codex_default_subagent_reasoning_effort ??
-            ""
+            realCodexConnected && (settingsDraft?.codex_default_subagent_model ?? settings?.codex_default_subagent_model)
+              ? (settingsDraft?.codex_default_subagent_reasoning_effort ?? settings?.codex_default_subagent_reasoning_effort ?? "")
+              : nativeSubagent?.effort ?? ""
           }
+          nativeSubagentOptions={nativeSubagent?.models.map((option) => ({ ...option, id: `native:${option.id}`, label: `${t("workspace.nativeSubagentModel")} · ${option.label}` }))}
           onDefaultSubagentChange={(model, effort) => {
             void persistDefaultSubagent(model, effort);
           }}

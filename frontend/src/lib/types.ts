@@ -587,6 +587,12 @@ export interface SubagentMatrixRow {
   detail: string;
 }
 
+export type CodexNativeSubagent = {
+  model: string;
+  effort: string;
+  models: { id: string; label: string; efforts: string[]; defaultEffort: string }[];
+};
+
 export interface Settings {
   claude_model_mappings?: Record<string, string> | null;
   locale: "zh-CN" | "en-US";
