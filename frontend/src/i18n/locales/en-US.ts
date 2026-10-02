@@ -61,6 +61,7 @@ const enUS = {
   "externalModels": "External models connected",
   "officialConfig": "Using official Codex configuration",
   "modelCount": "{{count}} available models",
+  "nativeSubagentModel": "Native",
   "defaultSubagent": "Default subagent",
   "defaultSubagentLabel": "Subagent",
   "defaultSubagentHint": "Native models are applied independently of the CodexHub connection.",

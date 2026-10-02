@@ -688,3 +688,10 @@ export interface CatalogOverrideDiagnostics {
   migrated: number;
   reasons: Record<string, number>;
 }
+
+export interface NativeSubagentSettings {
+  model: string;
+  effort: string;
+  native: boolean;
+  options: { id: string; label: string; efforts: string[]; defaultEffort: string }[];
+}

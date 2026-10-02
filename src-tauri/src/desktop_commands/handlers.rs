@@ -728,3 +728,13 @@ pub fn window_close_to_tray(window: Window) -> Result<(), String> {
         },
     )
 }
+
+#[tauri::command]
+pub async fn read_opencode_default_subagent() -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("read_opencode_default_subagent", gateway::read_opencode_default_subagent).await
+}
+
+#[tauri::command]
+pub async fn save_opencode_default_subagent(model: String, effort: String, native: bool) -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("save_opencode_default_subagent", move || gateway::save_opencode_default_subagent(model, effort, native)).await
+}

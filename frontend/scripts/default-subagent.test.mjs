@@ -352,3 +352,9 @@ test("every registered Fast model has a subagent toggle and a plain other-client
     assert.ok(other.some((option) => option.id === alias && !option.fast && !option.speedVariant));
   }
 });
+
+test("native options only expose client-declared efforts and keep the native default", () => {
+  assert.equal(resolveSubagentEffort({ id: "native:anthropic/child", native: true, efforts: [], defaultEffort: "" }, "high"), "");
+  assert.equal(resolveSubagentEffort({ id: "native:custom/child", native: true, efforts: ["", "high"], defaultEffort: "" }, "high"), "high");
+  assert.equal(resolveSubagentEffort({ id: "native:custom/child", native: true, efforts: ["", "high"], defaultEffort: "" }, "max"), "");
+});

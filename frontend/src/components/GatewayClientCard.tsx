@@ -157,7 +157,9 @@ export function GatewayClientCard({
               model={defaultSubagent.model}
               effort={
                 defaultSubagent.model
-                  ? resolveSubagentEffort(
+                  ? defaultSubagent.model.startsWith("native:")
+                    ? defaultSubagent.effort
+                    : resolveSubagentEffort(
                       defaultSubagent.options.find(
                         (option) => option.id === defaultSubagent.model,
                       ),
