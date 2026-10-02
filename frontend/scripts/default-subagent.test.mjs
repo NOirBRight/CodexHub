@@ -382,3 +382,17 @@ test("DSH native choices save independently and disclose Headless scope and rest
   assert.match(zh, /仅适用于 DSH Headless/);
   assert.match(commands, /save_dsh_headless_default_subagent/);
 });
+
+
+test("Codex picker wiring keeps native models without reasoning free of synthetic efforts", async () => {
+  const source = await readFile(new URL("../src/pages/ProvidersPage.tsx", import.meta.url), "utf8");
+  const expression = source.match(/nativeSubagentOptions=\{([^\n]+)\}/)[1];
+  const javascript = ts.transpileModule(`return ${expression};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const options = new Function("nativeSubagent", "t", javascript)({ models: [
+    { id: "native-plain", label: "Plain", efforts: [], defaultEffort: "" },
+  ] }, () => "Native");
+  assert.equal(options[0].native, true);
+  assert.deepEqual(options[0].efforts, []);
+  assert.equal(resolveSubagentEffort(options[0], "high"), "");
+  assert.equal(options[0].speedVariant, undefined);
+});

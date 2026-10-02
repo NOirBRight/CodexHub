@@ -230,7 +230,8 @@ export function ProviderWorkspaceView(props: Props) {
           id: props.defaultSubagentModel,
           label: props.defaultSubagentModel.replace(/^native:/, ""),
           efforts: [],
-          defaultEffort: "medium",
+          defaultEffort: props.defaultSubagentModel.startsWith("native:") ? "" : "medium",
+          native: props.defaultSubagentModel.startsWith("native:"),
         }
       : undefined);
   const subagentEfforts = selectedSubagent

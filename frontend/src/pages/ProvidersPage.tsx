@@ -1117,7 +1117,7 @@ function ProvidersPageImpl({
               ? (settingsDraft?.codex_default_subagent_reasoning_effort ?? settings?.codex_default_subagent_reasoning_effort ?? "")
               : nativeSubagent?.effort ?? ""
           }
-          nativeSubagentOptions={nativeSubagent?.models.map((option) => ({ ...option, id: `native:${option.id}`, label: `${t("workspace.nativeSubagentModel")} · ${option.label}` }))}
+          nativeSubagentOptions={nativeSubagent?.models.map((option) => ({ ...option, id: `native:${option.id}`, label: `${t("workspace.nativeSubagentModel")} · ${option.label}`, native: true }))}
           onDefaultSubagentChange={(model, effort) => {
             void persistDefaultSubagent(model, effort);
           }}

@@ -135,6 +135,8 @@ class ConfigOverlayTests(unittest.TestCase):
                 apply_overlay(config, backup, catalog, "http://127.0.0.1:9099", use_managed_catalog=True)
                 state = config_overlay.read_native_default_subagent(config, [backup])
             self.assertEqual([item["id"] for item in state["models"]], ["native-model"])
+            self.assertEqual(state["models"][0]["efforts"], [])
+            self.assertEqual(state["models"][0]["defaultEffort"], "")
 
     def test_retired_context_guard_commands_are_rejected_without_writes(self):
         with tempfile.TemporaryDirectory() as root:

@@ -81,7 +81,7 @@ fn with_official_options(mut state: CodexNativeSubagent) -> Result<CodexNativeSu
                 efforts: model.supported_reasoning_levels.unwrap_or_default(),
                 default_effort: model
                     .default_reasoning_level
-                    .unwrap_or_else(|| "medium".to_string()),
+                    .unwrap_or_default(),
             });
         }
     }

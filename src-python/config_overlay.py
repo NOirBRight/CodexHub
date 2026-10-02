@@ -961,7 +961,7 @@ def read_native_default_subagent(config_path: Path, backup_paths: list[Path]) ->
                 "id": slug,
                 "label": item.get("display_name") or slug,
                 "efforts": [effort for effort in efforts if effort],
-                "defaultEffort": item.get("default_reasoning_level") or "medium",
+                "defaultEffort": item.get("default_reasoning_level") or "",
             })
     result["native_catalog"] = bool(catalog)
     return result
