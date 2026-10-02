@@ -1,5 +1,5 @@
 use super::clients::claude::claude_settings_text;
-use super::clients::grok::{grok_config_text, grok_injected_blocks_match, grok_owned_shadows_match};
+use super::clients::grok::{grok_config_text_with_path, grok_injected_blocks_match, grok_owned_shadows_match};
 use super::clients::omp::{apply_omp_default_subagent_slice, omp_config_text, omp_models_yml_text};
 use super::clients::opencode::opencode_config_text_with_path;
 use super::clients::pi::pi_models_text;
@@ -206,7 +206,7 @@ pub fn verify_apply_readback(
         "grok" => {
             let written = fs::read_to_string(&target_paths[0])
                 .map_err(|error| format!("readback failed: {error}"))?;
-            let expected = grok_config_text(Some(&written), settings, providers, model)?;
+            let expected = grok_config_text_with_path(&target_paths[0], Some(&written), settings, providers, model)?;
             if !grok_injected_blocks_match(&written, &expected)? {
                 return Err(
                     "readback failed: grok injected block does not match production preview"

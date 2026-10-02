@@ -340,7 +340,9 @@ export const api = {
   syncGatewayClients: (model?: string | null) =>
     call<GatewayClientSyncSummary>(COMMANDS.syncGatewayClients, { model: model ?? null }),
   readOpenCodeDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readOpenCodeDefaultSubagent),
+  readGrokDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readGrokDefaultSubagent),
   saveOpenCodeDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveOpenCodeDefaultSubagent, { model, effort, native }),
+  saveGrokDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveGrokDefaultSubagent, { model, effort, native }),
   subagentMatrixStatus: () => call<SubagentMatrixStatus>(COMMANDS.subagentMatrixStatus),
   generateCatalog: () => call<Model[]>(COMMANDS.generateCatalog),
   catalogOverrideDiagnostics: () =>
