@@ -19,6 +19,35 @@ try {
   await expect(card.locator(".ws-client-logo img")).toHaveAttribute("src", /claude-code-icon/);
   await expect.poll(() => card.locator(".ws-client-logo img")
     .evaluate((image) => image.complete && image.naturalWidth > 0)).toBe(true);
+  const beforeCardSubagent = settings();
+  let cardSaveCount = 0;
+  await page.route("**/api/invoke", async (route) => {
+    if (route.request().postDataJSON()?.command === "save_claude_subagent") {
+      cardSaveCount++;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    await route.continue();
+  });
+  const cardPicker = card.getByRole("button", { name: "Default subagent", exact: true });
+  await expect(cardPicker).toBeEnabled();
+  await cardPicker.click();
+  let cardMenu = page.getByRole("dialog", { name: "Default subagent", exact: true });
+  await cardMenu.getByRole("button", { name: /^Model/ }).click();
+  await cardMenu.getByRole("option", { name: /^Native ·/ }).first().click();
+  await expect(cardMenu).toBeHidden();
+  await page.getByRole("heading", { name: "Claude Code", exact: true }).click();
+  await expect.poll(() => settings().env?.CLAUDE_CODE_SUBAGENT_MODEL).toMatch(/^claude-/);
+  await expect(cardPicker).toBeEnabled();
+  assert.equal(cardSaveCount, 1, "closing the card menu during save must not submit twice");
+  await cardPicker.click();
+  cardMenu = page.getByRole("dialog", { name: "Default subagent", exact: true });
+  await cardMenu.getByRole("button", { name: /^Model/ }).click();
+  await cardMenu.getByRole("option", { name: "CLI default", exact: true }).click();
+  await expect.poll(() => settings().env?.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
+  await expect(cardPicker).toBeEnabled();
+  assert.equal(cardSaveCount, 2);
+  assert.deepEqual(settings(), beforeCardSubagent, "card subagent edits must preserve main model, authentication and route settings");
+  await page.unroute("**/api/invoke");
   await card.getByRole("button", { name: "Claude Code connection details" }).click();
   let dialog = page.getByRole("dialog", { name: "Claude Code settings" });
   const picker = (name) => dialog.locator("label.ws-claude-field")

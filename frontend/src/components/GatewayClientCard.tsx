@@ -1,6 +1,6 @@
 import { ClaudeSettingsDialog } from "./ClaudeSettingsDialog";
 import claudeIcon from "../assets/claude-code-icon.svg";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useToasts } from "./PageToast";
 import { claudeSubagentOptions, type ClaudeSettings } from "../lib/claudeSettings";
 import { WorkspaceDialog } from "./workspace/WorkspaceDialog";
@@ -83,6 +83,7 @@ export function GatewayClientCard({
   const [claudeSubagentLoading, setClaudeSubagentLoading] = useState(true);
   const [claudeSubagentSaving, setClaudeSubagentSaving] = useState(false);
   const [claudeSubagentReset, setClaudeSubagentReset] = useState(0);
+  const claudeSubagentSavePending = useRef(false);
   useEffect(() => {
     if (!isClaude || claudeSubagentSaving || detailsOpen) return;
     let active = true;
@@ -98,6 +99,9 @@ export function GatewayClientCard({
   }, [isClaude, info, detailsOpen, claudeSubagentSaving]);
 
   async function saveClaudeSubagent(model: string) {
+    if (claudeSubagentSavePending.current) return;
+    claudeSubagentSavePending.current = true;
+    setClaudeSubagentReset((value) => value + 1);
     setClaudeSubagentSaving(true);
     const toastId = showToast({
       text: t("workspace.savingDefaultSubagent"), tone: "loading", timeoutMs: null,
@@ -114,6 +118,7 @@ export function GatewayClientCard({
       setClaudeSubagentReset((value) => value + 1);
       updateToast(toastId, { text: messageFromError(error), tone: "error", timeoutMs: null });
     } finally {
+      claudeSubagentSavePending.current = false;
       setClaudeSubagentSaving(false);
     }
   }

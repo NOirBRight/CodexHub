@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import test from "node:test";
 
 import {
@@ -25,14 +24,6 @@ test("Claude card subagent choices use native models offline and exported models
   assert.ok(online.every((option) => option.native && option.efforts.length === 0 && option.defaultEffort === ""));
 });
 
-test("Claude card exposes the picker and saves through the existing independent subagent API", () => {
-  const source = fs.readFileSync(new URL("../src/components/GatewayClientCard.tsx", import.meta.url), "utf8");
-  assert.match(source, /api\.readClaudeSubagentSettings\(\)/);
-  assert.match(source, /api\.saveClaudeSubagent\(model\)/);
-  assert.match(source, /claudeSubagentOptions\(/);
-  assert.match(source, /defaultSubagentSavedClient/);
-  assert.match(source, /isClaude \? \([\s\S]*?<DefaultSubagentPicker/);
-});
 test("native subagent selection remains valid without any exported Gateway model", () => {
   const saved = claudeDraft({ default_model: "claude-sonnet-4-6", role_mappings: {}, default_subagent_model: "" }, "");
   assert.equal(claudeDraftValid({ ...saved, subagent: "claude-opus-5-5[1m]" }, new Set(), saved, new Set(["claude-opus-5-5[1m]"])), true);
