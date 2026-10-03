@@ -1,3 +1,5 @@
+import type { DefaultSubagentOption } from "./defaultSubagent";
+
 export const claudeRoles = [
   "haiku",
   "sonnet",
@@ -51,6 +53,19 @@ export interface ClaudeModelChoice {
   id: string;
   label: string;
 }
+export function claudeSubagentOptions(
+  nativeModels: ClaudeModelChoice[],
+  gatewayModels: ClaudeModelChoice[],
+  connected: boolean,
+  nativeLabel: string,
+): DefaultSubagentOption[] {
+  const nativeIds = new Set(nativeModels.map((model) => model.id));
+  return [
+    ...nativeModels.map((model) => ({ ...model, label: `${nativeLabel} · ${model.label}` })),
+    ...(connected ? gatewayModels.filter((model) => !nativeIds.has(model.id)) : []),
+  ].map((model) => ({ ...model, native: true, efforts: [], defaultEffort: "" }));
+}
+
 export interface ClaudeSettings {
   default_model: string;
   role_mappings: Record<string, string>;
