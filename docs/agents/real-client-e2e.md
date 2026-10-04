@@ -421,8 +421,13 @@ contracts; accepting a newer version never relaxes these shapes:
   same unattended override used by the Beta3 protocol qualifier). The case
   still requires exactly one completed `command_execution` whose command names
   `sentinel.txt`, `status = completed`, and integer `exit_code = 0`;
-- OpenCode binds the case root with `--dir`, uses a fixed title, and runs
-  `--pure`;
+- OpenCode 1.x binds the case root with `--dir`, uses a fixed title, and runs
+  `--pure`. OpenCode 2.x rejects those flags. The 2.x launch keeps the process
+  working directory as the case root, uses `--standalone` so the run does not
+  attach to a background service, and passes `--auto` so the sentinel read is
+  not left on a permission prompt. Native model discovery still tries
+  `opencode models --verbose`; when that flag is rejected it reads the id-only
+  lines from `opencode models`;
 - Pi receives the complete prompt as one quoted positional message, enables
   only the built-in `read` tool, and disables context files, extensions,
   skills, and prompt templates. Windows batch launch must preserve that single
@@ -435,7 +440,11 @@ contracts; accepting a newer version never relaxes these shapes:
   `status = completed` and integer `exit_code = 0`;
 - OpenCode (contract baseline): `step_start`, completed `tool_use`, `text`, and
   the final `step_finish` whose reason is `stop`; the intermediate
-  `tool-calls` finish is not a terminal;
+  `tool-calls` finish is not a terminal. OpenCode 2.0.22 can leave that final
+  `step_finish` out of stdout when the session goes idle first. A last text
+  part with a finite numeric `time.end` is then the completed stop turn only
+  when that stream has no error event and no `error`, `aborted`, or `length`
+  step finish;
 - Pi and OMP (contract baselines): `tool_execution_end`, assistant
   `message_end`, and `agent_end`. The final assistant message must have
   `stopReason = stop`, no `errorMessage`, and exactly one later `agent_end`.

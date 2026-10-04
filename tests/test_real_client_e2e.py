@@ -2193,6 +2193,37 @@ def test_packaged_gateway_and_materializer_bind_to_their_embedded_python():
     assert "-PythonPath $script:MaterializerPythonPath" in source
 
 
+def test_windows_opencode_v2_launch_drops_removed_flags():
+    source = SCRIPT.read_text(encoding="utf-8")
+    body = source[
+        source.index("function Get-OpenCodeRunArguments"):
+        source.index("function Get-ClientArguments")
+    ]
+    assert "'--standalone'" in body
+    assert "'--auto'" in body
+    assert "'--dir'" in body and "'--pure'" in body
+    assert "2.0.0" in body
+    arguments = source[
+        source.index("function Get-ClientArguments"):
+        source.index("function ConvertFrom-ClientEvents")
+    ]
+    assert "Get-OpenCodeRunArguments" in arguments
+    invoke = source[
+        source.index("function Invoke-ClientAttempt"):
+        source.index("function Measure-AutomatedAttempt")
+    ]
+    assert "OPENCODE_CONFIG" in invoke
+    assert "OPENCODE_DISABLE_DEFAULT_PLUGINS" in invoke
+    parser = source[
+        source.index("function ConvertFrom-ClientEvents"):
+        source.index("function Test-CanonicalModelMatch")
+    ]
+    assert "'error', 'aborted', 'length'" in parser
+    assert "$openCodeHasError.Count -eq 0" in parser
+    assert "[double]::IsNaN" in parser
+    assert "[decimal]" in parser
+
+
 def test_desktop_gui_cases_open_projects_via_ready_second_instance(tmp_path):
     result = _run(
         tmp_path,

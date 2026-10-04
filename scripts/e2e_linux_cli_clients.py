@@ -14,6 +14,7 @@ require_python_313(__file__)
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -549,6 +550,7 @@ def parse_client_output(
     errors = 0
     malformed = 0
     open_code_text: list[str] = []
+    opencode_closed_text = False
     assistant_messages: list[tuple[int, str, str]] = []
     agent_ends: list[int] = []
     last_assistant_line = -1
@@ -608,6 +610,7 @@ def parse_client_output(
             part = event.get("part")
             if not isinstance(part, dict):
                 part = {}
+            opencode_closed_text = False
             state = part.get("state")
             if not isinstance(state, dict):
                 state = {}
@@ -623,6 +626,10 @@ def parse_client_output(
                 )
             elif kind == "text":
                 text_part = part.get("text")
+                time_part = part.get("time")
+                ended = time_part.get("end") if isinstance(time_part, dict) else None
+                # bool is an int subclass; only a finite JSON number closes the part.
+                opencode_closed_text = type(ended) in {int, float} and math.isfinite(ended)
                 if isinstance(text_part, str):
                     open_code_text.append(text_part)
             elif kind == "step_finish":
@@ -664,6 +671,10 @@ def parse_client_output(
                 errors += 1
 
     flush_open_code_text()
+    # OpenCode 2 can exit on session idle before the final step_finish reaches stdout.
+    # A closed text part is the stop turn that was stored for that session.
+    if client == "opencode" and opencode_closed_text and not terminals and errors == 0:
+        terminals.append("completed")
     if client in {"pi", "omp"}:
         final_message = assistant_messages[-1] if assistant_messages else None
         completed = (
@@ -700,6 +711,21 @@ def parse_client_output(
 def assistant_returned_sentinel(client: str, output: str, sentinel: str) -> bool:
     """Require assistant output; an echoed user prompt is not a successful turn."""
     return parse_client_output(client, output, sentinel)["sentinel_chunk_count"] > 0
+
+
+def opencode_launch_command(
+    selector: str, case_root: Path, title: str, prompt: str, version: str
+) -> list[str]:
+    """Build `opencode run` args. V2 removed `--dir` and `--pure`."""
+    command = ["opencode", "run", "--format", "json", "--model", selector]
+    parsed = _version_tuple(version)
+    if parsed is not None and parsed >= (2, 0, 0):
+        command.extend(["--standalone", "--title", title, "--auto", prompt])
+    else:
+        command.extend(
+            ["--dir", str(case_root), "--title", title, "--pure", "--auto", prompt]
+        )
+    return command
 
 
 def _client_launch(
@@ -746,22 +772,20 @@ def _client_launch(
         ]
         input_text = prompt
     elif case.client == "opencode":
-        _copy_tree(managed_root / "opencode", Path(env["XDG_CONFIG_HOME"]) / "opencode")
-        command = [
-            "opencode",
-            "run",
-            "--format",
-            "json",
-            "--model",
+        config_home = Path(env["XDG_CONFIG_HOME"]) / "opencode"
+        _copy_tree(managed_root / "opencode", config_home)
+        version = base_env.get("CODEXHUB_OPENCODE_VERSION", "")
+        if (_version_tuple(version) or (0, 0, 0)) >= (2, 0, 0):
+            env["OPENCODE_CONFIG"] = str(config_home / "opencode.json")
+            env["OPENCODE_DISABLE_DEFAULT_PLUGINS"] = "1"
+            env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+        command = opencode_launch_command(
             case.selector,
-            "--dir",
-            str(case_root),
-            "--title",
+            case_root,
             "codexhub-linux-cli-e2e",
-            "--pure",
-            "--auto",
             prompt,
-        ]
+            version,
+        )
         input_text = None
     elif case.client == "pi":
         agent = home / ".pi" / "agent"
@@ -1197,6 +1221,7 @@ def main(argv: list[str]) -> int:
             args.catalog,
             deepseek_api_key,
         )
+        env["CODEXHUB_OPENCODE_VERSION"] = versions.get("opencode", "")
         refresh_env = env.copy()
         refresh_env.pop("DEEPSEEK_API_KEY", None)
         refresh = None if catalog.is_file() else _run([str(binary), "refresh-models"], env=refresh_env, timeout=180)

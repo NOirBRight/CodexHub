@@ -123,10 +123,7 @@ fn read_config(path: &Path) -> Result<Value, String> {
     }
 }
 
-fn cli_models(path: &Path) -> Vec<NativeSubagentOption> {
-    let Some(executable) = detect_opencode_executable_path() else {
-        return Vec::new();
-    };
+fn run_opencode_models(executable: &Path, config: &Path, args: &[&str]) -> Option<String> {
     let mut command = if executable
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"))
@@ -137,18 +134,20 @@ fn cli_models(path: &Path) -> Vec<NativeSubagentOption> {
     } else {
         Command::new(executable)
     };
-    command.env("OPENCODE_CONFIG", path);
+    command.env("OPENCODE_CONFIG", config);
     command
-        .args(["models", "--verbose"])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     crate::runtime_paths::configure_no_window(&mut command);
     let Ok(mut child) = command.spawn() else {
-        return Vec::new();
+        return None;
     };
     let Some(stdout) = child.stdout.take() else {
-        return Vec::new();
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
     };
     let reader = thread::spawn(move || {
         let mut text = String::new();
@@ -163,11 +162,24 @@ fn cli_models(path: &Path) -> Vec<NativeSubagentOption> {
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Vec::new();
+                return None;
             }
         }
     }
-    parse_cli_models(&reader.join().unwrap_or_default())
+    Some(reader.join().unwrap_or_default())
+}
+
+fn cli_models(path: &Path) -> Vec<NativeSubagentOption> {
+    let Some(executable) = detect_opencode_executable_path() else {
+        return Vec::new();
+    };
+    // OpenCode 2.0.22 rejects `models --verbose` and exits before listing anything.
+    if let Some(text) = run_opencode_models(&executable, path, &["models", "--verbose"]) {
+        return parse_cli_models(&text);
+    }
+    run_opencode_models(&executable, path, &["models"])
+        .map(|text| parse_cli_models(&text))
+        .unwrap_or_default()
 }
 
 fn parse_cli_models(text: &str) -> Vec<NativeSubagentOption> {
@@ -820,6 +832,16 @@ mod native_opencode_tests {
         });
         let actual = read_config(&path).unwrap();
         assert_eq!(actual["agent"], manual["agent"]);
+    }
+
+    #[test]
+    fn parse_cli_models_accepts_id_only_lines_without_metadata() {
+        let options = parse_cli_models("native/child\nnative/other\n");
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].id, "native/child");
+        assert!(options[0].efforts.is_empty());
+        assert_eq!(options[1].id, "native/other");
+        assert_eq!(options[1].label, "native/other");
     }
 
     #[test]
