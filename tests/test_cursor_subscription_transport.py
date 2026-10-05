@@ -10,6 +10,7 @@ import socket
 import ssl
 import subprocess
 import threading
+import time
 from urllib.error import HTTPError
 from urllib.request import Request
 
@@ -22,6 +23,8 @@ from subscription_exchange import open_subscription
 
 
 SECRET = "PRIVATE-CREDENTIAL user@example.invalid private-host.invalid"
+_PEER_SETUP_SECONDS = 3
+_IDLE_SECONDS = .3
 
 
 @pytest.fixture(scope="module")
@@ -33,7 +36,7 @@ def certificate(tmp_path_factory):
     cert, key = root / "cert.pem", root / "key.pem"
     subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes",
                     "-keyout", str(key), "-out", str(cert), "-days", "1",
-                    "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"],
+                    "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
     return cert, key
 
@@ -99,7 +102,9 @@ def local_peer(certificate):
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
         listener.settimeout(3)
-        url = "https://localhost:" + str(listener.getsockname()[1]) + "/Run"
+        # The fixture listens on IPv4; do not spend the behavior deadline on
+        # Windows localhost resolution/IPv6 fallback. TLS still verifies SAN.
+        url = "https://127.0.0.1:" + str(listener.getsockname()[1]) + "/Run"
         accepted = []
         connected = threading.Event()
 
@@ -109,7 +114,8 @@ def local_peer(certificate):
                     raw, _address = listener.accept()
                     accepted.append(True)
                     with context.wrap_socket(raw, server_side=True) as peer:
-                        connected.set()
+                        if mode != "idle":
+                            connected.set()
                         peer.settimeout(3)
                         if mode == "tls":
                             peer.recv(65536)
@@ -125,15 +131,31 @@ def local_peer(certificate):
                             peer.sendall(connection.data_to_send() + bytes.fromhex("00000100000000000078"))
                             peer.recv(65536)
                         elif mode == "reset":
+                            from h2.events import RequestReceived
                             connection = H2Connection(config=H2Configuration(client_side=False))
                             connection.initiate_connection()
                             peer.sendall(connection.data_to_send())
-                            connection.receive_data(peer.recv(65536))
+                            while data := peer.recv(65536):
+                                if any(isinstance(event, RequestReceived) for event in connection.receive_data(data)):
+                                    break
+                            else:
+                                return
                             connection.reset_stream(1)
                             peer.sendall(connection.data_to_send())
-                        elif mode == "idle":
+                            # Let the actual RST_STREAM reach the client. Closing
+                            # with unread request data races it with a Winsock
+                            # read error, which is a different behavior.
                             while peer.recv(65536):
                                 pass
+                        elif mode == "idle":
+                            peer.settimeout(_PEER_SETUP_SECONDS + _IDLE_SECONDS + 1)
+                            from h2.events import DataReceived
+                            connection = H2Connection(config=H2Configuration(client_side=False))
+                            connection.initiate_connection()
+                            peer.sendall(connection.data_to_send())
+                            while data := peer.recv(65536):
+                                if any(isinstance(event, DataReceived) for event in connection.receive_data(data)):
+                                    connected.set()
                         else:
                             peer.recv(65536)
             except (OSError, ssl.SSLError):
@@ -206,9 +228,14 @@ def test_existing_transport_terminal_errors_remain_distinct(tmp_path, local_peer
 def test_transport_deadline_and_cancel_remain_distinct(local_peer, cancelled):
     url, trusted, connected = local_peer("idle")
     cancel = threading.Event()
-    with HTTP2Duplex(url, {}, cancel=cancel, timeout=.3, tls_context_factory=trusted) as transport:
+    started = time.monotonic()
+    # The real transport has a total deadline. Reserve a bounded fixture
+    # setup budget plus the idle interval; never change production deadlines.
+    with HTTP2Duplex(url, {}, cancel=cancel, timeout=_PEER_SETUP_SECONDS + _IDLE_SECONDS,
+                     tls_context_factory=trusted) as transport:
         transport.send(b"request")
-        assert connected.wait(1)
+        assert connected.wait(_PEER_SETUP_SECONDS)
+        assert time.monotonic() - started < _PEER_SETUP_SECONDS
         if cancelled:
             cancel.set()
         with pytest.raises(BackendError) as caught:

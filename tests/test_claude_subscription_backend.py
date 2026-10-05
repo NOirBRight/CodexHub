@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+import claude_subscription_backend
 from claude_subscription_backend import stream_chat
 from claude_subscription_mcp import run_mcp
 from subscription_backend_contract import BackendError
@@ -41,22 +42,28 @@ def tool_events(calls):
     return result + [event("message_delta", delta={"stop_reason": "tool_use"}), event("message_stop")]
 
 
+# Python/MCP startup belongs to the synthetic peer's setup budget, not the
+# subsecond idle behavior exercised after it is ready.
+_FIXTURE_SETUP_SECONDS = 3
+
 _FAKE_CLI = '''import json, os, subprocess, sys, time
 from pathlib import Path
+for stream in (sys.stdin, sys.stdout, sys.stderr):
+    stream.reconfigure(encoding="utf-8")
 args = json.loads(sys.argv[1])
 data = json.loads(sys.argv[2])
 line = sys.stdin.readline()
 Path(data["capture"]).write_text(line, encoding="utf-8")
 if data.get("child"):
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"])
-    Path(data["child"]).write_text(str(child.pid))
+    Path(data["child"]).write_text(str(child.pid), encoding="utf-8")
 helpers = []
 if data.get("calls"):
-    config = json.loads(Path(args[args.index("--mcp-config") + 1]).read_text())
+    config = json.loads(Path(args[args.index("--mcp-config") + 1]).read_text(encoding="utf-8"))
     server = config["mcpServers"]["codexhub"]
     for call in data["calls"]:
         helper = subprocess.Popen([server["command"], *server["args"]], stdin=subprocess.PIPE,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
         helper.stdin.write(json.dumps({"jsonrpc":"2.0", "id":1, "method":"initialize"}) + "\\n")
         helper.stdin.flush()
         assert json.loads(helper.stdout.readline())["result"]["serverInfo"]["name"] == "codexhub-caller-tools"
@@ -68,9 +75,14 @@ if data.get("calls"):
             "name":call["name"], "arguments":call["arguments"], "_meta":{"claudecode/toolUseId":call["id"]}}}) + "\\n")
         helper.stdin.flush()
         helpers.append(helper)
-    time.sleep(.15)
+    deadline = time.monotonic() + data["setup_seconds"]
+    ready = Path(data["callback_ready"])
+    while not ready.exists():
+        assert time.monotonic() < deadline, "actual MCP callback admission was not observed"
+        time.sleep(.005)
+    assert json.loads(ready.read_text(encoding="utf-8")) == {call["id"]: call for call in data["calls"]}
 if data.get("change"):
-    Path(data["change"]).write_text("{}")
+    Path(data["change"]).write_text("{}", encoding="utf-8")
 for value in data["events"]:
     delta = value.get("event", {}).get("delta", {})
     if "_fixture_repeat" in delta:
@@ -82,21 +94,38 @@ time.sleep(3600)
 
 
 @pytest.fixture
-def exchange(tmp_path):
+def exchange(tmp_path, monkeypatch):
     home = tmp_path / "home"
     config = home / ".claude"
     config.mkdir(parents=True)
     auth = config / ".credentials.json"
     auth.write_text(json.dumps({"claudeAiOauth": {"accessToken": "source-private-token", "refreshToken": "refresh-private",
-        "expiresAt": 4_000_000_000_000, "scopes": ["user:inference"]}, "mcpOAuth": {"private": "excluded"}}))
-    (config / "settings.json").write_text('{"env":{"ANTHROPIC_BASE_URL":"http://gateway.invalid"}}')
+        "expiresAt": 4_000_000_000_000, "scopes": ["user:inference"]}, "mcpOAuth": {"private": "excluded"}}), encoding="utf-8")
+    (config / "settings.json").write_text('{"env":{"ANTHROPIC_BASE_URL":"http://gateway.invalid"}}', encoding="utf-8")
     cli = tmp_path / "fake_cli.py"
-    cli.write_text(_FAKE_CLI)
+    cli.write_text(_FAKE_CLI, encoding="utf-8")
     capture = tmp_path / "capture.json"
     roots, children, commands = [], [], []
+    callbacks, observers = [], []
+    original_callback = claude_subscription_backend._Callback
+
+    def observe_callback(*args):
+        callback = original_callback(*args)
+        callbacks.append(callback)
+        return callback
+
+    # Observe the real parent's admission under its lock; do not replace the
+    # MCP process, HTTP handler, or validation. This file is only a fixture
+    # rendezvous and cannot authorize tool delivery.
+    monkeypatch.setattr(claude_subscription_backend, "_Callback", observe_callback)
     env = {"PATH": os.environ.get("PATH", ""), "ANTHROPIC_API_KEY": "ambient-private",
            "ANTHROPIC_BASE_URL": "http://gateway.invalid", "HTTP_PROXY": "http://proxy.invalid",
            "NODE_OPTIONS": "--require=bad", "CLAUDECODE": "1"}
+    # Winsock requires SystemRoot even for a numeric loopback connection.
+    # Supply the OS prerequisite, while retaining the poisoned provider/proxy
+    # settings above so production isolation is still asserted.
+    if os.name == "nt":
+        env["SystemRoot"] = os.environ["SystemRoot"]
 
     def status(binary, args, *, env, cwd, timeout):
         roots.append(cwd)
@@ -104,7 +133,7 @@ def exchange(tmp_path):
         assert env["HOME"] == str(cwd)
         assert not any(key in env for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "HTTP_PROXY", "NODE_OPTIONS", "CLAUDECODE"))
         account = Path(env["CLAUDE_CONFIG_DIR"]) / ".credentials.json"
-        assert set(json.loads(account.read_text())) == {"claudeAiOauth"}
+        assert set(json.loads(account.read_text(encoding="utf-8"))) == {"claudeAiOauth"}
         assert not account.with_name("settings.json").exists()
         if os.name != "nt":
             assert account.stat().st_mode & 0o777 == 0o600
@@ -112,8 +141,9 @@ def exchange(tmp_path):
         return subprocess.CompletedProcess([], 0, '{"loggedIn":true,"apiProvider":"firstParty","authMethod":"claude.ai"}', "")
 
     def invoke(payload=None, *, events=None, calls=None, cancel=None, timeout=3, change=False, child=False):
+        ready = tmp_path / f"callback-ready-{len(commands)}.json"
         data = {"capture": str(capture), "events": text_events() if events is None else events,
-                "calls": calls or []}
+                "calls": calls or [], "callback_ready": str(ready), "setup_seconds": _FIXTURE_SETUP_SECONDS}
         if change:
             data["change"] = str(auth)
         if child:
@@ -125,11 +155,30 @@ def exchange(tmp_path):
             assert command[command.index("--tools") + 1] == ""
             process = subprocess.Popen([sys.executable, "-u", str(cli), json.dumps(command), json.dumps(data)], **kwargs)
             children.append(process)
+            if calls:
+                callback = callbacks[-1]
+                def await_admission():
+                    deadline = time.monotonic() + _FIXTURE_SETUP_SECONDS
+                    while time.monotonic() < deadline and process.poll() is None:
+                        with callback.lock:
+                            admitted = dict(callback.calls)
+                        if set(admitted) == {call["id"] for call in calls}:
+                            pending = ready.with_suffix(".pending")
+                            pending.write_text(json.dumps(admitted), encoding="utf-8")
+                            pending.replace(ready)
+                            return
+                        time.sleep(.005)
+                observer = threading.Thread(target=await_admission, name="fixture-mcp-admission")
+                observers.append(observer)
+                observer.start()
             return process
         return stream_chat(payload or {"model": "claude-exact", "messages": [{"role": "user", "content": "answer"}]},
                            cancel=cancel or threading.Event(), timeout=timeout, source_home=home,
                            environ=env, binary=Path(sys.executable), status_runner=status, process_factory=factory)
-    return invoke, auth, capture, roots, children, commands, tmp_path
+    yield invoke, auth, capture, roots, children, commands, tmp_path
+    for observer in observers:
+        observer.join(timeout=_FIXTURE_SETUP_SECONDS)
+        assert not observer.is_alive()
 
 
 def test_text_stream_preserves_output_and_reaps(exchange):
@@ -141,7 +190,7 @@ def test_text_stream_preserves_output_and_reaps(exchange):
     assert all(row["model"] == "claude-exact" for row in rows)
     assert not any("usage" in row for row in rows)
     assert children[0].poll() is not None and not roots[0].exists()
-    prompt = json.loads(json.loads(capture.read_text())["message"]["content"])
+    prompt = json.loads(json.loads(capture.read_text(encoding="utf-8"))["message"]["content"])
     assert prompt["messages"] == [{"role": "user", "content": "answer"}]
     assert "--no-session-persistence" in commands[0]
 
@@ -171,7 +220,7 @@ def test_actual_private_mcp_parallel_calls_and_exact_history_restart(exchange):
                             {"role": "user", "content": "Continue same conversation"}]
     payload["messages"].insert(0, {"role": "system", "content": "original instructions"})
     list(invoke(payload))
-    history = json.loads(json.loads(capture.read_text())["message"]["content"])
+    history = json.loads(json.loads(capture.read_text(encoding="utf-8"))["message"]["content"])
     assert history["messages"] == payload["messages"]
     assert "user context" in history["adaptation"]
     assert len(children) == 2 and roots[0] != roots[1] and all(not root.exists() for root in roots)
@@ -209,7 +258,7 @@ def test_new_native_call_keeps_completed_history_call_identity_unique(exchange, 
         rows = list(iterator)
         assert rows[0]["choices"][0]["delta"]["tool_calls"][0]["id"] == call["id"]
         assert rows[-1]["choices"][0]["finish_reason"] == "tool_calls"
-    history = json.loads(json.loads(capture.read_text())["message"]["content"])
+    history = json.loads(json.loads(capture.read_text(encoding="utf-8"))["message"]["content"])
     assert history["messages"] == payload["messages"]
     assert all(child.poll() is not None for child in children)
     assert all(not root.exists() for root in roots)
@@ -273,8 +322,13 @@ def test_text_before_pending_tool_streams_without_native_completion(exchange):
     values = text_events("before-tool")[:-2] + tool_events([call])[1:-2]
     for value in values[4:]:
         value["event"]["index"] = 1
-    iterator = invoke(tool_payload(), events=values, calls=[call], timeout=.5)
+    # The deadline includes Windows interpreter/MCP setup. The stream still has
+    # no native message_stop: early text must arrive before the idle timeout.
+    started = time.monotonic()
+    iterator = invoke(tool_payload(), events=values, calls=[call], timeout=_FIXTURE_SETUP_SECONDS + .5)
     assert next(iterator)["choices"][0]["delta"]["content"] == "before-tool"
+    assert time.monotonic() - started < _FIXTURE_SETUP_SECONDS
+    assert all(child.poll() is None for child in children)
     with pytest.raises(BackendError) as error:
         next(iterator)
     assert error.value.code == "timeout"
@@ -326,7 +380,7 @@ def test_account_change_interrupts_before_any_chunk(exchange):
     ({"accessToken": "token", "expiresAt": 4_000_000_000_000, "scopes": []}, "not-eligible")])
 def test_auth_admission_never_launches_cli(exchange, auth, code):
     invoke, path, _, _, children, *_ = exchange
-    path.write_text(json.dumps({"claudeAiOauth": auth}))
+    path.write_text(json.dumps({"claudeAiOauth": auth}), encoding="utf-8")
     with pytest.raises(BackendError) as error:
         list(invoke())
     assert error.value.code == code and children == []
@@ -411,9 +465,9 @@ def test_exact_model_never_substitutes_or_falls_back(exchange):
 
 def test_expiry_during_idle_request_fails_and_reaps(exchange):
     invoke, path, _, roots, children, *_ = exchange
-    auth = json.loads(path.read_text())
+    auth = json.loads(path.read_text(encoding="utf-8"))
     auth["claudeAiOauth"]["expiresAt"] = time.time() + .25
-    path.write_text(json.dumps(auth))
+    path.write_text(json.dumps(auth), encoding="utf-8")
     with pytest.raises(BackendError) as error:
         list(invoke(events=[], timeout=3))
     assert error.value.code == "auth-expired"
@@ -435,7 +489,7 @@ def test_ambiguous_or_wrong_call_identity_never_becomes_success(exchange, histor
 
 
 def test_mcp_cancelled_call_never_returns_placeholder_result(exchange):
-    invoke, _, _, roots, children, *_ = exchange
+    invoke, _, _, roots, children, _, tmp_path = exchange
     calls = [{"id": "toolu-cancelled", "name": "first", "arguments": {}}]
     cancel = threading.Event()
     errors = []
@@ -446,10 +500,13 @@ def test_mcp_cancelled_call_never_returns_placeholder_result(exchange):
             errors.append(error.code)
     thread = threading.Thread(target=read)
     thread.start()
-    time.sleep(.4)
+    deadline = time.monotonic() + _FIXTURE_SETUP_SECONDS
+    while not (tmp_path / "callback-ready-0.json").exists() and time.monotonic() < deadline:
+        time.sleep(.005)
     cancel.set()
     thread.join(timeout=1)
     assert not thread.is_alive() and errors == ["cancelled"]
+    assert (tmp_path / "callback-ready-0.json").exists()
     assert all(child.poll() is not None for child in children) and all(not root.exists() for root in roots)
 
 
