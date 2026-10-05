@@ -4,6 +4,7 @@ import json
 import hashlib
 import http.client
 import gzip
+import os
 import sys
 import subprocess
 import shutil
@@ -28,6 +29,51 @@ spec.loader.exec_module(qualification)
 def capture(value="AA\u200b界", request="request"):
     return observation.FixtureCapture(observation.fixture_plan(value),
         {"run_id": "run", "case": "cursor-to-official", "epoch": 1, "request_id": request})
+
+
+def test_unsupported_private_storage_rejects_before_serialization_or_file_creation(tmp_path, monkeypatch):
+    # Exercise the real Windows capability on Windows and its refusal on POSIX.
+    monkeypatch.setattr(os, "fchmod", None, raising=False)
+    monkeypatch.setattr(observation.json, "dumps", lambda *a, **kw: pytest.fail("serialization before capability"))
+    with pytest.raises(NotImplementedError, match="private-storage-unsupported"):
+        observation.private_json(tmp_path / "raw.json", {"value": "inert fixture"})
+    with pytest.raises(NotImplementedError, match="private-storage-unsupported"):
+        capture().persist(tmp_path / "capture.json")
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("purpose", ["prepare", "observe", "run-case", "gateway"])
+def test_unsupported_private_storage_precedes_import_accounts_cli_and_output(tmp_path, monkeypatch, purpose):
+    monkeypatch.setattr(os, "fchmod", None, raising=False)
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsupported storage must precede observer/account/CLI/code execution")
+    monkeypatch.setattr(qualification, "load_observation", forbidden)
+    monkeypatch.setattr(qualification, "freeze_observation", forbidden)
+    monkeypatch.setattr(qualification, "freeze_candidate", forbidden)
+    monkeypatch.setattr(qualification, "run_case", forbidden if purpose != "run-case" else qualification.run_case)
+    monkeypatch.setattr(qualification.shutil, "which", forbidden)
+    monkeypatch.setattr(qualification.tempfile, "TemporaryDirectory", forbidden)
+    monkeypatch.setattr(observation, "install_gateway_observation", forbidden)
+    monkeypatch.setattr(observation.runpy, "run_path", forbidden)
+    # Source admission remains earlier than storage admission; only Git is allowed.
+    def git_only(command, **kwargs):
+        assert command[0] == "git", "CLI probe before capability refusal"
+        return SimpleNamespace(returncode=0, stdout="" if "status" in command else "fixture-sha")
+    monkeypatch.setattr(qualification.subprocess, "run", git_only)
+    output = tmp_path / "output.json"
+    with pytest.raises(NotImplementedError, match="private-storage-unsupported"):
+        if purpose == "run-case":
+            qualification.run_case("cursor-to-official", ROOT, tmp_path, tmp_path, tmp_path / "cli", 1,
+                                   observation_plan=observation.fixture_plan())
+        elif purpose == "gateway":
+            observation.main(["--gateway", "--plan", str(tmp_path / "absent-plan"),
+                              "--tickets", str(tmp_path / "tickets"), "--port", "1"])
+        else:
+            args = ["--checkout", str(ROOT), "--codex", str(tmp_path / "cli"), "--output", str(output)]
+            args += (["--prepare-fixture", str(output)] if purpose == "prepare" else
+                     ["--observe-fixture", str(tmp_path / "absent-plan"), "--case", "cursor-to-official"])
+            qualification.main(args)
+    assert list(tmp_path.iterdir()) == []
 
 
 def observed_run(tap, transport, payload=None, cancel=None):
@@ -114,7 +160,8 @@ def test_public_exchange_persists_rejection_and_preserves_owner_lifecycle(tmp_pa
     import subscription_exchange as exchange
     plan = observation.fixture_plan("123456789abcdddef1234567")
     correlation = {"run_id": plan["run_id"], "case": plan["case"], "epoch": 1, "request_id": "b" * 32}
-    observation.private_json(tmp_path / "peer-12345.json", correlation)
+    # Inert correlation fixture, not an assertion of private storage support.
+    (tmp_path / "peer-12345.json").write_bytes(json.dumps(correlation).encode())
     closed, cancelled = threading.Event(), threading.Event()
     native_captures = []
     original_capture = observation.FixtureCapture
@@ -169,7 +216,7 @@ def test_public_exchange_persists_rejection_and_preserves_owner_lifecycle(tmp_pa
     item = json.loads(json.dumps(qualification.aggregate_fixture_observations([parent], tmp_path, observation, requests)))[0]
     assert item["capture_failure"] is None
     assert item["boundaries"]["fixtureinput"]["utf8_hex"] == plan["value"].encode().hex()
-    if mode.startswith("writer-"):
+    if mode.startswith("writer-") or os.name != "posix":
         assert not sidecar.exists()
         assert item["native_report"] == {"state": "unavailable", "reason": "missing", "cause": "unknown"}
         assert "native_capture_failure" not in item  # Its actual cause cannot be recovered from absence.
@@ -244,7 +291,7 @@ def test_public_aggregation_rejects_mismatched_native_correlation(tmp_path, key,
     parent = capture()
     native = observation.FixtureCapture(parent.plan, dict(parent.correlation, **{key: value}))
     native.value("nativefield", parent.plan["value"])
-    native.persist(tmp_path / "request.json")
+    (tmp_path / "request.json").write_bytes(json.dumps(native.report()).encode())  # inert mismatched report
     requests = [{"fixture_request_id": "request", "epoch": 1, "model": qualification.CURSOR_MODEL}]
     with pytest.raises(ValueError, match="fixture-correlation-mismatch"):
         qualification.aggregate_fixture_observations([parent], tmp_path, observation, requests)
@@ -270,13 +317,23 @@ def test_public_native_stream_exact_loss_controls_and_split_utf8(tmp_path, value
         assert rows[stage]["exact_fixture"] == (value == "AA\u200b界")
     assert all(s.closed for s in transport.streams)
     assert "SECRET" not in json.dumps(tap.report())
-    tap.persist(tmp_path / "request.json")
+    if os.name != "posix":
+        with pytest.raises(NotImplementedError, match="private-storage-unsupported"):
+            tap.persist(tmp_path / "request.json")
+        assert not (tmp_path / "request.json").exists()
+    else:
+        tap.persist(tmp_path / "request.json")
     parent = observation.FixtureCapture(tap.plan, tap.correlation)
     requests = [{"fixture_request_id": "request", "epoch": 1, "model": qualification.CURSOR_MODEL}]
     item = qualification.aggregate_fixture_observations([parent], tmp_path, observation, requests)[0]
-    assert "native_report" not in item and item["native_capture_failure"] is None
-    for stage in ("nativefield", "canonicalchunks"):
-        assert item["boundaries"][stage] == rows[stage]
+    if os.name == "posix":
+        assert "native_report" not in item and item["native_capture_failure"] is None
+        for stage in ("nativefield", "canonicalchunks"):
+            assert item["boundaries"][stage] == rows[stage]
+    else:
+        assert item["native_report"] == {"state": "unavailable", "reason": "missing", "cause": "unknown"}
+        for stage in ("adaptedhistory", "servedhistoryblob", "nativefield", "canonicalchunks"):
+            assert item["boundaries"][stage] == {"state": "incomplete", "complete": False}
 
 
 def test_public_stream_noninterference_calls_order_errors_and_close():
@@ -385,6 +442,13 @@ def test_public_http_correlates_real_served_history_and_preserves_item_call_iden
     from tests.gateway_harness import GatewayHarness, GATEWAY_CLIENT_KEY, parsed_sse_events, require_single_terminal
     value = "AA\u200b界"
     plan = observation.fixture_plan(value)
+    native_captures = []
+    original_capture = observation.FixtureCapture
+    def collect(*args, **kwargs):
+        tap = original_capture(*args, **kwargs)
+        native_captures.append(tap)
+        return tap
+    monkeypatch.setattr(observation, "FixtureCapture", collect)
     original_exchange = subscription_exchange.open_subscription
     observation.install_gateway_observation(tmp_path, plan)
     real = backend.stream_chat
@@ -430,8 +494,8 @@ def test_public_http_correlates_real_served_history_and_preserves_item_call_iden
             connection.connect()
             correlation = {"run_id": plan["run_id"], "case": plan["case"], "epoch": 1, "request_id": "a" * 32}
             ticket = tmp_path / f"peer-{connection.sock.getsockname()[1]}.json"
-            observation.private_json(ticket, correlation)
-            tap = observation.FixtureCapture(plan, correlation)
+            ticket.write_bytes(json.dumps(correlation).encode())  # inert test correlation only
+            tap = original_capture(plan, correlation)
             tap.leaves("callerpayload", payload["input"])
             sse = observation.DownstreamTap(tap)
             connection.request("POST", "/v1/responses", body=before.encode(), headers={"Authorization": "Bearer " + GATEWAY_CLIENT_KEY, "Content-Type": "application/json"})
@@ -444,7 +508,14 @@ def test_public_http_correlates_real_served_history_and_preserves_item_call_iden
                 sse.feed(bytes([byte]))
             sse.finish()
             require_single_terminal(parsed_sse_events(data))
-            report = json.loads((tmp_path / ("a" * 32 + ".json")).read_bytes())
+            sidecar = tmp_path / ("a" * 32 + ".json")
+            if os.name == "posix":
+                report = json.loads(sidecar.read_bytes())
+                assert sidecar.stat().st_mode & 0o777 == 0o600
+            else:
+                assert not sidecar.exists()
+                assert len(native_captures) == 1
+                report = native_captures[0].report()  # bounded memory is not private persistence
             assert report["correlation"] == correlation
             rows = report["boundaries"]
             for stage in ("adaptedhistory", "servedhistoryblob"):
@@ -457,7 +528,6 @@ def test_public_http_correlates_real_served_history_and_preserves_item_call_iden
             assert json.dumps(payload, ensure_ascii=False) == before
             assert qualification.observe_request(payload, 1, value)["tool_outputs"][0]["call_sha256"] == hashlib.sha256(b"original-call").hexdigest()
             assert all(s.closed for s in transport.streams)
-            assert (tmp_path / ("a" * 32 + ".json")).stat().st_mode & 0o777 == 0o600
     finally:
         subscription_exchange.open_subscription = original_exchange
 
@@ -469,6 +539,7 @@ def test_preparation_has_no_cli_account_access_and_rollouts_do_not_relabel_old_e
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, target)
     subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "core.autocrlf", "false"], check=True)
     subprocess.run(["git", "-C", str(source), "add", "."], check=True)
     subprocess.run(["git", "-C", str(source), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], check=True)
     spec = importlib.util.spec_from_file_location("preparation_fixture", source / qualification.OBSERVATION_WRAPPERS[0])
@@ -480,11 +551,16 @@ def test_preparation_has_no_cli_account_access_and_rollouts_do_not_relabel_old_e
         return real_run(command, **kwargs)
     monkeypatch.setattr(module.subprocess, "run", no_cli)
     plan = tmp_path / "approved.json"
-    assert module.main(["--checkout", str(source), "--prepare-fixture", str(plan)]) == 0
-    assert observation.validate_plan(json.loads(plan.read_bytes()))
-    value = json.loads(plan.read_bytes())["value"]
-    assert len(value.encode()) == 24 and any(value[i:i+3] == value[i] * 3 for i in range(len(value) - 2))
-    assert plan.stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert module.main(["--checkout", str(source), "--prepare-fixture", str(plan)]) == 0
+        assert observation.validate_plan(json.loads(plan.read_bytes()))
+        value = json.loads(plan.read_bytes())["value"]
+        assert len(value.encode()) == 24 and any(value[i:i+3] == value[i] * 3 for i in range(len(value) - 2))
+        assert plan.stat().st_mode & 0o777 == 0o600
+    else:
+        with pytest.raises(NotImplementedError, match="private-storage-unsupported"):
+            module.main(["--checkout", str(source), "--prepare-fixture", str(plan)])
+        assert not plan.exists()
     path = tmp_path / "rollout.jsonl"
     def final(text):
         return {"type": "response_item", "payload": {"type": "message", "role": "assistant", "phase": "final_answer", "content": [{"type": "output_text", "text": text}]}}
@@ -511,7 +587,8 @@ def test_resource_rejection_does_not_change_public_stream(tmp_path, monkeypatch)
     assert "utf8_hex" not in json.dumps(report)
     assert all(s.closed for s in transport.streams)
     # Byte budget is independent of completion/whitelist admission.
-    with pytest.raises(ValueError, match="file-limit"):
+    error, reason = (ValueError, "file-limit") if os.name == "posix" else (NotImplementedError, "private-storage-unsupported")
+    with pytest.raises(error, match=reason):
         observation.private_json(tmp_path / "large.json", {"value": "x" * observation.MAX_REPORT_BYTES})
     assert not (tmp_path / "large.json").exists()
     monkeypatch.setattr(observation, "MAX_PARSE_BYTES", 100)
@@ -536,6 +613,7 @@ def test_observation_admission_includes_executed_wrappers(tmp_path, monkeypatch,
         shutil.copyfile(ROOT / name, target)
     (source / "src-python").mkdir()
     subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "core.autocrlf", "false"], check=True)
     subprocess.run(["git", "-C", str(source), "add", "."], check=True)
     subprocess.run(["git", "-C", str(source), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], check=True)
     path = source / "scripts/subscription_fixture_observer.py"
@@ -550,7 +628,7 @@ def test_observation_admission_includes_executed_wrappers(tmp_path, monkeypatch,
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     plan = tmp_path / "plan.json"
-    observation.private_json(plan, observation.fixture_plan())
+    plan.write_bytes(json.dumps(observation.fixture_plan()).encode())  # inert approval fixture
     monkeypatch.setattr(module, "freeze_candidate", lambda *a: pytest.fail("dirty wrapper must fail before freeze/accounts"))
     real_run = subprocess.run
     probes = []
@@ -565,17 +643,23 @@ def test_observation_admission_includes_executed_wrappers(tmp_path, monkeypatch,
             module.main(["--checkout", str(source), "--prepare-fixture", str(tmp_path / "prepared.json")])
         assert not (tmp_path / "prepared.json").exists()
     else:
-        assert module.main(["--checkout", str(source), "--codex", sys.executable, "--observe-fixture", str(plan),
-                            "--case", "cursor-to-official", "--output", str(tmp_path / "report.json")]) == 1
-        report = json.loads((tmp_path / "report.json").read_bytes())
-        assert report["source_runtime_dirty"] and not report["candidate_sha_is_exact_runtime"]
+        args = ["--checkout", str(source), "--codex", sys.executable, "--observe-fixture", str(plan),
+                "--case", "cursor-to-official", "--output", str(tmp_path / "report.json")]
+        if os.name == "posix":
+            assert module.main(args) == 1
+            report = json.loads((tmp_path / "report.json").read_bytes())
+            assert report["source_runtime_dirty"] and not report["candidate_sha_is_exact_runtime"]
+        else:
+            with pytest.raises(NotImplementedError, match="private-storage-unsupported"):
+                module.main(args)
+            assert not (tmp_path / "report.json").exists()
     assert not (tmp_path / "dirty-observer-ran").exists()
     assert probes == []
 
 
 def test_observation_rejects_different_checkout_before_import_or_probe(tmp_path, monkeypatch):
     plan = tmp_path / "plan.json"
-    observation.private_json(plan, observation.fixture_plan())
+    plan.write_bytes(json.dumps(observation.fixture_plan()).encode())  # inert approval fixture
     monkeypatch.setattr(qualification, "load_observation", lambda *a: pytest.fail("unadmitted import"))
     monkeypatch.setattr(qualification.subprocess, "run", lambda *a, **kw: pytest.fail("unadmitted probe"))
     with pytest.raises(SystemExit):
@@ -591,6 +675,7 @@ def test_freeze_hashes_and_executes_exact_wrapper_bytes(tmp_path):
         path.parent.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / name, path)
     subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "core.autocrlf", "false"], check=True)
     subprocess.run(["git", "-C", str(source), "add", "."], check=True)
     subprocess.run(["git", "-C", str(source), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], check=True)
     sha = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()

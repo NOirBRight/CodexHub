@@ -42,6 +42,12 @@ OBSERVATION_WRAPPERS = ("scripts/qualify_subscription_codemode.py", "scripts/sub
                         "scripts/codexhub-python.cmd", "scripts/codexhub-python.ps1", "scripts/Resolve-CodexHubPython.ps1")
 
 
+def require_private_storage():
+    """Qualification storage follows the POSIX evidence-grant capability policy."""
+    if os.name != "posix" or not callable(getattr(os, "fchmod", None)):
+        raise NotImplementedError("private-storage-unsupported: POSIX owner-only creation required; Windows ACLs unproven")
+
+
 def load_observation(path):
     spec = importlib.util.spec_from_file_location("qualified_fixture_observer", path)
     module = importlib.util.module_from_spec(spec)
@@ -446,6 +452,8 @@ def aggregate_fixture_observations(captures, tickets, observation, requests):
 
 def run_case(case, checkout, source_codex, source_user, codex, timeout, observation_plan=None):
     """Run one disposable production candidate; cleanup includes raw accounts/logs."""
+    if observation_plan is not None:
+        require_private_storage()
     case_started = time.monotonic()
     from claude_native_models import concrete_executable
     cursor = shutil.which("cursor-agent")
@@ -755,7 +763,7 @@ def main(argv=None):
     parser.add_argument("--checkout", type=Path, default=ROOT)
     parser.add_argument("--source-codex-home", type=Path, default=Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex"))
     parser.add_argument("--source-user-home", type=Path, default=Path.home())
-    parser.add_argument("--codex", type=Path, default=Path(shutil.which("codex") or "codex"))
+    parser.add_argument("--codex", type=Path)
     parser.add_argument("--case", choices=CASES, action="append")
     parser.add_argument("--case-timeout", type=int, default=180)
     parser.add_argument("--total-timeout", type=int, default=1200)
@@ -774,7 +782,7 @@ def main(argv=None):
     if len(selected_cases) > 4 or len(set(selected_cases)) != len(selected_cases):
         parser.error("select at most four distinct cases; duplicate cases are not allowed")
     if args.observe_fixture:
-        if selected_cases != ("cursor-to-official",) or args.observe_fixture.stat().st_size > 65536:
+        if selected_cases != ("cursor-to-official",):
             parser.error("fixture observation requires one cursor-to-official case and a bounded approval")
     observing = bool(args.observe_fixture or args.prepare_fixture)
     if observing:
@@ -791,6 +799,11 @@ def main(argv=None):
     report["candidate_sha_is_exact_runtime"] = not report["source_runtime_dirty"]
     if args.prepare_fixture and report["source_runtime_dirty"]:
         raise ValueError("candidate-runtime-not-clean")
+    if observing:
+        require_private_storage()
+        if args.observe_fixture and args.observe_fixture.stat().st_size > 65536:
+            parser.error("fixture observation requires one cursor-to-official case and a bounded approval")
+    args.codex = args.codex or Path(shutil.which("codex") or "codex")
     plan = None
     started = time.monotonic()
     if not report["candidate_sha_is_exact_runtime"]:

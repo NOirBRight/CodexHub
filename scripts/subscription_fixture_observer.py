@@ -61,7 +61,14 @@ def validate_plan(plan):
     return plan
 
 
+def require_private_storage():
+    """Mode bits prove owner-only creation on POSIX, not Windows ACL privacy."""
+    if os.name != "posix" or not callable(getattr(os, "fchmod", None)):
+        raise NotImplementedError("private-storage-unsupported: POSIX owner-only creation required; Windows ACLs unproven")
+
+
 def private_json(path, value):
+    require_private_storage()
     data = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
     if len(data) > MAX_REPORT_BYTES:
         raise ValueError("observation-file-limit")
@@ -436,6 +443,7 @@ def main(argv=None):
     parser.add_argument("--tickets", type=Path, required=True)
     parser.add_argument("--port", type=int, required=True)
     args = parser.parse_args(argv)
+    require_private_storage()
     if args.plan.stat().st_size > 65536:
         raise ValueError("fixture-plan-limit")
     plan = validate_plan(json.loads(args.plan.read_bytes()))
