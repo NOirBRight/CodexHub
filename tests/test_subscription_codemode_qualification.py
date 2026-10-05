@@ -138,9 +138,12 @@ def test_harness_rejects_duplicate_cases_before_any_candidate_or_inference(tmp_p
         qualification.main(["--case", "code-mode", "--case", "code-mode", "--output", str(tmp_path / "result.json")])
 
 
-@pytest.mark.parametrize("with_observation", [False, True])
-def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup(tmp_path, monkeypatch, record_property, with_observation):
+@pytest.mark.parametrize("mode", ["default", "observed", "gzip-budget", "plain-budget", "depth-budget", "node-budget", "request-budget"])
+def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup(tmp_path, monkeypatch, record_property, mode):
     import os
+    import gzip
+    import http.client
+    with_observation = mode != "default"
     if os.name == "nt":
         pytest.skip("POSIX fake executable fixture")
     source, user, frozen = tmp_path / "codex-source", tmp_path / "user", tmp_path / "candidate"
@@ -168,6 +171,58 @@ def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup
         fake.write_text(f'#!{sys.executable}\nimport json,sys\nif sys.argv[1] == "--version": print("codex-cli 0.159.3")\nelse:\n print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":{compound!r}}}}}))\n raise SystemExit(1)\n')
         runner = module.run_case
         assert set(manifest) == set(qualification.OBSERVATION_WRAPPERS)
+        if mode.endswith("budget"):
+            observer_module = module.load_observation(frozen / "scripts/subscription_fixture_observer.py")
+            observer_module.MAX_PARSE_BYTES = 256
+            if mode == "request-budget":
+                observer_module.MAX_REQUESTS = 0
+            monkeypatch.setattr(module, "load_observation", lambda *args: observer_module)
+            body = json.dumps({"model": "inert-unknown-model", "input": [{"role": "user", "content": "x" * 300}]}).encode()
+            if mode == "depth-budget":
+                body = b'{"model":"inert-unknown-model","input":' + b'[' * 20 + b'0' + b']' * 20 + b'}'
+            if mode == "node-budget":
+                observer_module.MAX_PARSE_BYTES = 16384
+                body = b'{"model":"inert-unknown-model","input":[' + b'0,' * 4096 + b'0]}'
+            encoding = "gzip" if mode == "gzip-budget" else "identity"
+            if encoding == "gzip":
+                body = gzip.compress(body)
+            fake.write_text(f'''#!{sys.executable}
+import http.client,json,os,tomllib
+from pathlib import Path
+import sys
+if sys.argv[1] == "--version":
+ print("codex-cli 0.159.3")
+else:
+ config=tomllib.loads((Path(os.environ["CODEX_HOME"])/"config.toml").read_text())
+ url=config["model_providers"]["qualification"]["base_url"]
+ from urllib.parse import urlsplit
+ connection=http.client.HTTPConnection(urlsplit(url).netloc,timeout=3)
+ connection.request("POST","/v1/responses",body={body!r},headers={{"Content-Encoding":{encoding!r},"Authorization":"Bearer "+os.environ["SUBSCRIPTION_QUALIFICATION_KEY"],"Content-Type":"application/json"}})
+ response=connection.getresponse();response.read();connection.close()
+ print(json.dumps({{"type":"turn.failed"}}))
+ raise SystemExit(1)
+''')
+            forwarded = []
+            original_request = http.client.HTTPConnection.request
+            def measured_request(connection, method, url, body=None, headers={}, **kwargs):
+                if method == "POST":
+                    forwarded.append((body, dict(headers)))
+                return original_request(connection, method, url, body, headers, **kwargs)
+            monkeypatch.setattr(http.client.HTTPConnection, "request", measured_request)
+            parsed_requests, decoded_reads = [], []
+            original_loads = json.loads
+            def measured_loads(data, *args, **kwargs):
+                if isinstance(data, (bytes, bytearray)) and b"inert-unknown-model" in data:
+                    parsed_requests.append(len(data))
+                return original_loads(data, *args, **kwargs)
+            monkeypatch.setattr(json, "loads", measured_loads)
+            original_gzip = gzip.GzipFile
+            class MeasuredGzip(original_gzip):
+                def read1(self, size=-1):
+                    result = super().read1(size)
+                    decoded_reads.append((size, len(result)))
+                    return result
+            monkeypatch.setattr(gzip, "GzipFile", MeasuredGzip)
     monkeypatch.syspath_prepend(str(frozen / "src-python"))
     monkeypatch.setenv("PATH", str(installed) + os.pathsep + os.environ.get("PATH", os.defpath))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
@@ -175,7 +230,24 @@ def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup
     result = runner("cursor-to-official" if with_observation else "code-mode", frozen, source, user, fake, 30,
                     **({"observation_plan": plan} if plan else {}))
     assert len(result["gateway_pids"]) == 1
-    assert result["requests"] == []  # no model request, even to a fake server
+    if mode.endswith("budget"):
+        assert len(result["requests"]) == 1
+        assert result["requests"][0]["status"] >= 400  # unknown model; never inference
+        assert forwarded == [(body, {"Accept-Encoding": "identity", "Content-Encoding": encoding, "Authorization": forwarded[0][1]["Authorization"],
+            "Content-Type": "application/json", "Content-Length": str(len(body))})]
+        row = result["requests"][0]
+        assert parsed_requests == []  # Reject before stdlib materializes the tree.
+        if mode == "gzip-budget":
+            assert decoded_reads and all(0 < size <= 257 for size, _ in decoded_reads)
+            assert sum(size for _, size in decoded_reads) <= 257  # Budget + one sentinel byte.
+        if mode == "request-budget":
+            assert row["fixture_observation_absent"] == "request-count-limit"
+            assert "model" not in row  # No parser work after count rejection.
+        else:
+            assert row["observation_invalid"]
+            assert result["fixture_observations"][0]["capture_failure"] == "observation-incomplete"
+    else:
+        assert result["requests"] == []  # no inference request
     assert result["failure_class"] is None
     assert not result["checks"]["passed"]
     assert result["private_tree_removed"]
@@ -186,7 +258,7 @@ def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup
     record_property("scope", "synthetic-no-inference")
     record_property("owned_pids_reaped", json.dumps(owned_pids))
     record_property("private_tree_removed", str(result["private_tree_removed"]))
-    if with_observation:
+    if mode == "observed":
         assert result["fixture_observations"][0]["boundaries"]["fixtureinput"]["utf8_hex"] == (plan["value"] + "\n").encode().hex()
         assert result["fixture_observations"][0]["boundaries"]["nativefield"]["state"] == "absent"
         assert result["turns"][0]["finals"] == [{"sha256": qualification.digest(compound), "length": 49, "zero_width_count": 0}]

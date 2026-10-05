@@ -36,6 +36,133 @@ def observed_run(tap, transport, payload=None, cancel=None):
         account_reader=lambda **kwargs: SimpleNamespace(check=lambda: None, token="SECRET-INERT", version="fixture"))
 
 
+@pytest.mark.parametrize("terminal,exit_code,timed_out", [(None, 0, False), ("error", 0, False),
+    ("turn.failed", 0, False), (None, 1, False), (None, 0, True)])
+def test_public_caller_parser_admits_only_successful_completed_finals(terminal, exit_code, timed_out):
+    value = "AA\u200b界"
+    events = [{"type": "item.completed", "item": {"type": "agent_message", "text": value}}]
+    if terminal:
+        events.append({"type": terminal, "error": {"message": "inert failure"}})
+    tap = capture()
+    qualification.parse_turn("\n".join(map(json.dumps, events)),
+        SimpleNamespace(returncode=exit_code, pid=1), timed_out, value, tap)
+    row = tap.report()["boundaries"]["callerstdout"]
+    successful = terminal is None and exit_code == 0 and not timed_out
+    assert row["complete"] is successful
+    assert row["sha256"] == hashlib.sha256(value.encode()).hexdigest()
+    assert row["utf8_bytes"] == len(value.encode())
+    assert ("utf8_hex" in row) is successful
+    assert row["rejection"] == (None if successful else "incomplete")
+
+
+def test_native_remaining_budget_precedes_decompression(monkeypatch):
+    import cursor_subscription_wire as wire
+    monkeypatch.setattr(observation, "MAX_PARSE_BYTES", 100)
+    reads = []
+    original = gzip.GzipFile
+    class MeasuredGzip(original):
+        def read(self, size=-1):
+            data = super().read(size)
+            reads.append((size, len(data)))
+            return data
+        def read1(self, size=-1):
+            data = super().read1(size)
+            reads.append((size, len(data)))
+            return data
+    monkeypatch.setattr(gzip, "GzipFile", MeasuredGzip)
+    tap = capture()
+    native = observation.NativeTap(tap)
+    # Incoming and outgoing share the same decoded allowance, across calls.
+    first = framed(b"{}", 2)
+    tap.guard(native.feed, first, False)
+    compressed = framed(gzip.compress(pb(1, pb(1, pb(1, "A" * 200)))), 1)
+    tap.guard(native.feed, compressed, True)
+    assert tap.failure == "observation-incomplete"
+    assert reads and all(0 < requested <= 99 and produced <= 99 for requested, produced in reads)
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_owner_optional_budget_bounds_multiple_frames_and_preserves_default(compressed):
+    from cursor_subscription_wire import Frames
+    bodies = [b"ab", b"cd", b"ef"]
+    data = b"".join(framed(gzip.compress(body), 1) if compressed else framed(body) for body in bodies)
+    expected = [(False, body) for body in bodies]
+    assert Frames().feed(data) == expected
+    assert Frames().feed(data, decoded_budget=6, frame_budget=3) == expected
+    with pytest.raises(BackendError) as error:
+        Frames().feed(data, decoded_budget=5)
+    assert error.value.code == "upstream-protocol-error"
+    with pytest.raises(BackendError):
+        Frames().feed(data, frame_budget=2)
+    parser = Frames()
+    assert parser.feed(data[:4], decoded_budget=6) == []
+    assert parser.feed(data[4:], decoded_budget=6) == expected
+
+
+def test_observed_request_json_capacity_scan_leaves_strings_to_stdlib():
+    payload = {"input": [{"role": "user", "content": '界\\\"' + '[{:0,}]' * 600}]}
+    body = json.dumps(payload, ensure_ascii=False).encode()
+    for encoding, data in [("identity", body), ("gzip", gzip.compress(body))]:
+        assert observation.request_payload(data, encoding) == payload
+
+
+@pytest.mark.parametrize("mode", ["rejected", "owner-error", "cancel", "writer-error"])
+def test_public_exchange_persists_rejection_and_preserves_owner_lifecycle(tmp_path, monkeypatch, mode):
+    from urllib.request import Request
+    from urllib.error import HTTPError
+    import cursor_subscription_backend as backend
+    import subscription_exchange as exchange
+    plan = observation.fixture_plan("123456789abcdddef1234567")
+    correlation = {"run_id": plan["run_id"], "case": plan["case"], "epoch": 1, "request_id": "b" * 32}
+    observation.private_json(tmp_path / "peer-12345.json", correlation)
+    closed, cancelled = threading.Event(), threading.Event()
+    def inert(payload, *, cancel, **kwargs):
+        try:
+            if mode in ("owner-error", "writer-error"):
+                raise BackendError("inert-owner-error", "synthetic owner failure")
+            yield {"choices": [{"delta": {"content": plan["value"]}, "finish_reason": None}]}
+            if mode == "cancel":
+                assert cancel.wait(2)
+                cancelled.set()
+                raise BackendError("cancelled", "synthetic cancellation", 499)
+            yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+        finally:
+            closed.set()
+    monkeypatch.setattr(backend, "stream_chat", inert)
+    monkeypatch.setattr(exchange, "open_subscription", exchange.open_subscription)
+    observation.install_gateway_observation(tmp_path, plan)
+    if mode == "writer-error":
+        monkeypatch.setattr(observation, "private_json", lambda *a: (_ for _ in ()).throw(OSError("inert writer failure")))
+    class Socket:
+        def getpeername(self):
+            return ("127.0.0.1", 12345)
+    payload = {"stream": True, "messages": [{"role": "user", "content": plan["value"]}] * 65}
+    request = Request("https://inert.invalid", data=json.dumps(payload).encode())
+    if mode in ("owner-error", "writer-error"):
+        with pytest.raises(HTTPError) as error:
+            with exchange.open_subscription(request, provider_id="cursor-subscription", timeout=3, downstream_socket=Socket()):
+                pytest.fail("owner error must win")
+        assert json.loads(error.value.read())["error"]["code"] == "inert-owner-error"
+    else:
+        with exchange.open_subscription(request, provider_id="cursor-subscription", timeout=3, downstream_socket=Socket()) as response:
+            if mode == "cancel":
+                assert plan["value"].encode() in response.readline()
+            else:
+                assert b"[DONE]" in response.read()
+    assert closed.wait(1)
+    if mode == "cancel":
+        assert cancelled.is_set()
+    sidecar = tmp_path / (correlation["request_id"] + ".json")
+    if mode == "writer-error":
+        assert not sidecar.exists()
+    else:
+        report = json.loads(sidecar.read_bytes())
+        assert report["capture_failure"] == "observation-incomplete"
+        assert len(report["boundaries"]["adaptedhistory"]["leaves"]) == 64
+        assert "utf8_hex" not in json.dumps(report) and "codepoints" not in json.dumps(report)
+        assert sidecar.stat().st_mode & 0o777 == 0o600
+
+
 @pytest.mark.parametrize("value", ["AA\u200b界", "A\u200b界", "AA界"])
 @pytest.mark.parametrize("compressed", [False, True])
 def test_public_native_stream_exact_loss_controls_and_split_utf8(value, compressed):
@@ -241,9 +368,24 @@ def test_public_http_correlates_real_served_history_and_preserves_item_call_iden
 
 
 def test_preparation_has_no_cli_account_access_and_rollouts_do_not_relabel_old_epochs(tmp_path, monkeypatch):
-    monkeypatch.setattr(qualification.subprocess, "run", lambda *a, **kw: pytest.fail("setup must not launch a CLI/git/account operation"))
+    source = tmp_path / "source"
+    for name in qualification.OBSERVATION_WRAPPERS:
+        target = source / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / name, target)
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], check=True)
+    spec = importlib.util.spec_from_file_location("preparation_fixture", source / qualification.OBSERVATION_WRAPPERS[0])
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    real_run = subprocess.run
+    def no_cli(command, **kwargs):
+        assert command[0] == "git", "setup must not launch a CLI/account operation"
+        return real_run(command, **kwargs)
+    monkeypatch.setattr(module.subprocess, "run", no_cli)
     plan = tmp_path / "approved.json"
-    assert qualification.main(["--prepare-fixture", str(plan)]) == 0
+    assert module.main(["--checkout", str(source), "--prepare-fixture", str(plan)]) == 0
     assert observation.validate_plan(json.loads(plan.read_bytes()))
     value = json.loads(plan.read_bytes())["value"]
     assert len(value.encode()) == 24 and any(value[i:i+3] == value[i] * 3 for i in range(len(value) - 2))
@@ -289,7 +431,8 @@ def test_resource_rejection_does_not_change_public_stream(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("change", ["staged", "unstaged", "untracked"])
-def test_observation_admission_includes_executed_wrappers(tmp_path, monkeypatch, change):
+@pytest.mark.parametrize("purpose", ["observe", "prepare"])
+def test_observation_admission_includes_executed_wrappers(tmp_path, monkeypatch, change, purpose):
     source = tmp_path / "source"
     source.mkdir()
     for name in qualification.OBSERVATION_WRAPPERS:
@@ -304,21 +447,45 @@ def test_observation_admission_includes_executed_wrappers(tmp_path, monkeypatch,
     if change == "untracked":
         subprocess.run(["git", "-C", str(source), "rm", "--cached", str(path)], check=True, stdout=subprocess.DEVNULL)
         subprocess.run(["git", "-C", str(source), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "untrack"], check=True)
-    else:
-        with path.open("a") as output:
-            output.write("\n# uncommitted fixture change\n")
-        if change == "staged":
-            subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    with path.open("a") as output:
+        output.write(f"\nfrom pathlib import Path\nPath({str(tmp_path / 'dirty-observer-ran')!r}).touch()\n")
+    if change == "staged":
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
     spec = importlib.util.spec_from_file_location("selected_qualification", source / qualification.OBSERVATION_WRAPPERS[0])
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     plan = tmp_path / "plan.json"
     observation.private_json(plan, observation.fixture_plan())
     monkeypatch.setattr(module, "freeze_candidate", lambda *a: pytest.fail("dirty wrapper must fail before freeze/accounts"))
-    assert module.main(["--checkout", str(source), "--codex", sys.executable, "--observe-fixture", str(plan),
-                        "--case", "cursor-to-official", "--output", str(tmp_path / "report.json")]) == 1
-    report = json.loads((tmp_path / "report.json").read_bytes())
-    assert report["source_runtime_dirty"] and not report["candidate_sha_is_exact_runtime"]
+    real_run = subprocess.run
+    probes = []
+    def no_cli_probe(command, **kwargs):
+        if command[0] != "git":
+            probes.append(command)
+            return SimpleNamespace(stdout="inert-version", returncode=0)
+        return real_run(command, **kwargs)
+    monkeypatch.setattr(module.subprocess, "run", no_cli_probe)
+    if purpose == "prepare":
+        with pytest.raises(ValueError, match="candidate-runtime-not-clean"):
+            module.main(["--checkout", str(source), "--prepare-fixture", str(tmp_path / "prepared.json")])
+        assert not (tmp_path / "prepared.json").exists()
+    else:
+        assert module.main(["--checkout", str(source), "--codex", sys.executable, "--observe-fixture", str(plan),
+                            "--case", "cursor-to-official", "--output", str(tmp_path / "report.json")]) == 1
+        report = json.loads((tmp_path / "report.json").read_bytes())
+        assert report["source_runtime_dirty"] and not report["candidate_sha_is_exact_runtime"]
+    assert not (tmp_path / "dirty-observer-ran").exists()
+    assert probes == []
+
+
+def test_observation_rejects_different_checkout_before_import_or_probe(tmp_path, monkeypatch):
+    plan = tmp_path / "plan.json"
+    observation.private_json(plan, observation.fixture_plan())
+    monkeypatch.setattr(qualification, "load_observation", lambda *a: pytest.fail("unadmitted import"))
+    monkeypatch.setattr(qualification.subprocess, "run", lambda *a, **kw: pytest.fail("unadmitted probe"))
+    with pytest.raises(SystemExit):
+        qualification.main(["--checkout", str(tmp_path), "--observe-fixture", str(plan),
+            "--case", "cursor-to-official", "--output", str(tmp_path / "report.json")])
 
 
 def test_freeze_hashes_and_executes_exact_wrapper_bytes(tmp_path):

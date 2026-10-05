@@ -392,11 +392,14 @@ def parse_turn(stdout, child, timed_out, nonce, fixture_capture=None):
     # Only exact controlled fixture outputs are published; wrong finals retain
     # their full bytes privately and an exact hash/length/zero-width count here.
     finals = finals[-1:]
+    errors = [{"type": row.get("type"), "sha256": digest(json.dumps(row, sort_keys=True))}
+              for row in events if row.get("type") in ("error", "turn.failed")]
+    complete = bool(finals) and not timed_out and child.returncode == 0 and not errors
     if fixture_capture is not None and finals:
-        fixture_capture.value("callerstdout", finals[0], complete=not timed_out and child.returncode == 0)
+        fixture_capture.value("callerstdout", finals[0], complete=complete)
     public_finals = [value if value in (nonce, nonce[::-1], nonce + "\n" + nonce[::-1]) else {"sha256": digest(value), "length": len(value), "zero_width_count": value.count("\u200b")} for value in finals]
     return {"exit": child.returncode, "pid": child.pid, "timed_out": timed_out, "finals": public_finals,
-            "errors": [{"type": row.get("type"), "sha256": digest(json.dumps(row, sort_keys=True))} for row in events if row.get("type") in ("error", "turn.failed")]}
+            "errors": errors, "complete": complete}
 
 
 def run_case(case, checkout, source_codex, source_user, codex, timeout, observation_plan=None):
@@ -483,13 +486,8 @@ def run_case(case, checkout, source_codex, source_user, codex, timeout, observat
                     return
                 body = self.rfile.read(length)
                 row = {"epoch": epoch[0], "path": self.path}
-                parsed = {}
-                try:
-                    parsed = json.loads(gzip.decompress(body) if self.headers.get("Content-Encoding") == "gzip" else body) if body else {}
-                    row.update(observe_request(parsed, epoch[0], nonce))
-                except (ValueError, OSError):
-                    row["observation_invalid"] = True
-                requests.append(row)
+                if not observation or len(requests) <= observation.MAX_REQUESTS:
+                    requests.append(row)  # One bounded count-rejection row after the admitted requests.
                 connection = http.client.HTTPConnection("127.0.0.1", gateway_port, timeout=timeout)
                 tap = None
                 ticket_path = None
@@ -503,6 +501,23 @@ def run_case(case, checkout, source_codex, source_user, codex, timeout, observat
                             captures.append(capture)
                     if observation and self.path == "/v1/responses" and not observe_this:
                         row["fixture_observation_absent"] = "request-count-limit"
+                    parsed = {}
+                    def record_request():
+                        nonlocal parsed
+                        parsed = (observation.request_payload(body, self.headers.get("Content-Encoding")) if observation
+                                  else json.loads(gzip.decompress(body) if self.headers.get("Content-Encoding") == "gzip" else body) if body else {})
+                        row.update(observe_request(parsed, epoch[0], nonce))
+                    if observe_this:
+                        capture.guard(record_request)
+                        if capture.failure:
+                            row["observation_invalid"] = True
+                            row["request_rejection"] = {"sha256": digest(body), "bytes": len(body), "complete": False,
+                                                        "rejection": "observation-incomplete"}
+                    elif not observation:
+                        try:
+                            record_request()
+                        except (ValueError, OSError):
+                            row["observation_invalid"] = True
                     if observe_this:
                         capture.guard(capture.leaves, "callerpayload", parsed.get("input", []) if isinstance(parsed, dict) else [])
                         row["fixture_request_id"] = correlation["request_id"]
@@ -675,7 +690,7 @@ unbounded_connection_retries=false
             # Publication still requires a whole approved leaf: do not leak a
             # surrounding/multi-leaf final through the legacy turn report.
             for row in turns:
-                complete = row["exit"] == 0 and not row["timed_out"] and not row["errors"]
+                complete = row["complete"]
                 row["finals"] = [value if not isinstance(value, str) or complete and value in observation_plan["approved"]
                                  else {"sha256": digest(value), "length": len(value), "zero_width_count": value.count("\u200b")}
                                  for value in row["finals"]]
@@ -721,35 +736,32 @@ def main(argv=None):
     if args.prepare_fixture:
         if args.observe_fixture:
             parser.error("prepare and observe are separate commands")
-        observation = load_observation(ROOT / "scripts/subscription_fixture_observer.py")
-        observation.private_json(args.prepare_fixture, observation.fixture_plan())
-        return 0
-    if args.output is None:
+    if not args.prepare_fixture and args.output is None:
         parser.error("--output is required for qualification")
     if not 1 <= args.case_timeout <= 180 or not 1 <= args.total_timeout <= 1200:
         parser.error("case timeout must be <=180s and total timeout <=1200s")
     selected_cases = tuple(args.case or CASES)
     if len(selected_cases) > 4 or len(set(selected_cases)) != len(selected_cases):
         parser.error("select at most four distinct cases; duplicate cases are not allowed")
-    plan = None
     if args.observe_fixture:
         if selected_cases != ("cursor-to-official",) or args.observe_fixture.stat().st_size > 65536:
             parser.error("fixture observation requires one cursor-to-official case and a bounded approval")
-        observation = load_observation(ROOT / "scripts/subscription_fixture_observer.py")
-        plan = observation.validate_plan(json.loads(args.observe_fixture.read_bytes()))
+    observing = bool(args.observe_fixture or args.prepare_fixture)
+    if observing:
         if Path(__file__).resolve() != (args.checkout.resolve() / OBSERVATION_WRAPPERS[0]):
             parser.error("execute the selected checkout's own qualification wrapper")
-    sys.path.insert(0, str(args.checkout.resolve() / "src-python"))
-    version = subprocess.run([str(args.codex), "--version"], capture_output=True, text=True, timeout=5, check=True).stdout.strip()
     sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=args.checkout, capture_output=True, text=True, timeout=5, check=True).stdout.strip()
     report = {"scope": "isolated actual Codex and production Gateway; passive byte-preserving observer; no injected codec", "candidate_sha": sha,
-              "codex_version": version, "case_timeout_seconds": args.case_timeout, "total_timeout_seconds": args.total_timeout,
+              "codex_version": None, "case_timeout_seconds": args.case_timeout, "total_timeout_seconds": args.total_timeout,
               "platform": sys.platform, "cases": []}
-    admission_paths = ["src-python", "config", "model-catalogs", *(OBSERVATION_WRAPPERS if plan else ())]
+    admission_paths = ["src-python", "config", "model-catalogs", *(OBSERVATION_WRAPPERS if observing else ())]
     status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all", "--", *admission_paths],
                             cwd=args.checkout, capture_output=True, text=True, timeout=5)
     report["source_runtime_dirty"] = status.returncode != 0 or bool(status.stdout.strip())
     report["candidate_sha_is_exact_runtime"] = not report["source_runtime_dirty"]
+    if args.prepare_fixture and report["source_runtime_dirty"]:
+        raise ValueError("candidate-runtime-not-clean")
+    plan = None
     started = time.monotonic()
     if not report["candidate_sha_is_exact_runtime"]:
         report["cases"].append({"case": "candidate.admission", "checks": {"passed": False},
@@ -758,14 +770,24 @@ def main(argv=None):
     else:
         with tempfile.TemporaryDirectory(prefix="codexhub-codemode-candidate-") as frozen:
             snapshot = Path(frozen)
-            report["runtime_snapshot_sha256"] = freeze_candidate(args.checkout.resolve(), snapshot)
             runner = run_case
-            if plan:
+            if observing:
                 frozen_wrapper, manifest = freeze_observation(args.checkout.resolve(), snapshot, sha)
                 report["observation_wrapper_sha256"] = manifest
+                # Only admitted, manifest-identified bytes execute observation.
+                observation = frozen_wrapper.load_observation(snapshot / "scripts/subscription_fixture_observer.py")
+                if args.prepare_fixture:
+                    observation.private_json(args.prepare_fixture, observation.fixture_plan())
+                    print(json.dumps({"candidate_sha": sha, "observation_wrapper_sha256": manifest,
+                                      "fixture_plan_sha256": digest(args.prepare_fixture.read_bytes())}))
+                    return 0
+                plan = observation.validate_plan(json.loads(args.observe_fixture.read_bytes()))
                 report["fixture_plan_sha256"] = digest(args.observe_fixture.read_bytes())
                 runner = frozen_wrapper.run_case
+            report["runtime_snapshot_sha256"] = freeze_candidate(args.checkout.resolve(), snapshot)
             sys.path.insert(0, str(snapshot / "src-python"))
+            report["codex_version"] = subprocess.run([str(args.codex), "--version"], capture_output=True, text=True,
+                                                      timeout=5, check=True).stdout.strip()
             for case in selected_cases:
                 remaining = args.total_timeout - (time.monotonic() - started)
                 if remaining <= 0:
@@ -781,7 +803,7 @@ def main(argv=None):
     report["passed"] = report["candidate_sha_is_exact_runtime"] and report["snapshot_tree_removed"] and bool(report["cases"]) and all(case["checks"]["passed"] for case in report["cases"]) and not report.get("budget_exhausted")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     report_text = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
-    if plan:
+    if observing:
         report_data = report_text.encode()
         if len(report_data) > MAX_CAPTURE:
             raise CaptureLimitExceeded("fixture-total-report-size-exceeded")

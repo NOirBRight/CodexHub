@@ -208,7 +208,9 @@ class Frames:
     def __init__(self) -> None:
         self.buffer = bytearray()
 
-    def feed(self, chunk: bytes) -> list[tuple[bool, bytes]]:
+    def feed(self, chunk: bytes, *, decoded_budget: int | None = None,
+             frame_budget: int | None = None) -> list[tuple[bool, bytes]]:
+        """Optional per-feed observation allowances; default transport is unchanged."""
         self.buffer.extend(chunk)
         result = []
         while len(self.buffer) >= 5:
@@ -218,16 +220,33 @@ class Frames:
                 raise malformed()
             if len(self.buffer) < size + 5:
                 break
+            if frame_budget is not None and len(result) >= frame_budget:
+                raise malformed()
+            limit = MAX_BYTES if decoded_budget is None else min(MAX_BYTES, decoded_budget)
+            if limit < 0 or not flags & 1 and size > limit:
+                raise malformed()
             data = bytes(self.buffer[5:5 + size])
             del self.buffer[:size + 5]
             if flags & 1:
                 try:
                     with gzip.GzipFile(fileobj=io.BytesIO(data)) as stream:
-                        data = stream.read(MAX_BYTES + 1)
+                        if decoded_budget is None:
+                            data = stream.read(MAX_BYTES + 1)
+                        else:
+                            # read1 also bounds the underlying decoder read; read()
+                            # may fill a larger BufferedReader buffer for tiny budgets.
+                            decoded = bytearray()
+                            while part := stream.read1(limit - len(decoded) + 1):
+                                decoded.extend(part)
+                                if len(decoded) > limit:
+                                    raise malformed()
+                            data = bytes(decoded)
                 except (OSError, EOFError):
                     raise malformed() from None
-                if len(data) > MAX_BYTES:
+                if len(data) > limit:
                     raise malformed()
+            if decoded_budget is not None:
+                decoded_budget -= len(data)
             result.append((bool(flags & 2), data))
         return result
 

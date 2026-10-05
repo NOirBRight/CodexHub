@@ -10,6 +10,8 @@ require_python_313(__file__)
 import argparse
 from contextlib import contextmanager
 import hashlib
+import gzip
+import io
 import json
 import os
 from pathlib import Path
@@ -26,6 +28,7 @@ MAX_REQUESTS = 128
 MAX_PARSE_BYTES = 16 * 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024
 MAX_REPORT_BYTES = 256 * 1024
+MAX_JSON_NODES = 4096
 BOUNDARIES = ("fixtureinput", "callerpayload", "adaptedhistory", "servedhistoryblob",
               "nativefield", "canonicalchunks", "downstreamSSEdelta",
               "downstreamSSEcompleted", "callerstdout", "rolloutfinal")
@@ -64,6 +67,57 @@ def private_json(path, value):
         raise ValueError("observation-file-limit")
     with os.fdopen(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "wb") as output:
         output.write(data)
+
+
+def bounded_json(data, limit=MAX_JSON_BYTES):
+    """Conservative capacity preflight; stdlib alone validates/parses JSON.
+
+    Count structural tokens outside strings before building any JSON tree.
+    No schema, string decoding, value recovery or alternate JSON parser.
+    """
+    if len(data) > limit:
+        raise ValueError("json-byte-limit")
+    depth = tokens = 0
+    quoted = escaped = scalar = False
+    for byte in data:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 92:
+                escaped = True
+            elif byte == 34:
+                quoted = False
+            continue
+        if byte in b" \t\r\n":
+            scalar = False
+            continue
+        if byte == 34 or byte in b"{}[],:" or not scalar:
+            tokens += 1
+        if byte == 34:
+            quoted = True
+        if byte in b"{[":
+            depth += 1
+        elif byte in b"}]":
+            depth -= 1
+        scalar = byte not in b'"{}[],:'
+        if depth > 16 or tokens > MAX_JSON_NODES:
+            raise ValueError("json-structure-limit")
+    return json.loads(data)
+
+
+def request_payload(body, encoding):
+    """Observation only: both encoded and decoded limits precede JSON parsing."""
+    if len(body) > MAX_PARSE_BYTES:
+        raise ValueError("request-byte-limit")
+    if encoding == "gzip":
+        decoded = bytearray()
+        with gzip.GzipFile(fileobj=io.BytesIO(body)) as stream:
+            while part := stream.read1(MAX_PARSE_BYTES - len(decoded) + 1):
+                decoded.extend(part)
+                if len(decoded) > MAX_PARSE_BYTES:
+                    raise ValueError("request-decoded-limit")
+        body = bytes(decoded)
+    return bounded_json(body, MAX_PARSE_BYTES) if body else {}
 
 
 class BoundedValue:
@@ -145,7 +199,7 @@ class FixtureCapture:
                 # Decode only bounded JSON, no surrounding text/substring extraction.
                 if len(node.encode()) <= 4096 and node[:1] in ("{", "["):
                     try:
-                        decoded = json.loads(node)
+                        decoded = bounded_json(node.encode())
                     except ValueError:
                         return
                     walk(decoded, depth + 1)
@@ -203,10 +257,8 @@ class NativeTap:
         if self.total > MAX_PARSE_BYTES:
             raise ValueError("native-byte-limit")
         parser = self.incoming if incoming else self.outgoing
-        # Reuse the owner decoder in small slices: one read cannot materialize
-        # a list of many decompressed frames before the decoded-byte budget.
-        for start in range(0, len(data), 4096):
-            self.consume(parser.feed(data[start:start + 4096]), incoming)
+        self.consume(parser.feed(data, decoded_budget=MAX_PARSE_BYTES - self.decoded,
+                                 frame_budget=4096 - self.frames), incoming)
 
     def consume(self, frames, incoming):
         import cursor_subscription_wire as wire
@@ -232,9 +284,13 @@ class NativeTap:
                             if len(blob) > MAX_JSON_BYTES:
                                 raise ValueError("blob-json-limit")
                             try:
-                                message = json.loads(blob)
+                                message = bounded_json(blob)
                             except (ValueError, UnicodeError):
-                                continue  # Non-JSON turn blobs are not history text.
+                                # Binary turn blobs are expected; JSON-looking
+                                # rejected history cannot be labelled complete.
+                                if blob[:1] in (b"{", b"["):
+                                    raise
+                                continue
                             if isinstance(message, dict) and message.get("role") in ("user", "assistant", "tool"):
                                 self.capture.leaves("servedhistoryblob", message.get("content"))
 
@@ -313,7 +369,7 @@ class DownstreamTap:
                 raise ValueError("sse-event-limit")
             if not event.data or event.data == b"[DONE]":
                 continue
-            value = json.loads(event.data)
+            value = bounded_json(event.data)
             if value.get("type") == "response.output_text.delta":
                 self.delta.add(value["delta"].encode())
             elif value.get("type") == "response.completed":
@@ -364,7 +420,10 @@ def install_gateway_observation(root, plan):
                     yield from observe_cursor(payload, capture=capture, cancel=cancel, timeout=timeout)
                 finally:
                     # A failed capture/write must never replace an owner exception.
-                    capture.guard(capture.persist, root / (ticket["request_id"] + ".json"))
+                    try:
+                        capture.persist(root / (ticket["request_id"] + ".json"))
+                    except Exception:
+                        pass  # Persistence is independent of capture admission.
         with original(request, provider_id=provider_id, timeout=timeout, backend=backend, downstream_socket=downstream_socket) as response:
             yield response
     subscription_exchange.open_subscription = observed
