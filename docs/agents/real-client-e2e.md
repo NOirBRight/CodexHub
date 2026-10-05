@@ -412,8 +412,10 @@ one successful read-only read tool, emit the named sentinel once, and finish
 once. The compatibility-baseline client parsers consume their real JSONL
 contracts; accepting a newer version never relaxes these shapes:
 
-- every automated prompt names `./sentinel.txt` explicitly instead of asking
-  the model to discover an unnamed file;
+- every automated prompt names the sentinel file explicitly instead of asking
+  the model to discover an unnamed file. OpenCode 2.x names the JSON-quoted
+  absolute fixture path and explicitly requests exactly one `read` call;
+  other clients name `./sentinel.txt`;
 - Codex CLI receives the prompt once through stdin, binds the case root with
   `-C`, and keeps `-s read-only`. On Windows, Codex CLI `0.149.1` exec-policy
   rejects the unattended `pwsh.exe Get-Content` read of `./sentinel.txt`, so
@@ -425,7 +427,10 @@ contracts; accepting a newer version never relaxes these shapes:
   `--pure`. OpenCode 2.x rejects those flags. The 2.x launch keeps the process
   working directory as the case root, uses `--standalone` so the run does not
   attach to a background service, and passes `--auto` so the sentinel read is
-  not left on a permission prompt. Native model discovery still tries
+  not left on a permission prompt. Its prompt uses the absolute fixture path
+  to avoid relative-path ambiguity in the private server. The successful
+  single-read, sentinel, terminal, and Gateway-correlation checks still apply.
+  Native model discovery still tries
   `opencode models --verbose`; when that flag is rejected it reads the id-only
   lines from `opencode models`;
 - Pi receives the complete prompt as one quoted positional message, enables
