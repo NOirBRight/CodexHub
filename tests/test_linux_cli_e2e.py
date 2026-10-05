@@ -254,6 +254,101 @@ def test_retried_client_attempt_gets_a_fresh_case_home(tmp_path, monkeypatch):
     assert roots[0] != roots[1]
 
 
+def test_opencode_v2_closed_text_completes_when_stop_event_is_missing(tmp_path):
+    sentinel = "SENTINEL:test"
+    case_root = tmp_path / "opencode"
+    case_root.mkdir()
+    (case_root / "sentinel.txt").write_text(sentinel + "\n", encoding="utf-8")
+    events = [
+        {"type": "step_start", "part": {"type": "step-start"}},
+        {
+            "type": "tool_use",
+            "part": {
+                "type": "tool",
+                "tool": "read",
+                "state": {"status": "completed", "input": {"filePath": "./sentinel.txt"}},
+            },
+        },
+        {"type": "step_finish", "part": {"type": "step-finish", "reason": "tool-calls"}},
+        {"type": "step_start", "part": {"type": "step-start"}},
+        {
+            "type": "text",
+            "part": {"type": "text", "text": sentinel, "time": {"start": 1, "end": 2}},
+        },
+    ]
+    output = "\n".join(json.dumps(event) for event in events)
+
+    evidence = E2E.parse_client_output("opencode", output, sentinel, case_root)
+
+    assert evidence["tool_call_count"] == 1
+    assert evidence["read_only_tool_call_count"] == 1
+    assert evidence["sentinel_chunk_count"] == 1
+    assert evidence["terminal_count"] == 1
+    assert evidence["terminal_classification"] == "completed"
+    assert evidence["error_event_count"] == 0
+
+
+def test_opencode_closed_text_does_not_complete_after_an_error():
+    sentinel = "SENTINEL:test"
+    text = {
+        "type": "text",
+        "part": {"type": "text", "text": sentinel, "time": {"end": 2.5}},
+    }
+
+    after_error = "\n".join(
+        json.dumps(event)
+        for event in ({"type": "error", "part": {}}, text)
+    )
+    errored = E2E.parse_client_output("opencode", after_error, sentinel)
+    assert errored["terminal_count"] == 0
+    assert errored["error_event_count"] == 1
+
+    after_failed_step = "\n".join(
+        json.dumps(event)
+        for event in ({"type": "step_finish", "part": {"reason": "error"}}, text)
+    )
+    failed = E2E.parse_client_output("opencode", after_failed_step, sentinel)
+    assert failed["terminal_count"] == 1
+    assert failed["terminal_classification"] == "error"
+    assert failed["error_event_count"] == 0
+
+    closed = E2E.parse_client_output("opencode", json.dumps(text), sentinel)
+    assert closed["terminal_count"] == 1
+    assert closed["terminal_classification"] == "completed"
+
+
+def test_opencode_v2_launch_drops_removed_flags(tmp_path):
+    prompt = "read ./sentinel.txt"
+    v1 = E2E.opencode_launch_command(
+        "codexhub-deepseek/deepseek-flash",
+        tmp_path,
+        "codexhub-linux-cli-e2e",
+        prompt,
+        "1.18.34",
+    )
+    v2 = E2E.opencode_launch_command(
+        "codexhub-deepseek/deepseek-flash",
+        tmp_path,
+        "codexhub-linux-cli-e2e",
+        prompt,
+        "2.0.22",
+    )
+
+    assert v1[:6] == [
+        "opencode",
+        "run",
+        "--format",
+        "json",
+        "--model",
+        "codexhub-deepseek/deepseek-flash",
+    ]
+    assert "--dir" in v1 and str(tmp_path) in v1
+    assert "--pure" in v1 and "--auto" in v1 and "--standalone" not in v1
+    assert "--dir" not in v2 and "--pure" not in v2
+    assert "--standalone" in v2 and "--auto" in v2
+    assert v2[-1] == prompt
+
+
 def test_cli_contract_is_versioned_and_complete() -> None:
     assert CONTRACT["schema"] == "codexhub.real-client-cli-contract.v1"
     assert set(CONTRACT["minimum_versions"]) == {"codex_cli", "opencode", "pi", "omp"}
@@ -416,3 +511,33 @@ def test_gateway_route_evidence_matches_production_telemetry(case, tmp_path):
     assert E2E.gateway_evidence(case, events, 0, 2)["route_metadata_error_count"] == 1
     events[0]["provider_id"] = "wrong-provider"
     assert E2E.gateway_evidence(case, events, 0, 2)["route_metadata_error_count"] > 1
+
+
+@pytest.mark.parametrize("version", ["2.0.22", "2.0.23"])
+def test_opencode_v2_reads_absolute_fixture_with_one_explicit_read(tmp_path, monkeypatch, version):
+    case_root = tmp_path / "case with spaces"
+    case_root.mkdir()
+    managed = tmp_path / "managed"
+    (managed / "opencode").mkdir(parents=True)
+    (managed / "opencode" / "opencode.json").write_text("{}")
+    case = next(case for case in E2E.CASES if case.case_id == "opencode-openai")
+    captured = []
+
+    def launch(command, **kwargs):
+        captured.append((command, kwargs))
+        return {
+            "stdout": "", "returncode": 0, "timed_out": False,
+            "output_truncated": False, "stdout_sha256": "", "stderr_sha256": "",
+            "stdout_size": 0, "stderr_size": 0,
+        }
+
+    monkeypatch.setattr(E2E, "_cli", lambda name: name)
+    monkeypatch.setattr(E2E, "_run_client_bounded", launch)
+    E2E._client_launch(case, managed, case_root, {"CODEXHUB_OPENCODE_VERSION": version}, 1)
+    command, kwargs = captured[0]
+    prompt = command[-1]
+    assert "exactly one call to the read tool" in prompt
+    assert json.dumps(str((case_root / "sentinel.txt").resolve())) in prompt
+    assert "./sentinel.txt" not in prompt
+    assert kwargs["cwd"] == case_root
+    assert (case_root / "sentinel.txt").read_text().strip() == E2E.SENTINEL_PREFIX + case.case_id

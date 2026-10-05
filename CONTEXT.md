@@ -95,5 +95,5 @@ A user-selected association from a Claude Code model-family alias to one Gateway
 **Compatibility Adaptation**:
 A declared transformation between a client's model protocol and an upstream model protocol. Equivalent transformations preserve meaning; best-effort transformations disclose approximations without silently losing essential content, breaking Call identity, or fabricating success.
 **Default subagent**:
-A per-client pin of which CodexHub-injected model (and effort) that client's built-in child sessions use. Empty keeps the CLI default: the child inherits the parent session. Independent per client; never Activation.
+A per-client choice of which model that client's built-in child sessions use, with effort or Fast where the client supports them. Existing Gateway-backed pins use CodexHub-injected models while connected. ADR-0019 defines independently applied native model settings, including while disconnected, with verified per-client capabilities and limitations. Native saves preserve the client's main model, route, and authentication and survive Connect/Disconnect. Empty uses the client's native default behavior. Independent per client; never Activation.
 _Avoid_: child model, subagent routing, enabling

@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 :root {
-  color: #1f2933;
+  color: var(--ws-ink);
   background: transparent;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -34,7 +34,7 @@ body {
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: var(--ws-bg, #f8f8f7);
+  background: var(--ws-bg);
   border-radius: 16px;
 }
 
@@ -46,10 +46,10 @@ body {
   background: transparent;
   overflow: visible;
 }
-.fit-stage-host { background: var(--ws-bg, #f5f4f8); }
+.fit-stage-host { background: var(--ws-bg); }
 [data-native-linux="true"] .fit-stage-host {
   border-radius: 14px;
-  box-shadow: 0 4px 12px #00000060, 0 1px 5px #00000030;
+  box-shadow: var(--ws-shadow-window);
 }
 [data-native-linux="true"][data-window-expanded="true"] #root {
   padding: 0;
@@ -126,12 +126,12 @@ html.sortable-list-dragging * {
 }
 
 .focus-ring {
-  --tw-ring-offset-color: #f8f8f7;
+  --tw-ring-offset-color: var(--ws-bg);
   @apply outline-none ring-action/20 focus-visible:ring-2 focus-visible:ring-offset-2;
 }
 
 .field {
-  @apply focus-ring h-10 w-full rounded-control border border-line bg-surface px-3 text-sm text-ink shadow-field placeholder:text-slate-400 transition-[box-shadow,border-color,background-color] duration-150 ease-out hover:bg-white focus-visible:border-action/40;
+  @apply focus-ring h-10 w-full rounded-control border border-line bg-surface px-3 text-sm text-ink shadow-field placeholder:text-muted transition-[box-shadow,border-color,background-color] duration-150 ease-out hover:bg-action-soft focus-visible:border-action/40;
 }
 
 .field-compact {
@@ -139,7 +139,7 @@ html.sortable-list-dragging * {
 }
 
 .select-trigger {
-  @apply focus-ring inline-flex min-w-0 items-center justify-between gap-2 rounded-control border border-line bg-surface px-3 text-sm font-medium text-ink shadow-field transition-[box-shadow,border-color,background-color] duration-150 ease-out hover:bg-white focus-visible:border-action/40;
+  @apply focus-ring inline-flex min-w-0 items-center justify-between gap-2 rounded-control border border-line bg-surface px-3 text-sm font-medium text-ink shadow-field transition-[box-shadow,border-color,background-color] duration-150 ease-out hover:bg-action-soft focus-visible:border-action/40;
 }
 
 .select-popover {
@@ -147,7 +147,7 @@ html.sortable-list-dragging * {
 }
 
 .select-option {
-  @apply focus-ring flex min-h-9 w-full items-center justify-between gap-2 rounded-control px-2.5 py-1.5 text-left text-sm text-ink transition-[background-color,color] duration-150 ease-out hover:bg-panel aria-selected:bg-action/10 aria-selected:text-action;
+  @apply focus-ring flex min-h-9 w-full items-center justify-between gap-2 rounded-control px-2.5 py-1.5 text-left text-sm text-ink transition-[background-color,color] duration-150 ease-out hover:bg-action-soft aria-selected:bg-action-soft aria-selected:text-action;
 }
 
 /* Scroll rails belong outside content; reserve their space before overflow. */
@@ -160,13 +160,13 @@ html.sortable-list-dragging * {
   padding-inline-end: 8px;
 }
 .vision-model-listbox {
-  scrollbar-color: var(--ws-line, #c7c2bb) transparent;
+  scrollbar-color: var(--ws-line) transparent;
   scrollbar-width: thin;
 }
 
 
 .mini-button {
-  @apply focus-ring h-8 rounded-control border border-line bg-surface px-2 text-xs font-medium text-slate-700 shadow-control transition-[box-shadow,border-color,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96];
+  @apply focus-ring h-8 rounded-control border border-line bg-surface px-2 text-xs font-medium text-ink shadow-control transition-[box-shadow,border-color,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96];
 }
 
 .status-pop {
@@ -189,9 +189,9 @@ html.sortable-list-dragging * {
   animation: codexhub-flow-up 2.8s cubic-bezier(0.37, 0, 0.32, 1) infinite;
   background: linear-gradient(
     180deg,
-    rgba(16, 185, 129, 0),
-    rgba(52, 211, 153, 0.85),
-    rgba(16, 185, 129, 0)
+    transparent,
+    color-mix(in srgb, var(--ws-green) 85%, transparent),
+    transparent
   );
   border-radius: 999px;
 }
@@ -204,9 +204,9 @@ html.sortable-list-dragging * {
   animation: codexhub-card-flow 3.4s cubic-bezier(0.37, 0, 0.32, 1) infinite;
   background: linear-gradient(
     90deg,
-    rgba(16, 185, 129, 0),
-    rgba(16, 185, 129, 0.65),
-    rgba(16, 185, 129, 0)
+    transparent,
+    color-mix(in srgb, var(--ws-green) 65%, transparent),
+    transparent
   );
 }
 

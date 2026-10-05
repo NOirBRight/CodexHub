@@ -69,6 +69,19 @@ pub fn save_settings(settings: Settings) -> Result<Settings, String> {
 }
 
 #[tauri::command]
+pub fn get_codex_native_subagent() -> Result<config::CodexNativeSubagent, String> {
+    config::get_codex_native_subagent()
+}
+
+#[tauri::command]
+pub fn save_codex_native_subagent(
+    model: String,
+    effort: String,
+) -> Result<config::CodexNativeSubagent, String> {
+    config::save_codex_native_subagent(model, effort)
+}
+
+#[tauri::command]
 pub fn get_catalog_override_diagnostics() -> Result<catalog::CatalogOverrideDiagnostics, String> {
     catalog::catalog_override_diagnostics()
 }
@@ -266,6 +279,16 @@ pub async fn list_gateway_clients(
         gateway::list_gateway_clients(include_versions.unwrap_or(false))
     })
     .await
+}
+
+#[tauri::command]
+pub async fn read_claude_subagent_settings() -> Result<gateway::ClaudeClientSettings, String> {
+    run_blocking("read_claude_subagent_settings", gateway::read_claude_subagent_settings).await
+}
+
+#[tauri::command]
+pub async fn save_claude_subagent(model: String) -> Result<gateway::ClaudeClientSettings, String> {
+    run_blocking("save_claude_subagent", move || gateway::save_claude_subagent(model)).await
 }
 
 #[tauri::command]
@@ -710,4 +733,54 @@ pub fn window_close_to_tray(window: Window) -> Result<(), String> {
                 .map_err(|error| format!("failed to hide window to tray: {error}"))
         },
     )
+}
+
+#[tauri::command]
+pub async fn read_opencode_default_subagent() -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("read_opencode_default_subagent", gateway::read_opencode_default_subagent).await
+}
+
+#[tauri::command]
+pub async fn save_opencode_default_subagent(model: String, effort: String, native: bool) -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("save_opencode_default_subagent", move || gateway::save_opencode_default_subagent(model, effort, native)).await
+}
+
+#[tauri::command]
+pub async fn read_zcode_default_subagent() -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("read_zcode_default_subagent", gateway::read_zcode_default_subagent).await
+}
+
+#[tauri::command]
+pub async fn save_zcode_default_subagent(model: String, effort: String, native: bool) -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("save_zcode_default_subagent", move || gateway::save_zcode_default_subagent(model, effort, native)).await
+}
+
+#[tauri::command]
+pub async fn read_omp_default_subagent() -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("read_omp_default_subagent", gateway::read_omp_default_subagent).await
+}
+
+#[tauri::command]
+pub async fn save_omp_default_subagent(model: String, effort: String, native: bool) -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("save_omp_default_subagent", move || gateway::save_omp_default_subagent(model, effort, native)).await
+}
+
+#[tauri::command]
+pub async fn read_dsh_headless_default_subagent() -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("read_dsh_headless_default_subagent", gateway::read_dsh_headless_default_subagent).await
+}
+
+#[tauri::command]
+pub async fn save_dsh_headless_default_subagent(model: String, effort: String) -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("save_dsh_headless_default_subagent", move || gateway::save_dsh_headless_default_subagent(model, effort)).await
+}
+
+#[tauri::command]
+pub async fn read_grok_default_subagent() -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("read_grok_default_subagent", gateway::read_grok_default_subagent).await
+}
+
+#[tauri::command]
+pub async fn save_grok_default_subagent(model: String, effort: String, native: bool) -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("save_grok_default_subagent", move || gateway::save_grok_default_subagent(model, effort, native)).await
 }

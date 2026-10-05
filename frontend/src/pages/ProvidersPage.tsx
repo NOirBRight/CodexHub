@@ -62,6 +62,7 @@ import {
 import type {
   AppFlavorInfo,
   AppStatus,
+  CodexNativeSubagent,
   GatewayStatus,
   Model,
   OpenAIUsageSnapshot,
@@ -187,6 +188,16 @@ function ProvidersPageImpl({
   } = workspace;
   const handledCodexSwitchRequestRef = useRef<number | null>(null);
   const defaultSubagentSaveGen = useRef(0);
+  const [nativeSubagent, setNativeSubagent] = useState<CodexNativeSubagent | null>(null);
+  useEffect(() => {
+    let active = true;
+    void api.getCodexNativeSubagent().then((state) => {
+      if (active) setNativeSubagent(state);
+    }).catch((error) => {
+      if (active) showToast(messageFromError(error), "error");
+    });
+    return () => { active = false; };
+  }, [appStatusSnapshot?.mode, catalogModels, showToast]);
   const [codexStatus, setCodexStatus] = useState<AppStatus | null>(
     appStatusSnapshot,
   );
@@ -778,6 +789,28 @@ function ProvidersPageImpl({
   async function persistDefaultSubagent(model: string, effort: string) {
     const current = settingsDraft ?? settings;
     if (!current) return;
+    if (!model || model.startsWith("native:")) {
+      const gen = ++defaultSubagentSaveGen.current;
+      const toastId = showToast({
+        dedupeKey: "default-subagent",
+        text: t("workspace.savingDefaultSubagent"),
+        tone: "loading",
+      });
+      try {
+        const state = await api.saveCodexNativeSubagent(model.replace(/^native:/, ""), effort);
+        const saved = await api.getSettings();
+        if (gen !== defaultSubagentSaveGen.current) return;
+        setNativeSubagent(state);
+        stageSettings(saved);
+        onSettingsChanged?.(saved);
+        markRestartReminder();
+        setRestartReminder(true);
+        updateToast(toastId, { action: null, text: t("workspace.defaultSubagentSaved"), tone: "success" });
+      } catch (error) {
+        if (gen === defaultSubagentSaveGen.current) updateToastWithError(toastId, error);
+      }
+      return;
+    }
     if (
       current.codex_default_subagent_model === model &&
       current.codex_default_subagent_reasoning_effort === effort
@@ -1075,15 +1108,16 @@ function ProvidersPageImpl({
           }
           onRefresh={() => loadOfficialOpenAIUsage(true, true)}
           defaultSubagentModel={
-            settingsDraft?.codex_default_subagent_model ??
-            settings?.codex_default_subagent_model ??
-            ""
+            realCodexConnected && (settingsDraft?.codex_default_subagent_model ?? settings?.codex_default_subagent_model)
+              ? (settingsDraft?.codex_default_subagent_model ?? settings?.codex_default_subagent_model ?? "")
+              : nativeSubagent?.model ? `native:${nativeSubagent.model}` : ""
           }
           defaultSubagentEffort={
-            settingsDraft?.codex_default_subagent_reasoning_effort ??
-            settings?.codex_default_subagent_reasoning_effort ??
-            ""
+            realCodexConnected && (settingsDraft?.codex_default_subagent_model ?? settings?.codex_default_subagent_model)
+              ? (settingsDraft?.codex_default_subagent_reasoning_effort ?? settings?.codex_default_subagent_reasoning_effort ?? "")
+              : nativeSubagent?.effort ?? ""
           }
+          nativeSubagentOptions={nativeSubagent?.models.map((option) => ({ ...option, id: `native:${option.id}`, label: `${t("workspace.nativeSubagentModel")} · ${option.label}`, native: true }))}
           onDefaultSubagentChange={(model, effort) => {
             void persistDefaultSubagent(model, effort);
           }}
@@ -1251,7 +1285,7 @@ function ProvidersPageImpl({
                       }
                     />
                   ) : (
-                    <div className="p-6 text-sm text-slate-500">
+                    <div className="p-6 text-sm text-muted">
                       {t("providers.selectProvider")}
                     </div>
                   )}
@@ -1316,20 +1350,20 @@ function UnsavedProviderChangesDialog({
   const { t } = useTranslation();
   const fallbackName = providerName || t("providers.thisProvider");
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/20 p-6">
-      <div className="grid w-full max-w-[420px] gap-4 rounded-overlay border border-line bg-white p-5 shadow-overlay">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-scrim p-6">
+      <div className="grid w-full max-w-[420px] gap-4 rounded-overlay border border-line bg-surface p-5 shadow-overlay">
         <div className="min-w-0">
           <h3 className="truncate text-base font-semibold">
             {t("providers.saveProviderChanges")}
           </h3>
-          <p className="mt-1 text-sm leading-5 text-slate-600">
+          <p className="mt-1 text-sm leading-5 text-muted">
             {t("providers.unsavedChanges", { name: fallbackName })}
           </p>
         </div>
         <div className="flex items-center justify-end gap-2">
           <button
             type="button"
-            className="focus-ring inline-flex h-9 items-center justify-center rounded-control border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100"
+            className="focus-ring inline-flex h-9 items-center justify-center rounded-control border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel"
             disabled={busy}
             onClick={onCancel}
           >
@@ -1337,7 +1371,7 @@ function UnsavedProviderChangesDialog({
           </button>
           <button
             type="button"
-            className="focus-ring inline-flex h-9 items-center justify-center rounded-control border border-line bg-white px-3 text-sm font-semibold hover:bg-slate-100"
+            className="focus-ring inline-flex h-9 items-center justify-center rounded-control border border-line bg-surface px-3 text-sm font-semibold hover:bg-panel"
             disabled={busy}
             onClick={onDiscard}
           >
@@ -1345,7 +1379,7 @@ function UnsavedProviderChangesDialog({
           </button>
           <button
             type="button"
-            className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-action px-3 text-sm font-semibold text-white disabled:bg-slate-300"
+            className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-action px-3 text-sm font-semibold text-on-action disabled:bg-line"
             disabled={busy}
             onClick={onSave}
           >
@@ -1444,28 +1478,28 @@ function ConnectionLink({ connected }: { connected: boolean }) {
       aria-hidden="true"
     >
       {connected ? (
-        <span className="absolute left-1/2 top-[-14px] bottom-[-14px] w-[3px] -translate-x-1/2 overflow-hidden rounded-full bg-gradient-to-t from-emerald-400/60 via-emerald-500/75 to-emerald-400/60">
+        <span className="absolute left-1/2 top-[-14px] bottom-[-14px] w-[3px] -translate-x-1/2 overflow-hidden rounded-full bg-gradient-to-t from-ok/60 via-ok/75 to-ok/60">
           <span className="codexhub-flow-beam absolute left-1/2 top-0 h-12 w-[7px] [--flow-distance:92px]" />
           <span className="codexhub-flow-beam codexhub-flow-beam-delay absolute left-1/2 top-0 h-12 w-[7px] [--flow-distance:92px]" />
         </span>
       ) : (
         <>
-          <span className="absolute left-1/2 top-[-14px] h-[calc(50%-8px)] w-[3px] -translate-x-1/2 rounded-full bg-slate-300/80" />
-          <span className="absolute left-1/2 bottom-[-14px] h-[calc(50%-8px)] w-[3px] -translate-x-1/2 rounded-full bg-slate-300/80" />
+          <span className="absolute left-1/2 top-[-14px] h-[calc(50%-8px)] w-[3px] -translate-x-1/2 rounded-full bg-line/80" />
+          <span className="absolute left-1/2 bottom-[-14px] h-[calc(50%-8px)] w-[3px] -translate-x-1/2 rounded-full bg-line/80" />
         </>
       )}
       <span
         className={cx(
           "relative z-10 grid h-4 w-4 place-items-center rounded-full border transition-[background-color,border-color,box-shadow] duration-200 ease-out",
           connected
-            ? "border-emerald-500 bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,0.16)]"
-            : "border-slate-300 bg-surface",
+            ? "border-ok-line bg-ok shadow-connected"
+            : "border-line bg-surface",
         )}
       >
         <span
           className={cx(
             "h-1.5 w-1.5 rounded-full",
-            connected ? "bg-white" : "bg-slate-300",
+            connected ? "bg-switch-thumb" : "bg-line",
           )}
         />
       </span>
@@ -1515,7 +1549,7 @@ function OfficialOpenAICard({
             <h2 className="truncate text-sm font-semibold">
               {t("providers.codexDesktop")}
             </h2>
-            <p className="mt-1 truncate text-xs text-slate-500">
+            <p className="mt-1 truncate text-xs text-muted">
               {t("providers.codexAppAuth")}
             </p>
           </div>
@@ -1544,7 +1578,7 @@ function OfficialOpenAICard({
         />
       </div>
       <p
-        className="truncate px-1 text-[11px] leading-4 text-slate-500"
+        className="truncate px-1 text-[11px] leading-4 text-muted"
         title={t("providers.openaiExportHint")}
       >
         {t("providers.openaiExportHint")}
@@ -1593,13 +1627,13 @@ function HubConnectionBridge({
         type="button"
         className={cx(
           "focus-ring flex h-11 min-w-0 items-center justify-center gap-2 overflow-hidden whitespace-nowrap rounded-full px-4 text-sm font-semibold shadow-control transition-[box-shadow,background-color,color,transform] duration-200 ease-out active:scale-[0.97] disabled:opacity-100",
-          pendingMode && "animate-pulse bg-slate-200/85 text-slate-600",
+          pendingMode && "animate-pulse bg-line/85 text-muted",
           !pendingMode && foreignOwner
-            ? "border border-emerald-200 bg-emerald-100 text-emerald-700 hover:bg-emerald-200 hover:shadow-raised"
+            ? "border border-ok-line bg-ok-soft text-ok hover:bg-ok-line hover:shadow-raised"
             : !pendingMode && connected
-              ? "bg-emerald-600 text-white hover:bg-emerald-700 hover:shadow-raised"
+              ? "bg-ok text-on-status hover:bg-ok-hover hover:shadow-raised"
               : !pendingMode &&
-                "bg-ink text-white hover:bg-slate-800 hover:shadow-raised",
+                "bg-action text-on-action hover:bg-action-hover hover:shadow-raised",
         )}
         disabled={disabled}
         onClick={onToggle}
@@ -1656,7 +1690,7 @@ function CodexHubProviderCard({
       className={cx(
         "relative grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-3 rounded-inner border px-3 pt-3 transition-[background-color,border-color,box-shadow]",
         connected
-          ? "border-emerald-300/70 bg-emerald-50/55"
+          ? "border-ok-line/70 bg-ok-soft/55"
           : "border-line bg-surface",
         "pb-3",
       )}
@@ -1668,12 +1702,12 @@ function CodexHubProviderCard({
             {t("common.codexHub")}
           </h2>
           <p
-            className="mt-1 truncate text-xs text-slate-500"
+            className="mt-1 truncate text-xs text-muted"
             title={t("providers.externalProviderCatalog")}
           >
             {t("providers.externalProviderCatalog")}
           </p>
-          <p className="mt-1 truncate whitespace-nowrap text-xs leading-4 text-slate-500">
+          <p className="mt-1 truncate whitespace-nowrap text-xs leading-4 text-muted">
             {t("providers.appsMaySortModels")}
           </p>
         </div>
@@ -1723,7 +1757,7 @@ function CodexHubProviderCard({
             )}
           />
         ) : (
-          <div className="grid min-h-[96px] place-items-center rounded-inner bg-panel-soft px-3 text-center text-xs text-slate-500 shadow-hairline">
+          <div className="grid min-h-[96px] place-items-center rounded-inner bg-panel-soft px-3 text-center text-xs text-muted shadow-hairline">
             {t("providers.addHubProviderEmpty")}
           </div>
         )}
@@ -1735,7 +1769,7 @@ function CodexHubProviderCard({
           "focus-ring flex h-10 w-full items-center justify-center gap-2 rounded-control text-sm font-medium shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out active:scale-[0.96]",
           activeAdd
             ? "bg-action/10 text-action"
-            : "bg-panel-soft text-slate-600 hover:bg-white hover:shadow-raised",
+            : "bg-panel-soft text-muted hover:bg-action-soft hover:shadow-raised",
         )}
         onClick={onAdd}
       >
@@ -1782,9 +1816,9 @@ function SourceStatusChip({
     <span
       className={cx(
         "ws-status-chip inline-flex h-6 max-w-[112px] items-center rounded-full border px-2 text-[11px] font-semibold leading-none",
-        tone === "ok" && "border-emerald-200 bg-emerald-50 text-emerald-700",
-        tone === "muted" && "border-slate-200 bg-white text-slate-500",
-        tone === "pending" && "border-amber-200 bg-amber-50 text-amber-700",
+        tone === "ok" && "border-ok-line bg-ok-soft text-ok",
+        tone === "muted" && "border-line bg-surface text-muted",
+        tone === "pending" && "border-warn-line bg-warn-soft text-warn",
       )}
     >
       <span className="truncate whitespace-nowrap">{label}</span>
@@ -1795,7 +1829,7 @@ function SourceStatusChip({
 function SourceMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="grid min-w-0 place-items-center rounded-inner bg-surface px-2 py-1.5 text-center shadow-control">
-      <div className="text-[9px] font-semibold uppercase leading-3 text-slate-500">
+      <div className="text-[9px] font-semibold uppercase leading-3 text-muted">
         {label}
       </div>
       <div className="mt-0.5 font-semibold leading-4 text-ink">{value}</div>
@@ -1835,11 +1869,11 @@ function ProviderNavButton({
         "grid min-h-[58px] w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-2 text-sm transition-[box-shadow,background-color] duration-150 ease-out",
         highlightShape === "right" ? "rounded-r-inner" : "rounded-inner",
         toggleDisabled
-          ? "bg-slate-50 text-slate-400 shadow-control ring-1 ring-slate-200"
+          ? "bg-panel text-muted shadow-control ring-1 ring-line"
           : active
             ? activeTone === "neutral"
               ? "bg-panel-soft text-ink shadow-raised ring-1 ring-line"
-              : "bg-blue-50 text-action shadow-raised"
+              : "bg-action-soft text-action shadow-raised"
             : "hover:bg-panel hover:shadow-control",
       )}
     >
@@ -1861,7 +1895,7 @@ function ProviderNavButton({
           ) : null}
           <span className="block truncate font-semibold">{label}</span>
         </span>
-        <span className="block truncate text-xs text-slate-500">{meta}</span>
+        <span className="block truncate text-xs text-muted">{meta}</span>
       </button>
       <SwitchControl
         checked={enabled}
@@ -2084,7 +2118,7 @@ function OfficialDetail({
                   />
                   <button
                     type="button"
-                    className="focus-ring grid h-7 w-7 place-items-center rounded-control bg-surface text-slate-600 shadow-control hover:bg-white disabled:text-slate-300"
+                    className="focus-ring grid h-7 w-7 place-items-center rounded-control bg-surface text-muted shadow-control hover:bg-action-soft disabled:text-muted"
                     disabled={usageBusy}
                     aria-label={t("providers.refreshOpenAIUsage")}
                     title={t("providers.refreshOpenAIUsage")}
@@ -2116,7 +2150,7 @@ function OfficialDetail({
           }
         />
         {!officialIncluded && (
-          <div className="rounded-inner border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium leading-5 text-amber-800 shadow-hairline">
+          <div className="rounded-inner border border-warn-line bg-warn-soft px-3 py-2 text-xs font-medium leading-5 text-warn shadow-hairline">
             {t("providers.openaiSourceExcludedDetail")}
           </div>
         )}
@@ -2155,7 +2189,7 @@ function OfficialDetail({
       <div className="flex items-center justify-end border-t border-line px-5 py-3">
         <button
           type="button"
-          className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-action px-3 text-sm font-semibold text-white disabled:bg-slate-300"
+          className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control bg-action px-3 text-sm font-semibold text-on-action disabled:bg-line"
           disabled={!dirty || saveBusy}
           onClick={onSave}
         >

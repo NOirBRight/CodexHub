@@ -55,7 +55,7 @@ export function RuntimeBar({
           {appFlavor?.product_name ?? "CodexHub"}
         </span>
         {appFlavor?.build.flavor === "debug" && appFlavor.build.diagnostics_enabled ? (
-          <span className="rounded-control border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">
+          <span className="rounded-control border border-warn-line bg-warn-soft px-1.5 py-0.5 text-[10px] font-semibold text-warn">
             {t("runtime.debugDiagnostics")}
           </span>
         ) : null}
@@ -70,17 +70,17 @@ export function RuntimeBar({
           title={message ?? `${address} ${running ? t("runtime.running") : t("runtime.stopped")}`}
         >
           <span className={cx("h-2 w-2 rounded-full", running ? "bg-ok" : "bg-danger")} />
-          <code className="font-mono text-slate-700">{address}</code>
-          <span className="text-slate-500">{running ? t("runtime.running") : t("runtime.stopped")}</span>
+          <code className="font-mono text-ink">{address}</code>
+          <span className="text-muted">{running ? t("runtime.running") : t("runtime.stopped")}</span>
           {runtimeHint && (
-            <span className="min-w-0 truncate border-l border-line pl-2 font-medium text-slate-600">
+            <span className="min-w-0 truncate border-l border-line pl-2 font-medium text-muted">
               {runtimeHint}
             </span>
           )}
         </div>
         <button
           type="button"
-          className="focus-ring inline-flex h-8 w-8 items-center justify-center rounded-control bg-surface text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+          className="focus-ring inline-flex h-8 w-8 items-center justify-center rounded-control bg-surface text-ink shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96]"
           disabled={Boolean(busy) || !status || lifecycleTransitionActive}
           onClick={running ? onStop : onStart}
           aria-label={running ? t("runtime.stopRuntime") : t("runtime.startRuntime")}
@@ -90,7 +90,7 @@ export function RuntimeBar({
         </button>
         <button
           type="button"
-          className="focus-ring grid h-8 w-8 place-items-center rounded-control bg-surface text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+          className="focus-ring grid h-8 w-8 place-items-center rounded-control bg-surface text-muted shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96]"
           onClick={onOpenSettings}
           aria-label={t("common.settings")}
           title={t("common.settings")}
@@ -184,8 +184,8 @@ function WindowControlButton({
     <button
       type="button"
       className={cx(
-        "focus-ring grid h-9 w-10 place-items-center rounded-control text-slate-600 transition-[background-color,color,transform] duration-150 ease-out hover:bg-panel hover:text-ink active:scale-[0.96]",
-        danger && "hover:bg-red-50 hover:text-danger",
+        "focus-ring grid h-9 w-10 place-items-center rounded-control text-muted transition-[background-color,color,transform] duration-150 ease-out hover:bg-panel hover:text-ink active:scale-[0.96]",
+        danger && "hover:bg-danger-soft hover:text-danger",
       )}
       aria-label={label}
       data-window-control

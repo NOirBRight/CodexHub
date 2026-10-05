@@ -84,6 +84,7 @@ type Props = {
   officialId: string;
   defaultSubagentModel: string;
   defaultSubagentEffort: string;
+  nativeSubagentOptions?: DefaultSubagentOption[];
   onDefaultSubagentChange?: (model: string, effort: string) => void;
 };
 let dailyCache: { day: string; snapshot: GatewayUsageSnapshot } | null = null;
@@ -215,25 +216,29 @@ export function ProviderWorkspaceView(props: Props) {
       props.officialIncluded ? props.officialEnabled : 0,
     );
   const subagentOptions = listDefaultSubagentOptions({
+    nativeOptions: props.nativeSubagentOptions,
     includeFastVariants: true,
     officialId: props.officialId,
-    officialIncluded: props.officialIncluded,
+    officialIncluded: props.connected && props.officialIncluded,
     officialModels: props.officialModels,
     officialDisabledModels: props.officialDisabledModels,
-    providers: props.providers,
+    providers: props.connected ? props.providers : [],
   });
   const selectedSubagent =
     subagentOptions.find((option) => option.id === props.defaultSubagentModel) ??
     (props.defaultSubagentModel
       ? {
           id: props.defaultSubagentModel,
-          label: props.defaultSubagentModel,
+          label: props.defaultSubagentModel.replace(/^native:/, ""),
           efforts: [],
-          defaultEffort: "medium",
+          defaultEffort: props.defaultSubagentModel.startsWith("native:") ? "" : "medium",
+          native: props.defaultSubagentModel.startsWith("native:"),
         }
       : undefined);
   const subagentEfforts = selectedSubagent
-    ? resolveSubagentEffort(selectedSubagent, props.defaultSubagentEffort)
+    ? props.defaultSubagentModel.startsWith("native:")
+      ? props.defaultSubagentEffort
+      : resolveSubagentEffort(selectedSubagent, props.defaultSubagentEffort)
     : "";
   const subagentDisabled =
     props.connectionBusy || !props.onDefaultSubagentChange;
@@ -673,6 +678,7 @@ export function DefaultSubagentPicker({
   options,
   selected,
   emptyLabel,
+  effortUnavailableHint,
   onChange,
 }: {
   disabled: boolean;
@@ -681,6 +687,7 @@ export function DefaultSubagentPicker({
   options: DefaultSubagentOption[];
   selected?: DefaultSubagentOption;
   emptyLabel?: string;
+  effortUnavailableHint?: string;
   onChange: (model: string, effort: string) => void;
 }) {
   const { t } = useTranslation();
@@ -709,7 +716,7 @@ export function DefaultSubagentPicker({
   );
   const effortChoices = activeSelected?.efforts.length
     ? activeSelected.efforts
-    : activeSelected
+    : activeSelected && !activeSelected.native
       ? [...CODEX_SUBAGENT_EFFORTS]
       : [];
   const modelChoices =
@@ -815,6 +822,11 @@ export function DefaultSubagentPicker({
   }
 
   const modelLabel = draftModel ? activeSelected?.label || draftModel : fallback;
+  const effortHint = effortUnavailableHint ?? (!draftModel
+    ? t("workspace.defaultSubagentEffortSelectModel")
+    : effortChoices.length === 0
+      ? t("workspace.defaultSubagentEffortUnavailable")
+      : undefined);
 
   return (
     <div
@@ -893,7 +905,8 @@ export function DefaultSubagentPicker({
               <button
                 type="button"
                 className="ws-bridge-subagent-row"
-                disabled={!draftModel}
+                disabled={!draftModel || effortChoices.length === 0}
+                title={effortHint}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => setPanel("effort")}
               >
@@ -903,7 +916,7 @@ export function DefaultSubagentPicker({
                   <ChevronRight size={11} />
                 </span>
               </button>
-              {options.some((option) => option.speedVariant) && <button
+              {!draftModel.startsWith("native:") && options.some((option) => option.speedVariant) && <button
                 type="button"
                 className="ws-bridge-subagent-row"
                 role="switch"
@@ -925,6 +938,7 @@ export function DefaultSubagentPicker({
                   <Zap size={11} aria-hidden="true" />
                 </span>
               </button>}
+              {effortHint && <p className="ws-bridge-subagent-hint">{effortHint}</p>}
             </>
           ) : (
             <>
@@ -981,7 +995,7 @@ export function DefaultSubagentPicker({
                       onMouseDown={(event) => event.preventDefault()}
                       onClick={() => chooseEffort(item)}
                     >
-                      {formatSubagentEffort(item)}
+                      {formatSubagentEffort(item) || t("workspace.defaultSubagentCliDefault")}
                     </button>
                   ))
                 )}

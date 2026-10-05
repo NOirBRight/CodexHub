@@ -196,6 +196,41 @@ def test_model_switch_keeps_user_content_after_tool_results(protocol: str) -> No
 
 
 @pytest.mark.parametrize("protocol", ["chat_completions", "responses"])
+def test_mid_conversation_system_images_have_a_declared_ordered_conversion(protocol: str) -> None:
+    from anthropic_messages_ir import prepare_upstream_request
+
+    urls = ["https://example.test/first.png", "https://example.test/second.png"]
+    body = {"model": "claude-synthetic-1", "max_tokens": 64, "messages": [
+        {"role": "user", "content": "Before"},
+        {"role": "system", "content": [
+            {"type": "text", "text": "Compact context"},
+            *[{"type": "image", "source": {"type": "url", "url": url}} for url in urls],
+        ]},
+        {"role": "user", "content": "After"},
+    ]}
+    result = prepare_upstream_request(json.dumps(body).encode(), protocol)
+    assert isinstance(result, Adapted), result
+    assert any(item.field == "messages[1].content" and
+               item.policy == "mid_conversation_system_image_lifted_to_user_message"
+               for item in result.adaptations)
+    translated = json.loads(result.body)
+    if protocol == "responses":
+        assert translated["instructions"] == "Compact context"
+        history = translated["input"]
+        image_type = "input_image"
+        image_urls = [part["image_url"] for part in history[-2]["content"]
+                      if part["type"] == image_type]
+    else:
+        history = translated["messages"]
+        assert history[1] == {"role": "system", "content": "Compact context"}
+        image_type = "image_url"
+        image_urls = [part["image_url"]["url"] for part in history[-2]["content"]
+                      if part["type"] == image_type]
+    assert [item["role"] for item in history if item["role"] != "system"] == ["user", "user", "user"]
+    assert image_urls == urls
+
+
+@pytest.mark.parametrize("protocol", ["chat_completions", "responses"])
 def test_known_claude_classifier_context_has_a_declared_conversion(protocol: str) -> None:
     from anthropic_messages_ir import prepare_upstream_request
 

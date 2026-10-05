@@ -26,7 +26,7 @@ export function CliSubscriptionCard({ provider, onChange }: { provider: Provider
     } finally { setBusy(false); }
   }
 
-  return <div className="grid gap-2 rounded-md border border-line bg-panel p-3 text-xs text-slate-600">
+  return <div className="grid gap-2 rounded-md border border-line bg-panel p-3 text-xs text-muted">
     <p>{t("providers.cliCurrentAccount")}</p>
     <div className="flex flex-wrap items-center gap-3">
       <button type="button" className="ws-button" disabled={busy} onClick={() => void detect()}>{t("providers.cliDetect")}</button>

@@ -314,7 +314,7 @@ const ZCODE_SUBAGENT_MARKER: &str = "x-codexhub-default-subagent: true";
 const ZCODE_RESTORE_MODEL: &str = "x-codexhub-restore-model";
 const ZCODE_RESTORE_THOUGHT: &str = "x-codexhub-restore-thoughtLevel";
 
-fn zcode_agents_dir(targets: &ZcodeConfigTargets) -> PathBuf {
+pub(in crate::gateway) fn zcode_agents_dir(targets: &ZcodeConfigTargets) -> PathBuf {
     match targets.v2_config_path.parent() {
         Some(parent) if parent.file_name().is_some_and(|name| name == "v2") => {
             parent.parent().unwrap_or(parent).join("agents")
@@ -330,6 +330,9 @@ pub(in crate::gateway) fn zcode_default_subagent_files(
     providers: &[Provider],
     model: &str,
 ) -> Result<Vec<(PathBuf, Option<String>)>, String> {
+    if super::zcode_native::native_active(targets)? {
+        return Ok(Vec::new());
+    }
     let pin = resolve_client_default_subagent_pin(settings, providers, "zcode", model)?;
     let agents_dir = zcode_agents_dir(targets);
     let mut files = Vec::new();
@@ -346,6 +349,9 @@ pub(in crate::gateway) fn zcode_default_subagent_files(
             }
             None => {}
         }
+    }
+    if let Some(state) = super::zcode_native::gateway_state_file(targets, pin.as_ref())? {
+        files.push(state);
     }
     Ok(files)
 }
@@ -416,7 +422,30 @@ fn zcode_restored_agent_text(existing: Option<&str>) -> Option<String> {
             take_frontmatter(&mut fields, "thoughtLevel");
         }
     }
-    Some(render_zcode_frontmatter(&fields, &body))
+    let _ = body;
+    let mut result = existing.to_string();
+    for key in ["x-codexhub-default-subagent", ZCODE_RESTORE_MODEL, ZCODE_RESTORE_THOUGHT, "model", "thoughtLevel"] {
+        result = patch_zcode_frontmatter(&result, key, fields.iter().find(|(name, _)| name == key).map(|(_, value)| value.as_str()));
+    }
+    Some(result)
+}
+
+fn patch_zcode_frontmatter(text: &str, key: &str, value: Option<&str>) -> String {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let Some(end) = lines.iter().enumerate().skip(1).find(|(_, line)| line.trim() == "---").map(|(index, _)| index) else { return text.to_string(); };
+    let mut result = String::new();
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut found = false;
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 && index < end && line.split_once(':').is_some_and(|(name, _)| name == key) {
+            found = true;
+            if let Some(value) = value { result.push_str(&format!("{key}: {value}{newline}")); }
+        } else {
+            if index == end && !found { if let Some(value) = value { result.push_str(&format!("{key}: {value}{newline}")); } }
+            result.push_str(line);
+        }
+    }
+    result
 }
 
 fn parse_zcode_frontmatter(text: &str) -> (Vec<(String, String)>, String) {
@@ -508,7 +537,7 @@ fn publish_zcode_agent_files(files: &[(PathBuf, Option<String>)]) -> Result<(), 
     Ok(())
 }
 
-fn clear_owned_zcode_agent_files(targets: &ZcodeConfigTargets) -> Result<(), String> {
+pub(in crate::gateway) fn clear_owned_zcode_agent_files(targets: &ZcodeConfigTargets) -> Result<(), String> {
     let agents_dir = zcode_agents_dir(targets);
     let files = ZCODE_SPAWN_AGENTS
         .iter()
@@ -519,7 +548,8 @@ fn clear_owned_zcode_agent_files(targets: &ZcodeConfigTargets) -> Result<(), Str
             (path, next)
         })
         .collect::<Vec<_>>();
-    publish_zcode_agent_files(&files)
+    publish_zcode_agent_files(&files)?;
+    super::zcode_native::restore_native_state(targets)
 }
 
 pub(in crate::gateway) fn zcode_owned_agents_match(
@@ -1003,7 +1033,7 @@ pub(in crate::gateway) fn preview_zcode_config_with_targets(
     .map(|text| sanitize_text(&text));
     let next_config = zcode_v2_config_text(&targets.v2_config_path, settings, providers, &model)?;
     let next_catalog = zcode_catalog_text(settings, providers, &model)?;
-    let next_cache = zcode_v2_cache_text(settings, providers, &model)?;
+    let next_cache = super::zcode_native::preserve_native_cache(&targets.v2_cache_path, &zcode_v2_cache_text(settings, providers, &model)?)?;
     let agent_files = zcode_default_subagent_files(targets, settings, providers, &model)?;
     Ok(GatewayClientConfigPreview {
         client_id: "zcode".to_string(),
@@ -1046,7 +1076,7 @@ pub(in crate::gateway) fn plan_zcode_apply(
 ) -> Result<ZcodeApplyPlan, String> {
     let model = resolve_gateway_client_model_id(settings, providers, model)?;
     let next_catalog = zcode_catalog_text(settings, providers, &model)?;
-    let next_cache = zcode_v2_cache_text(settings, providers, &model)?;
+    let next_cache = super::zcode_native::preserve_native_cache(&targets.v2_cache_path, &zcode_v2_cache_text(settings, providers, &model)?)?;
     let next_config = zcode_v2_config_text(&targets.v2_config_path, settings, providers, &model)?;
     Ok(ZcodeApplyPlan {
         skip_snapshot: zcode_targets_current_is_managed(targets),
@@ -1076,6 +1106,7 @@ pub(in crate::gateway) fn publish_zcode_apply(
     plan: &ZcodeApplyPlan,
     backup_root: &Path,
 ) -> Result<GatewayClientApplyResult, String> {
+    super::zcode_native::capture_before_publish(&plan.targets)?;
     let backup_path = create_snapshot_backup(
         "zcode",
         backup_root,

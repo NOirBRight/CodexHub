@@ -5,9 +5,11 @@ from pathlib import Path
 import subprocess
 import sys
 import shlex
+import pytest
 
 
-def test_native_discovery_preserves_exact_ids_and_isolates_configuration(tmp_path):
+@pytest.mark.parametrize('native_route', [False, True])
+def test_native_discovery_preserves_exact_ids_and_isolates_configuration(tmp_path, native_route):
     source = tmp_path / 'source'
     source.mkdir()
     settings = source / 'settings.json'
@@ -30,9 +32,12 @@ if "--version" in sys.argv:
     raise SystemExit(0)
 assert "ANTHROPIC_API_KEY" not in os.environ
 assert "ANTHROPIC_DEFAULT_OPUS_MODEL" not in json.loads((Path(os.environ["CLAUDE_CONFIG_DIR"])/"settings.json").read_text()).get("env", {})
+native_env=json.loads((Path(os.environ["CLAUDE_CONFIG_DIR"])/"settings.json").read_text()).get("env", {})
+assert ("ANTHROPIC_BASE_URL" not in native_env) == EXPECT_NATIVE_ROUTE
 assert json.loads(sys.stdin.readline())["request"]["subtype"] == "initialize"
 sys.stdout.buffer.write(json.dumps({"response":{"response":{"models":[{"value":"opus[1m]","resolvedModel":"claude-opus-5-5[1m]","displayName":"Opus \\U0001f680"},{"value":"haiku","resolvedModel":"claude-haiku-4-5-20251001","displayName":"Haiku"},{"value":"custom","resolvedModel":"claude-codexhub-external","displayName":"External"}],"account":{"secret":"MUST_NOT_RETURN"}}}}, ensure_ascii=False).encode("utf-8") + b"\\n")
 ''')
+    program.write_text(program.read_text().replace('EXPECT_NATIVE_ROUTE', repr(native_route)))
     fixture = tmp_path / ('claude & fixture.cmd' if os.name == 'nt' else 'claude')
     if os.name == 'nt':
         fixture.write_text(f'@echo off\n"%CODEXHUB_E2E_PYTHON%" "{program}" %*\n')
@@ -40,7 +45,8 @@ sys.stdout.buffer.write(json.dumps({"response":{"response":{"models":[{"value":"
         fixture.write_text(f'#!/bin/sh\nexec "$CODEXHUB_E2E_PYTHON" {shlex.quote(str(program))} "$@"\n')
     fixture.chmod(0o700)
     script = Path(__file__).resolve().parents[1] / 'src-python' / 'claude_native_models.py'
-    result = subprocess.run([sys.executable, str(script), '--claude-bin', str(fixture), '--config-dir', str(source)],
+    result = subprocess.run([sys.executable, str(script), '--claude-bin', str(fixture), '--config-dir', str(source),
+                            *(['--native-route'] if native_route else [])],
         capture_output=True, text=True, timeout=15,
         env={**os.environ, 'CODEXHUB_E2E_PYTHON': sys.executable, 'ANTHROPIC_API_KEY': 'MUST_NOT_INHERIT'})
     assert result.returncode == 0, result.stderr
@@ -49,6 +55,7 @@ sys.stdout.buffer.write(json.dumps({"response":{"response":{"models":[{"value":"
     assert discovered['source']['cli_version'] == '2.1.282'
     assert len(discovered['source']['fingerprint']) == 64
     assert rows[0]['label'] == 'Opus \U0001f680'
+    assert ('via Gateway' in rows[0]['description']) == (not native_route)
     assert [row['model'] for row in rows] == ['claude-opus-5-5[1m]', 'claude-haiku-4-5-20251001']
     assert 'MUST_NOT_RETURN' not in result.stdout
     assert settings.read_bytes() == before

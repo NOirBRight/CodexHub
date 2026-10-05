@@ -71,6 +71,73 @@ class DeterministicCompactionReplay:
 
 
 class ConfigOverlayTests(unittest.TestCase):
+    def test_native_subagent_save_is_direct_and_survives_gateway_lifecycle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config.toml"
+            backup = root / "backup.toml"
+            original = 'model = "parent"\nservice_tier = "priority"\n[agents]\nmax_depth = 3\n[agents.reviewer]\nconfig_file = "reviewer.toml"\n'
+            config.write_text(original, encoding="utf-8")
+            saved = config_overlay.save_native_default_subagent(config, [backup], "native-model", "high")
+            self.assertEqual(saved["model"], "native-model")
+            self.assertEqual(saved["effort"], "high")
+            self.assertFalse(backup.exists())
+            live = tomllib.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(live["model"], "parent")
+            self.assertEqual(live["service_tier"], "priority")
+            self.assertEqual(live["agents"]["reviewer"], {"config_file": "reviewer.toml"})
+            apply_overlay(config, backup, None, "http://127.0.0.1:9099", default_subagent_model="", default_subagent_reasoning_effort="")
+            apply_overlay(config, backup, None, "http://127.0.0.1:9099", default_subagent_model="gateway/model", default_subagent_reasoning_effort="max")
+            config_overlay.save_native_default_subagent(config, [backup], "native-updated", "low")
+            apply_overlay(config, backup, None, "http://127.0.0.1:9099", default_subagent_model="", default_subagent_reasoning_effort="")
+            self.assertEqual(tomllib.loads(config.read_text(encoding="utf-8"))["agents"]["default_subagent_model"], "native-updated")
+            restore_overlay(config, backup)
+            restored = tomllib.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(restored["agents"]["default_subagent_model"], "native-updated")
+            self.assertEqual(restored["model"], "parent")
+            self.assertEqual(restored["service_tier"], "priority")
+
+    def test_native_subagent_reset_updates_every_existing_channel_baseline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config.toml"
+            backups = [root / "stable.backup", root / "beta.backup"]
+            original = '[agents]\ndefault_subagent_model = "old"\ndefault_subagent_reasoning_effort = "max"\nmax_depth = 4\n'
+            for path in [config, *backups]:
+                path.write_text(original, encoding="utf-8")
+            config_overlay.save_native_default_subagent(config, backups, "", "")
+            for path in [config, *backups]:
+                self.assertEqual(tomllib.loads(path.read_text(encoding="utf-8"))["agents"], {"max_depth": 4})
+
+    def test_native_subagent_model_catalog_keeps_identity_and_advertised_efforts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config.toml"
+            (root / "native-catalog.json").write_text(json.dumps({"models": [{"slug": "native-only", "display_name": "Native only", "supported_reasoning_levels": [{"effort": "ultra"}], "default_reasoning_level": "ultra"}]}), encoding="utf-8")
+            config.write_text('model_catalog_json = "native-catalog.json"\nmodel = "parent"\n', encoding="utf-8")
+            state = config_overlay.save_native_default_subagent(config, [], "native-only", "ultra")
+            self.assertEqual(state["models"], [{"id": "native-only", "label": "Native only", "efforts": ["ultra"], "defaultEffort": "ultra"}])
+            self.assertEqual(state["effort"], "ultra")
+            self.assertTrue(state["native_catalog"])
+            inherited = config_overlay.save_native_default_subagent(config, [], "native-only", "")
+            self.assertEqual(inherited["model"], "native-only")
+            self.assertEqual(inherited["effort"], "")
+
+    def test_native_subagent_catalog_readback_does_not_consume_gateway_catalog(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config.toml"
+            backup = root / "backup.toml"
+            catalog = root / "model-catalogs" / "codexhub-model-catalog.json"
+            (root / "native.json").write_text('{"models": [{"slug": "native-model", "visibility": "list"}]}', encoding="utf-8")
+            config.write_text('model_catalog_json = "native.json"\n', encoding="utf-8")
+            with patch.dict(os.environ, {"CODEX_HOME": str(root)}):
+                apply_overlay(config, backup, catalog, "http://127.0.0.1:9099", use_managed_catalog=True)
+                state = config_overlay.read_native_default_subagent(config, [backup])
+            self.assertEqual([item["id"] for item in state["models"]], ["native-model"])
+            self.assertEqual(state["models"][0]["efforts"], [])
+            self.assertEqual(state["models"][0]["defaultEffort"], "")
+
     def test_retired_context_guard_commands_are_rejected_without_writes(self):
         with tempfile.TemporaryDirectory() as root:
             config = Path(root) / "config.toml"

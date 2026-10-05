@@ -21,7 +21,7 @@ const OFFICIAL_OPENAI_USAGE_STORAGE_KEY = "codexhub.officialOpenAIUsageSnapshot.
 const OFFICIAL_USAGE_CELL_GAP = 2;
 const OFFICIAL_USAGE_CELL_SIZE = 8;
 const USAGE_MONTH_LABEL_MIN_GAP_PX = 36;
-const OFFICIAL_USAGE_COLOR_STOPS = ["#eff2f5", "#d8ebff", "#acd7ff", "#7cc1ff", "#48a7fb", "#1687e8"];
+const OFFICIAL_USAGE_COLOR_STOPS = Array.from({ length: 6 }, (_, index) => `var(--ws-heatmap-${index})`);
 const OPENAI_USAGE_LIMIT_PLACEHOLDERS: OpenAIUsageLimit[] = [
   { key: "week", name: "Weekly", period: "week" },
 ];
@@ -165,7 +165,7 @@ type OfficialOpenAIUsageTooltipState = {
 function UsageMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="grid min-w-0 place-items-center rounded-inner bg-surface px-2 py-1 text-center shadow-control">
-      <div className="text-[9px] font-semibold uppercase leading-3 text-slate-500">{label}</div>
+      <div className="text-[9px] font-semibold uppercase leading-3 text-muted">{label}</div>
       <div className="mt-0.5 font-semibold leading-4 text-ink">{value}</div>
     </div>
   );
@@ -220,18 +220,18 @@ export function OfficialOpenAIUsageLimitBars({
               <span
                 className={cx(
                   "shrink-0 whitespace-nowrap text-[11px] font-bold leading-3",
-                  percent === null ? "text-slate-400" : "text-emerald-700",
+                  percent === null ? "text-muted" : "text-ok",
                 )}
               >
                 {value}
               </span>
             </div>
-            <div className="mt-0.5 whitespace-nowrap text-[9px] font-medium leading-3 text-slate-400">{endTime}</div>
-            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-200">
+            <div className="mt-0.5 whitespace-nowrap text-[9px] font-medium leading-3 text-muted">{endTime}</div>
+            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-line">
               <div
                 className={cx(
                   "h-full rounded-full transition-[width] duration-200 ease-out",
-                  percent === null ? "w-full bg-slate-300/70" : "bg-emerald-500",
+                  percent === null ? "w-full bg-line/70" : "bg-ok",
                   percent === null && busy && "animate-pulse",
                 )}
                 style={percent === null ? undefined : { width: `${percent}%` }}
@@ -335,8 +335,8 @@ export function OfficialOpenAIUsagePanel({
                 className="grid min-w-0 place-items-center rounded-inner bg-surface px-2 py-1 shadow-control"
                 aria-hidden="true"
               >
-                <span className="h-2 w-10 rounded-full bg-slate-200" />
-                <span className={cx("mt-2 h-3 rounded-full bg-slate-200", index === 0 ? "w-12" : "w-9")} />
+                <span className="h-2 w-10 rounded-full bg-line" />
+                <span className={cx("mt-2 h-3 rounded-full bg-line", index === 0 ? "w-12" : "w-9")} />
               </div>
             ))
           ) : (
@@ -371,7 +371,7 @@ export function OfficialOpenAIUsagePanel({
               type="button"
               className={cx(
                 "focus-ring h-6 rounded-full px-2 text-[11px] font-semibold transition-[background-color,color]",
-                mode === option.value ? "bg-ink text-white" : "text-slate-500 hover:bg-panel hover:text-ink",
+                mode === option.value ? "bg-action text-on-action" : "text-muted hover:bg-panel hover:text-ink",
               )}
               onClick={() => setMode(option.value)}
             >
@@ -382,7 +382,7 @@ export function OfficialOpenAIUsagePanel({
       </div>
 
       {error ? (
-        <div className="rounded-inner bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 shadow-hairline">
+        <div className="rounded-inner bg-warn-soft px-3 py-2 text-xs font-medium text-warn shadow-hairline">
           {error}
         </div>
       ) : showUsageSkeleton ? (
@@ -437,7 +437,7 @@ export function OfficialOpenAIUsagePanel({
                 })}
               </div>
               <div
-                className="relative mt-1 h-4 text-[10px] text-slate-400"
+                className="relative mt-1 h-4 text-[10px] text-muted"
                 style={{ width: usageGridWidth(chart.columns.length) }}
               >
                 {usageMonthLabels(chart.columns, locale, usageGridWidth(chart.columns.length)).map((label) => (
@@ -459,7 +459,7 @@ export function OfficialOpenAIUsagePanel({
               <OfficialOpenAIUsageTooltip tooltip={hoveredUsageCell} locale={locale} t={t as Translate} />
             </div>
           ) : (
-            <div className="grid min-h-[82px] place-items-center text-xs font-medium text-slate-500">
+            <div className="grid min-h-[82px] place-items-center text-xs font-medium text-muted">
               {busy ? t("providers.loadingOpenAIUsage") : t("providers.openaiUsageNoData")}
             </div>
           )}
@@ -490,16 +490,16 @@ function OfficialOpenAIUsageSkeleton({ label }: { label: string }) {
           <span
             key={`cell-${index}`}
             className={cx(
-              "h-full w-full rounded-[3px] bg-slate-200",
-              index % 11 === 0 && "bg-slate-300/80",
-              index % 17 === 0 && "bg-slate-300",
+              "h-full w-full rounded-[3px] bg-line",
+              index % 11 === 0 && "bg-line/80",
+              index % 17 === 0 && "bg-line",
             )}
           />
         ))}
       </div>
       <div className="mt-2 flex gap-5">
         {Array.from({ length: 6 }, (_, index) => (
-          <span key={`month-${index}`} className="h-2 w-7 rounded-full bg-slate-200" />
+          <span key={`month-${index}`} className="h-2 w-7 rounded-full bg-line" />
         ))}
       </div>
     </div>

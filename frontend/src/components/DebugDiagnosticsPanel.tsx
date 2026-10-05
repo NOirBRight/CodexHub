@@ -112,7 +112,7 @@ export function DebugDiagnosticsOverlay({
   const rollingHours = Math.floor((status?.rolling_window_seconds ?? 0) / 3600);
 
   return (
-    <div className="fixed inset-0 z-[80] grid place-items-center bg-black/20 px-4 py-6">
+    <div className="fixed inset-0 z-[80] grid place-items-center bg-scrim px-4 py-6">
       <section
         aria-labelledby="debug-diagnostics-overlay-title"
         aria-modal="true"
@@ -125,7 +125,7 @@ export function DebugDiagnosticsOverlay({
               <Activity size={16} className="shrink-0 text-action" />
               <span className="truncate">{t("diagnostics.title")}</span>
             </h2>
-            <p className="mt-0.5 truncate text-xs text-slate-500">
+            <p className="mt-0.5 truncate text-xs text-muted">
               {t("diagnostics.summary", {
                 hours: rollingHours,
                 bytes: status?.rolling_bytes ?? 0,
@@ -137,17 +137,17 @@ export function DebugDiagnosticsOverlay({
             <span
               className={`rounded-control px-2 py-1 text-[10px] font-semibold ${
                 paused
-                  ? "bg-amber-100 text-amber-800"
+                  ? "bg-warn-soft text-warn"
                   : active
-                    ? "bg-emerald-100 text-emerald-800"
-                    : "bg-slate-100 text-slate-600"
+                    ? "bg-ok-soft text-ok"
+                    : "bg-panel text-muted"
               }`}
             >
               {paused ? t("diagnostics.paused") : active ? t("diagnostics.active") : t("diagnostics.unavailable")}
             </span>
             <button
               type="button"
-              className="focus-ring grid h-8 w-8 shrink-0 place-items-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+              className="focus-ring grid h-8 w-8 shrink-0 place-items-center rounded-control bg-panel text-muted shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96]"
               aria-label={t("common.close")}
               onClick={onClose}
               title={t("common.close")}
@@ -159,26 +159,26 @@ export function DebugDiagnosticsOverlay({
 
         <div className="min-h-0 overflow-auto">
           <div className="grid gap-2 py-3 pl-3 pr-1">
-            <p className="text-xs text-slate-500">{t("diagnostics.subtitle")}</p>
+            <p className="text-xs text-muted">{t("diagnostics.subtitle")}</p>
 
             {!gatewayRunning ? (
-              <p className="rounded-inner bg-panel px-2 py-1.5 text-xs text-slate-600">{t("diagnostics.gatewayRequired")}</p>
+              <p className="rounded-inner bg-panel px-2 py-1.5 text-xs text-muted">{t("diagnostics.gatewayRequired")}</p>
             ) : error ? (
-              <p className="rounded-inner bg-amber-50 px-2 py-1.5 text-xs text-amber-800">{t("diagnostics.statusDelayed")}</p>
+              <p className="rounded-inner bg-warn-soft px-2 py-1.5 text-xs text-warn">{t("diagnostics.statusDelayed")}</p>
             ) : status ? (
-              <div className="grid gap-1 rounded-inner bg-panel p-2 text-xs text-slate-600">
+              <div className="grid gap-1 rounded-inner bg-panel p-2 text-xs text-muted">
                 <span>{t("diagnostics.rolling", { hours: rollingHours, bytes: status.rolling_bytes })}</span>
                 <span>{t("diagnostics.incidents", { count: status.incident_count })}</span>
                 <span>{t("diagnostics.noRestartRequired")}</span>
               </div>
             ) : (
-              <p className="rounded-inner bg-panel px-2 py-1.5 text-xs text-slate-500">{t("diagnostics.loading")}</p>
+              <p className="rounded-inner bg-panel px-2 py-1.5 text-xs text-muted">{t("diagnostics.loading")}</p>
             )}
 
             <div className="flex flex-wrap items-center gap-1.5">
               <button
                 type="button"
-                className="focus-ring inline-flex h-8 items-center gap-1 rounded-control bg-ink px-2 text-[11px] font-semibold text-white shadow-control transition hover:bg-slate-800 disabled:bg-slate-300"
+                className="focus-ring inline-flex h-8 items-center gap-1 rounded-control bg-action px-2 text-[11px] font-semibold text-on-action shadow-control transition hover:bg-action-hover disabled:bg-line"
                 disabled={!controlsAvailable || paused}
                 onClick={() => void runAction("mark", () => api.diagnosticsManualMark())}
               >
@@ -187,7 +187,7 @@ export function DebugDiagnosticsOverlay({
               </button>
               <button
                 type="button"
-                className="focus-ring inline-flex h-8 items-center gap-1 rounded-control bg-panel px-2 text-[11px] font-semibold text-slate-700 shadow-control transition hover:bg-white disabled:text-slate-300"
+                className="focus-ring inline-flex h-8 items-center gap-1 rounded-control bg-panel px-2 text-[11px] font-semibold text-ink shadow-control transition hover:bg-action-soft disabled:text-muted"
                 disabled={!controlsAvailable}
                 onClick={() =>
                   void runAction(paused ? "resume" : "pause", () =>
@@ -200,7 +200,7 @@ export function DebugDiagnosticsOverlay({
               </button>
               <button
                 type="button"
-                className="focus-ring inline-flex h-8 w-8 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition hover:bg-white disabled:text-slate-300"
+                className="focus-ring inline-flex h-8 w-8 items-center justify-center rounded-control bg-panel text-ink shadow-control transition hover:bg-action-soft disabled:text-muted"
                 disabled={!gatewayRunning || Boolean(busy)}
                 aria-label={t("diagnostics.refresh")}
                 title={t("diagnostics.refresh")}
@@ -213,11 +213,11 @@ export function DebugDiagnosticsOverlay({
             {status?.incident_ids.length ? (
               <div className="grid gap-1 border-t border-line pt-2">
                 {status.incident_ids.map((incidentId) => (
-                  <div key={incidentId} className="flex items-center justify-between gap-2 rounded-inner bg-panel px-2 py-1 text-xs text-slate-600">
+                  <div key={incidentId} className="flex items-center justify-between gap-2 rounded-inner bg-panel px-2 py-1 text-xs text-muted">
                     <span className="font-mono">{incidentId}</span>
                     <button
                       type="button"
-                      className="focus-ring inline-flex h-6 items-center gap-1 rounded-control px-1.5 text-[11px] font-semibold text-danger hover:bg-red-50 disabled:text-slate-300"
+                      className="focus-ring inline-flex h-6 items-center gap-1 rounded-control px-1.5 text-[11px] font-semibold text-danger hover:bg-danger-soft disabled:text-muted"
                       disabled={!controlsAvailable}
                       onClick={() => void runAction("delete", () => api.diagnosticsDeleteIncident(incidentId), incidentId)}
                     >

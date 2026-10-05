@@ -64,6 +64,11 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         Command::GetSettings => {
             to_value(config::get_settings().and_then(autostart::reconcile_settings))
         }
+        Command::GetCodexNativeSubagent => to_value(config::get_codex_native_subagent()),
+        Command::SaveCodexNativeSubagent => to_value(config::save_codex_native_subagent(
+            registry_raw_string_arg(args, command, "model")?,
+            registry_raw_string_arg(args, command, "effort")?,
+        )),
         Command::GetAppFlavor => to_value(Ok(crate::app_flavor::current_info())),
         Command::SaveSettings => {
             let settings = serde_json::from_value(
@@ -213,6 +218,11 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         Command::DshClientConnect => to_value(gateway::dsh_client_connect()),
         Command::DshClientDisconnect => to_value(gateway::dsh_client_disconnect()),
         Command::DshClientReadback => to_value(gateway::dsh_client_readback()),
+        Command::ReadClaudeSubagentSettings => to_value(gateway::read_claude_subagent_settings()),
+        Command::SaveClaudeSubagent => {
+            let model = registry_raw_string_arg(args, command, "model")?;
+            to_value(gateway::save_claude_subagent(model))
+        }
         Command::PreviewGatewayClientConfig => {
             let client_id = registry_string_arg(args, command, "client_id")?;
             let model = args
@@ -280,6 +290,40 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
             to_value(gateway::sync_gateway_clients(model))
+        }
+        Command::ReadOmpDefaultSubagent => to_value(gateway::read_omp_default_subagent()),
+        Command::SaveOmpDefaultSubagent => {
+            let model = registry_raw_string_arg(args, command, "model")?;
+            let effort = registry_raw_string_arg(args, command, "effort")?;
+            let native = registry_bool_arg(args, command, "native")?;
+            to_value(gateway::save_omp_default_subagent(model, effort, native))
+        }
+        Command::ReadDshHeadlessDefaultSubagent => to_value(gateway::read_dsh_headless_default_subagent()),
+        Command::SaveDshHeadlessDefaultSubagent => {
+            let model = registry_raw_string_arg(args, command, "model")?;
+            let effort = registry_raw_string_arg(args, command, "effort")?;
+            to_value(gateway::save_dsh_headless_default_subagent(model, effort))
+        }
+        Command::ReadOpenCodeDefaultSubagent => to_value(gateway::read_opencode_default_subagent()),
+        Command::ReadZCodeDefaultSubagent => to_value(gateway::read_zcode_default_subagent()),
+        Command::SaveZCodeDefaultSubagent => {
+            let model = registry_raw_string_arg(args, command, "model")?;
+            let effort = registry_raw_string_arg(args, command, "effort")?;
+            let native = registry_bool_arg(args, command, "native")?;
+            to_value(gateway::save_zcode_default_subagent(model, effort, native))
+        }
+        Command::SaveOpenCodeDefaultSubagent => {
+            let model = registry_raw_string_arg(args, command, "model")?;
+            let effort = registry_raw_string_arg(args, command, "effort")?;
+            let native = registry_bool_arg(args, command, "native")?;
+            to_value(gateway::save_opencode_default_subagent(model, effort, native))
+        }
+        Command::ReadGrokDefaultSubagent => to_value(gateway::read_grok_default_subagent()),
+        Command::SaveGrokDefaultSubagent => {
+            let model = registry_raw_string_arg(args, command, "model")?;
+            let effort = registry_raw_string_arg(args, command, "effort")?;
+            let native = registry_bool_arg(args, command, "native")?;
+            to_value(gateway::save_grok_default_subagent(model, effort, native))
         }
         Command::SubagentMatrixStatus => to_value(gateway::subagent_matrix_status()),
         Command::GenerateCatalog => to_value(crate::generate_catalog_coordinated()),
@@ -445,6 +489,13 @@ fn registry_string_arg(args: &Value, command: Command, canonical: &str) -> Resul
     optional_string_arg(args, &names).ok_or_else(|| format!("{} argument is required", names[0]))
 }
 
+fn registry_raw_string_arg(args: &Value, command: Command, canonical: &str) -> Result<String, String> {
+    registry_value(args, command, canonical)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| format!("{canonical} argument is required"))
+}
+
 fn registry_bool_arg(args: &Value, command: Command, canonical: &str) -> Result<bool, String> {
     let names = registry_argument_names(command, canonical);
     names
@@ -500,6 +551,23 @@ pub(crate) fn optional_bool_arg(args: &Value, names: &[&str]) -> Option<bool> {
 mod tests {
     use super::dispatch_web;
     use serde_json::json;
+
+    #[test]
+    fn native_subagent_commands_accept_empty_model_and_effort_arguments() {
+        for command in [
+            "save_opencode_default_subagent",
+            "save_zcode_default_subagent",
+            "save_omp_default_subagent",
+            "save_grok_default_subagent",
+        ] {
+            let error = dispatch_web(command, &json!({"model": "", "effort": ""}), None)
+                .expect_err("missing native flag must prevent configuration writes");
+            assert_eq!(error, "native argument is required", "{command}");
+        }
+        let error = dispatch_web("save_codex_native_subagent", &json!({"model": ""}), None)
+            .expect_err("missing effort must prevent configuration writes");
+        assert_eq!(error, "effort argument is required");
+    }
 
     #[test]
     fn discover_provider_models_accepts_blank_api_key() {

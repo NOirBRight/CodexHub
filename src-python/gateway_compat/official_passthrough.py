@@ -1750,17 +1750,10 @@ def _normalize_tool_json_schema(
             visiting.discard(ref)
             state["rewritten"] += 1
             merged = dict(inlined) if isinstance(inlined, dict) else {"type": "object"}
-            for key, value in next_node.items():
-                if key in {"$ref", "$dynamicRef"} or key in merged:
-                    continue
-                if isinstance(value, bool) and key in _TOOL_SCHEMA_BOOLEAN_APPLICATOR_KEYS:
-                    merged[key] = value
-                    continue
-                merged[key] = (
-                    _normalize_tool_json_schema(value, state, root=root, visiting=visiting)
-                    if isinstance(value, (dict, bool))
-                    else value
-                )
+            siblings = {key: value for key, value in next_node.items() if key not in {"$ref", "$dynamicRef"}}
+            normalized_siblings = _normalize_tool_json_schema(siblings, state, root=root, visiting=visiting)
+            for key, value in normalized_siblings.items():
+                merged.setdefault(key, value)
             return merged
     for key in _TOOL_SCHEMA_MAP_KEYS:
         value = next_node.get(key)

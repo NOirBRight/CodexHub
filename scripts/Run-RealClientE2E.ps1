@@ -1585,6 +1585,22 @@ function Invoke-CandidateOfficialBootstrap {
     }
 }
 
+function Get-OpenCodeRunArguments {
+    param([string]$Model, [string]$WorkRoot, [string]$Prompt, [string]$Title)
+    $version = [string]$script:ObservedVersions['opencode']
+    if (Test-StableVersionAtLeast -Actual $version -Minimum '2.0.0' -ComponentCount 3) {
+        return @(
+            'run', '--standalone', '--format', 'json', '--model', $Model,
+            '--title', $Title, '--auto', $Prompt
+        )
+    }
+    return @(
+        'run', '--format', 'json', '--model', $Model,
+        '--dir', $WorkRoot, '--title', $Title,
+        '--pure', $Prompt
+    )
+}
+
 function Get-ClientArguments {
     param([string]$Client, [string]$Model, [string]$WorkRoot, [string]$Prompt)
     switch ($Client) {
@@ -1597,11 +1613,7 @@ function Get-ClientArguments {
             )
         }
         'opencode' {
-            return @(
-                'run', '--format', 'json', '--model', $Model,
-                '--dir', $WorkRoot, '--title', 'codexhub-real-client-e2e',
-                '--pure', $Prompt
-            )
+            return @(Get-OpenCodeRunArguments -Model $Model -WorkRoot $WorkRoot -Prompt $Prompt -Title 'codexhub-real-client-e2e')
         }
         'pi' {
             return @(
@@ -1627,6 +1639,7 @@ function ConvertFrom-ClientEvents {
     $malformedCount = 0
     $lineIndex = 0
     $openCodeTextChunks = [System.Collections.Generic.List[string]]::new()
+    $openCodeClosedText = $false
     $assistantMessageCount = 0
     $lastAssistantLine = -1
     $lastAssistantStopReason = ''
@@ -1667,6 +1680,7 @@ function ConvertFrom-ClientEvents {
                     }
                 }
                 'opencode' {
+                    $openCodeClosedText = $false
                     $part = Get-JsonProperty $native 'part'
                     $toolName = [string](Get-JsonProperty $part 'tool' (Get-JsonProperty $native 'name' ''))
                     $toolStatus = [string](Get-JsonProperty (Get-JsonProperty $part 'state') 'status' '')
@@ -1682,6 +1696,13 @@ function ConvertFrom-ClientEvents {
                     }
                     elseif ($type -eq 'text') {
                         $text = [string](Get-JsonProperty $part 'text' '')
+                        $ended = Get-JsonProperty (Get-JsonProperty $part 'time') 'end' $null
+                        # Windows PowerShell ConvertFrom-Json yields Double for JSON numbers.
+                        # -and does not skip the second operand, so guard IsNaN from $null.
+                        $openCodeClosedText = $false
+                        if ($ended -is [int] -or $ended -is [long] -or $ended -is [double] -or $ended -is [decimal]) {
+                            $openCodeClosedText = -not [double]::IsNaN($ended) -and -not [double]::IsInfinity($ended)
+                        }
                         if ($text.Trim()) {
                             [void]$openCodeTextChunks.Add($text)
                         }
@@ -1693,6 +1714,13 @@ function ConvertFrom-ClientEvents {
                             $openCodeTextChunks.Clear()
                         }
                         [void]$events.Add([pscustomobject]@{ event = 'terminal'; classification = 'completed' })
+                    }
+                    elseif ($type -eq 'step_finish' -and [string](Get-JsonProperty $part 'reason' '') -in @('error', 'aborted', 'length')) {
+                        if ($openCodeTextChunks.Count -gt 0) {
+                            [void]$events.Add([pscustomobject]@{ event = 'assistant_output'; text = ($openCodeTextChunks -join '') })
+                            $openCodeTextChunks.Clear()
+                        }
+                        [void]$events.Add([pscustomobject]@{ event = 'terminal'; classification = [string](Get-JsonProperty $part 'reason' '') })
                     }
                     elseif ($type -eq 'error') {
                         [void]$events.Add([pscustomobject]@{ event = 'error' })
@@ -1741,6 +1769,11 @@ function ConvertFrom-ClientEvents {
     if ($openCodeTextChunks.Count -gt 0) {
         [void]$events.Add([pscustomobject]@{ event = 'assistant_output'; text = ($openCodeTextChunks -join '') })
         $openCodeTextChunks.Clear()
+    }
+    $openCodeHasTerminal = @($events | Where-Object { (Get-JsonProperty $_ 'event' '') -eq 'terminal' })
+    $openCodeHasError = @($events | Where-Object { (Get-JsonProperty $_ 'event' '') -eq 'error' })
+    if ($Client -ceq 'opencode' -and $openCodeClosedText -and $openCodeHasTerminal.Count -eq 0 -and $openCodeHasError.Count -eq 0) {
+        [void]$events.Add([pscustomobject]@{ event = 'terminal'; classification = 'completed' })
     }
     if ($Client -in @('pi', 'omp')) {
         $terminalClassification = if ($assistantErrorSeen) {
@@ -1921,6 +1954,12 @@ function Invoke-ClientAttempt {
     $sentinelPath = Join-Path $CaseRoot 'sentinel.txt'
     [System.IO.File]::WriteAllText($sentinelPath, $sentinel, $script:Utf8NoBom)
     $prompt = "Use exactly one read-only tool call to read ./sentinel.txt. Then reply with only this exact line and no other text: $sentinel"
+    $isOpenCodeV2 = $Case.client -ceq 'opencode' -and (Test-StableVersionAtLeast -Actual ([string]$script:ObservedVersions['opencode']) -Minimum '2.0.0' -ComponentCount 3)
+    if ($isOpenCodeV2) {
+        # Give V2's private server the exact fixture path, avoiding cwd ambiguity.
+        $fixturePath = $sentinelPath | ConvertTo-Json -Compress
+        $prompt = "Use exactly one call to the read tool to read the file at $fixturePath. Do not use any other tool. Then reply with only this exact line and no other text: $sentinel"
+    }
     $arguments = @(Get-ClientArguments -Client $Case.client -Model $LaunchModel -WorkRoot $CaseRoot -Prompt $prompt)
     $environment = @{
         CODEXHUB_E2E_CASE = $Case.case_id
@@ -1931,6 +1970,11 @@ function Invoke-ClientAttempt {
         CODEXHUB_E2E_SENTINEL_PATH = $sentinelPath
         CODEXHUB_E2E_ATTEMPT = [string]$Attempt
         CODEXHUB_E2E_DIAGNOSTICS_PATH = $script:DiagnosticsPath
+    }
+    if ($isOpenCodeV2) {
+        $environment['OPENCODE_CONFIG'] = Join-Path $CaseRoot '.config\opencode\opencode.json'
+        $environment['OPENCODE_DISABLE_DEFAULT_PLUGINS'] = '1'
+        $environment['OPENCODE_DISABLE_AUTOUPDATE'] = '1'
     }
     $diagnosticStartLine = Get-DiagnosticLineCount
     $processResult = Invoke-IsolatedProcess -Executable $Executable -Arguments $arguments -CaseRoot $CaseRoot -Environment $environment -StandardInput $prompt -ProcessTimeoutSeconds $TimeoutSeconds -MaximumCapturedCharacters $script:MaximumClientEventCharacters

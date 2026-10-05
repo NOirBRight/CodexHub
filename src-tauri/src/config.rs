@@ -5,6 +5,11 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod codex_native_subagent;
+pub use codex_native_subagent::{
+    get_codex_native_subagent, save_codex_native_subagent, CodexNativeSubagent,
+};
+
 pub fn get_providers() -> Result<Vec<Provider>, String> {
     let paths = ConfigPaths::runtime()?;
     let mut providers = get_providers_with_paths(&paths)?;
@@ -77,9 +82,18 @@ pub fn get_settings() -> Result<Settings, String> {
     get_settings_with_paths(&ConfigPaths::runtime()?)
 }
 
-pub fn save_settings(settings: Settings) -> Result<Settings, String> {
+pub fn save_settings(mut settings: Settings) -> Result<Settings, String> {
     crate::codex_desktop::serialize_config_writer(|| {
-        save_settings_with_paths(settings, &ConfigPaths::runtime()?)
+        let paths = ConfigPaths::runtime()?;
+        let current = get_settings_with_paths(&paths)?;
+        // The dedicated Claude subagent command owns this independent setting.
+        // A general-settings draft can predate that save.
+        settings.claude_native_subagent_model = current.claude_native_subagent_model;
+        if let Some(model) = current.claude_model_mappings.as_ref().and_then(|roles| roles.get("subagent")) {
+            settings.claude_model_mappings.get_or_insert_with(Default::default)
+                .insert("subagent".into(), model.clone());
+        }
+        save_settings_with_paths(settings, &paths)
     })
 }
 
@@ -409,6 +423,7 @@ struct ProvidersDocument {
 #[derive(Debug, Deserialize)]
 struct SettingsDocument {
     claude_model_mappings: Option<std::collections::BTreeMap<String, String>>,
+    claude_native_subagent_model: Option<String>,
     locale: Option<String>,
     auto_sync_history: Option<bool>,
     unified_codex_history: Option<bool>,
@@ -453,6 +468,7 @@ impl SettingsDocument {
             claude_native_picker: None,
             claude_native_picker_source: None,
             claude_model_mappings: self.claude_model_mappings,
+            claude_native_subagent_model: self.claude_native_subagent_model,
             locale: self.locale.unwrap_or_default(),
             auto_sync_history: self.auto_sync_history.unwrap_or(defaults.auto_sync_history),
             unified_codex_history: self

@@ -813,6 +813,55 @@ mod tests {
         use std::fs;
         use std::path::{Path, PathBuf};
 
+        static NATIVE_CLAUDE_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        struct NativeClaudeFixture {
+            previous_path: Option<std::ffi::OsString>,
+        }
+
+        impl Drop for NativeClaudeFixture {
+            fn drop(&mut self) {
+                match &self.previous_path {
+                    Some(path) => std::env::set_var("PATH", path),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        }
+
+        fn native_claude_fixture(root: &Path) -> NativeClaudeFixture {
+            let bin = root.join("native-bin");
+            fs::create_dir_all(&bin).unwrap();
+            fs::write(
+                bin.join("native-picker.json"),
+                r#"{"response":{"response":{"models":[{"value":"opus","resolvedModel":"claude-opus-5-5","displayName":"Opus"}]}}}"#,
+            )
+            .unwrap();
+            #[cfg(windows)]
+            fs::write(
+                bin.join("claude.cmd"),
+                "@echo off\r\nif \"%~1\"==\"--version\" goto version\r\ntype \"%~dp0native-picker.json\"\r\nexit /b 0\r\n:version\r\necho 2.1.282\r\n",
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let executable = bin.join("claude");
+                fs::write(
+                    &executable,
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then\n  printf '%s\\n' '2.1.282'\nelse\n  cat \"${0%/*}/native-picker.json\"\nfi\n",
+                )
+                .unwrap();
+                fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let previous_path = std::env::var_os("PATH");
+            let mut paths = vec![bin];
+            if let Some(path) = &previous_path {
+                paths.extend(std::env::split_paths(path));
+            }
+            std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+            NativeClaudeFixture { previous_path }
+        }
+
         fn write_settings_and_providers(root: &Path) -> (PathBuf, PathBuf) {
             let proxy_dir = root.join("proxy");
             let config_dir = proxy_dir.join("config");
@@ -1085,7 +1134,11 @@ gateway_exported = true
         // parity surface for codex/opencode/zcode/pi/omp.
         #[test]
         fn table_driven_managed_client_config_preview_accepts_all_clients() {
+            let _guard = NATIVE_CLAUDE_PATH_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let root = temp_root("mcc-table-preview");
+            let _native_claude = native_claude_fixture(&root);
             let (settings_path, providers_path) = write_settings_and_providers(&root);
             for client_id in ["codex", "opencode", "zcode", "pi", "omp", "grok", "claude"] {
                 let isolated = root.join(format!("isolated-{client_id}"));
@@ -1113,7 +1166,11 @@ gateway_exported = true
 
         #[test]
         fn managed_client_config_native_matrix_imports_external_catalog_into_fresh_roots() {
+            let _guard = NATIVE_CLAUDE_PATH_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let root = temp_root("mcc-external-catalog");
+            let _native_claude = native_claude_fixture(&root);
             let (settings_path, providers_path) = write_settings_and_providers(&root);
             let catalog_path = write_candidate_official_catalog(&root);
 

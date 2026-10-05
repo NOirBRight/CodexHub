@@ -1,10 +1,12 @@
 import { writeQuotaCache, clearQuotaCache } from "./quotaCache";
 import { invoke } from "@tauri-apps/api/core";
 import { COMMANDS, type CommandName } from "./commands";
+import type { ClaudeSettings } from "./claudeSettings";
 import type {
   AppFlavorInfo,
   AppStatus,
   CodexDesktopStatus,
+  CodexNativeSubagent,
   AppUpdateCompletionStatus,
   AppUpdateInstallResult,
   AppUpdateInstallStatus,
@@ -38,6 +40,7 @@ import type {
   RoutingOwner,
   Settings,
   SubagentMatrixStatus,
+  NativeSubagentSettings,
   UpstreamFormat,
   UpstreamFormatProbeResult,
   UnifiedHistoryResult,
@@ -215,6 +218,9 @@ export const api = {
   getBundledProviders: () => call<Provider[]>(COMMANDS.getBundledProviders),
   saveProviders: (providers: Provider[]) => call<Provider[]>(COMMANDS.saveProviders, { providers }),
   getSettings: async () => normalizeSettings(await call<Partial<Settings>>(COMMANDS.getSettings)),
+  getCodexNativeSubagent: () => call<CodexNativeSubagent>(COMMANDS.getCodexNativeSubagent),
+  saveCodexNativeSubagent: (model: string, effort: string) =>
+    call<CodexNativeSubagent>(COMMANDS.saveCodexNativeSubagent, { model, effort }),
   saveSettings: async (settings: Settings) =>
     normalizeSettings(
       await call<Partial<Settings>>(COMMANDS.saveSettings, {
@@ -299,6 +305,8 @@ export const api = {
   dshClientConnect: () => call<DshLifecycleReport>(COMMANDS.dshClientConnect),
   dshClientDisconnect: () => call<DshLifecycleReport>(COMMANDS.dshClientDisconnect),
   dshClientReadback: () => call<DshLifecycleReport>(COMMANDS.dshClientReadback),
+  readClaudeSubagentSettings: () => call<ClaudeSettings>(COMMANDS.readClaudeSubagentSettings),
+  saveClaudeSubagent: (model: string) => call<ClaudeSettings>(COMMANDS.saveClaudeSubagent, { model }),
   previewGatewayClientConfig: (clientId: string, model?: string | null, roleMappings?: Record<string, string> | null) =>
     call<GatewayClientConfigPreview>(COMMANDS.previewGatewayClientConfig, {
       clientId,
@@ -331,6 +339,16 @@ export const api = {
     }),
   syncGatewayClients: (model?: string | null) =>
     call<GatewayClientSyncSummary>(COMMANDS.syncGatewayClients, { model: model ?? null }),
+  readOmpDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readOmpDefaultSubagent),
+  saveOmpDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveOmpDefaultSubagent, { model, effort, native }),
+  readDshHeadlessDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readDshHeadlessDefaultSubagent),
+  saveDshHeadlessDefaultSubagent: (model: string, effort: string) => call<NativeSubagentSettings>(COMMANDS.saveDshHeadlessDefaultSubagent, { model, effort }),
+  readOpenCodeDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readOpenCodeDefaultSubagent),
+  readZCodeDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readZCodeDefaultSubagent),
+  saveZCodeDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveZCodeDefaultSubagent, { model, effort, native }),
+  readGrokDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readGrokDefaultSubagent),
+  saveOpenCodeDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveOpenCodeDefaultSubagent, { model, effort, native }),
+  saveGrokDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveGrokDefaultSubagent, { model, effort, native }),
   subagentMatrixStatus: () => call<SubagentMatrixStatus>(COMMANDS.subagentMatrixStatus),
   generateCatalog: () => call<Model[]>(COMMANDS.generateCatalog),
   catalogOverrideDiagnostics: () =>

@@ -34,7 +34,14 @@ sys.path.insert(0, str(ROOT / "src-python"))
 
 if os.environ.get("CODEXHUB_E2E_XAI") != "1":
     _probe_home = tempfile.TemporaryDirectory(prefix="codexhub-xai-preflight-")
-    atexit.register(_probe_home.cleanup)
+
+    def _cleanup_probe_home() -> None:
+        from gateway_events import GATEWAY_EVENT_WRITER
+
+        GATEWAY_EVENT_WRITER.shutdown()
+        _probe_home.cleanup()
+
+    atexit.register(_cleanup_probe_home)
     for _home_key in ("CODEX_HOME", "CODEXHUB_RUNTIME_HOME"):
         os.environ[_home_key] = _probe_home.name
 

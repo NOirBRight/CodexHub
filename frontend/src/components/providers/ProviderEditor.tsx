@@ -457,7 +457,7 @@ export function ProviderDetail({
         </div>
         {unsaved ? (
           <div className="flex items-center justify-between gap-3 border-t border-line px-4 py-3">
-            <p className="text-xs text-slate-600">{t("providers.chatgptWebSaveFirst")}</p>
+            <p className="text-xs text-muted">{t("providers.chatgptWebSaveFirst")}</p>
             <button type="button" className="ws-button" disabled={busy === "save"}
               onClick={() => onChange(draft, t("providers.providerAdded", { name: draft.name }))}>
               <Plus size={14} />{t("providers.chatgptWebAdd")}
@@ -617,7 +617,7 @@ export function ProviderDetail({
       <div className="flex items-center justify-end border-t border-line px-5 py-3">
         <button
           type="button"
-          className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-action px-3 text-sm font-semibold text-white disabled:bg-slate-300"
+          className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-md bg-action px-3 text-sm font-semibold text-on-action disabled:bg-line"
           disabled={!dirty || busy === "save"}
           onClick={() =>
             onChange(
@@ -817,7 +817,7 @@ export function AddProviderPanel({
       <div className="flex items-center justify-end border-t border-line px-5 py-3">
         <button
           type="button"
-          className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-action px-3 text-sm font-semibold text-white disabled:bg-slate-300"
+          className="focus-ring inline-flex h-9 items-center gap-2 rounded-md bg-action px-3 text-sm font-semibold text-on-action disabled:bg-line"
           disabled={!canAdd || Boolean(busy)}
           onClick={onAdd}
         >
@@ -843,9 +843,9 @@ function SubscriptionAuthChip({ signedIn }: { signedIn: boolean | null }) {
     <span
       className={cx(
         "ws-status-chip inline-flex h-6 max-w-[112px] items-center rounded-full border px-2 text-[11px] font-semibold leading-none",
-        tone === "ok" && "border-emerald-200 bg-emerald-50 text-emerald-700",
-        tone === "pending" && "border-amber-200 bg-amber-50 text-amber-700",
-        tone === "muted" && "border-slate-200 bg-white text-slate-500",
+        tone === "ok" && "border-ok-line bg-ok-soft text-ok",
+        tone === "pending" && "border-warn-line bg-warn-soft text-warn",
+        tone === "muted" && "border-line bg-surface text-muted",
       )}
     >
       <span className="truncate whitespace-nowrap">{label}</span>
@@ -882,10 +882,10 @@ function EndpointSelectionPanel({
   );
 
   return (
-    <div className="grid min-w-0 gap-1 text-sm font-medium text-slate-700">
+    <div className="grid min-w-0 gap-1 text-sm font-medium text-ink">
       <div className="flex min-w-0 items-center justify-between gap-2">
         <span>{t("common.endpointSelection")}</span>
-        <span className="truncate text-xs font-medium text-slate-500">
+        <span className="truncate text-xs font-medium text-muted">
           {toolProtocolLabel(toolProtocol)}
         </span>
       </div>
@@ -899,11 +899,11 @@ function EndpointSelectionPanel({
         <button
           type="button"
           className={cx(
-            "mini-button inline-flex h-9 shrink-0 items-center justify-center gap-2 px-3 text-sm font-semibold disabled:bg-slate-100",
+            "mini-button inline-flex h-9 shrink-0 items-center justify-center gap-2 px-3 text-sm font-semibold disabled:bg-panel",
             testState === "success" &&
-              "status-pop border-emerald-200 bg-emerald-50 text-emerald-700",
+              "status-pop border-ok-line bg-ok-soft text-ok",
             testState === "error" &&
-              "status-pop border-red-200 bg-red-50 text-danger",
+              "status-pop border-danger-line bg-danger-soft text-danger",
           )}
           disabled={probeDisabled || testState === "testing"}
           onClick={onProbe}
@@ -913,7 +913,7 @@ function EndpointSelectionPanel({
         </button>
       </div>
       {allowAuto && selected === "auto" && (
-        <small className="text-xs font-normal text-slate-500">
+        <small className="text-xs font-normal text-muted">
           {t("providers.deepseekAutoHint")}
         </small>
       )}
@@ -966,7 +966,7 @@ function EndpointFormatSelect({
           </span>
           {selectedAvailable && <EndpointAvailableChip />}
         </span>
-        <ChevronDown size={15} className="shrink-0 text-slate-500" />
+        <ChevronDown size={15} className="shrink-0 text-muted" />
       </button>
       {open && (
         <div
@@ -1007,7 +1007,7 @@ function EndpointFormatSelect({
 function EndpointAvailableChip() {
   const { t } = useTranslation();
   return (
-    <span className="shrink-0 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold leading-4 text-emerald-700">
+    <span className="shrink-0 rounded-full border border-ok-line bg-ok-soft px-2 py-0.5 text-[11px] font-semibold leading-4 text-ok">
       {t("common.available")}
     </span>
   );

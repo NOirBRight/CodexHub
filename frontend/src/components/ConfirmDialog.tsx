@@ -70,7 +70,7 @@ function ConfirmDialog({
 
   return createPortal(
     <div
-      className="absolute inset-0 z-[200] grid place-items-center bg-slate-950/35 p-4 backdrop-blur-[2px]"
+      className="absolute inset-0 z-[200] grid place-items-center bg-scrim p-4 backdrop-blur-[2px]"
       onMouseDown={(event) => {
         if (event.currentTarget === event.target) {
           onClose(false);
@@ -92,10 +92,10 @@ function ConfirmDialog({
             {request.message}
           </p>
         </div>
-        <div className="flex justify-end gap-2 bg-panel px-5 py-3 shadow-[inset_0_1px_0_rgba(15,23,42,0.08)]">
+        <div className="flex justify-end gap-2 bg-panel px-5 py-3 shadow-divider">
           <button
             type="button"
-            className="focus-ring h-9 rounded-control bg-surface px-3 text-sm font-semibold text-ink shadow-control hover:bg-white"
+            className="focus-ring h-9 rounded-control bg-surface px-3 text-sm font-semibold text-ink shadow-control hover:bg-action-soft"
             onClick={() => onClose(false)}
           >
             {request.cancelLabel}
@@ -104,8 +104,8 @@ function ConfirmDialog({
             ref={confirmRef}
             type="button"
             className={request.tone === "danger"
-              ? "focus-ring h-9 rounded-control bg-rose-600 px-3 text-sm font-semibold text-white shadow-control hover:bg-rose-700"
-              : "focus-ring h-9 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control hover:bg-slate-800"}
+              ? "focus-ring h-9 rounded-control bg-danger px-3 text-sm font-semibold text-on-status shadow-control hover:bg-danger-hover"
+              : "focus-ring h-9 rounded-control bg-action px-3 text-sm font-semibold text-on-action shadow-control hover:bg-action-hover"}
             onClick={() => onClose(true)}
           >
             {request.confirmLabel}

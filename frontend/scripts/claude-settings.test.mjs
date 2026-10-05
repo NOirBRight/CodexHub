@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
 import {
   aliasDefaultChanges,
   claudeDefaultTarget,
@@ -8,9 +9,25 @@ import {
   claudeDraftValid,
   claudePreserveDefault,
   claudeResumeCommand,
+  claudeSubagentOptions,
   filterClaudeModels,
   rebaseClaudeDraft,
 } from "../src/lib/claudeSettings.ts";
+test("Claude card subagent choices use native models offline and exported models when connected", () => {
+  const native = [{ id: "claude-opus-5-5[1m]", label: "Opus 5.5 1M" }];
+  const gateway = [{ id: "provider/child", label: "Child" }, native[0]];
+  const offline = claudeSubagentOptions(native, gateway, false, "Native");
+  assert.deepEqual(offline.map((option) => option.id), [native[0].id]);
+  assert.equal(offline[0].label, "Native · Opus 5.5 1M");
+  const online = claudeSubagentOptions(native, gateway, true, "Native");
+  assert.deepEqual(online.map((option) => option.id), [native[0].id, "provider/child"]);
+  assert.ok(online.every((option) => option.native && option.efforts.length === 0 && option.defaultEffort === ""));
+});
+
+test("native subagent selection remains valid without any exported Gateway model", () => {
+  const saved = claudeDraft({ default_model: "claude-sonnet-4-6", role_mappings: {}, default_subagent_model: "" }, "");
+  assert.equal(claudeDraftValid({ ...saved, subagent: "claude-opus-5-5[1m]" }, new Set(), saved, new Set(["claude-opus-5-5[1m]"])), true);
+});
 const models = [
   { id: "one", label: "One" },
   { id: "two", label: "Two" },

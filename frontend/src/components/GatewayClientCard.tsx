@@ -1,6 +1,8 @@
 import { ClaudeSettingsDialog } from "./ClaudeSettingsDialog";
 import claudeIcon from "../assets/claude-code-icon.svg";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useToasts } from "./PageToast";
+import { claudeSubagentOptions, type ClaudeSettings } from "../lib/claudeSettings";
 import { WorkspaceDialog } from "./workspace/WorkspaceDialog";
 import { DefaultSubagentPicker } from "./workspace/ProviderWorkspaceView";
 import { api, messageFromError } from "../lib/tauri";
@@ -76,6 +78,50 @@ export function GatewayClientCard({
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
   const isClaude = client.id === "claude";
+  const { showToast, updateToast } = useToasts();
+  const [claudeSubagent, setClaudeSubagent] = useState<ClaudeSettings | null>(null);
+  const [claudeSubagentLoading, setClaudeSubagentLoading] = useState(true);
+  const [claudeSubagentSaving, setClaudeSubagentSaving] = useState(false);
+  const [claudeSubagentReset, setClaudeSubagentReset] = useState(0);
+  const claudeSubagentSavePending = useRef(false);
+  useEffect(() => {
+    if (!isClaude || claudeSubagentSaving || detailsOpen) return;
+    let active = true;
+    setClaudeSubagentLoading(true);
+    void api.readClaudeSubagentSettings().then((readback) => {
+      if (active) setClaudeSubagent(readback);
+    }).catch((error) => {
+      if (active) showToast({ text: messageFromError(error), tone: "error", dedupeKey: "claude-subagent-read" });
+    }).finally(() => {
+      if (active) setClaudeSubagentLoading(false);
+    });
+    return () => { active = false; };
+  }, [isClaude, info, detailsOpen, claudeSubagentSaving]);
+
+  async function saveClaudeSubagent(model: string) {
+    if (claudeSubagentSavePending.current) return;
+    claudeSubagentSavePending.current = true;
+    setClaudeSubagentReset((value) => value + 1);
+    setClaudeSubagentSaving(true);
+    const toastId = showToast({
+      text: t("workspace.savingDefaultSubagent"), tone: "loading", timeoutMs: null,
+      dedupeKey: "default-subagent-claude",
+    });
+    try {
+      const readback = await api.saveClaudeSubagent(model);
+      setClaudeSubagent(readback);
+      updateToast(toastId, {
+        text: t("workspace.defaultSubagentSavedClient", { name: "Claude Code" }),
+        tone: "success", timeoutMs: 8000,
+      });
+    } catch (error) {
+      setClaudeSubagentReset((value) => value + 1);
+      updateToast(toastId, { text: messageFromError(error), tone: "error", timeoutMs: null });
+    } finally {
+      claudeSubagentSavePending.current = false;
+      setClaudeSubagentSaving(false);
+    }
+  }
   function requestToggle(connect: boolean) {
     if (isClaude && connect) {
       setDetailsOpen(true);
@@ -101,6 +147,13 @@ export function GatewayClientCard({
   const kindLabel = info?.kind ?? t("gateway.clientKind." + client.id);
   const name = info?.name ?? client.name;
   const checked = switchCheckedFromState(state);
+  const claudeOptions = claudeSubagentOptions(
+    claudeSubagent?.native_models ?? [],
+    exportedModels,
+    switchCheckedFromState(connectionStateFromInfo(info)) ||
+      Boolean(info?.managed_by_current_app && info.route_mode === "stale"),
+    t("workspace.nativeSubagentModel"),
+  );
   const disabled = state === "unavailable" || state === "busy" || !info;
   const label = busy
     ? t("gateway.connectionUpdating")
@@ -151,13 +204,27 @@ export function GatewayClientCard({
           </code>
         </div>
         <div className="ws-client-footer">
-          {defaultSubagent ? (
+          {isClaude ? (
+            <DefaultSubagentPicker
+              key={claudeSubagentReset}
+              disabled={Boolean(busy || claudeSubagentLoading || claudeSubagentSaving || !claudeSubagent)}
+              model={claudeSubagent?.default_subagent_model ?? ""}
+              effort=""
+              effortUnavailableHint={t("workspace.claudeDefaultSubagentEffortUnavailable")}
+              options={claudeOptions}
+              selected={claudeOptions.find((option) => option.id === claudeSubagent?.default_subagent_model)}
+              emptyLabel={t("workspace.defaultSubagentCliDefault")}
+              onChange={(model) => void saveClaudeSubagent(model)}
+            />
+          ) : defaultSubagent ? (
             <DefaultSubagentPicker
               disabled={Boolean(busy)}
               model={defaultSubagent.model}
               effort={
                 defaultSubagent.model
-                  ? resolveSubagentEffort(
+                  ? defaultSubagent.model.startsWith("native:")
+                    ? defaultSubagent.effort
+                    : resolveSubagentEffort(
                       defaultSubagent.options.find(
                         (option) => option.id === defaultSubagent.model,
                       ),
@@ -173,6 +240,7 @@ export function GatewayClientCard({
               onChange={defaultSubagent.onChange}
             />
           ) : null}
+          {defaultSubagent && client.id === "dsh" ? <small>{t("workspace.dshHeadlessSubagentHint")}</small> : null}
           <div className="ws-client-bottom">
             <div className={cx("ws-client-status", labelTone)}>
               <ConnectionNarrative
@@ -328,7 +396,7 @@ function ConnectionNarrative({
     return (
       <button
         type="button"
-        className="text-left text-amber-700 underline-offset-2 hover:underline"
+        className="text-left text-warn underline-offset-2 hover:underline"
         onClick={onRepair}
       >
         {t("gateway.configDriftRepair")}
@@ -361,7 +429,7 @@ function ClientLogo({ id, name }: { id: string; name: string }) {
   }
   return (
     <span
-      className="text-[9px] font-black tracking-normal text-slate-600"
+      className="text-[9px] font-black tracking-normal text-muted"
       aria-hidden="true"
     >
       {id.slice(0, 2).toUpperCase()}

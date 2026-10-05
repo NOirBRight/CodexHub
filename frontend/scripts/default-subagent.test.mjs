@@ -9,7 +9,7 @@ function loadDefaultSubagent() {
   const strip = (text) =>
     text
       .replace(/^\s*import[\s\S]*?;\s*$/gm, "")
-      .replace(/export type [\s\S]*?\};\n/g, "")
+      .replace(/export type [\s\S]*?\};\r?\n/g, "")
       .replace(/^export /gm, "");
   const wire = strip(
     fs.readFileSync(new URL("../src/lib/wireDisplayName.ts", import.meta.url), "utf8"),
@@ -41,6 +41,31 @@ const {
   resolveSubagentEffort,
   subagentCatalogSlug,
 } = loadDefaultSubagent();
+
+test("native Codex choices remain selectable when every Gateway model is excluded", () => {
+  const native = { id: "native:gpt-6-sol", label: "Native · Sol", efforts: ["high", "max"], defaultEffort: "high" };
+  const options = listDefaultSubagentOptions({
+    nativeOptions: [native],
+    includeFastVariants: true,
+    officialId: "__official__",
+    officialIncluded: false,
+    officialModels: [official("gpt-6-sol")],
+    officialDisabledModels: ["gpt-6-sol"],
+    providers: [],
+  });
+  assert.deepEqual(options, [native]);
+  assert.equal(resolveSubagentEffort(options[0], ""), "high");
+  assert.equal(options[0].speedVariant, undefined);
+});
+
+test("native and Gateway Codex choices retain distinct identities for the same model", () => {
+  const options = listDefaultSubagentOptions({
+    nativeOptions: [{ id: "native:gpt-6-sol", label: "Native · Sol", efforts: ["high"], defaultEffort: "high" }],
+    officialId: "__official__", officialIncluded: true,
+    officialModels: [official("gpt-6-sol")], officialDisabledModels: [], providers: [],
+  });
+  assert.deepEqual(options.map((option) => option.id), ["native:gpt-6-sol", "gpt-6-sol"]);
+});
 
 const official = (id, overrides = {}) => ({
   id,
@@ -253,7 +278,7 @@ test("subagent picker keeps the menu open after model or effort changes", async 
   assert.doesNotMatch(fn, /open \? draftModel : model/);
 });
 
-test("Clients-page cards reuse the picker for OpenCode, ZCode, OMP, and Grok only", async () => {
+test("Clients-page cards retain the Gateway-backed subagent picker", async () => {
   const [card, page, localesEn, localesZh, types, settings] = await Promise.all([
     readFile(new URL("../src/components/GatewayClientCard.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/pages/GatewayPage.tsx", import.meta.url), "utf8"),
@@ -326,4 +351,48 @@ test("every registered Fast model has a subagent toggle and a plain other-client
     const other = listDefaultSubagentOptions({ ...input, officialModels: [official(base), official(alias)] });
     assert.ok(other.some((option) => option.id === alias && !option.fast && !option.speedVariant));
   }
+});
+
+test("native options only expose client-declared efforts and keep the native default", () => {
+  assert.equal(resolveSubagentEffort({ id: "native:anthropic/child", native: true, efforts: [], defaultEffort: "" }, "high"), "");
+  assert.equal(resolveSubagentEffort({ id: "native:custom/child", native: true, efforts: ["", "high"], defaultEffort: "" }, "high"), "high");
+  assert.equal(resolveSubagentEffort({ id: "native:custom/child", native: true, efforts: ["", "high"], defaultEffort: "" }, "max"), "");
+});
+
+
+test("DSH native choices save independently and disclose Headless scope and restart", async () => {
+  const [page, card, en, zh, commands] = await Promise.all([
+    readFile(new URL("../src/pages/GatewayPage.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/GatewayClientCard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/i18n/locales/en-US.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/i18n/locales/zh-CN.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/commands.ts", import.meta.url), "utf8"),
+  ]);
+  const nativeSave = page.slice(page.indexOf('if (clientId === "dsh") {'), page.indexOf('const nativeSave ='));
+  assert.match(nativeSave, /saveDshHeadlessDefaultSubagent/);
+  assert.match(nativeSave, /setDshSubagent\(written\)/);
+  assert.match(nativeSave, /updateToastWithError/);
+  assert.match(nativeSave, /dshHeadlessSubagentSaved/);
+  assert.doesNotMatch(nativeSave, /await onApplySettings|applyGatewayClientConfig/);
+  assert.match(page, /client.id === "dsh" && dshSubagent/);
+  assert.match(card, /dshHeadlessSubagentHint/);
+  assert.match(en, /DSH Headless only/);
+  assert.match(en, /Start a new DSH Headless invocation to apply/);
+  assert.match(en, /Web presets are unaffected/);
+  assert.match(zh, /仅适用于 DSH Headless/);
+  assert.match(commands, /save_dsh_headless_default_subagent/);
+});
+
+
+test("Codex picker wiring keeps native models without reasoning free of synthetic efforts", async () => {
+  const source = await readFile(new URL("../src/pages/ProvidersPage.tsx", import.meta.url), "utf8");
+  const expression = source.match(/nativeSubagentOptions=\{([^\n]+)\}/)[1];
+  const javascript = ts.transpileModule(`return ${expression};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const options = new Function("nativeSubagent", "t", javascript)({ models: [
+    { id: "native-plain", label: "Plain", efforts: [], defaultEffort: "" },
+  ] }, () => "Native");
+  assert.equal(options[0].native, true);
+  assert.deepEqual(options[0].efforts, []);
+  assert.equal(resolveSubagentEffort(options[0], "high"), "");
+  assert.equal(options[0].speedVariant, undefined);
 });

@@ -41,6 +41,41 @@ def test_native_thinking_history_switches_to_official_without_output_only_fields
         assert "Continue with Astra." in json.dumps(sent["input"])
 
 
+@pytest.mark.parametrize("source,image_url", [
+    ({"type": "url", "url": "https://example.test/synthetic-compact-image.png"},
+     "https://example.test/synthetic-compact-image.png"),
+    ({"type": "base64", "media_type": "image/png", "data": "AA=="},
+     "data:image/png;base64,AA=="),
+], ids=["url", "base64"])
+def test_compact_history_system_image_survives_model_switch_http(source: dict, image_url: str) -> None:
+    with GatewayHarness() as harness:
+        harness.set_json_response(json.dumps({
+            "id": "resp_compact", "status": "completed", "model": "gpt-5.5",
+            "output": [{"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "Continued", "annotations": []}]}],
+            "usage": {"input_tokens": 7, "output_tokens": 1},
+        }).encode())
+        response = request_gateway(
+            harness.host, harness.port, "POST", "/v1/messages",
+            body=json.dumps({"model": "openai/gpt-5.5", "max_tokens": 64,
+                "messages": [
+                    {"role": "user", "content": "Before compaction"},
+                    {"role": "system", "content": [
+                        {"type": "text", "text": "Compact context"},
+                        {"type": "image", "source": source},
+                    ]},
+                    {"role": "user", "content": "Continue"},
+                ]}).encode(),
+            headers={"Authorization": f"Bearer {GATEWAY_CLIENT_KEY}",
+                     "Content-Type": "application/json"}, timeout=8.0,
+        )
+        assert response.status == 200, response.body
+        sent = json.loads(harness.stub.captures[-1].body)
+        assert sent["input"][0] == {"type": "message", "role": "developer", "content": "Compact context"}
+        assert [item["role"] for item in sent["input"]] == ["developer", "user", "user", "user"]
+        assert sent["input"][2]["content"][1] == {"type": "input_image", "image_url": image_url}
+
+
 def test_same_conversation_switches_native_codex_third_party_and_back() -> None:
     history = [{"role": "user", "content": "Remember switch-marker and read the file."}]
     tool_id = "toolu_switch.1"

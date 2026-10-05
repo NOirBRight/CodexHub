@@ -41,7 +41,7 @@ export function ProviderCatalogPicker({
 
   return createPortal(
     <div
-      className="absolute inset-0 z-[200] grid place-items-center bg-slate-950/35 p-4 backdrop-blur-[2px]"
+      className="absolute inset-0 z-[200] grid place-items-center bg-scrim p-4 backdrop-blur-[2px]"
       onMouseDown={(event) => {
         if (event.currentTarget === event.target) {
           onClose();
@@ -71,7 +71,7 @@ export function ProviderCatalogPicker({
         </div>
         <div className="min-h-0 overflow-y-auto px-5 pb-2">
           {loading ? (
-            <p className="py-6 text-sm text-slate-500">
+            <p className="py-6 text-sm text-muted">
               {t("providers.catalogPickerLoading")}
             </p>
           ) : (
@@ -89,7 +89,7 @@ export function ProviderCatalogPicker({
                     <button
                       key={provider.id}
                       type="button"
-                      className="focus-ring grid w-full gap-1 rounded-control bg-panel px-3 py-3 text-left shadow-control hover:bg-white"
+                      className="focus-ring grid w-full gap-1 rounded-control bg-panel px-3 py-3 text-left shadow-control hover:bg-action-soft"
                       onClick={() => onSelectPreset(provider)}
                     >
                       <span className="flex items-center justify-between gap-2">
@@ -100,17 +100,17 @@ export function ProviderCatalogPicker({
                           </span>
                         </span>
                         {alreadyAdded ? (
-                          <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted">
                             {t("providers.catalogProviderAlreadyAdded")}
                           </span>
                         ) : null}
                       </span>
                       {provider.onboarding_hint ? (
-                        <span className="text-xs text-slate-600">
+                        <span className="text-xs text-muted">
                           {t(provider.onboarding_hint)}
                         </span>
                       ) : (
-                        <span className="truncate text-xs text-slate-500">
+                        <span className="truncate text-xs text-muted">
                           {provider.base_url}
                         </span>
                       )}
@@ -119,24 +119,24 @@ export function ProviderCatalogPicker({
                 })}
               <button
                 type="button"
-                className="focus-ring grid w-full gap-1 rounded-control border border-dashed border-line bg-surface px-3 py-3 text-left hover:bg-white"
+                className="focus-ring grid w-full gap-1 rounded-control border border-dashed border-line bg-surface px-3 py-3 text-left hover:bg-action-soft"
                 onClick={onSelectCustom}
               >
                 <span className="truncate text-sm font-semibold text-ink">
                   {t("providers.chooseCatalogProviderCustom")}
                 </span>
-                <span className="text-xs text-slate-500">
+                <span className="text-xs text-muted">
                   {t("providers.chooseCatalogProviderCustomHint")}
                 </span>
               </button>
             </div>
           )}
         </div>
-        <div className="flex justify-end bg-panel px-5 py-3 shadow-[inset_0_1px_0_rgba(15,23,42,0.08)]">
+        <div className="flex justify-end bg-panel px-5 py-3 shadow-divider">
           <button
             ref={closeRef}
             type="button"
-            className="focus-ring h-9 rounded-control bg-surface px-3 text-sm font-semibold text-ink shadow-control hover:bg-white"
+            className="focus-ring h-9 rounded-control bg-surface px-3 text-sm font-semibold text-ink shadow-control hover:bg-action-soft"
             onClick={onClose}
           >
             {t("common.cancel")}

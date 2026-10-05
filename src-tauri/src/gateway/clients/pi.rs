@@ -401,8 +401,8 @@ pub(in crate::gateway) fn restore_pi_from_baseline(
             Some(BaselineFile::Absent) if path.exists() => match name {
                 // ADR-0004: settings.json is user-owned; detach never removes it.
                 "settings.json" => {}
-                "models.json" => {
-                    removed_any |= detach_pi_managed_models(path)?;
+                "models.json" if detach_pi_managed_models(path)? => {
+                    removed_any = true;
                 }
                 _ => {}
             },

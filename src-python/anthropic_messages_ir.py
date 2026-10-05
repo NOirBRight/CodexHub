@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping
 
 from gateway_errors import UpstreamStreamIncompleteError
+from multimodal_tool_result import source_caption
 from protocol_translation import (
     ResponsesToChatStreamConverter,
     UnsupportedProtocolTranslationError,
@@ -408,13 +409,17 @@ def _to_chat_request(request: AnthropicRequest) -> Adapted | NotForwardable:
             messages.append({"role": "system", "content": system_text})
 
     pending_tool_results: list[dict[str, Any]] = []
+    pending_tool_images: list[dict[str, Any]] = []
 
-    def flush_tool_results() -> None:
+    def flush_tool_results_and_images() -> None:
         # Anthropic carries several tool results in one user message; Chat
-        # Completions has one role:"tool" message per result. Order is preserved.
+        # Completions needs every role:"tool" reply before the lifted user
+        # images; interleaving a user message would break parallel tool calls.
         for result in pending_tool_results:
             messages.append({"role": "tool", **result})
         pending_tool_results.clear()
+        messages.extend(pending_tool_images)
+        pending_tool_images.clear()
 
     for index, message in enumerate(request.messages):
         label = f"messages[{index}]"
@@ -431,20 +436,20 @@ def _to_chat_request(request: AnthropicRequest) -> Adapted | NotForwardable:
                         continue
                     if content:
                         declared.refuse("user_content_before_tool_result")
-                    pending_tool_results.append(
-                        _tool_result_message(block, declared, label=f"{label}.content[{position}]")
-                    )
+                    result, images = _tool_result_message(block, declared, label=f"{label}.content[{position}]")
+                    pending_tool_results.append(result)
+                    pending_tool_images.extend(images)
                 if content:
-                    flush_tool_results()
+                    flush_tool_results_and_images()
                     messages.append({
                         "role": "user",
                         "content": _chat_user_content(tuple(content), declared, label=label),
                     })
                 continue
-            flush_tool_results()
+            flush_tool_results_and_images()
             messages.append({"role": "user", "content": _chat_user_content(message.content, declared, label=label)})
             continue
-        flush_tool_results()
+        flush_tool_results_and_images()
         if message.role == "assistant":
             messages.append(_chat_assistant_message(message.content, declared, label=label))
             continue
@@ -455,10 +460,29 @@ def _to_chat_request(request: AnthropicRequest) -> Adapted | NotForwardable:
                 "mid_conversation_system_flattened_to_chat_system",
                 "Chat Completions has no mid-conversation system role.",
             )
-            messages.append({"role": "system", "content": _chat_text(message.content, declared, label=label)})
+            text_blocks = tuple(block for block in message.content if block.type != "image")
+            images = tuple(block for block in message.content if block.type == "image")
+            messages.append({"role": "system", "content": _chat_text(text_blocks, declared, label=label)})
+            if images:
+                messages.extend(
+                    _captioned_image_user_messages(
+                        images,
+                        declared,
+                        label=label,
+                        caption=lambda index, total: source_caption(
+                            index, total, prefix="Image from prior system context"
+                        ),
+                        combine=True,
+                    )
+                )
+                declared.adapt(
+                    f"{label}.content",
+                    "mid_conversation_system_image_lifted_to_user_message",
+                    "System text stays in instructions; ordered images follow as user content.",
+                )
             continue
         declared.refuse(f"message_role:{message.role}")
-    flush_tool_results()
+    flush_tool_results_and_images()
 
     for name, value in request.options.items():
         if name == "model":
@@ -735,7 +759,56 @@ def _chat_tool_call(block: ContentBlock, index: int, declared: _Declared) -> dic
     }
 
 
-def _tool_result_message(block: ContentBlock, declared: _Declared, *, label: str) -> dict[str, Any]:
+def _as_chat_content_parts(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return list(content)
+    if isinstance(content, dict):
+        return [content]
+    if isinstance(content, str) and content:
+        return [{"type": "text", "text": content}]
+    return []
+
+
+def _captioned_image_user_messages(
+    images: tuple[ContentBlock, ...],
+    declared: _Declared,
+    *,
+    label: str,
+    caption: Callable[[int, int], str],
+    combine: bool = False,
+) -> list[dict[str, Any]]:
+    """Lift image blocks into captioned user messages for Chat Completions."""
+
+    if not images:
+        return []
+    total = len(images)
+    if combine:
+        content: list[dict[str, Any]] = []
+        for index, image in enumerate(images, start=1):
+            content.append({"type": "text", "text": caption(index, total)})
+            content.extend(
+                _as_chat_content_parts(_chat_user_content((image,), declared, label=label))
+            )
+        return [{"role": "user", "content": content}]
+    messages: list[dict[str, Any]] = []
+    for index, image in enumerate(images, start=1):
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": caption(index, total)},
+                    *_as_chat_content_parts(
+                        _chat_user_content((image,), declared, label=label)
+                    ),
+                ],
+            }
+        )
+    return messages
+
+
+def _tool_result_message(
+    block: ContentBlock, declared: _Declared, *, label: str
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     tool_use_id = block.data.get("tool_use_id")
     if not isinstance(tool_use_id, str) or not tool_use_id:
         declared.refuse(f"{label}.tool_use_id")
@@ -743,8 +816,25 @@ def _tool_result_message(block: ContentBlock, declared: _Declared, *, label: str
         block, {"type", "tool_use_id", "content", "is_error"}, label=label, declared=declared
     )
     content = block.data.get("content")
+    image_messages: list[dict[str, Any]] = []
     if isinstance(content, list):
-        text = _chat_text(tuple(_block(entry) for entry in content), declared, label=label)
+        blocks = tuple(_block(entry) for entry in content)
+        images = tuple(part for part in blocks if part.type == "image")
+        text = _chat_text(tuple(part for part in blocks if part.type != "image"), declared, label=label)
+        if images:
+            image_messages.extend(
+                _captioned_image_user_messages(
+                    images,
+                    declared,
+                    label=label,
+                    caption=lambda index, total: source_caption(index, total, tool_use_id),
+                )
+            )
+            declared.adapt(
+                f"{label}.content",
+                "tool_result_image_lifted_to_user_message",
+                "Tool text stays in its result; all tool replies precede ordered image messages.",
+            )
     elif isinstance(content, str):
         text = content
     else:
@@ -757,7 +847,7 @@ def _tool_result_message(block: ContentBlock, declared: _Declared, *, label: str
             "Chat Completions has no tool-result error flag; prefix the content.",
         )
         text = f"[tool_error] {text}"
-    return {"tool_call_id": tool_use_id, "content": text}
+    return {"tool_call_id": tool_use_id, "content": text}, image_messages
 
 
 def _chat_text(blocks: tuple[ContentBlock, ...], declared: _Declared, *, label: str) -> str:
