@@ -88,6 +88,7 @@
   <section class="card" aria-labelledby="account-title">
     <h2 id="account-title"><span class="step">1</span><span data-i18n="accountTitle">Sign in to ChatGPT</span></h2>
     <p data-i18n="accountHelp">Sign in with the ChatGPT account used by this component. This account is separate from your CodexHub service credential.</p>
+    <p id="login-blocked" class="notice hidden" role="status"></p>
     <div class="row">
       <button id="login-button" type="button" data-i18n="login">Open ChatGPT sign-in</button>
       <button id="cancel-login-button" class="danger hidden" type="button" data-i18n="cancelLogin">Cancel sign-in</button>
@@ -189,7 +190,7 @@
       savedPending:"Settings saved. Restart the ChatGPT component for these changes to take effect.", savedNextStart:"Settings saved. They will load the next time the ChatGPT component starts.", saveError:"Settings could not be saved. Your previous settings are unchanged.", sessionExpired:"This settings session expired. Return to CodexHub and open Runtime Settings again.",
       incompleteFull:"Full mode is selected, but tools are not ready until a Tunnel ID, Runtime Key, signed-in account, and authorized connector are available.",
       readinessCache:"Last check: {when}", noAccountCheck:"Sign-in has not been checked", noConnectorCheck:"Connector has not been checked", noTunnelCheck:"Tunnel has not been checked", browserOnlyTunnel:"Not needed in text mode",
-      errors:{"settings_busy":"Settings are being updated. Try again.","tunnel_id_invalid":"Check the Tunnel ID and try again.","runtime_key_invalid":"Check the Runtime Key and try again.","connector_name_invalid":"Enter a connector name.","mode_invalid":"Choose a supported ChatGPT mode.","runtime_options_invalid":"Check the runtime options and try again."}
+      errors:{"component_upgrade_required":"The installed ChatGPT component does not match this CodexHub build. In the ChatGPT provider’s advanced actions, upgrade the component and start it, then return here to sign in.","component_restart_required":"In the ChatGPT provider’s advanced actions, stop and start the component, then return here to sign in.","settings_busy":"Settings are being updated. Try again.","tunnel_id_invalid":"Check the Tunnel ID and try again.","runtime_key_invalid":"Check the Runtime Key and try again.","connector_name_invalid":"Enter a connector name.","mode_invalid":"Choose a supported ChatGPT mode.","runtime_options_invalid":"Check the runtime options and try again."}
     },
     zh: {
       title:"ChatGPT Runtime Settings", intro:"设置由 CodexHub 管理的 ChatGPT 组件所用的账号与工具。",
@@ -212,7 +213,7 @@
       savedPending:"设置已保存。重启 ChatGPT 组件后生效。", savedNextStart:"设置已保存。ChatGPT 组件下次启动时会加载。", saveError:"设置保存失败，之前的设置保持不变。", sessionExpired:"设置会话已过期。请回到 CodexHub，重新打开 Runtime Settings。",
       incompleteFull:"已选择完整模式，但工具就绪前仍需 Tunnel ID、Runtime Key、已登录账号和已授权连接器。",
       readinessCache:"最近检查：{when}", noAccountCheck:"尚未检查登录状态", noConnectorCheck:"尚未检查连接器", noTunnelCheck:"尚未检查 Tunnel", browserOnlyTunnel:"文本模式无需 Tunnel",
-      errors:{"settings_busy":"设置正在更新，请稍后重试。","tunnel_id_invalid":"请检查 Tunnel ID 后重试。","runtime_key_invalid":"请检查 Runtime Key 后重试。","connector_name_invalid":"请填写连接器名称。","mode_invalid":"请选择支持的 ChatGPT 模式。","runtime_options_invalid":"请检查运行选项后重试。"}
+      errors:{"component_upgrade_required":"已安装的 ChatGPT 组件与当前 CodexHub 版本不一致。请回到 ChatGPT Provider 的高级操作，升级组件并启动，然后返回此页登录。","component_restart_required":"请回到 ChatGPT Provider 的高级操作，停止再启动组件，然后返回此页登录。","settings_busy":"设置正在更新，请稍后重试。","tunnel_id_invalid":"请检查 Tunnel ID 后重试。","runtime_key_invalid":"请检查 Runtime Key 后重试。","connector_name_invalid":"请填写连接器名称。","mode_invalid":"请选择支持的 ChatGPT 模式。","runtime_options_invalid":"请检查运行选项后重试。"}
     }
   }[language];
 
@@ -243,7 +244,10 @@
   };
   const updateLoginButtons = () => {
     const open = current?.runtime?.login_window_open === true;
-    byId("login-button").disabled = busy || open;
+    const blocked = current?.runtime?.login_blocked_reason;
+    byId("login-button").disabled = busy || open || Boolean(blocked);
+    byId("login-blocked").textContent = text.errors[blocked] || "";
+    byId("login-blocked").classList.toggle("hidden", !blocked);
     byId("cancel-login-button").disabled = busy || !open;
     byId("cancel-login-button").classList.toggle("hidden", !open);
   };
@@ -309,9 +313,10 @@
     const runtime = data.runtime || {};
     const settingsPending = data.settings?.pending_restart === true || runtime.settings_pending_restart === true;
     const runtimePending = runtime.restart_required === true;
-    const pending = settingsPending || runtimePending;
+    const blocked = text.errors[runtime.login_blocked_reason];
+    const pending = settingsPending || runtimePending || Boolean(blocked);
     byId("pending-notice").classList.toggle("hidden", !pending);
-    byId("pending-notice").textContent = settingsPending ? text.summaryPending : runtimePending ? text.runtimeRestart : "";
+    byId("pending-notice").textContent = blocked || (settingsPending ? text.summaryPending : runtimePending ? text.runtimeRestart : "");
   };
   const applyStatus = (data, initial = false) => {
     current = data;
@@ -330,7 +335,8 @@
     byId("connector-state").textContent = checked ? label(readiness.connector?.state) : text.noConnectorCheck;
     let summary = !checked ? text.summaryNoCheck : readiness.tools_ready ? text.summaryReady
       : readiness.text_ready ? (runtime.active_mode === "full" ? text.summaryText : text.summaryTextOnly) : text.summaryNoCheck;
-    if (data.settings?.pending_restart || runtime.settings_pending_restart) summary = text.summaryPending;
+    if (runtime.login_blocked_reason) summary = text.errors[runtime.login_blocked_reason];
+    else if (data.settings?.pending_restart || runtime.settings_pending_restart) summary = text.summaryPending;
     else if (runtime.restart_required) summary = text.runtimeRestart;
     else if (runtime.active_mode === "full" && data.settings?.active?.configuration_complete === false) summary = text.incompleteFull;
     byId("readiness-summary").textContent = summary;

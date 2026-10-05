@@ -621,6 +621,37 @@ def test_status_readiness_requires_live_compatible_runtime_and_active_mode(
     assert payload["settings"]["pending_restart"] is (settings["pending_restart"] is True)
 
 
+@pytest.mark.parametrize(
+    ("compatible", "running", "restart", "control", "reason"),
+    [
+        (False, True, True, None, "component_upgrade_required"),
+        (False, False, False, None, "component_upgrade_required"),
+        (True, True, True, runtime.LOGIN_CONTROL, "component_restart_required"),
+        (True, True, False, None, "component_restart_required"),
+    ],
+)
+def test_login_reports_component_action_without_starting(
+    settings_server, monkeypatch, compatible, running, restart, control, reason
+):
+    server, _home = settings_server
+    session = _session(server)
+    monkeypatch.setattr(runtime, "build_status", lambda home: {
+        "installed": True, "component": {"compatible": compatible},
+        "process": {"running": running}, "restart_required": restart,
+        "login": {"control": control},
+    })
+    calls = []
+    monkeypatch.setattr(runtime, "open_login", lambda home: calls.append(home))
+    status, _, body = _call(server, "/api/login", method="POST", body={},
+                            headers={"Origin": server.origin}, session=session)
+    assert status == 409
+    assert json.loads(body)["error_code"] == reason
+    assert calls == []
+    status, _, body = _call(server, "/api/status", session=session)
+    assert status == 200
+    assert json.loads(body)["runtime"]["login_blocked_reason"] == reason
+
+
 def test_login_routes_open_and_cancel_separately(settings_server, monkeypatch):
     server, home = settings_server
     session = _session(server)
