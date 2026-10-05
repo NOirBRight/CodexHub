@@ -77,6 +77,8 @@ const zhCN = {
   "defaultSubagentFastOn": "开启",
   "defaultSubagentFast": "快速模式",
   "defaultSubagentFastOff": "关闭",
+  "defaultSubagentFastInherited": "跟随主会话",
+  "defaultSubagentNativeFastUnavailable": "当前 Codex 原生子代理的快速模式跟随主会话，暂不能在此单独设置。",
   "savingDefaultSubagent": "正在保存默认子代理…",
   "defaultSubagentSaved": "默认子代理已保存。请重启 Codex 使其生效。",
   "defaultSubagentSavedDisconnected": "默认子代理已保存。连接 CodexHub 后会写入 Codex。",

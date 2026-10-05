@@ -77,6 +77,8 @@ const enUS = {
   "defaultSubagentFastOn": "On",
   "defaultSubagentFast": "Fast",
   "defaultSubagentFastOff": "Off",
+  "defaultSubagentFastInherited": "Follows main session",
+  "defaultSubagentNativeFastUnavailable": "Native Codex subagents currently share the main session's Fast setting. It cannot be set independently here.",
   "savingDefaultSubagent": "Saving default subagent…",
   "defaultSubagentSaved": "Default subagent saved. Restart Codex to apply.",
   "defaultSubagentSavedDisconnected": "Default subagent saved. It will be written to Codex when you connect CodexHub.",

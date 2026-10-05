@@ -2,6 +2,7 @@ import { readQuotaCache } from "../../lib/quotaCache";
 import { createPortal } from "react-dom";
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -40,6 +41,7 @@ import {
 } from "../../lib/modelDisplay";
 import {
   listDefaultSubagentOptions,
+  nativeSubagentSupportsFast,
   resolveSubagentEffort,
   defaultSubagentSummary,
   formatSubagentEffort,
@@ -272,6 +274,7 @@ export function ProviderWorkspaceView(props: Props) {
           effort={subagentEfforts}
           options={subagentOptions}
           selected={selectedSubagent}
+          nativeFastUnavailableHint={t("workspace.defaultSubagentNativeFastUnavailable")}
           onChange={(nextModel, nextEffort) =>
             props.onDefaultSubagentChange?.(nextModel, nextEffort)
           }
@@ -679,6 +682,7 @@ export function DefaultSubagentPicker({
   selected,
   emptyLabel,
   effortUnavailableHint,
+  nativeFastUnavailableHint,
   onChange,
 }: {
   disabled: boolean;
@@ -688,9 +692,11 @@ export function DefaultSubagentPicker({
   selected?: DefaultSubagentOption;
   emptyLabel?: string;
   effortUnavailableHint?: string;
+  nativeFastUnavailableHint?: string;
   onChange: (model: string, effort: string) => void;
 }) {
   const { t } = useTranslation();
+  const nativeFastHintId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -709,6 +715,9 @@ export function DefaultSubagentPicker({
   const activeSelected =
     options.find((option) => option.id === draftModel) ??
     (draftModel && selected?.id === draftModel ? selected : undefined);
+  const nativeFastHint = nativeFastUnavailableHint && nativeSubagentSupportsFast(activeSelected)
+    ? nativeFastUnavailableHint
+    : undefined;
   const summary = defaultSubagentSummary(
     draftModel ? activeSelected?.label || draftModel : "",
     draftEffort,
@@ -758,8 +767,9 @@ export function DefaultSubagentPicker({
         left = Math.max(8, window.innerWidth - 8 - width);
       }
       if (left < 8) left = 8;
+      const menuHeight = panel === "menu" && nativeFastHint ? 200 : 132;
       const openUp =
-        window.innerHeight - rect.bottom < 132 && rect.top > window.innerHeight - rect.bottom;
+        window.innerHeight - rect.bottom < menuHeight && rect.top > window.innerHeight - rect.bottom;
       setMenuBox(
         openUp
           ? { left, width, bottom: window.innerHeight - rect.top + 6 }
@@ -773,7 +783,7 @@ export function DefaultSubagentPicker({
       window.removeEventListener("resize", place);
       window.removeEventListener("scroll", place, true);
     };
-  }, [open, panel]);
+  }, [open, panel, nativeFastHint]);
 
   useEffect(() => {
     if (!open) return;
@@ -916,14 +926,17 @@ export function DefaultSubagentPicker({
                   <ChevronRight size={11} />
                 </span>
               </button>
-              {!draftModel.startsWith("native:") && options.some((option) => option.speedVariant) && <button
+              {(nativeFastHint || (!draftModel.startsWith("native:") && options.some((option) => option.speedVariant))) && <button
                 type="button"
                 className="ws-bridge-subagent-row"
-                role="switch"
-                aria-checked={Boolean(activeSelected?.fast)}
-                disabled={!activeSelected?.speedVariant}
+                role={nativeFastHint ? undefined : "switch"}
+                aria-checked={nativeFastHint ? undefined : Boolean(activeSelected?.fast)}
+                aria-describedby={nativeFastHint ? nativeFastHintId : undefined}
+                title={nativeFastHint}
+                disabled={Boolean(nativeFastHint) || !activeSelected?.speedVariant}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => {
+                  if (nativeFastHint) return;
                   const nextModel = activeSelected?.speedVariant;
                   if (!nextModel) return;
                   setDraftModel(nextModel);
@@ -932,12 +945,15 @@ export function DefaultSubagentPicker({
               >
                 <span>{t("workspace.defaultSubagentFast")}</span>
                 <span>
-                  {t(activeSelected?.fast
+                  {t(nativeFastHint
+                    ? "workspace.defaultSubagentFastInherited"
+                    : activeSelected?.fast
                     ? "workspace.defaultSubagentFastOn"
                     : "workspace.defaultSubagentFastOff")}
                   <Zap size={11} aria-hidden="true" />
                 </span>
               </button>}
+              {nativeFastHint && <p id={nativeFastHintId} className="ws-bridge-subagent-hint">{nativeFastHint}</p>}
               {effortHint && <p className="ws-bridge-subagent-hint">{effortHint}</p>}
             </>
           ) : (

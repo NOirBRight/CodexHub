@@ -29,7 +29,8 @@ function loadDefaultSubagent() {
     exports.listDefaultSubagentOptions = listDefaultSubagentOptions;
     exports.resolveSubagentEffort = resolveSubagentEffort;
     exports.formatSubagentEffort = formatSubagentEffort;
-    exports.defaultSubagentSummary = defaultSubagentSummary;`,
+    exports.defaultSubagentSummary = defaultSubagentSummary;
+    exports.nativeSubagentSupportsFast = nativeSubagentSupportsFast;`,
   )(exported, JSON.parse(fs.readFileSync(new URL("../../config/official_fast_variants.json", import.meta.url), "utf8")));
   return exported;
 }
@@ -38,6 +39,7 @@ const {
   defaultSubagentSummary,
   formatSubagentEffort,
   listDefaultSubagentOptions,
+  nativeSubagentSupportsFast,
   resolveSubagentEffort,
   subagentCatalogSlug,
 } = loadDefaultSubagent();
@@ -72,6 +74,93 @@ const official = (id, overrides = {}) => ({
   enabled: true,
   display_name: overrides.display_name ?? id,
   ...overrides,
+});
+
+async function renderSubagentPicker(props) {
+  const source = await readFile(new URL("../src/components/workspace/ProviderWorkspaceView.tsx", import.meta.url), "utf8");
+  const compiled = ts.transpileModule(source.slice(source.indexOf("export function DefaultSubagentPicker")), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText;
+  const jsx = (type, props) => ({ type, props });
+  let hook = 0;
+  const dependencies = {
+    useTranslation: () => ({ t: (key) => key }),
+    useId: () => "native-fast-hint",
+    useState: (initial) => [[true, "menu", props.model, props.effort, { top: 1 }][hook++] ?? initial, () => {}],
+    useRef: (value) => ({ current: value }), useEffect: () => {}, useLayoutEffect: () => {},
+    createPortal: (node) => node, document: { body: {} },
+    Sparkles: () => null, ChevronDown: () => null, ChevronRight: () => null, ChevronLeft: () => null, Zap: () => null,
+    defaultSubagentSummary, formatSubagentEffort, resolveSubagentEffort, nativeSubagentSupportsFast,
+    CODEX_SUBAGENT_EFFORTS: ["low", "medium", "high", "xhigh", "max"],
+  };
+  const exports = {};
+  new Function("exports", "require", ...Object.keys(dependencies), compiled)(
+    exports, () => ({ jsx, jsxs: jsx }), ...Object.values(dependencies),
+  );
+  return exports.DefaultSubagentPicker({ disabled: false, ...props });
+}
+
+function findPickerNode(node, predicate) {
+  if (Array.isArray(node)) return node.map((child) => findPickerNode(child, predicate)).find(Boolean);
+  if (!node || typeof node !== "object") return undefined;
+  return predicate(node) ? node : findPickerNode(node.props?.children, predicate);
+}
+
+const pickerFastRow = (tree) => findPickerNode(tree, (node) =>
+  node.type === "button" && node.props.children?.[0]?.props?.children === "workspace.defaultSubagentFast");
+
+test("disconnected native Luna explains inherited Fast without changing model or effort", async () => {
+  const model = "native:gpt-6-luna";
+  const option = { id: model, label: "Native · 6 Luna", native: true, efforts: ["high", "max"], defaultEffort: "high" };
+  const options = listDefaultSubagentOptions({
+    nativeOptions: [option], includeFastVariants: true, officialId: "__official__",
+    officialIncluded: false, officialModels: [], officialDisabledModels: ["gpt-6-luna"], providers: [],
+  });
+  const changes = [];
+  const hint = "Native Fast follows the main session and cannot be set independently.";
+  const tree = await renderSubagentPicker({ model, effort: "max", options, nativeFastUnavailableHint: hint,
+    onChange: (...values) => changes.push(values) });
+  const row = pickerFastRow(tree);
+  assert.ok(row, "Fast remains visible without a Gateway connection");
+  assert.equal(row.props.disabled, true);
+  assert.equal(row.props.title, hint);
+  assert.equal(row.props["aria-checked"], undefined, "inherited Fast must not falsely display Off");
+  assert.ok(findPickerNode(row, (node) => node.props?.children?.includes?.("workspace.defaultSubagentFastInherited")));
+  const explanation = findPickerNode(tree, (node) => node.type === "p" && node.props.children === hint);
+  assert.ok(explanation);
+  assert.equal(row.props["aria-describedby"], explanation.props.id);
+  await row.props.onClick();
+  assert.deepEqual(changes, [], "a disabled Native Fast control must not save any setting");
+  const modelRow = findPickerNode(tree, (node) => node.type === "button" && node.props.children?.[0]?.props?.children === "workspace.defaultSubagentModel");
+  const effortRow = findPickerNode(tree, (node) => node.type === "button" && node.props.children?.[0]?.props?.children === "workspace.defaultSubagentEffort");
+  assert.ok(modelRow && !modelRow.props.disabled);
+  assert.ok(effortRow && !effortRow.props.disabled);
+  assert.deepEqual(options, [option], "Native identity and advertised effort remain intact");
+});
+
+test("native Fast limitation is scoped to Codex and Fast-capable models", async () => {
+  for (const [model, hint] of [["native:gpt-5.4-mini", "Codex native Fast limitation"], ["native:gpt-6-luna", undefined], ["", "Codex native Fast limitation"]]) {
+    const options = model ? [{ id: model, label: model, native: true, efforts: ["high"], defaultEffort: "high" }] : [];
+    const tree = await renderSubagentPicker({ model, effort: "high", options, nativeFastUnavailableHint: hint, onChange: () => {} });
+    assert.equal(pickerFastRow(tree), undefined);
+  }
+});
+
+test("Gateway Luna Fast remains editable and retains the chosen effort", async () => {
+  const options = listDefaultSubagentOptions({ includeFastVariants: true, officialId: "__official__", officialIncluded: true,
+    officialModels: [official("gpt-6-luna", { supported_reasoning_levels: ["high", "max"] })], officialDisabledModels: [], providers: [] });
+  for (const [model, target] of [["gpt-6-luna", "gpt-6-luna-fast"], ["gpt-6-luna-fast", "gpt-6-luna"]]) {
+    const changes = [];
+    const hint = "Codex native Fast limitation";
+    const tree = await renderSubagentPicker({ model, effort: "max", options, nativeFastUnavailableHint: hint, onChange: (...values) => changes.push(values) });
+    const row = pickerFastRow(tree);
+    assert.ok(row && !row.props.disabled);
+    assert.equal(row.props.role, "switch");
+    assert.equal(row.props["aria-checked"], model.endsWith("-fast"));
+    assert.equal(findPickerNode(tree, (node) => node.type === "p" && node.props.children === hint), undefined);
+    await row.props.onClick();
+    assert.deepEqual(changes, [[target, "max"]]);
+  }
 });
 
 test("official subagent slugs drop the openai/ prefix", () => {
@@ -348,6 +437,8 @@ test("every registered Fast model has a subagent toggle and a plain other-client
     const options = listDefaultSubagentOptions({ ...input, includeFastVariants: true });
     assert.equal(options.find((option) => option.id === base)?.speedVariant, alias);
     assert.equal(options.find((option) => option.id === alias)?.speedVariant, base);
+    assert.equal(nativeSubagentSupportsFast({ id: `native:${base}`, native: true }), true);
+    assert.equal(nativeSubagentSupportsFast({ id: `native:openai/${base}`, native: true }), true);
     const other = listDefaultSubagentOptions({ ...input, officialModels: [official(base), official(alias)] });
     assert.ok(other.some((option) => option.id === alias && !option.fast && !option.speedVariant));
   }
