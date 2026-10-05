@@ -19,7 +19,7 @@ function catalog(modern, request) {
   put(join(root, "package.json"), JSON.stringify({ name: "@deepseek-ai/dsh" }));
   put(executable, "");
   module("@deepseek-ai/dsh-tool-subagent", `export const Config = ${JSON.stringify({ uid: 1, refs: { 1: { dict: { agentOptions: 2 } }, 2: { dict: modern ? { reasoningEffort: 3 } : { model: 3 } } } })};`);
-  module("@deepseek-ai/dsh-llm-pi-ai", "export const Config = value => ({providers: {get: () => value.providers}});");
+  module("@deepseek-ai/dsh-llm-pi-ai", "export const Config = value => ({providers: {get: () => Object.fromEntries(Object.entries(value.providers).map(([id, profile]) => [id, {models: [], ...profile}]))}});");
   const pi = module("@earendil-works/pi-ai", "export const getSupportedThinkingLevels = model => model.levels;", { "./providers/all": "./all.js" });
   put(join(pi, "all.js"), 'export const getBuiltinModels = provider => provider === "native" ? [{id:"child", name:"Child", reasoning:true, levels:["low","high"]}] : [];');
   module("@deepseek-ai/dsh-llm-deepseek", modern
@@ -49,4 +49,11 @@ test("DSH legacy child schema remains model-only even with reasoning catalog dat
   const result = catalog(false, { providers: { native: {} }, deepseek: {} });
   assert.deepEqual(result.map(model => model.id), ["native/child", "deepseek/deep"]);
   assert.ok(result.every(model => model.efforts.length === 0));
+});
+
+test("DSH normalized empty model lists retain builtin reasoning metadata", () => {
+  for (const profile of [{}, { models: [] }]) {
+    const result = catalog(true, { providers: { native: profile }, deepseek: { models: [] } });
+    assert.deepEqual(result.find(model => model.id === "native/child").efforts, ["", "low", "high"]);
+  }
 });

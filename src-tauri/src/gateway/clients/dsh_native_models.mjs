@@ -37,9 +37,13 @@ if (Object.keys(request.providers).length) {
   for (const [provider, profile] of Object.entries(profiles)) {
     const builtin = nativePi.getBuiltinModels(provider);
     const byId = new Map(builtin.map((model) => [model.id, model]));
-    const models = profile.models ?? builtin;
+    // New Config normalizes omission to []; native 0.2 resolves both to its catalog.
+    const configuredModels = supportsEffort
+      ? Boolean(profile.models?.length)
+      : Object.hasOwn(request.providers[provider], "models");
+    const models = configuredModels ? profile.models : builtin;
     for (const model of models) {
-      const configured = profile.models ? model : profile.modelOverrides?.[model.id] ?? {};
+      const configured = configuredModels ? model : profile.modelOverrides?.[model.id] ?? {};
       const declared = configured.reasoningEfforts;
       // Configured levels are already wire-mapped by DSH; expose the declared keys.
       const efforts = declared && typeof declared === "object"
