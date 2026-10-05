@@ -212,7 +212,7 @@ else:
             parsed_requests, decoded_reads = [], []
             original_loads = json.loads
             def measured_loads(data, *args, **kwargs):
-                if isinstance(data, (bytes, bytearray)) and b"inert-unknown-model" in data:
+                if isinstance(data, (bytes, bytearray)) and data.startswith(b'{"model"'):
                     parsed_requests.append(len(data))
                 return original_loads(data, *args, **kwargs)
             monkeypatch.setattr(json, "loads", measured_loads)
