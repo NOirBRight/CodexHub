@@ -1954,6 +1954,12 @@ function Invoke-ClientAttempt {
     $sentinelPath = Join-Path $CaseRoot 'sentinel.txt'
     [System.IO.File]::WriteAllText($sentinelPath, $sentinel, $script:Utf8NoBom)
     $prompt = "Use exactly one read-only tool call to read ./sentinel.txt. Then reply with only this exact line and no other text: $sentinel"
+    $isOpenCodeV2 = $Case.client -ceq 'opencode' -and (Test-StableVersionAtLeast -Actual ([string]$script:ObservedVersions['opencode']) -Minimum '2.0.0' -ComponentCount 3)
+    if ($isOpenCodeV2) {
+        # Give V2's private server the exact fixture path, avoiding cwd ambiguity.
+        $fixturePath = $sentinelPath | ConvertTo-Json -Compress
+        $prompt = "Use exactly one call to the read tool to read the file at $fixturePath. Do not use any other tool. Then reply with only this exact line and no other text: $sentinel"
+    }
     $arguments = @(Get-ClientArguments -Client $Case.client -Model $LaunchModel -WorkRoot $CaseRoot -Prompt $prompt)
     $environment = @{
         CODEXHUB_E2E_CASE = $Case.case_id
@@ -1965,7 +1971,7 @@ function Invoke-ClientAttempt {
         CODEXHUB_E2E_ATTEMPT = [string]$Attempt
         CODEXHUB_E2E_DIAGNOSTICS_PATH = $script:DiagnosticsPath
     }
-    if ($Case.client -ceq 'opencode' -and (Test-StableVersionAtLeast -Actual ([string]$script:ObservedVersions['opencode']) -Minimum '2.0.0' -ComponentCount 3)) {
+    if ($isOpenCodeV2) {
         $environment['OPENCODE_CONFIG'] = Join-Path $CaseRoot '.config\opencode\opencode.json'
         $environment['OPENCODE_DISABLE_DEFAULT_PLUGINS'] = '1'
         $environment['OPENCODE_DISABLE_AUTOUPDATE'] = '1'

@@ -776,6 +776,13 @@ def _client_launch(
         _copy_tree(managed_root / "opencode", config_home)
         version = base_env.get("CODEXHUB_OPENCODE_VERSION", "")
         if (_version_tuple(version) or (0, 0, 0)) >= (2, 0, 0):
+            # Give V2's private server the exact fixture path, avoiding cwd ambiguity.
+            prompt = (
+                "Use exactly one call to the read tool to read the file at "
+                f"{json.dumps(str((case_root / 'sentinel.txt').resolve()))}. "
+                "Do not use any other tool. Then reply with only this exact line "
+                f"and no other text: {sentinel}"
+            )
             env["OPENCODE_CONFIG"] = str(config_home / "opencode.json")
             env["OPENCODE_DISABLE_DEFAULT_PLUGINS"] = "1"
             env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"

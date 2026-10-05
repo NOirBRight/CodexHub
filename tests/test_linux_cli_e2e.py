@@ -511,3 +511,33 @@ def test_gateway_route_evidence_matches_production_telemetry(case, tmp_path):
     assert E2E.gateway_evidence(case, events, 0, 2)["route_metadata_error_count"] == 1
     events[0]["provider_id"] = "wrong-provider"
     assert E2E.gateway_evidence(case, events, 0, 2)["route_metadata_error_count"] > 1
+
+
+@pytest.mark.parametrize("version", ["2.0.22", "2.0.23"])
+def test_opencode_v2_reads_absolute_fixture_with_one_explicit_read(tmp_path, monkeypatch, version):
+    case_root = tmp_path / "case with spaces"
+    case_root.mkdir()
+    managed = tmp_path / "managed"
+    (managed / "opencode").mkdir(parents=True)
+    (managed / "opencode" / "opencode.json").write_text("{}")
+    case = next(case for case in E2E.CASES if case.case_id == "opencode-openai")
+    captured = []
+
+    def launch(command, **kwargs):
+        captured.append((command, kwargs))
+        return {
+            "stdout": "", "returncode": 0, "timed_out": False,
+            "output_truncated": False, "stdout_sha256": "", "stderr_sha256": "",
+            "stdout_size": 0, "stderr_size": 0,
+        }
+
+    monkeypatch.setattr(E2E, "_cli", lambda name: name)
+    monkeypatch.setattr(E2E, "_run_client_bounded", launch)
+    E2E._client_launch(case, managed, case_root, {"CODEXHUB_OPENCODE_VERSION": version}, 1)
+    command, kwargs = captured[0]
+    prompt = command[-1]
+    assert "exactly one call to the read tool" in prompt
+    assert json.dumps(str((case_root / "sentinel.txt").resolve())) in prompt
+    assert "./sentinel.txt" not in prompt
+    assert kwargs["cwd"] == case_root
+    assert (case_root / "sentinel.txt").read_text().strip() == E2E.SENTINEL_PREFIX + case.case_id
