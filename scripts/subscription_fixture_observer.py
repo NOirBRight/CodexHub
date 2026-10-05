@@ -33,7 +33,9 @@ BOUNDARIES = ("fixtureinput", "callerpayload", "adaptedhistory", "servedhistoryb
 
 def fixture_plan(value=None):
     """Explicit operator-approved fixture/control whitelist; no substring grants."""
-    value = secrets.token_hex(12) if value is None else value
+    if value is None:
+        random = secrets.token_hex(11)
+        value = random[:12] + random[11] * 2 + random[12:]  # 24 bytes, unpredictable, includes a triple repeat.
     if not isinstance(value, str) or not value or len(value.encode()) > MAX_VALUE - 4:
         raise ValueError("invalid-fixture")
     allowed = {value, value + "\n", value[::-1]}

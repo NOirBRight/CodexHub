@@ -245,6 +245,8 @@ def test_preparation_has_no_cli_account_access_and_rollouts_do_not_relabel_old_e
     plan = tmp_path / "approved.json"
     assert qualification.main(["--prepare-fixture", str(plan)]) == 0
     assert observation.validate_plan(json.loads(plan.read_bytes()))
+    value = json.loads(plan.read_bytes())["value"]
+    assert len(value.encode()) == 24 and any(value[i:i+3] == value[i] * 3 for i in range(len(value) - 2))
     assert plan.stat().st_mode & 0o777 == 0o600
     path = tmp_path / "rollout.jsonl"
     def final(text):
