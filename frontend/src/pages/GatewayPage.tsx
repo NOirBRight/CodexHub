@@ -871,7 +871,7 @@ function GatewayPageImpl({
               <Server size={15} className="shrink-0 text-action" />
               <span className="truncate">{t("gateway.gateway")}</span>
             </h2>
-            <label className="flex h-7 items-center gap-2 rounded-control bg-panel px-2 text-[11px] font-semibold text-slate-600 shadow-control">
+            <label className="flex h-7 items-center gap-2 rounded-control bg-panel px-2 text-[11px] font-semibold text-muted shadow-control">
               <span>
                 {running ? t("runtime.running") : t("runtime.stopped")}
               </span>
@@ -893,7 +893,7 @@ function GatewayPageImpl({
           <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(220px,1fr))] items-stretch gap-2">
             <div className="grid min-w-0 content-start rounded-inner bg-panel p-2">
               <div className="grid min-w-0 content-start gap-1.5 rounded-inner bg-surface p-2 shadow-control">
-                <label className="grid gap-1 text-xs font-semibold text-slate-600">
+                <label className="grid gap-1 text-xs font-semibold text-muted">
                   <span>{t("common.apiKey")}</span>
                   <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
                     <div className="relative min-w-0">
@@ -907,7 +907,7 @@ function GatewayPageImpl({
                       />
                       <button
                         type="button"
-                        className="focus-ring absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
+                        className="focus-ring absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-control text-muted transition-colors hover:bg-panel hover:text-ink"
                         aria-label={
                           showDraftKey
                             ? t("common.hideApiKey")
@@ -924,7 +924,7 @@ function GatewayPageImpl({
                     </div>
                     <button
                       type="button"
-                      className="focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+                      className="focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-panel text-ink shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96]"
                       disabled={!draftKey}
                       aria-label={
                         apiKeyCopied
@@ -942,7 +942,7 @@ function GatewayPageImpl({
                     </button>
                     <button
                       type="button"
-                      className="focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+                      className="focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-panel text-ink shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96]"
                       aria-label={t("gateway.regenerateApiKey")}
                       title={t("gateway.regenerateApiKey")}
                       onClick={regenerateClientKey}
@@ -952,7 +952,7 @@ function GatewayPageImpl({
                   </div>
                 </label>
                 <div className="grid min-w-0 grid-cols-[minmax(64px,0.75fr)_minmax(64px,0.75fr)_minmax(112px,0.9fr)] items-end gap-1.5">
-                  <label className="grid min-w-0 gap-1 text-xs font-semibold text-slate-600">
+                  <label className="grid min-w-0 gap-1 text-xs font-semibold text-muted">
                     <span>{t("common.port")}</span>
                     <input
                       className="field field-compact"
@@ -965,7 +965,7 @@ function GatewayPageImpl({
                       }
                     />
                   </label>
-                  <label className="grid min-w-0 gap-1 text-xs font-semibold text-slate-600">
+                  <label className="grid min-w-0 gap-1 text-xs font-semibold text-muted">
                     <span>{t("common.timeout")}</span>
                     <input
                       className="field field-compact"
@@ -980,7 +980,7 @@ function GatewayPageImpl({
                   </label>
                   <button
                     type="button"
-                    className="focus-ring inline-flex h-9 self-end items-center justify-center gap-1.5 whitespace-nowrap rounded-control bg-ink px-2 text-[11px] font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+                    className="focus-ring inline-flex h-9 self-end items-center justify-center gap-1.5 whitespace-nowrap rounded-control bg-action px-2 text-[11px] font-semibold text-on-action shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-hover hover:shadow-raised active:scale-[0.96] disabled:bg-line"
                     disabled={Boolean(busy) || !settings}
                     onClick={() => void applyGatewaySettings()}
                   >
@@ -1032,10 +1032,10 @@ function GatewayPageImpl({
                   className={cx(
                     "rounded-inner px-2 py-1 text-xs shadow-control",
                     item.level === "error"
-                      ? "bg-red-50 text-danger"
+                      ? "bg-danger-soft text-danger"
                       : item.level === "warning"
-                        ? "bg-amber-50 text-warn"
-                        : "bg-emerald-50 text-ok",
+                        ? "bg-warn-soft text-warn"
+                        : "bg-ok-soft text-ok",
                   )}
                 >
                   {item.message}
@@ -1090,7 +1090,7 @@ function GatewayPageImpl({
             )}
             <button
               type="button"
-              className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96] disabled:text-slate-300"
+              className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-control bg-panel text-muted shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96] disabled:text-muted"
               disabled={clientRefreshBusy}
               aria-label={t("gateway.refreshClients")}
               title={t("gateway.refreshClientsTitle")}
@@ -1295,7 +1295,7 @@ function RecoveryActivityPanel({
             <Activity size={15} className="shrink-0 text-action" />
             <span className="truncate">{t("gateway.recoveryActivity")}</span>
           </h3>
-          <p className="mt-0.5 truncate text-[11px] text-slate-500">
+          <p className="mt-0.5 truncate text-[11px] text-muted">
             {enabled
               ? t("gateway.recoveryActivitySubtitle")
               : t("gateway.recoveryDisabled")}
@@ -1306,10 +1306,10 @@ function RecoveryActivityPanel({
             className={cx(
               "rounded-control px-2 py-1 text-[11px] font-semibold",
               !enabled
-                ? "bg-slate-100 text-slate-500"
+                ? "bg-panel text-muted"
                 : active
-                  ? "bg-emerald-50 text-ok"
-                  : "bg-slate-100 text-slate-500",
+                  ? "bg-ok-soft text-ok"
+                  : "bg-panel text-muted",
             )}
           >
             {!enabled
@@ -1318,7 +1318,7 @@ function RecoveryActivityPanel({
                 ? t("gateway.recoveryActive")
                 : t("gateway.recoveryIdle")}
           </span>
-          <label className="flex h-7 items-center gap-2 rounded-control bg-panel px-2 text-[11px] font-semibold text-slate-600 shadow-control">
+          <label className="flex h-7 items-center gap-2 rounded-control bg-panel px-2 text-[11px] font-semibold text-muted shadow-control">
             <span>{t("settings.autoRetry")}</span>
             <SwitchControl
               ariaLabel={t("settings.autoRetry")}
@@ -1373,7 +1373,7 @@ function RecoveryActivityPanel({
 function RecoveryMetric({ label, value }: { label: string; value: number }) {
   return (
     <div className="grid min-h-[40px] min-w-0 content-center rounded-inner bg-panel px-2.5 py-1.5 shadow-control">
-      <span className="truncate text-[11px] font-semibold text-slate-500">
+      <span className="truncate text-[11px] font-semibold text-muted">
         {label}
       </span>
       <span className="tabular-nums text-sm font-semibold text-ink">
@@ -1419,11 +1419,11 @@ function RecoveryEventRow({
     >
       <CheckCircle2
         size={13}
-        className={cx("shrink-0", active ? "text-ok" : "text-slate-400")}
+        className={cx("shrink-0", active ? "text-ok" : "text-muted")}
       />
       <div className="flex min-w-0 items-center gap-1.5">
         {event ? (
-          <span className="shrink-0 rounded-control bg-slate-100 px-1.5 py-0.5 font-semibold tabular-nums text-slate-600">
+          <span className="shrink-0 rounded-control bg-panel px-1.5 py-0.5 font-semibold tabular-nums text-muted">
             {retryText || t("gateway.recoveryAttemptUnknown")}
           </span>
         ) : null}
@@ -1435,7 +1435,7 @@ function RecoveryEventRow({
         <button
           type="button"
           aria-label={t("diagnostics.open")}
-          className="focus-ring grid h-7 w-7 shrink-0 place-items-center rounded-control bg-surface text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+          className="focus-ring grid h-7 w-7 shrink-0 place-items-center rounded-control bg-surface text-muted shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96]"
           onClick={onOpenDiagnostics}
           title={t("diagnostics.open")}
         >
@@ -1445,7 +1445,7 @@ function RecoveryEventRow({
       <button
         type="button"
         aria-label={t("gateway.recoveryOverviewTitle")}
-        className="focus-ring grid h-7 w-7 shrink-0 place-items-center rounded-control bg-surface text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+        className="focus-ring grid h-7 w-7 shrink-0 place-items-center rounded-control bg-surface text-muted shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96]"
         onClick={onOverview}
         title={t("gateway.recoveryOverviewTitle")}
       >
@@ -1484,7 +1484,7 @@ function RecoveryOverviewModal({
   const pageFrom = events.length === 0 ? 0 : pageStart + 1;
   const pageTo = pageStart + pageEvents.length;
   return (
-    <div className="fixed inset-0 z-[80] grid place-items-center bg-black/20 px-4 py-6">
+    <div className="fixed inset-0 z-[80] grid place-items-center bg-scrim px-4 py-6">
       <section
         aria-labelledby="gateway-recovery-overview-title"
         aria-modal="true"
@@ -1502,7 +1502,7 @@ function RecoveryOverviewModal({
                 {t("gateway.recoveryOverviewTitle")}
               </span>
             </h2>
-            <p className="mt-0.5 truncate text-xs text-slate-500">
+            <p className="mt-0.5 truncate text-xs text-muted">
               {t("gateway.recoveryOverviewSubtitle", {
                 count: events.length,
                 hours: RECOVERY_OVERVIEW_HOURS,
@@ -1514,7 +1514,7 @@ function RecoveryOverviewModal({
           </div>
           <button
             type="button"
-            className="focus-ring grid h-8 w-8 shrink-0 place-items-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+            className="focus-ring grid h-8 w-8 shrink-0 place-items-center rounded-control bg-panel text-muted shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96]"
             aria-label={t("common.close")}
             onClick={onClose}
           >
@@ -1523,18 +1523,18 @@ function RecoveryOverviewModal({
         </div>
 
         {loading ? (
-          <div className="p-4 text-sm text-slate-500">
+          <div className="p-4 text-sm text-muted">
             {t("gateway.recoveryOverviewLoading")}
           </div>
         ) : events.length === 0 ? (
-          <div className="p-4 text-sm text-slate-500">
+          <div className="p-4 text-sm text-muted">
             {t("gateway.recoveryEmpty")}
           </div>
         ) : (
           <div className="min-h-0 overflow-auto">
             <div className="p-3">
               <div className="min-w-[980px] overflow-hidden rounded-panel border border-line">
-                <div className="sticky top-0 z-10 grid grid-cols-[86px_92px_112px_142px_70px_62px_116px_60px_minmax(0,1fr)] bg-panel px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-500">
+                <div className="sticky top-0 z-10 grid grid-cols-[86px_92px_112px_142px_70px_62px_116px_60px_minmax(0,1fr)] bg-panel px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.04em] text-muted">
                   <span>{t("gateway.recoveryColumnTime")}</span>
                   <span>{t("gateway.recoveryColumnClient")}</span>
                   <span>{t("gateway.recoveryColumnProvider")}</span>
@@ -1550,7 +1550,7 @@ function RecoveryOverviewModal({
                     key={`${event.ts ?? "retry"}-${event.request_id ?? index}-${index}`}
                     className="grid grid-cols-[86px_92px_112px_142px_70px_62px_116px_60px_minmax(0,1fr)] items-start gap-0 border-t border-line px-3 py-2 text-xs"
                   >
-                    <span className="truncate tabular-nums text-slate-500">
+                    <span className="truncate tabular-nums text-muted">
                       {formatEventTime(event.ts)}
                     </span>
                     <span
@@ -1567,35 +1567,35 @@ function RecoveryOverviewModal({
                       {recoveryProviderLabel(event)}
                     </span>
                     <span
-                      className="truncate font-mono text-[11px] text-slate-600"
+                      className="truncate font-mono text-[11px] text-muted"
                       title={event.model ?? ""}
                     >
                       {displayRecoveryModel(event.model)}
                     </span>
-                    <span className="tabular-nums text-slate-700">
+                    <span className="tabular-nums text-ink">
                       {formatAttemptCell(event)}
                     </span>
-                    <span className="tabular-nums text-slate-700">
+                    <span className="tabular-nums text-ink">
                       {formatDelay(event.delay_ms) ?? "-"}
                     </span>
                     <span
-                      className="truncate text-slate-700"
+                      className="truncate text-ink"
                       title={event.failure_class ?? ""}
                     >
                       {event.failure_class ?? "-"}
                     </span>
-                    <span className="tabular-nums text-slate-600">
+                    <span className="tabular-nums text-muted">
                       {event.status ?? "-"}
                     </span>
                     <div className="grid min-w-0 gap-0.5">
                       <span
-                        className="break-all font-mono text-[10px] leading-4 text-slate-500"
+                        className="break-all font-mono text-[10px] leading-4 text-muted"
                         title={event.path ?? ""}
                       >
                         {event.path ?? "-"}
                       </span>
                       <span
-                        className="break-all font-mono text-[10px] leading-4 text-slate-400"
+                        className="break-all font-mono text-[10px] leading-4 text-muted"
                         title={event.request_id ?? ""}
                       >
                         {event.request_id ?? "-"}
@@ -1617,8 +1617,8 @@ function RecoveryOverviewModal({
             </div>
           </div>
         )}
-        <div className="flex min-w-0 items-center justify-between gap-3 px-4 py-3 shadow-[inset_0_1px_0_rgba(15,23,42,0.08)]">
-          <span className="truncate text-xs font-medium text-slate-500">
+        <div className="flex min-w-0 items-center justify-between gap-3 px-4 py-3 shadow-divider">
+          <span className="truncate text-xs font-medium text-muted">
             {t("gateway.recoveryPageSummary", {
               from: pageFrom,
               page: safePage + 1,
@@ -1630,7 +1630,7 @@ function RecoveryOverviewModal({
           <div className="flex shrink-0 items-center gap-2">
             <button
               type="button"
-              className="focus-ring h-8 rounded-control bg-panel px-3 text-xs font-semibold text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-45"
+              className="focus-ring h-8 rounded-control bg-panel px-3 text-xs font-semibold text-muted shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-45"
               disabled={loading || safePage === 0}
               onClick={() => onPageChange(safePage - 1)}
             >
@@ -1638,7 +1638,7 @@ function RecoveryOverviewModal({
             </button>
             <button
               type="button"
-              className="focus-ring h-8 rounded-control bg-panel px-3 text-xs font-semibold text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-45"
+              className="focus-ring h-8 rounded-control bg-panel px-3 text-xs font-semibold text-muted shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-45"
               disabled={loading || safePage >= pageCount - 1}
               onClick={() => onPageChange(safePage + 1)}
             >

@@ -269,7 +269,7 @@ export function SettingsDrawer({
       {open && !inlineCategory && (
         <button
           type="button"
-          className="fixed inset-0 z-40 cursor-default bg-black/10 backdrop-blur-[1px]"
+          className="fixed inset-0 z-40 cursor-default bg-scrim backdrop-blur-[1px]"
           aria-label={t("common.closeSettings")}
           onClick={requestClose}
         />
@@ -286,7 +286,7 @@ export function SettingsDrawer({
       >
         <div className="flex items-center justify-between gap-3 px-5 py-4 shadow-hairline">
           <div>
-            <div className="text-xs font-semibold uppercase tracking-[0.06em] text-slate-500">
+            <div className="text-xs font-semibold uppercase tracking-[0.06em] text-muted">
               {t("common.settings")}
             </div>
             <h2 className="text-base font-semibold text-ink">
@@ -295,7 +295,7 @@ export function SettingsDrawer({
           </div>
           <button
             type="button"
-            className="focus-ring grid h-8 w-8 place-items-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+            className="focus-ring grid h-8 w-8 place-items-center rounded-control bg-panel text-muted shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96]"
             onClick={requestClose}
             title={t("common.closeSettings")}
           >
@@ -306,7 +306,7 @@ export function SettingsDrawer({
         <div className="min-h-0 overflow-auto">
           <div className="py-5 pl-5 pr-2">
             {!draft ? (
-              <div className="rounded-panel bg-panel p-4 text-sm text-slate-500 shadow-card">
+              <div className="rounded-panel bg-panel p-4 text-sm text-muted shadow-card">
                 {t("common.loadingSettings")}
               </div>
             ) : (
@@ -340,8 +340,8 @@ export function SettingsDrawer({
                         </div>
                       </div>
                     )}
-                    <div className="grid gap-1 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
-                      <span className="text-xs font-semibold text-slate-500">
+                    <div className="grid gap-1 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-ink shadow-control">
+                      <span className="text-xs font-semibold text-muted">
                         {t("settings.language")}
                       </span>
                       <SegmentedSwitch
@@ -399,7 +399,7 @@ export function SettingsDrawer({
                     />
                     <button
                       type="button"
-                      className="focus-ring inline-flex h-9 items-center justify-start rounded-control bg-surface px-3 text-sm font-medium text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]"
+                      className="focus-ring inline-flex h-9 items-center justify-start rounded-control bg-surface px-3 text-sm font-medium text-ink shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96]"
                       disabled={Boolean(busy) || historyBusy}
                       onClick={() => void repairHistory()}
                     >
@@ -441,12 +441,12 @@ export function SettingsDrawer({
                         })
                       }
                     />
-                    <label className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_36px] items-center gap-3 rounded-inner bg-surface px-3 py-1.5 text-sm font-medium text-slate-700 shadow-control">
+                    <label className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_36px] items-center gap-3 rounded-inner bg-surface px-3 py-1.5 text-sm font-medium text-ink shadow-control">
                       <span className="min-w-0 truncate">
                         {t("settings.maxAttempts")}
                       </span>
                       <input
-                        className="h-6 w-9 min-w-0 rounded-control border border-transparent bg-transparent px-0 text-center text-sm font-semibold tabular-nums text-ink shadow-none outline-none transition-[box-shadow,border-color,background-color] duration-150 ease-out [appearance:textfield] focus:border-action/40 focus:bg-surface focus:shadow-field disabled:text-slate-400 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                        className="h-6 w-9 min-w-0 rounded-control border border-transparent bg-transparent px-0 text-center text-sm font-semibold tabular-nums text-ink shadow-none outline-none transition-[box-shadow,border-color,background-color] duration-150 ease-out [appearance:textfield] focus:border-action/40 focus:bg-surface focus:shadow-field disabled:text-muted [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                         type="number"
                         min={1}
                         max={30}
@@ -486,7 +486,7 @@ export function SettingsDrawer({
                         })
                       }
                     />
-                    <div className="relative grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,190px)] items-center gap-3 rounded-inner bg-surface px-3 py-1 text-sm font-medium text-slate-700 shadow-control">
+                    <div className="relative grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,190px)] items-center gap-3 rounded-inner bg-surface px-3 py-1 text-sm font-medium text-ink shadow-control">
                       <span className="min-w-0 truncate">
                         {t("settings.visionModel")}
                       </span>
@@ -564,13 +564,13 @@ export function SettingsDrawer({
         </SettingsActions>
       </aside>
       {closePromptOpen && (
-        <div className="fixed inset-0 z-[90] grid place-items-center bg-black/20 px-4">
+        <div className="fixed inset-0 z-[90] grid place-items-center bg-scrim px-4">
           <div className="grid w-full max-w-[360px] gap-4 rounded-overlay bg-surface p-4 shadow-overlay">
             <div>
               <h3 className="text-base font-semibold text-ink">
                 {t("settings.unsavedChangesTitle")}
               </h3>
-              <p className="mt-1 text-sm leading-5 text-slate-500">
+              <p className="mt-1 text-sm leading-5 text-muted">
                 {t("settings.unsavedChangesBody")}
               </p>
             </div>
@@ -591,7 +591,7 @@ export function SettingsDrawer({
               </button>
               <button
                 type="button"
-                className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+                className="focus-ring inline-flex h-8 items-center justify-center gap-2 rounded-control bg-action px-3 text-xs font-semibold text-on-action shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-hover hover:shadow-raised active:scale-[0.96] disabled:bg-line"
                 disabled={Boolean(busy) || historyBusy || !draft}
                 onClick={() => void saveDraft({ closeOnSuccess: true })}
               >
@@ -644,13 +644,13 @@ function VersionUpdateBlock({
 
   return (
     <div className="grid gap-3 rounded-panel bg-panel p-3 shadow-card">
-      <div className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
-        <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
+      <div className="grid min-h-9 min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-ink shadow-control">
+        <span className="min-w-0 truncate text-xs font-semibold text-muted">
           {t("settings.currentVersion")}
         </span>
         <span
           className={cx(
-            "shrink-0 rounded-full bg-panel px-2 py-0.5 text-[11px] font-semibold text-slate-600",
+            "shrink-0 rounded-full bg-panel px-2 py-0.5 text-[11px] font-semibold text-muted",
             rawCurrentVersion ? "font-mono tabular-nums" : "",
           )}
         >
@@ -658,7 +658,7 @@ function VersionUpdateBlock({
         </span>
         <button
           type="button"
-          className="focus-ring inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-control bg-panel text-slate-600 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:text-ink hover:shadow-raised active:scale-[0.96] disabled:text-slate-400"
+          className="focus-ring inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-control bg-panel text-muted shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:text-ink hover:shadow-raised active:scale-[0.96] disabled:text-muted"
           aria-label={t("settings.checkForUpdates")}
           title={t("settings.checkForUpdates")}
           disabled={Boolean(busy) || installActive}
@@ -673,7 +673,7 @@ function VersionUpdateBlock({
       {updateAvailable && (
         <div className="grid min-w-0 gap-3 rounded-inner bg-surface px-3 py-2 shadow-control">
           <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-            <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
+            <span className="min-w-0 truncate text-xs font-semibold text-muted">
               {t("settings.latestVersion")}
             </span>
             <span className="shrink-0 rounded-full bg-action/10 px-2 py-0.5 font-mono text-[11px] font-semibold tabular-nums text-action">
@@ -681,21 +681,21 @@ function VersionUpdateBlock({
             </span>
           </div>
           {releaseDate && (
-            <p className="min-w-0 truncate text-[11px] leading-4 text-slate-400">
+            <p className="min-w-0 truncate text-[11px] leading-4 text-muted">
               {releaseDate}
             </p>
           )}
           <div className="grid min-w-0 gap-1">
-            <span className="min-w-0 truncate text-xs font-semibold text-slate-500">
+            <span className="min-w-0 truncate text-xs font-semibold text-muted">
               {t("settings.releaseNotes")}
             </span>
-            <p className="max-h-24 min-w-0 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-slate-600">
+            <p className="max-h-24 min-w-0 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-muted">
               {releaseNotes}
             </p>
           </div>
           <button
             type="button"
-            className="focus-ring inline-flex h-9 min-w-0 items-center justify-center gap-2 rounded-control bg-ink px-3 text-sm font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96] disabled:bg-slate-300"
+            className="focus-ring inline-flex h-9 min-w-0 items-center justify-center gap-2 rounded-control bg-action px-3 text-sm font-semibold text-on-action shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-hover hover:shadow-raised active:scale-[0.96] disabled:bg-line"
             disabled={Boolean(busy) || installActive}
             onClick={onInstall}
           >
@@ -770,7 +770,7 @@ function Toggle({
   onChange: (value: boolean) => void;
 }) {
   return (
-    <label className="flex min-h-9 items-center justify-between gap-4 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-slate-700 shadow-control">
+    <label className="flex min-h-9 items-center justify-between gap-4 rounded-inner bg-surface px-3 py-2 text-sm font-medium text-ink shadow-control">
       <span className="min-w-0 truncate">{label}</span>
       <SwitchControl
         checked={checked}
@@ -814,12 +814,12 @@ export function SwitchControl({
             ? "bg-warn"
             : checked
               ? "bg-action"
-              : "bg-slate-200",
+              : "bg-line",
         )}
       />
       <span
         className={cx(
-          "pointer-events-none absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-disabled:opacity-80",
+          "pointer-events-none absolute left-0.5 h-4 w-4 rounded-full bg-switch-thumb shadow-sm transition-transform peer-disabled:opacity-80",
           checked && "translate-x-4",
         )}
       />
@@ -898,7 +898,7 @@ function VisionModelSelect({
     <div ref={ref} className="min-w-0">
       <button
         type="button"
-        className="focus-ring flex h-7 w-full min-w-0 items-center justify-between gap-2 overflow-hidden rounded-control bg-transparent px-2 text-left text-sm font-medium text-ink transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:text-slate-400"
+        className="focus-ring flex h-7 w-full min-w-0 items-center justify-between gap-2 overflow-hidden rounded-control bg-transparent px-2 text-left text-sm font-medium text-ink transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:text-muted"
         disabled={disabled}
         title={label}
         aria-haspopup="listbox"
@@ -908,14 +908,14 @@ function VisionModelSelect({
         {selectedParts ? (
           <VisionModelValue parts={selectedParts} />
         ) : (
-          <span className="min-w-0 flex-1 truncate text-slate-500">
+          <span className="min-w-0 flex-1 truncate text-muted">
             {label}
           </span>
         )}
         <ChevronDown
           size={16}
           className={cx(
-            "shrink-0 text-slate-500 transition-transform duration-150 ease-out",
+            "shrink-0 text-muted transition-transform duration-150 ease-out",
             open && "rotate-180 text-ink",
           )}
         />
@@ -948,7 +948,7 @@ function VisionModelValue({ parts }: { parts: VisionModelParts }) {
       <span className="min-w-0 truncate font-mono text-sm font-semibold leading-5 text-ink">
         {parts.modelId}
       </span>
-      <span className="shrink-0 truncate text-sm font-medium leading-5 text-slate-500">
+      <span className="shrink-0 truncate text-sm font-medium leading-5 text-muted">
         {parts.provider}
       </span>
     </span>
@@ -971,7 +971,7 @@ function VisionModelOption({
         "focus-ring flex min-h-8 w-full min-w-0 items-center justify-between gap-2 rounded-control px-2.5 py-1 text-left text-sm font-medium transition-[background-color,color] duration-150 ease-out",
         selected
           ? "bg-panel text-ink"
-          : "text-slate-600 hover:bg-panel hover:text-ink",
+          : "text-muted hover:bg-panel hover:text-ink",
       )}
       role="option"
       aria-selected={selected}

@@ -123,10 +123,7 @@ fn read_config(path: &Path) -> Result<Value, String> {
     }
 }
 
-fn cli_models(path: &Path) -> Vec<NativeSubagentOption> {
-    let Some(executable) = detect_opencode_executable_path() else {
-        return Vec::new();
-    };
+fn run_opencode_models(executable: &Path, config: &Path, args: &[&str]) -> Option<String> {
     let mut command = if executable
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"))
@@ -137,18 +134,20 @@ fn cli_models(path: &Path) -> Vec<NativeSubagentOption> {
     } else {
         Command::new(executable)
     };
-    command.env("OPENCODE_CONFIG", path);
+    command.env("OPENCODE_CONFIG", config);
     command
-        .args(["models", "--verbose"])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     crate::runtime_paths::configure_no_window(&mut command);
     let Ok(mut child) = command.spawn() else {
-        return Vec::new();
+        return None;
     };
     let Some(stdout) = child.stdout.take() else {
-        return Vec::new();
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
     };
     let reader = thread::spawn(move || {
         let mut text = String::new();
@@ -163,14 +162,51 @@ fn cli_models(path: &Path) -> Vec<NativeSubagentOption> {
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Vec::new();
+                return None;
             }
         }
     }
-    parse_cli_models(&reader.join().unwrap_or_default())
+    Some(reader.join().unwrap_or_default())
+}
+
+fn cli_models(path: &Path) -> Vec<NativeSubagentOption> {
+    let Some(executable) = detect_opencode_executable_path() else {
+        return Vec::new();
+    };
+    // OpenCode 2.0.22 rejects `models --verbose` and exits before listing anything.
+    if let Some(text) = run_opencode_models(&executable, path, &["models", "--verbose"]) {
+        return parse_cli_models(&text);
+    }
+    // V2 exposes model capabilities through its API; the plain models command drops variants.
+    if let Some(text) = run_opencode_models(&executable, path, &["api", "model.list"]) {
+        let options = parse_cli_models(&text);
+        if !options.is_empty() {
+            return options;
+        }
+    }
+    run_opencode_models(&executable, path, &["models"])
+        .map(|text| parse_cli_models(&text))
+        .unwrap_or_default()
 }
 
 fn parse_cli_models(text: &str) -> Vec<NativeSubagentOption> {
+    if let Ok(response) = serde_json::from_str::<Value>(text) {
+        if let Some(models) = response.get("data").and_then(Value::as_array) {
+            return models
+                .iter()
+                .filter(|model| model.get("enabled").and_then(Value::as_bool) != Some(false))
+                .filter_map(|model| {
+                    let provider = model.get("providerID")?.as_str()?;
+                    let model_id = model.get("id")?.as_str()?;
+                    if provider.is_empty() || model_id.is_empty() {
+                        return None;
+                    }
+                    let id = format!("{provider}/{model_id}");
+                    (!is_codexhub_client_model_selector(&id)).then(|| native_option(id, model))
+                })
+                .collect();
+        }
+    }
     let mut remaining = text;
     let mut options = Vec::new();
     while let Some((line, rest)) = remaining.split_once('\n') {
@@ -196,17 +232,21 @@ fn parse_cli_models(text: &str) -> Vec<NativeSubagentOption> {
 }
 
 fn native_option(id: String, metadata: &Value) -> NativeSubagentOption {
-    let mut efforts: Vec<String> = metadata
-        .get("variants")
-        .and_then(Value::as_object)
-        .map(|variants| {
-            variants
-                .iter()
-                .filter(|(_, value)| value.get("disabled").and_then(Value::as_bool) != Some(true))
-                .map(|(name, _)| name.clone())
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut efforts: Vec<String> = match metadata.get("variants") {
+        Some(Value::Object(variants)) => variants
+            .iter()
+            .filter(|(_, value)| value.get("disabled").and_then(Value::as_bool) != Some(true))
+            .map(|(name, _)| name.clone())
+            .collect(),
+        Some(Value::Array(variants)) => variants
+            .iter()
+            .filter(|value| value.get("disabled").and_then(Value::as_bool) != Some(true))
+            .filter_map(|value| value.get("id").and_then(Value::as_str))
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    };
     if !efforts.is_empty() {
         efforts.insert(0, String::new());
     }
@@ -522,6 +562,42 @@ mod native_opencode_tests {
     };
     use crate::{Provider, Settings};
 
+    #[test]
+    fn native_opencode_v2_model_api_retains_declared_reasoning_variants() {
+        let response = serde_json::json!({"data": [
+            {"providerID": "opencode-go", "id": "gpt-6-luna", "name": "GPT-6 Luna",
+             "enabled": true, "variants": [{"id": "low"}, {"id": "high"}, {"id": "max"}]},
+            {"providerID": "opencode", "id": "big-pickle", "variants": []},
+            {"providerID": "native", "id": "disabled", "enabled": false, "variants": [{"id": "high"}]},
+            {"providerID": "codexhub-openai", "id": "injected", "variants": [{"id": "high"}]}
+        ]});
+        let options = parse_cli_models(&response.to_string());
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].id, "opencode-go/gpt-6-luna");
+        assert_eq!(options[0].efforts, ["", "low", "high", "max"]);
+        assert!(options[1].efforts.is_empty());
+        let root = root();
+        let path = root.join("opencode.json");
+        let original = fixture(&path);
+        with_rollback_provenance_dir_override(Some(root.join("provenance")), || {
+            let saved = save_opencode_default_subagent_with_path(
+                &path,
+                options[0].id.clone(),
+                "high".into(),
+                true,
+                &options,
+            )
+            .unwrap();
+            assert_eq!(saved.effort, "high");
+            let actual = read_config(&path).unwrap();
+            assert_eq!(actual["model"], original["model"]);
+            assert_eq!(actual["provider"], original["provider"]);
+            for name in OPENCODE_SPAWN_AGENTS {
+                assert_eq!(actual["agent"][*name]["variant"], "high");
+            }
+        });
+    }
+
     fn root() -> PathBuf {
         std::env::temp_dir().join(format!(
             "codexhub-native-opencode-{}-{}",
@@ -820,6 +896,16 @@ mod native_opencode_tests {
         });
         let actual = read_config(&path).unwrap();
         assert_eq!(actual["agent"], manual["agent"]);
+    }
+
+    #[test]
+    fn parse_cli_models_accepts_id_only_lines_without_metadata() {
+        let options = parse_cli_models("native/child\nnative/other\n");
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].id, "native/child");
+        assert!(options[0].efforts.is_empty());
+        assert_eq!(options[1].id, "native/other");
+        assert_eq!(options[1].label, "native/other");
     }
 
     #[test]

@@ -48,11 +48,11 @@ export function SegmentedSwitch<T extends string>({
               "focus-ring min-h-8 rounded-control px-3 py-1.5 text-sm font-semibold transition-[box-shadow,background-color,color,transform] duration-150 ease-out active:scale-[0.96]",
               active
                 ? activeTone === "foreign"
-                  ? "bg-[#e7e7e4] text-slate-500 shadow-control"
-                  : "bg-ink text-white shadow-raised"
+                  ? "bg-panel text-muted shadow-control"
+                  : "bg-action text-on-action shadow-raised"
                 : pending
-                  ? "bg-slate-200/80 text-slate-500 shadow-control"
-                  : "text-slate-600 hover:bg-surface",
+                  ? "bg-line/80 text-muted shadow-control"
+                  : "text-muted hover:bg-surface",
               option.description && "text-left",
             )}
             disabled={disabled || option.disabled}
@@ -62,7 +62,7 @@ export function SegmentedSwitch<T extends string>({
           >
             <span className="block truncate">{option.label}</span>
             {option.description && (
-              <span className={cx("block truncate text-[11px] font-medium", active ? "text-white/70" : "text-slate-400")}>
+              <span className={cx("block truncate text-[11px] font-medium", active && activeTone !== "foreign" ? "text-on-action/70" : "text-muted")}>
                 {option.description}
               </span>
             )}

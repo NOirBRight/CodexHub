@@ -24,15 +24,15 @@ export function EndpointRow({ compact, copied, label, meta, onCopy, value }: End
     >
       <div className="min-w-0">
         <div className={cx("truncate font-semibold text-ink", compact && "text-xs leading-4")}>{label}</div>
-        <div className={cx("truncate text-slate-500", compact ? "text-[9px] leading-3" : "text-[11px]")}>
+        <div className={cx("truncate text-muted", compact ? "text-[9px] leading-3" : "text-[11px]")}>
           {meta}
         </div>
       </div>
-      <code className={cx("truncate font-mono text-slate-600", compact ? "text-[11px]" : "text-xs")}>{value}</code>
+      <code className={cx("truncate font-mono text-muted", compact ? "text-[11px]" : "text-xs")}>{value}</code>
       <button
         type="button"
         className={cx(
-          "focus-ring inline-flex shrink-0 items-center justify-center rounded-control bg-panel text-slate-700 shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-white hover:shadow-raised active:scale-[0.96]",
+          "focus-ring inline-flex shrink-0 items-center justify-center rounded-control bg-panel text-ink shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-soft hover:shadow-raised active:scale-[0.96]",
           compact ? "h-6 w-6" : "h-8 w-8",
         )}
         aria-label={copied ? t("gateway.copyEndpointCopied", { label }) : t("gateway.copyEndpoint", { label })}
