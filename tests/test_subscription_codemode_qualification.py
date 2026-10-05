@@ -138,7 +138,8 @@ def test_harness_rejects_duplicate_cases_before_any_candidate_or_inference(tmp_p
         qualification.main(["--case", "code-mode", "--case", "code-mode", "--output", str(tmp_path / "result.json")])
 
 
-def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_observation", [False, True])
+def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup(tmp_path, monkeypatch, record_property, with_observation):
     import os
     if os.name == "nt":
         pytest.skip("POSIX fake executable fixture")
@@ -157,16 +158,34 @@ def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup
     fake.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then printf "codex-cli 0.159.3\\n"; else printf \'{"type":"turn.failed","error":{"message":"fake caller no request"}}\\n\'; exit 1; fi\n')
     fake.chmod(0o700)
     qualification.freeze_candidate(ROOT, frozen)
+    plan = None
+    runner = qualification.run_case
+    if with_observation:
+        module, manifest = qualification.freeze_observation(ROOT, frozen)
+        plan = module.load_observation(frozen / "scripts/subscription_fixture_observer.py").fixture_plan()
+        runner = module.run_case
+        assert set(manifest) == set(qualification.OBSERVATION_WRAPPERS)
     monkeypatch.syspath_prepend(str(frozen / "src-python"))
     monkeypatch.setenv("PATH", str(installed) + os.pathsep + os.environ.get("PATH", os.defpath))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("APPDATA", raising=False)
-    result = qualification.run_case("code-mode", frozen, source, user, fake, 30)
+    result = runner("cursor-to-official" if with_observation else "code-mode", frozen, source, user, fake, 30,
+                    **({"observation_plan": plan} if plan else {}))
     assert len(result["gateway_pids"]) == 1
     assert result["requests"] == []  # no model request, even to a fake server
     assert result["failure_class"] is None
     assert not result["checks"]["passed"]
     assert result["private_tree_removed"]
+    owned_pids = [*result["gateway_pids"], *(row["pid"] for row in result["turns"])]
+    for pid in owned_pids:
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    record_property("scope", "synthetic-no-inference")
+    record_property("owned_pids_reaped", json.dumps(owned_pids))
+    record_property("private_tree_removed", str(result["private_tree_removed"]))
+    if with_observation:
+        assert result["fixture_observations"][0]["boundaries"]["fixtureinput"]["utf8_hex"] == (plan["value"] + "\n").encode().hex()
+        assert result["fixture_observations"][0]["boundaries"]["nativefield"]["state"] == "absent"
 
 
 

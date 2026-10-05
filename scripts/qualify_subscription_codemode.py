@@ -13,6 +13,7 @@ import argparse
 import gzip
 import hashlib
 import http.client
+import importlib.util
 import itertools
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -36,6 +37,37 @@ CURSOR_MODEL = "cursor-subscription/gpt-5.6-luna-high"
 OFFICIAL_MODEL = "gpt-6-astra"
 MAX_CAPTURE = 64 * 1024 * 1024
 MAX_ROLLOUT_FILES = 64
+OBSERVATION_WRAPPERS = ("scripts/qualify_subscription_codemode.py", "scripts/subscription_fixture_observer.py",
+                        "scripts/python_runtime_contract.py", "scripts/codexhub-python.sh",
+                        "scripts/codexhub-python.cmd", "scripts/codexhub-python.ps1", "scripts/Resolve-CodexHubPython.ps1")
+
+
+def load_observation(path):
+    spec = importlib.util.spec_from_file_location("qualified_fixture_observer", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def freeze_observation(checkout, snapshot, sha=None):
+    """Copy every executed harness source; callers run the frozen functions."""
+    manifest = {}
+    for name in OBSERVATION_WRAPPERS:
+        target = snapshot / name
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        data = (checkout / name).read_bytes()
+        if sha is not None:
+            committed = subprocess.run(["git", "show", sha + ":" + name], cwd=checkout,
+                                       capture_output=True, timeout=5, check=True).stdout
+            if data != committed:
+                raise ValueError("wrapper-source-does-not-match-candidate")
+        target.write_bytes(data)
+        target.chmod(0o600)
+        manifest[name] = digest(data)
+    spec = importlib.util.spec_from_file_location("frozen_qualification", snapshot / OBSERVATION_WRAPPERS[0])
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, manifest
 
 
 class CaptureLimitExceeded(ValueError):
@@ -207,7 +239,7 @@ def is_fixture_execution(call):
     ))
 
 
-def summarize_rollouts(paths, nonce):
+def summarize_rollouts(paths, nonce, fixture_capture=None, rollout_offsets=None):
     """Prove actual caller effects/child identity from private Codex rollouts."""
     sessions = []
     remaining = MAX_CAPTURE
@@ -218,6 +250,10 @@ def summarize_rollouts(paths, nonce):
             raise CaptureLimitExceeded("rollout-capture-size-exceeded")
         remaining -= len(data)
         rows = [json.loads(line) for line in data.decode("utf-8").splitlines() if line.strip()]
+        new_rows = rows
+        if fixture_capture is not None and rollout_offsets is not None:
+            new_rows = [json.loads(line) for line in data[rollout_offsets.get(path, 0):].decode("utf-8").splitlines() if line.strip()]
+            rollout_offsets[path] = len(data)
         items = [row.get("payload", {}) for row in rows if row.get("type") == "response_item"]
         meta = next((row.get("payload", {}) for row in rows if row.get("type") == "session_meta"), {})
         models = sorted({row.get("payload", {}).get("model") for row in rows if isinstance(row.get("payload", {}).get("model"), str)})
@@ -253,6 +289,11 @@ def summarize_rollouts(paths, nonce):
                                 "reversed_fixture_present": nonce[::-1] in data})
         assistant = "\n".join(part.get("text", "") for item in items if item.get("type") == "message" and item.get("role") == "assistant"
                               for part in item.get("content", []) if isinstance(part, dict))
+        if fixture_capture is not None:
+            fixture_capture.guard(fixture_capture.leaves, "rolloutfinal", [row.get("payload", {}) for row in new_rows
+                                  if row.get("type") == "response_item" and row.get("payload", {}).get("type") == "message"
+                                  and row.get("payload", {}).get("role") == "assistant"
+                                  and row.get("payload", {}).get("phase") == "final_answer"])
         sessions.append({"session_sha256": digest(meta.get("id", path.name)), "is_child": is_child, "models": models,
                          "calls": calls, "effects": effects, "assistant_returned_fixture": nonce in assistant,
                          "assistant_returned_reversed_fixture": nonce[::-1] in assistant, "rollout_sha256": digest(data)})
@@ -338,7 +379,7 @@ def stop_process(child):
             pass
 
 
-def parse_turn(stdout, child, timed_out, nonce):
+def parse_turn(stdout, child, timed_out, nonce, fixture_capture=None):
     events = []
     for line in stdout.splitlines():
         try:
@@ -351,12 +392,14 @@ def parse_turn(stdout, child, timed_out, nonce):
     # Only exact controlled fixture outputs are published; wrong finals retain
     # their full bytes privately and an exact hash/length/zero-width count here.
     finals = finals[-1:]
+    if fixture_capture is not None and finals:
+        fixture_capture.value("callerstdout", finals[0], complete=not timed_out and child.returncode == 0)
     public_finals = [value if value in (nonce, nonce[::-1], nonce + "\n" + nonce[::-1]) else {"sha256": digest(value), "length": len(value), "zero_width_count": value.count("\u200b")} for value in finals]
     return {"exit": child.returncode, "pid": child.pid, "timed_out": timed_out, "finals": public_finals,
             "errors": [{"type": row.get("type"), "sha256": digest(json.dumps(row, sort_keys=True))} for row in events if row.get("type") in ("error", "turn.failed")]}
 
 
-def run_case(case, checkout, source_codex, source_user, codex, timeout):
+def run_case(case, checkout, source_codex, source_user, codex, timeout, observation_plan=None):
     """Run one disposable production candidate; cleanup includes raw accounts/logs."""
     case_started = time.monotonic()
     from claude_native_models import concrete_executable
@@ -370,8 +413,16 @@ def run_case(case, checkout, source_codex, source_user, codex, timeout):
         server, client, fixture = (runtime / name for name in ("server", "client", "fixture"))
         for home in (server, client, fixture):
             home.mkdir(mode=0o700)
-        nonce = secrets.token_hex(12)
+        observation = load_observation(checkout / "scripts/subscription_fixture_observer.py") if observation_plan else None
+        nonce = observation_plan["value"] if observation_plan else secrets.token_hex(12)
+        captures = []
+        capture_lock = threading.Lock()
+        tickets = runtime / "observation"
+        if observation:
+            tickets.mkdir(mode=0o700)
+            observation.private_json(runtime / "observation-plan.json", observation_plan)
         (fixture / "probe-value.txt").write_text(nonce + "\n")
+        (fixture / "probe-value.txt").chmod(0o600)
         server_env = private_environment(server, str(cursor.parent) + os.pathsep + os.environ.get("PATH", os.defpath))
         client_env = private_environment(client, os.environ.get("PATH", os.defpath))
         for relative in ("auth.json", "proxy/official-editor-catalog.json", "model-catalogs/codexhub-model-catalog.json"):
@@ -432,6 +483,7 @@ def run_case(case, checkout, source_codex, source_user, codex, timeout):
                     return
                 body = self.rfile.read(length)
                 row = {"epoch": epoch[0], "path": self.path}
+                parsed = {}
                 try:
                     parsed = json.loads(gzip.decompress(body) if self.headers.get("Content-Encoding") == "gzip" else body) if body else {}
                     row.update(observe_request(parsed, epoch[0], nonce))
@@ -439,7 +491,25 @@ def run_case(case, checkout, source_codex, source_user, codex, timeout):
                     row["observation_invalid"] = True
                 requests.append(row)
                 connection = http.client.HTTPConnection("127.0.0.1", gateway_port, timeout=timeout)
+                tap = None
+                ticket_path = None
                 try:
+                    with capture_lock:
+                        observe_this = observation and self.path == "/v1/responses" and len(captures) < observation.MAX_REQUESTS
+                        if observe_this:
+                            correlation = {"run_id": observation_plan["run_id"], "case": case,
+                                           "epoch": epoch[0], "request_id": secrets.token_hex(16)}
+                            capture = observation.FixtureCapture(observation_plan, correlation)
+                            captures.append(capture)
+                    if observation and self.path == "/v1/responses" and not observe_this:
+                        row["fixture_observation_absent"] = "request-count-limit"
+                    if observe_this:
+                        capture.guard(capture.leaves, "callerpayload", parsed.get("input", []) if isinstance(parsed, dict) else [])
+                        row["fixture_request_id"] = correlation["request_id"]
+                        tap = observation.DownstreamTap(capture)
+                        connection.connect()
+                        ticket_path = tickets / f"peer-{connection.sock.getsockname()[1]}.json"
+                        observation.private_json(ticket_path, correlation)
                     # Content-Encoding and original body are deliberately kept.
                     headers = {name: value for name, value in self.headers.items() if name.lower() not in ("host", "connection", "transfer-encoding")}
                     connection.request(self.command, self.path, body=body, headers=headers)
@@ -457,6 +527,8 @@ def run_case(case, checkout, source_codex, source_user, codex, timeout):
                             failure_body.extend(data[:8192 - len(failure_body)])
                         self.wfile.write(data)
                         self.wfile.flush()
+                        if tap:
+                            tap.feed(data)
                     if response.status >= 400:
                         row["error_body_sha256"] = digest(bytes(failure_body))
                         try:
@@ -469,6 +541,10 @@ def run_case(case, checkout, source_codex, source_user, codex, timeout):
                 except (OSError, http.client.HTTPException):
                     row["stream_interrupted"] = True
                 finally:
+                    if tap:
+                        tap.finish(complete=not row.get("stream_interrupted") and row.get("status") == 200)
+                    if ticket_path:
+                        ticket_path.unlink(missing_ok=True)
                     connection.close()
                     self.close_connection = True
         observer = ThreadingHTTPServer(("127.0.0.1", 0), Observer)
@@ -510,9 +586,14 @@ unbounded_connection_retries=false
         gateway_pids = []
         turns = []
         sessions = []
+        rollout_offsets = {}
         log = (runtime / "gateway.log").open("w")
         def start_gateway():
-            process = subprocess.Popen([sys.executable, str(checkout / "src-python/codex_proxy.py"), "--port", str(gateway_port)],
+            command = [sys.executable, str(checkout / "src-python/codex_proxy.py"), "--port", str(gateway_port)]
+            if observation:
+                command = [sys.executable, str(checkout / "scripts/subscription_fixture_observer.py"), "--gateway",
+                           "--plan", str(runtime / "observation-plan.json"), "--tickets", str(tickets), "--port", str(gateway_port)]
+            process = subprocess.Popen(command,
                                        env=server_env, cwd=checkout, stdout=log, stderr=log, start_new_session=os.name != "nt")
             gateway_pids.append(process.pid)
             deadline = time.monotonic() + 15
@@ -562,7 +643,15 @@ unbounded_connection_retries=false
                 capture = runtime / f"caller-{turn}.jsonl"
                 data, caller, timed_out = capture_caller(command, env=client_env, cwd=fixture,
                                                         capture=capture, rollout_home=client / "sessions", timeout=max(.1, remaining))
-                turns.append(parse_turn(data.decode("utf-8"), caller, timed_out, nonce))
+                caller_capture = None
+                if observation:
+                    caller_capture = observation.FixtureCapture(observation_plan, {"run_id": observation_plan["run_id"],
+                        "case": case, "epoch": turn, "request_id": None})
+                    caller_capture.value("fixtureinput", (fixture / "probe-value.txt").read_bytes())
+                    captures.append(caller_capture)
+                turns.append(parse_turn(data.decode("utf-8"), caller, timed_out, nonce, caller_capture))
+                if caller_capture:
+                    summarize_rollouts((client / "sessions").rglob("*.jsonl"), nonce, caller_capture, rollout_offsets)
                 if caller.returncode:
                     break
             sessions = summarize_rollouts((client / "sessions").rglob("*.jsonl"), nonce)
@@ -581,6 +670,26 @@ unbounded_connection_retries=false
         result = {"case": case, "checks": checks, "turns": turns, "requests": requests, "sessions": sessions,
                 "fixture_sha256": digest(nonce), "gateway_pids": gateway_pids, "failure_class": failure,
                 "elapsed_seconds": round(time.monotonic() - case_started, 3)}
+        if observation:
+            result["fixture_observations"] = []
+            for capture in captures:
+                item = capture.report()
+                request_id = capture.correlation["request_id"]
+                native_path = tickets / (request_id + ".json") if request_id else None
+                if native_path and native_path.exists() and native_path.stat().st_size <= observation.MAX_REPORT_BYTES:
+                    native_report = json.loads(native_path.read_bytes())
+                    if native_report["correlation"] != capture.correlation:
+                        raise ValueError("fixture-correlation-mismatch")
+                    for name in ("adaptedhistory", "servedhistoryblob", "nativefield", "canonicalchunks"):
+                        item["boundaries"][name] = native_report["boundaries"][name]
+                    item["native_capture_failure"] = native_report["capture_failure"]
+                result["fixture_observations"].append(item)
+            result["fixture_observation_bounds"] = {"requests": observation.MAX_REQUESTS, "leaves_per_boundary": observation.MAX_LEAVES,
+                "utf8_bytes_per_raw_value": observation.MAX_VALUE, "parts_per_value": observation.MAX_PARTS,
+                "native_and_sse_parser_bytes": observation.MAX_PARSE_BYTES, "native_report_bytes": observation.MAX_REPORT_BYTES,
+                "sse_frame_and_blob_json_bytes": observation.MAX_JSON_BYTES,
+                "parser_frames_or_events": 4096, "parser_nodes": 4096, "parser_depth": 16,
+                "runtime_seconds": min(180, timeout), "total_report_bytes": MAX_CAPTURE}
     result["private_tree_removed"] = not runtime.exists()
     if not result["private_tree_removed"]:
         result["checks"]["passed"] = False
@@ -596,20 +705,39 @@ def main(argv=None):
     parser.add_argument("--case", choices=CASES, action="append")
     parser.add_argument("--case-timeout", type=int, default=180)
     parser.add_argument("--total-timeout", type=int, default=1200)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--prepare-fixture", type=Path, help="Create explicit random fixture/control approval; no CLI/account access")
+    parser.add_argument("--observe-fixture", type=Path, help="Opt in using an explicitly prepared fixture approval")
     args = parser.parse_args(argv)
+    if args.prepare_fixture:
+        if args.observe_fixture:
+            parser.error("prepare and observe are separate commands")
+        observation = load_observation(ROOT / "scripts/subscription_fixture_observer.py")
+        observation.private_json(args.prepare_fixture, observation.fixture_plan())
+        return 0
+    if args.output is None:
+        parser.error("--output is required for qualification")
     if not 1 <= args.case_timeout <= 180 or not 1 <= args.total_timeout <= 1200:
         parser.error("case timeout must be <=180s and total timeout <=1200s")
     selected_cases = tuple(args.case or CASES)
     if len(selected_cases) > 4 or len(set(selected_cases)) != len(selected_cases):
         parser.error("select at most four distinct cases; duplicate cases are not allowed")
+    plan = None
+    if args.observe_fixture:
+        if selected_cases != ("cursor-to-official",) or args.observe_fixture.stat().st_size > 65536:
+            parser.error("fixture observation requires one cursor-to-official case and a bounded approval")
+        observation = load_observation(ROOT / "scripts/subscription_fixture_observer.py")
+        plan = observation.validate_plan(json.loads(args.observe_fixture.read_bytes()))
+        if Path(__file__).resolve() != (args.checkout.resolve() / OBSERVATION_WRAPPERS[0]):
+            parser.error("execute the selected checkout's own qualification wrapper")
     sys.path.insert(0, str(args.checkout.resolve() / "src-python"))
     version = subprocess.run([str(args.codex), "--version"], capture_output=True, text=True, timeout=5, check=True).stdout.strip()
     sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=args.checkout, capture_output=True, text=True, timeout=5, check=True).stdout.strip()
     report = {"scope": "isolated actual Codex and production Gateway; passive byte-preserving observer; no injected codec", "candidate_sha": sha,
               "codex_version": version, "case_timeout_seconds": args.case_timeout, "total_timeout_seconds": args.total_timeout,
               "platform": sys.platform, "cases": []}
-    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all", "--", "src-python", "config", "model-catalogs"],
+    admission_paths = ["src-python", "config", "model-catalogs", *(OBSERVATION_WRAPPERS if plan else ())]
+    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all", "--", *admission_paths],
                             cwd=args.checkout, capture_output=True, text=True, timeout=5)
     report["source_runtime_dirty"] = status.returncode != 0 or bool(status.stdout.strip())
     report["candidate_sha_is_exact_runtime"] = not report["source_runtime_dirty"]
@@ -622,6 +750,12 @@ def main(argv=None):
         with tempfile.TemporaryDirectory(prefix="codexhub-codemode-candidate-") as frozen:
             snapshot = Path(frozen)
             report["runtime_snapshot_sha256"] = freeze_candidate(args.checkout.resolve(), snapshot)
+            runner = run_case
+            if plan:
+                frozen_wrapper, manifest = freeze_observation(args.checkout.resolve(), snapshot, sha)
+                report["observation_wrapper_sha256"] = manifest
+                report["fixture_plan_sha256"] = digest(args.observe_fixture.read_bytes())
+                runner = frozen_wrapper.run_case
             sys.path.insert(0, str(snapshot / "src-python"))
             for case in selected_cases:
                 remaining = args.total_timeout - (time.monotonic() - started)
@@ -629,14 +763,23 @@ def main(argv=None):
                     report["budget_exhausted"] = True
                     break
                 try:
-                    report["cases"].append(run_case(case, snapshot, args.source_codex_home, args.source_user_home,
-                                                     args.codex.resolve(), min(args.case_timeout, remaining)))
+                    options = {"observation_plan": plan} if plan else {}
+                    report["cases"].append(runner(case, snapshot, args.source_codex_home, args.source_user_home,
+                                                 args.codex.resolve(), min(args.case_timeout, remaining), **options))
                 except Exception as error:
                     report["cases"].append({"case": case, "checks": {"passed": False}, "failure_class": type(error).__name__})
         report["snapshot_tree_removed"] = not snapshot.exists()
     report["passed"] = report["candidate_sha_is_exact_runtime"] and report["snapshot_tree_removed"] and bool(report["cases"]) and all(case["checks"]["passed"] for case in report["cases"]) and not report.get("budget_exhausted")
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
+    report_text = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+    if plan:
+        report_data = report_text.encode()
+        if len(report_data) > MAX_CAPTURE:
+            raise CaptureLimitExceeded("fixture-total-report-size-exceeded")
+        with os.fdopen(os.open(args.output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "wb") as output:
+            output.write(report_data)
+    else:
+        args.output.write_text(report_text)
     print(json.dumps({"passed": report["passed"], "cases": [{"case": case["case"], "checks": case["checks"], "failure_class": case.get("failure_class")} for case in report["cases"]]}))
     return 0 if report["passed"] else 1
 
