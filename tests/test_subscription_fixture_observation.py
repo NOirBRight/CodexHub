@@ -106,7 +106,7 @@ def test_observed_request_json_capacity_scan_leaves_strings_to_stdlib():
         assert observation.request_payload(data, encoding) == payload
 
 
-@pytest.mark.parametrize("mode", ["rejected", "owner-error", "cancel", "writer-error"])
+@pytest.mark.parametrize("mode", ["rejected", "owner-error", "cancel", "writer-error", "writer-complete", "writer-cancel"])
 def test_public_exchange_persists_rejection_and_preserves_owner_lifecycle(tmp_path, monkeypatch, mode):
     from urllib.request import Request
     from urllib.error import HTTPError
@@ -116,12 +116,19 @@ def test_public_exchange_persists_rejection_and_preserves_owner_lifecycle(tmp_pa
     correlation = {"run_id": plan["run_id"], "case": plan["case"], "epoch": 1, "request_id": "b" * 32}
     observation.private_json(tmp_path / "peer-12345.json", correlation)
     closed, cancelled = threading.Event(), threading.Event()
+    native_captures = []
+    original_capture = observation.FixtureCapture
+    def collect(*args, **kwargs):
+        captured = original_capture(*args, **kwargs)
+        native_captures.append(captured)
+        return captured
+    monkeypatch.setattr(observation, "FixtureCapture", collect)
     def inert(payload, *, cancel, **kwargs):
         try:
             if mode in ("owner-error", "writer-error"):
                 raise BackendError("inert-owner-error", "synthetic owner failure")
             yield {"choices": [{"delta": {"content": plan["value"]}, "finish_reason": None}]}
-            if mode == "cancel":
+            if mode in ("cancel", "writer-cancel"):
                 assert cancel.wait(2)
                 cancelled.set()
                 raise BackendError("cancelled", "synthetic cancellation", 499)
@@ -131,7 +138,7 @@ def test_public_exchange_persists_rejection_and_preserves_owner_lifecycle(tmp_pa
     monkeypatch.setattr(backend, "stream_chat", inert)
     monkeypatch.setattr(exchange, "open_subscription", exchange.open_subscription)
     observation.install_gateway_observation(tmp_path, plan)
-    if mode == "writer-error":
+    if mode.startswith("writer-"):
         monkeypatch.setattr(observation, "private_json", lambda *a: (_ for _ in ()).throw(OSError("inert writer failure")))
     class Socket:
         def getpeername(self):
@@ -145,27 +152,108 @@ def test_public_exchange_persists_rejection_and_preserves_owner_lifecycle(tmp_pa
         assert json.loads(error.value.read())["error"]["code"] == "inert-owner-error"
     else:
         with exchange.open_subscription(request, provider_id="cursor-subscription", timeout=3, downstream_socket=Socket()) as response:
-            if mode == "cancel":
+            if mode in ("cancel", "writer-cancel"):
                 assert plan["value"].encode() in response.readline()
             else:
-                assert b"[DONE]" in response.read()
+                forwarded = response.read()
+                assert plan["value"].encode() in forwarded and b"[DONE]" in forwarded
     assert closed.wait(1)
-    if mode == "cancel":
+    if mode in ("cancel", "writer-cancel"):
         assert cancelled.is_set()
+    assert len(native_captures) == 1 and native_captures[0].failure == "observation-incomplete"
     sidecar = tmp_path / (correlation["request_id"] + ".json")
-    if mode == "writer-error":
+    parent = original_capture(plan, correlation)
+    parent.value("fixtureinput", plan["value"])
+    requests = [{"fixture_request_id": correlation["request_id"], "epoch": 1, "model": qualification.CURSOR_MODEL}]
+    # Serialize the same public aggregation result that run_case publishes.
+    item = json.loads(json.dumps(qualification.aggregate_fixture_observations([parent], tmp_path, observation, requests)))[0]
+    assert item["capture_failure"] is None
+    assert item["boundaries"]["fixtureinput"]["utf8_hex"] == plan["value"].encode().hex()
+    if mode.startswith("writer-"):
         assert not sidecar.exists()
+        assert item["native_report"] == {"state": "unavailable", "reason": "missing", "cause": "unknown"}
+        assert "native_capture_failure" not in item  # Its actual cause cannot be recovered from absence.
+        for name in ("adaptedhistory", "servedhistoryblob", "nativefield", "canonicalchunks"):
+            assert item["boundaries"][name] == {"state": "incomplete", "complete": False}
     else:
         report = json.loads(sidecar.read_bytes())
         assert report["capture_failure"] == "observation-incomplete"
         assert len(report["boundaries"]["adaptedhistory"]["leaves"]) == 64
         assert "utf8_hex" not in json.dumps(report) and "codepoints" not in json.dumps(report)
         assert sidecar.stat().st_mode & 0o777 == 0o600
+        assert item["native_capture_failure"] == report["capture_failure"]
+        for name in ("adaptedhistory", "servedhistoryblob", "nativefield", "canonicalchunks"):
+            assert item["boundaries"][name] == report["boundaries"][name]
+
+
+@pytest.mark.parametrize("kind", ["over-limit", "unreadable", "invalid-json"])
+def test_public_aggregation_bounds_unavailable_native_reports(tmp_path, monkeypatch, kind):
+    tap = capture()
+    path = tmp_path / "request.json"
+    limit = observation.MAX_REPORT_BYTES
+    if kind == "over-limit":
+        path.write_bytes(b"PRIVATE" * (limit // 7 + 1))
+        original_open = Path.open
+        reads = []
+        class BoundedRead:
+            def __enter__(self):
+                return self
+            def read(self, size):
+                reads.append(size)
+                assert size == limit + 1
+                return self.source.read(size)
+            def __exit__(self, *args):
+                self.source.close()
+        def measured_open(target, *args, **kwargs):
+            source = original_open(target, *args, **kwargs)
+            if target != path:
+                return source
+            measured = BoundedRead()
+            measured.source = source
+            return measured
+        monkeypatch.setattr(Path, "open", measured_open)
+    elif kind == "unreadable":
+        path.mkdir()  # Deterministic read failure, including under privileged test users.
+    else:
+        path.write_bytes(b"PRIVATE-invalid-json")
+    requests = [{"fixture_request_id": "request", "epoch": 1, "model": qualification.CURSOR_MODEL}]
+    item = qualification.aggregate_fixture_observations([tap], tmp_path, observation, requests)[0]
+    assert item["native_report"] == {"state": "unavailable", "reason": kind, "cause": "unknown"}
+    assert "PRIVATE" not in json.dumps(item) and "native_capture_failure" not in item
+    for name in ("adaptedhistory", "servedhistoryblob", "nativefield", "canonicalchunks"):
+        assert item["boundaries"][name] == {"state": "incomplete", "complete": False}
+    if kind == "over-limit":
+        assert reads == [limit + 1]
+
+
+@pytest.mark.parametrize("association", ["official", "caller-only", "different-request", "different-epoch", "unknown-model"])
+def test_public_aggregation_does_not_infer_expected_native_capture(tmp_path, association):
+    tap = capture(request=None if association == "caller-only" else "request")
+    requests = [{"fixture_request_id": "other" if association == "different-request" else "request",
+                 "epoch": 0 if association == "different-epoch" else 1,
+                 "model": qualification.OFFICIAL_MODEL if association == "official" else None if association == "unknown-model" else qualification.CURSOR_MODEL}]
+    item = qualification.aggregate_fixture_observations([tap], tmp_path, observation, requests)[0]
+    assert "native_report" not in item and "native_capture_failure" not in item
+    assert item["correlation"] == tap.correlation
+    for name in ("adaptedhistory", "servedhistoryblob", "nativefield", "canonicalchunks"):
+        assert item["boundaries"][name] == {"state": "absent", "complete": False}
+
+
+@pytest.mark.parametrize("key,value", [("run_id", "other"), ("case", "other"), ("epoch", 0), ("request_id", "other")])
+def test_public_aggregation_rejects_mismatched_native_correlation(tmp_path, key, value):
+    parent = capture()
+    native = observation.FixtureCapture(parent.plan, dict(parent.correlation, **{key: value}))
+    native.value("nativefield", parent.plan["value"])
+    native.persist(tmp_path / "request.json")
+    requests = [{"fixture_request_id": "request", "epoch": 1, "model": qualification.CURSOR_MODEL}]
+    with pytest.raises(ValueError, match="fixture-correlation-mismatch"):
+        qualification.aggregate_fixture_observations([parent], tmp_path, observation, requests)
+    assert parent.report()["boundaries"]["nativefield"]["state"] == "absent"
 
 
 @pytest.mark.parametrize("value", ["AA\u200b界", "A\u200b界", "AA界"])
 @pytest.mark.parametrize("compressed", [False, True])
-def test_public_native_stream_exact_loss_controls_and_split_utf8(value, compressed):
+def test_public_native_stream_exact_loss_controls_and_split_utf8(tmp_path, value, compressed):
     # Independent wire fixtures, fragmented inside UTF8, real public decoder.
     wire = b"".join(framed(gzip.compress(pb(1, pb(1, pb(1, char)))), 1) if compressed
                     else update(1, pb(1, char)) for char in value) + framed(b"{}", 2)
@@ -182,6 +270,13 @@ def test_public_native_stream_exact_loss_controls_and_split_utf8(value, compress
         assert rows[stage]["exact_fixture"] == (value == "AA\u200b界")
     assert all(s.closed for s in transport.streams)
     assert "SECRET" not in json.dumps(tap.report())
+    tap.persist(tmp_path / "request.json")
+    parent = observation.FixtureCapture(tap.plan, tap.correlation)
+    requests = [{"fixture_request_id": "request", "epoch": 1, "model": qualification.CURSOR_MODEL}]
+    item = qualification.aggregate_fixture_observations([parent], tmp_path, observation, requests)[0]
+    assert "native_report" not in item and item["native_capture_failure"] is None
+    for stage in ("nativefield", "canonicalchunks"):
+        assert item["boundaries"][stage] == rows[stage]
 
 
 def test_public_stream_noninterference_calls_order_errors_and_close():

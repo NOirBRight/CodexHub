@@ -402,6 +402,48 @@ def parse_turn(stdout, child, timed_out, nonce, fixture_capture=None):
             "errors": errors, "complete": complete}
 
 
+def aggregate_fixture_observations(captures, tickets, observation, requests):
+    """Join correlated reports; distinguish unavailable expected Cursor evidence."""
+    reports = []
+    native_boundaries = ("adaptedhistory", "servedhistoryblob", "nativefield", "canonicalchunks")
+    for capture in captures:
+        item = capture.report()
+        request_id = capture.correlation["request_id"]
+        if request_id:
+            unavailable = None
+            try:
+                with (tickets / (request_id + ".json")).open("rb") as source:
+                    data = source.read(observation.MAX_REPORT_BYTES + 1)
+                if len(data) > observation.MAX_REPORT_BYTES:
+                    unavailable = "over-limit"
+                else:
+                    native_report = json.loads(data)
+            except FileNotFoundError:
+                unavailable = "missing"
+            except OSError:
+                unavailable = "unreadable"
+            except (ValueError, RecursionError):
+                unavailable = "invalid-json"
+            if unavailable:
+                # Selection establishes expectation, never the missing report's
+                # cause or the native route/bytes actually observed.
+                expected = any(row.get("fixture_request_id") == request_id
+                               and row.get("epoch") == capture.correlation["epoch"]
+                               and row.get("model") == CURSOR_MODEL for row in requests)
+                if expected:
+                    item["native_report"] = {"state": "unavailable", "reason": unavailable, "cause": "unknown"}
+                    for name in native_boundaries:
+                        item["boundaries"][name] = {"state": "incomplete", "complete": False}
+            else:
+                if not isinstance(native_report, dict) or native_report.get("correlation") != capture.correlation:
+                    raise ValueError("fixture-correlation-mismatch")
+                for name in native_boundaries:
+                    item["boundaries"][name] = native_report["boundaries"][name]
+                item["native_capture_failure"] = native_report["capture_failure"]
+        reports.append(item)
+    return reports
+
+
 def run_case(case, checkout, source_codex, source_user, codex, timeout, observation_plan=None):
     """Run one disposable production candidate; cleanup includes raw accounts/logs."""
     case_started = time.monotonic()
@@ -695,19 +737,7 @@ unbounded_connection_retries=false
                                  else {"sha256": digest(value), "length": len(value), "zero_width_count": value.count("\u200b")}
                                  for value in row["finals"]]
             result["fixture_final_publication"] = "oracle evaluated exact values before redaction; complete approved leaves raw, other finals hash-only"
-            result["fixture_observations"] = []
-            for capture in captures:
-                item = capture.report()
-                request_id = capture.correlation["request_id"]
-                native_path = tickets / (request_id + ".json") if request_id else None
-                if native_path and native_path.exists() and native_path.stat().st_size <= observation.MAX_REPORT_BYTES:
-                    native_report = json.loads(native_path.read_bytes())
-                    if native_report["correlation"] != capture.correlation:
-                        raise ValueError("fixture-correlation-mismatch")
-                    for name in ("adaptedhistory", "servedhistoryblob", "nativefield", "canonicalchunks"):
-                        item["boundaries"][name] = native_report["boundaries"][name]
-                    item["native_capture_failure"] = native_report["capture_failure"]
-                result["fixture_observations"].append(item)
+            result["fixture_observations"] = aggregate_fixture_observations(captures, tickets, observation, requests)
             result["fixture_observation_bounds"] = {"requests": observation.MAX_REQUESTS, "leaves_per_boundary": observation.MAX_LEAVES,
                 "utf8_bytes_per_raw_value": observation.MAX_VALUE, "parts_per_value": observation.MAX_PARTS,
                 "native_and_sse_parser_bytes": observation.MAX_PARSE_BYTES, "native_report_bytes": observation.MAX_REPORT_BYTES,
