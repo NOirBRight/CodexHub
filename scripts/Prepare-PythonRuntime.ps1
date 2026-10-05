@@ -164,6 +164,16 @@ function Update-PythonPathFile {
     [System.IO.File]::WriteAllLines($pathFile.FullName, $lines, [System.Text.UTF8Encoding]::new($false))
 }
 
+function Clear-PythonRuntime {
+    if (Test-Path -LiteralPath $runtimeDir) {
+        # This tracked source file also owns its checkout's newline bytes.
+        # Leave it in place; discard every installed/stale runtime artifact.
+        Get-ChildItem -LiteralPath $runtimeDir -Force |
+            Where-Object { $_.Name -ne '.keep' } |
+            Remove-Item -Recurse -Force
+    }
+}
+
 Assert-UnderPath $runtimeDir $repoRootPath
 Assert-UnderPath $downloadDir $repoRootPath
 
@@ -178,7 +188,7 @@ if ($CheckOnly) {
 New-Item -ItemType Directory -Force -Path $resourcesDir, $downloadDir | Out-Null
 
 if ($Force -and (Test-Path -LiteralPath $runtimeDir)) {
-    Remove-Item -LiteralPath $runtimeDir -Recurse -Force
+    Clear-PythonRuntime
 }
 
 if (Test-PythonRuntimeReady) {
@@ -219,41 +229,52 @@ if (Test-Path -LiteralPath $tempDir) {
 }
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
-Expand-Archive -LiteralPath $zipPath -DestinationPath $tempDir -Force
+try {
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $tempDir -Force
+    Clear-PythonRuntime
+    New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
+    Get-ChildItem -LiteralPath $tempDir -Force |
+        Where-Object { $_.Name -ne '.keep' } |
+        Move-Item -Destination $runtimeDir
+    Update-PythonPathFile
+    $python = Join-Path $runtimeDir "python.exe"
+    & $python -m zipfile -e $zstandardWheelPath $runtimeDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "zstandard wheel extraction failed with exit code $LASTEXITCODE."
+    }
 
-if (Test-Path -LiteralPath $runtimeDir) {
-    Remove-Item -LiteralPath $runtimeDir -Recurse -Force
-}
-Move-Item -LiteralPath $tempDir -Destination $runtimeDir
-Update-PythonPathFile
-$python = Join-Path $runtimeDir "python.exe"
-& $python -m zipfile -e $zstandardWheelPath $runtimeDir
-if ($LASTEXITCODE -ne 0) {
-    throw "zstandard wheel extraction failed with exit code $LASTEXITCODE."
-}
+    $actualPythonVersion = Get-PythonRuntimeVersion $python
+    if ($null -eq $actualPythonVersion -or
+        $actualPythonVersion -lt [System.Version]::new(3, 13, 0) -or
+        $actualPythonVersion -ne $requestedPythonVersion) {
+        throw "Extracted Python runtime version is not the requested compatible version: expected $PythonVersion, got $actualPythonVersion"
+    }
 
-$actualPythonVersion = Get-PythonRuntimeVersion $python
-if ($null -eq $actualPythonVersion -or
-    $actualPythonVersion -lt [System.Version]::new(3, 13, 0) -or
-    $actualPythonVersion -ne $requestedPythonVersion) {
-    throw "Extracted Python runtime version is not the requested compatible version: expected $PythonVersion, got $actualPythonVersion"
-}
+    $manifest = [ordered]@{
+        python_version = $actualPythonVersion.ToString()
+        requested_python_version = $PythonVersion
+        source_url = $PythonZipUrl
+        sha256 = $PythonZipSha256.ToLowerInvariant()
+        zstandard_version = $ZstandardVersion
+        zstandard_source_url = $ZstandardWheelUrl
+        zstandard_sha256 = $ZstandardWheelSha256.ToLowerInvariant()
+        prepared_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", [Globalization.CultureInfo]::InvariantCulture)
+    }
+    $manifestJson = $manifest | ConvertTo-Json -Depth 4
+    [System.IO.File]::WriteAllText($runtimeManifestPath, $manifestJson + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
 
-$manifest = [ordered]@{
-    python_version = $actualPythonVersion.ToString()
-    requested_python_version = $PythonVersion
-    source_url = $PythonZipUrl
-    sha256 = $PythonZipSha256.ToLowerInvariant()
-    zstandard_version = $ZstandardVersion
-    zstandard_source_url = $ZstandardWheelUrl
-    zstandard_sha256 = $ZstandardWheelSha256.ToLowerInvariant()
-    prepared_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", [Globalization.CultureInfo]::InvariantCulture)
+    if (-not (Test-PythonRuntimeReady)) {
+        throw "Prepared Python runtime failed validation: $runtimeDir"
+    }
 }
-$manifestJson = $manifest | ConvertTo-Json -Depth 4
-[System.IO.File]::WriteAllText($runtimeManifestPath, $manifestJson + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
-
-if (-not (Test-PythonRuntimeReady)) {
-    throw "Prepared Python runtime failed validation: $runtimeDir"
+catch {
+    Clear-PythonRuntime
+    throw
+}
+finally {
+    if (Test-Path -LiteralPath $tempDir) {
+        Remove-Item -LiteralPath $tempDir -Recurse -Force
+    }
 }
 
 Write-Host "Python runtime prepared:"
