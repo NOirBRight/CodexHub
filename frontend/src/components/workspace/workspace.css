@@ -574,7 +574,11 @@
 .ws-bridge-subagent-back + .ws-bridge-subagent-options {
   box-shadow: inset 0 1px 0 var(--ws-line);
 }
-.ws-bridge-subagent-row:hover,
+.ws-bridge-subagent-row:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+.ws-bridge-subagent-row:not(:disabled):hover,
 .ws-bridge-subagent-back:hover,
 .ws-bridge-subagent-options .select-option:hover {
   background: var(--ws-soft);

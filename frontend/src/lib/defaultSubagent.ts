@@ -91,6 +91,12 @@ export type DefaultSubagentOption = {
 
 const FAST_SUBAGENT_MODELS = new Set(Object.values(officialFastVariants));
 
+export function nativeSubagentSupportsFast(option: DefaultSubagentOption | undefined) {
+  return option?.native === true && FAST_SUBAGENT_MODELS.has(
+    officialModelKey(option.id.replace(/^native:/, "")),
+  );
+}
+
 export function subagentCatalogSlug(
   providerId: string,
   modelId: string,
