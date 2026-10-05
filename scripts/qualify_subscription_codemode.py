@@ -671,6 +671,15 @@ unbounded_connection_retries=false
                 "fixture_sha256": digest(nonce), "gateway_pids": gateway_pids, "failure_class": failure,
                 "elapsed_seconds": round(time.monotonic() - case_started, 3)}
         if observation:
+            # The unchanged oracle already assessed exact V2 compound finals.
+            # Publication still requires a whole approved leaf: do not leak a
+            # surrounding/multi-leaf final through the legacy turn report.
+            for row in turns:
+                complete = row["exit"] == 0 and not row["timed_out"] and not row["errors"]
+                row["finals"] = [value if not isinstance(value, str) or complete and value in observation_plan["approved"]
+                                 else {"sha256": digest(value), "length": len(value), "zero_width_count": value.count("\u200b")}
+                                 for value in row["finals"]]
+            result["fixture_final_publication"] = "oracle evaluated exact values before redaction; complete approved leaves raw, other finals hash-only"
             result["fixture_observations"] = []
             for capture in captures:
                 item = capture.report()

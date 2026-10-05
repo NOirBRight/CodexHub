@@ -163,6 +163,9 @@ def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup
     if with_observation:
         module, manifest = qualification.freeze_observation(ROOT, frozen)
         plan = module.load_observation(frozen / "scripts/subscription_fixture_observer.py").fixture_plan()
+        # Explicit synthetic final: exercise publication without a model call.
+        compound = plan["value"] + "\n" + plan["value"][::-1]
+        fake.write_text(f'#!{sys.executable}\nimport json,sys\nif sys.argv[1] == "--version": print("codex-cli 0.159.3")\nelse:\n print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text":{compound!r}}}}}))\n raise SystemExit(1)\n')
         runner = module.run_case
         assert set(manifest) == set(qualification.OBSERVATION_WRAPPERS)
     monkeypatch.syspath_prepend(str(frozen / "src-python"))
@@ -186,6 +189,8 @@ def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup
     if with_observation:
         assert result["fixture_observations"][0]["boundaries"]["fixtureinput"]["utf8_hex"] == (plan["value"] + "\n").encode().hex()
         assert result["fixture_observations"][0]["boundaries"]["nativefield"]["state"] == "absent"
+        assert result["turns"][0]["finals"] == [{"sha256": qualification.digest(compound), "length": 49, "zero_width_count": 0}]
+        assert compound not in json.dumps(result)
 
 
 
