@@ -773,7 +773,7 @@ function GatewayPageImpl({
       const gen = (subagentSaveGen.current.dsh = (subagentSaveGen.current.dsh ?? 0) + 1);
       const toastId = showToast({ dedupeKey: "default-subagent-dsh", text: t("workspace.savingDefaultSubagent"), tone: "loading" });
       try {
-        const written = await api.saveDshHeadlessDefaultSubagent(model.replace(/^native:/, ""));
+        const written = await api.saveDshHeadlessDefaultSubagent(model.replace(/^native:/, ""), effort);
         if (gen !== subagentSaveGen.current.dsh) return;
         setDshSubagent(written);
         updateToast(toastId, { action: null, text: t("workspace.dshHeadlessSubagentSaved"), tone: "success" });
@@ -1137,7 +1137,7 @@ function GatewayPageImpl({
                   defaultSubagent={
                     client.id === "dsh" && dshSubagent ? {
                       model: dshSubagent.model ? `native:${dshSubagent.model}` : "",
-                      effort: "",
+                      effort: dshSubagent.effort,
                       options: subagentOptionsFor(client.id),
                       onChange: (model, effort) => { void persistClientDefaultSubagent("dsh", model, effort); },
                     } : settings && supportsClientDefaultSubagent(client.id)

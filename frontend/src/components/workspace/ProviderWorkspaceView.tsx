@@ -675,6 +675,7 @@ export function DefaultSubagentPicker({
   options,
   selected,
   emptyLabel,
+  effortUnavailableHint,
   onChange,
 }: {
   disabled: boolean;
@@ -683,6 +684,7 @@ export function DefaultSubagentPicker({
   options: DefaultSubagentOption[];
   selected?: DefaultSubagentOption;
   emptyLabel?: string;
+  effortUnavailableHint?: string;
   onChange: (model: string, effort: string) => void;
 }) {
   const { t } = useTranslation();
@@ -817,11 +819,11 @@ export function DefaultSubagentPicker({
   }
 
   const modelLabel = draftModel ? activeSelected?.label || draftModel : fallback;
-  const effortHint = !draftModel
+  const effortHint = effortUnavailableHint ?? (!draftModel
     ? t("workspace.defaultSubagentEffortSelectModel")
     : effortChoices.length === 0
       ? t("workspace.defaultSubagentEffortUnavailable")
-      : undefined;
+      : undefined);
 
   return (
     <div

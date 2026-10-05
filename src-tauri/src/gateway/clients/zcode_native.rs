@@ -214,7 +214,7 @@ fn apply_selections(state: &mut Value, agents: &Map<String, Value>) -> Result<()
 }
 
 fn native_option(provider: &str, model_id: &str, metadata: &Value) -> NativeSubagentOption {
-    let efforts = if metadata
+    let mut efforts: Vec<String> = if metadata
         .pointer("/reasoning/enabled")
         .and_then(Value::as_bool)
         == Some(true)
@@ -239,6 +239,9 @@ fn native_option(provider: &str, model_id: &str, metadata: &Value) -> NativeSuba
         .filter(|value| efforts.iter().any(|effort| effort == value))
         .unwrap_or_default()
         .to_string();
+    if !efforts.is_empty() {
+        efforts.insert(0, String::new());
+    }
     let id = format!("{provider}/{model_id}");
     NativeSubagentOption {
         label: metadata
@@ -291,8 +294,36 @@ fn model_options(
                         continue;
                     }
                     if let Some(model_id) = model.get("id").and_then(Value::as_str) {
-                        let option = native_option(provider_id, model_id, model);
-                        if !options.iter().any(|entry| entry.id == option.id) {
+                        // Configured fields override the cache; an identity/name-only
+                        // entry must not discard the client's declared reasoning data.
+                        let configured = config
+                            .get("provider")
+                            .and_then(|providers| providers.get(provider_id));
+                        if configured.is_some_and(|provider| {
+                            provider.get("enabled").and_then(Value::as_bool) == Some(false)
+                        }) {
+                            continue;
+                        }
+                        let configured_model = configured
+                            .and_then(|provider| provider.get("models"))
+                            .and_then(|models| models.get(model_id));
+                        if configured_model.is_some_and(|model| {
+                            model.get("enabled").and_then(Value::as_bool) == Some(false)
+                        }) {
+                            continue;
+                        }
+                        let mut metadata = model.clone();
+                        if let (Some(cached), Some(configured)) = (
+                            metadata.as_object_mut(),
+                            configured_model.and_then(Value::as_object),
+                        ) {
+                            cached.extend(configured.clone());
+                        }
+                        let option = native_option(provider_id, model_id, &metadata);
+                        if let Some(entry) = options.iter_mut().find(|entry| entry.id == option.id)
+                        {
+                            *entry = option;
+                        } else {
                             options.push(option);
                         }
                     }
@@ -317,7 +348,7 @@ fn model_options(
                 efforts: if effort.is_empty() {
                     vec![]
                 } else {
-                    vec![effort.clone()]
+                    vec![String::new(), effort.clone()]
                 },
                 default_effort: effort,
             });
@@ -604,6 +635,43 @@ mod native_zcode_tests {
     }
 
     #[test]
+    fn native_zcode_configured_model_retains_cached_efforts_and_can_reset() {
+        let root = std::env::temp_dir().join(format!(
+            "codexhub-zcode-cached-effort-{}-{}",
+            std::process::id(),
+            crate::gateway::timestamp_millis()
+        ));
+        let targets = fixture(&root, false);
+        let config =
+            json!({"provider": {"native": {"models": {"child": {"name": "Configured child"}}}}});
+        fs::write(&targets.v2_config_path, config.to_string()).unwrap();
+        let cache = json!({"providers": [{"id": "native", "models": [{"id": "child", "reasoning": {"enabled": true, "variants": ["off", "high"], "defaultVariant": "high"}}]}]});
+        fs::write(&targets.v2_cache_path, cache.to_string()).unwrap();
+        with_rollback_provenance_dir_override(Some(root.join("provenance")), || {
+            let settings = read_with_targets(&targets).unwrap();
+            let child = settings
+                .options
+                .iter()
+                .find(|option| option.id == "native/child")
+                .unwrap();
+            assert_eq!(child.efforts, ["", "off", "high"]);
+            assert!(child.label.contains("Configured child"));
+            save_with_targets(&targets, child.id.clone(), "high".into(), true).unwrap();
+            let reset = save_with_targets(&targets, child.id.clone(), "".into(), true).unwrap();
+            assert_eq!(reset.model, "native/child");
+            assert!(reset.effort.is_empty());
+            // An explicit configuration disabling reasoning takes precedence.
+            let mut config = config.clone();
+            config["provider"]["native"]["models"]["child"]["reasoning"] =
+                json!({"enabled": false});
+            fs::write(&targets.v2_config_path, config.to_string()).unwrap();
+            assert!(read_with_targets(&targets).unwrap().options[0]
+                .efforts
+                .is_empty());
+        });
+    }
+
+    #[test]
     fn native_zcode_reads_existing_legacy_model_identities_without_mutation() {
         let root = std::env::temp_dir().join(format!(
             "codexhub-zcode-legacy-readback-{}-{}",
@@ -613,9 +681,15 @@ mod native_zcode_tests {
         let targets = fixture(&root, true);
         for (legacy, expected) in [
             ("custom:builtin:zai:glm-4.7", "builtin:zai/glm-4.7"),
-            ("custom:builtin:zai:vendor/model:tag", "builtin:zai/vendor/model:tag"),
+            (
+                "custom:builtin:zai:vendor/model:tag",
+                "builtin:zai/vendor/model:tag",
+            ),
             ("custom:user:vendor/model", "user/vendor/model"),
-            ("custom:builtin%3Azai:vendor%2Fmodel%3Atag", "builtin:zai/vendor/model:tag"),
+            (
+                "custom:builtin%3Azai:vendor%2Fmodel%3Atag",
+                "builtin:zai/vendor/model:tag",
+            ),
             ("user/vendor/model", "user/vendor/model"),
         ] {
             let state = json!({
@@ -680,18 +754,25 @@ mod native_zcode_tests {
                     }
                     assert_eq!(fs::read(&targets.v2_config_path).unwrap(), original_config);
                     assert_eq!(fs::read(&custom).unwrap(), original_custom);
-                assert!(!saved
-                    .options
+                    assert!(!saved
+                        .options
                         .iter()
-                    .any(|option| option.id.starts_with("codexhub")));
-                // ZCode's existing custom: identity encoding must retain
-                // provider colons and literal model separators.
-                let mut config = read_object(&targets.v2_config_path).unwrap();
-                config["provider"]["builtin:test"] = json!({"models": {"tag:model$literal": {}}});
-                fs::write(&targets.v2_config_path, config.to_string()).unwrap();
-                let encoded = save_with_targets(&targets, "builtin:test/tag:model$literal".into(), "".into(), true).unwrap();
-                assert_eq!(encoded.model, "builtin:test/tag:model$literal");
-                save_with_targets(&targets, "".into(), "".into(), true).unwrap();
+                        .any(|option| option.id.starts_with("codexhub")));
+                    // ZCode's existing custom: identity encoding must retain
+                    // provider colons and literal model separators.
+                    let mut config = read_object(&targets.v2_config_path).unwrap();
+                    config["provider"]["builtin:test"] =
+                        json!({"models": {"tag:model$literal": {}}});
+                    fs::write(&targets.v2_config_path, config.to_string()).unwrap();
+                    let encoded = save_with_targets(
+                        &targets,
+                        "builtin:test/tag:model$literal".into(),
+                        "".into(),
+                        true,
+                    )
+                    .unwrap();
+                    assert_eq!(encoded.model, "builtin:test/tag:model$literal");
+                    save_with_targets(&targets, "".into(), "".into(), true).unwrap();
                     assert!(selections(&read_object(&state_path(&targets)).unwrap())
                         .values()
                         .all(Value::is_null));
