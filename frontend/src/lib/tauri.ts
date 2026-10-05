@@ -342,7 +342,7 @@ export const api = {
   readOmpDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readOmpDefaultSubagent),
   saveOmpDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveOmpDefaultSubagent, { model, effort, native }),
   readDshHeadlessDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readDshHeadlessDefaultSubagent),
-  saveDshHeadlessDefaultSubagent: (model: string) => call<NativeSubagentSettings>(COMMANDS.saveDshHeadlessDefaultSubagent, { model }),
+  saveDshHeadlessDefaultSubagent: (model: string, effort: string) => call<NativeSubagentSettings>(COMMANDS.saveDshHeadlessDefaultSubagent, { model, effort }),
   readOpenCodeDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readOpenCodeDefaultSubagent),
   readZCodeDefaultSubagent: () => call<NativeSubagentSettings>(COMMANDS.readZCodeDefaultSubagent),
   saveZCodeDefaultSubagent: (model: string, effort: string, native = true) => call<NativeSubagentSettings>(COMMANDS.saveZCodeDefaultSubagent, { model, effort, native }),

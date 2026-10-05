@@ -210,6 +210,7 @@ export function GatewayClientCard({
               disabled={Boolean(busy || claudeSubagentLoading || claudeSubagentSaving || !claudeSubagent)}
               model={claudeSubagent?.default_subagent_model ?? ""}
               effort=""
+              effortUnavailableHint={t("workspace.claudeDefaultSubagentEffortUnavailable")}
               options={claudeOptions}
               selected={claudeOptions.find((option) => option.id === claudeSubagent?.default_subagent_model)}
               emptyLabel={t("workspace.defaultSubagentCliDefault")}

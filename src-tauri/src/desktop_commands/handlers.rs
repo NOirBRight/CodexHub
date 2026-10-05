@@ -765,8 +765,8 @@ pub async fn read_dsh_headless_default_subagent() -> Result<gateway::NativeSubag
 }
 
 #[tauri::command]
-pub async fn save_dsh_headless_default_subagent(model: String) -> Result<gateway::NativeSubagentSettings, String> {
-    run_blocking("save_dsh_headless_default_subagent", move || gateway::save_dsh_headless_default_subagent(model)).await
+pub async fn save_dsh_headless_default_subagent(model: String, effort: String) -> Result<gateway::NativeSubagentSettings, String> {
+    run_blocking("save_dsh_headless_default_subagent", move || gateway::save_dsh_headless_default_subagent(model, effort)).await
 }
 
 #[tauri::command]

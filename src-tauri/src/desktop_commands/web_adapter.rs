@@ -297,7 +297,8 @@ pub fn dispatch_web(command: &str, args: &Value, app: Option<AppHandle>) -> Resu
         Command::ReadDshHeadlessDefaultSubagent => to_value(gateway::read_dsh_headless_default_subagent()),
         Command::SaveDshHeadlessDefaultSubagent => {
             let model = registry_raw_string_arg(args, command, "model")?;
-            to_value(gateway::save_dsh_headless_default_subagent(model))
+            let effort = registry_raw_string_arg(args, command, "effort")?;
+            to_value(gateway::save_dsh_headless_default_subagent(model, effort))
         }
         Command::ReadOpenCodeDefaultSubagent => to_value(gateway::read_opencode_default_subagent()),
         Command::ReadZCodeDefaultSubagent => to_value(gateway::read_zcode_default_subagent()),
