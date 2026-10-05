@@ -88,24 +88,17 @@ interface ChartHover {
   y: number;
 }
 
-const STACK_COLORS = ["#3941ff", "#00a8a8", "#7c3aed", "#0ea5e9", "#b1a7ff", "#10b981"];
-const OTHER_SERIES_COLOR = "#cbd5e1";
+const STACK_COLORS = Array.from({ length: 6 }, (_, index) => `var(--ws-chart-series-${index + 1})`);
+const OTHER_SERIES_COLOR = "var(--ws-chart-other)";
 const STACK_AREA_OPACITY = 0.24;
-const STACK_SEPARATOR_COLOR = "rgba(255, 255, 255, 0.78)";
+const STACK_SEPARATOR_COLOR = "var(--ws-surface)";
 const TOOLTIP_GAP = 16;
 const TOOLTIP_WIDTH = 250;
 const TOOLTIP_EDGE_MARGIN = 12;
 const OTHER_SERIES_KEY = "__other__";
 
 function stackAreaColor(color: string) {
-  const hex = color.match(/^#([0-9a-f]{6})$/i)?.[1];
-  if (!hex) {
-    return color;
-  }
-  const red = parseInt(hex.slice(0, 2), 16);
-  const green = parseInt(hex.slice(2, 4), 16);
-  const blue = parseInt(hex.slice(4, 6), 16);
-  return `rgba(${red}, ${green}, ${blue}, ${STACK_AREA_OPACITY})`;
+  return `color-mix(in srgb, ${color} ${STACK_AREA_OPACITY * 100}%, transparent)`;
 }
 
 export function StackedUsageChartShell({
@@ -256,7 +249,7 @@ export function StackedUsageChartShell({
                 className={
                   view === value
                     ? "h-7 rounded-full bg-surface px-2 font-semibold text-ink shadow-raised"
-                    : "h-7 rounded-full px-2 font-semibold text-slate-500 hover:text-ink"
+                    : "h-7 rounded-full px-2 font-semibold text-muted hover:text-ink"
                 }
                 aria-pressed={view === value}
                 onClick={() => setView(value)}
@@ -345,7 +338,7 @@ export function StackedUsageChartShell({
                   className={
                     range === option.value
                       ? "h-7 rounded-full bg-surface px-2 font-semibold text-ink shadow-raised"
-                      : "h-7 rounded-full px-2 font-semibold text-slate-500 hover:text-ink"
+                      : "h-7 rounded-full px-2 font-semibold text-muted hover:text-ink"
                   }
                   aria-pressed={range === option.value}
                   onClick={() => selectRange(option.value as UsageRange)}
@@ -429,7 +422,7 @@ function RequestUsageTable({
   return (
     <div className="h-full min-h-0 overflow-auto">
       <table className="min-w-full border-collapse text-left text-[11px]" aria-label={t("usage.requestDetails")}>
-        <thead className="sticky top-0 z-10 bg-panel text-[10px] font-semibold uppercase text-slate-500 shadow-hairline">
+        <thead className="sticky top-0 z-10 bg-panel text-[10px] font-semibold uppercase text-muted shadow-hairline">
           <tr>
             <th className="whitespace-nowrap px-3 py-2">{t("usage.requestTime")}</th>
             <th className="min-w-[180px] px-3 py-2">{t("usage.model")}</th>
@@ -452,12 +445,12 @@ function RequestUsageTable({
                 : t("usage.usageRecorded");
             return (
               <tr key={event.request_id ?? `${event.ts}-${index}`} className="text-ink hover:bg-panel/70">
-                <td className="whitespace-nowrap px-3 py-2 font-mono text-slate-500">
+                <td className="whitespace-nowrap px-3 py-2 font-mono text-muted">
                   {event.ts ? timestamp.format(new Date(event.ts)) : "—"}
                 </td>
                 <td className="px-3 py-2">
                   <div className="font-semibold">{providerLabel(event.upstream ?? "", providerLabels, t)}</div>
-                  <div className="truncate font-mono text-[10px] text-slate-500" title={event.model ?? undefined}>
+                  <div className="truncate font-mono text-[10px] text-muted" title={event.model ?? undefined}>
                     {event.model ? displayModelId(event.model) : t("usage.unknownModel")}
                   </div>
                 </td>
@@ -475,7 +468,7 @@ function RequestUsageTable({
           })}
           {events.length === 0 && (
             <tr>
-              <td colSpan={9} className="px-3 py-8 text-center text-slate-500">{t("usage.noRequestDetails")}</td>
+              <td colSpan={9} className="px-3 py-8 text-center text-muted">{t("usage.noRequestDetails")}</td>
             </tr>
           )}
         </tbody>
@@ -505,7 +498,7 @@ function UsageDropdown<T extends string>({
     <div className="relative">
       <button
         type="button"
-        className="ws-chart-select focus-ring flex h-8 min-w-0 items-center justify-between gap-1 rounded-full bg-surface px-2 text-[11px] font-semibold text-slate-600 shadow-control transition-[box-shadow,background-color] duration-150 ease-out hover:bg-white hover:shadow-raised"
+        className="ws-chart-select focus-ring flex h-8 min-w-0 items-center justify-between gap-1 rounded-full bg-surface px-2 text-[11px] font-semibold text-muted shadow-control transition-[box-shadow,background-color] duration-150 ease-out hover:bg-action-soft hover:shadow-raised"
         aria-expanded={open}
         onClick={onToggle}
       >
@@ -566,7 +559,7 @@ function CalendarRangePopover({
         >
           <ChevronLeft size={16} />
         </button>
-        <div className="text-[10px] font-semibold text-slate-500">
+        <div className="text-[10px] font-semibold text-muted">
           {formatDate(range.start, locale)} - {formatDate(range.end, locale)}
         </div>
         <button
@@ -602,7 +595,7 @@ function MonthGrid({
   return (
     <div className="min-w-0">
       <h3 className="mb-2 text-center text-sm font-semibold text-ink">{formatMonthTitle(month, locale)}</h3>
-      <div className="mb-1 grid grid-cols-7 text-center text-[10px] font-semibold text-slate-400">
+      <div className="mb-1 grid grid-cols-7 text-center text-[10px] font-semibold text-muted">
         {weekdayLabels.map((day) => (
           <span key={day}>{day}</span>
         ))}
@@ -621,14 +614,14 @@ function MonthGrid({
               className={
                 inRange
                   ? "mx-0 grid h-6 place-items-center rounded-full bg-action/15 text-ink"
-                  : "mx-0 grid h-6 place-items-center rounded-full text-slate-500 hover:bg-panel hover:text-ink"
+                  : "mx-0 grid h-6 place-items-center rounded-full text-muted hover:bg-panel hover:text-ink"
               }
               onClick={() => onSelect(day)}
             >
               <span
                 className={
                   selected
-                    ? "grid h-5 w-5 place-items-center rounded-full bg-ink text-white"
+                    ? "grid h-5 w-5 place-items-center rounded-full bg-action text-on-action"
                     : "grid h-5 w-5 place-items-center rounded-full"
                 }
               >
@@ -772,7 +765,7 @@ function StackedUsageChart({
     <div className="grid h-full min-h-0">
       <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_auto] overflow-hidden">
         <div className="relative min-h-0">
-          <div className="absolute bottom-8 left-3 top-6 grid w-9 grid-rows-[auto_1fr_auto] text-[10px] font-semibold text-slate-400">
+          <div className="absolute bottom-8 left-3 top-6 grid w-9 grid-rows-[auto_1fr_auto] text-[10px] font-semibold text-muted">
             <span title={formatNumber(maxTotal, locale)}>{formatAxisNumber(maxTotal, locale)}</span>
             <span className="self-center" title={formatNumber(Math.round(maxTotal / 2), locale)}>
               {formatAxisNumber(Math.round(maxTotal / 2), locale)}
@@ -792,7 +785,7 @@ function StackedUsageChart({
                   x2="100"
                   y1={y}
                   y2={y}
-                  stroke="#e2e8f0"
+                  stroke="var(--ws-line)"
                   strokeWidth="0.45"
                   vectorEffect="non-scaling-stroke"
                   strokeDasharray={y === 0 ? "0" : y === 25 ? "3 3" : "0"}
@@ -823,7 +816,7 @@ function StackedUsageChart({
                   x2={bucketX(activeIndex, buckets.length)}
                   y1="0"
                   y2="100"
-                  stroke="#94a3b8"
+                  stroke="var(--ws-muted)"
                   strokeWidth="1"
                   strokeDasharray="4 4"
                   vectorEffect="non-scaling-stroke"
@@ -872,7 +865,7 @@ function StackedUsageChart({
               </div>
             )}
           </div>
-          <div className="absolute bottom-2 left-12 right-3 h-5 text-center text-[10px] font-semibold text-slate-400">
+          <div className="absolute bottom-2 left-12 right-3 h-5 text-center text-[10px] font-semibold text-muted">
             {buckets.map((bucket, index) => (
               <span
                 key={`${bucket.label}-${bucket.start.toISOString()}`}
@@ -901,7 +894,7 @@ function StackedUsageChart({
                     className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2"
                   >
                     <i className="mt-[3px] h-2.5 w-2.5 rounded-full" style={{ backgroundColor: segment.fillColor }} />
-                    <span className="min-w-0 whitespace-normal break-words leading-4 text-slate-600">
+                    <span className="min-w-0 whitespace-normal break-words leading-4 text-muted">
                       {segment.label}
                     </span>
                     <span className="font-mono font-semibold leading-4 text-ink">{formatNumber(segment.value, locale)}</span>
@@ -912,7 +905,7 @@ function StackedUsageChart({
           )}
         </div>
         {series.length > 0 && (
-          <div className="flex min-h-7 flex-wrap items-start justify-center gap-x-2.5 gap-y-1 overflow-visible px-6 py-1.5 text-[10px] font-semibold text-slate-500">
+          <div className="flex min-h-7 flex-wrap items-start justify-center gap-x-2.5 gap-y-1 overflow-visible px-6 py-1.5 text-[10px] font-semibold text-muted">
             {series.map((item) => {
               const hidden = hiddenSeriesKeys.has(item.key);
               return (
@@ -971,7 +964,7 @@ function NoTokenChart({
         <div className="relative overflow-hidden">
           <div className="absolute inset-x-8 bottom-0 top-4 grid grid-rows-4">
             {Array.from({ length: 4 }).map((_, index) => (
-              <span key={index} className="border-b border-slate-200/80" />
+              <span key={index} className="border-b border-line/80" />
             ))}
           </div>
           <div
@@ -1004,7 +997,7 @@ function NoTokenChart({
           </div>
         </div>
         <div
-          className="mx-8 grid items-start gap-1 pt-1 text-center text-[10px] font-semibold text-slate-400"
+          className="mx-8 grid items-start gap-1 pt-1 text-center text-[10px] font-semibold text-muted"
           style={{ gridTemplateColumns: columns }}
         >
           {axis.map((label) => (
@@ -1394,7 +1387,7 @@ function rangeToSpan(range: UsageRange, customRange: DateSpan): DateSpan {
 function Metric({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
     <div className="rounded-inner bg-panel px-2 py-1.5 shadow-control" title={title}>
-      <div className="truncate text-[10px] font-semibold uppercase leading-3 text-slate-500">
+      <div className="truncate text-[10px] font-semibold uppercase leading-3 text-muted">
         {label}
       </div>
       <div className="mt-0.5 truncate font-mono text-[13px] font-semibold leading-5 text-ink">{value}</div>

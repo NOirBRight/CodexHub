@@ -214,25 +214,25 @@ export function ChatGptWebRuntimeCard({
   return (
     <section className="grid gap-5" aria-label={t("providers.chatgptWebTitle")}>
       <div className="flex items-start gap-3">
-        <div className="rounded-control border border-line bg-white p-3"><ProviderLogo providerId="chatgpt-web" /></div>
+        <div className="rounded-control border border-line bg-brand-surface p-3"><ProviderLogo providerId="chatgpt-web" /></div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-base font-semibold text-ink">ChatGPT</h3>
             <span className="ws-status-chip inline-flex h-6 items-center border border-line bg-panel px-2 text-[11px] font-semibold leading-none" role="status">{t(`providers.${stateKey}`)}</span>
           </div>
-          <p className="mt-1 text-xs leading-5 text-slate-600">{t("providers.chatgptWebBody")}</p>
+          <p className="mt-1 text-xs leading-5 text-muted">{t("providers.chatgptWebBody")}</p>
         </div>
         <button type="button" className="ws-button" disabled={busy} onClick={() => setRefreshIndex((value) => value + 1)}>
           <RefreshCcw size={14} />{t("providers.chatgptWebRefresh")}
         </button>
       </div>
-      {error ? <p role="alert" className="text-xs text-red-700">{error}</p> : null}
+      {error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}
 
       <section className="grid gap-3 rounded-control border border-line p-4" aria-label={t("providers.chatgptWebConnectionTitle")}>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <h4 className="text-sm font-semibold">{t("providers.chatgptWebConnectionTitle")}</h4>
-            <p className="mt-1 text-xs leading-5 text-slate-600">{t("providers.chatgptWebConnectionBody")}</p>
+            <p className="mt-1 text-xs leading-5 text-muted">{t("providers.chatgptWebConnectionBody")}</p>
           </div>
           <button type="button" className="ws-button" disabled={settingsBusy} onClick={() => void openRuntimeSettings()}>
             <ExternalLink size={14} />{t("providers.chatgptWebOpenSettings")}
@@ -243,41 +243,41 @@ export function ChatGptWebRuntimeCard({
             placeholder={managedAddress || t("providers.chatgptWebAddressUnavailable")}
             onChange={(event) => updateConnection({ base_url: event.target.value })} />
         </Field>
-        <p className="-mt-2 text-xs leading-5 text-slate-500">{t("providers.chatgptWebServiceAddressHelp", { address: managedAddress || "—" })}</p>
+        <p className="-mt-2 text-xs leading-5 text-muted">{t("providers.chatgptWebServiceAddressHelp", { address: managedAddress || "—" })}</p>
         <Field label={t("providers.chatgptWebServiceCredential")}>
           <input className="field field-compact" type="password" autoComplete="off" spellCheck={false}
             value={provider.api_key ?? ""} placeholder={t("providers.chatgptWebCredentialPlaceholder")}
             onChange={(event) => updateConnection({ api_key: event.target.value })} />
         </Field>
-        <p className="-mt-2 text-xs leading-5 text-slate-500">{t("providers.chatgptWebServiceCredentialHelp")}</p>
+        <p className="-mt-2 text-xs leading-5 text-muted">{t("providers.chatgptWebServiceCredentialHelp")}</p>
         <div className="flex flex-wrap items-center gap-2">
           <button type="button" className="ws-button" disabled={connectionBusy || !status?.process.running}
             onClick={() => void testConnection()}>{t("providers.chatgptWebConnectionCheck")}</button>
-          <span className="text-xs text-slate-600">{textReady ? t("providers.chatgptWebTextReady") : t("providers.chatgptWebNotReady")}</span>
-          <span className="text-xs text-slate-600">{toolsReady ? t("providers.chatgptWebToolsReady") : t("providers.chatgptWebToolsPending")}</span>
+          <span className="text-xs text-muted">{textReady ? t("providers.chatgptWebTextReady") : t("providers.chatgptWebNotReady")}</span>
+          <span className="text-xs text-muted">{toolsReady ? t("providers.chatgptWebToolsReady") : t("providers.chatgptWebToolsPending")}</span>
         </div>
-        {connectionError ? <p role="alert" className="text-xs text-red-700">{connectionError}</p> : null}
-        <p className="text-xs leading-5 text-slate-500">{t("providers.chatgptWebRuntimeSettingsHint")}</p>
+        {connectionError ? <p role="alert" className="text-xs text-danger">{connectionError}</p> : null}
+        <p className="text-xs leading-5 text-muted">{t("providers.chatgptWebRuntimeSettingsHint")}</p>
       </section>
 
       <section className="grid gap-3 rounded-control border border-line p-4" aria-label={t("providers.chatgptWebModelsTitle")}>
         <div>
           <h4 className="text-sm font-semibold">{t("providers.chatgptWebModelsTitle")}</h4>
-          <p className="mt-1 text-xs leading-5 text-slate-600">{t("providers.chatgptWebModelsBody")}</p>
+          <p className="mt-1 text-xs leading-5 text-muted">{t("providers.chatgptWebModelsBody")}</p>
         </div>
         {models.length ? <ul className="divide-y divide-line">
           {models.map((model) => <li key={model.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
             <SwitchControl checked={modelEnabled(model)} label={model.display_name || model.id}
               onChange={(enabled) => toggleModel(model, enabled)} />
-            <code className="break-all text-xs text-slate-500">{model.id}</code>
+            <code className="break-all text-xs text-muted">{model.id}</code>
           </li>)}
-        </ul> : <p className="text-xs text-slate-600">{t("providers.chatgptWebNoModels")}</p>}
+        </ul> : <p className="text-xs text-muted">{t("providers.chatgptWebNoModels")}</p>}
       </section>
 
       <section className="flex flex-wrap items-center gap-2 rounded-control border border-line p-4">
         <div className="mr-auto min-w-0">
           <h4 className="text-sm font-semibold">{t("providers.chatgptWebPrepareTitle")}</h4>
-          <p className="mt-1 text-xs leading-5 text-slate-600">{t("providers.chatgptWebPrepareBody")}</p>
+          <p className="mt-1 text-xs leading-5 text-muted">{t("providers.chatgptWebPrepareBody")}</p>
         </div>
         {!prepared || status?.restart_required ? <button type="button" className="ws-button" disabled={disabled}
           onClick={lifecycleAction("chatgptWebInstalling", () => api.chatgptWebEnable(), "chatgptWebInstalled")}>
@@ -285,7 +285,7 @@ export function ChatGptWebRuntimeCard({
         </button> : null}
         <details className="w-full border-t border-line pt-3">
           <summary className="cursor-pointer text-xs font-medium">{t("providers.chatgptWebAdvanced")}</summary>
-          {status ? <dl className="my-3 grid gap-2 break-all text-xs text-slate-600">
+          {status ? <dl className="my-3 grid gap-2 break-all text-xs text-muted">
             <div><dt className="inline font-medium">{t("providers.chatgptWebLogin")}: </dt><dd className="inline">{status.login.state}</dd></div>
             <div><dt className="inline font-medium">{t("providers.chatgptWebBrowserSmoke")}: </dt><dd className="inline">{status.browser_smoke.state}</dd></div>
             <div><dt className="inline font-medium">{t("providers.chatgptWebTunnel")}: </dt><dd className="inline">{status.tunnel.state}</dd></div>

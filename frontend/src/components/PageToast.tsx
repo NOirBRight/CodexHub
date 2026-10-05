@@ -215,7 +215,7 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
       {toast.action && (
         <button
           type="button"
-          className="ws-toast-action focus-ring inline-flex h-7 shrink-0 items-center justify-center whitespace-nowrap rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-slate-800 hover:shadow-raised active:scale-[0.96]"
+          className="ws-toast-action focus-ring inline-flex h-7 shrink-0 items-center justify-center whitespace-nowrap rounded-control bg-action px-3 text-xs font-semibold text-on-action shadow-control transition-[box-shadow,background-color,transform] duration-150 ease-out hover:bg-action-hover hover:shadow-raised active:scale-[0.96]"
           onClick={toast.action.onClick}
         >
           {toast.action.label}
@@ -224,7 +224,7 @@ export function PageToast({ toast, onDismiss }: PageToastProps) {
       {dismissible && (
         <button
           type="button"
-          className="ws-toast-dismiss focus-ring grid h-6 w-6 shrink-0 place-items-center rounded-control text-slate-500 transition-colors hover:bg-panel hover:text-ink"
+          className="ws-toast-dismiss focus-ring grid h-6 w-6 shrink-0 place-items-center rounded-control text-muted transition-colors hover:bg-panel hover:text-ink"
           aria-label={t("common.dismissNotification")}
           onClick={onDismiss}
         >

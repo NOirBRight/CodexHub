@@ -71,6 +71,8 @@ const enUS = {
   "defaultSubagentCliDefault": "CLI default",
   "defaultSubagentModel": "Model",
   "defaultSubagentEffort": "Effort",
+  "defaultSubagentEffortSelectModel": "Select a model before choosing effort.",
+  "defaultSubagentEffortUnavailable": "This model declares no selectable effort levels in the client.",
   "defaultSubagentFastOn": "On",
   "defaultSubagentFast": "Fast",
   "defaultSubagentFastOff": "Off",

@@ -395,7 +395,7 @@ function ConnectionNarrative({
     return (
       <button
         type="button"
-        className="text-left text-amber-700 underline-offset-2 hover:underline"
+        className="text-left text-warn underline-offset-2 hover:underline"
         onClick={onRepair}
       >
         {t("gateway.configDriftRepair")}
@@ -428,7 +428,7 @@ function ClientLogo({ id, name }: { id: string; name: string }) {
   }
   return (
     <span
-      className="text-[9px] font-black tracking-normal text-slate-600"
+      className="text-[9px] font-black tracking-normal text-muted"
       aria-hidden="true"
     >
       {id.slice(0, 2).toUpperCase()}

@@ -191,14 +191,14 @@ export function XaiLoginCard({
     );
 
   return (
-    <section className="grid gap-3 rounded-inner bg-amber-50/70 p-3 text-sm shadow-hairline">
+    <section className="grid gap-3 rounded-inner bg-warn-soft/70 p-3 text-sm shadow-hairline">
       <div className="min-w-0">
         <h3 className="truncate text-sm font-semibold text-ink">
           {signedIn
             ? translate("providers.xaiSignedInTitle")
             : translate("providers.xaiSignInTitle")}
         </h3>
-        <p className="mt-1 text-xs leading-5 text-slate-700">
+        <p className="mt-1 text-xs leading-5 text-ink">
           {translate(
             signedIn ? "providers.xaiSignedInBody" : "providers.xaiSignInBody",
           )}
@@ -213,7 +213,7 @@ export function XaiLoginCard({
         {!signedIn && (
           <button
             type="button"
-            className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-ink px-3 text-xs font-semibold text-white shadow-control hover:bg-slate-800 disabled:bg-slate-300"
+            className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-action px-3 text-xs font-semibold text-on-action shadow-control hover:bg-action-hover disabled:bg-line"
             disabled={busy}
             onClick={() => void startLogin()}
           >
@@ -226,7 +226,7 @@ export function XaiLoginCard({
         {verificationUrl ? (
           <button
             type="button"
-            className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-slate-700 shadow-control hover:bg-white"
+            className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-ink shadow-control hover:bg-action-soft"
             onClick={() => void openVerificationUrl(verificationUrl)}
           >
             <ExternalLink size={15} />
@@ -237,7 +237,7 @@ export function XaiLoginCard({
         ) : null}
         <button
           type="button"
-          className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-slate-700 shadow-control hover:bg-white disabled:text-slate-300"
+          className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-ink shadow-control hover:bg-action-soft disabled:text-muted"
           disabled={busy}
           onClick={() => void refreshStatus()}
         >
@@ -249,7 +249,7 @@ export function XaiLoginCard({
         {signedIn && (
           <button
             type="button"
-            className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-slate-700 shadow-control hover:bg-white disabled:text-slate-300"
+            className="focus-ring flex h-9 min-w-0 items-center gap-2 rounded-control bg-surface px-3 text-xs font-semibold text-ink shadow-control hover:bg-action-soft disabled:text-muted"
             disabled={busy}
             onClick={() => void logout()}
           >

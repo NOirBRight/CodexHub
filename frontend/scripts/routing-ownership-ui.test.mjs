@@ -81,8 +81,8 @@ test("Codex keeps connected surfaces visible for a foreign owner and takes over 
   );
   assert.match(providers, /codexForeignOwner=\{codexOwnedByOtherApp\}/);
   assert.match(providers, /codexOwnerLabel=\{codexRouteOwnerLabel\}/);
-  assert.match(providers, /foreignOwner[\s\S]*bg-emerald-100 text-emerald-700/);
-  assert.match(providers, /!pendingMode && connected[\s\S]*bg-emerald-600 text-white/);
+  assert.match(providers, /foreignOwner[\s\S]*bg-ok-soft text-ok/);
+  assert.match(providers, /!pendingMode && connected[\s\S]*bg-ok text-on-status/);
   assert.match(providers, /connectedToHubChannel/);
 });
 

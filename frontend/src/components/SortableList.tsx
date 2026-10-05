@@ -271,7 +271,7 @@ export function SortableList<T>({
               type="button"
               data-sortable-handle="true"
               className={cx(
-                "focus-ring flex touch-none select-none items-center justify-center rounded-l-inner border-r border-transparent bg-transparent text-slate-300 transition-colors hover:text-slate-500 group-hover:border-line group-hover:text-slate-400 [&_*]:pointer-events-none",
+                "focus-ring flex touch-none select-none items-center justify-center rounded-l-inner border-r border-transparent bg-transparent text-muted transition-colors hover:text-muted group-hover:border-line group-hover:text-muted [&_*]:pointer-events-none",
                 draggedId ? "cursor-grabbing" : "cursor-grab",
               )}
               aria-label="Reorder"
@@ -298,7 +298,7 @@ export function SortableList<T>({
                 minHeight: dragGhost.height,
               }}
             >
-              <div className="flex cursor-grabbing items-center justify-center border-r border-line text-slate-400">
+              <div className="flex cursor-grabbing items-center justify-center border-r border-line text-muted">
                 <Grip size={15} />
               </div>
               <div className="min-w-0">{renderItem(draggedItem)}</div>

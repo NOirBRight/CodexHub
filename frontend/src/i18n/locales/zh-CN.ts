@@ -71,6 +71,8 @@ const zhCN = {
   "defaultSubagentCliDefault": "维持 CLI 默认",
   "defaultSubagentModel": "模型",
   "defaultSubagentEffort": "推理强度",
+  "defaultSubagentEffortSelectModel": "请先选择模型，再设置推理强度。",
+  "defaultSubagentEffortUnavailable": "此模型在客户端中未提供可选的推理强度。",
   "defaultSubagentFastOn": "开启",
   "defaultSubagentFast": "快速模式",
   "defaultSubagentFastOff": "关闭",

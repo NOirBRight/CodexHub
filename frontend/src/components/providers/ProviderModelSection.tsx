@@ -161,7 +161,7 @@ export function ModelSection({
       setEditingModelId(model.id);
     }
     const actions = (
-      <div className="flex min-w-0 max-w-full flex-nowrap items-center justify-end gap-1 overflow-hidden text-xs text-slate-500">
+      <div className="flex min-w-0 max-w-full flex-nowrap items-center justify-end gap-1 overflow-hidden text-xs text-muted">
         {modelCapabilityTags(displayed).map((tag) => (
           <ModelCapabilityChip key={tag} tag={tag} />
         ))}
@@ -268,7 +268,7 @@ export function ModelSection({
     return (
       <div className="space-y-1">
         {items.map((model) => (
-          <div key={model.id} className="rounded-control border border-line bg-white shadow-subtle">
+          <div key={model.id} className="rounded-control border border-line bg-surface shadow-subtle">
             {renderModelRow(model)}
           </div>
         ))}
@@ -280,13 +280,13 @@ export function ModelSection({
     <div
       className={cx(
         "grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3 p-5",
-        interactionDisabled && "text-slate-400",
+        interactionDisabled && "text-muted",
       )}
     >
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold">{t("common.models")}</h3>
-          <p className="mt-1 truncate text-xs leading-4 text-slate-500">
+          <p className="mt-1 truncate text-xs leading-4 text-muted">
             {t("providers.configured", { count: models.length })}
             {" · "}
             {t("providers.appsMaySortModels")}
@@ -303,7 +303,7 @@ export function ModelSection({
             <button
               type="button"
               className={cx(
-                "ws-model-refresh focus-ring inline-flex shrink-0 items-center justify-center gap-2 border border-line bg-panel px-3 font-semibold hover:bg-slate-100 disabled:bg-slate-100",
+                "ws-model-refresh focus-ring inline-flex shrink-0 items-center justify-center gap-2 border border-line bg-panel px-3 font-semibold hover:bg-panel disabled:bg-panel",
                 headerControl ? "ws-compact h-7 rounded-full text-xs" : "h-9 rounded-md text-sm",
               )}
               disabled={interactionDisabled || (refreshBusy && !onCancelRefresh)}
@@ -318,7 +318,7 @@ export function ModelSection({
           {onDiscover && (
             <button
               type="button"
-              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-control border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100 disabled:bg-slate-100"
+              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-control border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel disabled:bg-panel"
               disabled={discoverBusy || discoverDisabled}
               onClick={onDiscover}
             >
@@ -329,7 +329,7 @@ export function ModelSection({
           {!disabled && (
             <button
               type="button"
-              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-control border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100"
+              className="focus-ring inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-control border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel"
               onClick={addAndEdit}
             >
               <Plus size={16} />
@@ -345,7 +345,7 @@ export function ModelSection({
         )}
       >
         {models.length === 0 ? (
-          <div className="rounded-inner bg-panel-soft p-4 text-sm text-slate-500 shadow-hairline">
+          <div className="rounded-inner bg-panel-soft p-4 text-sm text-muted shadow-hairline">
             {t("common.noModels")}
           </div>
         ) : (
@@ -353,7 +353,7 @@ export function ModelSection({
             {renderGroup(enabledModels)}
             {disabledModels.length > 0 && (
               <div className="grid gap-1">
-                <h4 className="px-1 text-xs font-semibold text-slate-500">
+                <h4 className="px-1 text-xs font-semibold text-muted">
                   {t("providers.hiddenFromPicker")}
                 </h4>
                 {renderGroup(disabledModels)}
@@ -425,10 +425,10 @@ function ModelIdentity({
   return (
     <div className="flex min-w-0 items-center gap-1.5">
       <span className="min-w-0 truncate text-sm font-medium">{displayModelName(model, provider)}</span>
-      <span className="min-w-0 truncate font-mono text-xs text-slate-500">{model.id}</span>
+      <span className="min-w-0 truncate font-mono text-xs text-muted">{model.id}</span>
       <button
         type="button"
-        className="focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-transparent text-slate-500 transition-[background-color,border-color,color] duration-150 ease-out hover:border-line hover:bg-panel hover:text-ink"
+        className="focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-transparent text-muted transition-[background-color,border-color,color] duration-150 ease-out hover:border-line hover:bg-panel hover:text-ink"
         disabled={actionsDisabled}
         onClick={copyModelId}
         title={copied ? t("common.copied") : t("providers.copyModelIdTitle", { id: copyValue })}
@@ -440,12 +440,12 @@ function ModelIdentity({
         <button
           type="button"
           className={cx(
-            "focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border text-slate-500 transition-[background-color,border-color,color,transform] duration-150 ease-out active:scale-[0.96]",
+            "focus-ring inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border text-muted transition-[background-color,border-color,color,transform] duration-150 ease-out active:scale-[0.96]",
             testState === "success"
-              ? "status-pop border-emerald-200 bg-emerald-50 text-emerald-700"
+              ? "status-pop border-ok-line bg-ok-soft text-ok"
               : testState === "error"
-                ? "status-pop border-red-200 bg-red-50 text-danger"
-                : "border-transparent text-slate-500 hover:border-line hover:bg-panel hover:text-ink",
+                ? "status-pop border-danger-line bg-danger-soft text-danger"
+                : "border-transparent text-muted hover:border-line hover:bg-panel hover:text-ink",
           )}
           disabled={testDisabled || testState === "testing"}
           onClick={testCurrentModel}
@@ -539,7 +539,7 @@ function ModelEditorOverlay({
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/20 p-6">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-scrim p-6">
       <div
         ref={panel}
         data-nested-dialog=""
@@ -547,16 +547,16 @@ function ModelEditorOverlay({
         role="dialog"
         aria-modal="true"
         aria-labelledby="model-settings-title"
-        className="grid w-full max-w-[760px] overflow-hidden rounded-overlay border border-line bg-white shadow-overlay"
+        className="grid w-full max-w-[760px] overflow-hidden rounded-overlay border border-line bg-surface shadow-overlay"
       >
         <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
           <div className="min-w-0">
             <h3 id="model-settings-title" className="truncate text-base font-semibold">{t("providers.modelSettings")}</h3>
-            <p className="mt-1 truncate text-xs text-slate-500">{model.id}</p>
+            <p className="mt-1 truncate text-xs text-muted">{model.id}</p>
           </div>
           <button
             type="button"
-            className="focus-ring grid h-8 w-8 place-items-center rounded-control border border-line bg-panel hover:bg-slate-100"
+            className="focus-ring grid h-8 w-8 place-items-center rounded-control border border-line bg-panel hover:bg-panel"
             onClick={onClose}
             aria-label={t("providers.closeModelSettings")}
           >
@@ -568,7 +568,7 @@ function ModelEditorOverlay({
           <fieldset disabled={readOnly} className="grid min-w-0 gap-3 rounded-inner border border-line bg-panel p-3">
             <div>
               <h4 className="text-sm font-semibold">{t("providers.identity")}</h4>
-              <p className="mt-0.5 text-xs text-slate-500">{t("providers.gatewayFacingModelName")}</p>
+              <p className="mt-0.5 text-xs text-muted">{t("providers.gatewayFacingModelName")}</p>
             </div>
             <Field label={t("common.modelId")}>
               <input
@@ -600,11 +600,11 @@ function ModelEditorOverlay({
           <section className="grid gap-3 rounded-inner border border-line bg-panel p-3">
             <div>
               <div className="text-sm font-semibold">{t("providers.capabilities")}</div>
-              <div className="mt-0.5 text-xs text-slate-500">{t("providers.gatewayFacingMetadata")}</div>
+              <div className="mt-0.5 text-xs text-muted">{t("providers.gatewayFacingMetadata")}</div>
             </div>
             <fieldset disabled={readOnly} className="grid min-w-0 gap-3">
               <div className="grid gap-2 sm:grid-cols-2">
-                <label className="flex h-9 items-center justify-between rounded-control border border-line bg-white px-3 text-sm font-medium">
+                <label className="flex h-9 items-center justify-between rounded-control border border-line bg-surface px-3 text-sm font-medium">
                   <span className="inline-flex items-center gap-2">
                     <Eye size={15} />
                     {t("providers.vision")}
@@ -621,7 +621,7 @@ function ModelEditorOverlay({
                     }
                   />
                 </label>
-                <label className="flex h-9 items-center justify-between rounded-control border border-line bg-white px-3 text-sm font-medium">
+                <label className="flex h-9 items-center justify-between rounded-control border border-line bg-surface px-3 text-sm font-medium">
                   <span className="inline-flex items-center gap-2">
                     <Brain size={15} />
                     {t("providers.thinking")}
@@ -634,7 +634,7 @@ function ModelEditorOverlay({
                 </label>
               </div>
               {officialThinking && (
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-muted">
                   {draft.thinking_mode === "toggle"
                     ? t("providers.thinkingToggle")
                     : draft.thinking_mode === "none"
@@ -650,7 +650,7 @@ function ModelEditorOverlay({
                       {levelOptions.map((level) => (
                         <label
                           key={level}
-                          className="flex h-8 items-center gap-2 rounded-control border border-line bg-white px-2 text-xs font-medium"
+                          className="flex h-8 items-center gap-2 rounded-control border border-line bg-surface px-2 text-xs font-medium"
                         >
                           <input
                             type="checkbox"
@@ -708,7 +708,7 @@ function ModelEditorOverlay({
           {onRemove ? (
             <button
               type="button"
-              className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control border border-danger/40 bg-red-50 px-3 text-sm font-semibold text-danger"
+              className="focus-ring inline-flex h-9 items-center justify-center gap-2 rounded-control border border-danger/40 bg-danger-soft px-3 text-sm font-semibold text-danger"
               onClick={onRemove}
             >
               <Trash2 size={15} />
@@ -720,14 +720,14 @@ function ModelEditorOverlay({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              className="focus-ring inline-flex h-9 items-center justify-center rounded-control border border-line bg-panel px-3 text-sm font-semibold hover:bg-slate-100"
+              className="focus-ring inline-flex h-9 items-center justify-center rounded-control border border-line bg-panel px-3 text-sm font-semibold hover:bg-panel"
               onClick={onClose}
             >
               {t("common.cancel")}
             </button>
             <button
               type="button"
-              className="focus-ring inline-flex h-9 items-center justify-center rounded-control bg-action px-3 text-sm font-semibold text-white"
+              className="focus-ring inline-flex h-9 items-center justify-center rounded-control bg-action px-3 text-sm font-semibold text-on-action"
               disabled={readOnly && (!collaboration || !onCollaborationChange)}
               onClick={() => {
                 if (readOnly) {
@@ -755,7 +755,7 @@ function optionalPositiveNumber(value: string) {
 
 function CapabilityChip({ icon, label, title }: { icon?: React.ReactNode; label: string; title?: string }) {
   return (
-    <span title={title} className="ws-model-tag inline-flex h-5 min-w-0 shrink items-center gap-1 truncate rounded-full border border-line bg-panel px-1.5 text-[11px] font-semibold text-slate-600">
+    <span title={title} className="ws-model-tag inline-flex h-5 min-w-0 shrink items-center gap-1 truncate rounded-full border border-line bg-panel px-1.5 text-[11px] font-semibold text-muted">
       {icon}
       {label}
     </span>
@@ -790,7 +790,7 @@ export function SwitchControl({
   return (
     <label
       className={cx(
-        "inline-flex h-6 shrink-0 items-center gap-2 whitespace-nowrap text-xs font-semibold text-slate-600",
+        "inline-flex h-6 shrink-0 items-center gap-2 whitespace-nowrap text-xs font-semibold text-muted",
         showLabel && "rounded-full border border-line bg-panel pl-2 pr-1",
         className,
       )}
@@ -812,17 +812,17 @@ export function SwitchControl({
           className={cx(
             "absolute inset-0 rounded-full border transition-colors",
             disabled
-              ? "border-slate-200 bg-slate-200"
+              ? "border-line bg-line"
               : checked
                 ? "border-action bg-action"
-                : "border-line bg-slate-200",
+                : "border-line bg-line",
           )}
         />
         <span
           className={cx(
             "absolute left-0.5 h-4 w-4 rounded-full shadow-sm transition-transform",
             checked && "translate-x-4",
-            disabled ? "bg-slate-100" : "bg-white",
+            disabled ? "bg-panel" : "bg-surface",
           )}
         />
       </span>

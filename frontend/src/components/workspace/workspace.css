@@ -24,6 +24,31 @@
   --ws-soft: #eee7f5;
   --ws-green: #388775;
   --ws-rim: #ffffffb8;
+  --ws-on-status: #fff;
+  --ws-accent-hover: color-mix(in srgb, var(--ws-accent) 80%, var(--ws-ink));
+  --ws-green-hover: color-mix(in srgb, var(--ws-green) 80%, var(--ws-ink));
+  --ws-danger-hover: color-mix(in srgb, var(--ws-danger) 80%, var(--ws-ink));
+  --ws-green-soft: color-mix(in srgb, var(--ws-green) 10%, var(--ws-surface));
+  --ws-danger-soft: color-mix(in srgb, var(--ws-danger) 9%, var(--ws-surface));
+  --ws-warning-soft: color-mix(in srgb, var(--ws-warning) 10%, var(--ws-surface));
+  --ws-green-line: color-mix(in srgb, var(--ws-green) 28%, var(--ws-line));
+  --ws-danger-line: color-mix(in srgb, var(--ws-danger) 30%, var(--ws-line));
+  --ws-warning-line: color-mix(in srgb, var(--ws-warning) 30%, var(--ws-line));
+  --ws-shadow-thumb: 0 1px 3px #0003;
+  --ws-shadow-window: 0 4px 12px #00000060, 0 1px 5px #00000030;
+  --ws-chart-series-1: #3941ff;
+  --ws-chart-series-2: #00a8a8;
+  --ws-chart-series-3: #7c3aed;
+  --ws-chart-series-4: #0ea5e9;
+  --ws-chart-series-5: #b1a7ff;
+  --ws-chart-series-6: #10b981;
+  --ws-chart-other: #94a3b8;
+  --ws-heatmap-0: var(--ws-inset);
+  --ws-heatmap-1: #d8ebff;
+  --ws-heatmap-2: #acd7ff;
+  --ws-heatmap-3: #7cc1ff;
+  --ws-heatmap-4: #48a7fb;
+  --ws-heatmap-5: #1687e8;
 }
 .workspace-root {
   position: relative;
@@ -48,6 +73,24 @@
   --ws-soft: #3e334d;
   --ws-green: #85c2ad;
   --ws-rim: #ffffff0c;
+  --ws-on-status: #211e29;
+  --ws-scrim: #100c1bb3;
+  --ws-shadow-control: inset 0 1px var(--ws-rim), 0 1px 3px #0003;
+  --ws-shadow-surface: inset 0 1px var(--ws-rim), 0 2px 6px #0003;
+  --ws-shadow-floating: 0 8px 24px #0006;
+  --ws-shadow-overlay: 0 20px 64px #0008;
+  --ws-chart-series-1: #9398ff;
+  --ws-chart-series-2: #50cccc;
+  --ws-chart-series-3: #b394f6;
+  --ws-chart-series-4: #6ac8f3;
+  --ws-chart-series-5: #d0c8ff;
+  --ws-chart-series-6: #6dd5b2;
+  --ws-chart-other: #9da6b7;
+  --ws-heatmap-1: #29394f;
+  --ws-heatmap-2: #30577d;
+  --ws-heatmap-3: #377aaa;
+  --ws-heatmap-4: #48a7db;
+  --ws-heatmap-5: #78c9f6;
   color-scheme: dark;
 }
 .workspace-root [hidden] {
@@ -495,6 +538,7 @@
   max-height: min(280px, 50vh);
   overflow: auto;
   padding: 4px 0;
+  color: var(--ws-ink);
 }
 .ws-bridge-subagent-heading {
   padding: 4px 10px 6px;
@@ -503,6 +547,12 @@
   font-weight: 600;
   letter-spacing: 0.04em;
   white-space: nowrap;
+}
+.ws-bridge-subagent-hint {
+  margin: 0;
+  padding: 6px 10px;
+  color: var(--ws-muted);
+  font-size: 10px;
 }
 .ws-bridge-subagent-row,
 .ws-bridge-subagent-back {
@@ -2003,7 +2053,7 @@
 .workspace-root.workspace-root
   :is(.ws-model-switch, .ws-switch-control)
   > span:last-child {
-  box-shadow: 0 1px 3px #0003;
+  box-shadow: var(--ws-shadow-thumb);
 }
 .workspace-root.workspace-root input.field {
   height: var(--ws-control-height);

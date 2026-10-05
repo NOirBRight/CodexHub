@@ -817,6 +817,11 @@ export function DefaultSubagentPicker({
   }
 
   const modelLabel = draftModel ? activeSelected?.label || draftModel : fallback;
+  const effortHint = !draftModel
+    ? t("workspace.defaultSubagentEffortSelectModel")
+    : effortChoices.length === 0
+      ? t("workspace.defaultSubagentEffortUnavailable")
+      : undefined;
 
   return (
     <div
@@ -896,6 +901,7 @@ export function DefaultSubagentPicker({
                 type="button"
                 className="ws-bridge-subagent-row"
                 disabled={!draftModel || effortChoices.length === 0}
+                title={effortHint}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => setPanel("effort")}
               >
@@ -927,6 +933,7 @@ export function DefaultSubagentPicker({
                   <Zap size={11} aria-hidden="true" />
                 </span>
               </button>}
+              {effortHint && <p className="ws-bridge-subagent-hint">{effortHint}</p>}
             </>
           ) : (
             <>
