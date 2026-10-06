@@ -308,7 +308,7 @@ def _upstream_tls_count(pid: int) -> int | None:
                 fields = line.split()
                 if fields[3] == "01" and fields[2].rsplit(":", 1)[1] == "01BB" and fields[9] in inodes:
                     count += 1
-        return count
+        return count if Path(f"/proc/{pid}/fd").exists() else None
     except OSError:
         return None
 

@@ -310,6 +310,8 @@ def test_tool_continuation_delta_does_not_repeat_text_stream_or_cancellation(tmp
     ("linux-readlink-error", "cancel-ownership-unobserved", False),
     ("linux-table-denied", "cancel-ownership-unobserved", False),
     ("linux-table-error", "cancel-ownership-unobserved", False),
+    ("linux-directory-lost-in-table", "cancel-ownership-unobserved", False),
+    ("linux-directory-check-error", "cancel-ownership-unobserved", False),
     pytest.param("active", None, True, id="windows-active"),
     pytest.param("ownership-unobserved", "cancel-ownership-unobserved", True, id="windows-unavailable"),
     pytest.param("identity-mismatch", "cancel-ownership-unobserved", True, id="windows-identity-mismatch"),
@@ -428,6 +430,8 @@ def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch
                 self.table = table
 
             def exists(self):
+                if directory_lost and scenario == "linux-directory-check-error":
+                    raise PermissionError(errno.EACCES, "controlled")
                 return scenario != "linux-process-missing" and not directory_lost
 
             def iterdir(self):
@@ -451,6 +455,11 @@ def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch
                         filesystem_faults.append("ENOENT-directory")
 
             def read_text(self):
+                nonlocal directory_lost
+                if observing_active() and self.table == "tcp6" and scenario in {
+                        "linux-directory-lost-in-table", "linux-directory-check-error"}:
+                    directory_lost = True
+                    filesystem_faults.append("ENOENT-directory" if scenario == "linux-directory-lost-in-table" else "EACCES")
                 if observing_active() and (
                         scenario == "linux-table-denied" and self.table == "tcp"
                         or scenario == "linux-table-error" and self.table == "tcp6"):
