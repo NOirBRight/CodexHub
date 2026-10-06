@@ -234,19 +234,28 @@ def test_tool_continuation_delta_does_not_repeat_text_stream_or_cancellation(tmp
                                                          "responses.restart-history-fresh-caller"]
 
 
-@pytest.mark.parametrize("scenario,code", [
-    ("active", None),
-    ("natural-finish", "cancel-response-already-ended"),
-    ("natural-finish-during-observation", "cancel-response-already-ended"),
-    ("first-text-after-deadline", "cancel-first-text-timeout"),
-    ("no-text", "cancel-first-text-unobserved"),
-    ("cleanup-unobserved", "cancel-cleanup-unobserved"),
-    ("cleanup-observer-missing", "cancel-cleanup-unobserved"),
-    ("ownership-unobserved", "cancel-ownership-unobserved"),
-    ("inactive-after-text", "cancel-request-inactive"),
-    ("denied", "not-eligible"),
+@pytest.mark.parametrize("scenario,code,windows", [
+    ("active", None, False),
+    ("natural-finish", "cancel-response-already-ended", False),
+    ("natural-finish-during-observation", "cancel-response-already-ended", False),
+    ("first-text-after-deadline", "cancel-first-text-timeout", False),
+    ("no-text", "cancel-first-text-unobserved", False),
+    ("cleanup-unobserved", "cancel-cleanup-unobserved", False),
+    ("cleanup-observer-missing", "cancel-cleanup-unobserved", False),
+    ("ownership-unobserved", "cancel-ownership-unobserved", False),
+    ("inactive-after-text", "cancel-request-inactive", False),
+    ("denied", "not-eligible", False),
+    pytest.param("active", None, True, id="windows-active"),
+    pytest.param("ownership-unobserved", "cancel-ownership-unobserved", True, id="windows-unavailable"),
+    pytest.param("identity-mismatch", "cancel-ownership-unobserved", True, id="windows-identity-mismatch"),
+    pytest.param("inactive-after-text", "cancel-request-inactive", True, id="windows-inactive"),
+    pytest.param("cleanup-unobserved", "cancel-cleanup-unobserved", True, id="windows-cleanup"),
+    pytest.param("cleanup-observer-missing", "cancel-cleanup-unobserved", True, id="windows-cleanup-unavailable"),
+    pytest.param("natural-finish-during-observation", "cancel-response-already-ended", True, id="windows-terminal"),
+    pytest.param("first-text-after-deadline", "cancel-first-text-timeout", True, id="windows-late-text"),
+    pytest.param("denied", "not-eligible", True, id="windows-denied"),
 ])
-def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch, scenario, code):
+def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch, scenario, code, windows):
     """Real local HTTP/SSE; socket ownership is controlled engineering evidence."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     import threading
@@ -307,6 +316,7 @@ def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch
             self.key = "private-key"
             self.timeout = .15 if scenario == "first-text-after-deadline" else .5
             self.process = type("Process", (), {"pid": 123, "poll": lambda self: None})()
+            self.windows_tcp = WindowsObservation() if windows else None
 
     def upstream_count(pid):
         assert pid == 123
@@ -331,8 +341,16 @@ def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch
             return 0
         return int(active.is_set())
 
-    monkeypatch.setattr(qualify, "_upstream_tls_count", upstream_count)
-    monkeypatch.setattr(qualify, "_socket_count", lambda pid: 1 + int(active.is_set() and not disconnected.is_set()))
+    class WindowsObservation:
+        """Controlled adapter seam; no native API or creation proof is claimed."""
+        def observe(self):
+            if scenario == "identity-mismatch":
+                return None, None
+            proxy = upstream_count(123)
+            return (1 + int(active.is_set() and not disconnected.is_set()), proxy) if proxy is not None else (None, None)
+
+    monkeypatch.setattr(qualify, "_upstream_tls_count", (lambda pid: None) if windows else upstream_count)
+    monkeypatch.setattr(qualify, "_socket_count", lambda pid: None if windows else 1 + int(active.is_set() and not disconnected.is_set()))
     try:
         if code:
             with pytest.raises(qualify.QualificationFailure) as error:
@@ -357,6 +375,20 @@ def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch
             assert evidence["first_text_elapsed_seconds"] > evidence["wait_bound_seconds"]
             assert evidence["request_active_at_disconnect"] and evidence["caller_disconnect_observed"]
             assert evidence["caller_wait_ended"] and evidence["upstream_socket_cleanup_observed"]
+        assert evidence["caller_wait_ended"]
+        if scenario not in {"natural-finish", "natural-finish-during-observation", "no-text", "denied"}:
+            assert evidence["caller_disconnect_observed"]
+        if windows:
+            assert evidence["socket_baseline"] is None and evidence["socket_after_cancel"] is None
+            assert evidence["upstream_tls_baseline"] is None and evidence["upstream_tls_after_cancel"] is None
+            assert evidence["socket_observation_kind"] == "windows-owned-tcp-endpoints"
+            if not code:
+                assert evidence["owned_tcp_endpoint_baseline"] == evidence["owned_tcp_endpoint_after_cancel"] == 1
+                assert evidence["established_remote443_proxy_endpoint_at_disconnect"] == 1
+                assert evidence["windows_tcp_endpoint_cleanup_observed"]
+            if scenario in {"ownership-unobserved", "identity-mismatch"}:
+                assert evidence["owned_tcp_endpoint_baseline"] is None
+                assert not evidence["upstream_socket_cleanup_observed"]
         serialized = json.dumps(evidence)
         assert all(secret not in serialized for secret in ("private-text", "private-key", "private-denial"))
     finally:
@@ -408,3 +440,139 @@ def test_cli_selects_one_cancel_phase_and_uses_its_own_result(tmp_path, monkeypa
     assert calls[0]["protocols"] == ()
     assert calls[0]["include_cancel"] == (flag == "--cancel-only")
     assert calls[0]["cancel_after_first_text"] == (flag == "--cancel-after-first-text-only")
+
+
+@pytest.fixture
+def owned_windows_adapter(tmp_path, monkeypatch):
+    """Actual owned Popen, with controlled native calls; not Windows OS proof."""
+    import ctypes
+    import sys
+
+    process = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read()"], stdin=subprocess.PIPE)
+    if not hasattr(process, "_handle"):
+        monkeypatch.setattr(process, "_handle", 12345, raising=False)
+    state = {"pid": process.pid, "creation": 42, "wait": 258, "times_ok": True,
+             "size": 4, "probe_code": 122, "fetch_code": 0, "calls": [], "rows": {2: [], 23: []}}
+
+    class NativeCall:
+        def __init__(self, function):
+            self.function = function
+        def __call__(self, *args):
+            return self.function(*args)
+
+    def get_times(handle, creation, exit_time, kernel, user):
+        ctypes.cast(creation, ctypes.POINTER(ctypes.c_uint32))[0] = state["creation"]
+        return state["times_ok"]
+
+    def tcp_table(buffer, size, ordered, family, table_class, reserved):
+        assert table_class == 5 and reserved == 0
+        state["calls"].append((family, buffer is None))
+        pointer = ctypes.cast(size, ctypes.POINTER(ctypes.c_uint32))
+        rows = state["rows"][family]
+        payload = len(rows).to_bytes(4, "little") + b"".join(bytes(row) for row in rows)
+        if buffer is None:
+            pointer[0] = max(state["size"], len(payload))
+            return state["probe_code"]
+        if state["fetch_code"] != 0:
+            return state["fetch_code"]
+        payload = state.get("payload", payload)
+        assert len(payload) <= pointer[0]
+        ctypes.memmove(buffer, payload, len(payload))
+        pointer[0] = len(payload)
+        return 0
+
+    kernel = type("Kernel", (), {})()
+    kernel.GetProcessId = NativeCall(lambda handle: state["pid"])
+    kernel.WaitForSingleObject = NativeCall(lambda handle, timeout: state["wait"])
+    kernel.GetProcessTimes = NativeCall(get_times)
+    table = NativeCall(tcp_table)
+    dll = type("Dll", (), {"GetExtendedTcpTable": table})()
+    monkeypatch.setattr(qualify.ctypes, "WinDLL", lambda name, **kwargs: kernel if name == "kernel32" else dll, raising=False)
+    try:
+        yield qualify.WindowsOwnedTcp(process), state
+    finally:
+        process.stdin.close()
+        process.wait(timeout=3)
+
+
+def test_windows_owned_tcp_native_layout_network_port_filter_and_transient_rows(owned_windows_adapter):
+    import ctypes
+    import socket
+
+    observer, state = owned_windows_adapter
+    assert observer.creation == 42
+    for family, row_type, stride, pid_offset, port_offset in (
+        (2, qualify._Tcp4Row, 24, 20, 16), (23, qualify._Tcp6Row, 56, 52, 44)
+    ):
+        assert ctypes.sizeof(row_type) == stride
+        assert row_type.pid.offset == pid_offset and row_type.remote_port.offset == port_offset
+        for pid, status, port in ((observer.pid, 5, 443), (observer.pid, 5, 444),
+                                  (observer.pid, 2, 443), (observer.pid, 8, 443), (observer.pid + 1, 5, 443)):
+            row = row_type()
+            row.pid, row.state, row.remote_port = pid, status, socket.htons(port)
+            state["rows"][family].append(row)
+    assert observer.observe() == (8, 2)
+    assert state["calls"] == [(2, True), (2, False), (23, True), (23, False)]
+    assert not any("rows" in name or "buffer" in name for name in vars(observer))
+    state["rows"] = {2: [], 23: []}
+    assert observer.observe() == (0, 0)
+
+
+@pytest.mark.parametrize("failure", ["pid", "creation", "exited", "wait-failed", "times", "missing-api",
+                                     "probe-error", "oversize", "growth", "fetch-error", "short", "truncated"])
+def test_windows_owned_tcp_unavailable_never_reuses_zero_or_another_identity(owned_windows_adapter, failure):
+    observer, state = owned_windows_adapter
+    assert observer.observe() == (0, 0)
+    state["calls"].clear()
+    if failure == "pid":
+        state["pid"] += 1
+    elif failure == "creation":
+        state["creation"] += 1
+    elif failure == "exited":
+        state["wait"] = 0
+    elif failure == "wait-failed":
+        state["wait"] = 0xffffffff
+    elif failure == "times":
+        state["times_ok"] = False
+    elif failure == "missing-api":
+        observer.table = None
+    elif failure == "probe-error":
+        state["probe_code"] = 5
+    elif failure == "oversize":
+        state["size"] = 1024 * 1024 + 1
+    elif failure == "growth":
+        state["fetch_code"] = 122
+    elif failure == "fetch-error":
+        state["fetch_code"] = 87
+    elif failure == "short":
+        state["payload"] = b"\x00" * 3
+    else:
+        state["payload"] = b"\x01\x00\x00\x00"
+    assert observer.observe() == (None, None)
+    if failure == "growth":
+        assert state["calls"] == [(2, True)] + [(2, False)] * 3
+    if failure == "oversize":
+        assert state["calls"] == [(2, True)]
+
+
+def test_windows_owned_tcp_rejects_unowned_schema_and_identity_change_during_snapshot(owned_windows_adapter):
+    observer, state = owned_windows_adapter
+    assert qualify.WindowsOwnedTcp(type("Process", (), {"pid": observer.pid, "_handle": observer.handle})()).observe() == (None, None)
+    original = observer.table.function
+    def changed_after_fetch(*args):
+        result = original(*args)
+        if args[0] is not None and args[3] == 23:
+            state["creation"] += 1
+        return result
+    observer.table.function = changed_after_fetch
+    assert observer.observe() == (None, None)
+
+
+def test_windows_owned_tcp_binding_failure_stays_unavailable(owned_windows_adapter, monkeypatch):
+    observer, state = owned_windows_adapter
+    state["creation"] = 0
+    assert qualify.WindowsOwnedTcp(observer.process).observe() == (None, None)
+    def missing_dll(*args, **kwargs):
+        raise OSError("controlled missing DLL")
+    monkeypatch.setattr(qualify.ctypes, "WinDLL", missing_dll)
+    assert qualify.WindowsOwnedTcp(observer.process).observe() == (None, None)
