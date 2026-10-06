@@ -512,8 +512,11 @@ path.chmod(0o600)
                     "headers_received_before_cancel": False, "billing_cessation_claimed": False,
                     "wait_bound_seconds": self.timeout, "caller_join_bound_seconds": 1, "cleanup_bound_seconds": 3}
         errors = []
+        first_text_at = None
+        first_text_within_bound = False
 
         def reading_caller() -> None:
+            nonlocal first_text_at
             response = None
             try:
                 response = connection.getresponse()
@@ -537,9 +540,10 @@ path.chmod(0o600)
                                 evidence["terminal_observed_before_cancel"] = True
                             text = choice.get("delta", {}).get("content")
                             if isinstance(text, str) and text and not evidence["first_nonempty_text_observed"]:
+                                first_text_at = time.monotonic()
                                 evidence.update(first_nonempty_text_observed=True, first_text_sha256=fingerprint(text),
                                                 first_text_bytes=len(text.encode()),
-                                                first_text_elapsed_seconds=round(time.monotonic() - start, 3))
+                                                first_text_elapsed_seconds=round(first_text_at - start, 3))
             except Exception as error:
                 with lock:
                     errors.append(error if isinstance(error, QualificationFailure)
@@ -572,6 +576,9 @@ path.chmod(0o600)
                     if evidence["first_nonempty_text_observed"] or finished.is_set() or errors:
                         break
                 time.sleep(.01)
+            # Seal the wait result before socket observation can admit late text.
+            with lock:
+                first_text_within_bound = first_text_at is not None and first_text_at < wait_deadline
         finally:
             # Socket observation must not prevent the reader recording a
             # natural terminal while the /proc snapshot is being collected.
@@ -626,6 +633,8 @@ path.chmod(0o600)
             raise QualificationFailure("cancel-request-inactive", evidence=evidence)
         if not finished.is_set() or not evidence["upstream_socket_cleanup_observed"]:
             raise QualificationFailure("cancel-cleanup-unobserved", evidence=evidence)
+        if not first_text_within_bound:
+            raise QualificationFailure("cancel-first-text-timeout", evidence=evidence)
         return evidence
 
 

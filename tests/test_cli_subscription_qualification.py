@@ -238,6 +238,7 @@ def test_tool_continuation_delta_does_not_repeat_text_stream_or_cancellation(tmp
     ("active", None),
     ("natural-finish", "cancel-response-already-ended"),
     ("natural-finish-during-observation", "cancel-response-already-ended"),
+    ("first-text-after-deadline", "cancel-first-text-timeout"),
     ("no-text", "cancel-first-text-unobserved"),
     ("cleanup-unobserved", "cancel-cleanup-unobserved"),
     ("cleanup-observer-missing", "cancel-cleanup-unobserved"),
@@ -268,6 +269,11 @@ def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch
                 return
             active.set()
             self.wfile.write(b'data: {"choices":[{"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n')
+            if scenario == "first-text-after-deadline":
+                while not finish_requested.wait(.005):
+                    self.wfile.write(b'data: {"choices":[{"delta":{"content":""},"finish_reason":null}]}\n\n')
+                    self.wfile.flush()
+                threading.Event().wait(.03)
             if scenario != "no-text":
                 # A terminal in the same text frame must beat cancellation.
                 finish = "stop" if scenario == "natural-finish" else None
@@ -299,7 +305,7 @@ def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch
         def __init__(self):
             self.port = server.server_port
             self.key = "private-key"
-            self.timeout = .5
+            self.timeout = .15 if scenario == "first-text-after-deadline" else .5
             self.process = type("Process", (), {"pid": 123, "poll": lambda self: None})()
 
     def upstream_count(pid):
@@ -310,6 +316,10 @@ def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch
             return None
         if scenario == "inactive-after-text":
             return 0
+        if scenario == "first-text-after-deadline" and active.is_set() and not disconnected.is_set():
+            finish_requested.set()
+            threading.Event().wait(.07)
+            return 1
         if scenario == "natural-finish-during-observation" and active.is_set() and not disconnected.is_set():
             finish_requested.set()
             assert disconnected.wait(2)
@@ -343,6 +353,10 @@ def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch
         if evidence:
             assert evidence["cancel_phase"] == "after-first-nonempty-text"
             assert not evidence["billing_cessation_claimed"]
+        if scenario == "first-text-after-deadline":
+            assert evidence["first_text_elapsed_seconds"] > evidence["wait_bound_seconds"]
+            assert evidence["request_active_at_disconnect"] and evidence["caller_disconnect_observed"]
+            assert evidence["caller_wait_ended"] and evidence["upstream_socket_cleanup_observed"]
         serialized = json.dumps(evidence)
         assert all(secret not in serialized for secret in ("private-text", "private-key", "private-denial"))
     finally:
