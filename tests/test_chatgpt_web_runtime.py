@@ -759,6 +759,54 @@ def test_full_mode_starts_and_stops_owned_tunnel_with_spaced_mcp_paths(
     assert not (home / "tunnel-ownership.json").exists()
 
 
+def test_browser_only_start_preserves_saved_key_without_marking_it_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "runtime"
+    archive = _archive(tmp_path, _fixture_script(home / "executed-marker"))
+    pin = _pin_for(tmp_path, archive.read_bytes())
+    assert _run(home, "install", "--source", str(archive), pin=pin)["_exit_code"] == 0
+    monkeypatch.setenv("CODEXHUB_CHATGPT_WEB_PIN", str(pin))
+    chatgpt_web_runtime.save_settings(
+        home, {"tunnel": {"runtime_key": {"action": "replace", "value": SECRET}}}
+    )
+    saved_path = home / "runtime-settings.json"
+    saved_bytes = saved_path.read_bytes()
+    active_path = home / "active-runtime-settings.json"
+    assert not active_path.exists()
+    real_urlopen = chatgpt_web_runtime.urllib.request.urlopen
+    status_gate_reached = False
+
+    def wait_for_loaded_settings(url: object, *args: object, **kwargs: object) -> object:
+        nonlocal status_gate_reached
+        if isinstance(url, str) and url.endswith("/status") and not status_gate_reached:
+            status_gate_reached = True
+            deadline = time.monotonic() + 5
+            while not active_path.is_file() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert active_path.is_file(), "supervisor did not persist its loaded settings"
+        return real_urlopen(url, *args, **kwargs)
+
+    monkeypatch.setattr(chatgpt_web_runtime.urllib.request, "urlopen", wait_for_loaded_settings)
+    try:
+        started = _start_runtime(home)
+        assert status_gate_reached
+        assert started["process"]["running"] is True
+        assert started["settings_pending_restart"] is True
+        settings = chatgpt_web_runtime.read_settings(home)
+        assert settings["saved"]["tunnel"]["runtime_key_configured"] is True
+        assert settings["active"]["tunnel"]["runtime_key_configured"] is False
+        assert settings["active_state"] == "loaded"
+        assert settings["pending_restart"] is True
+        assert saved_path.read_bytes() == saved_bytes
+        config = json.loads((home / "web-home" / "config.json").read_text(encoding="utf-8"))
+        assert "tunnel" not in config
+        assert SECRET not in json.dumps(settings)
+        assert SECRET not in json.dumps(started)
+    finally:
+        chatgpt_web_runtime.stop_runtime(home, disable=True)
+
+
 def test_settings_saved_during_startup_remain_pending_until_next_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
