@@ -14,6 +14,7 @@ from python_runtime_contract import require_python_313
 require_python_313(__file__)
 
 import argparse
+import ctypes
 from dataclasses import dataclass, field
 import hashlib
 import http.client
@@ -296,6 +297,107 @@ def _upstream_tls_count(pid: int) -> int | None:
         return None
 
 
+class _Tcp4Row(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint32) for name in
+                ("state", "local_addr", "local_port", "remote_addr", "remote_port", "pid")]
+
+
+class _Tcp6Row(ctypes.Structure):
+    _fields_ = [("local_addr", ctypes.c_ubyte * 16), ("local_scope", ctypes.c_uint32),
+                ("local_port", ctypes.c_uint32), ("remote_addr", ctypes.c_ubyte * 16),
+                ("remote_scope", ctypes.c_uint32), ("remote_port", ctypes.c_uint32),
+                ("state", ctypes.c_uint32), ("pid", ctypes.c_uint32)]
+
+
+class WindowsOwnedTcp:
+    """TCP-only counts bound to an actual Popen's retained Windows handle.
+
+    Borrow the Popen handle; only Popen owns/closes it. Never open an arbitrary
+    PID. Both family tables are transient: persist no rows or endpoint addresses.
+    remote443 is a proxy metric, not TLS/request/vendor/billing proof.
+    """
+
+    def __init__(self, process: subprocess.Popen):
+        self.process = process
+        self.creation = None
+        try:
+            if not isinstance(process, subprocess.Popen):
+                raise ValueError("not an owned Popen")
+            self.pid, self.handle = process.pid, int(process._handle)
+            self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            self.table = ctypes.WinDLL("iphlpapi", use_last_error=True).GetExtendedTcpTable
+            self.kernel.GetProcessId.argtypes = [ctypes.c_void_p]
+            self.kernel.GetProcessId.restype = ctypes.c_uint32
+            self.kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            self.kernel.WaitForSingleObject.restype = ctypes.c_uint32
+            self.kernel.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 4
+            self.kernel.GetProcessTimes.restype = ctypes.c_int
+            self.table.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_int,
+                                   ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+            self.table.restype = ctypes.c_uint32
+            self.creation = self._identity()
+        except Exception:
+            # Observation failure must never interrupt the caller-owned cleanup.
+            self.creation = None
+
+    def _identity(self) -> int:
+        if (self.process.pid != self.pid or int(self.process._handle) != self.handle
+                or self.process.poll() is not None
+                or self.kernel.GetProcessId(self.handle) != self.pid
+                or self.kernel.WaitForSingleObject(self.handle, 0) != 258):
+            raise ValueError("owned process unavailable")
+        times = [(ctypes.c_uint32 * 2)() for _ in range(4)]
+        if not self.kernel.GetProcessTimes(self.handle, *(ctypes.byref(value) for value in times)):
+            raise OSError("process creation unavailable")
+        creation = times[0][0] | (times[0][1] << 32)
+        if not creation:
+            raise ValueError("process creation unavailable")
+        return creation
+
+    def _family_counts(self, family: int, row: type[ctypes.Structure]) -> tuple[int, int]:
+        class Table(ctypes.Structure):
+            _fields_ = [("count", ctypes.c_uint32), ("rows", row * 1)]
+
+        size = ctypes.c_uint32()
+        if self.table(None, ctypes.byref(size), False, family, 5, 0) != 122:
+            raise OSError("TCP sizing unavailable")
+        for _ in range(3):
+            if not Table.rows.offset <= size.value <= 1024 * 1024:
+                raise ValueError("TCP allocation bound")
+            capacity = size.value
+            buffer = ctypes.create_string_buffer(capacity)
+            code = self.table(buffer, ctypes.byref(size), False, family, 5, 0)
+            if code == 122:
+                continue
+            if code != 0 or not Table.rows.offset <= size.value <= capacity:
+                raise OSError("TCP fetch unavailable")
+            count = ctypes.c_uint32.from_buffer(buffer).value
+            stride, offset = ctypes.sizeof(row), Table.rows.offset
+            if count > (size.value - offset) // stride:
+                raise ValueError("TCP table truncated")
+            owned = proxy = 0
+            for index in range(count):
+                item = row.from_buffer(buffer, offset + index * stride)
+                if item.pid == self.pid:
+                    owned += 1
+                    proxy += item.state == 5 and socket.ntohs(item.remote_port & 0xffff) == 443
+            return owned, proxy
+        raise OSError("TCP buffer growth bound")
+
+    def observe(self) -> tuple[int | None, int | None]:
+        """Return available owned TCP rows/proxy rows, or two nulls on failure."""
+        try:
+            if self.creation is None or self._identity() != self.creation:
+                return None, None
+            ipv4 = self._family_counts(2, _Tcp4Row)
+            ipv6 = self._family_counts(23, _Tcp6Row)
+            if self._identity() != self.creation:
+                return None, None
+            return ipv4[0] + ipv6[0], ipv4[1] + ipv6[1]
+        except Exception:
+            return None, None
+
+
 def freeze_candidate(repo: Path, destination: Path) -> str:
     """Copy a bounded runtime snapshot so a restart cannot load worker edits."""
     digest = hashlib.sha256()
@@ -331,6 +433,7 @@ class PrivateGateway:
                         CODEX_PROXY_REQUEST_TIMEOUT_SECONDS=str(timeout),
                         CODEX_PROXY_GATEWAY_AUTO_RETRY_ENABLED="0", PYTHONPATH=str(repo / "src-python"))
         self.process = None
+        self.windows_tcp = None
         self.log = None
         setup = '''import json, os, sys
 from pathlib import Path
@@ -365,10 +468,17 @@ path.chmod(0o600)
 
     def start(self) -> None:
         self.log = (self.root / "gateway-private.log").open("ab")
+        spawn_options = {"env": self.env}
+        if os.name == "nt":
+            # Bypass the venv redirector so the retained Popen handle owns the
+            # socket interpreter, while getpath still selects the same venv.
+            spawn_options = {"executable": sys._base_executable,
+                             "env": {**self.env, "__PYVENV_LAUNCHER__": sys.executable}}
         self.process = subprocess.Popen([sys.executable, str(self.repo / "src-python/codex_proxy.py"),
                                          "--host", "127.0.0.1", "--port", str(self.port)],
-                                        env=self.env, cwd=self.root, stdout=self.log, stderr=self.log,
-                                        start_new_session=os.name != "nt")
+                                        cwd=self.root, stdout=self.log, stderr=self.log,
+                                        start_new_session=os.name != "nt", **spawn_options)
+        self.windows_tcp = WindowsOwnedTcp(self.process) if os.name == "nt" else None
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
@@ -397,6 +507,7 @@ path.chmod(0o600)
                 subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
             self.process.wait(timeout=5)
+            self.windows_tcp = None
             self.process = None
         if self.log is not None:
             self.log.close()
@@ -499,8 +610,9 @@ path.chmod(0o600)
         """Disconnect an active text stream, observing only this Gateway's sockets."""
         assert self.process is not None
         start = time.monotonic()
-        baseline = _socket_count(self.process.pid)
-        upstream_baseline = _upstream_tls_count(self.process.pid)
+        windows = self.windows_tcp is not None
+        baseline, upstream_baseline = (self.windows_tcp.observe() if windows else
+                                      (_socket_count(self.process.pid), _upstream_tls_count(self.process.pid)))
         payload = request_for("chat", model, [{"role": "user", "content":
             "Write an extremely long numbered list of unique sentences. Continue for at least 10000 lines."}], stream=True)
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout)
@@ -581,8 +693,9 @@ path.chmod(0o600)
                 first_text_within_bound = first_text_at is not None and first_text_at < wait_deadline
         finally:
             # Socket observation must not prevent the reader recording a
-            # natural terminal while the /proc snapshot is being collected.
-            upstream_at_disconnect = _upstream_tls_count(self.process.pid)
+            # natural terminal while the owned snapshot is being collected.
+            upstream_at_disconnect = (self.windows_tcp.observe()[1] if windows else
+                                      _upstream_tls_count(self.process.pid))
             with lock:
                 terminal_at_disconnect = evidence["terminal_observed_before_cancel"]
                 finished_at_disconnect = finished.is_set()
@@ -603,24 +716,33 @@ path.chmod(0o600)
                 thread.join(timeout=1)
         cleanup_start = time.monotonic()
         cleanup_deadline = cleanup_start + 3
-        count = _socket_count(self.process.pid)
-        upstream_after = _upstream_tls_count(self.process.pid)
+        count, upstream_after = (self.windows_tcp.observe() if windows else
+                                 (_socket_count(self.process.pid), _upstream_tls_count(self.process.pid)))
         while (baseline is not None and upstream_baseline is not None and count is not None and upstream_after is not None
                and (count > baseline or upstream_after > upstream_baseline) and time.monotonic() < cleanup_deadline):
             time.sleep(.05)
-            count = _socket_count(self.process.pid)
-            upstream_after = _upstream_tls_count(self.process.pid)
+            count, upstream_after = (self.windows_tcp.observe() if windows else
+                                     (_socket_count(self.process.pid), _upstream_tls_count(self.process.pid)))
         evidence.update(terminal_observed_before_cancel=terminal_at_disconnect,
                         caller_finished_before_cancel=finished_at_disconnect,
                         request_active_at_disconnect=active and disconnected, caller_disconnect_observed=disconnected,
                         caller_wait_ended=finished.is_set(), caller_failure_observed=bool(errors),
-                        socket_baseline=baseline, socket_after_cancel=count,
-                        upstream_tls_baseline=upstream_baseline, upstream_tls_at_disconnect=upstream_at_disconnect,
-                        upstream_tls_after_cancel=upstream_after,
+                        socket_baseline=None if windows else baseline, socket_after_cancel=None if windows else count,
+                        upstream_tls_baseline=None if windows else upstream_baseline,
+                        upstream_tls_at_disconnect=None if windows else upstream_at_disconnect,
+                        upstream_tls_after_cancel=None if windows else upstream_after,
                         cleanup_elapsed_seconds=round(time.monotonic() - cleanup_start, 3),
                         upstream_socket_cleanup_observed=(active and disconnected and baseline is not None and count is not None and count <= baseline
                             and upstream_baseline is not None and upstream_after == upstream_baseline
-                            and self.process.poll() is None))
+                            and self.process.poll() is None
+                            and (not windows or time.monotonic() < cleanup_deadline)))
+        if windows:
+            evidence.update(socket_observation_kind="windows-owned-tcp-endpoints",
+                            owned_tcp_endpoint_baseline=baseline, owned_tcp_endpoint_after_cancel=count,
+                            established_remote443_proxy_endpoint_baseline=upstream_baseline,
+                            established_remote443_proxy_endpoint_at_disconnect=upstream_at_disconnect,
+                            established_remote443_proxy_endpoint_after_cancel=upstream_after,
+                            windows_tcp_endpoint_cleanup_observed=evidence["upstream_socket_cleanup_observed"])
         if error_at_disconnect is not None:
             raise QualificationFailure(error_at_disconnect.code, error_at_disconnect.status, evidence)
         if not evidence["first_nonempty_text_observed"]:
