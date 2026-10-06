@@ -409,9 +409,10 @@ def parse_turn(stdout, child, timed_out, nonce, fixture_capture=None):
 
 
 def aggregate_fixture_observations(captures, tickets, observation, requests):
-    """Join correlated reports; distinguish unavailable expected Cursor evidence."""
+    """Join correlated reports; route expectation is not an actual native receipt."""
     reports = []
-    native_boundaries = ("adaptedhistory", "servedhistoryblob", "nativefield", "canonicalchunks")
+    native_boundaries = ("adaptedhistory", "servedhistoryblob", "nativefield", "canonicalchunks",
+                         "officialoutgoinghistory", "officialreceived")
     for capture in captures:
         item = capture.report()
         request_id = capture.correlation["request_id"]
@@ -435,7 +436,7 @@ def aggregate_fixture_observations(captures, tickets, observation, requests):
                 # cause or the native route/bytes actually observed.
                 expected = any(row.get("fixture_request_id") == request_id
                                and row.get("epoch") == capture.correlation["epoch"]
-                               and row.get("model") == CURSOR_MODEL for row in requests)
+                               and row.get("model") in (CURSOR_MODEL, OFFICIAL_MODEL) for row in requests)
                 if expected:
                     item["native_report"] = {"state": "unavailable", "reason": unavailable, "cause": "unknown"}
                     for name in native_boundaries:
@@ -446,6 +447,9 @@ def aggregate_fixture_observations(captures, tickets, observation, requests):
                 for name in native_boundaries:
                     item["boundaries"][name] = native_report["boundaries"][name]
                 item["native_capture_failure"] = native_report["capture_failure"]
+                for name in ("actual_route", "opening_association"):
+                    if name in native_report:
+                        item[name] = native_report[name]
         reports.append(item)
     return reports
 
@@ -571,7 +575,7 @@ def run_case(case, checkout, source_codex, source_user, codex, timeout, observat
                     if observe_this:
                         capture.guard(capture.leaves, "callerpayload", parsed.get("input", []) if isinstance(parsed, dict) else [])
                         row["fixture_request_id"] = correlation["request_id"]
-                        tap = observation.DownstreamTap(capture)
+                        tap = observation.DownstreamTap(capture, official_payload=parsed if isinstance(parsed, dict) and parsed.get("model") == OFFICIAL_MODEL else None)
                         connection.connect()
                         ticket_path = tickets / f"peer-{connection.sock.getsockname()[1]}.json"
                         observation.private_json(ticket_path, correlation)
