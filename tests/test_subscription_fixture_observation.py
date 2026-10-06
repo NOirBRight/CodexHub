@@ -711,7 +711,8 @@ def test_freeze_hashes_and_executes_exact_wrapper_bytes(tmp_path):
 @pytest.mark.parametrize("mode", ["exact", "toolonly", "utf8", "deletion", "u200b", "partial", "unapproved",
                                   "identity", "order", "delta", "opaque", "undeclared", "missing", "error",
                                   "bytes", "leaves", "parts", "arguments", "ownererror", "captureerror", "frozen", "readerror",
-                                  "item-identity", "failed"])
+                                  "item-identity", "failed", "argument-index-bool", "text-index-float",
+                                  "item-index-bool", "item-index-float"])
 def test_public_official_transport_relay_capture_and_join(tmp_path, monkeypatch, mode):
     """Authored offline bytes through real pooled transport and public relay, not a provider trace."""
     from urllib.request import Request
@@ -761,6 +762,14 @@ def test_public_official_transport_relay_capture_and_join(tmp_path, monkeypatch,
         events[3]["delta"] += "wrong"
     if mode == "item-identity":
         events[3]["item_id"] = "distinct-actual-call"
+    malformed_index = {
+        "argument-index-bool": ("response.function_call_arguments.delta", False),
+        "text-index-float": ("response.output_text.done", 1.0),
+        "item-index-bool": ("response.output_item.done", False),
+        "item-index-float": ("response.output_item.done", 0.0),
+    }.get(mode)
+    if malformed_index:
+        next(event for event in events if event["type"] == malformed_index[0])["output_index"] = malformed_index[1]
     if mode != "partial":
         events.append({"type": "response.completed", "response": {"id": "actual-response", "status": "completed", "output": output}})
     if mode == "failed":
@@ -895,7 +904,7 @@ def test_public_official_transport_relay_capture_and_join(tmp_path, monkeypatch,
     assert (tmp_path / (correlation["request_id"] + ".json")).exists(), "Official public transport capture missing"
     assert rows["canonicalchunks"]["state"] == rows["servedhistoryblob"]["state"] == "not-applicable"
     native = rows["officialreceived"]
-    good = mode in ("exact", "toolonly", "utf8", "deletion", "u200b", "unapproved", "frozen")
+    good = mode in ("exact", "toolonly", "utf8", "deletion", "u200b", "frozen")
     assert native["complete"] is good
     assert joined["actual_route"] == "official"
     assert joined["opening_association"]["gateway_request_sha256"] == hashlib.sha256(b"actual-gateway-request").hexdigest()
@@ -906,7 +915,7 @@ def test_public_official_transport_relay_capture_and_join(tmp_path, monkeypatch,
         assert leaf["channel"] == "arguments.message" and leaf["item_sha256"] != leaf["call_sha256"]
         assert leaf["utf8_bytes"] == len(result.encode())
         assert leaf["exact_expected_reverse"] is (mode in ("exact", "toolonly", "utf8", "frozen"))
-        assert ("utf8_hex" in leaf) is (mode != "unapproved")
+        assert "utf8_hex" in leaf
         assert leaf["response_sha256"] == hashlib.sha256(b"actual-response").hexdigest()
         assert leaf["output_index"] == 0 and leaf["event_ordinal"] == 6
         assert leaf["part_count"] == 1
@@ -918,3 +927,20 @@ def test_public_official_transport_relay_capture_and_join(tmp_path, monkeypatch,
             assert rows["downstreamSSEcompleted"]["utf8_bytes"] == 0
     else:
         assert "utf8_hex" not in json.dumps(native)
+        assert native["cause"] == "unknown"
+        if malformed_index:
+            assert joined["capture_failure"] == "observation-incomplete"
+            assert rows["downstreamOfficialmessages"]["complete"] is False
+            assert "utf8_hex" not in json.dumps(rows["downstreamOfficialmessages"])
+        elif mode == "unapproved":
+            assert joined["capture_failure"] is None
+            for boundary in (native, rows["downstreamOfficialmessages"]):
+                assert boundary["state"] == "unavailable" and boundary["complete"] is False
+                assert boundary["cause"] == "unknown" and boundary["terminal_event_ordinal"] == len(events)
+                assert len(boundary["leaves"]) == 2
+                for leaf in boundary["leaves"]:
+                    assert leaf["state"] == "unavailable" and leaf["complete"] is False
+                    assert leaf["rejection"] == "unapproved"
+                    assert leaf["sha256"] == hashlib.sha256(result.encode()).hexdigest()
+                    assert leaf["utf8_bytes"] == len(result.encode())
+                assert "utf8_hex" not in json.dumps(boundary) and "codepoints" not in json.dumps(boundary)

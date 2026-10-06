@@ -489,7 +489,10 @@ class OfficialTap:
                 "type": item.get("type"), "name": item.get("name"), "namespace": item.get("namespace")}
         elif kind in ("response.function_call_arguments.delta", "response.function_call_arguments.done",
                       "response.output_text.delta", "response.output_text.done"):
-            state = self.items[event["output_index"]]
+            index = event["output_index"]
+            if type(index) is not int or index < 0 or index not in self.items:
+                raise ValueError("official-output-index")
+            state = self.items[index]
             if identity(event["item_id"]) != state["id"] or state["done"] is not None:
                 raise ValueError("official-item-identity")
             if kind.startswith("response.function_call_arguments.") and state["selected_call"]:
@@ -529,6 +532,8 @@ class OfficialTap:
                     state["texts"][index] = (value, hashlib.sha256(data).hexdigest())
         elif kind == "response.output_item.done":
             index, item = event["output_index"], event["item"]
+            if type(index) is not int or index < 0 or index not in self.items:
+                raise ValueError("official-output-index")
             state = self.items[index]
             if (identity(item.get("id")) != state["id"] or state["done"] is not None or item.get("type") != state["type"]
                     or item.get("name") != state["name"] or item.get("namespace") != state["namespace"]):
@@ -590,7 +595,11 @@ class OfficialTap:
                 if good and row["utf8_bytes"] <= MAX_VALUE:
                     # BoundedValue's summary deliberately withheld raw while partial.
                     row.update(value.summary(self.capture.plan, True))
-            self.capture.boundaries[self.boundary] = {"state": "observed" if self.rows else "unavailable",
+                if row["rejection"] == "unapproved":
+                    row.update(state="unavailable", complete=False)
+            unapproved = any(row["rejection"] == "unapproved" for row in self.rows)
+            good = good and not unapproved
+            self.capture.boundaries[self.boundary] = {"state": "observed" if self.rows and not unapproved else "unavailable",
                 "complete": good, "leaves": self.rows, "cause": "unknown" if not good else None,
                 "terminal_event_ordinal": self.events if self.terminal else None,
                 "coverage": ("successful response reader receives; may be read-ahead; consumption/forwarding unproven"
