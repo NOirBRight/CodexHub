@@ -300,6 +300,16 @@ def test_tool_continuation_delta_does_not_repeat_text_stream_or_cancellation(tmp
     ("ownership-unobserved", "cancel-ownership-unobserved", False),
     ("inactive-after-text", "cancel-request-inactive", False),
     ("denied", "not-eligible", False),
+    ("linux-fd-close", None, False),
+    ("linux-process-missing", "cancel-ownership-unobserved", False),
+    ("linux-directory-lost", "cancel-ownership-unobserved", False),
+    ("linux-enumeration-lost", "cancel-ownership-unobserved", False),
+    ("linux-directory-lost-at-end", "cancel-ownership-unobserved", False),
+    ("linux-directory-denied", "cancel-ownership-unobserved", False),
+    ("linux-readlink-denied", "cancel-ownership-unobserved", False),
+    ("linux-readlink-error", "cancel-ownership-unobserved", False),
+    ("linux-table-denied", "cancel-ownership-unobserved", False),
+    ("linux-table-error", "cancel-ownership-unobserved", False),
     pytest.param("active", None, True, id="windows-active"),
     pytest.param("ownership-unobserved", "cancel-ownership-unobserved", True, id="windows-unavailable"),
     pytest.param("identity-mismatch", "cancel-ownership-unobserved", True, id="windows-identity-mismatch"),
@@ -314,6 +324,7 @@ def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch
     """Real local HTTP/SSE; socket ownership is controlled engineering evidence."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     import threading
+    import errno
 
     active, disconnected = threading.Event(), threading.Event()
     finish_requested = threading.Event()
@@ -404,8 +415,75 @@ def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch
             proxy = upstream_count(123)
             return (1 + int(active.is_set() and not disconnected.is_set()), proxy) if proxy is not None else (None, None)
 
-    monkeypatch.setattr(qualify, "_upstream_tls_count", (lambda pid: None) if windows else upstream_count)
-    monkeypatch.setattr(qualify, "_socket_count", lambda pid: None if windows else 1 + int(active.is_set() and not disconnected.is_set()))
+    filesystem_faults = []
+    if scenario.startswith("linux-"):
+        directory_lost = False
+
+        def observing_active():
+            return active.is_set() and not disconnected.is_set()
+
+        class FilesystemPort:
+            """External synthetic proc inputs; both owning helpers remain real."""
+            def __init__(self, table=None):
+                self.table = table
+
+            def exists(self):
+                return scenario != "linux-process-missing" and not directory_lost
+
+            def iterdir(self):
+                nonlocal directory_lost
+                if observing_active() and scenario == "linux-directory-denied":
+                    filesystem_faults.append("EACCES")
+                    raise PermissionError(errno.EACCES, "controlled")
+                # Distinct descriptors share an inode: FD counts must not dedupe.
+                yield "shared-0"
+                if observing_active() and scenario == "linux-enumeration-lost":
+                    directory_lost = True
+                    filesystem_faults.append("ENOENT-directory")
+                    raise FileNotFoundError(errno.ENOENT, "controlled")
+                yield "shared-1"
+                if observing_active():
+                    yield "active"
+                    if scenario == "linux-fd-close":
+                        yield "closing"
+                    if scenario == "linux-directory-lost-at-end":
+                        directory_lost = True
+                        filesystem_faults.append("ENOENT-directory")
+
+            def read_text(self):
+                if observing_active() and (
+                        scenario == "linux-table-denied" and self.table == "tcp"
+                        or scenario == "linux-table-error" and self.table == "tcp6"):
+                    code = errno.EACCES if scenario == "linux-table-denied" else errno.EIO
+                    filesystem_faults.append("EACCES" if code == errno.EACCES else "EIO")
+                    raise OSError(code, "controlled")
+                return "header\n" + ("0: 00000000:0000 00000000:01BB 01 0 0 0 0 0 200\n"
+                                     if observing_active() and self.table == "tcp" else "")
+
+        def filesystem_path(*parts):
+            if parts == ("/proc/123/fd",):
+                return FilesystemPort()
+            assert parts in (("/proc/net", "tcp"), ("/proc/net", "tcp6"))
+            return FilesystemPort(parts[1])
+
+        def readlink(path):
+            nonlocal directory_lost
+            if path == "closing":
+                filesystem_faults.append("ENOENT-fd")
+                raise FileNotFoundError(errno.ENOENT, "controlled")
+            if path == "active" and scenario in {"linux-directory-lost", "linux-readlink-denied", "linux-readlink-error"}:
+                directory_lost = scenario == "linux-directory-lost"
+                error = errno.ENOENT if directory_lost else errno.EACCES if scenario == "linux-readlink-denied" else errno.EIO
+                filesystem_faults.append("ENOENT-directory" if directory_lost else "EACCES" if error == errno.EACCES else "EIO")
+                raise OSError(error, "controlled")
+            assert path in {"shared-0", "shared-1", "active"}
+            return "socket:[200]" if path == "active" else "socket:[100]"
+
+        monkeypatch.setattr(qualify, "Path", filesystem_path)
+        monkeypatch.setattr(qualify.os, "readlink", readlink)
+    else:
+        monkeypatch.setattr(qualify, "_upstream_tls_count", (lambda pid: None) if windows else upstream_count)
+        monkeypatch.setattr(qualify, "_socket_count", lambda pid: None if windows else 1 + int(active.is_set() and not disconnected.is_set()))
     try:
         if code:
             with pytest.raises(qualify.QualificationFailure) as error:
@@ -444,6 +522,19 @@ def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch
             if scenario in {"ownership-unobserved", "identity-mismatch"}:
                 assert evidence["owned_tcp_endpoint_baseline"] is None
                 assert not evidence["upstream_socket_cleanup_observed"]
+        if scenario == "linux-fd-close":
+            assert "ENOENT-fd" in filesystem_faults
+            assert evidence["socket_baseline"] == evidence["socket_after_cancel"] == 2
+            assert evidence["upstream_tls_baseline"] == evidence["upstream_tls_after_cancel"] == 0
+            assert evidence["upstream_tls_at_disconnect"] == 1
+        elif scenario.startswith("linux-"):
+            assert evidence["upstream_tls_at_disconnect"] is None
+            assert not evidence["request_active_at_disconnect"]
+            if scenario == "linux-process-missing":
+                assert evidence["socket_baseline"] is evidence["upstream_tls_baseline"] is None
+            else:
+                assert evidence["socket_baseline"] == 2 and evidence["upstream_tls_baseline"] == 0
+                assert filesystem_faults
         serialized = json.dumps(evidence)
         assert all(secret not in serialized for secret in ("private-text", "private-key", "private-denial"))
     finally:

@@ -15,6 +15,7 @@ require_python_313(__file__)
 
 import argparse
 import ctypes
+import errno
 from dataclasses import dataclass, field
 import hashlib
 import http.client
@@ -268,24 +269,39 @@ def decode_stream(protocol: str, events: Iterator[dict[str, Any] | str]) -> Repl
     return Reply(text, [], [], usage, finish, count)
 
 
-def _socket_count(pid: int) -> int | None:
+def _socket_inodes(pid: int) -> list[str] | None:
+    """One inode per surviving socket descriptor, including duplicate FDs."""
     directory = Path(f"/proc/{pid}/fd")
-    if not directory.exists():
-        return None
     try:
-        return sum(os.readlink(path).startswith("socket:[") for path in directory.iterdir())
+        if not directory.exists():
+            return None
+        inodes = []
+        for path in directory.iterdir():
+            try:
+                target = os.readlink(path)
+            except OSError as error:
+                if error.errno != errno.ENOENT or not directory.exists():
+                    raise
+                continue
+            if target.startswith("socket:["):
+                inodes.append(target[8:-1])
+        return inodes if directory.exists() else None
     except OSError:
         return None
 
 
+def _socket_count(pid: int) -> int | None:
+    inodes = _socket_inodes(pid)
+    return len(inodes) if inodes is not None else None
+
+
 def _upstream_tls_count(pid: int) -> int | None:
     """Observe this private Gateway's established vendor TLS sockets on Linux."""
-    directory = Path(f"/proc/{pid}/fd")
-    if not directory.exists():
+    descriptors = _socket_inodes(pid)
+    if descriptors is None:
         return None
+    inodes = set(descriptors)
     try:
-        inodes = {target[8:-1] for path in directory.iterdir()
-                  if (target := os.readlink(path)).startswith("socket:[")}
         count = 0
         for table in ("tcp", "tcp6"):
             for line in Path("/proc/net", table).read_text().splitlines()[1:]:
