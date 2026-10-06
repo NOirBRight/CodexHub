@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import threading
+import select
+import socket
 import time
 from collections.abc import Callable
 from typing import Any
@@ -10,6 +12,30 @@ from typing import Any
 
 GATEWAY_USER_REQUESTED_SHUTDOWN_BUDGET_SECONDS = 2.0
 USER_REQUESTED_SHUTDOWN_OUTCOME = "user_requested_shutdown"
+
+
+def watch_downstream_disconnect(sock: socket.socket | None) -> threading.Event:
+    """Cancel this admitted request when its local caller disconnects."""
+    stop = threading.Event()
+    admission = active_gateway_request()
+    if sock is None or admission is None:
+        return stop
+
+    def watch() -> None:
+        while not stop.is_set() and not admission.cancelled:
+            try:
+                readable, _, errored = select.select([sock], [], [sock], 0.2)
+                if stop.is_set() or not readable and not errored:
+                    continue
+                if sock.recv(1, socket.MSG_PEEK) == b"" or errored:
+                    admission.cancel()
+                    return
+            except (OSError, ValueError):
+                admission.cancel()
+                return
+
+    threading.Thread(target=watch, name="gateway-downstream-cancel", daemon=True).start()
+    return stop
 
 
 class GatewayUserRequestedShutdown(RuntimeError):

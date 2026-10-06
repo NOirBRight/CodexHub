@@ -985,7 +985,8 @@ def _external_upstream(
             provider_id=provider_id,
             model_slug=slug,
         )
-    auth_mode = provider_auth_mode(provider_id) or "api_key"
+    from subscription_exchange import AUTH_MODE, is_subscription_provider
+    auth_mode = AUTH_MODE if is_subscription_provider(provider_id) else provider_auth_mode(provider_id) or "api_key"
     return {
         "name": external_model["upstream_name"],
         "provider_id": provider_id,

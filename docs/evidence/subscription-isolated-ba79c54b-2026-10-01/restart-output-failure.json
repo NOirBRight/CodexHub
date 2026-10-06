@@ -1,0 +1,23 @@
+{
+  "case": "cursor-to-official",
+  "check": "restart_exact",
+  "expected_length": 24,
+  "observed_length": 23,
+  "observed_zero_width_count": 0,
+  "response_matches_single_character_deletion": true,
+  "matching_deletion_positions_zero_based": [
+    10,
+    11,
+    12
+  ],
+  "all_requests_http_200": true,
+  "caller_exits": [
+    0,
+    0
+  ],
+  "caller_timed_out": false,
+  "gateway_restart_observed": true,
+  "completed_calls_replayed": true,
+  "responsible_layer": "unproven; raw successful upstream text is not retained by this harness",
+  "state": "failed; no output repair or retry"
+}

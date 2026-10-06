@@ -1,0 +1,2808 @@
+{
+  "scope": "isolated actual Codex and production Gateway; passive byte-preserving observer; no injected codec",
+  "candidate_sha": "e9449930e3cc6e5c8812a2862471b1ca88c36a5d",
+  "codex_version": "codex-cli 0.159.3",
+  "case_timeout_seconds": 180,
+  "total_timeout_seconds": 240,
+  "platform": "linux",
+  "cases": [
+    {
+      "case": "official-to-cursor",
+      "checks": {
+        "exact_selected_model_identity": true,
+        "actual_custom_exec": true,
+        "actual_fixture_tool_result": true,
+        "first_exact": true,
+        "one_child": true,
+        "parent_did_not_read": true,
+        "spawn": true,
+        "same_child_followup": true,
+        "wait": true,
+        "child_read_twice": true,
+        "child_both_results": true,
+        "direction_models": true,
+        "actual_gateway_restart": true,
+        "fresh_caller": true,
+        "completed_calls_replayed": true,
+        "restart_exact": true,
+        "passed": true
+      },
+      "turns": [
+        {
+          "exit": 0,
+          "pid": 275395,
+          "timed_out": false,
+          "finals": [
+            "815f85322a8ca9d20ed97cb5\n5bc79de02d9ac8a22358f518"
+          ],
+          "errors": []
+        },
+        {
+          "exit": 0,
+          "pid": 297987,
+          "timed_out": false,
+          "finals": [
+            "5bc79de02d9ac8a22358f518"
+          ],
+          "errors": []
+        }
+      ],
+      "requests": [
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "gpt-6-astra",
+          "requested_reasoning_effort": "high",
+          "parallel_tool_calls": false,
+          "input_types": [
+            "additional_tools",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message"
+          ],
+          "input_sha256": "294a41e05f2ae276f450a5be5b3ed79100840956424650ef4bd59f8e40d7e615",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input_async",
+              "schema_sha256": "f1fbb40b4d11546ee3e2cb870b705d7dfc86e2d646668abe8ef5749442256812",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "sleep",
+              "schema_sha256": "8b5ae0633744b7eb44c4a7212032f63982726a8a0ababf054931997d04966547",
+              "namespace": "clock"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            }
+          ],
+          "tool_outputs": [],
+          "history_calls": [],
+          "agent_messages": [],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "cursor-subscription/gpt-5.6-luna-high",
+          "requested_reasoning_effort": "absent",
+          "parallel_tool_calls": true,
+          "input_types": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "agent_message"
+          ],
+          "input_sha256": "d58832009cf2841534186f11a87b3dcd7bfa6ffb814086dd719d9f7c329e28d5",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637"
+            },
+            {
+              "type": "function",
+              "name": "exec_command",
+              "schema_sha256": "a598ae291787a2a763c4ef3479636ad2aa34cd442e1c1ef51d52567ea96003c6"
+            },
+            {
+              "type": "function",
+              "name": "write_stdin",
+              "schema_sha256": "6a7b92584883e01d395fcb870e2fa35bad550c87bcea16ed267c36bd5835c5d5"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4"
+            },
+            {
+              "type": "custom",
+              "name": "apply_patch",
+              "schema_sha256": "f18c24151d79bf0ed1908d888037ebbc018980ec374f7009e0bfdf618cacb47c"
+            },
+            {
+              "type": "function",
+              "name": "view_image",
+              "schema_sha256": "60d940fffd61ebeac814199d38edb5b52e1031773e7b581ebfcac257a3947340"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "get_goal",
+              "schema_sha256": "9284f72895b68d5da186e57484e6016aaea4ebb94234017590759919bde51cc4"
+            },
+            {
+              "type": "function",
+              "name": "create_goal",
+              "schema_sha256": "caf39db4551d71d4e9e46c176f38e61dcfbf024b2346157601d5a53107c31966"
+            },
+            {
+              "type": "function",
+              "name": "update_goal",
+              "schema_sha256": "7e0919ed7de59d3f73b66a742b9a05f155a89f39186cceb90baf2d3ed9eff40c"
+            }
+          ],
+          "tool_outputs": [],
+          "history_calls": [],
+          "agent_messages": [
+            {
+              "author_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "recipient_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "gpt-6-astra",
+          "requested_reasoning_effort": "high",
+          "parallel_tool_calls": false,
+          "input_types": [
+            "additional_tools",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output"
+          ],
+          "input_sha256": "d2786f1cbe18ed0c7848cea3f32d679e7cbc90cf76313da2e3a4fc8c72a130f0",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input_async",
+              "schema_sha256": "f1fbb40b4d11546ee3e2cb870b705d7dfc86e2d646668abe8ef5749442256812",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "sleep",
+              "schema_sha256": "8b5ae0633744b7eb44c4a7212032f63982726a8a0ababf054931997d04966547",
+              "namespace": "clock"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "function_call_output",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "f780231fa02bbcb7cf15b74d7f426b5683d2cb7d9f648253f728a14e51e4ec31",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "fa2444796e729789c163ad372a96f16788aaae72a66f1c170fff059f24e312e0",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "cursor-subscription/gpt-5.6-luna-high",
+          "requested_reasoning_effort": "absent",
+          "parallel_tool_calls": true,
+          "input_types": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "agent_message",
+            "custom_tool_call",
+            "custom_tool_call_output"
+          ],
+          "input_sha256": "66ef88b0bfae2d1fc7f0ce5a2ab9b6794bad00e1b8425417500e19a621ec9533",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637"
+            },
+            {
+              "type": "function",
+              "name": "exec_command",
+              "schema_sha256": "a598ae291787a2a763c4ef3479636ad2aa34cd442e1c1ef51d52567ea96003c6"
+            },
+            {
+              "type": "function",
+              "name": "write_stdin",
+              "schema_sha256": "6a7b92584883e01d395fcb870e2fa35bad550c87bcea16ed267c36bd5835c5d5"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4"
+            },
+            {
+              "type": "custom",
+              "name": "apply_patch",
+              "schema_sha256": "f18c24151d79bf0ed1908d888037ebbc018980ec374f7009e0bfdf618cacb47c"
+            },
+            {
+              "type": "function",
+              "name": "view_image",
+              "schema_sha256": "60d940fffd61ebeac814199d38edb5b52e1031773e7b581ebfcac257a3947340"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "get_goal",
+              "schema_sha256": "9284f72895b68d5da186e57484e6016aaea4ebb94234017590759919bde51cc4"
+            },
+            {
+              "type": "function",
+              "name": "create_goal",
+              "schema_sha256": "caf39db4551d71d4e9e46c176f38e61dcfbf024b2346157601d5a53107c31966"
+            },
+            {
+              "type": "function",
+              "name": "update_goal",
+              "schema_sha256": "7e0919ed7de59d3f73b66a742b9a05f155a89f39186cceb90baf2d3ed9eff40c"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "custom_tool_call_output",
+              "call_sha256": "4b44240e4794912112d0534c3a1b7b865f5711ba65362cc2957c2d6991707e28",
+              "item_sha256": "4d6e43b9a8ab2b4f734304a6833ed66f32c2f8becce7bef6ab763a7f5076b54f",
+              "fixture_present": true,
+              "reversed_fixture_present": false
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "custom_tool_call",
+              "name": "exec",
+              "namespace": null,
+              "call_sha256": "4b44240e4794912112d0534c3a1b7b865f5711ba65362cc2957c2d6991707e28",
+              "item_sha256": "6b36e1ece148825bb8668e736d30b6dfd32e6f85cde28a2c119c01f36258ac8e",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [
+            {
+              "author_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "recipient_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "cursor-subscription/gpt-5.6-luna-high",
+          "requested_reasoning_effort": "absent",
+          "parallel_tool_calls": true,
+          "input_types": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "agent_message",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "function_call",
+            "function_call_output"
+          ],
+          "input_sha256": "045ff0e650df4b7f0cc0036548863f20091fb9d48c434e37ba8238d9214d3c02",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637"
+            },
+            {
+              "type": "function",
+              "name": "exec_command",
+              "schema_sha256": "a598ae291787a2a763c4ef3479636ad2aa34cd442e1c1ef51d52567ea96003c6"
+            },
+            {
+              "type": "function",
+              "name": "write_stdin",
+              "schema_sha256": "6a7b92584883e01d395fcb870e2fa35bad550c87bcea16ed267c36bd5835c5d5"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4"
+            },
+            {
+              "type": "custom",
+              "name": "apply_patch",
+              "schema_sha256": "f18c24151d79bf0ed1908d888037ebbc018980ec374f7009e0bfdf618cacb47c"
+            },
+            {
+              "type": "function",
+              "name": "view_image",
+              "schema_sha256": "60d940fffd61ebeac814199d38edb5b52e1031773e7b581ebfcac257a3947340"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "get_goal",
+              "schema_sha256": "9284f72895b68d5da186e57484e6016aaea4ebb94234017590759919bde51cc4"
+            },
+            {
+              "type": "function",
+              "name": "create_goal",
+              "schema_sha256": "caf39db4551d71d4e9e46c176f38e61dcfbf024b2346157601d5a53107c31966"
+            },
+            {
+              "type": "function",
+              "name": "update_goal",
+              "schema_sha256": "7e0919ed7de59d3f73b66a742b9a05f155a89f39186cceb90baf2d3ed9eff40c"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "custom_tool_call_output",
+              "call_sha256": "4b44240e4794912112d0534c3a1b7b865f5711ba65362cc2957c2d6991707e28",
+              "item_sha256": "4d6e43b9a8ab2b4f734304a6833ed66f32c2f8becce7bef6ab763a7f5076b54f",
+              "fixture_present": true,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "aaec6b82a5eef63b1536535b000772a56482baaa96319f77784b1e1950a2c1fc",
+              "item_sha256": "0a7c49d2a56e96d1080d6f684dcc1cb4c86f8fe0d3eb5446d1e2f3d5d01c6bc2",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "custom_tool_call",
+              "name": "exec",
+              "namespace": null,
+              "call_sha256": "4b44240e4794912112d0534c3a1b7b865f5711ba65362cc2957c2d6991707e28",
+              "item_sha256": "6b36e1ece148825bb8668e736d30b6dfd32e6f85cde28a2c119c01f36258ac8e",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "send_message",
+              "namespace": "collaboration",
+              "call_sha256": "aaec6b82a5eef63b1536535b000772a56482baaa96319f77784b1e1950a2c1fc",
+              "item_sha256": "43c0f5151be1100e622fc6c5df692c1182c6a517b4994e22c14aa63413a62d91",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [
+            {
+              "author_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "recipient_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "gpt-6-astra",
+          "requested_reasoning_effort": "high",
+          "parallel_tool_calls": false,
+          "input_types": [
+            "additional_tools",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message"
+          ],
+          "input_sha256": "87cf6d12b441f4c04fcd92893393389094cd22afb502935b3e6ee809e32651ce",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input_async",
+              "schema_sha256": "f1fbb40b4d11546ee3e2cb870b705d7dfc86e2d646668abe8ef5749442256812",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "sleep",
+              "schema_sha256": "8b5ae0633744b7eb44c4a7212032f63982726a8a0ababf054931997d04966547",
+              "namespace": "clock"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "function_call_output",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "f780231fa02bbcb7cf15b74d7f426b5683d2cb7d9f648253f728a14e51e4ec31",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "7e4a7abfbc99f7ca685875550491dd3a0769b1433b04b32c6c479d93f4ac4c4d",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "fa2444796e729789c163ad372a96f16788aaae72a66f1c170fff059f24e312e0",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "d705a8e4e1804e1c10fd9752084703ef2d203a4ed4cc38d94fc9d7418e5988ad",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "gpt-6-astra",
+          "requested_reasoning_effort": "high",
+          "parallel_tool_calls": false,
+          "input_types": [
+            "additional_tools",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "reasoning",
+            "function_call",
+            "function_call_output"
+          ],
+          "input_sha256": "13fe8cf39039fb6fd7aa0146d547036463b4d00eb1d601d906dc9d4248be6406",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input_async",
+              "schema_sha256": "f1fbb40b4d11546ee3e2cb870b705d7dfc86e2d646668abe8ef5749442256812",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "sleep",
+              "schema_sha256": "8b5ae0633744b7eb44c4a7212032f63982726a8a0ababf054931997d04966547",
+              "namespace": "clock"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "function_call_output",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "f780231fa02bbcb7cf15b74d7f426b5683d2cb7d9f648253f728a14e51e4ec31",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "7e4a7abfbc99f7ca685875550491dd3a0769b1433b04b32c6c479d93f4ac4c4d",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "2dbd6a42488033ee6b4011addb600c13493628846218c0010c7d6ed71a3ae0ac",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "fa2444796e729789c163ad372a96f16788aaae72a66f1c170fff059f24e312e0",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "d705a8e4e1804e1c10fd9752084703ef2d203a4ed4cc38d94fc9d7418e5988ad",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "list_agents",
+              "namespace": "collaboration",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "43acd9a4e6cac507037b371c5ab69c6ae788e1dbf84c3d904c8794dfc3a5d6ae",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "gpt-6-astra",
+          "requested_reasoning_effort": "high",
+          "parallel_tool_calls": false,
+          "input_types": [
+            "additional_tools",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message"
+          ],
+          "input_sha256": "1c2f16fe5227c6a33ef565df80ae0e2af9c01284931621585b94f41178c205c6",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input_async",
+              "schema_sha256": "f1fbb40b4d11546ee3e2cb870b705d7dfc86e2d646668abe8ef5749442256812",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "sleep",
+              "schema_sha256": "8b5ae0633744b7eb44c4a7212032f63982726a8a0ababf054931997d04966547",
+              "namespace": "clock"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "function_call_output",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "f780231fa02bbcb7cf15b74d7f426b5683d2cb7d9f648253f728a14e51e4ec31",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "7e4a7abfbc99f7ca685875550491dd3a0769b1433b04b32c6c479d93f4ac4c4d",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "2dbd6a42488033ee6b4011addb600c13493628846218c0010c7d6ed71a3ae0ac",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "2f113b1da968d0ca603a7554434e59432efc763ee172ca19692691a0805f4279",
+              "item_sha256": "568c4aeb4e1ae256c8503baf9d41794ced244f4c15575c4fd0fea1de75a8a05f",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "fa2444796e729789c163ad372a96f16788aaae72a66f1c170fff059f24e312e0",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "d705a8e4e1804e1c10fd9752084703ef2d203a4ed4cc38d94fc9d7418e5988ad",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "list_agents",
+              "namespace": "collaboration",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "43acd9a4e6cac507037b371c5ab69c6ae788e1dbf84c3d904c8794dfc3a5d6ae",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "2f113b1da968d0ca603a7554434e59432efc763ee172ca19692691a0805f4279",
+              "item_sha256": "a7bea2a9bf7b29074fad688b2e17b180765d50d22bd5db61d2c0c76fb3514fac",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "gpt-6-astra",
+          "requested_reasoning_effort": "high",
+          "parallel_tool_calls": false,
+          "input_types": [
+            "additional_tools",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "function_call",
+            "function_call_output"
+          ],
+          "input_sha256": "36900dae4870c1cb364f666f5d913a021eaccd89f9a6ae2f0b674c451cde32f6",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input_async",
+              "schema_sha256": "f1fbb40b4d11546ee3e2cb870b705d7dfc86e2d646668abe8ef5749442256812",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "sleep",
+              "schema_sha256": "8b5ae0633744b7eb44c4a7212032f63982726a8a0ababf054931997d04966547",
+              "namespace": "clock"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "function_call_output",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "f780231fa02bbcb7cf15b74d7f426b5683d2cb7d9f648253f728a14e51e4ec31",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "7e4a7abfbc99f7ca685875550491dd3a0769b1433b04b32c6c479d93f4ac4c4d",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "2dbd6a42488033ee6b4011addb600c13493628846218c0010c7d6ed71a3ae0ac",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "2f113b1da968d0ca603a7554434e59432efc763ee172ca19692691a0805f4279",
+              "item_sha256": "568c4aeb4e1ae256c8503baf9d41794ced244f4c15575c4fd0fea1de75a8a05f",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "99249d859648ee2ca9857e92331e048875840ba7a760f79d8278e5e720732e89",
+              "item_sha256": "28a1c283a569a1585c03e16d138a5f64454d9662c506fbe619a32e1f93801d5b",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "fa2444796e729789c163ad372a96f16788aaae72a66f1c170fff059f24e312e0",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "d705a8e4e1804e1c10fd9752084703ef2d203a4ed4cc38d94fc9d7418e5988ad",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "list_agents",
+              "namespace": "collaboration",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "43acd9a4e6cac507037b371c5ab69c6ae788e1dbf84c3d904c8794dfc3a5d6ae",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "2f113b1da968d0ca603a7554434e59432efc763ee172ca19692691a0805f4279",
+              "item_sha256": "a7bea2a9bf7b29074fad688b2e17b180765d50d22bd5db61d2c0c76fb3514fac",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "followup_task",
+              "namespace": "collaboration",
+              "call_sha256": "99249d859648ee2ca9857e92331e048875840ba7a760f79d8278e5e720732e89",
+              "item_sha256": "7bbda031cc1616c439f1b3c6b9477fd58b8fce2b4893109833b89f86f4339b78",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "cursor-subscription/gpt-5.6-luna-high",
+          "requested_reasoning_effort": "absent",
+          "parallel_tool_calls": true,
+          "input_types": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "agent_message",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "function_call",
+            "function_call_output",
+            "message",
+            "agent_message"
+          ],
+          "input_sha256": "a85a3f240be8c59a5a10f9f52eea4aa0be09e1ee3ceb76fb9fe8a4635296642f",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637"
+            },
+            {
+              "type": "function",
+              "name": "exec_command",
+              "schema_sha256": "a598ae291787a2a763c4ef3479636ad2aa34cd442e1c1ef51d52567ea96003c6"
+            },
+            {
+              "type": "function",
+              "name": "write_stdin",
+              "schema_sha256": "6a7b92584883e01d395fcb870e2fa35bad550c87bcea16ed267c36bd5835c5d5"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4"
+            },
+            {
+              "type": "custom",
+              "name": "apply_patch",
+              "schema_sha256": "f18c24151d79bf0ed1908d888037ebbc018980ec374f7009e0bfdf618cacb47c"
+            },
+            {
+              "type": "function",
+              "name": "view_image",
+              "schema_sha256": "60d940fffd61ebeac814199d38edb5b52e1031773e7b581ebfcac257a3947340"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "get_goal",
+              "schema_sha256": "9284f72895b68d5da186e57484e6016aaea4ebb94234017590759919bde51cc4"
+            },
+            {
+              "type": "function",
+              "name": "create_goal",
+              "schema_sha256": "caf39db4551d71d4e9e46c176f38e61dcfbf024b2346157601d5a53107c31966"
+            },
+            {
+              "type": "function",
+              "name": "update_goal",
+              "schema_sha256": "7e0919ed7de59d3f73b66a742b9a05f155a89f39186cceb90baf2d3ed9eff40c"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "custom_tool_call_output",
+              "call_sha256": "4b44240e4794912112d0534c3a1b7b865f5711ba65362cc2957c2d6991707e28",
+              "item_sha256": "4d6e43b9a8ab2b4f734304a6833ed66f32c2f8becce7bef6ab763a7f5076b54f",
+              "fixture_present": true,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "aaec6b82a5eef63b1536535b000772a56482baaa96319f77784b1e1950a2c1fc",
+              "item_sha256": "0a7c49d2a56e96d1080d6f684dcc1cb4c86f8fe0d3eb5446d1e2f3d5d01c6bc2",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "custom_tool_call",
+              "name": "exec",
+              "namespace": null,
+              "call_sha256": "4b44240e4794912112d0534c3a1b7b865f5711ba65362cc2957c2d6991707e28",
+              "item_sha256": "6b36e1ece148825bb8668e736d30b6dfd32e6f85cde28a2c119c01f36258ac8e",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "send_message",
+              "namespace": "collaboration",
+              "call_sha256": "aaec6b82a5eef63b1536535b000772a56482baaa96319f77784b1e1950a2c1fc",
+              "item_sha256": "43c0f5151be1100e622fc6c5df692c1182c6a517b4994e22c14aa63413a62d91",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [
+            {
+              "author_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "recipient_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "recipient_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "cursor-subscription/gpt-5.6-luna-high",
+          "requested_reasoning_effort": "absent",
+          "parallel_tool_calls": true,
+          "input_types": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "agent_message",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "function_call",
+            "function_call_output",
+            "message",
+            "agent_message",
+            "custom_tool_call",
+            "custom_tool_call_output"
+          ],
+          "input_sha256": "8d152035361786f639e36c87014aa718dec8cdfb51e52d1bbd0b7da5ca66886d",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637"
+            },
+            {
+              "type": "function",
+              "name": "exec_command",
+              "schema_sha256": "a598ae291787a2a763c4ef3479636ad2aa34cd442e1c1ef51d52567ea96003c6"
+            },
+            {
+              "type": "function",
+              "name": "write_stdin",
+              "schema_sha256": "6a7b92584883e01d395fcb870e2fa35bad550c87bcea16ed267c36bd5835c5d5"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4"
+            },
+            {
+              "type": "custom",
+              "name": "apply_patch",
+              "schema_sha256": "f18c24151d79bf0ed1908d888037ebbc018980ec374f7009e0bfdf618cacb47c"
+            },
+            {
+              "type": "function",
+              "name": "view_image",
+              "schema_sha256": "60d940fffd61ebeac814199d38edb5b52e1031773e7b581ebfcac257a3947340"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "get_goal",
+              "schema_sha256": "9284f72895b68d5da186e57484e6016aaea4ebb94234017590759919bde51cc4"
+            },
+            {
+              "type": "function",
+              "name": "create_goal",
+              "schema_sha256": "caf39db4551d71d4e9e46c176f38e61dcfbf024b2346157601d5a53107c31966"
+            },
+            {
+              "type": "function",
+              "name": "update_goal",
+              "schema_sha256": "7e0919ed7de59d3f73b66a742b9a05f155a89f39186cceb90baf2d3ed9eff40c"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "custom_tool_call_output",
+              "call_sha256": "4b44240e4794912112d0534c3a1b7b865f5711ba65362cc2957c2d6991707e28",
+              "item_sha256": "4d6e43b9a8ab2b4f734304a6833ed66f32c2f8becce7bef6ab763a7f5076b54f",
+              "fixture_present": true,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "aaec6b82a5eef63b1536535b000772a56482baaa96319f77784b1e1950a2c1fc",
+              "item_sha256": "0a7c49d2a56e96d1080d6f684dcc1cb4c86f8fe0d3eb5446d1e2f3d5d01c6bc2",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "custom_tool_call_output",
+              "call_sha256": "c49095ca44015df6c456be3a416181ca5d434308ddd3896b2fab0e42a7135398",
+              "item_sha256": "a69d4f82b0dc9a6688fab7c2d8b5938fc6de2d7580b5ca205d98fb9e53f2a99f",
+              "fixture_present": false,
+              "reversed_fixture_present": true
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "custom_tool_call",
+              "name": "exec",
+              "namespace": null,
+              "call_sha256": "4b44240e4794912112d0534c3a1b7b865f5711ba65362cc2957c2d6991707e28",
+              "item_sha256": "6b36e1ece148825bb8668e736d30b6dfd32e6f85cde28a2c119c01f36258ac8e",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "send_message",
+              "namespace": "collaboration",
+              "call_sha256": "aaec6b82a5eef63b1536535b000772a56482baaa96319f77784b1e1950a2c1fc",
+              "item_sha256": "43c0f5151be1100e622fc6c5df692c1182c6a517b4994e22c14aa63413a62d91",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "custom_tool_call",
+              "name": "exec",
+              "namespace": null,
+              "call_sha256": "c49095ca44015df6c456be3a416181ca5d434308ddd3896b2fab0e42a7135398",
+              "item_sha256": "1ab6cdabb2d87aa904dcec24f8791f70ea400ed64010f9f752800191e348e2e4",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [
+            {
+              "author_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "recipient_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "recipient_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "cursor-subscription/gpt-5.6-luna-high",
+          "requested_reasoning_effort": "absent",
+          "parallel_tool_calls": true,
+          "input_types": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "agent_message",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "function_call",
+            "function_call_output",
+            "message",
+            "agent_message",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "function_call",
+            "function_call_output"
+          ],
+          "input_sha256": "ee2d397e057ce198294a39d2d488ec524d00213275ab44bf7f8026d3c3413aac",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637"
+            },
+            {
+              "type": "function",
+              "name": "exec_command",
+              "schema_sha256": "a598ae291787a2a763c4ef3479636ad2aa34cd442e1c1ef51d52567ea96003c6"
+            },
+            {
+              "type": "function",
+              "name": "write_stdin",
+              "schema_sha256": "6a7b92584883e01d395fcb870e2fa35bad550c87bcea16ed267c36bd5835c5d5"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4"
+            },
+            {
+              "type": "custom",
+              "name": "apply_patch",
+              "schema_sha256": "f18c24151d79bf0ed1908d888037ebbc018980ec374f7009e0bfdf618cacb47c"
+            },
+            {
+              "type": "function",
+              "name": "view_image",
+              "schema_sha256": "60d940fffd61ebeac814199d38edb5b52e1031773e7b581ebfcac257a3947340"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "get_goal",
+              "schema_sha256": "9284f72895b68d5da186e57484e6016aaea4ebb94234017590759919bde51cc4"
+            },
+            {
+              "type": "function",
+              "name": "create_goal",
+              "schema_sha256": "caf39db4551d71d4e9e46c176f38e61dcfbf024b2346157601d5a53107c31966"
+            },
+            {
+              "type": "function",
+              "name": "update_goal",
+              "schema_sha256": "7e0919ed7de59d3f73b66a742b9a05f155a89f39186cceb90baf2d3ed9eff40c"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "custom_tool_call_output",
+              "call_sha256": "4b44240e4794912112d0534c3a1b7b865f5711ba65362cc2957c2d6991707e28",
+              "item_sha256": "4d6e43b9a8ab2b4f734304a6833ed66f32c2f8becce7bef6ab763a7f5076b54f",
+              "fixture_present": true,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "aaec6b82a5eef63b1536535b000772a56482baaa96319f77784b1e1950a2c1fc",
+              "item_sha256": "0a7c49d2a56e96d1080d6f684dcc1cb4c86f8fe0d3eb5446d1e2f3d5d01c6bc2",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "custom_tool_call_output",
+              "call_sha256": "c49095ca44015df6c456be3a416181ca5d434308ddd3896b2fab0e42a7135398",
+              "item_sha256": "a69d4f82b0dc9a6688fab7c2d8b5938fc6de2d7580b5ca205d98fb9e53f2a99f",
+              "fixture_present": false,
+              "reversed_fixture_present": true
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "43c6605b36c92b184885c864cda74ef4d324d1fc47fdee4beba44203e6d4e0de",
+              "item_sha256": "f423e88e96b543e25083b17fb085f7c2a19439d1bbe43fe0a66ea5ef61ab5120",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "custom_tool_call",
+              "name": "exec",
+              "namespace": null,
+              "call_sha256": "4b44240e4794912112d0534c3a1b7b865f5711ba65362cc2957c2d6991707e28",
+              "item_sha256": "6b36e1ece148825bb8668e736d30b6dfd32e6f85cde28a2c119c01f36258ac8e",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "send_message",
+              "namespace": "collaboration",
+              "call_sha256": "aaec6b82a5eef63b1536535b000772a56482baaa96319f77784b1e1950a2c1fc",
+              "item_sha256": "43c0f5151be1100e622fc6c5df692c1182c6a517b4994e22c14aa63413a62d91",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "custom_tool_call",
+              "name": "exec",
+              "namespace": null,
+              "call_sha256": "c49095ca44015df6c456be3a416181ca5d434308ddd3896b2fab0e42a7135398",
+              "item_sha256": "1ab6cdabb2d87aa904dcec24f8791f70ea400ed64010f9f752800191e348e2e4",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "send_message",
+              "namespace": "collaboration",
+              "call_sha256": "43c6605b36c92b184885c864cda74ef4d324d1fc47fdee4beba44203e6d4e0de",
+              "item_sha256": "794d97b5978ea16fd85ffe0b98d23462c2255a6c0f23dd455d81494476ecab7c",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [
+            {
+              "author_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "recipient_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "recipient_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "gpt-6-astra",
+          "requested_reasoning_effort": "high",
+          "parallel_tool_calls": false,
+          "input_types": [
+            "additional_tools",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message"
+          ],
+          "input_sha256": "2dbf9f41fa1b6038df1bab2d5c47b57e930071cfe6a7eed962e3690db3e50cb0",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input_async",
+              "schema_sha256": "f1fbb40b4d11546ee3e2cb870b705d7dfc86e2d646668abe8ef5749442256812",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "sleep",
+              "schema_sha256": "8b5ae0633744b7eb44c4a7212032f63982726a8a0ababf054931997d04966547",
+              "namespace": "clock"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "function_call_output",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "f780231fa02bbcb7cf15b74d7f426b5683d2cb7d9f648253f728a14e51e4ec31",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "7e4a7abfbc99f7ca685875550491dd3a0769b1433b04b32c6c479d93f4ac4c4d",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "2dbd6a42488033ee6b4011addb600c13493628846218c0010c7d6ed71a3ae0ac",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "2f113b1da968d0ca603a7554434e59432efc763ee172ca19692691a0805f4279",
+              "item_sha256": "568c4aeb4e1ae256c8503baf9d41794ced244f4c15575c4fd0fea1de75a8a05f",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "99249d859648ee2ca9857e92331e048875840ba7a760f79d8278e5e720732e89",
+              "item_sha256": "28a1c283a569a1585c03e16d138a5f64454d9662c506fbe619a32e1f93801d5b",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "a5be4ea3ebb6487f73e07424554f63eee081d99d3e039651d0f4305132871e48",
+              "item_sha256": "89117ef09ace8242e7479b07d1bd6a0a21c1fb484052b5c871bce83272f55d41",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "fa2444796e729789c163ad372a96f16788aaae72a66f1c170fff059f24e312e0",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "d705a8e4e1804e1c10fd9752084703ef2d203a4ed4cc38d94fc9d7418e5988ad",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "list_agents",
+              "namespace": "collaboration",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "43acd9a4e6cac507037b371c5ab69c6ae788e1dbf84c3d904c8794dfc3a5d6ae",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "2f113b1da968d0ca603a7554434e59432efc763ee172ca19692691a0805f4279",
+              "item_sha256": "a7bea2a9bf7b29074fad688b2e17b180765d50d22bd5db61d2c0c76fb3514fac",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "followup_task",
+              "namespace": "collaboration",
+              "call_sha256": "99249d859648ee2ca9857e92331e048875840ba7a760f79d8278e5e720732e89",
+              "item_sha256": "7bbda031cc1616c439f1b3c6b9477fd58b8fce2b4893109833b89f86f4339b78",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "a5be4ea3ebb6487f73e07424554f63eee081d99d3e039651d0f4305132871e48",
+              "item_sha256": "cb0303563733dabefe8859882d7945620e200dbd6e673c96ed3a27da6c2d25ff",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "gpt-6-astra",
+          "requested_reasoning_effort": "high",
+          "parallel_tool_calls": false,
+          "input_types": [
+            "additional_tools",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "function_call",
+            "function_call_output",
+            "agent_message"
+          ],
+          "input_sha256": "e6f643cc00ef4be7980935b93bd303d8afb2be3832223da567ee84a8b83c7c78",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input_async",
+              "schema_sha256": "f1fbb40b4d11546ee3e2cb870b705d7dfc86e2d646668abe8ef5749442256812",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "sleep",
+              "schema_sha256": "8b5ae0633744b7eb44c4a7212032f63982726a8a0ababf054931997d04966547",
+              "namespace": "clock"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "function_call_output",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "f780231fa02bbcb7cf15b74d7f426b5683d2cb7d9f648253f728a14e51e4ec31",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "7e4a7abfbc99f7ca685875550491dd3a0769b1433b04b32c6c479d93f4ac4c4d",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "2dbd6a42488033ee6b4011addb600c13493628846218c0010c7d6ed71a3ae0ac",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "2f113b1da968d0ca603a7554434e59432efc763ee172ca19692691a0805f4279",
+              "item_sha256": "568c4aeb4e1ae256c8503baf9d41794ced244f4c15575c4fd0fea1de75a8a05f",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "99249d859648ee2ca9857e92331e048875840ba7a760f79d8278e5e720732e89",
+              "item_sha256": "28a1c283a569a1585c03e16d138a5f64454d9662c506fbe619a32e1f93801d5b",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "a5be4ea3ebb6487f73e07424554f63eee081d99d3e039651d0f4305132871e48",
+              "item_sha256": "89117ef09ace8242e7479b07d1bd6a0a21c1fb484052b5c871bce83272f55d41",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "29a9825021052218f4806942b01a6465cbb10cdf9bdbdd18dd6a3f532002f514",
+              "item_sha256": "81f9b6bd08ce9fc9e5f3843c77e3fdd36afed492085e82f1d7cf478ea8a2b255",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "fa2444796e729789c163ad372a96f16788aaae72a66f1c170fff059f24e312e0",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "d705a8e4e1804e1c10fd9752084703ef2d203a4ed4cc38d94fc9d7418e5988ad",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "list_agents",
+              "namespace": "collaboration",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "43acd9a4e6cac507037b371c5ab69c6ae788e1dbf84c3d904c8794dfc3a5d6ae",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "2f113b1da968d0ca603a7554434e59432efc763ee172ca19692691a0805f4279",
+              "item_sha256": "a7bea2a9bf7b29074fad688b2e17b180765d50d22bd5db61d2c0c76fb3514fac",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "followup_task",
+              "namespace": "collaboration",
+              "call_sha256": "99249d859648ee2ca9857e92331e048875840ba7a760f79d8278e5e720732e89",
+              "item_sha256": "7bbda031cc1616c439f1b3c6b9477fd58b8fce2b4893109833b89f86f4339b78",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "a5be4ea3ebb6487f73e07424554f63eee081d99d3e039651d0f4305132871e48",
+              "item_sha256": "cb0303563733dabefe8859882d7945620e200dbd6e673c96ed3a27da6c2d25ff",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "29a9825021052218f4806942b01a6465cbb10cdf9bdbdd18dd6a3f532002f514",
+              "item_sha256": "ea9301167fbd41d98fbde76f9bb2a07d6aeb32499cfae2acb53171beeae94834",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        },
+        {
+          "epoch": 1,
+          "path": "/v1/responses",
+          "model": "gpt-6-astra",
+          "requested_reasoning_effort": "high",
+          "parallel_tool_calls": false,
+          "input_types": [
+            "additional_tools",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "function_call",
+            "function_call_output",
+            "agent_message",
+            "message",
+            "message"
+          ],
+          "input_sha256": "e896e4bb015e0e22ce928450d4058a21eed35a5d749a437af492a778eb35494e",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input_async",
+              "schema_sha256": "f1fbb40b4d11546ee3e2cb870b705d7dfc86e2d646668abe8ef5749442256812",
+              "namespace": "functions"
+            },
+            {
+              "type": "function",
+              "name": "sleep",
+              "schema_sha256": "8b5ae0633744b7eb44c4a7212032f63982726a8a0ababf054931997d04966547",
+              "namespace": "clock"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "function_call_output",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "f780231fa02bbcb7cf15b74d7f426b5683d2cb7d9f648253f728a14e51e4ec31",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "7e4a7abfbc99f7ca685875550491dd3a0769b1433b04b32c6c479d93f4ac4c4d",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "2dbd6a42488033ee6b4011addb600c13493628846218c0010c7d6ed71a3ae0ac",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "2f113b1da968d0ca603a7554434e59432efc763ee172ca19692691a0805f4279",
+              "item_sha256": "568c4aeb4e1ae256c8503baf9d41794ced244f4c15575c4fd0fea1de75a8a05f",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "99249d859648ee2ca9857e92331e048875840ba7a760f79d8278e5e720732e89",
+              "item_sha256": "28a1c283a569a1585c03e16d138a5f64454d9662c506fbe619a32e1f93801d5b",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "a5be4ea3ebb6487f73e07424554f63eee081d99d3e039651d0f4305132871e48",
+              "item_sha256": "89117ef09ace8242e7479b07d1bd6a0a21c1fb484052b5c871bce83272f55d41",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "type": "function_call_output",
+              "call_sha256": "29a9825021052218f4806942b01a6465cbb10cdf9bdbdd18dd6a3f532002f514",
+              "item_sha256": "81f9b6bd08ce9fc9e5f3843c77e3fdd36afed492085e82f1d7cf478ea8a2b255",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "history_calls": [
+            {
+              "type": "function_call",
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "fa2444796e729789c163ad372a96f16788aaae72a66f1c170fff059f24e312e0",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "d705a8e4e1804e1c10fd9752084703ef2d203a4ed4cc38d94fc9d7418e5988ad",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "list_agents",
+              "namespace": "collaboration",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "43acd9a4e6cac507037b371c5ab69c6ae788e1dbf84c3d904c8794dfc3a5d6ae",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "2f113b1da968d0ca603a7554434e59432efc763ee172ca19692691a0805f4279",
+              "item_sha256": "a7bea2a9bf7b29074fad688b2e17b180765d50d22bd5db61d2c0c76fb3514fac",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "followup_task",
+              "namespace": "collaboration",
+              "call_sha256": "99249d859648ee2ca9857e92331e048875840ba7a760f79d8278e5e720732e89",
+              "item_sha256": "7bbda031cc1616c439f1b3c6b9477fd58b8fce2b4893109833b89f86f4339b78",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "a5be4ea3ebb6487f73e07424554f63eee081d99d3e039651d0f4305132871e48",
+              "item_sha256": "cb0303563733dabefe8859882d7945620e200dbd6e673c96ed3a27da6c2d25ff",
+              "encrypted_function_args_shape": "absent"
+            },
+            {
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "call_sha256": "29a9825021052218f4806942b01a6465cbb10cdf9bdbdd18dd6a3f532002f514",
+              "item_sha256": "ea9301167fbd41d98fbde76f9bb2a07d6aeb32499cfae2acb53171beeae94834",
+              "encrypted_function_args_shape": "absent"
+            }
+          ],
+          "agent_messages": [
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            },
+            {
+              "author_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "recipient_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "part_types": [
+                "input_text"
+              ]
+            }
+          ],
+          "status": 200
+        }
+      ],
+      "sessions": [
+        {
+          "session_sha256": "50a5ee306ec9f53f84a583713b83cf6df206f58d1fa1390098c16004a10781f0",
+          "is_child": false,
+          "models": [
+            "gpt-6-astra"
+          ],
+          "calls": [
+            {
+              "target_sha256": null,
+              "spawn_target_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "type": "function_call",
+              "name": "spawn_agent",
+              "namespace": "collaboration",
+              "encrypted_function_args_shape": "empty-list",
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "item_sha256": "fa2444796e729789c163ad372a96f16788aaae72a66f1c170fff059f24e312e0",
+              "reads_fixture": false,
+              "spawn": true,
+              "followup": false,
+              "wait": false
+            },
+            {
+              "target_sha256": null,
+              "spawn_target_sha256": null,
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "encrypted_function_args_shape": "empty-list",
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "item_sha256": "d705a8e4e1804e1c10fd9752084703ef2d203a4ed4cc38d94fc9d7418e5988ad",
+              "reads_fixture": false,
+              "spawn": false,
+              "followup": false,
+              "wait": true
+            },
+            {
+              "target_sha256": null,
+              "spawn_target_sha256": null,
+              "type": "function_call",
+              "name": "list_agents",
+              "namespace": "collaboration",
+              "encrypted_function_args_shape": "empty-list",
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "item_sha256": "43acd9a4e6cac507037b371c5ab69c6ae788e1dbf84c3d904c8794dfc3a5d6ae",
+              "reads_fixture": false,
+              "spawn": false,
+              "followup": false,
+              "wait": false
+            },
+            {
+              "target_sha256": null,
+              "spawn_target_sha256": null,
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "encrypted_function_args_shape": "empty-list",
+              "call_sha256": "2f113b1da968d0ca603a7554434e59432efc763ee172ca19692691a0805f4279",
+              "item_sha256": "a7bea2a9bf7b29074fad688b2e17b180765d50d22bd5db61d2c0c76fb3514fac",
+              "reads_fixture": false,
+              "spawn": false,
+              "followup": false,
+              "wait": true
+            },
+            {
+              "target_sha256": "809db9fc2e57755f847923e3e38b112ff88bac7f65037ee041ad1436b8c83cc0",
+              "spawn_target_sha256": null,
+              "type": "function_call",
+              "name": "followup_task",
+              "namespace": "collaboration",
+              "encrypted_function_args_shape": "empty-list",
+              "call_sha256": "99249d859648ee2ca9857e92331e048875840ba7a760f79d8278e5e720732e89",
+              "item_sha256": "7bbda031cc1616c439f1b3c6b9477fd58b8fce2b4893109833b89f86f4339b78",
+              "reads_fixture": false,
+              "spawn": false,
+              "followup": true,
+              "wait": false
+            },
+            {
+              "target_sha256": null,
+              "spawn_target_sha256": null,
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "encrypted_function_args_shape": "empty-list",
+              "call_sha256": "a5be4ea3ebb6487f73e07424554f63eee081d99d3e039651d0f4305132871e48",
+              "item_sha256": "cb0303563733dabefe8859882d7945620e200dbd6e673c96ed3a27da6c2d25ff",
+              "reads_fixture": false,
+              "spawn": false,
+              "followup": false,
+              "wait": true
+            },
+            {
+              "target_sha256": null,
+              "spawn_target_sha256": null,
+              "type": "function_call",
+              "name": "wait_agent",
+              "namespace": "collaboration",
+              "encrypted_function_args_shape": "empty-list",
+              "call_sha256": "29a9825021052218f4806942b01a6465cbb10cdf9bdbdd18dd6a3f532002f514",
+              "item_sha256": "ea9301167fbd41d98fbde76f9bb2a07d6aeb32499cfae2acb53171beeae94834",
+              "reads_fixture": false,
+              "spawn": false,
+              "followup": false,
+              "wait": true
+            }
+          ],
+          "effects": [
+            {
+              "call_sha256": "c31c420be87458f4ef464b5958fec32efd8a8956376dba99723440fc589320de",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "call_sha256": "1c0f7fae05cb5ddc072628df53d26ae7bbb22a7c42c161606f945afc554422ad",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "call_sha256": "ba54928f61b3255a4777ea952ac957e7fcff245ea06a1d7223f093a1613f7beb",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "call_sha256": "2f113b1da968d0ca603a7554434e59432efc763ee172ca19692691a0805f4279",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "call_sha256": "99249d859648ee2ca9857e92331e048875840ba7a760f79d8278e5e720732e89",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "call_sha256": "a5be4ea3ebb6487f73e07424554f63eee081d99d3e039651d0f4305132871e48",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "call_sha256": "29a9825021052218f4806942b01a6465cbb10cdf9bdbdd18dd6a3f532002f514",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "assistant_returned_fixture": true,
+          "assistant_returned_reversed_fixture": true,
+          "rollout_sha256": "a6c37b8a9dd3f38afbbea4d59dd60ca3b464437cb3850e28fd68b93de6c57af4"
+        },
+        {
+          "session_sha256": "38038fc114c7292cff3cf699bf6667ac3e2bb004c48b0c7cc23143436b58685f",
+          "is_child": true,
+          "models": [
+            "cursor-subscription/gpt-5.6-luna-high"
+          ],
+          "calls": [
+            {
+              "target_sha256": null,
+              "spawn_target_sha256": null,
+              "type": "custom_tool_call",
+              "name": "exec",
+              "namespace": null,
+              "encrypted_function_args_shape": "absent",
+              "call_sha256": "4b44240e4794912112d0534c3a1b7b865f5711ba65362cc2957c2d6991707e28",
+              "item_sha256": "6b36e1ece148825bb8668e736d30b6dfd32e6f85cde28a2c119c01f36258ac8e",
+              "reads_fixture": true,
+              "spawn": false,
+              "followup": false,
+              "wait": false
+            },
+            {
+              "target_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "spawn_target_sha256": null,
+              "type": "function_call",
+              "name": "send_message",
+              "namespace": "collaboration",
+              "encrypted_function_args_shape": "empty-list",
+              "call_sha256": "aaec6b82a5eef63b1536535b000772a56482baaa96319f77784b1e1950a2c1fc",
+              "item_sha256": "43c0f5151be1100e622fc6c5df692c1182c6a517b4994e22c14aa63413a62d91",
+              "reads_fixture": false,
+              "spawn": false,
+              "followup": false,
+              "wait": false
+            },
+            {
+              "target_sha256": null,
+              "spawn_target_sha256": null,
+              "type": "custom_tool_call",
+              "name": "exec",
+              "namespace": null,
+              "encrypted_function_args_shape": "absent",
+              "call_sha256": "c49095ca44015df6c456be3a416181ca5d434308ddd3896b2fab0e42a7135398",
+              "item_sha256": "1ab6cdabb2d87aa904dcec24f8791f70ea400ed64010f9f752800191e348e2e4",
+              "reads_fixture": true,
+              "spawn": false,
+              "followup": false,
+              "wait": false
+            },
+            {
+              "target_sha256": "94a6b447580330f9f2b609422537b04239ff3a39df9137e32efd559f1a2935cb",
+              "spawn_target_sha256": null,
+              "type": "function_call",
+              "name": "send_message",
+              "namespace": "collaboration",
+              "encrypted_function_args_shape": "empty-list",
+              "call_sha256": "43c6605b36c92b184885c864cda74ef4d324d1fc47fdee4beba44203e6d4e0de",
+              "item_sha256": "794d97b5978ea16fd85ffe0b98d23462c2255a6c0f23dd455d81494476ecab7c",
+              "reads_fixture": false,
+              "spawn": false,
+              "followup": false,
+              "wait": false
+            }
+          ],
+          "effects": [
+            {
+              "call_sha256": "4b44240e4794912112d0534c3a1b7b865f5711ba65362cc2957c2d6991707e28",
+              "fixture_present": true,
+              "reversed_fixture_present": false
+            },
+            {
+              "call_sha256": "aaec6b82a5eef63b1536535b000772a56482baaa96319f77784b1e1950a2c1fc",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            },
+            {
+              "call_sha256": "c49095ca44015df6c456be3a416181ca5d434308ddd3896b2fab0e42a7135398",
+              "fixture_present": false,
+              "reversed_fixture_present": true
+            },
+            {
+              "call_sha256": "43c6605b36c92b184885c864cda74ef4d324d1fc47fdee4beba44203e6d4e0de",
+              "fixture_present": false,
+              "reversed_fixture_present": false
+            }
+          ],
+          "assistant_returned_fixture": true,
+          "assistant_returned_reversed_fixture": true,
+          "rollout_sha256": "454683a6b215e2228b966a996bb3f40c26858165168793318e476ba5ce7e4d7e"
+        }
+      ],
+      "fixture_sha256": "0cfe4254a625dfd64ff458bbe20235c867c4ba81c0dc7b374deb085e62768ea1",
+      "gateway_pids": [
+        275324,
+        297826
+      ],
+      "failure_class": null,
+      "elapsed_seconds": 72.996,
+      "private_tree_removed": true
+    }
+  ],
+  "runtime_snapshot_sha256": "4c715365c9f190e72d884f6e2aa3402cf7d0010e8a3b4a5c41f6296970cd13b8",
+  "source_runtime_dirty": false,
+  "candidate_sha_is_exact_runtime": true,
+  "snapshot_tree_removed": true,
+  "passed": true
+}

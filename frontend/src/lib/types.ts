@@ -78,6 +78,7 @@ export interface Provider {
   auth_capabilities?: string[] | null;
   onboarding_hint?: string | null;
   discovery_policy?: string | null;
+  system_context_consent?: string | null;
   sort_order?: number | null;
   enabled: boolean;
   locked?: boolean;

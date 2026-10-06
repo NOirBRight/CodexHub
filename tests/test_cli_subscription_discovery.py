@@ -197,7 +197,7 @@ def test_failures_clean_private_directory_and_never_return_raw_errors(tmp_path, 
 
 
 @pytest.mark.parametrize("output", ["", "warning: could not list models", "same - One\nsame - Two",
-                                    "good - Good\nunsupported/id - Unsupported"])
+                                    "good - Good\nunsupported id - Unsupported"])
 def test_missing_or_ambiguous_cursor_catalog_is_not_available(tmp_path, output):
     home, _, binary = account(tmp_path)
     runner = cursor_runner([])
@@ -209,11 +209,19 @@ def test_missing_or_ambiguous_cursor_catalog_is_not_available(tmp_path, output):
     assert not result.models
 
 
+def test_raw_vendor_slash_identity_survives_discovery(tmp_path):
+    home, _, binary = account(tmp_path)
+    result = discover_subscription("cursor-subscription", binary=binary, source_home=home,
+                                   environ=environment(home), runner=cursor_runner([], "vendor/exact-high-fast - Vendor Model"))
+    assert result.state == "available"
+    assert result.models[0].id == "vendor/exact-high-fast"
+
+
 @pytest.mark.parametrize("page", [
     {"data": [], "has_more": False},
     {"data": [{"id": "good", "display_name": "Good"}], "has_more": True},
     {"data": [{"id": "good"}], "has_more": "false"},
-    {"data": [{"id": "bad/id", "display_name": "Bad"}], "has_more": False},
+    {"data": [{"id": "bad id", "display_name": "Bad"}], "has_more": False},
 ])
 def test_malformed_or_incomplete_vendor_catalog_discards_partial_models(tmp_path, page):
     home, _, binary = account(tmp_path, "claude-subscription")
@@ -297,6 +305,64 @@ def test_vendor_http_errors_have_bounded_classification_and_no_raw_message(monke
     assert body.closed
 
 
+def assert_descendant_not_running(state_path):
+    # An orphan can briefly remain a zombie awaiting init; it cannot execute.
+    try:
+        stat = state_path.read_text()
+    except FileNotFoundError:
+        return
+    assert stat.split()[2] == "Z"
+
+
+def test_descendant_stat_disappearing_at_read_is_not_running(tmp_path, monkeypatch):
+    state_path = tmp_path / "stat"
+    state_path.write_text("123 (python) Z")
+    read_text = Path.read_text
+    def disappearing_read(path, *args, **kwargs):
+        if path == state_path:
+            path.unlink()
+        return read_text(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", disappearing_read)
+    assert_descendant_not_running(state_path)
+
+
+def test_descendant_zombie_is_not_running(tmp_path):
+    state_path = tmp_path / "stat"
+    state_path.write_text("123 (python) Z")
+    assert_descendant_not_running(state_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group observation")
+def test_descendant_observation_rejects_a_living_process(tmp_path):
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                             stdin=subprocess.PIPE, cwd=tmp_path)
+    try:
+        with pytest.raises(AssertionError):
+            assert_descendant_not_running(Path(f"/proc/{child.pid}/stat"))
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+        child.stdin.close()
+
+
+@pytest.mark.parametrize("error", [PermissionError("denied"), OSError("read failed")])
+def test_descendant_observation_does_not_hide_read_errors(tmp_path, monkeypatch, error):
+    state_path = tmp_path / "stat"
+    state_path.touch()
+    def failed_read(*_args, **_kwargs):
+        raise error
+    monkeypatch.setattr(Path, "read_text", failed_read)
+    with pytest.raises(type(error), match=str(error)):
+        assert_descendant_not_running(state_path)
+
+
+def test_descendant_observation_does_not_hide_malformed_stat(tmp_path):
+    state_path = tmp_path / "stat"
+    state_path.write_text("malformed")
+    with pytest.raises(IndexError):
+        assert_descendant_not_running(state_path)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group observation")
 def test_cli_timeout_kills_the_cli_and_its_descendant(tmp_path):
     script = "import subprocess,sys,time; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); Path(sys.argv[1]).write_text(str(p.pid)); time.sleep(30)"
@@ -305,6 +371,4 @@ def test_cli_timeout_kills_the_cli_and_its_descendant(tmp_path):
         run_cli(Path(sys.executable), ["-c", script, str(pid_file)], env=os.environ, cwd=tmp_path, timeout=1)
     assert pid_file.exists()
     state_path = Path(f"/proc/{pid_file.read_text()}/stat")
-    # An orphan can briefly remain a zombie awaiting init; it cannot execute.
-    if state_path.exists():
-        assert state_path.read_text().split()[2] == "Z"
+    assert_descendant_not_running(state_path)

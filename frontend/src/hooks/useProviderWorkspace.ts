@@ -199,23 +199,27 @@ export function useProviderWorkspace(options: {
   );
 
   const catalogSyncToastMessage = useCallback(
-    (baseMessage: string | undefined, syncResult: { failed?: number; applied?: number; catalog_override_diagnostics?: unknown } | null) => {
-      const overrideDiagnostics = (syncResult as { catalog_override_diagnostics?: import("../lib/types").CatalogOverrideDiagnostics | null })?.catalog_override_diagnostics;
+    (baseMessage: string | undefined, syncResult: GatewayClientSyncSummary | null) => {
+      const appliedMessages = (syncResult?.results ?? [])
+        .filter(result => result.applied)
+        .map(result => `${result.name}: ${result.message}`)
+        .join("; ");
+      const overrideDiagnostics = syncResult?.catalog_override_diagnostics;
       const overrideMessage = overrideDiagnostics
         ? catalogOverrideToastMessage(overrideDiagnostics, t)
         : null;
       if (syncResult?.failed) {
         const syncMessage = tr("providers.syncClientsFailed", { count: syncResult.failed });
-        return [baseMessage, syncMessage, overrideMessage].filter(Boolean).join("; ") || null;
+        return [baseMessage, syncMessage, appliedMessages, overrideMessage].filter(Boolean).join("; ") || null;
       }
       if (syncResult?.applied) {
         const syncMessage = tr("providers.syncedClients", {
           count: syncResult.applied,
           plural: syncResult.applied === 1 ? "" : "s",
         });
-        return [baseMessage, syncMessage, overrideMessage].filter(Boolean).join("; ") || null;
+        return [baseMessage, syncMessage, appliedMessages, overrideMessage].filter(Boolean).join("; ") || null;
       }
-      return [baseMessage, overrideMessage].filter(Boolean).join("; ") || null;
+      return [baseMessage, appliedMessages, overrideMessage].filter(Boolean).join("; ") || null;
     },
     [t, tr],
   );

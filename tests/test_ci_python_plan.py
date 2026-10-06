@@ -309,6 +309,112 @@ def test_checker_keeps_test_nodeids_containing_collected(monkeypatch, capsys):
     assert "synthetic: 1 tests" in output
 
 
+def test_checker_counts_real_items_despite_collection_warnings(
+    tmp_path, monkeypatch, capsys
+):
+    checker = _load_module(CHECKER_PATH, "check_python_test_partitions_warnings")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    marker = tmp_path / "executed"
+    (tests / "test_core.py").write_text(
+        "import sys\n"
+        "import warnings\n"
+        "from pathlib import Path\n"
+        "import pytest\n"
+        f"assert sys.executable == {sys.executable!r}\n"
+        "warnings.warn('tests/test_fake.py::test_warning\\n"
+        "tests/test_fake.py::test_collected[warning]', UserWarning)\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def never_run():\n"
+        f"    Path({str(marker)!r}).touch()\n"
+        "@pytest.mark.parametrize('value', [1, 2], "
+        "ids=['collected::warnings summary', 'ordinary'])\n"
+        "def test_core(value):\n"
+        f"    Path({str(marker)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    (tests / "test_real_client_e2e.py").write_text(
+        "from pathlib import Path\n"
+        "def test_synthetic():\n"
+        f"    Path({str(marker)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(checker, "ROOT", tmp_path)
+    run = subprocess.run
+    collections = []
+
+    def collect(*args, **kwargs):
+        result = run(*args, **kwargs)
+        collections.append(result.stdout)
+        return result
+
+    monkeypatch.setattr(checker.subprocess, "run", collect)
+    assert checker.main() == 0
+    output = capsys.readouterr().out
+    assert "warnings summary" in collections[0]
+    assert "tests/test_fake.py::test_warning" in collections[0]
+    assert "full: 3 tests" in output, (output, collections)
+    assert "core: 2 tests" in output
+    assert "synthetic: 1 tests" in output
+    assert not marker.exists()
+
+    # A collection error must abort, even when pytest printed some real items.
+    (tests / "test_broken.py").write_text("raise RuntimeError('collection failed')\n")
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        checker.main()
+    assert error.value.returncode != 0
+    assert "collection failed" in error.value.stdout
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("defect", ["missing", "extra", "overlap"])
+def test_checker_rejects_real_partition_defects(defect, monkeypatch, capsys):
+    checker = _load_module(CHECKER_PATH, "check_python_test_partitions_defects")
+    core_node = "tests/test_core.py::test_collected[param::warnings summary]"
+    synthetic_node = "tests/test_real_client_e2e.py::test_synthetic[param::collected]"
+    extra_node = "tests/test_core.py::test_extra[param::collected]"
+    full = [core_node, synthetic_node]
+    core = [] if defect == "missing" else [core_node]
+    synthetic = [synthetic_node]
+    if defect == "extra":
+        core.append(extra_node)
+    elif defect == "overlap":
+        synthetic.append(core_node)
+    collections = iter([full, core, synthetic])
+
+    def collect(cmd, **_kwargs):
+        nodeids = next(collections)
+        stdout = "\n".join([*nodeids, f"{len(nodeids)} tests collected in 0.01s"])
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(checker.subprocess, "run", collect)
+    assert checker.main() == 1
+    output = capsys.readouterr().out
+    if defect == "extra":
+        assert "extra=1" in output
+        assert extra_node in output
+    elif defect == "missing":
+        assert "missing=1" in output
+        assert core_node in output
+    else:
+        assert "overlap=1" in output
+        assert core_node in output
+
+
+def test_checker_aborts_on_collection_process_failure(monkeypatch):
+    checker = _load_module(CHECKER_PATH, "check_python_test_partitions_process")
+
+    def fail(cmd, **kwargs):
+        assert cmd[:3] == [sys.executable, "-m", "pytest"]
+        assert "--collect-only" in cmd
+        assert kwargs["check"] is True
+        raise OSError("cannot start collection")
+
+    monkeypatch.setattr(checker.subprocess, "run", fail)
+    with pytest.raises(OSError, match="cannot start collection"):
+        checker.main()
+
+
 def test_ci_yaml_has_full_checkout_for_synthetic_merge_base():
     """Regression: shallow checkout breaks git merge-base on a fresh PR runner."""
     workflow_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(

@@ -1,6 +1,32 @@
 # Bundled Maintained Provider presets. Model identity is owned by maintained_catalog.py (ADR-0009).
 
 [[providers]]
+id = "cursor-subscription"
+name = "Cursor Subscription"
+base_url = "https://cli-subscription.invalid/v1"
+api_key = ""
+auth_capabilities = ["subscription:cursor_cli"]
+onboarding_hint = "Uses the current official Cursor CLI account. Discover models before enabling. Listing does not prove generation permission."
+upstream_format = "chat_completions"
+available_upstream_formats = ["chat_completions"]
+tool_protocol = "chat_tools"
+sort_order = 100
+enabled = false
+
+[[providers]]
+id = "claude-subscription"
+name = "Claude Subscription"
+base_url = "https://cli-subscription.invalid/v1"
+api_key = ""
+auth_capabilities = ["subscription:claude_cli"]
+onboarding_hint = "Uses the current official Claude CLI account. Explicit user-context consent is required before enabling. Listing does not prove generation permission."
+upstream_format = "chat_completions"
+available_upstream_formats = ["chat_completions"]
+tool_protocol = "chat_tools"
+sort_order = 101
+enabled = false
+
+[[providers]]
 id = "ollama-cloud"
 name = "Ollama Cloud"
 base_url = "https://ollama.com/v1"

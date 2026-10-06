@@ -1012,6 +1012,9 @@ def build_upstream_headers(
                 make_id=make_id,
             )
         return outgoing
+    if auth_mode == "official_cli_session":
+        # Credentials are owned by the isolated backend, never request headers.
+        return outgoing
     if auth_mode == "incoming":
         incoming_auth = (
             operational_authentication.authorization

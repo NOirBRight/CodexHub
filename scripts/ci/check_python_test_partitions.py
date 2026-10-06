@@ -52,6 +52,9 @@ def _collect(nodeids: List[str]) -> Set[str]:
         line = line.strip()
         if not line:
             continue
+        # pytest prints warning diagnostics after the collected nodeid list.
+        if re.fullmatch(r"=+ warnings summary =+", line):
+            break
         if line.startswith("no tests"):
             continue
         if "test session starts" in line.lower():

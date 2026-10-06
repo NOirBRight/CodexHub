@@ -378,18 +378,25 @@ def test_c1_native_responses_forwards_declarations_unchanged() -> None:
     assert terminal["response"]["output"][6]["type"] == "agent_message"
 
 
-def test_c1_native_history_drops_non_portable_encrypted_agent_message() -> None:
-    """C1: native V2 history round-trips except Official encrypted agent_message."""
+def test_c1_native_history_cannot_discard_unavailable_assignment_content() -> None:
+    """C1: an unavailable task fails visibly, even with a readable fragment."""
     body = _request_body(input_items=_v2_history())
+    original = copy.deepcopy(body)
+    fixture = _ProtocolFixture(body, _responses_upstream(native_namespace=True))
+    with pytest.raises(gateway_errors.UpstreamProtocolTranslationError, match="caller must restate") as error:
+        fixture.request()
+    assert error.value.cause.code == "encrypted_agent_message_unavailable"
+    assert "opaque" not in str(error.value)
+    assert body == original
+
+
+def test_c1_plaintext_native_history_preserves_all_calls_results_and_routing() -> None:
+    """C1: readable caller history still roundtrips through the native seam."""
+    body = _request_body(input_items=_v2_history_without_encrypted_agent_message())
     fixture = _ProtocolFixture(body, _responses_upstream(native_namespace=True))
     payload = fixture.request()
-
-    # Official encrypted agent_message parts are not portable off Official.
-    expected = _request_body(input_items=_v2_history_without_encrypted_agent_message())
-    assert payload["input"] == expected["input"]
-
-    # Response body with the same history also round-trips unchanged.
-    response = fixture.response({"id": "resp-history", "output": body["input"]})
+    assert payload["input"] == body["input"]
+    response = fixture.response({"id": "resp-history-plaintext", "output": body["input"]})
     assert response["output"] == body["input"]
 
 

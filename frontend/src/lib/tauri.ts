@@ -423,6 +423,7 @@ export const api = {
     return snapshot;
   },
   chatgptWebStatus: () => call<ChatGptWebStatus>(COMMANDS.chatgptWebStatus),
+  cliSubscriptionStatus: (providerId: string) => call<import("./cliSubscription").CliSubscriptionStatus>(COMMANDS.cliSubscriptionStatus, { providerId }),
   chatgptWebConnectionCheck: async (baseUrl: string, apiKey: string) => {
     const result = await desktopCall<ChatGptWebConnectionCheck>(
       COMMANDS.chatgptWebConnectionCheck,

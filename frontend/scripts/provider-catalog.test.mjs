@@ -75,6 +75,15 @@ const catalogXai = makeProvider({
   ],
 });
 
+test("CLI presets remain disabled until an explicit workspace enable", () => {
+  for (const id of ["cursor-subscription", "claude-subscription"]) {
+    const next = instantiateCatalogProvider(makeProvider({ id, auth_capabilities: ["subscription:official_cli"], api_key: "must-not-copy", enabled: true }), 11);
+    assert.equal(next.enabled, false);
+    assert.equal(next.api_key, null);
+    assert.equal(next.system_context_consent, undefined);
+  }
+});
+
 test("empty xAI stub inherits catalog endpoint and Grok 4 without copying the env api key", () => {
   const stub = makeProvider();
   const filled = applyCatalogPresetDefaults(stub, catalogXai);

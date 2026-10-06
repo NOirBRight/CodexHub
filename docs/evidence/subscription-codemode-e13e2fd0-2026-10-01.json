@@ -1,0 +1,301 @@
+{
+  "scope": "isolated actual Codex and production Gateway; passive byte-preserving observer; no injected codec",
+  "candidate_sha": "e13e2fd0df3562f44da4d98dd88554871388d505",
+  "codex_version": "codex-cli 0.159.3",
+  "case_timeout_seconds": 180,
+  "total_timeout_seconds": 240,
+  "platform": "linux",
+  "cases": [
+    {
+      "case": "code-mode",
+      "checks": {
+        "exact_selected_model_identity": true,
+        "actual_custom_exec": true,
+        "actual_fixture_tool_result": true,
+        "first_exact": true,
+        "passed": true
+      },
+      "turns": [
+        {
+          "exit": 0,
+          "pid": 3588054,
+          "timed_out": false,
+          "finals": [
+            "84101a9be101a1938f71dd9b"
+          ],
+          "errors": []
+        }
+      ],
+      "requests": [
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "cursor-subscription/gpt-5.6-luna-high",
+          "requested_reasoning_effort": "absent",
+          "parallel_tool_calls": true,
+          "input_types": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message"
+          ],
+          "input_sha256": "0f7a8300cd1e2a19ac2bb64341dddbae3a7be75a86820cf3f2e07b83b5d044b7",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637"
+            },
+            {
+              "type": "function",
+              "name": "exec_command",
+              "schema_sha256": "a598ae291787a2a763c4ef3479636ad2aa34cd442e1c1ef51d52567ea96003c6"
+            },
+            {
+              "type": "function",
+              "name": "write_stdin",
+              "schema_sha256": "6a7b92584883e01d395fcb870e2fa35bad550c87bcea16ed267c36bd5835c5d5"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4"
+            },
+            {
+              "type": "custom",
+              "name": "apply_patch",
+              "schema_sha256": "f18c24151d79bf0ed1908d888037ebbc018980ec374f7009e0bfdf618cacb47c"
+            },
+            {
+              "type": "function",
+              "name": "view_image",
+              "schema_sha256": "60d940fffd61ebeac814199d38edb5b52e1031773e7b581ebfcac257a3947340"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "get_goal",
+              "schema_sha256": "9284f72895b68d5da186e57484e6016aaea4ebb94234017590759919bde51cc4"
+            },
+            {
+              "type": "function",
+              "name": "create_goal",
+              "schema_sha256": "caf39db4551d71d4e9e46c176f38e61dcfbf024b2346157601d5a53107c31966"
+            },
+            {
+              "type": "function",
+              "name": "update_goal",
+              "schema_sha256": "7e0919ed7de59d3f73b66a742b9a05f155a89f39186cceb90baf2d3ed9eff40c"
+            }
+          ],
+          "tool_outputs": [],
+          "agent_messages": [],
+          "status": 200
+        },
+        {
+          "epoch": 0,
+          "path": "/v1/responses",
+          "model": "cursor-subscription/gpt-5.6-luna-high",
+          "requested_reasoning_effort": "absent",
+          "parallel_tool_calls": true,
+          "input_types": [
+            "message",
+            "message",
+            "message",
+            "message",
+            "message",
+            "custom_tool_call",
+            "custom_tool_call_output"
+          ],
+          "input_sha256": "cf315697a126702ad2d559b4557fbc393882533f66b5f45d9026924909c1e620",
+          "declarations": [
+            {
+              "type": "custom",
+              "name": "exec",
+              "schema_sha256": "f3f1c2830c70ee0658767edb7b12a78c66a0afe6ab1e18b94331b88750777082"
+            },
+            {
+              "type": "function",
+              "name": "wait",
+              "schema_sha256": "a1539c4ffbe043602bdb7eb04b45c1834f8a47c4506225a941410e2faf64d637"
+            },
+            {
+              "type": "function",
+              "name": "exec_command",
+              "schema_sha256": "a598ae291787a2a763c4ef3479636ad2aa34cd442e1c1ef51d52567ea96003c6"
+            },
+            {
+              "type": "function",
+              "name": "write_stdin",
+              "schema_sha256": "6a7b92584883e01d395fcb870e2fa35bad550c87bcea16ed267c36bd5835c5d5"
+            },
+            {
+              "type": "function",
+              "name": "request_user_input",
+              "schema_sha256": "e84516e6fab6e6a2e7d7025daeee8f081fe01a12a33ff521e9eb2f0c05ed1ee4"
+            },
+            {
+              "type": "custom",
+              "name": "apply_patch",
+              "schema_sha256": "f18c24151d79bf0ed1908d888037ebbc018980ec374f7009e0bfdf618cacb47c"
+            },
+            {
+              "type": "function",
+              "name": "view_image",
+              "schema_sha256": "60d940fffd61ebeac814199d38edb5b52e1031773e7b581ebfcac257a3947340"
+            },
+            {
+              "type": "function",
+              "name": "followup_task",
+              "schema_sha256": "2eb06628e65830fb3a8de8b9a5e5bb6426482f5daaf09a36787f6f34ee3d0c81",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "interrupt_agent",
+              "schema_sha256": "7a8af955171278dff898cabc869a96084211d960acf0a8cb8b7e21ace4f63443",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "list_agents",
+              "schema_sha256": "f98835af8d3012eb4b874cf2e6909a1438bab63c3bf56ed63a021cd35f23b50a",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "send_message",
+              "schema_sha256": "b7d349dbab2ff5531f74361b242a34d7014b06df2b790580f51422d5b877feab",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "spawn_agent",
+              "schema_sha256": "2bd6d4b00866fc08147223b9d56cc4ffd88628aa4cae8e8c6f348a7656900c25",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "wait_agent",
+              "schema_sha256": "eb7c7224c2c38b69bbe71104e7eb8293b2b848de2ec5f224574383e4fce4e7b2",
+              "namespace": "collaboration"
+            },
+            {
+              "type": "function",
+              "name": "get_goal",
+              "schema_sha256": "9284f72895b68d5da186e57484e6016aaea4ebb94234017590759919bde51cc4"
+            },
+            {
+              "type": "function",
+              "name": "create_goal",
+              "schema_sha256": "caf39db4551d71d4e9e46c176f38e61dcfbf024b2346157601d5a53107c31966"
+            },
+            {
+              "type": "function",
+              "name": "update_goal",
+              "schema_sha256": "7e0919ed7de59d3f73b66a742b9a05f155a89f39186cceb90baf2d3ed9eff40c"
+            }
+          ],
+          "tool_outputs": [
+            {
+              "type": "custom_tool_call_output",
+              "call_sha256": "7afa2e77368aea833ef43b1ddd788c2fdd1280d2a46cb66fb138ea1084577cdb",
+              "item_sha256": "f624363b433a1a91b0f4669bd90887e32cec5cac9dec670c3d6b25145ffcacb4",
+              "fixture_present": true,
+              "reversed_fixture_present": false
+            }
+          ],
+          "agent_messages": [],
+          "status": 200
+        }
+      ],
+      "sessions": [
+        {
+          "session_sha256": "5d75629e468215f2f773c77a5edd63494a383b1483efb36bdeda503a4de6274d",
+          "is_child": false,
+          "models": [
+            "cursor-subscription/gpt-5.6-luna-high"
+          ],
+          "calls": [
+            {
+              "target_sha256": null,
+              "spawn_target_sha256": null,
+              "type": "custom_tool_call",
+              "name": "exec",
+              "namespace": null,
+              "call_sha256": "7afa2e77368aea833ef43b1ddd788c2fdd1280d2a46cb66fb138ea1084577cdb",
+              "item_sha256": "1a4189c54aad7dbe79f530d895e6cffe805c75b91f0be9cd56f723fdfb0ceb5b",
+              "reads_fixture": true,
+              "spawn": false,
+              "followup": false,
+              "wait": false
+            }
+          ],
+          "effects": [
+            {
+              "call_sha256": "7afa2e77368aea833ef43b1ddd788c2fdd1280d2a46cb66fb138ea1084577cdb",
+              "fixture_present": true,
+              "reversed_fixture_present": false
+            }
+          ],
+          "assistant_returned_fixture": true,
+          "assistant_returned_reversed_fixture": false,
+          "rollout_sha256": "129640a07cf8b467c8feeaa3238a4815e56e89d3141e538193c1134dc88a985b"
+        }
+      ],
+      "fixture_sha256": "c9a70c8154f5a0775d76274594004a4d44c933383f4f0176ae89e03bc5926194",
+      "gateway_pids": [
+        3587853
+      ],
+      "failure_class": null,
+      "elapsed_seconds": 19.672,
+      "private_tree_removed": true
+    }
+  ],
+  "runtime_snapshot_sha256": "1f5b8efda8b6e230e5a1694cf22b365974c22e540761d9e6fd0d903a5247f227",
+  "source_runtime_dirty": false,
+  "candidate_sha_is_exact_runtime": true,
+  "snapshot_tree_removed": true,
+  "passed": true
+}

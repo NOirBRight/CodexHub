@@ -112,6 +112,82 @@ test('restart notice is required for a connected Codex regardless of Desktop', a
 // The reducer dispatch log observes the same busy state consumed by the page.
 import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
+import { catalogOverrideToastMessage } from '../src/lib/providerWorkspace/feedback.ts';
+test('provider auto-sync retains applied client feedback in the same completion or error toast', async t => {
+  const source = await readFile(new URL('../src/hooks/useProviderWorkspace.ts', import.meta.url), 'utf8');
+  const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const claudeMessage = 'Claude Code now routes new sessions through the CodexHub Gateway. Restart Claude Code.';
+  const claude = { client_id: 'claude', name: 'Claude Code', status: 'applied', applied: true, skipped: false, message: claudeMessage };
+  const skipped = { client_id: 'dsh', name: 'DSH', status: 'skipped', applied: false, skipped: true, message: 'Skipped DSH fixture. Restart DSH.' };
+  const failed = { client_id: 'cursor', name: 'Cursor', status: 'failed', applied: false, skipped: false, message: 'Failed Cursor fixture. Restart Cursor.' };
+  for (const scenario of [
+    { name: 'Claude applied with Codex disconnected', mode: 'official', results: [claude] },
+    { name: 'partial failure retains the applied Claude reminder', mode: 'official', results: [claude, skipped, failed] },
+    { name: 'Codex required reminder and override diagnostics survive alongside Claude', mode: 'custom', results: [claude], notice: 'providers.catalogOverrideRestartCodex', diagnostics: { accepted: 1, rejected: 2, migrated: 3, reasons: {} } },
+    { name: 'Codex unknown notice survives alongside Claude', mode: 'unknown', results: [claude], notice: 'providers.codexRestartStatusUnknown' },
+    { name: 'skipped and failed clients do not acquire apply feedback or restart requirements', mode: 'official', results: [skipped, failed] },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const calls = [], shown = [], updated = [];
+      const provider = { id: 'p', name: 'P', models: [] };
+      const state = { providers: [provider], settings: { auto_sync_clients: true }, selectedId: 'p', form: {}, pendingNewProvider: null };
+      const summary = {
+        applied: scenario.results.filter(result => result.applied).length,
+        skipped: scenario.results.filter(result => result.skipped).length,
+        failed: scenario.results.filter(result => result.status === 'failed').length,
+        results: scenario.results,
+        message: 'Bound client sync failed',
+        catalog_override_diagnostics: scenario.diagnostics,
+      };
+      const deps = {
+        react: {
+          useRef: current => ({ current }), useCallback: callback => callback,
+          useMemo: factory => factory(), useEffect: () => {}, useReducer: () => [state, () => {}],
+        },
+        '../lib/providerWorkspace/core': { selectSelectedProvider: () => provider },
+        '../lib/providerWorkspace/save': { createWorkspaceSaveCoordinator },
+        '../lib/providerWorkspace/restart': { readCodexRestartNotice },
+        '../lib/providerWorkspace/feedback': { catalogOverrideToastMessage },
+        '../lib/tauri': { messageFromError: String, api: {
+          saveProviders: async providers => { calls.push('persist'); return providers; },
+          generateCatalog: async () => { calls.push('publish'); },
+          getStatus: async () => { calls.push('restart-readback'); if (scenario.mode === 'unknown') throw Error('unavailable'); return { mode: scenario.mode }; },
+          syncGatewayClients: async () => { calls.push('sync'); return summary; },
+        } },
+      };
+      const exported = {};
+      new Function('exports', 'require', js)(exported, name => deps[name] ?? {});
+      const translate = (key, options) => key === 'providers.providerSavedCatalogWarning'
+        ? `${options.saved}; ${options.message}` : options ? `${key} ${JSON.stringify(options)}` : key;
+      const workspace = exported.useProviderWorkspace({
+        getSource: () => ({ ...state, catalogModels: [], modelMetadata: [] }),
+        refreshGatewayState: async () => { calls.push('refresh'); },
+        toast: { showToast: input => { shown.push(input); return 'save-toast'; }, updateToast: (id, patch) => updated.push({ id, ...patch }) },
+        t: translate, tr: translate,
+      });
+      assert.equal((await workspace.saveProviders([provider])).kind, 'ok');
+      assert.deepEqual(calls, ['persist', 'publish', 'restart-readback', 'sync', ...(summary.failed ? [] : ['refresh'])]);
+      assert.equal(shown.length, 1);
+      assert.equal(shown[0].tone, 'loading');
+      assert.equal(shown[0].timeoutMs, null);
+      assert.ok(updated.every(patch => patch.id === 'save-toast'));
+      const completed = updated.at(-1);
+      assert.equal(completed.tone, summary.failed ? 'error' : 'success');
+      assert.equal(completed.timeoutMs, summary.failed ? null : 6000);
+      assert.equal(typeof completed.action?.onClick, summary.failed ? 'function' : 'undefined');
+      if (summary.applied) assert.ok(completed.text.includes(`Claude Code: ${claudeMessage}`), completed.text);
+      assert.ok(completed.text.includes(summary.failed
+        ? translate('providers.syncClientsFailed', { count: summary.failed })
+        : translate('providers.syncedClients', { count: summary.applied, plural: summary.applied === 1 ? '' : 's' })));
+      if (summary.failed) assert.ok(completed.text.includes(summary.message));
+      if (scenario.notice) assert.ok(completed.text.includes(scenario.notice));
+      else assert.doesNotMatch(completed.text, /providers\.(catalogOverrideRestartCodex|codexRestartStatusUnknown)/);
+      if (scenario.diagnostics) assert.ok(completed.text.includes(catalogOverrideToastMessage(scenario.diagnostics, translate)));
+      assert.doesNotMatch(completed.text, /DSH|Cursor/);
+      if (!summary.applied) assert.doesNotMatch(completed.text, /Restart|Claude Code|providers.syncedClients/);
+    });
+  }
+});
 test('discovery uses the current draft and keeps editing locked until publication finishes', async () => {
   const source = await readFile(new URL('../src/hooks/useProviderWorkspace.ts', import.meta.url), 'utf8');
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;

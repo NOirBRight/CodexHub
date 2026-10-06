@@ -9,9 +9,6 @@ ports.
 
 from __future__ import annotations
 
-import select
-import socket
-import threading
 import time as _time
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
@@ -31,6 +28,7 @@ import gateway_transport as _gateway_transport
 import protocol_translation as _protocol_translation
 import proxy_telemetry as _proxy_telemetry
 import route_plan as _route_plan_module
+import subscription_exchange as _subscription_exchange
 from gateway_error_dispatch import PostRequestLiveState
 from gateway_exchange import (
     DownstreamAction,
@@ -98,6 +96,13 @@ class LiveTransport:
         self._handler = live.handler
 
     def open(self, opening: OpenExchangeRequest) -> AbstractContextManager[UpstreamResponseLike]:
+        if _subscription_exchange.is_subscription_provider(opening.upstream_name):
+            return _subscription_exchange.open_subscription(
+                opening.request,
+                provider_id=opening.upstream_name,
+                timeout=opening.attempt.retry.request_timeout_seconds,
+                downstream_socket=getattr(self._handler, "connection", None),
+            )
         return _gateway_transport.open_upstream_response(
             opening.request,
             upstream_name=opening.upstream_name,
@@ -122,7 +127,7 @@ class LiveDownstream:
     def relay(self, response: UpstreamResponseLike, relay_request: RelayExchangeRequest) -> int:
         stop_disconnect_watch = None
         if relay_request.upstream_name == "chatgpt_web":
-            stop_disconnect_watch = _watch_chatgpt_web_downstream_disconnect(self._handler)
+            stop_disconnect_watch = _gateway_admission.watch_downstream_disconnect(getattr(self._handler, "connection", None))
         try:
             return self._handler._relay_upstream_response(
                 response,
@@ -171,40 +176,6 @@ class LiveDownstream:
             if not self._handler._send_sse_headers(200, ""):
                 return False
         return self._handler._write_sse_event("codexhub.retry", payload)
-
-
-def _watch_chatgpt_web_downstream_disconnect(handler: Any) -> threading.Event:
-    """Abort the upstream body when the caller disconnects or cancels."""
-    stop = threading.Event()
-    sock = getattr(handler, "connection", None)
-    admission = _gateway_admission.active_gateway_request()
-    if sock is None or admission is None:
-        return stop
-
-    def watch() -> None:
-        while not stop.is_set() and not admission.cancelled:
-            try:
-                readable, _, errored = select.select([sock], [], [sock], 0.2)
-            except (OSError, ValueError):
-                admission.cancel()
-                return
-            if stop.is_set() or not readable and not errored:
-                continue
-            try:
-                peeked = sock.recv(1, socket.MSG_PEEK)
-            except OSError:
-                admission.cancel()
-                return
-            if peeked == b"" or errored:
-                admission.cancel()
-                return
-
-    threading.Thread(
-        target=watch,
-        name="chatgpt-web-downstream-cancel",
-        daemon=True,
-    ).start()
-    return stop
 
 
 def live_finish_downstream_failure(handler: Any) -> None:

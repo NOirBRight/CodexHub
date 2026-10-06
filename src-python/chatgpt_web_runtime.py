@@ -1414,7 +1414,7 @@ def _write_minimum_config(home: Path, entry: Path) -> tuple[int, dict[str, Any]]
                 "alias": _owned_tunnel_alias(home, tunnel["alias"]),
             }
         _write_json(web_config_path, config, mode=0o600)
-    return port, settings
+    return port, _settings_from_upstream(home, config)
 
 
 def _tunnel_manifest_path(home: Path) -> Path:

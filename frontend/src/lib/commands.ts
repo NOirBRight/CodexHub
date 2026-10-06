@@ -28,6 +28,7 @@ export const COMMANDS = {
   refreshOfficialModels: "refresh_official_models",
   openaiUsageCompletions: "openai_usage_completions",
   discoverProviderModels: "discover_provider_models",
+  cliSubscriptionStatus: "cli_subscription_status",
   probeUpstreamFormat: "probe_upstream_format",
   providerProbeUpstreamFormat: "provider_probe_upstream_format",
   testModelEndpoint: "test_model_endpoint",

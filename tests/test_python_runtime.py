@@ -22,6 +22,8 @@ PREPARE_RUNTIME = ROOT / "scripts" / "Prepare-PythonRuntime.ps1"
 
 DIRECT_PYTHON_ENTRYPOINTS = (
     "src-python/claude_native_models.py",
+    "src-python/cli_subscription_status.py",
+    "src-python/claude_subscription_mcp.py",
     "scripts/capture_desktop_tool_catalog.py",
     "scripts/e2e_desktop_tool_matrix.py",
     "src-python/bucket_sync.py",
@@ -51,6 +53,7 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/claude_code_version_gate.py",
     "scripts/claude_messages_loopback_harness.py",
     "scripts/discover_cli_subscription.py",
+    "scripts/qualify_cli_subscriptions.py",
     "scripts/ci/check_python_test_partitions.py",
     "scripts/ci/ci_change_plan.py",
     "scripts/ci/python_test_plan.py",
@@ -80,6 +83,8 @@ DIRECT_PYTHON_ENTRYPOINTS = (
     "scripts/prepare_chatgpt_web_runtime.py",
     "scripts/probe_claude_role_identity.py",
     "scripts/qualify_authenticated_provider_cli.py",
+    "scripts/qualify_subscription_codemode.py",
+    "scripts/subscription_fixture_observer.py",
     "scripts/qualify_beta3_protocol_cli.py",
     "scripts/replay_official_transport.py",
     "scripts/report_quality_gates.py",

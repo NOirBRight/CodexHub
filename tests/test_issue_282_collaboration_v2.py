@@ -772,7 +772,7 @@ def test_official_portable_messages_decode_and_replay_with_plaintext_marker(tool
     assert upstream["input"][0] == {**decoded, "namespace": wire_call["namespace"]}
 
 
-@pytest.mark.parametrize("case", ["unrelated", "collision", "unknown_contract"])
+@pytest.mark.parametrize("case", ["unrelated", "alias_only", "unknown_contract"])
 def test_official_portability_preserves_unowned_tool_declarations(case) -> None:
     from gateway_compat.collaboration_delivery import ALIAS
 
@@ -782,8 +782,8 @@ def test_official_portability_preserves_unowned_tool_declarations(case) -> None:
     elif case == "unknown_contract":
         declaration["tools"].pop()
     tools = [declaration]
-    if case == "collision":
-        tools.append({"type": "namespace", "name": ALIAS, "tools": []})
+    if case == "alias_only":
+        tools = [{"type": "namespace", "name": ALIAS, "tools": []}]
     context = {}
     encoded = json.loads(gateway_compat.compatible_request_body(
         json.dumps({"tools": tools}).encode(), {"name": "official"}, event_context=context,

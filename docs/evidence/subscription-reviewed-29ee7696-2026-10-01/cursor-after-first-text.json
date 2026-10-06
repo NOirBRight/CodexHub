@@ -1,0 +1,18 @@
+{
+  "scope": "after-first-text caller cancellation",
+  "bound_seconds": 90,
+  "billing_cessation_claimed": false,
+  "passed": false,
+  "failure_code": "active-upstream-cleanup-unobserved",
+  "candidate_sha": "29ee769689816511fbd7b010ee6339dddf61bc8f",
+  "candidate_sha_is_exact_runtime": true,
+  "cli_version": "2026.09.28-64d2043",
+  "runtime_source_sha256": "d0f6b9eecea3920755fb628b9060a710b378e380efb2220adac5faecda9d4083",
+  "upstream_tls_baseline": 0,
+  "http_status": 200,
+  "first_text_observed": true,
+  "upstream_tls_at_disconnect": 0,
+  "upstream_tls_after_cancel": 0,
+  "private_artifacts_removed": true,
+  "elapsed_seconds": 48.531
+}

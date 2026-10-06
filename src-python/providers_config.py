@@ -124,6 +124,7 @@ class ProviderConfig:
     sort_order: int = 0
     enabled: bool = True
     models: list[ModelConfig] = field(default_factory=list)
+    system_context_consent: str | None = None
 
     def resolved_api_key(self) -> str | None:
         configured_api_key = self.api_key.strip()
@@ -244,11 +245,12 @@ def discover_provider_models(
 
 
 def provider_has_subscription_session(provider_id: str) -> bool:
-    """True when ADR-0005 has a live subscription session for this provider."""
+    """Admit keyless configuration; CLI backends check the live account per call."""
 
+    from subscription_exchange import is_subscription_provider
     from subscription_credential import provider_auth_mode
 
-    return bool(provider_auth_mode(provider_id))
+    return is_subscription_provider(provider_id) or bool(provider_auth_mode(provider_id))
 
 
 def build_external_model_index(
@@ -259,6 +261,10 @@ def build_external_model_index(
     result: dict[str, dict[str, Any]] = {}
     for provider in providers:
         provider_id = canonical_model_id(provider.id)
+        from subscription_exchange import is_subscription_provider, SYSTEM_CONTEXT_CONSENT
+        cli_subscription = is_subscription_provider(provider_id)
+        if provider_id == "claude-subscription" and provider.system_context_consent != SYSTEM_CONTEXT_CONSENT:
+            continue
         if (
             not provider.enabled
             or not provider_id
@@ -266,7 +272,7 @@ def build_external_model_index(
         ):
             continue
 
-        base_url = provider.base_url.strip()
+        base_url = "https://cli-subscription.invalid/v1" if cli_subscription else provider.base_url.strip()
         if not base_url:
             continue
 
@@ -290,12 +296,12 @@ def build_external_model_index(
             entry = {
                 "alias": alias,
                 "provider_alias": provider_id,
-                "upstream_name": EXTERNAL_PROVIDER_UPSTREAM_NAMES.get(provider_id, provider_id),
+                "upstream_name": provider_id if cli_subscription else EXTERNAL_PROVIDER_UPSTREAM_NAMES.get(provider_id, provider_id),
                 "display_prefix": provider.display_prefix,
                 "base_url": base_url,
-                "api_key": api_key,
-                "upstream_format": provider.upstream_format,
-                "available_upstream_formats": provider.available_upstream_formats,
+                "api_key": None if cli_subscription else api_key,
+                "upstream_format": "chat_completions" if cli_subscription else provider.upstream_format,
+                "available_upstream_formats": ("chat_completions",) if cli_subscription else provider.available_upstream_formats,
                 "tool_protocol": provider.tool_protocol,
                 "tool_protocol_capabilities": _resolved_tool_protocol_capabilities(provider, model),
                 "tool_surface_strategy": tool_surface_strategy,
@@ -584,6 +590,7 @@ def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
             sort_order=_int_field(raw_provider.get("sort_order"), 0),
             enabled=_bool_field(raw_provider.get("enabled"), True),
             models=_sort_by_order(indexed_models),
+            system_context_consent=_optional_string_field(raw_provider.get("system_context_consent")),
         )
         provider._tool_surface_strategy_explicit = "tool_surface_strategy" in raw_provider
         provider._native_responses_tool_codec_explicit = (
@@ -885,6 +892,8 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
             chunks.append(_toml_bool_line("reports_cached_input_tokens", provider.reports_cached_input_tokens))
         if not provider.supports_developer_role:
             chunks.append(_toml_bool_line("supports_developer_role", provider.supports_developer_role))
+        if provider.system_context_consent is not None:
+            chunks.append(_toml_string_line("system_context_consent", provider.system_context_consent))
         chunks.extend(
             [
                 _toml_int_line("sort_order", provider.sort_order),
