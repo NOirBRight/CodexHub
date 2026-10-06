@@ -232,3 +232,165 @@ def test_tool_continuation_delta_does_not_repeat_text_stream_or_cancellation(tmp
     assert result["ordinary_qualified"] and result["ordinary_scope"] == "tool-continuation-only"
     assert [case["case"] for case in result["cases"]] == ["responses.caller-tool", "responses.tool-result",
                                                          "responses.restart-history-fresh-caller"]
+
+
+@pytest.mark.parametrize("scenario,code", [
+    ("active", None),
+    ("natural-finish", "cancel-response-already-ended"),
+    ("natural-finish-during-observation", "cancel-response-already-ended"),
+    ("no-text", "cancel-first-text-unobserved"),
+    ("cleanup-unobserved", "cancel-cleanup-unobserved"),
+    ("cleanup-observer-missing", "cancel-cleanup-unobserved"),
+    ("ownership-unobserved", "cancel-ownership-unobserved"),
+    ("inactive-after-text", "cancel-request-inactive"),
+    ("denied", "not-eligible"),
+])
+def test_after_first_text_cancel_observes_real_sse_and_owned_cleanup(monkeypatch, scenario, code):
+    """Real local HTTP/SSE; socket ownership is controlled engineering evidence."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    active, disconnected = threading.Event(), threading.Event()
+    finish_requested = threading.Event()
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(403 if scenario == "denied" else 200)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if scenario == "denied":
+                self.wfile.write(b'{"error":{"code":"not-eligible","message":"private-denial"}}')
+                return
+            active.set()
+            self.wfile.write(b'data: {"choices":[{"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n')
+            if scenario != "no-text":
+                # A terminal in the same text frame must beat cancellation.
+                finish = "stop" if scenario == "natural-finish" else None
+                self.wfile.write(("data: " + json.dumps({"choices": [{"delta": {"content": "private-text\u200b"},
+                    "finish_reason": finish}]}) + "\n\n").encode())
+            if scenario in {"natural-finish", "no-text"}:
+                self.wfile.write(b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+                self.wfile.flush()
+                disconnected.set()
+                return
+            self.wfile.flush()
+            if scenario == "natural-finish-during-observation":
+                assert finish_requested.wait(5)
+                self.wfile.write(b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
+                self.wfile.flush()
+                disconnected.set()
+                return
+            self.connection.settimeout(5)
+            try:
+                self.connection.recv(1)
+            finally:
+                disconnected.set()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    class Gateway(qualify.PrivateGateway):
+        def __init__(self):
+            self.port = server.server_port
+            self.key = "private-key"
+            self.timeout = .5
+            self.process = type("Process", (), {"pid": 123, "poll": lambda self: None})()
+
+    def upstream_count(pid):
+        assert pid == 123
+        if scenario == "ownership-unobserved":
+            return None
+        if scenario == "cleanup-observer-missing" and disconnected.is_set():
+            return None
+        if scenario == "inactive-after-text":
+            return 0
+        if scenario == "natural-finish-during-observation" and active.is_set() and not disconnected.is_set():
+            finish_requested.set()
+            assert disconnected.wait(2)
+            # The socket snapshot can precede terminal delivery. Allow the
+            # real reader to observe it while this observation is in flight.
+            threading.Event().wait(.05)
+            return 1
+        if disconnected.is_set() and scenario != "cleanup-unobserved":
+            return 0
+        return int(active.is_set())
+
+    monkeypatch.setattr(qualify, "_upstream_tls_count", upstream_count)
+    monkeypatch.setattr(qualify, "_socket_count", lambda pid: 1 + int(active.is_set() and not disconnected.is_set()))
+    try:
+        if code:
+            with pytest.raises(qualify.QualificationFailure) as error:
+                Gateway().cancel_stream_after_first_text("cursor-subscription/exact/high-fast")
+            assert error.value.code == code
+            evidence = error.value.evidence
+        else:
+            evidence = Gateway().cancel_stream_after_first_text("cursor-subscription/exact/high-fast")
+            assert evidence["first_nonempty_text_observed"]
+            assert evidence["request_active_at_disconnect"]
+            assert evidence["caller_wait_ended"] and evidence["upstream_socket_cleanup_observed"]
+            assert not evidence["terminal_observed_before_cancel"]
+            assert not evidence["caller_finished_before_cancel"]
+            assert evidence["first_text_sha256"] == qualify.fingerprint("private-text\u200b")
+            assert evidence["first_text_elapsed_seconds"] <= evidence["disconnect_elapsed_seconds"]
+        assert requests[0]["model"] == "cursor-subscription/exact/high-fast"
+        assert requests[0]["stream"] and "max_tokens" not in requests[0]
+        if evidence:
+            assert evidence["cancel_phase"] == "after-first-nonempty-text"
+            assert not evidence["billing_cessation_claimed"]
+        serialized = json.dumps(evidence)
+        assert all(secret not in serialized for secret in ("private-text", "private-key", "private-denial"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_after_first_text_selection_keeps_upstream_wait_report_meaning(tmp_path, monkeypatch):
+    class AfterText(FakeGateway):
+        def cancel_stream(self, model):
+            raise AssertionError("explicit text scenario must not repeat upstream-wait")
+
+        def cancel_stream_after_first_text(self, model):
+            assert model == "cursor-subscription/exact-model"
+            return {"cancel_phase": "after-first-nonempty-text", "first_nonempty_text_observed": True,
+                    "request_active_at_disconnect": True, "terminal_observed_before_cancel": False,
+                    "caller_wait_ended": True, "upstream_socket_cleanup_observed": True,
+                    "billing_cessation_claimed": False}
+
+    monkeypatch.setattr(qualify, "PrivateGateway", AfterText)
+    result = qualify.run_qualification(minimal_repo(tmp_path), "cursor-subscription", "exact-model",
+        protocols=(), include_cancel=False, cancel_after_first_text=True)
+    assert result["caller_cancel_after_first_text_qualified"]
+    assert not result["caller_cancel_qualified"] and not result["ordinary_qualified"]
+    assert result["private_artifacts_removed"] and not result["generation_qualified"]
+    assert [row["case"] for row in result["cases"]] == ["chat.caller-cancel-after-first-text"]
+
+
+@pytest.mark.parametrize("flag,key", [
+    ("--cancel-only", "caller_cancel_qualified"),
+    ("--cancel-after-first-text-only", "caller_cancel_after_first_text_qualified"),
+])
+def test_cli_selects_one_cancel_phase_and_uses_its_own_result(tmp_path, monkeypatch, flag, key):
+    repo = tmp_path / "repo"
+    (repo / "src-python").mkdir(parents=True)
+    (repo / "src-python/codex_proxy.py").touch()
+    calls = []
+
+    def qualification(repo, provider, model, **kwargs):
+        calls.append(kwargs)
+        return {"ordinary_qualified": False, "caller_cancel_qualified": key == "caller_cancel_qualified",
+                "caller_cancel_after_first_text_qualified": key == "caller_cancel_after_first_text_qualified",
+                "cases": [], "private_artifacts_removed": True}
+
+    monkeypatch.setattr(qualify, "run_qualification", qualification)
+    assert qualify.main(["--repo-root", str(repo), "--provider", "cursor-subscription", "--model", "exact-model",
+                         "--output", str(tmp_path / "result.json"), flag]) == 0
+    assert calls[0]["protocols"] == ()
+    assert calls[0]["include_cancel"] == (flag == "--cancel-only")
+    assert calls[0]["cancel_after_first_text"] == (flag == "--cancel-after-first-text-only")

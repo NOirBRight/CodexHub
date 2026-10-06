@@ -495,10 +495,144 @@ path.chmod(0o600)
                     and upstream_at_disconnect > upstream_baseline and upstream_after == upstream_baseline),
                 "billing_cessation_claimed": False}
 
+    def cancel_stream_after_first_text(self, model: str) -> dict[str, Any]:
+        """Disconnect an active text stream, observing only this Gateway's sockets."""
+        assert self.process is not None
+        start = time.monotonic()
+        baseline = _socket_count(self.process.pid)
+        upstream_baseline = _upstream_tls_count(self.process.pid)
+        payload = request_for("chat", model, [{"role": "user", "content":
+            "Write an extremely long numbered list of unique sentences. Continue for at least 10000 lines."}], stream=True)
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout)
+        finished = threading.Event()
+        lock = threading.Lock()
+        evidence = {"cancel_phase": "after-first-nonempty-text", "protocol": "chat", "gateway_model": model,
+                    "first_nonempty_text_observed": False, "first_text_sha256": None, "first_text_bytes": 0,
+                    "first_text_elapsed_seconds": None, "terminal_observed_before_cancel": False,
+                    "headers_received_before_cancel": False, "billing_cessation_claimed": False,
+                    "wait_bound_seconds": self.timeout, "caller_join_bound_seconds": 1, "cleanup_bound_seconds": 3}
+        errors = []
+
+        def reading_caller() -> None:
+            response = None
+            try:
+                response = connection.getresponse()
+                with lock:
+                    evidence["headers_received_before_cancel"] = True
+                if response.status != 200:
+                    body = response.read(_MAX_RESPONSE + 1)
+                    try:
+                        value = json.loads(body)
+                    except ValueError:
+                        value = {}
+                    raise _error(value, response.status)
+                for value in sse_events(response):
+                    with lock:
+                        if value == "[DONE]":
+                            evidence["terminal_observed_before_cancel"] = True
+                            continue
+                        for choice in value.get("choices", []):
+                            # A finish in the same frame as text is already complete.
+                            if choice.get("finish_reason") is not None:
+                                evidence["terminal_observed_before_cancel"] = True
+                            text = choice.get("delta", {}).get("content")
+                            if isinstance(text, str) and text and not evidence["first_nonempty_text_observed"]:
+                                evidence.update(first_nonempty_text_observed=True, first_text_sha256=fingerprint(text),
+                                                first_text_bytes=len(text.encode()),
+                                                first_text_elapsed_seconds=round(time.monotonic() - start, 3))
+            except Exception as error:
+                with lock:
+                    errors.append(error if isinstance(error, QualificationFailure)
+                                  else QualificationFailure("harness-or-transport-failure"))
+            finally:
+                if response is not None:
+                    response.close()
+                with lock:
+                    finished.set()
+
+        thread = None
+        caller_socket = None
+        active = False
+        disconnected = False
+        upstream_at_disconnect = None
+        terminal_at_disconnect = False
+        finished_at_disconnect = False
+        error_at_disconnect = None
+        try:
+            connection.request("POST", ENDPOINTS["chat"], body=json.dumps(payload).encode(), headers={
+                "Content-Type": "application/json", "Authorization": "Bearer " + self.key, "Connection": "close"})
+            # HTTPConnection detaches its socket on Connection: close headers;
+            # retain our owned socket so a blocked SSE read can still be interrupted.
+            caller_socket = connection.sock
+            thread = threading.Thread(target=reading_caller, daemon=True)
+            thread.start()
+            wait_deadline = start + self.timeout
+            while time.monotonic() < wait_deadline:
+                with lock:
+                    if evidence["first_nonempty_text_observed"] or finished.is_set() or errors:
+                        break
+                time.sleep(.01)
+        finally:
+            # Socket observation must not prevent the reader recording a
+            # natural terminal while the /proc snapshot is being collected.
+            upstream_at_disconnect = _upstream_tls_count(self.process.pid)
+            with lock:
+                terminal_at_disconnect = evidence["terminal_observed_before_cancel"]
+                finished_at_disconnect = finished.is_set()
+                error_at_disconnect = errors[0] if errors else None
+                active = (baseline is not None and upstream_baseline is not None and upstream_at_disconnect is not None
+                          and upstream_at_disconnect > upstream_baseline and self.process.poll() is None
+                          and not finished_at_disconnect and not terminal_at_disconnect and not errors
+                          and evidence["first_nonempty_text_observed"])
+                if caller_socket is not None:
+                    try:
+                        caller_socket.shutdown(socket.SHUT_RDWR)
+                        disconnected = True
+                    except OSError:
+                        pass
+                evidence["disconnect_elapsed_seconds"] = round(time.monotonic() - start, 3)
+            connection.close()
+            if thread is not None:
+                thread.join(timeout=1)
+        cleanup_start = time.monotonic()
+        cleanup_deadline = cleanup_start + 3
+        count = _socket_count(self.process.pid)
+        upstream_after = _upstream_tls_count(self.process.pid)
+        while (baseline is not None and upstream_baseline is not None and count is not None and upstream_after is not None
+               and (count > baseline or upstream_after > upstream_baseline) and time.monotonic() < cleanup_deadline):
+            time.sleep(.05)
+            count = _socket_count(self.process.pid)
+            upstream_after = _upstream_tls_count(self.process.pid)
+        evidence.update(terminal_observed_before_cancel=terminal_at_disconnect,
+                        caller_finished_before_cancel=finished_at_disconnect,
+                        request_active_at_disconnect=active and disconnected, caller_disconnect_observed=disconnected,
+                        caller_wait_ended=finished.is_set(), caller_failure_observed=bool(errors),
+                        socket_baseline=baseline, socket_after_cancel=count,
+                        upstream_tls_baseline=upstream_baseline, upstream_tls_at_disconnect=upstream_at_disconnect,
+                        upstream_tls_after_cancel=upstream_after,
+                        cleanup_elapsed_seconds=round(time.monotonic() - cleanup_start, 3),
+                        upstream_socket_cleanup_observed=(active and disconnected and baseline is not None and count is not None and count <= baseline
+                            and upstream_baseline is not None and upstream_after == upstream_baseline
+                            and self.process.poll() is None))
+        if error_at_disconnect is not None:
+            raise QualificationFailure(error_at_disconnect.code, error_at_disconnect.status, evidence)
+        if not evidence["first_nonempty_text_observed"]:
+            raise QualificationFailure("cancel-first-text-unobserved", evidence=evidence)
+        if terminal_at_disconnect:
+            raise QualificationFailure("cancel-response-already-ended", evidence=evidence)
+        if baseline is None or upstream_baseline is None or upstream_at_disconnect is None:
+            raise QualificationFailure("cancel-ownership-unobserved", evidence=evidence)
+        if not evidence["request_active_at_disconnect"]:
+            raise QualificationFailure("cancel-request-inactive", evidence=evidence)
+        if not finished.is_set() or not evidence["upstream_socket_cleanup_observed"]:
+            raise QualificationFailure("cancel-cleanup-unobserved", evidence=evidence)
+        return evidence
+
 
 def run_qualification(repo: Path, provider: str, model: str, *, timeout: float = 60,
                       total_timeout: float = 900, protocols: tuple[str, ...] = PROTOCOLS,
-                      progress: Any = None, include_cancel: bool = True, include_text: bool = True) -> dict[str, Any]:
+                      progress: Any = None, include_cancel: bool = True, include_text: bool = True,
+                      cancel_after_first_text: bool = False) -> dict[str, Any]:
     """Execute bounded ordinary acceptance; advanced/Windows gates stay separate."""
     start = time.monotonic()
     deadline = start + total_timeout
@@ -630,6 +764,8 @@ def run_qualification(repo: Path, provider: str, model: str, *, timeout: float =
                         raise QualificationFailure("cancel-cleanup-unobserved", evidence=evidence)
                     return evidence
                 case("chat.caller-cancel", cancellation)
+            if provider == "cursor-subscription" and cancel_after_first_text:
+                case("chat.caller-cancel-after-first-text", lambda: server.cancel_stream_after_first_text(selected))
         except QualificationFailure as error:
             qualified = False
             records.append({"case": "gateway.setup", "state": "failed", "code": error.code})
@@ -640,6 +776,8 @@ def run_qualification(repo: Path, provider: str, model: str, *, timeout: float =
     report["cli_version_observed_after_run"] = installed_cli_version(provider)
     report["ordinary_qualified"] = qualified and bool(records) and bool(protocols)
     report["caller_cancel_qualified"] = any(row["case"] == "chat.caller-cancel" and row["state"] == "passed" for row in records)
+    report["caller_cancel_after_first_text_qualified"] = any(row["case"] == "chat.caller-cancel-after-first-text"
+                                                            and row["state"] == "passed" for row in records)
     report["generation_qualified"] = False  # full product acceptance includes separate advanced/platform gates
     report["elapsed_seconds"] = round(time.monotonic() - start, 2)
     return report
@@ -655,6 +793,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--total-timeout", type=float, default=900)
     parser.add_argument("--protocol", choices=PROTOCOLS, action="append")
     parser.add_argument("--cancel-only", action="store_true", help="Run only the actual upstream-wait caller cancellation probe")
+    parser.add_argument("--cancel-after-first-text-only", action="store_true", help="Run only cancellation after an actual nonempty Chat text delta")
     parser.add_argument("--skip-cancel", action="store_true", help="Retain earlier cancellation evidence while verifying only protocol deltas")
     parser.add_argument("--tool-continuation-only", action="store_true", help="Verify new real tool call/result and restart without repeating text/stream/cancel")
     args = parser.parse_args(argv)
@@ -662,16 +801,23 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("positive bounds and a real Gateway checkout are required")
     if args.cancel_only and args.tool_continuation_only:
         parser.error("select cancellation or tool continuation, not both")
+    if args.cancel_after_first_text_only and (args.cancel_only or args.skip_cancel or args.tool_continuation_only or args.protocol):
+        parser.error("select the after-first-text cancellation scenario alone")
+    if args.cancel_after_first_text_only and args.provider != "cursor-subscription":
+        parser.error("after-first-text socket observation currently requires Cursor")
     result = run_qualification(args.repo_root, args.provider, args.model, timeout=args.timeout,
-                               total_timeout=args.total_timeout, protocols=() if args.cancel_only else tuple(args.protocol or PROTOCOLS),
+                               total_timeout=args.total_timeout, protocols=() if (args.cancel_only or args.cancel_after_first_text_only) else tuple(args.protocol or PROTOCOLS),
                                progress=lambda case: print(json.dumps(case), flush=True),
-                               include_cancel=not (args.skip_cancel or args.tool_continuation_only),
-                               include_text=not args.tool_continuation_only)
+                               include_cancel=not (args.skip_cancel or args.tool_continuation_only or args.cancel_after_first_text_only),
+                               include_text=not args.tool_continuation_only,
+                               cancel_after_first_text=args.cancel_after_first_text_only)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"provider": args.provider, "ordinary_qualified": result["ordinary_qualified"],
                       "cases": len(result["cases"]), "private_artifacts_removed": result["private_artifacts_removed"]}))
-    return 0 if (result["caller_cancel_qualified"] if args.cancel_only else result["ordinary_qualified"]) else 1
+    passed = (result["caller_cancel_after_first_text_qualified"] if args.cancel_after_first_text_only else
+              result["caller_cancel_qualified"] if args.cancel_only else result["ordinary_qualified"])
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":
