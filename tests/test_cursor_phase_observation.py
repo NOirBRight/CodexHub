@@ -8,6 +8,7 @@ import queue
 import socket
 import subprocess
 import sys
+from threading import Event
 from unittest.mock import patch
 
 import pytest
@@ -33,7 +34,7 @@ def control(root, mode):
     from h2.events import DataReceived, RequestReceived
 
     observer = load_observation(ROOT / "scripts/subscription_fixture_observer.py")
-    if mode == "cap":
+    if mode in {"cap", "drop-cap"}:
         observer.MAX_PHASE_RECORDS = 1
     lease = account(root)
     calls = []
@@ -112,6 +113,11 @@ def control(root, mode):
                           data=json.dumps({"model": "controlled", "stream": True,
                                            "messages": [{"role": "user", "content": SECRET}]}).encode())
         with patch("socket.create_connection", connect):
+            if mode == "drop-cap":
+                # Public backend call outside exchange has no request deadline:
+                # disclose drop first, then let the actual exchange reach cap.
+                list(backend(json.loads(request.data), cancel=Event(), timeout=180))
+                calls.clear()
             try:
                 with subscription_exchange.open_subscription(request, provider_id="cursor-subscription",
                                                                timeout=180, backend=backend) as response:
@@ -131,7 +137,7 @@ def control(root, mode):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Existing qualification owner-only storage is POSIX-only")
-@pytest.mark.parametrize("mode", ["complete", "error", "incomplete", "cap"])
+@pytest.mark.parametrize("mode", ["complete", "error", "incomplete", "cap", "drop-cap"])
 def test_child_phase_observer_covers_exchange_and_http2_without_network(tmp_path, mode, record_property):
     result = subprocess.run([str(ROOT / "scripts/codexhub-python.sh"), str(Path(__file__).resolve()),
                              str(tmp_path), mode], cwd=ROOT, capture_output=True, timeout=15)
@@ -145,7 +151,7 @@ def test_child_phase_observer_covers_exchange_and_http2_without_network(tmp_path
     record_property("child_pid", report["process_ids"][0])
     record_property("parent_pid", os.getpid())
     starts = [row for row in report["records"] if row["event"] == "begin"]
-    if mode == "cap":
+    if mode in {"cap", "drop-cap"}:
         assert "cap" in report["closure"] and "drop" in report["closure"]
         assert len(report["records"]) <= 2
         return

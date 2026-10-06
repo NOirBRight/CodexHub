@@ -111,6 +111,7 @@ class CursorPhaseObservation:
         self.states = {}
         self.actors = {"startup": False, "exchange": False, "http2": False}
         self.flags = set()
+        self.closure_lock = threading.Lock()
         self.count = self.bytes = 0
         self.installed = sys.getprofile() is None and threading.getprofile() is None
         if self.installed:
@@ -138,12 +139,20 @@ class CursorPhaseObservation:
             self.disclose()
 
     def disclose(self):
-        try:
-            private_json(self.root / "closure.json", {"pid": self.pid, "parent_pid": self.parent_pid,
-                                                     "actors": dict(self.actors),
-                                                     "closure": sorted(self.flags), "event": "closure"})
-        except Exception:
-            pass  # Collector still discloses unreadable/missing receipts.
+        with self.closure_lock:
+            temporary = self.root / ".closure.json"
+            try:
+                private_json(temporary, {"pid": self.pid, "parent_pid": self.parent_pid,
+                                         "actors": dict(self.actors),
+                                         "closure": sorted(self.flags), "event": "closure"})
+                os.replace(temporary, self.root / "closure.json")
+            except Exception:
+                pass  # Collector still discloses unreadable/missing receipts.
+            finally:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def profile(self, frame, event, argument):
         code = frame.f_code
