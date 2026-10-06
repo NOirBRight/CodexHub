@@ -31,7 +31,8 @@ MAX_REPORT_BYTES = 256 * 1024
 MAX_JSON_NODES = 4096
 BOUNDARIES = ("fixtureinput", "callerpayload", "adaptedhistory", "servedhistoryblob",
               "nativefield", "canonicalchunks", "downstreamSSEdelta",
-              "downstreamSSEcompleted", "callerstdout", "rolloutfinal")
+              "downstreamSSEcompleted", "callerstdout", "rolloutfinal",
+              "officialoutgoinghistory", "officialreceived", "downstreamOfficialmessages")
 
 
 def fixture_plan(value=None):
@@ -112,7 +113,7 @@ def bounded_json(data, limit=MAX_JSON_BYTES):
     return json.loads(data)
 
 
-def request_payload(body, encoding):
+def request_payload(body, encoding, budget=None):
     """Observation only: both encoded and decoded limits precede JSON parsing."""
     if len(body) > MAX_PARSE_BYTES:
         raise ValueError("request-byte-limit")
@@ -124,6 +125,10 @@ def request_payload(body, encoding):
                 if len(decoded) > MAX_PARSE_BYTES:
                     raise ValueError("request-decoded-limit")
         body = bytes(decoded)
+    if budget is not None:
+        budget.total += len(body)
+        if budget.total > MAX_PARSE_BYTES:
+            raise ValueError("official-shared-byte-limit")
     return bounded_json(body, MAX_PARSE_BYTES) if body else {}
 
 
@@ -172,6 +177,7 @@ class FixtureCapture:
         self.boundaries = {}
         self.failure = None
         self.deadline = time.monotonic() + 180
+        self.association = {}
 
     def guard(self, operation, *args):
         """Observation failure rejects capture, never changes the original stream."""
@@ -238,6 +244,7 @@ class FixtureCapture:
                     leaf["complete"] = False
                     leaf["rejection"] = "incomplete"
         return {"correlation": self.correlation, "boundaries": rows, "capture_failure": self.failure,
+                **self.association,
                 "native_coverage": "received transport text fields; read-ahead consumption unproven",
                 "caller_request_correlation": "case/epoch only unless request_id is explicit",
                 "caller_extraction": "last item.completed agent_message; rollout requires explicit final_answer phase"}
@@ -353,8 +360,257 @@ def observe_cursor(payload, *, capture, transport_factory=None, **kwargs):
             capture.boundaries["canonicalchunks"] = canonical.summary(capture.plan, complete)
 
 
+def identity(value):
+    """Retain actual identifiers only as bounded hashes; never derive them from text."""
+    if not isinstance(value, str) or not value or len(value.encode()) > MAX_VALUE:
+        raise ValueError("official-identity-unavailable")
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def item_digest(item):
+    return hashlib.sha256(json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+
+
+def official_message_names(payload):
+    from gateway_compat.collaboration_delivery import ALIAS, MESSAGE_TOOLS, portable_handler_names
+    from code_mode_collaboration import expose_declared_collaboration
+    payload = dict(payload)
+    expose_declared_collaboration(payload)  # Existing typed declaration contract; never generated exec input.
+    # Downstream declarations retain the original namespace. Only this known
+    # namespace is mapped for selection; no generated source/task inference.
+    groups = [payload.get("tools", [])] + [item.get("tools", []) for item in payload.get("input", [])
+              if isinstance(item, dict) and item.get("type") == "additional_tools"]
+    tools = [{**tool, "name": ALIAS, "tools": [child for child in tool.get("tools", [])
+              if isinstance(child, dict) and child.get("type") == "function"
+              and child.get("parameters", {}).get("properties", {}).get("message", {}).get("type") == "string"]}
+             for group in groups if isinstance(group, list) for tool in group if isinstance(tool, dict)
+             and tool.get("type") == "namespace" and tool.get("name") in ("collaboration", ALIAS)]
+    return set(portable_handler_names({"tools": tools})) & MESSAGE_TOOLS
+
+
+class OfficialTap:
+    """Selected Responses leaves. All argument JSON stays bounded and ephemeral.
+
+    Native feed is the response reader's successful receive, possibly read-ahead.
+    It proves neither relay consumption nor downstream/caller receipt. The
+    downstream tap runs on the qualifier's separately forwarded response bytes.
+    """
+    def __init__(self, capture, names, boundary="officialreceived", namespace="codexhub_plaintext_collaboration"):
+        from sse_events import SseEventAssembler
+        from gateway_compat.collaboration_delivery import MESSAGE_TOOLS
+        self.capture, self.names, self.boundary, self.namespace = capture, names, boundary, namespace
+        self.message_tools = MESSAGE_TOOLS
+        self.parser = SseEventAssembler(max_frame_bytes=MAX_JSON_BYTES)
+        self.total = self.events = self.parts = self.argument_bytes = self.leaf_count = 0
+        self.items = {}
+        self.response = None
+        self.sequence = None
+        self.sequence_present = None
+        self.terminal = False
+        self.rows = []
+        self.values = []
+        self.unavailable = False
+
+    def history(self, payload):
+        rows = []
+        for index, item in enumerate(payload.get("input", [])):
+            if not isinstance(item, dict):
+                continue
+            selected = []
+            if item.get("type") == "message" and item.get("role") == "assistant" and item.get("status") == "completed":
+                selected = [("output_text", i, part["text"]) for i, part in enumerate(item.get("content", []))
+                            if part.get("type") == "output_text" and isinstance(part.get("text"), str)]
+            elif self.message_call(item) and item.get("status") in (None, "completed"):
+                arguments = item.get("arguments")
+                if isinstance(arguments, str):
+                    parsed = bounded_json(arguments.encode())
+                    if isinstance(parsed, dict) and isinstance(parsed.get("message"), str):
+                        selected = [("arguments.message", None, parsed["message"])]
+            for channel, content_index, text in selected:
+                self.reserve_leaf()
+                bounded = BoundedValue()
+                bounded.add(text.encode())
+                rows.append({**bounded.summary(self.capture.plan, True), "channel": channel, "input_index": index,
+                             "content_index": content_index, "item_sha256": identity(item.get("id")),
+                             "call_sha256": identity(item["call_id"]) if channel == "arguments.message" else None,
+                             "boundary": "actual outgoing Responses input before open"})
+        self.capture.boundaries["officialoutgoinghistory"] = {"state": "observed" if rows else "unavailable", "leaves": rows}
+
+    def reserve_leaf(self):
+        self.leaf_count += 1
+        if self.leaf_count > MAX_LEAVES:
+            raise ValueError("official-shared-leaf-limit")
+
+    def message_call(self, item):
+        return (item.get("type") == "function_call" and item.get("namespace") == self.namespace
+                and item.get("name") in self.names and item.get("encrypted_function_args", []) == [])
+
+    def feed(self, data):
+        self.total += len(data)
+        if self.total > MAX_PARSE_BYTES:
+            raise ValueError("official-byte-limit")
+        for event in self.parser.feed(data):
+            if event.data and event.data != b"[DONE]":
+                self.accept(bounded_json(event.data))
+
+    def accept(self, event):
+        self.events += 1
+        if self.events > 4096 or self.terminal:
+            raise ValueError("official-event-limit-or-post-terminal")
+        sequence = event.get("sequence_number")
+        if self.sequence_present is None:
+            self.sequence_present = sequence is not None
+        elif self.sequence_present != (sequence is not None):
+            raise ValueError("official-event-sequence-unavailable")
+        if sequence is not None:
+            if type(sequence) is not int or sequence < 0 or (self.sequence is not None and sequence != self.sequence + 1):
+                raise ValueError("official-event-order")
+            self.sequence = sequence
+        if "response_id" in event and identity(event["response_id"]) != self.response:
+            raise ValueError("official-response-identity")
+        kind = event.get("type")
+        if kind == "response.created":
+            if self.response is not None:
+                raise ValueError("official-duplicate-response")
+            self.response = identity(event["response"]["id"])
+        elif kind == "response.output_item.added":
+            index, item = event["output_index"], event["item"]
+            if self.response is None or type(index) is not int or index != len(self.items) or len(self.items) >= MAX_LEAVES:
+                raise ValueError("official-item-order")
+            key = identity(item.get("id"))
+            if any(state["id"] == key for state in self.items.values()):
+                raise ValueError("official-duplicate-item")
+            if (item.get("type") == "function_call" and item.get("namespace") == self.namespace
+                    and item.get("name") in self.message_tools and not self.message_call(item)):
+                self.unavailable = True
+            self.items[index] = {"id": key, "call": identity(item["call_id"]) if item.get("type") == "function_call" else None,
+                "selected_call": self.message_call(item), "selected_text": item.get("type") == "message" and item.get("role") == "assistant",
+                "arguments": bytearray(), "argument_hash": None, "texts": {}, "done": None,
+                "type": item.get("type"), "name": item.get("name"), "namespace": item.get("namespace")}
+        elif kind in ("response.function_call_arguments.delta", "response.function_call_arguments.done",
+                      "response.output_text.delta", "response.output_text.done"):
+            index = event["output_index"]
+            if type(index) is not int or index < 0 or index not in self.items:
+                raise ValueError("official-output-index")
+            state = self.items[index]
+            if identity(event["item_id"]) != state["id"] or state["done"] is not None:
+                raise ValueError("official-item-identity")
+            if kind.startswith("response.function_call_arguments.") and state["selected_call"]:
+                if state["argument_hash"] is not None:
+                    raise ValueError("official-argument-order")
+                if kind.endswith(".delta"):
+                    data = event["delta"].encode()
+                    self.parts += 1
+                    self.argument_bytes += len(data)
+                    if self.parts > MAX_PARTS or self.argument_bytes > MAX_JSON_BYTES:
+                        raise ValueError("official-shared-argument-limit")
+                    state["arguments"].extend(data)
+                else:
+                    data = event["arguments"].encode()
+                    if data != state["arguments"]:
+                        raise ValueError("official-argument-delta-mismatch")
+                    state["argument_hash"] = hashlib.sha256(data).hexdigest()
+            elif kind.startswith("response.output_text.") and state["selected_text"]:
+                index = event["content_index"]
+                if type(index) is not int or index < 0:
+                    raise ValueError("official-content-index")
+                if index not in state["texts"]:
+                    self.reserve_leaf()
+                    state["texts"][index] = (BoundedValue(), None)
+                value, done = state["texts"][index]
+                if done is not None:
+                    raise ValueError("official-text-order")
+                if kind.endswith(".delta"):
+                    self.parts += 1
+                    if self.parts > MAX_PARTS:
+                        raise ValueError("official-shared-part-limit")
+                    value.add(event["delta"].encode())
+                else:
+                    data = event["text"].encode()
+                    if not value.count or value.length != len(data) or value.hash.hexdigest() != hashlib.sha256(data).hexdigest():
+                        raise ValueError("official-text-delta-mismatch")
+                    state["texts"][index] = (value, hashlib.sha256(data).hexdigest())
+        elif kind == "response.output_item.done":
+            index, item = event["output_index"], event["item"]
+            if type(index) is not int or index < 0 or index not in self.items:
+                raise ValueError("official-output-index")
+            state = self.items[index]
+            if (identity(item.get("id")) != state["id"] or state["done"] is not None or item.get("type") != state["type"]
+                    or item.get("name") != state["name"] or item.get("namespace") != state["namespace"]):
+                raise ValueError("official-completed-item-mismatch")
+            common = {"response_sha256": self.response, "item_sha256": state["id"], "call_sha256": state["call"],
+                      "output_index": index, "event_ordinal": self.events, "sequence_number": sequence,
+                      "phase": "output_item.done; terminal membership checked separately"}
+            if state["selected_call"]:
+                if (not self.message_call(item) or item.get("status") not in (None, "completed")
+                        or identity(item.get("call_id")) != state["call"]):
+                    raise ValueError("official-call-identity")
+                data = item["arguments"].encode()
+                if state["argument_hash"] is None or hashlib.sha256(data).hexdigest() != state["argument_hash"]:
+                    raise ValueError("official-completed-arguments-mismatch")
+                parsed = bounded_json(bytes(state["arguments"]))
+                if not isinstance(parsed, dict) or not isinstance(parsed.get("message"), str):
+                    raise ValueError("official-message-unavailable")
+                self.reserve_leaf()
+                value = BoundedValue()
+                value.add(parsed["message"].encode())
+                self.values.append(value)
+                self.rows.append({**value.summary(self.capture.plan, False), **common, "channel": "arguments.message", "content_index": None})
+                # Only the whole message is eligible; full arguments/target are discarded.
+                state["arguments"].clear()
+            if state["selected_text"]:
+                if item.get("role") != "assistant" or item.get("status") != "completed":
+                    raise ValueError("official-assistant-incomplete")
+                content = item.get("content", [])
+                indices = {i for i, part in enumerate(content) if part.get("type") == "output_text"}
+                if indices != set(state["texts"]):
+                    raise ValueError("official-content-membership")
+                for i, (value, done) in state["texts"].items():
+                    if done is None or hashlib.sha256(content[i]["text"].encode()).hexdigest() != done:
+                        raise ValueError("official-completed-text-mismatch")
+                    self.values.append(value)
+                    self.rows.append({**value.summary(self.capture.plan, False), **common, "channel": "output_text", "content_index": i})
+            state["done"] = item_digest(item)
+        elif kind == "response.completed":
+            response = event["response"]
+            output = response.get("output", [])
+            if (identity(response.get("id")) != self.response or response.get("status") != "completed"
+                    or len(output) != len(self.items) or any(self.items[i]["done"] != item_digest(item) for i, item in enumerate(output))):
+                raise ValueError("official-terminal-membership")
+            self.terminal = True
+        elif kind in ("error", "response.failed", "response.incomplete"):
+            raise ValueError("official-stream-error")
+
+    def finish(self, complete=True, *, framed=None):
+        def finalize():
+            if framed is None:
+                end = self.parser.finish() if complete else self.parser.cancel()
+                framing = end.disposition == "complete" and end.discarded_bytes == 0 and not end.events
+            else:
+                framing = framed
+            good = complete and framing and self.terminal and bool(self.rows) and not self.unavailable and not self.capture.failure
+            for row, value in zip(self.rows, self.values):
+                # Re-admit raw only after every Item and terminal binding succeeds.
+                row["complete"] = good
+                if good and row["utf8_bytes"] <= MAX_VALUE:
+                    # BoundedValue's summary deliberately withheld raw while partial.
+                    row.update(value.summary(self.capture.plan, True))
+                if row["rejection"] == "unapproved":
+                    row.update(state="unavailable", complete=False)
+            unapproved = any(row["rejection"] == "unapproved" for row in self.rows)
+            good = good and not unapproved
+            self.capture.boundaries[self.boundary] = {"state": "observed" if self.rows and not unapproved else "unavailable",
+                "complete": good, "leaves": self.rows, "cause": "unknown" if not good else None,
+                "terminal_event_ordinal": self.events if self.terminal else None,
+                "coverage": ("successful response reader receives; may be read-ahead; consumption/forwarding unproven"
+                             if self.boundary == "officialreceived" else "qualifier forwarded post-Gateway bytes; caller consumption unproven")}
+        self.capture.guard(finalize)
+        if self.boundary not in self.capture.boundaries:
+            self.capture.boundaries[self.boundary] = {"state": "incomplete", "complete": False, "leaves": self.rows, "cause": "unknown"}
+
+
 class DownstreamTap:
-    def __init__(self, capture):
+    def __init__(self, capture, official_payload=None):
         from sse_events import SseEventAssembler
         self.capture = capture
         self.parser = SseEventAssembler(max_frame_bytes=MAX_JSON_BYTES)
@@ -362,6 +618,11 @@ class DownstreamTap:
         self.completed = BoundedValue()
         self.terminal = False
         self.total = self.events = 0
+        self.official = None
+        if official_payload is not None:
+            def select():
+                self.official = OfficialTap(capture, official_message_names(official_payload), "downstreamOfficialmessages", "collaboration")
+            capture.guard(select)
 
     def feed(self, data):
         self.capture.guard(self.consume, data)
@@ -377,6 +638,8 @@ class DownstreamTap:
             if not event.data or event.data == b"[DONE]":
                 continue
             value = bounded_json(event.data)
+            if self.official:
+                self.capture.guard(self.official.accept, value)
             if value.get("type") == "response.output_text.delta":
                 self.delta.add(value["delta"].encode())
             elif value.get("type") == "response.completed":
@@ -397,29 +660,41 @@ class DownstreamTap:
         good = complete and self.terminal and termination is not None and termination.disposition == "complete" and not self.capture.failure
         self.capture.boundaries["downstreamSSEdelta"] = self.delta.summary(self.capture.plan, good)
         self.capture.boundaries["downstreamSSEcompleted"] = self.completed.summary(self.capture.plan, good)
+        if self.official:
+            self.official.finish(complete, framed=good and termination.discarded_bytes == 0)
+
+
+def peer_ticket(root, plan, downstream_socket):
+    try:
+        host, port = downstream_socket.getpeername()[:2]
+        if host != "127.0.0.1":
+            return None
+        path = root / f"peer-{port}.json"
+        if path.stat().st_size > 4096:
+            return None
+        with path.open("rb") as source:
+            data = source.read(4097)
+        ticket = bounded_json(data, 4096)
+        if (ticket["run_id"] != plan["run_id"] or ticket["case"] != plan["case"]
+                or type(ticket["epoch"]) is not int or ticket["epoch"] not in (0, 1)
+                or not isinstance(ticket["request_id"], str) or not re.fullmatch(r"[a-f0-9]{32}", ticket["request_id"])):
+            return None
+        return {key: ticket[key] for key in ("run_id", "case", "epoch", "request_id")}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 def install_gateway_observation(root, plan):
     """Qualification startup only; use the public owning exchange/socket seam."""
+    require_private_storage()
     import subscription_exchange
+    import gateway_exchange_adapters
     original = subscription_exchange.open_subscription
     @contextmanager
     def observed(request, *, provider_id, timeout, backend=None, downstream_socket=None):
         ticket = None
         if provider_id == "cursor-subscription" and backend is None and downstream_socket is not None:
-            try:
-                host, port = downstream_socket.getpeername()[:2]
-                if host != "127.0.0.1":
-                    raise ValueError()
-                path = root / f"peer-{port}.json"
-                if path.stat().st_size > 4096:
-                    raise ValueError()
-                ticket = json.loads(path.read_bytes())
-                if (ticket["run_id"] != plan["run_id"] or ticket["case"] != plan["case"]
-                        or ticket["epoch"] not in (0, 1) or not re.fullmatch(r"[a-f0-9]{32}", ticket["request_id"])):
-                    raise ValueError()
-            except (OSError, ValueError, KeyError, TypeError):
-                ticket = None
+            ticket = peer_ticket(root, plan, downstream_socket)
         if ticket is not None:
             capture = FixtureCapture(plan, ticket)
             def backend(payload, *, cancel, timeout):
@@ -434,6 +709,60 @@ def install_gateway_observation(root, plan):
         with original(request, provider_id=provider_id, timeout=timeout, backend=backend, downstream_socket=downstream_socket) as response:
             yield response
     subscription_exchange.open_subscription = observed
+    original_open = gateway_exchange_adapters.LiveTransport.open
+
+    def official_open(transport, opening):
+        # Actual immutable route selection, independent of requested model expectation.
+        if opening.upstream_name != "official":
+            return original_open(transport, opening)
+        ticket = peer_ticket(root, plan, getattr(transport._handler, "connection", None))
+        if ticket is None:
+            return original_open(transport, opening)
+        capture = FixtureCapture(plan, ticket)
+        capture.association = {"actual_route": "official", "opening_association": {}}
+        for name in ("adaptedhistory", "servedhistoryblob", "nativefield", "canonicalchunks"):
+            capture.boundaries[name] = {"state": "not-applicable", "complete": False}
+        tap = OfficialTap(capture, set())
+        def prepare():
+            context = opening.event_context or {}
+            capture.association["opening_association"] = {
+                "gateway_request_sha256": identity(context.get("request_id")),
+                "route_attempt_index": context.get("route_attempt_index") if type(context.get("route_attempt_index")) is int else None,
+                "native_boundary": "successful response readline bytes; may include reader read-ahead; consumption/forwarding unproven"}
+            body = opening.request.data or b""
+            payload = request_payload(body, opening.request.get_header("Content-encoding", ""), budget=tap)
+            tap.names = official_message_names(payload)
+            tap.history(payload)
+        capture.guard(prepare)
+
+        @contextmanager
+        def context_view():
+            succeeded = yielded = False
+            try:
+                with original_open(transport, opening) as response:
+                    supported = (200 <= (getattr(response, "status", None) or response.getcode()) < 300
+                                 and opening.upstream_format == "responses"
+                                 and "text/event-stream" in response.headers.get("Content-Type", ""))
+                    class ResponseView:
+                        def __getattr__(self, name):
+                            return getattr(response, name)
+                        def readline(self, *args, **kwargs):
+                            data = response.readline(*args, **kwargs)
+                            if supported:
+                                capture.guard(tap.feed, data)
+                            return data  # Same object; owner errors/close/release stay delegated.
+                    yield ResponseView()
+                    yielded = True
+                succeeded = yielded and supported
+            finally:
+                # Observation/persistence cannot replace an opening/read/owner exception.
+                try:
+                    tap.finish(succeeded)
+                    capture.persist(root / (ticket["request_id"] + ".json"))
+                except Exception:
+                    pass
+        return context_view()
+    gateway_exchange_adapters.LiveTransport.open = official_open
 
 
 def main(argv=None):

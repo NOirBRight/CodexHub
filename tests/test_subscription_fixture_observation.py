@@ -39,6 +39,8 @@ def test_unsupported_private_storage_rejects_before_serialization_or_file_creati
         observation.private_json(tmp_path / "raw.json", {"value": "inert fixture"})
     with pytest.raises(NotImplementedError, match="private-storage-unsupported"):
         capture().persist(tmp_path / "capture.json")
+    with pytest.raises(NotImplementedError, match="private-storage-unsupported"):
+        observation.install_gateway_observation(tmp_path, observation.fixture_plan())
     assert list(tmp_path.iterdir()) == []
 
 
@@ -158,6 +160,7 @@ def test_public_exchange_persists_rejection_and_preserves_owner_lifecycle(tmp_pa
     from urllib.error import HTTPError
     import cursor_subscription_backend as backend
     import subscription_exchange as exchange
+    import gateway_exchange_adapters
     plan = observation.fixture_plan("123456789abcdddef1234567")
     correlation = {"run_id": plan["run_id"], "case": plan["case"], "epoch": 1, "request_id": "b" * 32}
     # Inert correlation fixture, not an assertion of private storage support.
@@ -184,6 +187,11 @@ def test_public_exchange_persists_rejection_and_preserves_owner_lifecycle(tmp_pa
             closed.set()
     monkeypatch.setattr(backend, "stream_chat", inert)
     monkeypatch.setattr(exchange, "open_subscription", exchange.open_subscription)
+    monkeypatch.setattr(gateway_exchange_adapters.LiveTransport, "open", gateway_exchange_adapters.LiveTransport.open)
+    if os.name != "posix":
+        with pytest.raises(NotImplementedError, match="private-storage-unsupported"):
+            observation.install_gateway_observation(tmp_path, plan)
+        return
     observation.install_gateway_observation(tmp_path, plan)
     if mode.startswith("writer-"):
         monkeypatch.setattr(observation, "private_json", lambda *a: (_ for _ in ()).throw(OSError("inert writer failure")))
@@ -280,10 +288,14 @@ def test_public_aggregation_does_not_infer_expected_native_capture(tmp_path, ass
                  "epoch": 0 if association == "different-epoch" else 1,
                  "model": qualification.OFFICIAL_MODEL if association == "official" else None if association == "unknown-model" else qualification.CURSOR_MODEL}]
     item = qualification.aggregate_fixture_observations([tap], tmp_path, observation, requests)[0]
-    assert "native_report" not in item and "native_capture_failure" not in item
+    if association == "official":
+        assert item["native_report"] == {"state": "unavailable", "reason": "missing", "cause": "unknown"}
+    else:
+        assert "native_report" not in item
+    assert "native_capture_failure" not in item and "actual_route" not in item
     assert item["correlation"] == tap.correlation
     for name in ("adaptedhistory", "servedhistoryblob", "nativefield", "canonicalchunks"):
-        assert item["boundaries"][name] == {"state": "absent", "complete": False}
+        assert item["boundaries"][name] == {"state": "incomplete" if association == "official" else "absent", "complete": False}
 
 
 @pytest.mark.parametrize("key,value", [("run_id", "other"), ("case", "other"), ("epoch", 0), ("request_id", "other")])
@@ -438,6 +450,7 @@ def test_sse_and_caller_boundaries_are_independent_and_incomplete_stays_private(
 def test_public_http_correlates_real_served_history_and_preserves_item_call_identity(tmp_path, monkeypatch, inject_canonical_loss):
     import cursor_subscription_backend as backend
     import gateway_catalog_runtime
+    import gateway_exchange_adapters
     import subscription_exchange
     from tests.gateway_harness import GatewayHarness, GATEWAY_CLIENT_KEY, parsed_sse_events, require_single_terminal
     value = "AA\u200b界"
@@ -450,6 +463,11 @@ def test_public_http_correlates_real_served_history_and_preserves_item_call_iden
         return tap
     monkeypatch.setattr(observation, "FixtureCapture", collect)
     original_exchange = subscription_exchange.open_subscription
+    monkeypatch.setattr(gateway_exchange_adapters.LiveTransport, "open", gateway_exchange_adapters.LiveTransport.open)
+    if os.name != "posix":
+        with pytest.raises(NotImplementedError, match="private-storage-unsupported"):
+            observation.install_gateway_observation(tmp_path, plan)
+        return
     observation.install_gateway_observation(tmp_path, plan)
     real = backend.stream_chat
     class BlobTransport(Transport):
@@ -688,3 +706,241 @@ def test_freeze_hashes_and_executes_exact_wrapper_bytes(tmp_path):
     assert module.load_observation(frozen / qualification.OBSERVATION_WRAPPERS[1]).observe_cursor.__code__.co_filename.startswith(str(frozen))
     with pytest.raises(ValueError, match="does-not-match"):
         qualification.freeze_observation(source, tmp_path / "other", sha)
+
+
+@pytest.mark.parametrize("mode", ["exact", "toolonly", "utf8", "deletion", "u200b", "partial", "unapproved",
+                                  "identity", "order", "delta", "opaque", "undeclared", "missing", "error",
+                                  "bytes", "leaves", "parts", "arguments", "ownererror", "captureerror", "frozen", "readerror",
+                                  "item-identity", "failed", "argument-index-bool", "text-index-float",
+                                  "item-index-bool", "item-index-float"])
+def test_public_official_transport_relay_capture_and_join(tmp_path, monkeypatch, mode):
+    """Authored offline bytes through real pooled transport and public relay, not a provider trace."""
+    from urllib.request import Request
+    import gateway_exchange_adapters
+    import subscription_exchange
+    from gateway_exchange import OpenExchangeRequest
+    from gateway_exchange_bindings import relay_context_for_handler
+    from gateway_relay_passthrough import relay_official_passthrough_sse_response
+    from tests.gateway_harness import GatewayHarness
+    from tests.test_gateway_relay import Writer
+    from gateway_compat import collaboration_delivery
+    value = "0123456789abbbcd01234567" if mode != "utf8" else "AA\u200b界"
+    plan = observation.fixture_plan(value)
+    result = value[::-1]
+    if mode == "deletion":
+        result = result.replace("bbb", "bb")
+    elif mode == "u200b":
+        result += "\u200b"
+    elif mode == "unapproved":
+        result = "unapproved surrounding " + result
+    namespace = "codexhub_plaintext_collaboration"
+    arguments = json.dumps({"target": "UNRELATED-TARGET" + ("x" * (observation.MAX_JSON_BYTES + 10) if mode == "arguments" else ""), "message": result}, ensure_ascii=False)
+    call_item = {"type": "function_call", "id": "actual-item", "call_id": "distinct-actual-call",
+                 "namespace": namespace, "name": "send_message", "arguments": arguments,
+                 "encrypted_function_args": ["opaque"] if mode == "opaque" else []}
+    text_item = {"type": "message", "role": "assistant", "id": "text-item", "status": "completed",
+                 "content": [{"type": "output_text", "text": result}]}
+    events = [{"type": "response.created", "response": {"id": "actual-response", "status": "in_progress"}},
+              {"type": "response.output_item.added", "output_index": 0, "item": {**call_item, "arguments": ""}},
+              {"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": "actual-item", "delta": arguments[:len(arguments)//2]},
+              {"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": "actual-item", "delta": arguments[len(arguments)//2:]},
+              {"type": "response.function_call_arguments.done", "output_index": 0, "item_id": "actual-item", "arguments": arguments},
+              {"type": "response.output_item.done", "output_index": 0, "item": call_item}]
+    output = [call_item]
+    if mode != "toolonly":
+        events += [{"type": "response.output_item.added", "output_index": 1, "item": {**text_item, "content": []}},
+                   {"type": "response.output_text.delta", "output_index": 1, "item_id": "text-item", "content_index": 0, "delta": result},
+                   {"type": "response.output_text.done", "output_index": 1, "item_id": "text-item", "content_index": 0, "text": result},
+                   {"type": "response.output_item.done", "output_index": 1, "item": text_item}]
+        output.append(text_item)
+        # Identical Call/text values still own distinct fragmentation receipts.
+        events[7]["delta"] = result[:1]
+        events.insert(8, {**events[7], "delta": result[1:]})
+    if mode == "identity":
+        output = [{**call_item, "call_id": "wrong-call"}] + output[1:]
+    if mode == "delta":
+        events[3]["delta"] += "wrong"
+    if mode == "item-identity":
+        events[3]["item_id"] = "distinct-actual-call"
+    malformed_index = {
+        "argument-index-bool": ("response.function_call_arguments.delta", False),
+        "text-index-float": ("response.output_text.done", 1.0),
+        "item-index-bool": ("response.output_item.done", False),
+        "item-index-float": ("response.output_item.done", 0.0),
+    }.get(mode)
+    if malformed_index:
+        next(event for event in events if event["type"] == malformed_index[0])["output_index"] = malformed_index[1]
+    if mode != "partial":
+        events.append({"type": "response.completed", "response": {"id": "actual-response", "status": "completed", "output": output}})
+    if mode == "failed":
+        events[-1]["type"] = "response.failed"
+        events[-1]["response"]["status"] = "failed"
+    for sequence, event in enumerate(events):
+        event["sequence_number"] = sequence + (1 if mode == "order" and sequence == 2 else 0)
+    raw = b"".join(b"data: " + json.dumps(e, ensure_ascii=False).encode() + b"\n\n" for e in events)
+    correlation = {"run_id": plan["run_id"], "case": plan["case"], "epoch": 1, "request_id": "a" * 32}
+    (tmp_path / "peer-12345.json").write_bytes(json.dumps(correlation).encode())
+    payload = {"model": "not-route-authority", "input": [text_item, call_item], "tools": [{"type": "namespace", "name": namespace,
+               "tools": [{"type": "function", "name": "send_message", "parameters": {"type": "object", "properties": {"message": {"type": "string"}}}}]}]}
+    if mode == "undeclared":
+        payload["tools"] = []
+    if mode == "arguments":
+        payload["input"] = [text_item]  # Small history; test incoming assembly, not history refusal.
+    monkeypatch.setattr(subscription_exchange, "open_subscription", subscription_exchange.open_subscription)
+    monkeypatch.setattr(gateway_exchange_adapters.LiveTransport, "open", gateway_exchange_adapters.LiveTransport.open)
+    original_capture = observation.FixtureCapture
+    # History and native stream spend the same allowance. Each fits alone.
+    if mode == "bytes":
+        monkeypatch.setattr(observation, "MAX_PARSE_BYTES", len(raw) + len(json.dumps(payload).encode()) - 1)
+    elif mode == "leaves":
+        monkeypatch.setattr(observation, "MAX_LEAVES", 3)
+    elif mode == "parts":
+        monkeypatch.setattr(observation, "MAX_PARTS", 2)
+    argument_parses, argument_lengths = [], []
+    if mode == "arguments":
+        # Every fragment fits; assembled argument bytes do not. Spy checks the
+        # bounded parser never receives an over-limit argument.
+        original_json = observation.bounded_json
+        def bounded(data, limit=observation.MAX_JSON_BYTES):
+            if data.startswith(b'{"target":'):
+                argument_parses.append(len(data))
+            return original_json(data, limit)
+        monkeypatch.setattr(observation, "bounded_json", bounded)
+    elif mode == "captureerror":
+        monkeypatch.setattr(observation.FixtureCapture, "persist", lambda *a: (_ for _ in ()).throw(ValueError("inert writer failure")))
+    if mode != "missing":
+        if os.name != "posix":
+            with pytest.raises(NotImplementedError, match="private-storage-unsupported"):
+                observation.install_gateway_observation(tmp_path, plan)
+            return
+        observation.install_gateway_observation(tmp_path, plan)
+    context = {"request_id": "actual-gateway-request", "route_attempt_index": 2,
+               "official_plaintext_collaboration": ("send_message",) if mode != "opaque" else ()}
+    retry = SimpleNamespace(request_timeout_seconds=2, request_kind="main_generation", policy=SimpleNamespace(value="default"),
+                            retry_http_errors=False, base_open_attempts=1, open_attempt_budget=None,
+                            new_open_attempt_budget=lambda: None)
+    writer = Writer()
+    writer._relay_transparent_upstream_response = lambda *a, **kw: pytest.fail("wrong relay")
+    writer._relay_official_passthrough_sse_response = lambda *a, **kw: pytest.fail("wrong relay")
+    # The view must hand back exactly the owner's byte objects, in order.
+    import gateway_http_pool
+    received, observed = [], []
+    original_line = gateway_http_pool.PooledResponse.readline
+    original_feed = observation.OfficialTap.feed if hasattr(observation, "OfficialTap") else None
+    def line(owner, *args):
+        if mode == "readerror":
+            raise read_error
+        data = original_line(owner, *args)
+        received.append(data)
+        return data
+    def feed(tap, data):
+        observed.append(data)
+        try:
+            return original_feed(tap, data)
+        finally:
+            if mode == "arguments":
+                argument_lengths.extend(len(state["arguments"]) for state in tap.items.values())
+    monkeypatch.setattr(gateway_http_pool.PooledResponse, "readline", line)
+    if original_feed:
+        monkeypatch.setattr(observation.OfficialTap, "feed", feed)
+    read_error = OSError("inert reader exception")
+    transport = gateway_exchange_adapters.LiveTransport(SimpleNamespace(handler=SimpleNamespace(
+        connection=SimpleNamespace(getpeername=lambda: ("127.0.0.1", 12345)))))
+    with GatewayHarness() as gateway:
+        partition = 4096 if mode == "arguments" else 7
+        gateway.stub.stream_chunks = tuple(raw[i:i+partition] for i in range(0, len(raw), partition))
+        gateway.stub.response_status = 500 if mode == "error" else 200
+        opening = OpenExchangeRequest(Request(gateway.stub_base_url + "/responses", data=json.dumps(payload).encode()),
+            SimpleNamespace(retry=retry, transport_policy=None), "official", "responses", context, None, lambda: False, None, None)
+        if mode == "error":
+            from urllib.error import HTTPError
+            with pytest.raises(HTTPError):
+                with transport.open(opening):
+                    pytest.fail("owner error must propagate")
+        elif mode == "ownererror":
+            marker = RuntimeError("inert owner exception")
+            with pytest.raises(RuntimeError) as failure:
+                with transport.open(opening) as response:
+                    relay_official_passthrough_sse_response(relay_context_for_handler(writer), response, "official", event_context=context)
+                    raise marker
+            assert failure.value is marker
+            assert response._released
+        elif mode == "readerror":
+            with transport.open(opening) as response:
+                with pytest.raises(OSError) as failure:
+                    response.readline()
+                assert failure.value is read_error
+            assert response._released
+        else:
+            with transport.open(opening) as response:
+                if mode == "frozen":
+                    (tmp_path / "peer-12345.json").write_bytes(json.dumps({**correlation, "epoch": 0, "request_id": "b" * 32}).encode())
+                    context["request_id"] = "later-mutated-context"
+                relay_official_passthrough_sse_response(relay_context_for_handler(writer), response, "official", event_context=context)
+            assert response._released
+            expected = b"".join(collaboration_delivery.decode_sse_line(line, context)
+                                for line in raw.splitlines(keepends=True))
+            assert writer.wfile.getvalue() == expected
+    if mode not in ("missing", "captureerror"):
+        assert (tmp_path / (correlation["request_id"] + ".json")).exists(), "Official public transport capture missing"
+    if mode not in ("missing", "error") and original_feed:
+        assert len(observed) <= len(received)  # A rejected tap stops; the owner's reader continues unchanged.
+        assert all(left is right for left, right in zip(received, observed))
+        if mode in ("exact", "toolonly", "utf8", "deletion", "u200b", "unapproved", "ownererror", "captureerror", "undeclared", "opaque", "partial", "frozen"):
+            assert len(received) == len(observed)
+    if mode == "arguments":
+        assert argument_parses == [] and max(argument_lengths) <= observation.MAX_JSON_BYTES
+    caller = original_capture(plan, correlation)
+    downstream = observation.DownstreamTap(caller, official_payload=payload)
+    for byte in writer.wfile.getvalue():
+        downstream.feed(bytes([byte]))
+    downstream.finish(mode not in ("error", "ownererror", "readerror"))
+    joined = qualification.aggregate_fixture_observations([caller], tmp_path, observation,
+        [{"fixture_request_id": correlation["request_id"], "epoch": 1, "model": qualification.OFFICIAL_MODEL}])[0]
+    if mode in ("missing", "captureerror"):
+        assert joined["native_report"] == {"state": "unavailable", "reason": "missing", "cause": "unknown"}
+        return
+    rows = joined["boundaries"]
+    assert (tmp_path / (correlation["request_id"] + ".json")).exists(), "Official public transport capture missing"
+    assert rows["canonicalchunks"]["state"] == rows["servedhistoryblob"]["state"] == "not-applicable"
+    native = rows["officialreceived"]
+    good = mode in ("exact", "toolonly", "utf8", "deletion", "u200b", "frozen")
+    assert native["complete"] is good
+    assert joined["actual_route"] == "official"
+    assert joined["opening_association"]["gateway_request_sha256"] == hashlib.sha256(b"actual-gateway-request").hexdigest()
+    assert joined["opening_association"]["route_attempt_index"] == 2
+    assert "UNRELATED-TARGET" not in json.dumps(joined)
+    if good:
+        leaf = native["leaves"][0]
+        assert leaf["channel"] == "arguments.message" and leaf["item_sha256"] != leaf["call_sha256"]
+        assert leaf["utf8_bytes"] == len(result.encode())
+        assert leaf["exact_expected_reverse"] is (mode in ("exact", "toolonly", "utf8", "frozen"))
+        assert "utf8_hex" in leaf
+        assert leaf["response_sha256"] == hashlib.sha256(b"actual-response").hexdigest()
+        assert leaf["output_index"] == 0 and leaf["event_ordinal"] == 6
+        assert leaf["part_count"] == 1
+        if mode != "toolonly":
+            assert native["leaves"][1]["part_count"] == 2
+        messages = rows["downstreamOfficialmessages"]["leaves"]
+        assert messages[0]["sha256"] == leaf["sha256"]
+        if mode == "toolonly":
+            assert rows["downstreamSSEcompleted"]["utf8_bytes"] == 0
+    else:
+        assert "utf8_hex" not in json.dumps(native)
+        assert native["cause"] == "unknown"
+        if malformed_index:
+            assert joined["capture_failure"] == "observation-incomplete"
+            assert rows["downstreamOfficialmessages"]["complete"] is False
+            assert "utf8_hex" not in json.dumps(rows["downstreamOfficialmessages"])
+        elif mode == "unapproved":
+            assert joined["capture_failure"] is None
+            for boundary in (native, rows["downstreamOfficialmessages"]):
+                assert boundary["state"] == "unavailable" and boundary["complete"] is False
+                assert boundary["cause"] == "unknown" and boundary["terminal_event_ordinal"] == len(events)
+                assert len(boundary["leaves"]) == 2
+                for leaf in boundary["leaves"]:
+                    assert leaf["state"] == "unavailable" and leaf["complete"] is False
+                    assert leaf["rejection"] == "unapproved"
+                    assert leaf["sha256"] == hashlib.sha256(result.encode()).hexdigest()
+                    assert leaf["utf8_bytes"] == len(result.encode())
+                assert "utf8_hex" not in json.dumps(boundary) and "codepoints" not in json.dumps(boundary)
