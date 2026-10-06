@@ -12,6 +12,7 @@ import pytest
 
 import gateway_catalog_runtime
 import gateway_settings
+import multimodal_tool_result
 import subscription_exchange
 from subscription_backend_contract import BackendError
 from tests.gateway_harness import GATEWAY_CLIENT_KEY, GatewayHarness, parsed_sse_events, request_gateway
@@ -294,3 +295,52 @@ def test_adapted_http_chat_does_not_retry_incomplete_stream_after_text_exposure(
     assert any("error" in row for row in rows)
     assert not any(choice.get("finish_reason") is not None
                    for row in rows for choice in row.get("choices", []))
+
+
+def test_compact_chat_omitted_tool_media_keeps_existing_summary_rewrite():
+    marker = "data:image/png;base64,AA=="
+    openings = []
+
+    def producer(payload, **options):
+        openings.append(payload)
+        assert marker not in json.dumps(payload)
+        assert multimodal_tool_result.VISUAL_CONTENT_OMITTED_NOTICE in json.dumps(payload)
+        yield chunk({"content": "Summary text. "})
+        yield chunk({}, "stop")
+
+    payload = {
+        "model": UPSTREAM["model_id"], "stream": True,
+        "messages": [
+            {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "call_media", "type": "function",
+                "function": {"name": "inspect_image", "arguments": "{}"},
+            }]},
+            {"role": "tool", "tool_call_id": "call_media", "content": [
+                {"type": "text", "text": "tool info"},
+                {"type": "image_url", "image_url": {"url": marker}},
+            ]},
+            {"role": "user", "content": "Summarize this history."},
+        ],
+    }
+    with GatewayHarness() as harness, patch.object(
+        gateway_catalog_runtime, "choose_upstream", return_value={**UPSTREAM, "input_modalities": ["text"]}
+    ), patch.object(subscription_exchange, "backend_for", return_value=producer):
+        result = request_gateway(
+            harness.host, harness.port, "POST", "/v1/chat/completions",
+            body=json.dumps(payload).encode(),
+            headers={"Authorization": f"Bearer {GATEWAY_CLIENT_KEY}", "Content-Type": "application/json",
+                     "Connection": "close", "x-request-kind": "compact"},
+        )
+    assert len(openings) == 1
+    assert result.status == 200
+    rows = ["[DONE]" if event.data == b"[DONE]" else json.loads(event.data)
+            for event in parsed_sse_events(result.body) if event.data]
+    chunks = [row for row in rows if isinstance(row, dict)]
+    assert not any("error" in row for row in chunks)
+    assert "".join(choice.get("delta", {}).get("content", "")
+                   for row in chunks for choice in row.get("choices", [])) == (
+                       "Summary text.\n\n" + multimodal_tool_result.VISUAL_CONTENT_OMITTED_NOTICE
+                   )
+    assert sum(choice.get("finish_reason") is not None
+               for row in chunks for choice in row.get("choices", [])) == 1
+    assert rows.count("[DONE]") == 1

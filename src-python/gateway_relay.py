@@ -26,6 +26,7 @@ import gateway_request
 import gateway_sse
 import gateway_stream_semantics
 import gateway_transport
+import multimodal_tool_result
 import protocol_translation
 import route_primitives
 import sse_events
@@ -1907,7 +1908,9 @@ def relay_upstream_response(
             chunks: list[Mapping[str, Any] | str] = []
             text_prefix = (
                 gateway_relay_chat.ChatTextPrefix()
-                if want_chat_output and upstream_format == "chat_completions" else None
+                if want_chat_output and upstream_format == "chat_completions"
+                and not multimodal_tool_result.should_annotate_compact_response(compatibility_event_context)
+                else None
             )
             anthropic_converter = (
                 anthropic_messages.AnthropicToChatStreamConverter()
