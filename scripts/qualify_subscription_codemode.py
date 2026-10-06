@@ -454,8 +454,10 @@ def aggregate_fixture_observations(captures, tickets, observation, requests):
     return reports
 
 
-def run_case(case, checkout, source_codex, source_user, codex, timeout, observation_plan=None):
+def run_case(case, checkout, source_codex, source_user, codex, timeout, observation_plan=None, observe_cursor_phases=False):
     """Run one disposable production candidate; cleanup includes raw accounts/logs."""
+    if observe_cursor_phases and observation_plan is None:
+        raise ValueError("phase-observation-requires-fixture-approval")
     if observation_plan is not None:
         require_private_storage()
     case_started = time.monotonic()
@@ -662,6 +664,8 @@ unbounded_connection_retries=false
             if observation:
                 command = [sys.executable, str(checkout / "scripts/subscription_fixture_observer.py"), "--gateway",
                            "--plan", str(runtime / "observation-plan.json"), "--tickets", str(tickets), "--port", str(gateway_port)]
+                if observe_cursor_phases:
+                    command.append("--observe-cursor-phases")
             process = subprocess.Popen(command,
                                        env=server_env, cwd=checkout, stdout=log, stderr=log, start_new_session=os.name != "nt")
             gateway_pids.append(process.pid)
@@ -756,6 +760,8 @@ unbounded_connection_retries=false
                 "sse_frame_and_blob_json_bytes": observation.MAX_JSON_BYTES,
                 "parser_frames_or_events": 4096, "parser_nodes": 4096, "parser_depth": 16,
                 "runtime_seconds": min(180, timeout), "total_report_bytes": MAX_CAPTURE}
+            if observe_cursor_phases:
+                result["cursor_phase_observation"] = observation.collect_cursor_phase_observation(tickets, gateway_pids)
     result["private_tree_removed"] = not runtime.exists()
     if not result["private_tree_removed"]:
         result["checks"]["passed"] = False
@@ -774,7 +780,10 @@ def main(argv=None):
     parser.add_argument("--output", type=Path)
     parser.add_argument("--prepare-fixture", type=Path, help="Create explicit random fixture/control approval; no CLI/account access")
     parser.add_argument("--observe-fixture", type=Path, help="Opt in using an explicitly prepared fixture approval")
+    parser.add_argument("--observe-cursor-phases", action="store_true", help="Record bounded Cursor phase timing in the observed Gateway child")
     args = parser.parse_args(argv)
+    if args.observe_cursor_phases and (args.prepare_fixture or not args.observe_fixture):
+        parser.error("phase observation requires --observe-fixture")
     if args.prepare_fixture:
         if args.observe_fixture:
             parser.error("prepare and observe are separate commands")
@@ -842,6 +851,8 @@ def main(argv=None):
                     break
                 try:
                     options = {"observation_plan": plan} if plan else {}
+                    if args.observe_cursor_phases:
+                        options["observe_cursor_phases"] = True
                     report["cases"].append(runner(case, snapshot, args.source_codex_home, args.source_user_home,
                                                  args.codex.resolve(), min(args.case_timeout, remaining), **options))
                 except Exception as error:

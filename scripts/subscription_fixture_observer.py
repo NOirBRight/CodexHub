@@ -13,12 +13,14 @@ import hashlib
 import gzip
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
 import runpy
 import secrets
 import sys
+import threading
 import time
 
 MAX_VALUE = 256
@@ -29,6 +31,17 @@ MAX_PARSE_BYTES = 16 * 1024 * 1024
 MAX_JSON_BYTES = 64 * 1024
 MAX_REPORT_BYTES = 256 * 1024
 MAX_JSON_NODES = 4096
+MAX_PHASE_RECORDS = 64
+MAX_PHASE_BYTES = 64 * 1024
+PHASE_OPERATIONS = {"connection", "dns", "connect", "tls", "http2", "write", "read"}
+PHASE_ERRORS = {"cancelled", "upstream-timeout", "upstream-interrupted", "upstream-protocol-error",
+                "backend-unavailable", "upstream-connection-error", "upstream-dns-error",
+                "upstream-connect-error", "upstream-tls-error", "upstream-read-error",
+                "upstream-write-error", "upstream-http2-error"}
+PHASE_CLOSURES = {"missing-binding", "missing-phase", "missing-end", "drop", "observer-error", "cap"}
+PHASE_NUMBERS = {"begin_monotonic", "end_monotonic", "request_timeout_seconds", "request_deadline_monotonic",
+                 "backend_deadline_monotonic", "phase_timeout_seconds", "phase_deadline_monotonic",
+                 "remaining_request_seconds", "remaining_phase_seconds"}
 BOUNDARIES = ("fixtureinput", "callerpayload", "adaptedhistory", "servedhistoryblob",
               "nativefield", "canonicalchunks", "downstreamSSEdelta",
               "downstreamSSEcompleted", "callerstdout", "rolloutfinal",
@@ -75,6 +88,204 @@ def private_json(path, value):
         raise ValueError("observation-file-limit")
     with os.fdopen(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "wb") as output:
         output.write(data)
+
+
+class CursorPhaseObservation:
+    """Fixed Cursor code identities only; no provider values or frame retention."""
+
+    def __init__(self, root):
+        import cursor_subscription_backend as cursor
+        import subscription_exchange
+        from subscription_backend_contract import BackendError
+
+        self.pid, self.parent_pid = os.getpid(), os.getppid()
+        self.root = root / f"phase-{self.pid}"
+        self.root.mkdir(mode=0o700)
+        self.codes = {
+            "init": cursor.HTTP2Duplex.__init__.__code__, "exit": cursor.HTTP2Duplex.__exit__.__code__,
+            "pump": cursor.HTTP2Duplex._pump.__code__, "check": cursor.HTTP2Duplex._check.__code__,
+            "request": cursor.stream_chat.__code__, "config": cursor._agent_url.__code__,
+            "exchange": subscription_exchange.SubscriptionResponse._produce.__code__,
+            "error": BackendError.__init__.__code__,
+        }
+        self.states = {}
+        self.actors = {"startup": False, "exchange": False, "http2": False}
+        self.flags = set()
+        self.count = self.bytes = 0
+        self.installed = sys.getprofile() is None and threading.getprofile() is None
+        if self.installed:
+            self.actors["startup"] = True
+            sys.setprofile(self.profile)
+            threading.setprofile(self.profile)
+        else:
+            self.flags.add("missing-binding")
+        self.emit({"event": "binding"})
+
+    def emit(self, row):
+        value = {"pid": self.pid, "parent_pid": self.parent_pid,
+                 "actors": dict(self.actors), "closure": sorted(self.flags), **row}
+        size = len(json.dumps(value, separators=(",", ":")).encode()) + 1
+        if self.count >= MAX_PHASE_RECORDS or self.bytes + size > MAX_PHASE_BYTES:
+            self.flags.update({"cap", "drop"})
+            self.disclose()
+            return
+        self.count += 1
+        self.bytes += size
+        try:
+            private_json(self.root / f"{self.count}.json", value)
+        except Exception:
+            self.flags.add("observer-error")
+            self.disclose()
+
+    def disclose(self):
+        try:
+            private_json(self.root / "closure.json", {"pid": self.pid, "parent_pid": self.parent_pid,
+                                                     "actors": dict(self.actors),
+                                                     "closure": sorted(self.flags), "event": "closure"})
+        except Exception:
+            pass  # Collector still discloses unreadable/missing receipts.
+
+    def profile(self, frame, event, argument):
+        code = frame.f_code
+        if code not in (self.codes["init"], self.codes["exit"], self.codes["pump"], self.codes["error"]):
+            return
+        if "cap" in self.flags:
+            return
+        try:
+            if code == self.codes["init"] and event == "return":
+                phase = "run"
+                request = None
+                exchange_deadline = None
+                parent = frame.f_back
+                for _ in range(12):
+                    if parent is None:
+                        break
+                    if parent.f_code == self.codes["config"]:
+                        phase = "config"
+                    if parent.f_code == self.codes["exchange"]:
+                        self.actors["exchange"] = True
+                        exchange_deadline = parent.f_locals["self"]._deadline
+                    if parent.f_code == self.codes["request"]:
+                        request = (parent.f_locals.get("timeout"), parent.f_locals.get("started"))
+                    parent = parent.f_back
+                timeout = frame.f_locals.get("timeout")
+                transport = frame.f_locals["self"]
+                deadline = transport.deadline
+                values = (*request, timeout, deadline, exchange_deadline) if request else ()
+                if len(values) != 5 or any(type(v) not in (int, float) or not math.isfinite(v) for v in values):
+                    self.flags.add("drop")
+                    self.disclose()
+                    return
+                request_timeout, started, timeout, deadline, exchange_deadline = values
+                now = time.monotonic()
+                row = {"phase": phase, "begin_monotonic": deadline - timeout,
+                       "request_timeout_seconds": request_timeout, "request_deadline_monotonic": exchange_deadline,
+                       "backend_deadline_monotonic": started + request_timeout,
+                       "phase_timeout_seconds": timeout, "phase_deadline_monotonic": deadline,
+                       "remaining_request_seconds": max(0, exchange_deadline - now),
+                       "remaining_phase_seconds": max(0, deadline - now)}
+                self.states[id(transport)] = row
+                self.emit({"event": "begin", **row})
+            elif code == self.codes["pump"]:
+                self.actors["http2"] = True
+                if event == "return":
+                    row = self.states.get(id(frame.f_locals["self"]))
+                    stage = frame.f_locals.get("stage")
+                    if row is not None and stage in PHASE_OPERATIONS:
+                        row["operation"] = stage
+            elif code == self.codes["error"] and event == "return":
+                error_code = frame.f_locals.get("code")
+                if type(error_code) is not str or error_code not in PHASE_ERRORS:
+                    return
+                parent = frame.f_back
+                for _ in range(12):
+                    if parent is None:
+                        break
+                    if parent.f_code in (self.codes["pump"], self.codes["check"]):
+                        row = self.states.get(id(parent.f_locals["self"]))
+                        if row is not None:
+                            row["coded_error"] = error_code
+                        break
+                    parent = parent.f_back
+            elif code == self.codes["exit"] and event == "return":
+                row = self.states.pop(id(frame.f_locals["self"]), None)
+                if row is not None:
+                    now = time.monotonic()
+                    row["remaining_request_seconds"] = max(0, row["request_deadline_monotonic"] - now)
+                    row["remaining_phase_seconds"] = max(0, row["phase_deadline_monotonic"] - now)
+                    self.emit({"event": "end", "end_monotonic": now, **row})
+        except Exception:
+            self.flags.add("observer-error")
+            self.disclose()
+
+    def close(self):
+        if self.installed:
+            sys.setprofile(None)
+            threading.setprofile(None)
+            self.installed = False
+
+
+def install_cursor_phase_observation(root):
+    """Only explicit qualification startup calls this hook."""
+    return CursorPhaseObservation(root)
+
+
+def collect_cursor_phase_observation(root, pids):
+    """Known Gateway actors only; coverage never changes qualification checks."""
+    records, flags = [], set()
+    actors = {"startup": False, "exchange": False, "http2": False}
+    if any(type(pid) is not int or pid <= 0 for pid in pids):
+        flags.add("observer-error")
+    pids = [pid for pid in pids if type(pid) is int and pid > 0]
+    for pid in pids:
+        folder = root / f"phase-{pid}"
+        if not folder.is_dir():
+            flags.add("missing-binding")
+            continue
+        if not (folder / "1.json").is_file():
+            flags.add("missing-binding")
+        total = 0
+        paths = [folder / f"{index}.json" for index in range(1, MAX_PHASE_RECORDS + 1)] + [folder / "closure.json"]
+        for path in paths:
+            if not path.exists():
+                continue
+            try:
+                size = path.stat().st_size
+                total += size
+                if path.is_symlink() or size > 2048 or total > MAX_PHASE_BYTES + 2048:
+                    raise ValueError()
+                row = bounded_json(path.read_bytes(), 2048)
+                allowed = PHASE_NUMBERS | {"pid", "parent_pid", "actors", "closure", "event", "phase", "operation", "coded_error"}
+                if (not isinstance(row, dict) or row.keys() - allowed or row.get("pid") != pid
+                        or type(row.get("pid")) is not int
+                        or type(row.get("parent_pid")) is not int or row["parent_pid"] <= 0
+                        or row.get("event") not in {"binding", "begin", "end", "closure"}
+                        or not isinstance(row.get("actors"), dict) or row["actors"].keys() != actors.keys()
+                        or any(type(value) is not bool for value in row["actors"].values())
+                        or not isinstance(row.get("closure"), list)
+                        or any(type(value) is not str or value not in PHASE_CLOSURES for value in row["closure"])
+                        or any(type(row[key]) not in (int, float) or not math.isfinite(row[key])
+                               for key in PHASE_NUMBERS & row.keys())
+                        or "operation" in row and row["operation"] not in PHASE_OPERATIONS
+                        or "coded_error" in row and row["coded_error"] not in PHASE_ERRORS
+                        or "phase" in row and row["phase"] not in {"config", "run"}
+                        or row["event"] in {"begin", "end"} and (
+                            row.get("phase") not in {"config", "run"}
+                            or PHASE_NUMBERS - {"end_monotonic"} - row.keys()
+                            or row["event"] == "end" and "end_monotonic" not in row)):
+                    raise ValueError()
+                actors = {key: actors[key] or row["actors"][key] is True for key in actors}
+                flags.update(row["closure"])
+                records.append(row)
+            except Exception:
+                flags.add("observer-error")
+    begins = [row for row in records if row["event"] == "begin"]
+    ends = {(row["pid"], row["phase"], row["begin_monotonic"]) for row in records if row["event"] == "end"}
+    if {row["phase"] for row in begins} != {"config", "run"}:
+        flags.add("missing-phase")
+    if any((row["pid"], row["phase"], row["begin_monotonic"]) not in ends for row in begins):
+        flags.add("missing-end")
+    return {"process_ids": list(pids), "actors": actors, "records": records, "closure": sorted(flags)}
 
 
 def bounded_json(data, limit=MAX_JSON_BYTES):
@@ -771,14 +982,20 @@ def main(argv=None):
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--tickets", type=Path, required=True)
     parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--observe-cursor-phases", action="store_true")
     args = parser.parse_args(argv)
     require_private_storage()
     if args.plan.stat().st_size > 65536:
         raise ValueError("fixture-plan-limit")
     plan = validate_plan(json.loads(args.plan.read_bytes()))
     install_gateway_observation(args.tickets, plan)
+    phase_observer = install_cursor_phase_observation(args.tickets) if args.observe_cursor_phases else None
     sys.argv = ["codex_proxy.py", "--port", str(args.port)]
-    runpy.run_path(str(Path(__file__).resolve().parents[1] / "src-python/codex_proxy.py"), run_name="__main__")
+    try:
+        runpy.run_path(str(Path(__file__).resolve().parents[1] / "src-python/codex_proxy.py"), run_name="__main__")
+    finally:
+        if phase_observer is not None:
+            phase_observer.close()
     return 0
 
 

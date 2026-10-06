@@ -138,7 +138,7 @@ def test_harness_rejects_duplicate_cases_before_any_candidate_or_inference(tmp_p
         qualification.main(["--case", "code-mode", "--case", "code-mode", "--output", str(tmp_path / "result.json")])
 
 
-@pytest.mark.parametrize("mode", ["default", "observed", "gzip-budget", "plain-budget", "depth-budget", "node-budget", "request-budget"])
+@pytest.mark.parametrize("mode", ["default", "observed", "phase-observed", "gzip-budget", "plain-budget", "depth-budget", "node-budget", "request-budget"])
 def test_public_case_smoke_uses_real_gateway_but_no_inference_and_checks_cleanup(tmp_path, monkeypatch, record_property, mode):
     import os
     import gzip
@@ -227,8 +227,11 @@ else:
     monkeypatch.setenv("PATH", str(installed) + os.pathsep + os.environ.get("PATH", os.defpath))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("APPDATA", raising=False)
+    options = {"observation_plan": plan} if plan else {}
+    if mode == "phase-observed":
+        options["observe_cursor_phases"] = True
     result = runner("cursor-to-official" if with_observation else "code-mode", frozen, source, user, fake, 30,
-                    **({"observation_plan": plan} if plan else {}))
+                    **options)
     assert len(result["gateway_pids"]) == 1
     if mode.endswith("budget"):
         assert len(result["requests"]) == 1
@@ -251,6 +254,11 @@ else:
     assert result["failure_class"] is None
     assert not result["checks"]["passed"]
     assert result["private_tree_removed"]
+    if mode == "phase-observed":
+        phases = result["cursor_phase_observation"]
+        assert phases["process_ids"] == result["gateway_pids"]
+        assert phases["actors"] == {"startup": True, "exchange": False, "http2": False}
+        assert phases["closure"] == ["missing-phase"]
     owned_pids = [*result["gateway_pids"], *(row["pid"] for row in result["turns"])]
     for pid in owned_pids:
         with pytest.raises(ProcessLookupError):
