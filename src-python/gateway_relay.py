@@ -18,6 +18,7 @@ import anthropic_messages
 import anthropic_messages_ir
 import collaboration_adapter
 import gateway_relay_anthropic
+import gateway_relay_chat
 import gateway_compat
 import gateway_errors
 import gateway_events
@@ -1904,6 +1905,10 @@ def relay_upstream_response(
         if upstream_format in {"chat_completions", "anthropic_messages"}:
             line_ending = b"\n"
             chunks: list[Mapping[str, Any] | str] = []
+            text_prefix = (
+                gateway_relay_chat.ChatTextPrefix()
+                if want_chat_output and upstream_format == "chat_completions" else None
+            )
             anthropic_converter = (
                 anthropic_messages.AnthropicToChatStreamConverter()
                 if upstream_format == "anthropic_messages"
@@ -1933,6 +1938,12 @@ def relay_upstream_response(
                         event_name, payload, anthropic_converter
                     )
                     for payload in chat_payloads:
+                        if text_prefix is not None:
+                            for chunk in text_prefix.chunks_for_payload(payload):
+                                if not send_downstream_response_headers_once() or not output.data(chunk):
+                                    return finish_downstream_stream_closed(
+                                        seam.last_write_error() or OSError("downstream closed")
+                                    )
                         if payload == "[DONE]":
                             chunks.append("[DONE]")
                             continue
@@ -2096,12 +2107,13 @@ def relay_upstream_response(
                     return finish_downstream_stream_closed(
                         seam.last_write_error() or OSError("downstream closed")
                     )
-                for chunk in gateway_stream_semantics._chat_completion_body_to_stream_chunks(
+                final_chunks = gateway_stream_semantics._chat_completion_body_to_stream_chunks(
                     gateway_stream_semantics.response_body_to_chat_completion_body(
                         response_body,
                         preserve_reasoning_history=preserve_reasoning_history,
                     )
-                ):
+                )
+                for chunk in text_prefix.remaining_chunks(final_chunks) if text_prefix is not None else final_chunks:
                     if not output.data(chunk):
                         return finish_downstream_stream_closed(
                             seam.last_write_error() or OSError("downstream closed")
