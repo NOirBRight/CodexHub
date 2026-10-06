@@ -468,10 +468,16 @@ path.chmod(0o600)
 
     def start(self) -> None:
         self.log = (self.root / "gateway-private.log").open("ab")
+        spawn_options = {"env": self.env}
+        if os.name == "nt":
+            # Bypass the venv redirector so the retained Popen handle owns the
+            # socket interpreter, while getpath still selects the same venv.
+            spawn_options = {"executable": sys._base_executable,
+                             "env": {**self.env, "__PYVENV_LAUNCHER__": sys.executable}}
         self.process = subprocess.Popen([sys.executable, str(self.repo / "src-python/codex_proxy.py"),
                                          "--host", "127.0.0.1", "--port", str(self.port)],
-                                        env=self.env, cwd=self.root, stdout=self.log, stderr=self.log,
-                                        start_new_session=os.name != "nt")
+                                        cwd=self.root, stdout=self.log, stderr=self.log,
+                                        start_new_session=os.name != "nt", **spawn_options)
         self.windows_tcp = WindowsOwnedTcp(self.process) if os.name == "nt" else None
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:

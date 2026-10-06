@@ -12,6 +12,61 @@ import pytest
 from scripts import qualify_cli_subscriptions as qualify
 
 
+@pytest.mark.parametrize("platform,base", [("nt", "base/python.exe"),
+                                          ("nt", "selected/python.exe"), ("posix", "base/python")])
+def test_private_gateway_start_owns_selected_interpreter_without_mutating_environment(tmp_path, monkeypatch,
+                                                                                    platform, base):
+    from types import SimpleNamespace
+
+    gateway = qualify.PrivateGateway.__new__(qualify.PrivateGateway)
+    gateway.repo = gateway.root = tmp_path
+    gateway.port = 12345
+    gateway.env = {"PATH": "selected-path", "CODEXHUB_PYTHON": "selected/python.exe"}
+    original_env = gateway.env.copy()
+    parent_env = qualify.os.environ.copy()
+    spawned = []
+    process = SimpleNamespace(poll=lambda: None)
+    observer = object()
+
+    def spawn(argv, **options):
+        spawned.append((argv, options))
+        return process
+
+    def observe(owned):
+        assert owned is process
+        return observer
+
+    monkeypatch.setattr(qualify, "os", SimpleNamespace(name=platform))
+    monkeypatch.setattr(qualify, "sys", SimpleNamespace(executable="selected/python.exe", _base_executable=base))
+    monkeypatch.setattr(qualify.subprocess, "Popen", spawn)
+    monkeypatch.setattr(qualify, "WindowsOwnedTcp", observe)
+    monkeypatch.setattr(qualify.http.client, "HTTPConnection", lambda *args, **kwargs: SimpleNamespace(
+        request=lambda *args: None, close=lambda: None,
+        getresponse=lambda: SimpleNamespace(status=200, read=lambda: b'{"ok":true}')))
+    try:
+        gateway.start()
+        argv, options = spawned[0]
+        assert argv == ["selected/python.exe", str(tmp_path / "src-python/codex_proxy.py"),
+                        "--host", "127.0.0.1", "--port", "12345"]
+        assert gateway.process is process
+        assert options["cwd"] == tmp_path
+        assert options["stdout"] is gateway.log and options["stderr"] is gateway.log
+        assert options["start_new_session"] is (platform != "nt")
+        if platform == "nt":
+            assert options.get("executable") == base, "Popen must own the interpreter, not the venv redirector"
+            assert options["env"] == {**original_env, "__PYVENV_LAUNCHER__": "selected/python.exe"}
+            assert options["env"] is not gateway.env
+            assert gateway.windows_tcp is observer
+        else:
+            assert "executable" not in options
+            assert options["env"] is gateway.env and gateway.windows_tcp is None
+        assert gateway.env == original_env
+        import os
+        assert os.environ == parent_env
+    finally:
+        gateway.log.close()
+
+
 @pytest.mark.parametrize("protocol", qualify.PROTOCOLS)
 def test_native_protocol_requests_keep_model_history_and_declared_tools(protocol):
     history = [{"role": "user", "content": "private-prompt"}]
