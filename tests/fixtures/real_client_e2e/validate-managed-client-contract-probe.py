@@ -13,9 +13,9 @@ EXPECTED = {
     (client, model)
     for client in ("codex", "opencode", "zcode", "pi", "omp")
     for model in (
-        ("gpt-5.6-luna", "opencode-go/muse-spark-1.3-contributor")
+        ("gpt-6-luna", "deepseek/deepseek-flash")
         if client == "codex"
-        else ("openai/gpt-5.6-luna", "opencode-go/muse-spark-1.3-contributor")
+        else ("openai/gpt-6-luna", "deepseek/deepseek-flash")
     )
 }
 
@@ -31,9 +31,9 @@ def main(path: Path) -> None:
             if (row["client"], row["model"]) == pair
         } == {"preview", "apply", "readback"}
     for row in rows:
-        if row["model"] in ("gpt-5.6-luna", "openai/gpt-5.6-luna"):
+        if row["model"] in ("gpt-6-luna", "openai/gpt-6-luna"):
             assert "--catalog-path" in row["flags"], row
-        elif row["model"] == "opencode-go/muse-spark-1.3-contributor":
+        elif row["model"] == "deepseek/deepseek-flash":
             assert "--catalog-path" not in row["flags"], row
 
 

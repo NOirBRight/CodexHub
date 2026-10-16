@@ -38,7 +38,7 @@ def main(case_root: Path) -> None:
     )
     expected = {
         "codexhub-openai": (
-            "openai", "gpt-5.6-luna", "openai", "openai-responses", "responses"
+            "openai", "gpt-6-luna", "openai", "openai-responses", "responses"
         ),
         "codexhub-volc": (
             "volc", "glm-5.2", "openai-compatible", "openai-chat-completions",
