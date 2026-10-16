@@ -4,7 +4,8 @@ use super::super::{
     GatewayClientProviderModel,
 };
 use crate::{Provider, Settings};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::path::Path;
 
 pub(in crate::gateway) fn pi_settings_text(
@@ -79,11 +80,51 @@ fn codexhub_pi_provider_value(settings: &Settings, group: &GatewayClientProvider
     })
 }
 
+const PI_THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+fn pi_thinking_level_key(level: &str) -> Option<&'static str> {
+    let effort = level.trim().to_ascii_lowercase();
+    // Pi's schema has `off`, not catalog `none`.
+    let key = if effort == "none" {
+        "off"
+    } else {
+        effort.as_str()
+    };
+    PI_THINKING_LEVELS.iter().copied().find(|name| *name == key)
+}
+
+pub(in crate::gateway) fn pi_thinking_level_map(
+    model: &GatewayClientProviderModel,
+) -> Option<Map<String, Value>> {
+    let mut offered = HashSet::new();
+    for level in &model.supported_reasoning_levels {
+        if let Some(key) = pi_thinking_level_key(level) {
+            offered.insert(key);
+        }
+    }
+    if model.thinking_off_control() {
+        offered.insert("off");
+    }
+    if offered.is_empty() {
+        return None;
+    }
+    let mut map = Map::new();
+    for level in PI_THINKING_LEVELS {
+        if offered.contains(level) {
+            map.insert(level.to_string(), json!(level));
+        } else {
+            map.insert(level.to_string(), Value::Null);
+        }
+    }
+    Some(map)
+}
+
 fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
+    let thinking_map = pi_thinking_level_map(model);
     let mut value = json!({
         "id": model.id.clone(),
         "name": model.display_name.clone(),
-        "reasoning": !model.supported_reasoning_levels.is_empty(),
+        "reasoning": thinking_map.is_some(),
         "input": model.input_modalities.clone(),
         "headers": {
             "x-codex-client-id": "pi",
@@ -95,6 +136,9 @@ fn codexhub_pi_model_value(model: &GatewayClientProviderModel) -> Value {
             "cacheWrite": 0,
         },
     });
+    if let (Some(object), Some(map)) = (value.as_object_mut(), thinking_map) {
+        object.insert("thinkingLevelMap".to_string(), Value::Object(map));
+    }
     if let (Some(object), Some(context_window)) = (value.as_object_mut(), model.context_window) {
         object.insert("contextWindow".to_string(), json!(context_window));
     }

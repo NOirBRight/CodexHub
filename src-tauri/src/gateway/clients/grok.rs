@@ -4,6 +4,7 @@ use super::super::{
     read_rollback_baseline, resolve_gateway_client_model_id, route_owner_from_endpoint,
     sanitize_text, write_text_replace, BackupChannel, BaselineFile, GatewayClientApplyResult,
     GatewayClientConfigPreview, GatewayClientEndpointSelection, GatewayClientProviderGroup,
+    GatewayClientProviderModel,
 };
 use crate::app_flavor::RoutingOwner;
 use crate::{Provider, Settings};
@@ -264,29 +265,120 @@ fn insert_owned_provider(
     providers.insert(id.to_string(), Value::Table(table));
 }
 
+const GROK_REASONING_EFFORTS: [&str; 7] =
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+fn grok_canonical_reasoning_effort(level: &str) -> Option<String> {
+    let effort = level.trim().to_ascii_lowercase();
+    grok_effort_rank(&effort).map(|_| effort)
+}
+
+fn grok_effort_rank(effort: &str) -> Option<usize> {
+    GROK_REASONING_EFFORTS
+        .iter()
+        .position(|name| *name == effort)
+}
+
+fn grok_snap_default(efforts: &[String], default: Option<&str>) -> String {
+    let Some(requested) = default.filter(|value| !value.trim().is_empty()) else {
+        return efforts[0].clone();
+    };
+    if let Some(canonical) = grok_canonical_reasoning_effort(requested) {
+        if efforts.iter().any(|effort| effort == &canonical) {
+            return canonical;
+        }
+        if let Some(target) = grok_effort_rank(&canonical) {
+            return grok_nearest_effort(efforts, target);
+        }
+    }
+    grok_nearest_effort(efforts, GROK_REASONING_EFFORTS.len())
+}
+
+fn grok_nearest_effort(efforts: &[String], target: usize) -> String {
+    efforts
+        .iter()
+        .min_by_key(|effort| {
+            let rank = grok_effort_rank(effort).unwrap_or(0);
+            (rank.abs_diff(target), usize::MAX - rank)
+        })
+        .cloned()
+        .unwrap_or_else(|| efforts[0].clone())
+}
+
+fn grok_reasoning_effort_label(effort: &str) -> &'static str {
+    match effort {
+        "none" => "None",
+        "minimal" => "Minimal Effort",
+        "low" => "Low Effort",
+        "medium" => "Medium Effort",
+        "high" => "High Effort",
+        "xhigh" => "Extra High Effort",
+        "max" => "Max Effort",
+        _ => "Effort",
+    }
+}
+
+fn grok_reasoning_effort_menu(
+    gateway_model: &GatewayClientProviderModel,
+) -> Option<(String, Vec<Value>)> {
+    let mut efforts: Vec<String> = gateway_model
+        .supported_reasoning_levels
+        .iter()
+        .filter_map(|level| grok_canonical_reasoning_effort(level))
+        .collect();
+    if gateway_model.thinking_off_control() && !efforts.iter().any(|effort| effort == "none") {
+        efforts.push("none".to_string());
+    }
+    if efforts.is_empty() {
+        return None;
+    }
+    let default = grok_snap_default(&efforts, gateway_model.default_reasoning_level.as_deref());
+    let menu = efforts
+        .into_iter()
+        .map(|effort| {
+            let mut entry = Table::new();
+            entry.insert("id".to_string(), Value::String(effort.clone()));
+            entry.insert("value".to_string(), Value::String(effort.clone()));
+            entry.insert(
+                "label".to_string(),
+                Value::String(grok_reasoning_effort_label(&effort).to_string()),
+            );
+            entry.insert("default".to_string(), Value::Boolean(effort == default));
+            Value::Table(entry)
+        })
+        .collect();
+    Some((default, menu))
+}
+
 fn insert_owned_model(
     models: &mut Table,
     picker_key: &str,
-    short_id: &str,
-    display_name: &str,
+    gateway_model: &GatewayClientProviderModel,
     provider_id: &str,
-    context_window: Option<u32>,
 ) {
     let mut table = Table::new();
-    table.insert("model".to_string(), Value::String(short_id.to_string()));
+    table.insert("model".to_string(), Value::String(gateway_model.id.clone()));
     table.insert(
         "name".to_string(),
-        Value::String(grok_model_display_name(display_name)),
+        Value::String(grok_model_display_name(&gateway_model.display_name)),
     );
     table.insert(
         "model_provider".to_string(),
         Value::String(provider_id.to_string()),
     );
-    if let Some(window) = context_window {
+    if let Some(window) = gateway_model.context_window {
         table.insert(
             "context_window".to_string(),
             Value::Integer(i64::from(window)),
         );
+    }
+    if let Some((default, menu)) = grok_reasoning_effort_menu(gateway_model) {
+        table.insert(
+            "supports_reasoning_effort".to_string(),
+            Value::Boolean(true),
+        );
+        table.insert("reasoning_effort".to_string(), Value::String(default));
+        table.insert("reasoning_efforts".to_string(), Value::Array(menu));
     }
     table.insert("supports_backend_search".to_string(), Value::Boolean(false));
     models.insert(picker_key.to_string(), Value::Table(table));
@@ -350,10 +442,8 @@ pub(in crate::gateway) fn grok_config_text(
                 insert_owned_model(
                     model_tables,
                     &grok_picker_key(&group.client_provider_id, &gateway_model.id),
-                    &gateway_model.id,
-                    &gateway_model.display_name,
+                    gateway_model,
                     &group.client_provider_id,
-                    gateway_model.context_window,
                 );
             }
         }

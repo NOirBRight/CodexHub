@@ -1,7 +1,10 @@
 use super::super::{
     gateway_client_provider_groups, is_any_top_level_yaml_key, is_top_level_yaml_key, yaml_scalar,
+    GatewayClientProviderModel,
 };
+use super::pi::pi_thinking_level_map;
 use crate::{Provider, Settings};
+use serde_json::Value;
 
 pub(in crate::gateway) fn omp_config_text(
     current: Option<&str>,
@@ -199,7 +202,8 @@ pub(in crate::gateway) fn omp_models_yml_text(
         for gateway_model in &group.models {
             let model_id = yaml_scalar(&gateway_model.id);
             let model_name = yaml_scalar(&gateway_model.display_name);
-            let reasoning = !gateway_model.supported_reasoning_levels.is_empty();
+            let thinking_map = omp_thinking_level_map_yaml(gateway_model);
+            let reasoning = !thinking_map.is_empty();
             let input_list = gateway_model
                 .input_modalities
                 .iter()
@@ -214,11 +218,31 @@ pub(in crate::gateway) fn omp_models_yml_text(
                 .map(|value| format!("        maxTokens: {value}\n"))
                 .unwrap_or_default();
             output.push_str(&format!(
-            "      - id: {model_id}\n        name: {model_name}\n        reasoning: {reasoning}\n        input:\n{input_list}        headers:\n          x-codex-client-id: omp\n{context_window}{max_tokens}        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
+            "      - id: {model_id}\n        name: {model_name}\n        reasoning: {reasoning}\n{thinking_map}        input:\n{input_list}        headers:\n          x-codex-client-id: omp\n{context_window}{max_tokens}        cost:\n          input: 0\n          output: 0\n          cacheRead: 0\n          cacheWrite: 0\n"
         ));
         }
     }
     Ok(output)
+}
+
+fn omp_thinking_level_map_yaml(model: &GatewayClientProviderModel) -> String {
+    let Some(map) = pi_thinking_level_map(model) else {
+        return String::new();
+    };
+    let mut out = String::from("        thinkingLevelMap:\n");
+    for (key, value) in &map {
+        let rendered = match value {
+            Value::Null => "null".to_string(),
+            Value::String(text) => yaml_scalar(text),
+            _ => continue,
+        };
+        out.push_str("          ");
+        out.push_str(&yaml_scalar(key));
+        out.push_str(": ");
+        out.push_str(&rendered);
+        out.push('\n');
+    }
+    out
 }
 
 use super::super::{
