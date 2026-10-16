@@ -1,2 +1,0 @@
-Placeholder so Tauri's `resources/python/*` resource glob matches.
-The real bundled CPython runtime is not committed; see docs/agents/ci.md.
