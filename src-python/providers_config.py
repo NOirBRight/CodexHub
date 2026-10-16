@@ -70,6 +70,7 @@ class ModelConfig:
     supported_reasoning_levels: tuple[str, ...] = ()
     default_reasoning_level: str | None = None
     thinking_mode: str | None = None
+    capabilities_edited: bool = False
     tool_surface_strategy: str | None = None
     native_responses_tool_codec: str | None = None
     multi_agent_version: str | None = None
@@ -308,6 +309,7 @@ def build_external_model_index(
                 "supported_reasoning_levels": model.supported_reasoning_levels,
                 "default_reasoning_level": model.default_reasoning_level,
                 "thinking_mode": model.thinking_mode,
+                "capabilities_edited": model.capabilities_edited,
                 "display_name": model.display_name,
                 "provider_name": provider.name,
                 "context_source": "providers_toml",
@@ -393,6 +395,7 @@ def build_ollama_cloud_model_index(
                 "supported_reasoning_levels": model.supported_reasoning_levels,
                 "default_reasoning_level": model.default_reasoning_level,
                 "thinking_mode": model.thinking_mode,
+                "capabilities_edited": model.capabilities_edited,
                 "display_name": model.display_name,
                 "provider_name": provider.name,
                 "context_source": "providers_toml",
@@ -533,6 +536,7 @@ def _providers_from_data(data: dict[str, Any]) -> list[ProviderConfig]:
                 supported_reasoning_levels=_string_tuple_field(raw_model.get("supported_reasoning_levels"), ()),
                 default_reasoning_level=_optional_string_field(raw_model.get("default_reasoning_level")),
                 thinking_mode=_thinking_mode_field(raw_model.get("thinking_mode")),
+                capabilities_edited=raw_model.get("capabilities_edited") is True,
                 tool_surface_strategy=_tool_surface_strategy_field(
                     raw_model.get("tool_surface_strategy"), default=None
                 ),
@@ -912,6 +916,8 @@ def save_providers(providers: Iterable[ProviderConfig], path: Path = DEFAULT_PRO
                 chunks.append(_toml_string_list_line("supported_reasoning_levels", model.supported_reasoning_levels, indent="  "))
             if model.default_reasoning_level is not None:
                 chunks.append(_toml_string_line("default_reasoning_level", model.default_reasoning_level, indent="  "))
+            if model.capabilities_edited:
+                chunks.append("  capabilities_edited = true")
             if model.thinking_mode is not None:
                 chunks.append(_toml_string_line("thinking_mode", model.thinking_mode, indent="  "))
             model_tool_surface_strategy = _tool_surface_strategy_field(

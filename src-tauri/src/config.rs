@@ -151,7 +151,7 @@ pub fn switch_mode_with_takeover(
     let runner = ProcessCommandRunner;
 
     if mode == "custom" {
-        crate::catalog::generate_catalog_with_existing_lock()?;
+        crate::catalog::rebuild_catalog_with_existing_lock(true)?;
     }
     let mut status =
         switch_mode_with_paths_takeover(mode, auto_sync, force_takeover, &paths, &python, &runner)?;

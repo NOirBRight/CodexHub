@@ -36,6 +36,10 @@ pub(crate) fn generate_catalog_with_existing_lock() -> Result<Vec<Model>, String
 }
 
 pub(crate) fn sync_catalog_with_existing_lock() -> Result<String, String> {
+    rebuild_catalog_with_existing_lock(false)
+}
+
+pub(crate) fn rebuild_catalog_with_existing_lock(offline: bool) -> Result<String, String> {
     let paths = CatalogPaths::runtime()?;
     let python = config::find_python()?;
     let runner = ProcessCatalogSyncCommandRunner;
@@ -44,7 +48,7 @@ pub(crate) fn sync_catalog_with_existing_lock() -> Result<String, String> {
         crate::safe_file::write_text_atomic_with_mode(&seed.path, &seed.text, seed.unix_mode)?;
     }
 
-    sync_catalog_with_paths(&paths, &python, &runner)
+    sync_catalog_with_paths(&paths, &python, &runner, offline)
 }
 
 pub(crate) struct PreparedCatalogPublication {
@@ -104,7 +108,7 @@ fn prepare_catalog_with_paths(
         )?;
     }
 
-    sync_catalog_with_paths(&staged, python, runner)?;
+    sync_catalog_with_paths(&staged, python, runner, false)?;
 
     let staged_catalog_dir = staged.codex_dir.join("model-catalogs");
     let actual_catalog_dir = actual.codex_dir.join("model-catalogs");
@@ -300,6 +304,7 @@ fn sync_catalog_with_paths(
     paths: &CatalogPaths,
     python: &Path,
     runner: &dyn CatalogSyncCommandRunner,
+    offline: bool,
 ) -> Result<String, String> {
     let catalog_path = paths.generated_catalog_path();
     if let Some(parent) = catalog_path.parent() {
@@ -311,10 +316,13 @@ fn sync_catalog_with_paths(
         })?;
     }
 
-    let args = vec![
+    let mut args = vec![
         paths.catalog_sync_script().to_string_lossy().into_owned(),
         "--sync".to_string(),
     ];
+    if offline {
+        args.push("--offline".to_string());
+    }
     let env = vec![
         ("CODEX_HOME".to_string(), paths.codex_dir.clone()),
         (
@@ -449,7 +457,7 @@ mod tests {
             .join(GENERATED_CATALOG_FILE);
         let runner = RecordingCatalogRunner::successful("catalog written\n", catalog_path.clone());
 
-        let result = sync_catalog_with_paths(&paths, Path::new("python-test"), &runner)
+        let result = sync_catalog_with_paths(&paths, Path::new("python-test"), &runner, false)
             .expect("catalog sync");
 
         assert_eq!(result, catalog_path.to_string_lossy().into_owned());
@@ -487,6 +495,20 @@ mod tests {
     }
 
     #[test]
+    fn connection_catalog_disables_remote_discovery() {
+        let root = temp_root("catalog-offline");
+        let paths = test_paths(&root);
+        let runner =
+            RecordingCatalogRunner::successful("catalog written\n", paths.generated_catalog_path());
+        sync_catalog_with_paths(&paths, Path::new("python-test"), &runner, true)
+            .expect("offline catalog");
+        assert!(runner.commands.borrow()[0]
+            .args
+            .iter()
+            .any(|arg| arg == "--offline"));
+    }
+
+    #[test]
     fn sync_catalog_failure_includes_command_stdout_and_stderr() {
         let root = temp_root("catalog-failure");
         let repo_root = root.join("repo-root");
@@ -494,7 +516,7 @@ mod tests {
         write_fake_catalog_script(&repo_root);
         let runner = RecordingCatalogRunner::failed(19, "printed stdout", "printed stderr");
 
-        let error = sync_catalog_with_paths(&paths, Path::new("python-test"), &runner)
+        let error = sync_catalog_with_paths(&paths, Path::new("python-test"), &runner, false)
             .expect_err("catalog sync should fail");
 
         assert!(error.contains("catalog sync failed"));

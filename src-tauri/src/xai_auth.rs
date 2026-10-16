@@ -108,11 +108,49 @@ pub(crate) fn pin_https_xai_url(url: &str) -> Result<String, String> {
 }
 
 fn spawn_system_browser(url: &str) -> Result<(), String> {
-    let mut command = system_browser_command(url);
+    wait_for_browser_launcher(system_browser_command(url), Duration::from_secs(10))
+}
+
+fn wait_for_browser_launcher(mut command: Command, timeout: Duration) -> Result<(), String> {
+    use std::process::Stdio;
     command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command
         .spawn()
         .map_err(|error| format!("failed to open xAI verification page: {error}"))?;
-    Ok(())
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "browser launcher failed ({status}); check your default browser"
+                ))
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(match result {
+                    Err(error) => format!("failed to check browser launcher: {error}"),
+                    _ => "browser launcher did not finish within the time limit; check your browser window".to_string(),
+                });
+            }
+        }
+    }
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn linux_browser_launcher(omarchy_root: Option<&std::ffi::OsStr>) -> std::ffi::OsString {
+    omarchy_root
+        .map(|root| PathBuf::from(root).join("bin/omarchy-launch-browser"))
+        .filter(|launcher| launcher.is_file())
+        .map(|launcher| launcher.into_os_string())
+        .unwrap_or_else(|| "xdg-open".into())
 }
 
 fn system_browser_command(url: &str) -> Command {
@@ -140,12 +178,11 @@ fn system_browser_command(url: &str) -> Command {
     }
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
-        use std::process::Stdio;
-        let mut command = Command::new("xdg-open");
+        // Omarchy opens the default browser and focuses its existing workspace.
+        let mut command = Command::new(linux_browser_launcher(
+            std::env::var_os("OMARCHY_PATH").as_deref(),
+        ));
         command.arg(url);
-        command.stdin(Stdio::null());
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::null());
         command
     }
 }
@@ -265,6 +302,52 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn omarchy_browser_launch_uses_the_desktop_focus_adapter() {
+        let root = std::env::temp_dir().join(format!("codexhub-browser-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let launcher = root.join("bin/omarchy-launch-browser");
+        std::fs::write(&launcher, "fixture").unwrap();
+        assert_eq!(
+            super::linux_browser_launcher(Some(root.as_os_str())),
+            launcher.as_os_str()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(
+            super::linux_browser_launcher(Some(root.as_os_str())),
+            "xdg-open"
+        );
+        assert_eq!(super::linux_browser_launcher(None), "xdg-open");
+    }
+
+    #[test]
+    fn browser_launch_reports_nonzero_exit_instead_of_success() {
+        #[cfg(target_os = "windows")]
+        let mut command = std::process::Command::new("cmd");
+        #[cfg(target_os = "windows")]
+        command.args(["/C", "exit 7"]);
+        #[cfg(not(target_os = "windows"))]
+        let mut command = std::process::Command::new("sh");
+        #[cfg(not(target_os = "windows"))]
+        command.args(["-c", "exit 7"]);
+        let error = super::wait_for_browser_launcher(command, std::time::Duration::from_secs(2))
+            .unwrap_err();
+        assert!(error.contains("browser launcher failed"), "{error}");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn hung_browser_launcher_is_bounded_and_reaped() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exec sleep 5"]);
+        let started = std::time::Instant::now();
+        let error = super::wait_for_browser_launcher(command, std::time::Duration::from_millis(50))
+            .unwrap_err();
+        assert!(error.contains("time limit"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
     fn system_browser_command_targets_the_os_opener() {
         let url = "https://auth.x.ai/device?user_code=ABCD-EFGH";
         let command = system_browser_command(url);
@@ -294,7 +377,11 @@ mod tests {
         }
         #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
         {
-            assert_eq!(program, "xdg-open");
+            assert_eq!(
+                program,
+                super::linux_browser_launcher(std::env::var_os("OMARCHY_PATH").as_deref())
+                    .to_string_lossy()
+            );
             assert_eq!(args, [url]);
         }
     }

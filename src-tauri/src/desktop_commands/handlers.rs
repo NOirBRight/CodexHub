@@ -552,7 +552,9 @@ pub(crate) fn finish_catalog_write<T>(
     })
 }
 
-#[tauri::command]
+// Catalog generation, file locks and history reconciliation can take seconds.
+// Tauri's async dispatch keeps this synchronous CLI-compatible entry off GTK.
+#[tauri::command(async)]
 pub fn switch_mode(
     mode: String,
     auto_sync: bool,

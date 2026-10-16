@@ -574,31 +574,34 @@ def test_official_passthrough_keeps_web_search_external_web_access():
     assert web_search["external_web_access"] is False
 
 
-def test_compatible_request_rejects_third_party_cache_only_web_search():
-    from gateway_errors import UpstreamProtocolTranslationError
+@pytest.mark.parametrize("tool_type", ["web_search", "web_search_preview", "web_search_preview_2025_03_11"])
+@pytest.mark.parametrize("choice", [None, "auto", "none"])
+def test_compatible_request_disables_optional_cache_only_search(tool_type, choice):
+    body = _third_party_web_search_request("grok-4.7", external_web_access=False)
+    body["tools"][0]["type"] = tool_type
+    body["tools"].append({"type": "function", "name": "read_file", "parameters": {"type": "object"}})
+    body["instructions"] = "Original instructions."
+    body["tool_choice"] = choice
+    transformed = json.loads(gateway_compat.compatible_request_body(
+        json.dumps(body).encode(), _xai_upstream(), inject_codex_tools=False,
+        behavior_profile="codex_app_external_adapter", event_context={},
+    ))
+    assert [tool["name"] for tool in transformed["tools"]] == ["read_file"]
+    assert transformed["instructions"].startswith("Original instructions.")
+    assert "Cache-only web search is unavailable" in transformed["instructions"]
+    assert "Do not substitute live web access" in transformed["instructions"]
+    assert transformed.get("tool_choice") == choice
 
+
+@pytest.mark.parametrize("choice", ["required", {"type": "web_search"}, {"type": "web_search_preview"}])
+def test_compatible_request_rejects_required_cache_only_search(choice):
+    from gateway_errors import UpstreamProtocolTranslationError
+    body = _third_party_web_search_request("grok-4.7", external_web_access=False)
+    body["tool_choice"] = choice
     with pytest.raises(UpstreamProtocolTranslationError, match="external_web_access=false"):
         gateway_compat.compatible_request_body(
-            json.dumps(_third_party_web_search_request("grok-4.6", external_web_access=False)).encode(),
-            _xai_upstream(),
-            inject_codex_tools=False,
-            behavior_profile="codex_app_external_adapter",
-            event_context={},
-        )
-
-
-def test_compatible_request_rejects_third_party_cache_only_web_search_preview():
-    from gateway_errors import UpstreamProtocolTranslationError
-
-    body = _third_party_web_search_request("grok-4.6", external_web_access=False)
-    body["tools"][0]["type"] = "web_search_preview"
-    with pytest.raises(UpstreamProtocolTranslationError, match="external_web_access=false"):
-        gateway_compat.compatible_request_body(
-            json.dumps(body).encode(),
-            _xai_upstream(),
-            inject_codex_tools=False,
-            behavior_profile="codex_app_external_adapter",
-            event_context={},
+            json.dumps(body).encode(), _xai_upstream(), inject_codex_tools=False,
+            behavior_profile="codex_app_external_adapter", event_context={},
         )
 
 
