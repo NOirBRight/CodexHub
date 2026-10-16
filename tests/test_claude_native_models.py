@@ -11,11 +11,13 @@ def test_native_discovery_preserves_exact_ids_and_isolates_configuration(tmp_pat
     source = tmp_path / 'source'
     source.mkdir()
     settings = source / 'settings.json'
-    settings.write_text(json.dumps({'env': {
+    settings.write_text(json.dumps({'theme': '深色', 'env': {
         'ANTHROPIC_BASE_URL': 'http://production.invalid',
         'ANTHROPIC_DEFAULT_OPUS_MODEL': 'claude-codexhub-external',
         'CODEXHUB_MANAGED_CLIENT': 'claude',
-    }}))
+    }}, ensure_ascii=False), encoding='utf-8')
+    (source / '.claude.json').write_text(
+        json.dumps({'displayName': '演示 🚀'}, ensure_ascii=False), encoding='utf-8')
     before = settings.read_bytes()
     program = tmp_path / 'fixture.py'
     program.write_text('''
@@ -29,7 +31,7 @@ if "--version" in sys.argv:
 assert "ANTHROPIC_API_KEY" not in os.environ
 assert "ANTHROPIC_DEFAULT_OPUS_MODEL" not in json.loads((Path(os.environ["CLAUDE_CONFIG_DIR"])/"settings.json").read_text()).get("env", {})
 assert json.loads(sys.stdin.readline())["request"]["subtype"] == "initialize"
-print(json.dumps({"response":{"response":{"models":[{"value":"opus[1m]","resolvedModel":"claude-opus-5-5[1m]","displayName":"Opus"},{"value":"haiku","resolvedModel":"claude-haiku-4-5-20251001","displayName":"Haiku"},{"value":"custom","resolvedModel":"claude-codexhub-external","displayName":"External"}],"account":{"secret":"MUST_NOT_RETURN"}}}}))
+sys.stdout.buffer.write(json.dumps({"response":{"response":{"models":[{"value":"opus[1m]","resolvedModel":"claude-opus-5-5[1m]","displayName":"Opus \\U0001f680"},{"value":"haiku","resolvedModel":"claude-haiku-4-5-20251001","displayName":"Haiku"},{"value":"custom","resolvedModel":"claude-codexhub-external","displayName":"External"}],"account":{"secret":"MUST_NOT_RETURN"}}}}, ensure_ascii=False).encode("utf-8") + b"\\n")
 ''')
     fixture = tmp_path / ('claude & fixture.cmd' if os.name == 'nt' else 'claude')
     if os.name == 'nt':
@@ -46,7 +48,7 @@ print(json.dumps({"response":{"response":{"models":[{"value":"opus[1m]","resolve
     rows = discovered['models']
     assert discovered['source']['cli_version'] == '2.1.282'
     assert len(discovered['source']['fingerprint']) == 64
-    assert rows[0]['label'] == 'Opus'
+    assert rows[0]['label'] == 'Opus \U0001f680'
     assert [row['model'] for row in rows] == ['claude-opus-5-5[1m]', 'claude-haiku-4-5-20251001']
     assert 'MUST_NOT_RETURN' not in result.stdout
     assert settings.read_bytes() == before
